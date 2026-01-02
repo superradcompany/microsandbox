@@ -5,6 +5,7 @@
 //! - Parsing and validating image references (tags and digests)
 //! - Managing image manifests, configurations, and layers
 
+mod global_cache;
 mod layer;
 #[cfg(test)]
 pub(crate) mod mocks;
@@ -17,6 +18,7 @@ mod tests;
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+pub(crate) use global_cache::*;
 pub(crate) use layer::*;
 pub use reference::*;
 pub(crate) use registry::*;

@@ -1,7 +1,10 @@
 use std::str::FromStr;
 
 use crate::{
-    oci::{DOCKER_REFERENCE_TYPE_ANNOTATION, Reference, mocks::mock_registry_and_db},
+    oci::{
+        DOCKER_REFERENCE_TYPE_ANNOTATION, Reference, global_cache::GlobalCacheOps,
+        mocks::mock_registry_and_db,
+    },
     utils,
 };
 
@@ -55,7 +58,11 @@ async fn test_docker_pull_image() -> anyhow::Result<()> {
     for layer in layers {
         let digest = layer.get::<String, _>("digest");
         let size = layer.get::<i64, _>("size_bytes");
-        let layer_path = registry.layer_download_dir.join(&digest);
+        let layer_path = registry
+            .global_cache()
+            .tar_download_dir()
+            .join(&digest)
+            .with_extension("tar");
 
         // Verify layer file exists and has correct size
         assert!(layer_path.exists(), "Layer file {} not found", digest);

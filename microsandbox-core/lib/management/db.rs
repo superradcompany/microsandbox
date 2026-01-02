@@ -8,7 +8,10 @@
 use std::path::Path;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
-use oci_client::{config::ConfigFile, manifest::OciImageManifest};
+use oci_client::{
+    config::ConfigFile,
+    manifest::{OciDescriptor, OciImageManifest},
+};
 use oci_spec::image::MediaType;
 use sqlx::{Pool, Row, Sqlite, migrate::Migrator, sqlite::SqlitePoolOptions};
 use tokio::fs;
@@ -844,6 +847,44 @@ pub(crate) async fn get_image_layer_digests(
         .into_iter()
         .map(|row| row.get::<String, _>("digest"))
         .collect())
+}
+
+/// Associates a layer with a manifest in the database.
+///
+/// If the layer doesn't exist, it will be created first, before being
+/// linked to the manifest.
+///
+/// ## Arguments
+///
+/// * `pool` - SQLite connection pool
+/// * `layer` - OCI layer descriptor
+/// * `diff_id` - Diff ID of the layer
+/// * `manifest_id` - ID of the manifest to link the layer to
+///
+/// ## Returns
+///
+/// Returns the ID of the manifest layer if successful.
+pub(crate) async fn create_or_update_manifest_layer(
+    pool: &Pool<Sqlite>,
+    layer: &OciDescriptor,
+    diff_id: &str,
+    manifest_id: i64,
+) -> MicrosandboxResult<i64> {
+    // if None, it means the layer doesn't exist in database yet
+    let db_layer_id = get_layer_by_digest(pool, &layer.digest.to_string())
+        .await?
+        .map(|l| l.id);
+
+    let db_layer_id = match db_layer_id {
+        Some(layer_id) => layer_id,
+        None => {
+            save_or_update_layer(pool, &layer.media_type, &layer.digest, layer.size, &diff_id)
+                .await?
+        }
+    };
+
+    // finally, link the layer to the manifest
+    save_manifest_layer(pool, manifest_id, db_layer_id).await
 }
 
 //--------------------------------------------------------------------------------------------------
