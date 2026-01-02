@@ -131,11 +131,6 @@ impl GlobalCacheOps for GlobalCache {
         Arc::new(Layer::new(Arc::new(self.clone()), digest.clone()))
     }
 
-    /// Checks if all layers for an image exist in both the database and the layers directory.
-    ///
-    /// ## Arguments
-    ///
-    /// * `image` - The reference to the image to check
     async fn all_layers_extracted(&self, image: &Reference) -> MicrosandboxResult<bool> {
         // Check if the image exists in the database
         match db::image_exists(&self.db, &image.to_string()).await {

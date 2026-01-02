@@ -22,8 +22,8 @@ use tokio::{
 
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    management::{db, image::ContainerImage},
-    oci::{Reference, global_cache::GlobalCacheOps, layer::LayerOps},
+    management::db,
+    oci::{Reference, global_cache::GlobalCacheOps, image::Image, layer::LayerOps},
     utils,
 };
 
@@ -319,7 +319,7 @@ where
         #[cfg(feature = "cli")]
         download_layers_sp.finish();
 
-        ContainerImage::new(layers).extract_all().await
+        Image::new(layers).extract_all().await
     }
 
     /// Fetches all available multi-platform manifests for the given reference.

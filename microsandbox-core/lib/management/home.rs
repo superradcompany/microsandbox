@@ -7,8 +7,8 @@
 use crate::{
     MicrosandboxError, MicrosandboxResult,
     config::{EnvPair, Microsandbox, PathPair, PortPair, ReferenceOrPath, Sandbox},
-    management::{config, db, image, menv},
-    oci::Reference,
+    management::{config, db, menv},
+    oci::{Image, Reference},
 };
 use microsandbox_utils::{
     MICROSANDBOX_CONFIG_FILENAME, MICROSANDBOX_HOME_DIR, OCI_DB_FILENAME, XDG_BIN_DIR,
@@ -249,7 +249,7 @@ pub async fn install(
     // Apply image configuration defaults if enabled
     if use_image_defaults {
         // Pull the image from the registry if not already pulled
-        image::pull(image.clone(), None).await?;
+        Image::pull(image.clone(), None).await?;
 
         // Get the OCI database path and create a connection pool
         let db_path = home_path.join(OCI_DB_FILENAME);

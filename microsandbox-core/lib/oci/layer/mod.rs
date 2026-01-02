@@ -20,8 +20,9 @@ use tokio_tar::Archive;
 
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    management::image::ContainerImage,
-    oci::{extraction::extract_tar_with_ownership_override, global_cache::GlobalCacheOps},
+    oci::{
+        extraction::extract_tar_with_ownership_override, global_cache::GlobalCacheOps, image::Image,
+    },
 };
 
 #[async_trait]
@@ -137,7 +138,6 @@ impl LayerOps for Layer {
         Ok((false, guard))
     }
 
-    /// Cleans up the extracted layer directory if it exists.
     async fn cleanup_extracted(&self) -> MicrosandboxResult<()> {
         let _guard = self.lock.lock().await;
         let layer_path = self.extracted_layer_dir();
@@ -209,12 +209,14 @@ impl LayerOps for Layer {
     }
 }
 
+/// Abstraction around all dependencies of a layer i.e. all
+/// layers upon which the current layer depends on.
 #[derive(Clone)]
 pub(crate) struct LayerDependencies {
     /// The layer digest in focus.
     layer: Digest,
     /// The image this layer belongs to.
-    image: ContainerImage,
+    image: Image,
 }
 
 impl LayerDependencies {
@@ -224,7 +226,7 @@ impl LayerDependencies {
     ///
     /// * `layer` - The layer digest in focus.
     /// * `image` - The image this layer belongs to.
-    pub(crate) fn new(layer: Digest, image: ContainerImage) -> Self {
+    pub(crate) fn new(layer: Digest, image: Image) -> Self {
         Self { layer, image }
     }
 

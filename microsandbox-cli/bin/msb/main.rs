@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser};
 use microsandbox_cli::{
     AnsiStyles, MicrosandboxArgs, MicrosandboxCliResult, MicrosandboxSubcommand, ServerSubcommand,
 };
-use microsandbox_core::management::{image, orchestra};
+use microsandbox_core::{management::orchestra, oci::Image};
 use msb::handlers;
 
 //--------------------------------------------------------------------------------------------------
@@ -81,7 +81,7 @@ async fn main() -> MicrosandboxCliResult<()> {
             handlers::list_subcommand(sandbox, build, file).await?;
         }
         Some(MicrosandboxSubcommand::Pull { name, layer_path }) => {
-            image::pull(name, layer_path).await?;
+            Image::pull(name, layer_path).await?;
         }
         Some(MicrosandboxSubcommand::Run {
             sandbox,

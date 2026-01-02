@@ -22,7 +22,6 @@
 pub mod config;
 pub mod db;
 pub mod home;
-pub mod image;
 pub mod menv;
 pub mod orchestra;
 pub mod rootfs;

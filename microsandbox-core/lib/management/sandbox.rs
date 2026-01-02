@@ -25,8 +25,8 @@ use crate::{
     config::{
         EnvPair, Microsandbox, PathPair, PortPair, ReferenceOrPath, START_SCRIPT_NAME, Sandbox,
     },
-    management::{config, db, image, menv, rootfs},
-    oci::Reference,
+    management::{config, db, menv, rootfs},
+    oci::{Image, Reference},
     vm::Rootfs,
 };
 
@@ -544,7 +544,7 @@ async fn setup_image_rootfs(
     use_image_defaults: bool,
 ) -> MicrosandboxResult<Rootfs> {
     tracing::info!(?image, "pulling image");
-    image::pull(image.clone(), None).await?;
+    Image::pull(image.clone(), None).await?;
 
     // Get the microsandbox home path and database path
     let microsandbox_home_path = env::get_microsandbox_home_path();

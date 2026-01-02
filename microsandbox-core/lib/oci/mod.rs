@@ -6,6 +6,7 @@
 //! - Managing image manifests, configurations, and layers
 
 mod global_cache;
+mod image;
 mod layer;
 #[cfg(test)]
 pub(crate) mod mocks;
@@ -19,6 +20,7 @@ mod tests;
 //--------------------------------------------------------------------------------------------------
 
 pub(crate) use global_cache::*;
+pub use image::*;
 pub(crate) use layer::*;
 pub use reference::*;
 pub(crate) use registry::*;
