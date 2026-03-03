@@ -2,6 +2,7 @@
 resolver = "3"
 exclude = ["sdk/rust"]
 members = [
+    "microsandbox",
     "microsandbox-cli",
     "microsandbox-core",
     "microsandbox-portal",

@@ -2,7 +2,7 @@
 
 The microsandbox team welcomes security reports and is committed to
 providing prompt attention to security issues. Security issues should be
-reported privately via [appcypher@outlook.com][support-email]. Security issues should
+reported privately via [steve@superrad.company][support-email]. Security issues should
 not be reported via the public GitHub Issue tracker.
 
 ## Security advisories

@@ -1,0 +1,20 @@
+[package]
+name = "microsandbox"
+description = "`microsandbox` is the core library for the microsandbox project."
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "microsandbox"
+path = "bin/main.rs"
+
+[lib]
+name = "microsandbox"
+path = "lib/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
