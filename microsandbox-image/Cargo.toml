@@ -1,0 +1,10 @@
+[package]
+name = "microsandbox-image"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[lib]
+path = "lib/lib.rs"

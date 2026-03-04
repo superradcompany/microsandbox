@@ -1,0 +1,468 @@
+//! Exec session management: spawning processes with PTY or pipe I/O.
+
+use std::ffi::CString;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::process::Stdio;
+
+use nix::pty::openpty;
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
+use tokio::io::AsyncReadExt;
+use tokio::io::unix::AsyncFd;
+use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
+
+use microsandbox_protocol::exec::ExecRequest;
+
+use crate::error::{AgentdError, AgentdResult};
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// An active exec session handle for sending input to a running process.
+///
+/// Output reading is handled by a background task that sends events
+/// via the `mpsc` channel provided at spawn time.
+pub struct ExecSession {
+    /// The correlation ID for this session.
+    id: u32,
+
+    /// The PID of the spawned process.
+    pid: i32,
+
+    /// The PTY master fd (only for PTY mode, used for writing and resize).
+    pty_master: Option<OwnedFd>,
+
+    /// The child's stdin (only for pipe mode).
+    stdin: Option<tokio::process::ChildStdin>,
+
+    /// Whether this session uses a PTY.
+    is_tty: bool,
+}
+
+/// Output from a session that the agent loop should forward to the host.
+pub enum SessionOutput {
+    /// Data from stdout (or PTY master).
+    Stdout(Vec<u8>),
+
+    /// Data from stderr (pipe mode only).
+    Stderr(Vec<u8>),
+
+    /// The process has exited with the given code.
+    Exited(i32),
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl ExecSession {
+    /// Spawns a new exec session.
+    ///
+    /// If `req.tty` is true, uses a PTY. Otherwise, uses piped stdin/stdout/stderr.
+    /// A background task is spawned to read output and send events via `tx`.
+    pub fn spawn(
+        id: u32,
+        req: &ExecRequest,
+        tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+    ) -> AgentdResult<Self> {
+        if req.tty {
+            Self::spawn_pty(id, req, tx)
+        } else {
+            Self::spawn_pipe(id, req, tx)
+        }
+    }
+
+    /// Returns the session correlation ID.
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// Returns the PID of the spawned process (as u32 for the protocol).
+    pub fn pid(&self) -> u32 {
+        self.pid as u32
+    }
+
+    /// Returns whether this session uses a PTY.
+    pub fn is_tty(&self) -> bool {
+        self.is_tty
+    }
+
+    /// Writes data to the process's stdin (or PTY master).
+    pub async fn write_stdin(&self, data: &[u8]) -> AgentdResult<()> {
+        if let Some(ref master) = self.pty_master {
+            blocking_write_fd(master.as_raw_fd(), data).await
+        } else if let Some(ref stdin) = self.stdin {
+            blocking_write_fd(stdin.as_raw_fd(), data).await
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Resizes the PTY (only applicable for TTY sessions).
+    pub fn resize(&self, rows: u16, cols: u16) -> AgentdResult<()> {
+        if let Some(ref master) = self.pty_master {
+            let ws = libc::winsize {
+                ws_row: rows,
+                ws_col: cols,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            let ret =
+                unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws) };
+            if ret < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Sends a signal to the spawned process.
+    pub fn send_signal(&self, signal: i32) -> AgentdResult<()> {
+        let sig = Signal::try_from(signal)
+            .map_err(|e| AgentdError::ExecSession(format!("invalid signal {signal}: {e}")))?;
+        kill(Pid::from_raw(self.pid), sig)?;
+        Ok(())
+    }
+}
+
+impl ExecSession {
+    /// Spawns a process with a PTY.
+    fn spawn_pty(
+        id: u32,
+        req: &ExecRequest,
+        tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+    ) -> AgentdResult<Self> {
+        let pty = openpty(None, None)?;
+
+        // Set initial window size.
+        let ws = libc::winsize {
+            ws_row: req.rows,
+            ws_col: req.cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let ret = unsafe {
+            libc::ioctl(
+                pty.master.as_raw_fd(),
+                libc::TIOCSWINSZ,
+                &ws,
+            )
+        };
+        if ret < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+
+        let slave_fd = pty.slave.as_raw_fd();
+
+        // Pre-build all strings before fork to avoid allocating in the child.
+        let c_cmd = CString::new(req.cmd.as_str())
+            .map_err(|e| AgentdError::ExecSession(format!("invalid command: {e}")))?;
+        let mut c_args: Vec<CString> = vec![c_cmd.clone()];
+        for arg in &req.args {
+            c_args.push(
+                CString::new(arg.as_str())
+                    .map_err(|e| AgentdError::ExecSession(format!("invalid arg: {e}")))?,
+            );
+        }
+
+        // Build argv pointer array (null-terminated).
+        let argv_ptrs: Vec<*const libc::c_char> = c_args
+            .iter()
+            .map(|s| s.as_ptr())
+            .chain(std::iter::once(std::ptr::null()))
+            .collect();
+
+        // Pre-parse environment variables into CStrings.
+        let c_env: Vec<(CString, CString)> = req
+            .env
+            .iter()
+            .filter_map(|var| {
+                let (key, val) = var.split_once('=')?;
+                let k = CString::new(key).ok()?;
+                let v = CString::new(val).ok()?;
+                Some((k, v))
+            })
+            .collect();
+
+        // Pre-build cwd CString.
+        let c_cwd = req
+            .cwd
+            .as_ref()
+            .map(|dir| CString::new(dir.as_str()))
+            .transpose()
+            .map_err(|e| AgentdError::ExecSession(format!("invalid cwd: {e}")))?;
+
+        // Fork.
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+
+        #[allow(unreachable_code)]
+        if pid == 0 {
+            // Child process — only async-signal-safe operations from here.
+            drop(pty.master);
+
+            // Create new session.
+            if unsafe { libc::setsid() } < 0 {
+                unsafe { libc::_exit(1) };
+            }
+
+            // Set controlling terminal.
+            if unsafe { libc::ioctl(slave_fd, libc::TIOCSCTTY.into(), 0) } < 0 {
+                unsafe { libc::_exit(1) };
+            }
+
+            // Dup slave to stdin/stdout/stderr.
+            unsafe {
+                if libc::dup2(slave_fd, 0) < 0 {
+                    libc::_exit(1);
+                }
+                if libc::dup2(slave_fd, 1) < 0 {
+                    libc::_exit(1);
+                }
+                if libc::dup2(slave_fd, 2) < 0 {
+                    libc::_exit(1);
+                }
+                if slave_fd > 2 {
+                    libc::close(slave_fd);
+                }
+            }
+
+            // Set environment variables using pre-built CStrings.
+            for (key, val) in &c_env {
+                unsafe {
+                    libc::setenv(key.as_ptr(), val.as_ptr(), 1);
+                }
+            }
+
+            // Set working directory.
+            if let Some(ref dir) = c_cwd {
+                unsafe {
+                    libc::chdir(dir.as_ptr());
+                }
+            }
+
+            // execvp — on success this never returns.
+            unsafe {
+                libc::execvp(argv_ptrs[0], argv_ptrs.as_ptr());
+            }
+
+            // If execvp returns, it failed.
+            unsafe { libc::_exit(127) };
+        }
+
+        // Parent process.
+        drop(pty.slave);
+
+        // Dup the master fd for the reader task.
+        let reader_fd = unsafe { libc::dup(pty.master.as_raw_fd()) };
+        if reader_fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let reader_fd = unsafe { OwnedFd::from_raw_fd(reader_fd) };
+
+        // Spawn background reader task.
+        tokio::spawn(pty_reader_task(id, pid, reader_fd, tx));
+
+        Ok(Self {
+            id,
+            pid,
+            pty_master: Some(pty.master),
+            stdin: None,
+            is_tty: true,
+        })
+    }
+
+    /// Spawns a process with piped stdio.
+    fn spawn_pipe(
+        id: u32,
+        req: &ExecRequest,
+        tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+    ) -> AgentdResult<Self> {
+        let mut cmd = Command::new(&req.cmd);
+        cmd.args(&req.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        for var in &req.env {
+            if let Some((key, val)) = var.split_once('=') {
+                cmd.env(key, val);
+            }
+        }
+
+        if let Some(ref dir) = req.cwd {
+            cmd.current_dir(dir);
+        }
+
+        let mut child = cmd.spawn()?;
+        let pid = child.id().unwrap_or(0) as i32;
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        // Spawn background reader task.
+        tokio::spawn(pipe_reader_task(id, child, stdout, stderr, tx));
+
+        Ok(Self {
+            id,
+            pid,
+            pty_master: None,
+            stdin,
+            is_tty: false,
+        })
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Writes data to a raw fd using a blocking task.
+async fn blocking_write_fd(fd: RawFd, data: &[u8]) -> AgentdResult<()> {
+    let data = data.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let ret =
+            unsafe { libc::write(fd, data.as_ptr() as *const libc::c_void, data.len()) };
+        if ret < 0 {
+            Err(AgentdError::Io(std::io::Error::last_os_error()))
+        } else {
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AgentdError::ExecSession(format!("stdin write join error: {e}")))?
+}
+
+/// Background task that reads from a PTY master fd and sends output events.
+async fn pty_reader_task(
+    id: u32,
+    pid: i32,
+    master_fd: OwnedFd,
+    tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+) {
+    // Set non-blocking for async I/O.
+    let raw = master_fd.as_raw_fd();
+    let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
+    if flags >= 0 {
+        unsafe { libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    }
+
+    let Ok(async_fd) = AsyncFd::new(master_fd) else {
+        let code = wait_for_pid(pid).await;
+        let _ = tx.send((id, SessionOutput::Exited(code)));
+        return;
+    };
+
+    loop {
+        let Ok(mut guard) = async_fd.readable().await else {
+            break;
+        };
+
+        let fd = async_fd.as_raw_fd();
+        let mut buf = [0u8; 4096];
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+
+        if n > 0 {
+            let _ = tx.send((id, SessionOutput::Stdout(buf[..n as usize].to_vec())));
+            guard.clear_ready();
+        } else if n == 0 {
+            break;
+        } else {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EAGAIN)
+                || err.raw_os_error() == Some(libc::EWOULDBLOCK)
+            {
+                guard.clear_ready();
+                continue;
+            }
+            // EIO or other error — PTY slave closed.
+            break;
+        }
+    }
+
+    let code = wait_for_pid(pid).await;
+    let _ = tx.send((id, SessionOutput::Exited(code)));
+}
+
+/// Background task that reads from piped stdout/stderr and sends output events.
+async fn pipe_reader_task(
+    id: u32,
+    mut child: Child,
+    stdout: Option<tokio::process::ChildStdout>,
+    stderr: Option<tokio::process::ChildStderr>,
+    tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+) {
+    let mut stdout = stdout;
+    let mut stderr = stderr;
+    let mut stdout_eof = stdout.is_none();
+    let mut stderr_eof = stderr.is_none();
+
+    while !stdout_eof || !stderr_eof {
+        let mut stdout_buf = [0u8; 4096];
+        let mut stderr_buf = [0u8; 4096];
+
+        tokio::select! {
+            result = async {
+                match stdout.as_mut() {
+                    Some(out) => out.read(&mut stdout_buf).await,
+                    None => std::future::pending().await,
+                }
+            }, if !stdout_eof => {
+                match result {
+                    Ok(0) | Err(_) => {
+                        stdout = None;
+                        stdout_eof = true;
+                    }
+                    Ok(n) => {
+                        let _ = tx.send((id, SessionOutput::Stdout(stdout_buf[..n].to_vec())));
+                    }
+                }
+            }
+            result = async {
+                match stderr.as_mut() {
+                    Some(err) => err.read(&mut stderr_buf).await,
+                    None => std::future::pending().await,
+                }
+            }, if !stderr_eof => {
+                match result {
+                    Ok(0) | Err(_) => {
+                        stderr = None;
+                        stderr_eof = true;
+                    }
+                    Ok(n) => {
+                        let _ = tx.send((id, SessionOutput::Stderr(stderr_buf[..n].to_vec())));
+                    }
+                }
+            }
+        }
+    }
+
+    // Both streams are done — wait for process exit.
+    let code = match child.wait().await {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(_) => -1,
+    };
+
+    let _ = tx.send((id, SessionOutput::Exited(code)));
+}
+
+/// Waits for a process to exit by PID and returns the exit code.
+async fn wait_for_pid(pid: i32) -> i32 {
+    tokio::task::spawn_blocking(move || {
+        let mut status: i32 = 0;
+        unsafe {
+            libc::waitpid(pid, &mut status, 0);
+        }
+        if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else {
+            -1
+        }
+    })
+    .await
+    .unwrap_or(-1)
+}
