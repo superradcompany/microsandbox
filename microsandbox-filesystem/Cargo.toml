@@ -8,3 +8,10 @@ edition.workspace = true
 
 [lib]
 path = "lib/lib.rs"
+
+[features]
+prebuilt = ["dep:ureq"]
+
+[build-dependencies]
+microsandbox-utils = { path = "../microsandbox-utils" }
+ureq = { workspace = true, optional = true }

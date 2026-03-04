@@ -15,6 +15,21 @@ path = "bin/main.rs"
 name = "microsandbox"
 path = "lib/lib.rs"
 
+[features]
+prebuilt = ["microsandbox-filesystem/prebuilt", "dep:ureq"]
+
 [dependencies]
+microsandbox-filesystem = { path = "../microsandbox-filesystem" }
+microsandbox-utils = { path = "../microsandbox-utils" }
+dirs.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+typed-builder.workspace = true
+
+[build-dependencies]
+microsandbox-utils = { path = "../microsandbox-utils" }
+ureq = { workspace = true, optional = true }
 
 [dev-dependencies]

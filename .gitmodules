@@ -1,0 +1,4 @@
+[submodule "vendor/libkrunfw"]
+	path = vendor/libkrunfw
+	url = https://github.com/zerocore-ai/libkrunfw.git
+	branch = krunfw
