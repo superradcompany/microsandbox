@@ -1,0 +1,25 @@
+[package]
+name = "microsandbox-agentd"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "microsandbox-agentd"
+path = "bin/main.rs"
+
+[lib]
+path = "lib/lib.rs"
+
+[dependencies]
+microsandbox-protocol = { path = "../microsandbox-protocol" }
+chrono.workspace = true
+ciborium.workspace = true
+libc.workspace = true
+nix = { workspace = true, features = ["fs", "mount", "process", "signal", "term"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "io-util", "process", "time", "fs", "signal", "net"] }

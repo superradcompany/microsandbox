@@ -3,11 +3,13 @@ resolver = "3"
 exclude = ["sdk/rust"]
 members = [
     "microsandbox",
+    "microsandbox-agentd",
     "microsandbox-cli",
-    "microsandbox-core",
-    "microsandbox-portal",
-    "microsandbox-server",
-    "microsandbox-utils",
+    "microsandbox-filesystem",
+    "microsandbox-image",
+    "microsandbox-network",
+    "microsandbox-protocol",
+    "microsandbox-runtime",
 ]
 
 [workspace.package]
@@ -19,6 +21,9 @@ edition = "2024"
 
 [profile.release]
 codegen-units = 1
+lto = true
+strip = true
+panic = "abort"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -31,6 +36,7 @@ base64 = "0.22"
 bytes = "1.9"
 cfg-if = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
+ciborium = "0.2"
 clap = { version = "4.5", features = ["color", "derive"] }
 console = "0.16"
 criterion = "0.8"
@@ -46,9 +52,6 @@ intaglio = "1.10"
 ipnetwork = { version = "0.21.0", features = ["serde"] }
 jsonwebtoken = "9.3"
 libc = "0.2"
-microsandbox-core = { version = "0.2.6", path = "./microsandbox-core" }
-microsandbox-server = { version = "0.2.6", path = "./microsandbox-server" }
-microsandbox-utils = { version = "0.2.6", path = "./microsandbox-utils" }
 multihash = "0.19"
 multihash-codetable = "0.1"
 nfsserve = "0.10"
@@ -69,6 +72,7 @@ reqwest-retry = "0.8"                                                       # Ca
 scopeguard = "1.2"
 semver = { version = "1.0.24", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
 serde_json = "1.0"
 serde_yaml = "0.9"
 serial_test = "3.2.0"
@@ -95,5 +99,3 @@ which = "8"
 xattr = "1.3"
 rstest = "0.26"
 
-[patch.crates-io]
-oci-client = { git = "https://github.com/toksdotdev/rust-oci-client.git", branch = "toks/string-impl-for-enums" }

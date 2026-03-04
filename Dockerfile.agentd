@@ -1,0 +1,11 @@
+FROM rust:alpine AS builder
+
+RUN apk add --no-cache musl-dev
+
+WORKDIR /build
+COPY . .
+
+RUN cargo build --release -p microsandbox-agentd
+
+FROM scratch
+COPY --from=builder /build/target/release/microsandbox-agentd /microsandbox-agentd
