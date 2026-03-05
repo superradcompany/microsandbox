@@ -25,7 +25,6 @@ build-agentd:
     id=$(docker create microsandbox-agentd-build /dev/null)
     trap 'docker rm "$id" >/dev/null 2>&1' EXIT
     docker cp "$id:/agentd" build/agentd
-    docker rm "$id" > /dev/null
 
 # Build libkrunfw on Linux. Requires: kernel build dependencies (gcc, make, flex, bison, etc.).
 [linux]
