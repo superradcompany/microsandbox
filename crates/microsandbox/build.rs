@@ -6,9 +6,9 @@ use microsandbox_utils::libkrunfw_download_url;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../microsandbox-utils/lib/lib.rs");
+    println!("cargo:rerun-if-changed=../utils/lib/lib.rs");
 
-    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
     build_libkrunfw(&workspace_root, &out_dir);

@@ -19,9 +19,9 @@ path = "lib/lib.rs"
 prebuilt = ["microsandbox-filesystem/prebuilt", "dep:ureq"]
 
 [dependencies]
-microsandbox-filesystem = { path = "../microsandbox-filesystem" }
-microsandbox-migration = { path = "../microsandbox-migration" }
-microsandbox-utils = { path = "../microsandbox-utils" }
+microsandbox-filesystem = { path = "../filesystem" }
+microsandbox-migration = { path = "../migration" }
+microsandbox-utils = { path = "../utils" }
 dirs.workspace = true
 futures.workspace = true
 reqwest.workspace = true
@@ -31,7 +31,7 @@ thiserror.workspace = true
 typed-builder.workspace = true
 
 [build-dependencies]
-microsandbox-utils = { path = "../microsandbox-utils" }
+microsandbox-utils = { path = "../utils" }
 ureq = { workspace = true, optional = true }
 
 [dev-dependencies]

@@ -13,5 +13,5 @@ path = "lib/lib.rs"
 prebuilt = ["dep:ureq"]
 
 [build-dependencies]
-microsandbox-utils = { path = "../microsandbox-utils" }
+microsandbox-utils = { path = "../utils" }
 ureq = { workspace = true, optional = true }
