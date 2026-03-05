@@ -14,7 +14,7 @@ path = "bin/main.rs"
 path = "lib/lib.rs"
 
 [dependencies]
-microsandbox-protocol = { path = "../microsandbox-protocol" }
+microsandbox-protocol = { path = "../protocol" }
 chrono.workspace = true
 ciborium.workspace = true
 libc.workspace = true

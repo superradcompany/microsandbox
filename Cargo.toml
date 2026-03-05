@@ -2,16 +2,16 @@
 resolver = "3"
 exclude = ["sdk/rust"]
 members = [
-    "microsandbox",
-    "microsandbox-agentd",
-    "microsandbox-cli",
-    "microsandbox-filesystem",
-    "microsandbox-image",
-    "microsandbox-migration",
-    "microsandbox-network",
-    "microsandbox-protocol",
-    "microsandbox-runtime",
-    "microsandbox-utils",
+    "crates/microsandbox",
+    "crates/agentd",
+    "crates/cli",
+    "crates/filesystem",
+    "crates/image",
+    "crates/migration",
+    "crates/network",
+    "crates/protocol",
+    "crates/runtime",
+    "crates/utils",
 ]
 
 [workspace.package]
