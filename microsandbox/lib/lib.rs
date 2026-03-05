@@ -9,6 +9,8 @@ mod error;
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+#[allow(dead_code)]
+pub(crate) mod db;
 pub mod setup;
 
 pub use error::*;

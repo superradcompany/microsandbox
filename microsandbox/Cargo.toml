@@ -20,10 +20,12 @@ prebuilt = ["microsandbox-filesystem/prebuilt", "dep:ureq"]
 
 [dependencies]
 microsandbox-filesystem = { path = "../microsandbox-filesystem" }
+microsandbox-migration = { path = "../microsandbox-migration" }
 microsandbox-utils = { path = "../microsandbox-utils" }
 dirs.workspace = true
 futures.workspace = true
 reqwest.workspace = true
+sea-orm.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 typed-builder.workspace = true
@@ -33,3 +35,4 @@ microsandbox-utils = { path = "../microsandbox-utils" }
 ureq = { workspace = true, optional = true }
 
 [dev-dependencies]
+tempfile.workspace = true

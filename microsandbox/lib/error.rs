@@ -22,6 +22,10 @@ pub enum MicrosandboxError {
     #[error("libkrunfw not found: {0}")]
     LibkrunfwNotFound(String),
 
+    /// A database error occurred.
+    #[error("database error: {0}")]
+    Database(#[from] sea_orm::DbErr),
+
     /// A custom error message.
     #[error("{0}")]
     Custom(String),
