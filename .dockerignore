@@ -1,6 +1,7 @@
 # Folders to ignore
 build/
 ignore/
+vendor/
 .git/
 .github/
 .menv/

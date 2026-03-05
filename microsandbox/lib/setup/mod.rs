@@ -1,14 +1,10 @@
-//! `microsandbox` is the core library for the microsandbox project.
+//! Setup and installation utilities for microsandbox runtime dependencies.
 
-#![warn(missing_docs)]
-#![allow(clippy::module_inception)]
-
-mod error;
+mod download;
+mod verify;
 
 //--------------------------------------------------------------------------------------------------
-// Exports
+// Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub mod setup;
-
-pub use error::*;
+pub use download::*;

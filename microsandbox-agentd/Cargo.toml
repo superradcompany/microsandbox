@@ -7,7 +7,7 @@ license.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "microsandbox-agentd"
+name = "agentd"
 path = "bin/main.rs"
 
 [lib]

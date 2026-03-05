@@ -10,6 +10,7 @@ members = [
     "microsandbox-network",
     "microsandbox-protocol",
     "microsandbox-runtime",
+    "microsandbox-utils",
 ]
 
 [workspace.package]
@@ -55,7 +56,7 @@ libc = "0.2"
 multihash = "0.19"
 multihash-codetable = "0.1"
 nfsserve = "0.10"
-nix = "0.30"                                                                # Cannot upgrade to 0.30 because pty no longer works correctly. Yet to investigate properly.
+nix = "0.30"
 nondestructive = { version = "0.0.28", features = ["serde"] }
 oci-client = "0.15"
 oci-spec = "0.8"
@@ -98,4 +99,5 @@ walkdir = "2.4"
 which = "8"
 xattr = "1.3"
 rstest = "0.26"
+ureq = "3"
 
