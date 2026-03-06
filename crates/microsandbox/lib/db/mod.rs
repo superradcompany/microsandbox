@@ -16,13 +16,6 @@ use tokio::sync::OnceCell;
 use crate::MicrosandboxResult;
 
 //--------------------------------------------------------------------------------------------------
-// Constants
-//--------------------------------------------------------------------------------------------------
-
-/// Default maximum number of connections in the pool.
-const DEFAULT_MAX_CONNECTIONS: u32 = 5;
-
-//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -47,7 +40,7 @@ pub async fn init_global(max_connections: Option<u32>) -> MicrosandboxResult<&'s
                 .join(microsandbox_utils::BASE_DIR_NAME)
                 .join(microsandbox_utils::DB_SUBDIR);
 
-            connect_and_migrate(&db_dir, max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS)).await
+            connect_and_migrate(&db_dir, max_connections.unwrap_or(crate::config::DEFAULT_MAX_CONNECTIONS)).await
         })
         .await
 }
@@ -69,7 +62,7 @@ pub async fn init_project(
                 .join(microsandbox_utils::BASE_DIR_NAME)
                 .join(microsandbox_utils::DB_SUBDIR);
 
-            let conn = connect_and_migrate(&db_dir, max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS)).await?;
+            let conn = connect_and_migrate(&db_dir, max_connections.unwrap_or(crate::config::DEFAULT_MAX_CONNECTIONS)).await?;
             Ok::<_, crate::MicrosandboxError>((requested.clone(), conn))
         })
         .await?;

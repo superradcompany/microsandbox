@@ -1,13 +1,14 @@
 //! Child process and supervisor lifecycle policies.
 
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
 /// Action taken when a child process exits.
-#[derive(Debug, Clone, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 pub enum ExitAction {
     /// Kill all other children and shut down the supervisor.
     ShutdownAll,
@@ -20,7 +21,7 @@ pub enum ExitAction {
 }
 
 /// Policy for a single child process (VM or msbnet).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChildPolicy {
     /// Action to take when the child exits.
     pub on_exit: ExitAction,
@@ -39,7 +40,7 @@ pub struct ChildPolicy {
 }
 
 /// Shutdown mode for the supervisor drain sequence.
-#[derive(Debug, Clone, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 pub enum ShutdownMode {
     /// Wait for voluntary exit, then SIGTERM, then SIGKILL.
     Graceful,
@@ -52,7 +53,7 @@ pub enum ShutdownMode {
 }
 
 /// Supervisor-level lifecycle policy.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupervisorPolicy {
     /// How to shut down children when drain is triggered.
     pub shutdown_mode: ShutdownMode,
@@ -68,7 +69,7 @@ pub struct SupervisorPolicy {
 }
 
 /// Combined child policies for all managed processes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChildPolicies {
     /// Policy for the VM process.
     pub vm: ChildPolicy,
@@ -130,5 +131,69 @@ impl Default for SupervisorPolicy {
             max_duration_secs: None,
             idle_timeout_secs: None,
         }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_supervisor_policy_serde_roundtrip() {
+        let policy = SupervisorPolicy {
+            shutdown_mode: ShutdownMode::Terminate,
+            grace_secs: 30,
+            max_duration_secs: Some(3600),
+            idle_timeout_secs: Some(120),
+        };
+
+        let json = serde_json::to_string(&policy).unwrap();
+        let decoded: SupervisorPolicy = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.shutdown_mode, ShutdownMode::Terminate);
+        assert_eq!(decoded.grace_secs, 30);
+        assert_eq!(decoded.max_duration_secs, Some(3600));
+        assert_eq!(decoded.idle_timeout_secs, Some(120));
+    }
+
+    #[test]
+    fn test_child_policies_serde_roundtrip() {
+        let policies = ChildPolicies::default();
+
+        let json = serde_json::to_string(&policies).unwrap();
+        let decoded: ChildPolicies = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.vm.on_exit, ExitAction::ShutdownAll);
+        assert_eq!(decoded.vm.shutdown_timeout_ms, 5000);
+        assert_eq!(decoded.msbnet.on_exit, ExitAction::Restart);
+        assert_eq!(decoded.msbnet.max_restarts, 3);
+    }
+
+    #[test]
+    fn test_default_supervisor_policy() {
+        let policy = SupervisorPolicy::default();
+        assert_eq!(policy.shutdown_mode, ShutdownMode::Graceful);
+        assert_eq!(policy.grace_secs, 15);
+        assert!(policy.max_duration_secs.is_none());
+        assert!(policy.idle_timeout_secs.is_none());
+    }
+
+    #[test]
+    fn test_default_child_policies() {
+        let policies = ChildPolicies::default();
+
+        // VM default: ShutdownAll, no restarts.
+        assert_eq!(policies.vm.on_exit, ExitAction::ShutdownAll);
+        assert_eq!(policies.vm.max_restarts, 0);
+
+        // msbnet default: Restart, up to 3 times.
+        assert_eq!(policies.msbnet.on_exit, ExitAction::Restart);
+        assert_eq!(policies.msbnet.max_restarts, 3);
+        assert_eq!(policies.msbnet.restart_delay_ms, 1000);
+        assert_eq!(policies.msbnet.restart_window_secs, 60);
     }
 }

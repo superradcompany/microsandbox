@@ -26,6 +26,34 @@ pub enum MicrosandboxError {
     #[error("database error: {0}")]
     Database(#[from] sea_orm::DbErr),
 
+    /// Invalid configuration.
+    #[error("invalid config: {0}")]
+    InvalidConfig(String),
+
+    /// The requested sandbox was not found.
+    #[error("sandbox not found: {0}")]
+    SandboxNotFound(String),
+
+    /// The sandbox is not running.
+    #[error("sandbox not running: {0}")]
+    SandboxNotRunning(String),
+
+    /// A runtime error occurred.
+    #[error("runtime error: {0}")]
+    Runtime(String),
+
+    /// A JSON serialization/deserialization error occurred.
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// A protocol error occurred.
+    #[error("protocol error: {0}")]
+    Protocol(#[from] microsandbox_protocol::ProtocolError),
+
+    /// A nix/errno error occurred.
+    #[error("nix error: {0}")]
+    Nix(#[from] nix::errno::Errno),
+
     /// A custom error message.
     #[error("{0}")]
     Custom(String),

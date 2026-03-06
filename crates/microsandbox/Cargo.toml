@@ -21,14 +21,23 @@ prebuilt = ["microsandbox-filesystem/prebuilt", "dep:ureq"]
 [dependencies]
 microsandbox-filesystem = { path = "../filesystem" }
 microsandbox-migration = { path = "../migration" }
+microsandbox-protocol = { path = "../protocol" }
+microsandbox-runtime = { path = "../runtime" }
 microsandbox-utils = { path = "../utils" }
+chrono.workspace = true
 dirs.workspace = true
 futures.workspace = true
+libc.workspace = true
+nix = { workspace = true, features = ["process", "signal"] }
 reqwest.workspace = true
 sea-orm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 typed-builder.workspace = true
+which.workspace = true
 
 [build-dependencies]
 microsandbox-utils = { path = "../utils" }

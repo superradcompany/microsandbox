@@ -32,6 +32,15 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
+    // Auto-set MSB_PATH so the library can find the msb binary
+    // when spawning supervisor processes.
+    // Safety: called before any threads are spawned (single-threaded at this point).
+    if std::env::var("MSB_PATH").is_err() {
+        if let Ok(exe) = std::env::current_exe() {
+            unsafe { std::env::set_var("MSB_PATH", &exe) };
+        }
+    }
+
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
