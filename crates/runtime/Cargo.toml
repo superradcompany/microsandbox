@@ -1,5 +1,6 @@
 [package]
 name = "microsandbox-runtime"
+description = "Runtime library for the microsandbox supervisor and microVM entry points."
 version.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -7,4 +8,19 @@ license.workspace = true
 edition.workspace = true
 
 [lib]
+name = "microsandbox_runtime"
 path = "lib/lib.rs"
+
+[dependencies]
+microsandbox-protocol = { path = "../protocol" }
+microsandbox-utils = { path = "../utils" }
+msb_krun = { version = "0.1.0", features = ["net"] }
+chrono.workspace = true
+libc.workspace = true
+nix = { workspace = true, features = ["process", "signal"] }
+sea-orm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
