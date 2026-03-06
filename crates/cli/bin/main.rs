@@ -19,12 +19,10 @@ struct Cli {
 /// Top-level commands.
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the supervisor process (hidden — used internally).
-    #[command(hide = true)]
+    /// Run the supervisor process.
     Supervisor(SupervisorArgs),
 
-    /// Run the microVM process (hidden — used internally).
-    #[command(hide = true)]
+    /// Run the microVM process.
     Microvm(MicrovmArgs),
 }
 
