@@ -54,15 +54,21 @@ build-libkrunfw:
     cd build
     ln -sf libkrunfw.{{ LIBKRUNFW_ABI }}.dylib libkrunfw.dylib
 
-# Build the msb CLI binary (release mode).
-build: build-deps
+# Build the msb CLI binary (release mode). Requires: just build-deps (if not already built).
+[linux]
+build:
+    @test -f build/agentd || { echo "error: build/agentd not found. Run 'just build-deps' first."; exit 1; }
     cargo build --release -p microsandbox-cli
     mkdir -p build
     cp target/release/msb build/msb
 
-# Build and sign msb for macOS (hypervisor entitlement required for HVF).
+# Build and sign the msb CLI binary (release mode). Requires: just build-deps (if not already built).
 [macos]
-build-signed: build
+build:
+    @test -f build/agentd || { echo "error: build/agentd not found. Run 'just build-deps' first."; exit 1; }
+    cargo build --release -p microsandbox-cli
+    mkdir -p build
+    cp target/release/msb build/msb
     codesign --entitlements entitlements.plist --force -s - build/msb
 
 # Clean build artifacts.
