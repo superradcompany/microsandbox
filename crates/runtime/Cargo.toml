@@ -15,6 +15,7 @@ path = "lib/lib.rs"
 microsandbox-protocol = { path = "../protocol" }
 microsandbox-utils = { path = "../utils" }
 msb_krun = { version = "0.1.0", features = ["net"] }
+clap = { workspace = true, features = ["derive"] }
 chrono.workspace = true
 libc.workspace = true
 nix = { workspace = true, features = ["process", "signal"] }

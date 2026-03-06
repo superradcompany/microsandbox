@@ -1,16 +1,16 @@
-//! Handler for the hidden `msb supervisor` subcommand.
+//! Handler for the `msb supervisor` subcommand.
 //!
-//! Parses CLI arguments, decodes base64-encoded JSON policies, builds a
-//! `SupervisorConfig`, and delegates to `microsandbox_runtime::supervisor::run()`.
+//! Parses CLI arguments, builds a `SupervisorConfig`, and delegates to
+//! `microsandbox_runtime::supervisor::run()`.
 
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Args;
 use microsandbox_runtime::RuntimeResult;
-use microsandbox_runtime::policy::{ChildPolicies, SupervisorPolicy};
+use microsandbox_runtime::policy::{
+    ChildPolicies, ChildPolicy, ExitAction, ShutdownMode, SupervisorPolicy,
+};
 use microsandbox_runtime::supervisor::SupervisorConfig;
 use microsandbox_runtime::vm::VmConfig;
 
@@ -18,15 +18,15 @@ use microsandbox_runtime::vm::VmConfig;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Arguments for the hidden `msb supervisor` subcommand.
+/// Arguments for the `msb supervisor` subcommand.
 #[derive(Debug, Args)]
 pub struct SupervisorArgs {
     /// Name of the sandbox.
-    #[arg(long)]
+    #[arg(long = "name")]
     pub sandbox_name: String,
 
     /// Path to the sandbox database file.
-    #[arg(long)]
+    #[arg(long = "db-path")]
     pub sandbox_db_path: PathBuf,
 
     /// Directory for log files.
@@ -42,16 +42,48 @@ pub struct SupervisorArgs {
     pub agent_fd: RawFd,
 
     /// Forward VM console output to supervisor stdout.
-    #[arg(long, default_value_t = false)]
+    #[arg(long = "forward")]
     pub forward_output: bool,
 
-    /// Child policies as base64-encoded JSON.
-    #[arg(long, default_value = "")]
-    pub child_policies: String,
+    // ── Supervisor policy ────────────────────────────────────────────────
 
-    /// Supervisor policy as base64-encoded JSON.
-    #[arg(long, default_value = "")]
-    pub supervisor_policy: String,
+    /// Shutdown mode: graceful, terminate, or kill.
+    #[arg(long, default_value = "graceful")]
+    pub shutdown_mode: ShutdownMode,
+
+    /// Grace period in seconds between drain escalation steps.
+    #[arg(long, default_value_t = 15)]
+    pub grace_secs: u64,
+
+    /// Hard cap on total sandbox lifetime in seconds.
+    #[arg(long)]
+    pub max_duration: Option<u64>,
+
+    /// Idle timeout in seconds.
+    #[arg(long)]
+    pub idle_timeout: Option<u64>,
+
+    // ── VM child policy ──────────────────────────────────────────────────
+
+    /// VM exit action: shutdown-all, restart, or ignore.
+    #[arg(long, default_value = "shutdown-all")]
+    pub vm_on_exit: ExitAction,
+
+    /// Max VM restart attempts before falling back to shutdown-all.
+    #[arg(long, default_value_t = 0)]
+    pub vm_max_restarts: u32,
+
+    /// Delay in milliseconds between VM restart attempts.
+    #[arg(long, default_value_t = 0)]
+    pub vm_restart_delay_ms: u64,
+
+    /// Window in seconds for counting VM restart attempts.
+    #[arg(long, default_value_t = 0)]
+    pub vm_restart_window: u64,
+
+    /// Grace period in milliseconds before SIGKILL on VM shutdown.
+    #[arg(long, default_value_t = 5000)]
+    pub vm_shutdown_timeout_ms: u64,
 
     // ── VM passthrough args ──────────────────────────────────────────────
 
@@ -102,8 +134,23 @@ pub struct SupervisorArgs {
 
 /// Run the supervisor with the given CLI arguments.
 pub async fn run(args: SupervisorArgs) -> RuntimeResult<()> {
-    let child_policies = decode_or_default::<ChildPolicies>(&args.child_policies)?;
-    let supervisor_policy = decode_or_default::<SupervisorPolicy>(&args.supervisor_policy)?;
+    let child_policies = ChildPolicies {
+        vm: ChildPolicy {
+            on_exit: args.vm_on_exit,
+            max_restarts: args.vm_max_restarts,
+            restart_delay_ms: args.vm_restart_delay_ms,
+            restart_window_secs: args.vm_restart_window,
+            shutdown_timeout_ms: args.vm_shutdown_timeout_ms,
+        },
+        msbnet: ChildPolicy::msbnet_default(),
+    };
+
+    let supervisor_policy = SupervisorPolicy {
+        shutdown_mode: args.shutdown_mode,
+        grace_secs: args.grace_secs,
+        max_duration_secs: args.max_duration,
+        idle_timeout_secs: args.idle_timeout,
+    };
 
     let vm_config = VmConfig {
         libkrunfw_path: args.libkrunfw_path,
@@ -117,7 +164,7 @@ pub async fn run(args: SupervisorArgs) -> RuntimeResult<()> {
         exec_path: args.exec_path,
         exec_args: args.exec_args,
         net_fd: None,
-        agent_fd: Some(args.agent_fd),
+        agent_fd: None,
     };
 
     let config = SupervisorConfig {
@@ -133,24 +180,4 @@ pub async fn run(args: SupervisorArgs) -> RuntimeResult<()> {
     };
 
     microsandbox_runtime::supervisor::run(config).await
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions: Helpers
-//--------------------------------------------------------------------------------------------------
-
-/// Decode a base64-encoded JSON string, or return Default if empty.
-fn decode_or_default<T: serde::de::DeserializeOwned + Default>(
-    input: &str,
-) -> RuntimeResult<T> {
-    if input.is_empty() {
-        return Ok(T::default());
-    }
-
-    let bytes = BASE64
-        .decode(input)
-        .map_err(|e| microsandbox_runtime::RuntimeError::Custom(format!("base64 decode error: {e}")))?;
-
-    let value = serde_json::from_slice(&bytes)?;
-    Ok(value)
 }

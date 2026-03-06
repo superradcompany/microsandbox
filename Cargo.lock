@@ -1673,11 +1673,8 @@ dependencies = [
 name = "microsandbox-cli"
 version = "0.2.6"
 dependencies = [
- "base64",
  "clap",
  "microsandbox-runtime",
- "serde",
- "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1723,6 +1720,7 @@ name = "microsandbox-runtime"
 version = "0.2.6"
 dependencies = [
  "chrono",
+ "clap",
  "libc",
  "microsandbox-protocol",
  "microsandbox-utils",

@@ -1,16 +1,13 @@
 //! Child process and supervisor lifecycle policies.
-//!
-//! These types are serialized as JSON and passed to the supervisor via CLI args.
 
-use serde::{Deserialize, Serialize};
+use clap::ValueEnum;
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
 /// Action taken when a child process exits.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, ValueEnum)]
 pub enum ExitAction {
     /// Kill all other children and shut down the supervisor.
     ShutdownAll,
@@ -23,7 +20,7 @@ pub enum ExitAction {
 }
 
 /// Policy for a single child process (VM or msbnet).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ChildPolicy {
     /// Action to take when the child exits.
     pub on_exit: ExitAction,
@@ -42,8 +39,7 @@ pub struct ChildPolicy {
 }
 
 /// Shutdown mode for the supervisor drain sequence.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, ValueEnum)]
 pub enum ShutdownMode {
     /// Wait for voluntary exit, then SIGTERM, then SIGKILL.
     Graceful,
@@ -56,7 +52,7 @@ pub enum ShutdownMode {
 }
 
 /// Supervisor-level lifecycle policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SupervisorPolicy {
     /// How to shut down children when drain is triggered.
     pub shutdown_mode: ShutdownMode,
@@ -72,7 +68,7 @@ pub struct SupervisorPolicy {
 }
 
 /// Combined child policies for all managed processes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ChildPolicies {
     /// Policy for the VM process.
     pub vm: ChildPolicy,

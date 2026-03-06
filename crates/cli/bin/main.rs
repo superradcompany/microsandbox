@@ -10,7 +10,7 @@ use microsandbox_cli::supervisor_cmd::{self, SupervisorArgs};
 
 /// Microsandbox CLI.
 #[derive(Parser)]
-#[command(name = "msb", version, about = "Microsandbox CLI")]
+#[command(name = "msb", version, about = "Microsandbox CLI", styles = microsandbox_cli::styles::styles())]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

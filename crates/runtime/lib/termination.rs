@@ -1,14 +1,11 @@
 //! Termination reason tracking for sandbox lifecycle.
 
-use serde::{Deserialize, Serialize};
-
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
 /// The reason a sandbox terminated.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminationReason {
     /// VM exited with code 0 (guest shutdown cleanly).
     VmCompleted,
