@@ -129,9 +129,11 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
         builder = builder.kernel(|k| k.cmdline(&format!("init={}", init_path.display())));
     }
 
-    // TODO: Wire agent_fd through ConsoleBuilder.port() for virtio-console multi-port (hvc1).
-    // Blocked on msb_krun: the Rust `ConsoleBuilder::port(name, input_fd, output_fd)` wrapper
-    // has not been added yet. The underlying C API (krun_add_console_port_inout) exists in libkrun.
+    // Agent — wire agent_fd through virtio-console multi-port.
+    // Guest discovers port by name via /sys/class/virtio-ports/agent.
+    if let Some(agent_fd) = config.agent_fd {
+        builder = builder.console(|c| c.port("agent", agent_fd, agent_fd));
+    }
 
     // Network — use msb_krun's built-in Unixgram backend to relay frames to msbnet.
     if let Some(raw_fd) = config.net_fd {
