@@ -15,9 +15,11 @@ use microsandbox_protocol::exec::{
     ExecExited, ExecRequest, ExecResize, ExecSignal, ExecStarted, ExecStdin, ExecStdout,
     ExecStderr,
 };
+use microsandbox_protocol::fs::{FsData, FsRequest};
 use microsandbox_protocol::message::{Message, MessageType};
 
 use crate::error::{AgentdError, AgentdResult};
+use crate::fs::FsWriteSession;
 use crate::heartbeat::{heartbeat_dir_exists, write_heartbeat};
 use crate::serial::{AGENT_PORT_NAME, find_serial_port};
 use crate::session::{ExecSession, SessionOutput};
@@ -69,8 +71,11 @@ pub async fn run() -> AgentdResult<()> {
     let mut serial_in_buf = Vec::new();
     let mut serial_out_buf = Vec::new();
 
-    // Active sessions.
+    // Active exec sessions.
     let mut sessions: HashMap<u32, ExecSession> = HashMap::new();
+
+    // Active filesystem write sessions.
+    let mut write_sessions: HashMap<u32, FsWriteSession> = HashMap::new();
 
     // Channel for session output events.
     let (session_tx, mut session_rx) = mpsc::unbounded_channel::<(u32, SessionOutput)>();
@@ -111,6 +116,7 @@ pub async fn run() -> AgentdResult<()> {
                                 handle_message(
                                     msg,
                                     &mut sessions,
+                                    &mut write_sessions,
                                     &session_tx,
                                     &mut serial_out_buf,
                                 ).await?;
@@ -155,6 +161,10 @@ pub async fn run() -> AgentdResult<()> {
                             .map_err(|e| AgentdError::ExecSession(format!("encode exited frame: {e}")))?;
                         sessions.remove(&id);
                     }
+                    SessionOutput::Raw(frame_bytes) => {
+                        // Pre-encoded frame — write directly to output buffer.
+                        serial_out_buf.extend_from_slice(&frame_bytes);
+                    }
                 }
 
                 if !serial_out_buf.is_empty() {
@@ -185,6 +195,7 @@ pub async fn run() -> AgentdResult<()> {
 async fn handle_message(
     msg: Message,
     sessions: &mut HashMap<u32, ExecSession>,
+    write_sessions: &mut HashMap<u32, FsWriteSession>,
     session_tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
     out_buf: &mut Vec<u8>,
 ) -> AgentdResult<()> {
@@ -252,11 +263,57 @@ async fn handle_message(
             }
         }
 
+        MessageType::FsRequest => {
+            let req: FsRequest = msg
+                .payload()
+                .map_err(|e| AgentdError::ExecSession(format!("decode fs request: {e}")))?;
+            match crate::fs::handle_fs_request(msg.id, req, out_buf, session_tx).await {
+                Ok(Some(ws)) => {
+                    write_sessions.insert(msg.id, ws);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("fs request error for {}: {e}", msg.id);
+                }
+            }
+        }
+
+        MessageType::FsData => {
+            let data: FsData = msg
+                .payload()
+                .map_err(|e| AgentdError::ExecSession(format!("decode fs data: {e}")))?;
+            if let Some(session) = write_sessions.get_mut(&msg.id) {
+                match crate::fs::handle_fs_data(msg.id, data, session, out_buf).await {
+                    Ok(true) => {
+                        // Session complete — remove it.
+                        write_sessions.remove(&msg.id);
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        eprintln!("fs data error for {}: {e}", msg.id);
+                        write_sessions.remove(&msg.id);
+                    }
+                }
+            } else {
+                // No write session for this ID — send error response.
+                let resp = microsandbox_protocol::fs::FsResponse {
+                    ok: false,
+                    error: Some(format!("unknown write session: {}", msg.id)),
+                    data: None,
+                };
+                let reply = Message::with_payload(MessageType::FsResponse, msg.id, &resp)
+                    .map_err(|e| AgentdError::ExecSession(format!("encode fs error: {e}")))?;
+                encode_to_buf(&reply, out_buf)
+                    .map_err(|e| AgentdError::ExecSession(format!("encode fs error frame: {e}")))?;
+            }
+        }
+
         MessageType::Shutdown => {
             // Graceful shutdown — signal all sessions and break from main loop.
             for (_, session) in sessions.drain() {
                 let _ = session.send_signal(15); // SIGTERM
             }
+            write_sessions.clear();
             return Err(AgentdError::Shutdown);
         }
 

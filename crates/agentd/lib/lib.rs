@@ -10,6 +10,7 @@ mod error;
 //--------------------------------------------------------------------------------------------------
 
 pub mod agent;
+pub mod fs;
 pub mod heartbeat;
 pub mod init;
 pub mod serial;

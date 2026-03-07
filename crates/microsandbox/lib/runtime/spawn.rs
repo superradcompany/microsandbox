@@ -14,7 +14,7 @@ use tokio::process::Command;
 
 use crate::config;
 use crate::runtime::handle::SupervisorHandle;
-use crate::sandbox::{RootfsSource, SandboxConfig};
+use crate::sandbox::{RootfsSource, SandboxConfig, VolumeMount};
 use crate::MicrosandboxResult;
 
 //--------------------------------------------------------------------------------------------------
@@ -129,6 +129,33 @@ pub async fn spawn_supervisor(
         cmd.arg("--env").arg(format!("{key}={value}"));
     }
 
+    // Volume mounts.
+    for mount in &config.mounts {
+        match mount {
+            VolumeMount::Bind { host, guest, readonly } => {
+                // Format: "tag:host_path[:ro]" where tag is a sanitized guest path.
+                let tag = guest_mount_tag(guest);
+                let mut arg = format!("{tag}:{}", host.display());
+                if *readonly {
+                    arg.push_str(":ro");
+                }
+                cmd.arg("--mount").arg(arg);
+            }
+            VolumeMount::Named { name, guest, readonly } => {
+                let vol_path = config::config().volumes_dir().join(name);
+                let tag = guest_mount_tag(guest);
+                let mut arg = format!("{tag}:{}", vol_path.display());
+                if *readonly {
+                    arg.push_str(":ro");
+                }
+                cmd.arg("--mount").arg(arg);
+            }
+            VolumeMount::Tmpfs { .. } => {
+                // Tmpfs mounts are handled by the guest kernel, not virtiofs.
+            }
+        }
+    }
+
     // Working directory.
     if let Some(ref workdir) = config.workdir {
         cmd.arg("--workdir").arg(workdir);
@@ -237,6 +264,17 @@ fn shutdown_mode_str(mode: &microsandbox_runtime::policy::ShutdownMode) -> &'sta
         ShutdownMode::Terminate => "terminate",
         ShutdownMode::Kill => "kill",
     }
+}
+
+/// Generate a virtiofs tag from a guest mount path.
+///
+/// Replaces `/` with `_` and strips leading underscores to produce a
+/// valid tag name. For example, `/data/cache` becomes `data_cache`.
+fn guest_mount_tag(guest_path: &str) -> String {
+    guest_path
+        .replace('/', "_")
+        .trim_start_matches('_')
+        .to_string()
 }
 
 /// Convert ExitAction to CLI arg string.

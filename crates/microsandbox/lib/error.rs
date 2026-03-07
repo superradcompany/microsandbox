@@ -66,6 +66,18 @@ pub enum MicrosandboxError {
     #[error("terminal error: {0}")]
     Terminal(String),
 
+    /// A filesystem operation failed inside the sandbox.
+    #[error("sandbox fs error: {0}")]
+    SandboxFs(String),
+
+    /// The requested volume was not found.
+    #[error("volume not found: {0}")]
+    VolumeNotFound(String),
+
+    /// The volume already exists.
+    #[error("volume already exists: {0}")]
+    VolumeAlreadyExists(String),
+
     /// A custom error message.
     #[error("{0}")]
     Custom(String),

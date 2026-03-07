@@ -25,9 +25,6 @@ use crate::error::{AgentdError, AgentdResult};
 /// Output reading is handled by a background task that sends events
 /// via the `mpsc` channel provided at spawn time.
 pub struct ExecSession {
-    /// The correlation ID for this session.
-    id: u32,
-
     /// The PID of the spawned process.
     pid: i32,
 
@@ -36,9 +33,6 @@ pub struct ExecSession {
 
     /// The child's stdin (only for pipe mode).
     stdin: Option<tokio::process::ChildStdin>,
-
-    /// Whether this session uses a PTY.
-    is_tty: bool,
 }
 
 /// Output from a session that the agent loop should forward to the host.
@@ -51,6 +45,12 @@ pub enum SessionOutput {
 
     /// The process has exited with the given code.
     Exited(i32),
+
+    /// Pre-encoded frame bytes to write directly to the serial output buffer.
+    ///
+    /// Used by filesystem streaming operations that encode their own
+    /// `FsData`/`FsResponse` messages.
+    Raw(Vec<u8>),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -74,19 +74,9 @@ impl ExecSession {
         }
     }
 
-    /// Returns the session correlation ID.
-    pub fn id(&self) -> u32 {
-        self.id
-    }
-
     /// Returns the PID of the spawned process (as u32 for the protocol).
     pub fn pid(&self) -> u32 {
         self.pid as u32
-    }
-
-    /// Returns whether this session uses a PTY.
-    pub fn is_tty(&self) -> bool {
-        self.is_tty
     }
 
     /// Writes data to the process's stdin (or PTY master).
@@ -286,11 +276,9 @@ impl ExecSession {
         tokio::spawn(pty_reader_task(id, pid, reader_fd, tx));
 
         Ok(Self {
-            id,
             pid,
             pty_master: Some(pty.master),
             stdin: None,
-            is_tty: true,
         })
     }
 
@@ -341,11 +329,9 @@ impl ExecSession {
         tokio::spawn(pipe_reader_task(id, child, stdout, stderr, tx));
 
         Ok(Self {
-            id,
             pid,
             pty_master: None,
             stdin,
-            is_tty: false,
         })
     }
 }
