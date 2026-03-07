@@ -1704,6 +1704,7 @@ dependencies = [
  "dirs",
  "futures",
  "libc",
+ "microsandbox-db",
  "microsandbox-filesystem",
  "microsandbox-migration",
  "microsandbox-protocol",
@@ -1751,6 +1752,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "microsandbox-db"
+version = "0.2.6"
+dependencies = [
+ "sea-orm",
+]
+
+[[package]]
 name = "microsandbox-filesystem"
 version = "0.2.6"
 dependencies = [
@@ -1792,6 +1800,7 @@ dependencies = [
  "chrono",
  "clap",
  "libc",
+ "microsandbox-db",
  "microsandbox-protocol",
  "microsandbox-utils",
  "msb_krun",

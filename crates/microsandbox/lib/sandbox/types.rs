@@ -143,24 +143,26 @@ impl MountBuilder {
 
     /// Build the volume mount.
     ///
-    /// Panics if no mount type was set (bind, named, or tmpfs).
-    pub fn build(self) -> VolumeMount {
+    /// Returns an error if no mount type was set (bind, named, or tmpfs).
+    pub fn build(self) -> crate::MicrosandboxResult<VolumeMount> {
         match self.mount {
-            MountKind::Bind(host) => VolumeMount::Bind {
+            MountKind::Bind(host) => Ok(VolumeMount::Bind {
                 host,
                 guest: self.guest,
                 readonly: self.readonly,
-            },
-            MountKind::Named(name) => VolumeMount::Named {
+            }),
+            MountKind::Named(name) => Ok(VolumeMount::Named {
                 name,
                 guest: self.guest,
                 readonly: self.readonly,
-            },
-            MountKind::Tmpfs => VolumeMount::Tmpfs {
+            }),
+            MountKind::Tmpfs => Ok(VolumeMount::Tmpfs {
                 guest: self.guest,
                 size_mib: self.size_mib,
-            },
-            MountKind::Unset => panic!("MountBuilder: no mount type set (call .bind(), .named(), or .tmpfs())"),
+            }),
+            MountKind::Unset => Err(crate::MicrosandboxError::InvalidConfig(
+                "MountBuilder: no mount type set (call .bind(), .named(), or .tmpfs())".into(),
+            )),
         }
     }
 }

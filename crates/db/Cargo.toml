@@ -1,0 +1,15 @@
+[package]
+name = "microsandbox-db"
+description = "Shared database entity definitions for the microsandbox project."
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[lib]
+name = "microsandbox_db"
+path = "lib/lib.rs"
+
+[dependencies]
+sea-orm.workspace = true

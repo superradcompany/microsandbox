@@ -13,6 +13,7 @@ use crate::MicrosandboxResult;
 /// Builder for constructing a [`SandboxConfig`] with a fluent API.
 pub struct SandboxBuilder {
     config: SandboxConfig,
+    build_error: Option<crate::MicrosandboxError>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -27,6 +28,7 @@ impl SandboxBuilder {
                 name: name.into(),
                 ..Default::default()
             },
+            build_error: None,
         }
     }
 
@@ -137,13 +139,19 @@ impl SandboxBuilder {
         guest_path: impl Into<String>,
         f: impl FnOnce(MountBuilder) -> MountBuilder,
     ) -> Self {
-        let mount = f(MountBuilder::new(guest_path)).build();
-        self.config.mounts.push(mount);
+        match f(MountBuilder::new(guest_path)).build() {
+            Ok(mount) => self.config.mounts.push(mount),
+            Err(e) => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(e);
+                }
+            }
+        }
         self
     }
 
     /// Build the configuration without creating the sandbox.
-    pub fn build(self) -> MicrosandboxResult<SandboxConfig> {
+    pub fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
         self.validate()?;
         Ok(self.config)
     }
@@ -157,7 +165,11 @@ impl SandboxBuilder {
 
 impl SandboxBuilder {
     /// Validate the configuration before building.
-    fn validate(&self) -> MicrosandboxResult<()> {
+    fn validate(&mut self) -> MicrosandboxResult<()> {
+        if let Some(err) = self.build_error.take() {
+            return Err(err);
+        }
+
         if self.config.name.is_empty() {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "sandbox name is required".into(),
@@ -184,6 +196,6 @@ impl SandboxBuilder {
 
 impl From<SandboxConfig> for SandboxBuilder {
     fn from(config: SandboxConfig) -> Self {
-        Self { config }
+        Self { config, build_error: None }
     }
 }

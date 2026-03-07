@@ -12,6 +12,7 @@ name = "microsandbox_runtime"
 path = "lib/lib.rs"
 
 [dependencies]
+microsandbox-db = { path = "../db" }
 microsandbox-protocol = { path = "../protocol" }
 microsandbox-utils = { path = "../utils" }
 msb_krun = { version = "0.1.0", features = ["net"] }

@@ -28,6 +28,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::agent::AgentBridge;
 use crate::db::entity::sandbox as sandbox_entity;
+use crate::db::entity::sandbox::SandboxStatus;
 use crate::runtime::{SupervisorHandle, spawn_supervisor};
 use crate::MicrosandboxResult;
 
@@ -94,7 +95,7 @@ impl Sandbox {
         match Self::create_inner(&config).await {
             Ok(sandbox) => Ok(sandbox),
             Err(e) => {
-                let _ = update_sandbox_status(db, &config.name, "Stopped").await;
+                let _ = update_sandbox_status(db, &config.name, SandboxStatus::Stopped).await;
                 Err(e)
             }
         }
@@ -143,8 +144,8 @@ impl Sandbox {
     pub async fn remove(name: &str) -> MicrosandboxResult<()> {
         // Check if the sandbox exists and its status.
         let model = Self::get(name).await?;
-        if model.status == "Running" {
-            return Err(crate::MicrosandboxError::SandboxNotRunning(
+        if model.status == SandboxStatus::Running || model.status == SandboxStatus::Draining {
+            return Err(crate::MicrosandboxError::SandboxStillRunning(
                 format!("cannot remove sandbox '{name}': still running"),
             ));
         }
@@ -210,7 +211,7 @@ impl Sandbox {
         if let Ok(db) = crate::db::init_global(
             Some(crate::config::config().database.max_connections),
         ).await {
-            let _ = update_sandbox_status(db, &self.config.name, "Stopped").await;
+            let _ = update_sandbox_status(db, &self.config.name, SandboxStatus::Stopped).await;
         }
 
         Ok(status)
@@ -614,7 +615,7 @@ async fn event_mapper_task(
 async fn update_sandbox_status(
     db: &sea_orm::DatabaseConnection,
     name: &str,
-    status: &str,
+    status: SandboxStatus,
 ) -> MicrosandboxResult<()> {
     sandbox_entity::Entity::update_many()
         .col_expr(sandbox_entity::Column::Status, Expr::value(status))
@@ -640,7 +641,7 @@ async fn upsert_sandbox_record(
     let model = sandbox_entity::ActiveModel {
         name: Set(config.name.clone()),
         config: Set(config_json),
-        status: Set("Running".to_string()),
+        status: Set(SandboxStatus::Running),
         created_at: Set(Some(now)),
         updated_at: Set(Some(now)),
         ..Default::default()

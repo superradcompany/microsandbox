@@ -5,7 +5,7 @@
 //! automatically applied on first connection.
 
 #[allow(missing_docs)]
-pub mod entity;
+pub use microsandbox_db::entity;
 
 use std::path::{Path, PathBuf};
 

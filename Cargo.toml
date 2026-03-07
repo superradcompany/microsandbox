@@ -5,6 +5,7 @@ members = [
     "crates/microsandbox",
     "crates/agentd",
     "crates/cli",
+    "crates/db",
     "crates/filesystem",
     "crates/image",
     "crates/migration",
