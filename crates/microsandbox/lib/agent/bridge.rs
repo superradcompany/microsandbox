@@ -158,7 +158,7 @@ async fn reader_loop<R: AsyncRead + Unpin>(
             msg.id
         };
 
-        let is_terminal = msg.t == MessageType::ExecExited;
+        let is_terminal = matches!(msg.t, MessageType::ExecExited | MessageType::FsResponse);
 
         let mut map = pending.lock().await;
         if let Some(tx) = map.get(&dispatch_id) {

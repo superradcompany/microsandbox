@@ -9,6 +9,7 @@ mod attach;
 mod builder;
 mod config;
 pub mod exec;
+pub mod fs;
 mod types;
 
 use std::process::ExitStatus;
@@ -42,7 +43,11 @@ pub use config::SandboxConfig;
 pub use exec::{
     ExecOptionsBuilder, ExitStatus as ExecExitStatus, Rlimit, RlimitResource, SizeExt,
 };
-pub use types::*;
+pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
+pub use types::{
+    MountBuilder, NetworkConfig, Patch, RootfsSource, SecretsConfig, SshConfig,
+    VolumeMount,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -172,6 +177,11 @@ impl Sandbox {
     /// Get the agent bridge for low-level communication with agentd.
     pub fn bridge(&self) -> &AgentBridge {
         &self.bridge
+    }
+
+    /// Access the filesystem API for this sandbox.
+    pub fn fs(&self) -> fs::SandboxFs<'_> {
+        fs::SandboxFs::new(&self.bridge)
     }
 
     /// Stop the sandbox gracefully by sending `core.shutdown` to agentd.

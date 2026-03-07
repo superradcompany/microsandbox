@@ -1,8 +1,6 @@
-//! Stub types for sandbox configuration.
+//! Types for sandbox configuration.
 //!
-//! These types are referenced by [`SandboxConfig`](super::SandboxConfig) but
-//! will be fully implemented in later phases. They carry enough structure
-//! for Phase 4 to compile and for configs to round-trip through serde.
+//! These types are referenced by [`SandboxConfig`](super::SandboxConfig).
 
 use std::path::PathBuf;
 
@@ -22,43 +20,150 @@ pub enum RootfsSource {
     Oci(String),
 }
 
-/// A volume mount mapping a host source to a guest path.
+/// A volume mount specification for a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VolumeMount {
-    /// Source identifier (host path or named volume).
-    pub source: String,
+#[serde(tag = "type")]
+pub enum VolumeMount {
+    /// Bind mount a host directory into the guest.
+    Bind {
+        /// Host path to bind mount.
+        host: PathBuf,
+        /// Guest mount path.
+        guest: String,
+        /// Whether the mount is read-only.
+        #[serde(default)]
+        readonly: bool,
+    },
 
-    /// Mount target path inside the guest.
-    pub target: String,
+    /// Mount a named volume into the guest.
+    Named {
+        /// Volume name.
+        name: String,
+        /// Guest mount path.
+        guest: String,
+        /// Whether the mount is read-only.
+        #[serde(default)]
+        readonly: bool,
+    },
 
-    /// Whether the mount is read-only.
-    #[serde(default)]
-    pub read_only: bool,
+    /// Temporary filesystem (memory-backed).
+    Tmpfs {
+        /// Guest mount path.
+        guest: String,
+        /// Size limit in MiB.
+        #[serde(default)]
+        size_mib: Option<u32>,
+    },
+}
+
+/// Builder for constructing a [`VolumeMount`].
+pub struct MountBuilder {
+    guest: String,
+    mount: MountKind,
+    readonly: bool,
+    size_mib: Option<u32>,
+}
+
+/// Internal kind for the mount builder.
+enum MountKind {
+    Bind(PathBuf),
+    Named(String),
+    Tmpfs,
+    Unset,
 }
 
 /// A rootfs patch applied as an overlay layer before VM start.
 ///
-/// Fully implemented in Phase 8 (Image Management).
+/// Fully implemented in Phase 13 (Patches).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Patch {}
 
 /// Network configuration for a sandbox.
 ///
-/// Fully implemented in Phase 6 (Networking).
+/// Fully implemented in Phase 9 (Network).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkConfig {}
 
 /// Secrets configuration for a sandbox.
 ///
-/// Fully implemented in Phase 7 (Secrets Management).
+/// Fully implemented in Phase 11 (Secrets).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SecretsConfig {}
 
 /// SSH configuration for a sandbox.
 ///
-/// Fully implemented in Phase 9 (SSH).
+/// Fully implemented in Phase 14 (Polish).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SshConfig {}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl MountBuilder {
+    /// Create a new mount builder for the given guest path.
+    pub fn new(guest: impl Into<String>) -> Self {
+        Self {
+            guest: guest.into(),
+            mount: MountKind::Unset,
+            readonly: false,
+            size_mib: None,
+        }
+    }
+
+    /// Bind mount from a host path.
+    pub fn bind(mut self, host: impl Into<PathBuf>) -> Self {
+        self.mount = MountKind::Bind(host.into());
+        self
+    }
+
+    /// Use a named volume.
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.mount = MountKind::Named(name.into());
+        self
+    }
+
+    /// Use tmpfs (memory-backed).
+    pub fn tmpfs(mut self) -> Self {
+        self.mount = MountKind::Tmpfs;
+        self
+    }
+
+    /// Make the mount read-only.
+    pub fn readonly(mut self) -> Self {
+        self.readonly = true;
+        self
+    }
+
+    /// Set size limit in MiB (for tmpfs).
+    pub fn size_mib(mut self, size: u32) -> Self {
+        self.size_mib = Some(size);
+        self
+    }
+
+    /// Build the volume mount.
+    ///
+    /// Panics if no mount type was set (bind, named, or tmpfs).
+    pub fn build(self) -> VolumeMount {
+        match self.mount {
+            MountKind::Bind(host) => VolumeMount::Bind {
+                host,
+                guest: self.guest,
+                readonly: self.readonly,
+            },
+            MountKind::Named(name) => VolumeMount::Named {
+                name,
+                guest: self.guest,
+                readonly: self.readonly,
+            },
+            MountKind::Tmpfs => VolumeMount::Tmpfs {
+                guest: self.guest,
+                size_mib: self.size_mib,
+            },
+            MountKind::Unset => panic!("MountBuilder: no mount type set (call .bind(), .named(), or .tmpfs())"),
+        }
+    }
+}
 
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations

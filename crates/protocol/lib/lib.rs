@@ -12,6 +12,7 @@ mod error;
 pub mod codec;
 pub mod core;
 pub mod exec;
+pub mod fs;
 pub mod heartbeat;
 pub mod message;
 

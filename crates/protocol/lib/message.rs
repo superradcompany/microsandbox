@@ -67,6 +67,15 @@ pub enum MessageType {
 
     /// Host sends signal to process.
     ExecSignal,
+
+    /// Host requests a filesystem operation.
+    FsRequest,
+
+    /// Guest sends a terminal filesystem response.
+    FsResponse,
+
+    /// Streaming file data chunk (bidirectional).
+    FsData,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -116,6 +125,9 @@ impl MessageType {
             Self::ExecExited => "core.exec.exited",
             Self::ExecResize => "core.exec.resize",
             Self::ExecSignal => "core.exec.signal",
+            Self::FsRequest => "core.fs.request",
+            Self::FsResponse => "core.fs.response",
+            Self::FsData => "core.fs.data",
         }
     }
 
@@ -132,6 +144,9 @@ impl MessageType {
             "core.exec.exited" => Some(Self::ExecExited),
             "core.exec.resize" => Some(Self::ExecResize),
             "core.exec.signal" => Some(Self::ExecSignal),
+            "core.fs.request" => Some(Self::FsRequest),
+            "core.fs.response" => Some(Self::FsResponse),
+            "core.fs.data" => Some(Self::FsData),
             _ => None,
         }
     }
@@ -181,6 +196,9 @@ mod tests {
             (MessageType::ExecExited, "core.exec.exited"),
             (MessageType::ExecResize, "core.exec.resize"),
             (MessageType::ExecSignal, "core.exec.signal"),
+            (MessageType::FsRequest, "core.fs.request"),
+            (MessageType::FsResponse, "core.fs.response"),
+            (MessageType::FsData, "core.fs.data"),
         ];
 
         for (mt, expected_str) in &types {
@@ -202,6 +220,9 @@ mod tests {
             MessageType::ExecExited,
             MessageType::ExecResize,
             MessageType::ExecSignal,
+            MessageType::FsRequest,
+            MessageType::FsResponse,
+            MessageType::FsData,
         ];
 
         for mt in &types {

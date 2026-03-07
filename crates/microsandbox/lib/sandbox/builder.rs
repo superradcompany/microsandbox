@@ -3,7 +3,7 @@
 use microsandbox_runtime::policy::ShutdownMode;
 
 use super::config::SandboxConfig;
-use super::types::RootfsSource;
+use super::types::{MountBuilder, RootfsSource};
 use crate::MicrosandboxResult;
 
 //--------------------------------------------------------------------------------------------------
@@ -121,6 +121,24 @@ impl SandboxBuilder {
     /// Set the idle timeout in seconds.
     pub fn idle_timeout(mut self, secs: u64) -> Self {
         self.config.supervisor_policy.idle_timeout_secs = Some(secs);
+        self
+    }
+
+    /// Add a volume mount using a closure-based builder.
+    ///
+    /// ```ignore
+    /// .volume("/data", |m| m.bind("/host/data"))
+    /// .volume("/config", |m| m.bind("/host/config").readonly())
+    /// .volume("/cache", |m| m.named("my-cache"))
+    /// .volume("/tmp", |m| m.tmpfs().size_mib(100))
+    /// ```
+    pub fn volume(
+        mut self,
+        guest_path: impl Into<String>,
+        f: impl FnOnce(MountBuilder) -> MountBuilder,
+    ) -> Self {
+        let mount = f(MountBuilder::new(guest_path)).build();
+        self.config.mounts.push(mount);
         self
     }
 
