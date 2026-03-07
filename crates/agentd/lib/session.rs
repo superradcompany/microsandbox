@@ -125,6 +125,14 @@ impl ExecSession {
         kill(Pid::from_raw(self.pid), sig)?;
         Ok(())
     }
+
+    /// Closes the process's stdin.
+    ///
+    /// For pipe mode, drops the `ChildStdin` handle which closes the fd.
+    /// For PTY mode, this is a no-op (the PTY master stays open for output).
+    pub fn close_stdin(&mut self) {
+        self.stdin.take();
+    }
 }
 
 impl ExecSession {
@@ -194,6 +202,9 @@ impl ExecSession {
             .transpose()
             .map_err(|e| AgentdError::ExecSession(format!("invalid cwd: {e}")))?;
 
+        // Pre-parse rlimits before fork (no allocations in child).
+        let parsed_rlimits = parse_rlimits(req);
+
         // Fork.
         let pid = unsafe { libc::fork() };
         if pid < 0 {
@@ -242,6 +253,13 @@ impl ExecSession {
             if let Some(ref dir) = c_cwd {
                 unsafe {
                     libc::chdir(dir.as_ptr());
+                }
+            }
+
+            // Apply resource limits.
+            for (resource, limit) in &parsed_rlimits {
+                if unsafe { libc::setrlimit(*resource as _, limit) } != 0 {
+                    unsafe { libc::_exit(1) };
                 }
             }
 
@@ -298,6 +316,21 @@ impl ExecSession {
             cmd.current_dir(dir);
         }
 
+        // Apply resource limits in the child before exec.
+        let parsed_rlimits = parse_rlimits(req);
+        if !parsed_rlimits.is_empty() {
+            unsafe {
+                cmd.pre_exec(move || {
+                    for (resource, limit) in &parsed_rlimits {
+                        if libc::setrlimit(*resource as _, limit) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+                    Ok(())
+                });
+            }
+        }
+
         let mut child = cmd.spawn()?;
         let pid = child.id().unwrap_or(0) as i32;
         let stdin = child.stdin.take();
@@ -321,17 +354,73 @@ impl ExecSession {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Writes data to a raw fd using a blocking task.
+/// Parses a resource limit name into the corresponding `RLIMIT_*` constant.
+///
+/// Uses raw constants for Linux-specific limits that aren't in libc's cross-platform API.
+fn parse_rlimit_resource(name: &str) -> Option<libc::c_int> {
+    // Linux x86_64 RLIMIT_* values for resources not exposed by libc on all platforms.
+    const RLIMIT_LOCKS: libc::c_int = 10;
+    const RLIMIT_SIGPENDING: libc::c_int = 11;
+    const RLIMIT_MSGQUEUE: libc::c_int = 12;
+    const RLIMIT_NICE: libc::c_int = 13;
+    const RLIMIT_RTPRIO: libc::c_int = 14;
+    const RLIMIT_RTTIME: libc::c_int = 15;
+
+    match name {
+        "cpu" => Some(libc::RLIMIT_CPU as _),
+        "fsize" => Some(libc::RLIMIT_FSIZE as _),
+        "data" => Some(libc::RLIMIT_DATA as _),
+        "stack" => Some(libc::RLIMIT_STACK as _),
+        "core" => Some(libc::RLIMIT_CORE as _),
+        "rss" => Some(libc::RLIMIT_RSS as _),
+        "nproc" => Some(libc::RLIMIT_NPROC as _),
+        "nofile" => Some(libc::RLIMIT_NOFILE as _),
+        "memlock" => Some(libc::RLIMIT_MEMLOCK as _),
+        "as" => Some(libc::RLIMIT_AS as _),
+        "locks" => Some(RLIMIT_LOCKS),
+        "sigpending" => Some(RLIMIT_SIGPENDING),
+        "msgqueue" => Some(RLIMIT_MSGQUEUE),
+        "nice" => Some(RLIMIT_NICE),
+        "rtprio" => Some(RLIMIT_RTPRIO),
+        "rttime" => Some(RLIMIT_RTTIME),
+        _ => None,
+    }
+}
+
+/// Pre-parses rlimits from the exec request into `(resource_id, rlimit)` tuples
+/// that can be applied in the child process via `setrlimit()`.
+fn parse_rlimits(
+    req: &ExecRequest,
+) -> Vec<(libc::c_int, libc::rlimit)> {
+    req.rlimits
+        .iter()
+        .filter_map(|rl| {
+            let resource = parse_rlimit_resource(&rl.resource)?;
+            Some((
+                resource,
+                libc::rlimit {
+                    rlim_cur: rl.soft,
+                    rlim_max: rl.hard,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Writes data to a raw fd using a blocking task, handling short writes.
 async fn blocking_write_fd(fd: RawFd, data: &[u8]) -> AgentdResult<()> {
     let data = data.to_vec();
     tokio::task::spawn_blocking(move || {
-        let ret =
-            unsafe { libc::write(fd, data.as_ptr() as *const libc::c_void, data.len()) };
-        if ret < 0 {
-            Err(AgentdError::Io(std::io::Error::last_os_error()))
-        } else {
-            Ok(())
+        let mut written = 0;
+        while written < data.len() {
+            let ptr = unsafe { data.as_ptr().add(written) as *const libc::c_void };
+            let ret = unsafe { libc::write(fd, ptr, data.len() - written) };
+            if ret < 0 {
+                return Err(AgentdError::Io(std::io::Error::last_os_error()));
+            }
+            written += ret as usize;
         }
+        Ok(())
     })
     .await
     .map_err(|e| AgentdError::ExecSession(format!("stdin write join error: {e}")))?

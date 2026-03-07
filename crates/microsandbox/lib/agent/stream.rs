@@ -39,7 +39,7 @@ pub struct FdWriter {
 ///
 /// The caller must ensure `raw_fd` is a valid, open file descriptor.
 /// Ownership of `raw_fd` is transferred to the returned `FdReader`.
-pub fn from_raw_fd(raw_fd: RawFd) -> io::Result<(FdReader, FdWriter)> {
+pub unsafe fn from_raw_fd(raw_fd: RawFd) -> io::Result<(FdReader, FdWriter)> {
     // Dup the FD so reader and writer are independent.
     // Safety: raw_fd is valid per precondition.
     let read_owned = unsafe { OwnedFd::from_raw_fd(raw_fd) };

@@ -21,9 +21,13 @@ fn main() {
         .expect("agentd: failed to build tokio runtime");
 
     rt.block_on(async {
-        if let Err(e) = microsandbox_agentd::agent::run().await {
-            eprintln!("agentd: agent loop error: {e}");
-            std::process::exit(1);
+        match microsandbox_agentd::agent::run().await {
+            Ok(()) => {}
+            Err(microsandbox_agentd::AgentdError::Shutdown) => {}
+            Err(e) => {
+                eprintln!("agentd: agent loop error: {e}");
+                std::process::exit(1);
+            }
         }
     });
 

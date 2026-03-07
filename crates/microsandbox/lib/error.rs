@@ -54,6 +54,18 @@ pub enum MicrosandboxError {
     #[error("nix error: {0}")]
     Nix(#[from] nix::errno::Errno),
 
+    /// Command execution timed out.
+    #[error("exec timed out after {0:?}")]
+    ExecTimeout(std::time::Duration),
+
+    /// The requested script was not found in sandbox configuration.
+    #[error("script not found: {0}")]
+    ScriptNotFound(String),
+
+    /// A terminal operation failed.
+    #[error("terminal error: {0}")]
+    Terminal(String),
+
     /// A custom error message.
     #[error("{0}")]
     Custom(String),

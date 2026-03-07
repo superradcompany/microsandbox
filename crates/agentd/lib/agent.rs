@@ -224,8 +224,13 @@ async fn handle_message(
             let stdin: ExecStdin = msg
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode stdin: {e}")))?;
-            if let Some(session) = sessions.get(&msg.id) {
-                let _ = session.write_stdin(&stdin.data).await;
+            if let Some(session) = sessions.get_mut(&msg.id) {
+                if stdin.data.is_empty() {
+                    // Empty data signals EOF — close stdin.
+                    session.close_stdin();
+                } else {
+                    let _ = session.write_stdin(&stdin.data).await;
+                }
             }
         }
 
@@ -248,11 +253,11 @@ async fn handle_message(
         }
 
         MessageType::Shutdown => {
-            // Graceful shutdown — kill all sessions, then exit.
+            // Graceful shutdown — signal all sessions and break from main loop.
             for (_, session) in sessions.drain() {
                 let _ = session.send_signal(15); // SIGTERM
             }
-            std::process::exit(0);
+            return Err(AgentdError::Shutdown);
         }
 
         _ => {

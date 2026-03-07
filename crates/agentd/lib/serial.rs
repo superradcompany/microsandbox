@@ -13,7 +13,7 @@ use crate::error::{AgentdError, AgentdResult};
 const VIRTIO_PORTS_PATH: &str = "/sys/class/virtio-ports";
 
 /// The expected port name for the agent channel.
-pub const AGENT_PORT_NAME: &str = "msb-agent";
+pub const AGENT_PORT_NAME: &str = "agent";
 
 //--------------------------------------------------------------------------------------------------
 // Functions

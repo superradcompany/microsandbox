@@ -24,12 +24,15 @@ microsandbox-migration = { path = "../migration" }
 microsandbox-protocol = { path = "../protocol" }
 microsandbox-runtime = { path = "../runtime" }
 microsandbox-utils = { path = "../utils" }
+bytes.workspace = true
 chrono.workspace = true
+crossterm.workspace = true
 dirs.workspace = true
 futures.workspace = true
 libc.workspace = true
 nix = { workspace = true, features = ["process", "signal"] }
 reqwest.workspace = true
+scopeguard.workspace = true
 sea-orm.workspace = true
 serde.workspace = true
 serde_json.workspace = true

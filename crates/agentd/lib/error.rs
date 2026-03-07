@@ -39,4 +39,8 @@ pub enum AgentdError {
     /// An init error.
     #[error("init error: {0}")]
     Init(String),
+
+    /// Graceful shutdown requested.
+    #[error("shutdown")]
+    Shutdown,
 }

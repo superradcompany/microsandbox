@@ -35,6 +35,23 @@ pub struct ExecRequest {
     /// Initial terminal columns (only used when `tty` is true).
     #[serde(default = "default_cols")]
     pub cols: u16,
+
+    /// POSIX resource limits to apply to the spawned process via `setrlimit()`.
+    #[serde(default)]
+    pub rlimits: Vec<ExecRlimit>,
+}
+
+/// A POSIX resource limit to apply to a spawned process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecRlimit {
+    /// Resource name (lowercase): "nofile", "nproc", "as", "cpu", etc.
+    pub resource: String,
+
+    /// Soft limit (can be raised up to hard limit by the process).
+    pub soft: u64,
+
+    /// Hard limit (ceiling, requires privileges to raise).
+    pub hard: u64,
 }
 
 /// Confirmation that a command has been started.

@@ -130,7 +130,7 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
     }
 
     // Agent — wire agent_fd through virtio-console multi-port.
-    // Guest discovers port by name via /sys/class/virtio-ports/agent.
+    // Guest discovers port by name "agent" via /sys/class/virtio-ports/.
     if let Some(agent_fd) = config.agent_fd {
         builder = builder.console(|c| c.port("agent", agent_fd, agent_fd));
     }
