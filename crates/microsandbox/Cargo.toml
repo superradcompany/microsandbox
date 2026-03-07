@@ -19,6 +19,7 @@ path = "lib/lib.rs"
 prebuilt = ["microsandbox-filesystem/prebuilt", "dep:ureq"]
 
 [dependencies]
+microsandbox-db = { path = "../db" }
 microsandbox-filesystem = { path = "../filesystem" }
 microsandbox-migration = { path = "../migration" }
 microsandbox-protocol = { path = "../protocol" }

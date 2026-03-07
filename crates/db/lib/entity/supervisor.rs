@@ -1,4 +1,4 @@
-//! Entity definition for the `microvms` table.
+//! Entity definition for the `supervisors` table.
 
 use sea_orm::entity::prelude::*;
 
@@ -6,33 +6,40 @@ use sea_orm::entity::prelude::*;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// The microVM process entity model.
+/// The status of a supervisor process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+pub enum SupervisorStatus {
+    /// The supervisor is running.
+    #[sea_orm(string_value = "Running")]
+    Running,
+
+    /// The supervisor has stopped.
+    #[sea_orm(string_value = "Stopped")]
+    Stopped,
+}
+
+/// The supervisor process entity model.
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-#[sea_orm(table_name = "microvm")]
+#[sea_orm(table_name = "supervisor")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
     pub sandbox_id: i32,
-    pub supervisor_id: i32,
     pub pid: Option<i32>,
-    pub status: String,
-    pub exit_code: Option<i32>,
-    pub exit_signal: Option<i32>,
-    pub termination_reason: Option<String>,
-    pub termination_detail: Option<String>,
-    pub signals_sent: Option<String>,
+    pub status: SupervisorStatus,
     pub started_at: Option<DateTime>,
-    pub terminated_at: Option<DateTime>,
+    pub stopped_at: Option<DateTime>,
 }
 
 //--------------------------------------------------------------------------------------------------
 // Types: Relations
 //--------------------------------------------------------------------------------------------------
 
-/// Relations for the microvm entity.
+/// Relations for the supervisor entity.
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    /// A microvm belongs to a sandbox.
+    /// A supervisor belongs to a sandbox.
     #[sea_orm(
         belongs_to = "super::sandbox::Entity",
         from = "Column::SandboxId",
@@ -41,14 +48,13 @@ pub enum Relation {
     )]
     Sandbox,
 
-    /// A microvm belongs to a supervisor.
-    #[sea_orm(
-        belongs_to = "super::supervisor::Entity",
-        from = "Column::SupervisorId",
-        to = "super::supervisor::Column::Id",
-        on_delete = "Cascade"
-    )]
-    Supervisor,
+    /// A supervisor has many microvms.
+    #[sea_orm(has_many = "super::microvm::Entity")]
+    Microvm,
+
+    /// A supervisor has many msbnets.
+    #[sea_orm(has_many = "super::msbnet::Entity")]
+    Msbnet,
 }
 
 impl Related<super::sandbox::Entity> for Entity {
@@ -57,9 +63,15 @@ impl Related<super::sandbox::Entity> for Entity {
     }
 }
 
-impl Related<super::supervisor::Entity> for Entity {
+impl Related<super::microvm::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Supervisor.def()
+        Relation::Microvm.def()
+    }
+}
+
+impl Related<super::msbnet::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Msbnet.def()
     }
 }
 

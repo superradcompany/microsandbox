@@ -12,8 +12,15 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use microsandbox_db::entity::{
+    microvm as microvm_entity, sandbox as sandbox_entity, supervisor as supervisor_entity,
+};
 use nix::sys::signal::Signal;
-use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Statement};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait,
+    QueryFilter, Set,
+};
+use sea_orm::sea_query::Expr;
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::signal::unix::SignalKind;
@@ -115,7 +122,7 @@ pub async fn run(config: SupervisorConfig) -> RuntimeResult<()> {
         insert_microvm_record(&db, sandbox_id, supervisor_db_id, vm_pid).await?;
 
     // Update sandbox status to Running.
-    update_sandbox_status(&db, &config.sandbox_name, "Running").await?;
+    update_sandbox_status(&db, &config.sandbox_name, sandbox_entity::SandboxStatus::Running).await?;
 
     // Write startup info to stdout (the parent reads this).
     let startup = StartupInfo {
@@ -322,17 +329,17 @@ pub async fn run(config: SupervisorConfig) -> RuntimeResult<()> {
 
     let reason = drain
         .as_ref()
-        .map(|d| d.reason().clone())
+        .map(|d| *d.reason())
         .unwrap_or(TerminationReason::VmCompleted);
 
     let signals = drain
         .as_ref()
         .map(|d| d.signals_sent().join(","))
-        .unwrap_or_default();
+        .filter(|s| !s.is_empty());
 
     let exit_code = vm_exit_status.and_then(|s| s.code());
 
-    update_microvm_record(&db, microvm_db_id, exit_code, &reason, &signals).await?;
+    update_microvm_record(&db, microvm_db_id, exit_code, reason, signals).await?;
     update_supervisor_record(&db, supervisor_db_id).await?;
 
     let final_status = match reason {
@@ -340,15 +347,15 @@ pub async fn run(config: SupervisorConfig) -> RuntimeResult<()> {
         | TerminationReason::DrainRequested
         | TerminationReason::SupervisorSignal
         | TerminationReason::IdleTimeout
-        | TerminationReason::MaxDurationExceeded => "Stopped",
-        _ => "Crashed",
+        | TerminationReason::MaxDurationExceeded => sandbox_entity::SandboxStatus::Stopped,
+        _ => sandbox_entity::SandboxStatus::Crashed,
     };
     update_sandbox_status(&db, &config.sandbox_name, final_status).await?;
 
     tracing::info!(
         sandbox = %config.sandbox_name,
         reason = %reason,
-        status = final_status,
+        status = ?final_status,
         "supervisor exiting",
     );
 
@@ -546,7 +553,9 @@ where
         match reader.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
-                let _ = file.write_all(&buf[..n]).await;
+                if let Err(e) = file.write_all(&buf[..n]).await {
+                    tracing::warn!(path = %file_path.display(), error = %e, "log file write failed");
+                }
                 if let Some(ref mut w) = forward_to {
                     let _ = w.write_all(&buf[..n]).await;
                 }
@@ -583,106 +592,124 @@ async fn connect_db(db_path: &Path) -> RuntimeResult<DatabaseConnection> {
 async fn insert_supervisor_record(
     db: &DatabaseConnection,
     sandbox_id: i32,
-) -> RuntimeResult<i64> {
-    let pid = std::process::id() as i32;
+) -> RuntimeResult<i32> {
+    let pid = i32::try_from(std::process::id()).map_err(|e| {
+        crate::RuntimeError::Custom(format!("supervisor PID does not fit in i32: {e}"))
+    })?;
+    let now = chrono::Utc::now().naive_utc();
 
-    let result = db
-        .execute(Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Sqlite,
-            "INSERT INTO supervisor (sandbox_id, pid, status, started_at) VALUES ($1, $2, $3, datetime('now'))",
-            [sandbox_id.into(), pid.into(), "Running".into()],
-        ))
-        .await?;
+    let model = supervisor_entity::ActiveModel {
+        sandbox_id: Set(sandbox_id),
+        pid: Set(Some(pid)),
+        status: Set(supervisor_entity::SupervisorStatus::Running),
+        started_at: Set(Some(now)),
+        ..Default::default()
+    };
 
-    Ok(result.last_insert_id() as i64)
+    let result = model.insert(db).await?;
+    Ok(result.id)
 }
 
 async fn insert_microvm_record(
     db: &DatabaseConnection,
     sandbox_id: i32,
-    supervisor_id: i64,
+    supervisor_id: i32,
     vm_pid: u32,
-) -> RuntimeResult<i64> {
-    let result = db
-        .execute(Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Sqlite,
-            "INSERT INTO microvm (sandbox_id, supervisor_id, pid, status, started_at) VALUES ($1, $2, $3, $4, datetime('now'))",
-            [
-                sandbox_id.into(),
-                supervisor_id.into(),
-                (vm_pid as i64).into(),
-                "Running".into(),
-            ],
-        ))
-        .await?;
+) -> RuntimeResult<i32> {
+    let vm_pid = i32::try_from(vm_pid).map_err(|e| {
+        crate::RuntimeError::Custom(format!("VM PID does not fit in i32: {e}"))
+    })?;
+    let now = chrono::Utc::now().naive_utc();
 
-    Ok(result.last_insert_id() as i64)
+    let model = microvm_entity::ActiveModel {
+        sandbox_id: Set(sandbox_id),
+        supervisor_id: Set(supervisor_id),
+        pid: Set(Some(vm_pid)),
+        status: Set(microvm_entity::MicrovmStatus::Running),
+        started_at: Set(Some(now)),
+        ..Default::default()
+    };
+
+    let result = model.insert(db).await?;
+    Ok(result.id)
 }
 
 async fn update_sandbox_status(
     db: &DatabaseConnection,
     sandbox_name: &str,
-    status: &str,
+    status: sandbox_entity::SandboxStatus,
 ) -> RuntimeResult<()> {
-    db.execute(Statement::from_sql_and_values(
-        sea_orm::DatabaseBackend::Sqlite,
-        "UPDATE sandbox SET status = $1, updated_at = datetime('now') WHERE name = $2",
-        [status.into(), sandbox_name.into()],
-    ))
-    .await?;
+    let result = sandbox_entity::Entity::update_many()
+        .col_expr(sandbox_entity::Column::Status, Expr::value(status))
+        .col_expr(
+            sandbox_entity::Column::UpdatedAt,
+            Expr::value(chrono::Utc::now().naive_utc()),
+        )
+        .filter(sandbox_entity::Column::Name.eq(sandbox_name))
+        .exec(db)
+        .await?;
+
+    if result.rows_affected == 0 {
+        tracing::warn!(sandbox = sandbox_name, "update_sandbox_status matched zero rows");
+    }
 
     Ok(())
 }
 
 async fn update_microvm_record(
     db: &DatabaseConnection,
-    microvm_id: i64,
+    microvm_id: i32,
     exit_code: Option<i32>,
-    reason: &TerminationReason,
-    signals: &str,
+    reason: TerminationReason,
+    signals: Option<String>,
 ) -> RuntimeResult<()> {
-    let exit_code_value: sea_orm::Value = match exit_code {
-        Some(code) => code.into(),
-        None => sea_orm::Value::Int(None),
-    };
+    let now = chrono::Utc::now().naive_utc();
 
-    db.execute(Statement::from_sql_and_values(
-        sea_orm::DatabaseBackend::Sqlite,
-        "UPDATE microvm SET status = $1, exit_code = $2, termination_reason = $3, signals_sent = $4, terminated_at = datetime('now') WHERE id = $5",
-        [
-            "Terminated".into(),
-            exit_code_value,
-            reason.as_str().into(),
-            signals.into(),
-            microvm_id.into(),
-        ],
-    ))
-    .await?;
+    microvm_entity::Entity::update_many()
+        .col_expr(
+            microvm_entity::Column::Status,
+            Expr::value(microvm_entity::MicrovmStatus::Terminated),
+        )
+        .col_expr(microvm_entity::Column::ExitCode, Expr::value(exit_code))
+        .col_expr(
+            microvm_entity::Column::TerminationReason,
+            Expr::value(reason),
+        )
+        .col_expr(
+            microvm_entity::Column::SignalsSent,
+            Expr::value(signals),
+        )
+        .col_expr(microvm_entity::Column::TerminatedAt, Expr::value(now))
+        .filter(microvm_entity::Column::Id.eq(microvm_id))
+        .exec(db)
+        .await?;
 
     Ok(())
 }
 
 async fn update_supervisor_record(
     db: &DatabaseConnection,
-    supervisor_id: i64,
+    supervisor_id: i32,
 ) -> RuntimeResult<()> {
-    db.execute(Statement::from_sql_and_values(
-        sea_orm::DatabaseBackend::Sqlite,
-        "UPDATE supervisor SET status = $1, stopped_at = datetime('now') WHERE id = $2",
-        ["Stopped".into(), supervisor_id.into()],
-    ))
-    .await?;
+    let now = chrono::Utc::now().naive_utc();
+
+    supervisor_entity::Entity::update_many()
+        .col_expr(
+            supervisor_entity::Column::Status,
+            Expr::value(supervisor_entity::SupervisorStatus::Stopped),
+        )
+        .col_expr(supervisor_entity::Column::StoppedAt, Expr::value(now))
+        .filter(supervisor_entity::Column::Id.eq(supervisor_id))
+        .exec(db)
+        .await?;
 
     Ok(())
 }
 
 async fn get_sandbox_id(db: &DatabaseConnection, sandbox_name: &str) -> RuntimeResult<i32> {
-    let row = db
-        .query_one(Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Sqlite,
-            "SELECT id FROM sandbox WHERE name = $1",
-            [sandbox_name.into()],
-        ))
+    let model = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(sandbox_name))
+        .one(db)
         .await?
         .ok_or_else(|| {
             crate::RuntimeError::Custom(format!(
@@ -691,5 +718,5 @@ async fn get_sandbox_id(db: &DatabaseConnection, sandbox_name: &str) -> RuntimeR
             ))
         })?;
 
-    Ok(row.try_get_by_index(0)?)
+    Ok(model.id)
 }

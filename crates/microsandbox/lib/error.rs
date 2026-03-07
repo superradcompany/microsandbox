@@ -34,9 +34,9 @@ pub enum MicrosandboxError {
     #[error("sandbox not found: {0}")]
     SandboxNotFound(String),
 
-    /// The sandbox is not running.
-    #[error("sandbox not running: {0}")]
-    SandboxNotRunning(String),
+    /// The sandbox is still running and cannot be removed.
+    #[error("sandbox still running: {0}")]
+    SandboxStillRunning(String),
 
     /// A runtime error occurred.
     #[error("runtime error: {0}")]
