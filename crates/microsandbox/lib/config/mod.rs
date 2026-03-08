@@ -209,7 +209,8 @@ pub fn set_config(config: GlobalConfig) -> Result<(), GlobalConfig> {
 /// Resolution order:
 /// 1. `MSB_PATH` environment variable
 /// 2. `config().paths.msb`
-/// 3. `which::which("msb")`
+/// 3. `~/.microsandbox/bin/msb`
+/// 4. `which::which("msb")`
 pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
     if let Ok(path) = std::env::var("MSB_PATH") {
         return Ok(PathBuf::from(path));
@@ -217,6 +218,15 @@ pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
 
     if let Some(path) = &config().paths.msb {
         return Ok(path.clone());
+    }
+
+    // Check ~/.microsandbox/bin/msb.
+    let home_bin = config()
+        .home()
+        .join(microsandbox_utils::BIN_SUBDIR)
+        .join(microsandbox_utils::MSB_BINARY);
+    if home_bin.is_file() {
+        return Ok(home_bin);
     }
 
     which::which(microsandbox_utils::MSB_BINARY).map_err(|e| {

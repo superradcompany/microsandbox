@@ -190,6 +190,66 @@ impl PassthroughFs {
 }
 
 impl PassthroughFs {
+    /// Register root inode (inode 1) in the inode table.
+    ///
+    /// Called during `init()`. The guest kernel sends GETATTR on the root inode
+    /// immediately after FUSE_INIT, so the root must be in the table before any
+    /// other FUSE operations are processed.
+    fn register_root_inode(&self) -> io::Result<()> {
+        let root_fd = self.root_fd.as_raw_fd();
+
+        #[cfg(target_os = "linux")]
+        let (st, mnt_id) = {
+            let mut stx: libc::statx = unsafe { std::mem::zeroed() };
+            let ret = unsafe {
+                libc::statx(
+                    root_fd,
+                    c"".as_ptr(),
+                    libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_SYNC_AS_STAT,
+                    libc::STATX_BASIC_STATS | libc::STATX_MNT_ID,
+                    &mut stx,
+                )
+            };
+            if ret < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
+            (platform::statx_to_stat64(&stx), stx.stx_mnt_id)
+        };
+
+        #[cfg(target_os = "macos")]
+        let st = platform::fstat(root_fd)?;
+
+        #[cfg(target_os = "linux")]
+        let alt_key = InodeAltKey::new(st.st_ino, st.st_dev, mnt_id);
+
+        #[cfg(target_os = "macos")]
+        let alt_key = InodeAltKey::new(st.st_ino as u64, st.st_dev as u64);
+
+        let data = Arc::new(InodeData {
+            inode: 1, // ROOT_ID
+            ino: st.st_ino as u64,
+            dev: st.st_dev as u64,
+            refcount: AtomicU64::new(2), // libfuse convention: root gets refcount 2
+            #[cfg(target_os = "linux")]
+            file: {
+                use std::os::fd::FromRawFd;
+                // Dup the root fd so InodeData owns its own copy.
+                let fd = unsafe { libc::fcntl(root_fd, libc::F_DUPFD_CLOEXEC, 0) };
+                if fd < 0 {
+                    return Err(platform::linux_error(io::Error::last_os_error()));
+                }
+                unsafe { std::fs::File::from_raw_fd(fd) }
+            },
+            #[cfg(target_os = "linux")]
+            mnt_id,
+        });
+
+        let mut inodes = self.inodes.write().unwrap();
+        inodes.insert(1, alt_key, data);
+
+        Ok(())
+    }
+
     /// Get the `OpenOptions` for file opens based on cache policy.
     pub(crate) fn cache_open_options(&self) -> OpenOptions {
         match self.cfg.cache_policy {
@@ -229,6 +289,11 @@ impl Default for PassthroughConfig {
 
 impl DynFileSystem for PassthroughFs {
     fn init(&self, capable: FsOptions) -> io::Result<FsOptions> {
+        // Register root inode (inode 1) in the inode table.
+        // The guest kernel issues GETATTR on the root inode immediately after FUSE_INIT.
+        // Without this entry, stat_inode(1) fails and the guest cannot resolve any paths.
+        self.register_root_inode()?;
+
         let mut opts = FsOptions::empty();
 
         // DONT_MASK: we handle umask ourselves in create/mkdir/mknod.
@@ -261,6 +326,9 @@ impl DynFileSystem for PassthroughFs {
             opts |= FsOptions::WRITEBACK_CACHE;
             self.writeback.store(true, Ordering::Relaxed);
         }
+
+        // Clear umask so the client can set all mode bits.
+        unsafe { libc::umask(0o000) };
 
         Ok(opts)
     }

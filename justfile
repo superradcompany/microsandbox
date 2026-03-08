@@ -71,6 +71,51 @@ build:
     cp target/release/msb build/msb
     codesign --entitlements entitlements.plist --force -s - build/msb
 
+# Install msb and libkrunfw to ~/.microsandbox/{bin,lib}/ and configure shell paths. Requires: just build.
+[linux]
+install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -f build/msb || { echo "error: build/msb not found. Run 'just build' first."; exit 1; }
+    test -f build/libkrunfw.so.{{ LIBKRUNFW_VERSION }} || { echo "error: build/libkrunfw.so.{{ LIBKRUNFW_VERSION }} not found. Run 'just build-deps' first."; exit 1; }
+
+    # Install msb to ~/.microsandbox/bin/.
+    mkdir -p ~/.microsandbox/bin
+    install -m755 build/msb ~/.microsandbox/bin/msb
+    echo "Installed msb → ~/.microsandbox/bin/msb"
+
+    # Install libkrunfw to ~/.microsandbox/lib/.
+    mkdir -p ~/.microsandbox/lib
+    cp build/libkrunfw.so.{{ LIBKRUNFW_VERSION }} ~/.microsandbox/lib/
+    ln -sf libkrunfw.so.{{ LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.{{ LIBKRUNFW_ABI }}
+    ln -sf libkrunfw.so.{{ LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
+    echo "Installed libkrunfw → ~/.microsandbox/lib/"
+
+    echo ""
+    echo "Remember to add ~/.microsandbox/bin to your PATH and ~/.microsandbox/lib to your LD_LIBRARY_PATH."
+
+# Install msb and libkrunfw to ~/.microsandbox/{bin,lib}/. Requires: just build.
+[macos]
+install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -f build/msb || { echo "error: build/msb not found. Run 'just build' first."; exit 1; }
+    test -f build/libkrunfw.{{ LIBKRUNFW_ABI }}.dylib || { echo "error: build/libkrunfw.{{ LIBKRUNFW_ABI }}.dylib not found. Run 'just build-deps' first."; exit 1; }
+
+    # Install msb to ~/.microsandbox/bin/ (cp preserves codesign; install strips it).
+    mkdir -p ~/.microsandbox/bin
+    cp build/msb ~/.microsandbox/bin/msb
+    echo "Installed msb → ~/.microsandbox/bin/msb"
+
+    # Install libkrunfw to ~/.microsandbox/lib/.
+    mkdir -p ~/.microsandbox/lib
+    cp build/libkrunfw.{{ LIBKRUNFW_ABI }}.dylib ~/.microsandbox/lib/
+    ln -sf libkrunfw.{{ LIBKRUNFW_ABI }}.dylib ~/.microsandbox/lib/libkrunfw.dylib
+    echo "Installed libkrunfw → ~/.microsandbox/lib/"
+
+    echo ""
+    echo "Remember to add ~/.microsandbox/bin to your PATH and ~/.microsandbox/lib to your DYLD_LIBRARY_PATH."
+
 # Clean build artifacts.
 clean:
     rm -rf build

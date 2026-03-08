@@ -83,7 +83,14 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
             m.vcpus(config.vcpus)
                 .memory_mib(config.memory_mib as usize)
         })
-        .kernel(|k| k.krunfw_path(&config.libkrunfw_path));
+        .kernel(|k| {
+            let k = k.krunfw_path(&config.libkrunfw_path);
+            if let Some(ref init_path) = config.init_path {
+                k.init_path(init_path)
+            } else {
+                k
+            }
+        });
 
     // Root filesystem — single layer uses passthrough via virtio-fs with stat virtualization.
     // TODO: Multiple layers should use OverlayFs via `fs.custom(Box::new(overlay))`
@@ -134,11 +141,6 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
         }
         e
     });
-
-    // Override init path if specified (default is /init.krun).
-    if let Some(ref init_path) = config.init_path {
-        builder = builder.kernel(|k| k.cmdline(&format!("init={}", init_path.display())));
-    }
 
     // Agent — wire agent_fd through virtio-console multi-port.
     // Guest discovers port by name "agent" via /sys/class/virtio-ports/.

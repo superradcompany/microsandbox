@@ -161,7 +161,7 @@ pub async fn spawn_supervisor(
         cmd.arg("--workdir").arg(workdir);
     }
 
-    // Capture stdout (for startup JSON), inherit stderr.
+    // Capture stdout (for startup JSON), inherit stderr so errors are visible.
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::inherit());
 
@@ -191,7 +191,17 @@ pub async fn spawn_supervisor(
     let mut line = String::new();
     reader.read_line(&mut line).await?;
 
-    let startup: StartupInfo = serde_json::from_str(line.trim())?;
+    let startup: StartupInfo = match serde_json::from_str(line.trim()) {
+        Ok(info) => info,
+        Err(_) => {
+            // Supervisor exited before writing JSON. Wait for it to get exit code.
+            let status = child.wait().await?;
+            return Err(crate::MicrosandboxError::Runtime(format!(
+                "supervisor exited ({status}) before sending startup info \
+                 (check stderr above for details)"
+            )));
+        }
+    };
 
     // Transfer ownership of the host FD to the caller.
     let host_raw_fd = host_fd.into_raw_fd();
