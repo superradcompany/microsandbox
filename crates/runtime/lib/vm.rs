@@ -7,6 +7,7 @@
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 
+use microsandbox_filesystem::{PassthroughConfig, PassthroughFs};
 use msb_krun::{NetBackend, VmBuilder};
 
 //--------------------------------------------------------------------------------------------------
@@ -84,20 +85,30 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
         })
         .kernel(|k| k.krunfw_path(&config.libkrunfw_path));
 
-    // Root filesystem — single layer uses passthrough via virtio-fs.
-    // TODO(Phase 7): Multiple layers should use OverlayFs via `fs.custom(Box::new(overlay))`
+    // Root filesystem — single layer uses passthrough via virtio-fs with stat virtualization.
+    // TODO: Multiple layers should use OverlayFs via `fs.custom(Box::new(overlay))`
     // from the microsandbox-filesystem crate (DynFileSystem backend with COW and whiteouts).
     if let Some(first_layer) = config.rootfs_layers.first() {
-        let path = first_layer.clone();
-        builder = builder.fs(|fs| fs.root(path));
+        let cfg = PassthroughConfig {
+            root_dir: first_layer.clone(),
+            ..Default::default()
+        };
+        let backend = PassthroughFs::new(cfg)?;
+        builder = builder
+            .fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
     }
 
     // Additional mounts (tag:host_path format).
     for mount_spec in &config.mounts {
         if let Some((tag, path)) = mount_spec.split_once(':') {
             let tag = tag.to_string();
-            let path = PathBuf::from(path);
-            builder = builder.fs(move |fs| fs.tag(&tag).path(path));
+            let cfg = PassthroughConfig {
+                root_dir: PathBuf::from(path),
+                ..Default::default()
+            };
+            let backend = PassthroughFs::new(cfg)?;
+            builder = builder
+                .fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
         } else {
             tracing::warn!(mount = %mount_spec, "skipping malformed mount spec (expected tag:path)");
         }

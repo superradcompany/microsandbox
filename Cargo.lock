@@ -1762,7 +1762,12 @@ dependencies = [
 name = "microsandbox-filesystem"
 version = "0.2.6"
 dependencies = [
+ "libc",
  "microsandbox-utils",
+ "msb_krun",
+ "scopeguard",
+ "tempfile",
+ "tracing",
  "ureq",
 ]
 
@@ -1801,6 +1806,7 @@ dependencies = [
  "clap",
  "libc",
  "microsandbox-db",
+ "microsandbox-filesystem",
  "microsandbox-protocol",
  "microsandbox-utils",
  "msb_krun",

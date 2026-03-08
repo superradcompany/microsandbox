@@ -9,6 +9,13 @@ edition.workspace = true
 [lib]
 path = "lib/lib.rs"
 
+[dependencies]
+msb_krun = "0.1.0"
+libc.workspace = true
+tracing.workspace = true
+scopeguard.workspace = true
+tempfile.workspace = true
+
 [features]
 prebuilt = ["dep:ureq"]
 
