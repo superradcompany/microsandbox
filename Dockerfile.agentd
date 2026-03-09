@@ -3,9 +3,35 @@ FROM rust:alpine AS builder
 RUN apk add --no-cache musl-dev
 
 WORKDIR /build
-COPY . .
 
-RUN cargo build --release -p microsandbox-agentd
+# Copy only the crates needed for agentd
+COPY crates/agentd crates/agentd
+COPY crates/protocol crates/protocol
+
+# Create a minimal workspace Cargo.toml for protocol's workspace resolution
+# (no [patch.crates-io] section, so libkrun is not required)
+COPY <<'EOF' Cargo.toml
+[workspace]
+resolver = "3"
+members = ["crates/protocol"]
+
+[workspace.package]
+authors = ["Team MicroSandbox <team@microsandbox.dev>"]
+repository = "https://github.com/zerocore-ai/microsandbox"
+version = "0.2.6"
+license = "Apache-2.0"
+edition = "2024"
+
+[workspace.dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+ciborium = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
+thiserror = "2.0"
+tokio = { version = "1.42", features = ["full"] }
+EOF
+
+RUN cd crates/agentd && cargo build --release
 
 FROM scratch
-COPY --from=builder /build/target/release/agentd /agentd
+COPY --from=builder /build/crates/agentd/target/release/agentd /agentd
