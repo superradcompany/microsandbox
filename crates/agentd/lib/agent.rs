@@ -52,22 +52,19 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
     // Discover serial port.
     let port_path = find_serial_port(AGENT_PORT_NAME)?;
 
-    // Open the port for reading and writing using separate file descriptors.
-    let read_file = OpenOptions::new()
+    // Open the port once with read+write. Virtio-console multiport devices
+    // only allow a single open; a second open returns EBUSY.
+    let port_file = OpenOptions::new()
         .read(true)
-        .open(&port_path)?;
-    let write_file = OpenOptions::new()
         .write(true)
         .open(&port_path)?;
 
     // Set non-blocking for async I/O.
-    let read_fd = read_file.as_raw_fd();
-    let write_fd = write_file.as_raw_fd();
-    set_nonblocking(read_fd)?;
-    set_nonblocking(write_fd)?;
+    let port_fd = port_file.as_raw_fd();
+    set_nonblocking(port_fd)?;
 
-    let async_read = AsyncFd::new(read_file)?;
-    let async_write = AsyncFd::new(write_file)?;
+    // A single AsyncFd tracks both readable and writable readiness.
+    let async_port = AsyncFd::new(port_file)?;
 
     // Buffer for serial reads.
     let mut read_buf = vec![0u8; SERIAL_READ_BUF_SIZE];
@@ -101,15 +98,15 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
     encode_to_buf(&ready_msg, &mut serial_out_buf)
         .map_err(|e| AgentdError::ExecSession(format!("encode ready frame: {e}")))?;
-    flush_write_buf(&async_write, &mut serial_out_buf).await?;
+    flush_write_buf(&async_port, &mut serial_out_buf).await?;
 
     // Main loop.
     loop {
         tokio::select! {
             // Read from serial port.
-            result = async_read_ready(&async_read) => {
+            result = async_read_ready(&async_port) => {
                 if result.is_ok() {
-                    match read_from_fd(read_fd, &mut read_buf) {
+                    match read_from_fd(port_fd, &mut read_buf) {
                         Ok(n) if n > 0 => {
                             serial_in_buf.extend_from_slice(&read_buf[..n]);
                             last_activity = Utc::now();
@@ -136,7 +133,7 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
 
                             // Flush any outgoing messages.
                             if !serial_out_buf.is_empty() {
-                                flush_write_buf(&async_write, &mut serial_out_buf).await?;
+                                flush_write_buf(&async_port, &mut serial_out_buf).await?;
                             }
                         }
                         Ok(_) => {
@@ -180,7 +177,7 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
                 }
 
                 if !serial_out_buf.is_empty() {
-                    flush_write_buf(&async_write, &mut serial_out_buf).await?;
+                    flush_write_buf(&async_port, &mut serial_out_buf).await?;
                 }
             }
 

@@ -12,7 +12,7 @@ use crate::error::AgentdResult;
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Path to the heartbeat JSON file.
+/// Path to the heartbeat JSON file (under [`microsandbox_protocol::RUNTIME_MOUNT_POINT`]).
 const HEARTBEAT_PATH: &str = "/.msb/heartbeat.json";
 
 /// Path to the temporary heartbeat file (for atomic rename).
@@ -41,7 +41,7 @@ pub async fn write_heartbeat(
     Ok(())
 }
 
-/// Returns `true` if the heartbeat directory exists (i.e., `/.msb` is mounted).
+/// Returns `true` if the heartbeat directory exists (i.e., the runtime mount is available).
 pub fn heartbeat_dir_exists() -> bool {
-    Path::new("/.msb").is_dir()
+    Path::new(microsandbox_protocol::RUNTIME_MOUNT_POINT).is_dir()
 }

@@ -12,8 +12,8 @@ use crate::error::{AgentdError, AgentdResult};
 /// The sysfs path where virtio ports are listed.
 const VIRTIO_PORTS_PATH: &str = "/sys/class/virtio-ports";
 
-/// The expected port name for the agent channel.
-pub const AGENT_PORT_NAME: &str = "agent";
+/// Re-export the canonical agent port name from the protocol crate.
+pub use microsandbox_protocol::AGENT_PORT_NAME;
 
 //--------------------------------------------------------------------------------------------------
 // Functions

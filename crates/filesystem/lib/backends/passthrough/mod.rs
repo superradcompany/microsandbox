@@ -242,6 +242,8 @@ impl PassthroughFs {
             },
             #[cfg(target_os = "linux")]
             mnt_id,
+            #[cfg(target_os = "macos")]
+            unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
         });
 
         let mut inodes = self.inodes.write().unwrap();
@@ -463,9 +465,10 @@ impl DynFileSystem for PassthroughFs {
         &self,
         ctx: Context,
         ino: u64,
+        kill_priv: bool,
         flags: u32,
     ) -> io::Result<(Option<u64>, OpenOptions)> {
-        file_ops::do_open(self, ctx, ino, flags)
+        file_ops::do_open(self, ctx, ino, kill_priv, flags)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -475,11 +478,12 @@ impl DynFileSystem for PassthroughFs {
         parent: u64,
         name: &CStr,
         mode: u32,
+        kill_priv: bool,
         flags: u32,
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<(Entry, Option<u64>, OpenOptions)> {
-        create_ops::do_create(self, ctx, parent, name, mode, flags, umask, extensions)
+        create_ops::do_create(self, ctx, parent, name, mode, kill_priv, flags, umask, extensions)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -508,10 +512,10 @@ impl DynFileSystem for PassthroughFs {
         offset: u64,
         _lock_owner: Option<u64>,
         _delayed_write: bool,
-        _kill_priv: bool,
+        kill_priv: bool,
         _flags: u32,
     ) -> io::Result<usize> {
-        file_ops::do_write(self, ctx, ino, handle, r, size, offset)
+        file_ops::do_write(self, ctx, ino, handle, r, size, offset, kill_priv)
     }
 
     fn flush(
@@ -681,5 +685,43 @@ impl DynFileSystem for PassthroughFs {
             self, ctx, inode_in, handle_in, offset_in, inode_out, handle_out, offset_out, len,
             flags,
         )
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test: after `init()`, `getattr` on root inode (inode 1) must succeed.
+    ///
+    /// The passthrough filesystem previously failed to register the root inode on
+    /// macOS, causing the guest kernel to panic with `Requested init /init.krun
+    /// failed (error -2)` because GETATTR(ROOT_ID) immediately after FUSE_INIT
+    /// returned ENOENT.
+    #[test]
+    fn test_root_inode_accessible_after_init() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = PassthroughConfig {
+            root_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let fs = PassthroughFs::new(cfg).unwrap();
+        fs.init(FsOptions::empty()).unwrap();
+
+        // ROOT_ID = 1. getattr must succeed after init.
+        let ctx = Context {
+            uid: 0,
+            gid: 0,
+            pid: 0,
+        };
+        let result = fs.getattr(ctx, 1, None);
+        assert!(
+            result.is_ok(),
+            "getattr on root inode must succeed after init: {result:?}"
+        );
     }
 }

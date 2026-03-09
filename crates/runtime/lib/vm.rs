@@ -143,10 +143,17 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
     });
 
     // Agent — wire agent_fd through virtio-console multi-port.
-    // Guest discovers port by name "agent" via /sys/class/virtio-ports/.
-    if let Some(agent_fd) = config.agent_fd {
-        builder = builder.console(|c| c.port("agent", agent_fd, agent_fd));
-    }
+    // Guest discovers port by name via /sys/class/virtio-ports/.
+    // Disable the implicit console — microsandbox VMs are headless and only use
+    // the explicit agent port for host↔guest communication.
+    builder = builder.console(|c| {
+        let c = c.disable_implicit();
+        if let Some(agent_fd) = config.agent_fd {
+            c.port(microsandbox_protocol::AGENT_PORT_NAME, agent_fd, agent_fd)
+        } else {
+            c
+        }
+    });
 
     // Network — use msb_krun's built-in Unixgram backend to relay frames to msbnet.
     if let Some(raw_fd) = config.net_fd {

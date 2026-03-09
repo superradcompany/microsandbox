@@ -54,18 +54,16 @@ build-libkrunfw:
     cd build
     ln -sf libkrunfw.{{ LIBKRUNFW_ABI }}.dylib libkrunfw.dylib
 
-# Build the msb CLI binary (release mode). Requires: just build-deps (if not already built).
+# Build the msb CLI binary (release mode). Rebuilds agentd first if needed.
 [linux]
-build:
-    @test -f build/agentd || { echo "error: build/agentd not found. Run 'just build-deps' first."; exit 1; }
+build: build-agentd
     cargo build --release -p microsandbox-cli
     mkdir -p build
     cp target/release/msb build/msb
 
-# Build and sign the msb CLI binary (release mode). Requires: just build-deps (if not already built).
+# Build and sign the msb CLI binary (release mode). Rebuilds agentd first if needed.
 [macos]
-build:
-    @test -f build/agentd || { echo "error: build/agentd not found. Run 'just build-deps' first."; exit 1; }
+build: build-agentd
     cargo build --release -p microsandbox-cli
     mkdir -p build
     cp target/release/msb build/msb

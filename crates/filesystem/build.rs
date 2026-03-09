@@ -7,6 +7,10 @@ use microsandbox_utils::agentd_download_url;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../utils/lib/lib.rs");
+    // Invalidate the embedded agentd when its source changes.
+    // This won't auto-rebuild agentd (that requires `just build-agentd`),
+    // but it forces cargo to re-check that `build/agentd` is fresh.
+    println!("cargo:rerun-if-changed=../agentd");
 
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
@@ -41,6 +45,21 @@ fn build_agentd(workspace_root: &Path, out_dir: &Path) {
                  Run `just build-deps` first.",
                 source.display()
             );
+        }
+
+        // Warn if the binary is older than the agentd source directory.
+        let agentd_src = workspace_root.join("crates/agentd");
+        if let (Ok(bin_meta), Ok(src_meta)) =
+            (std::fs::metadata(&source), std::fs::metadata(&agentd_src))
+        {
+            if let (Ok(bin_time), Ok(src_time)) = (bin_meta.modified(), src_meta.modified()) {
+                if src_time > bin_time {
+                    println!(
+                        "cargo:warning=build/{AGENTD_BINARY} is older than crates/agentd source. \
+                         Run `just build-agentd` to rebuild."
+                    );
+                }
+            }
         }
 
         let dest = out_dir.join(AGENTD_BINARY);

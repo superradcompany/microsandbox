@@ -228,7 +228,7 @@ pub(crate) fn do_statfs(
     let fd = if inode == init_binary::INIT_INODE || inode == 1 {
         fs.root_fd.as_raw_fd()
     } else {
-        super::inode::get_inode_fd(fs, inode)?
+        super::inode::get_inode_fd(fs, inode)?.raw()
     };
 
     #[cfg(target_os = "linux")]

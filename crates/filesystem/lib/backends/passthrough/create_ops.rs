@@ -49,6 +49,7 @@ pub(crate) fn do_create(
     parent: u64,
     name: &CStr,
     mode: u32,
+    kill_priv: bool,
     flags: u32,
     umask: u32,
     _extensions: Extensions,
@@ -64,15 +65,12 @@ pub(crate) fn do_create(
     // Apply umask.
     let file_mode = mode & !umask & 0o7777;
 
-    let mut open_flags = flags as i32;
-    // Strip O_NOFOLLOW: this openat is by name (not through open_inode_fd), so
-    // O_NOFOLLOW would reject creating over an existing file-backed symlink.
-    open_flags &= !libc::O_NOFOLLOW;
-    open_flags |= libc::O_CREAT | libc::O_CLOEXEC;
+    let mut open_flags = inode::translate_open_flags(flags as i32);
+    open_flags |= libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW;
 
     let fd = unsafe {
         libc::openat(
-            parent_fd,
+            parent_fd.raw(),
             name.as_ptr(),
             open_flags,
             (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
@@ -86,7 +84,7 @@ pub(crate) fn do_create(
     let full_mode = libc::S_IFREG as u32 | file_mode;
     if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, full_mode, 0) {
         unsafe { libc::close(fd) };
-        unsafe { libc::unlinkat(parent_fd, name.as_ptr(), 0) };
+        unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
         return Err(e);
     }
 
@@ -98,6 +96,17 @@ pub(crate) fn do_create(
     // Reopen for the handle — strip O_CREAT since the file already exists.
     // open_inode_fd adds O_NOFOLLOW and O_CLOEXEC itself.
     let open_fd = inode::open_inode_fd(fs, entry.inode, open_flags & !libc::O_CREAT)?;
+
+    // Clear SUID/SGID on create+truncate of existing file (HANDLE_KILLPRIV_V2).
+    if kill_priv && (open_flags & libc::O_TRUNC != 0) {
+        if let Ok(Some(ovr)) = stat_override::get_override(open_fd) {
+            let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+            if new_mode != ovr.mode {
+                let _ = stat_override::set_override(open_fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+            }
+        }
+    }
+
     let file = unsafe { std::fs::File::from_raw_fd(open_fd) };
 
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);
@@ -130,7 +139,7 @@ pub(crate) fn do_mkdir(
 
     let ret = unsafe {
         libc::mkdirat(
-            parent_fd,
+            parent_fd.raw(),
             name.as_ptr(),
             (libc::S_IRWXU) as libc::mode_t,
         )
@@ -141,9 +150,10 @@ pub(crate) fn do_mkdir(
 
     // Set override xattr.
     let full_mode = libc::S_IFDIR as u32 | dir_mode;
-    if let Err(e) = stat_override::set_override_at(parent_fd, name, ctx.uid, ctx.gid, full_mode, 0)
+    if let Err(e) =
+        stat_override::set_override_at(parent_fd.raw(), name, ctx.uid, ctx.gid, full_mode, 0)
     {
-        unsafe { libc::unlinkat(parent_fd, name.as_ptr(), libc::AT_REMOVEDIR) };
+        unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), libc::AT_REMOVEDIR) };
         return Err(e);
     }
 
@@ -178,7 +188,7 @@ pub(crate) fn do_mknod(
     // Always create a regular file on host.
     let fd = unsafe {
         libc::openat(
-            parent_fd,
+            parent_fd.raw(),
             name.as_ptr(),
             libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_CLOEXEC,
             (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
@@ -192,7 +202,7 @@ pub(crate) fn do_mknod(
     let full_mode = file_type | perm_mode;
     if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, full_mode, rdev) {
         unsafe { libc::close(fd) };
-        unsafe { libc::unlinkat(parent_fd, name.as_ptr(), 0) };
+        unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
         return Err(e);
     }
     unsafe { libc::close(fd) };
@@ -226,7 +236,7 @@ pub(crate) fn do_symlink(
         // File-backed symlink: create a regular file with the target as content.
         let fd = unsafe {
             libc::openat(
-                parent_fd,
+                parent_fd.raw(),
                 name.as_ptr(),
                 libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_CLOEXEC,
                 (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
@@ -242,12 +252,12 @@ pub(crate) fn do_symlink(
         if written < 0 {
             let err = io::Error::last_os_error();
             unsafe { libc::close(fd) };
-            unsafe { libc::unlinkat(parent_fd, name.as_ptr(), 0) };
+            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
             return Err(platform::linux_error(err));
         }
         if (written as usize) != target.len() {
             unsafe { libc::close(fd) };
-            unsafe { libc::unlinkat(parent_fd, name.as_ptr(), 0) };
+            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
             return Err(platform::eio());
         }
 
@@ -255,7 +265,7 @@ pub(crate) fn do_symlink(
         let mode = libc::S_IFLNK as u32 | 0o777;
         if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0) {
             unsafe { libc::close(fd) };
-            unsafe { libc::unlinkat(parent_fd, name.as_ptr(), 0) };
+            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
             return Err(e);
         }
         unsafe { libc::close(fd) };
@@ -264,7 +274,7 @@ pub(crate) fn do_symlink(
     #[cfg(target_os = "macos")]
     {
         // Real symlink on macOS.
-        let ret = unsafe { libc::symlinkat(linkname.as_ptr(), parent_fd, name.as_ptr()) };
+        let ret = unsafe { libc::symlinkat(linkname.as_ptr(), parent_fd.raw(), name.as_ptr()) };
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
@@ -291,13 +301,13 @@ pub(crate) fn do_symlink(
         // We need the full path, so open the parent and construct it.
         let fd = unsafe {
             libc::openat(
-                parent_fd,
+                parent_fd.raw(),
                 name.as_ptr(),
                 libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK,
             )
         };
         if fd < 0 {
-            unsafe { libc::unlinkat(parent_fd, name.as_ptr(), 0) };
+            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
 
@@ -314,7 +324,7 @@ pub(crate) fn do_symlink(
         unsafe { libc::close(fd) };
 
         if xattr_ret < 0 {
-            unsafe { libc::unlinkat(parent_fd, name.as_ptr(), 0) };
+            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
     }
@@ -348,12 +358,12 @@ pub(crate) fn do_link(
         let inode_fd = inode::get_inode_fd(fs, inode)?;
         let newparent_fd = inode::get_inode_fd(fs, newparent)?;
 
-        let path = format!("/proc/self/fd/{inode_fd}\0");
+        let path = format!("/proc/self/fd/{}\0", inode_fd.raw());
         let ret = unsafe {
             libc::linkat(
                 libc::AT_FDCWD,
                 path.as_ptr() as *const libc::c_char,
-                newparent_fd,
+                newparent_fd.raw(),
                 newname.as_ptr(),
                 libc::AT_SYMLINK_FOLLOW,
             )
@@ -374,7 +384,7 @@ pub(crate) fn do_link(
             libc::linkat(
                 libc::AT_FDCWD,
                 src_path.as_ptr() as *const libc::c_char,
-                newparent_fd,
+                newparent_fd.raw(),
                 newname.as_ptr(),
                 0,
             )
@@ -408,12 +418,12 @@ pub(crate) fn do_readlink(
     #[cfg(target_os = "linux")]
     {
         let inode_fd = inode::get_inode_fd(fs, ino)?;
-        let st = platform::fstat(inode_fd)?;
+        let st = platform::fstat(inode_fd.raw())?;
 
         // Real symlink on host — use readlinkat.
         if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
             let mut buf = vec![0u8; libc::PATH_MAX as usize];
-            let path = format!("/proc/self/fd/{inode_fd}\0");
+            let path = format!("/proc/self/fd/{}\0", inode_fd.raw());
             let ret = unsafe {
                 libc::readlinkat(
                     libc::AT_FDCWD,
@@ -431,7 +441,7 @@ pub(crate) fn do_readlink(
 
         // Verify override xattr says S_IFLNK before reading file content.
         // Without this check, a guest could read any regular file's content via readlink.
-        match stat_override::get_override(inode_fd)? {
+        match stat_override::get_override(inode_fd.raw())? {
             Some(ovr) if ovr.mode & libc::S_IFMT as u32 == libc::S_IFLNK as u32 => {}
             _ => return Err(platform::einval()),
         }

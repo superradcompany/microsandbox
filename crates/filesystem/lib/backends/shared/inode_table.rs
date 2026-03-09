@@ -6,6 +6,8 @@
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU64;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicI64;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -61,6 +63,14 @@ pub(crate) struct InodeData {
     /// Mount ID from statx (Linux only, for cross-mount deduplication).
     #[cfg(target_os = "linux")]
     pub mnt_id: u64,
+
+    /// Fd grabbed before unlink, keeping the file accessible after deletion.
+    ///
+    /// On macOS, `/.vol/<dev>/<ino>` may become invalid after unlink. This fd
+    /// (set by `do_unlink`) keeps the file data alive for open handles. -1 means
+    /// the file has not been unlinked.
+    #[cfg(target_os = "macos")]
+    pub unlinked_fd: AtomicI64,
 }
 
 //--------------------------------------------------------------------------------------------------
