@@ -387,6 +387,14 @@ fn spawn_vm_process(
         cmd.arg("--mount").arg(mount);
     }
 
+    // Inject the runtime directory as a virtiofs mount so the guest can access
+    // scripts and write heartbeat at the canonical mount point (/.msb).
+    cmd.arg("--mount").arg(format!(
+        "{}:{}",
+        microsandbox_protocol::RUNTIME_FS_TAG,
+        config.runtime_dir.display()
+    ));
+
     if let Some(ref init_path) = config.vm_config.init_path {
         cmd.arg("--init-path").arg(init_path);
     }
@@ -412,6 +420,11 @@ fn spawn_vm_process(
 
     // Spawn in its own process group for clean signal delivery.
     cmd.process_group(0);
+
+    // Redirect stdin to /dev/null so the VM child never reads from the caller's
+    // terminal. Without this, libkrun's implicit console reads STDIN_FILENO,
+    // and the background process group gets SIGTTIN (stopped).
+    cmd.stdin(Stdio::null());
 
     // Pipe stdout/stderr for log capture.
     cmd.stdout(Stdio::piped());
@@ -540,7 +553,8 @@ where
 {
     let Ok(mut file) = tokio::fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(&file_path)
         .await
     else {

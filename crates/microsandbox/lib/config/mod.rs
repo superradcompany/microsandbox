@@ -213,10 +213,12 @@ pub fn set_config(config: GlobalConfig) -> Result<(), GlobalConfig> {
 /// 4. `which::which("msb")`
 pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
     if let Ok(path) = std::env::var("MSB_PATH") {
+        tracing::debug!(path = %path, source = "MSB_PATH env", "resolved msb binary");
         return Ok(PathBuf::from(path));
     }
 
     if let Some(path) = &config().paths.msb {
+        tracing::debug!(path = %path.display(), source = "config.paths.msb", "resolved msb binary");
         return Ok(path.clone());
     }
 
@@ -226,14 +228,17 @@ pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
         .join(microsandbox_utils::BIN_SUBDIR)
         .join(microsandbox_utils::MSB_BINARY);
     if home_bin.is_file() {
+        tracing::debug!(path = %home_bin.display(), source = "~/.microsandbox/bin/msb", "resolved msb binary");
         return Ok(home_bin);
     }
 
-    which::which(microsandbox_utils::MSB_BINARY).map_err(|e| {
+    let path = which::which(microsandbox_utils::MSB_BINARY).map_err(|e| {
         crate::MicrosandboxError::Custom(format!(
             "msb binary not found: set MSB_PATH env var or add msb to PATH ({e})"
         ))
-    })
+    })?;
+    tracing::debug!(path = %path.display(), source = "PATH lookup", "resolved msb binary");
+    Ok(path)
 }
 
 /// Resolve the path to `libkrunfw`.

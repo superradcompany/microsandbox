@@ -23,6 +23,7 @@ use super::PassthroughFs;
 use crate::backends::shared::handle_table::HandleData;
 use crate::backends::shared::init_binary;
 use crate::backends::shared::platform;
+use crate::backends::shared::stat_override;
 use crate::{Context, OpenOptions, ZeroCopyReader, ZeroCopyWriter};
 
 //--------------------------------------------------------------------------------------------------
@@ -30,17 +31,21 @@ use crate::{Context, OpenOptions, ZeroCopyReader, ZeroCopyWriter};
 //--------------------------------------------------------------------------------------------------
 
 /// Open a file and return a handle.
+///
+/// When `kill_priv` is true and the open includes `O_TRUNC`, clears SUID/SGID
+/// bits from the override xattr — truncating a setuid binary should remove setuid.
 pub(crate) fn do_open(
     fs: &PassthroughFs,
     _ctx: Context,
     inode: u64,
+    kill_priv: bool,
     flags: u32,
 ) -> io::Result<(Option<u64>, OpenOptions)> {
     if inode == init_binary::INIT_INODE {
         return Ok((Some(init_binary::INIT_HANDLE), OpenOptions::KEEP_CACHE));
     }
 
-    let mut open_flags = flags as i32;
+    let mut open_flags = inode::translate_open_flags(flags as i32);
 
     // Writeback cache: kernel may issue reads on O_WRONLY fds for cache coherency,
     // so widen to O_RDWR. Strip O_APPEND because it races with the kernel's cached
@@ -55,6 +60,17 @@ pub(crate) fn do_open(
     // open_inode_fd adds O_NOFOLLOW and O_CLOEXEC itself for security
     // (prevents procfd magic-link following), so no need to set them here.
     let fd = inode::open_inode_fd(fs, inode, open_flags)?;
+
+    // Clear SUID/SGID on open+truncate (HANDLE_KILLPRIV_V2).
+    if kill_priv && (open_flags & libc::O_TRUNC != 0) {
+        if let Ok(Some(ovr)) = stat_override::get_override(fd) {
+            let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+            if new_mode != ovr.mode {
+                let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+            }
+        }
+    }
+
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
 
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);
@@ -88,6 +104,10 @@ pub(crate) fn do_read(
 }
 
 /// Write data to a file.
+///
+/// When `kill_priv` is true (HANDLE_KILLPRIV_V2 negotiated), clears SUID/SGID
+/// bits from the override xattr after a successful write — the guest kernel
+/// expects the filesystem to handle this.
 pub(crate) fn do_write(
     fs: &PassthroughFs,
     _ctx: Context,
@@ -96,6 +116,7 @@ pub(crate) fn do_write(
     r: &mut dyn ZeroCopyReader,
     size: u32,
     offset: u64,
+    kill_priv: bool,
 ) -> io::Result<usize> {
     if inode == init_binary::INIT_INODE {
         return Err(platform::eacces());
@@ -104,7 +125,19 @@ pub(crate) fn do_write(
     let handles = fs.handles.read().unwrap();
     let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
     let f = data.file.read().unwrap();
-    r.read_to(&f, size as usize, offset)
+    let written = r.read_to(&f, size as usize, offset)?;
+
+    if kill_priv {
+        let fd = f.as_raw_fd();
+        if let Ok(Some(ovr)) = stat_override::get_override(fd) {
+            let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+            if new_mode != ovr.mode {
+                let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+            }
+        }
+    }
+
+    Ok(written)
 }
 
 /// Flush pending data for a file handle.

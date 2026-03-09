@@ -29,8 +29,97 @@ use crate::backends::shared::platform;
 use crate::{stat64, Entry};
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Owned-or-borrowed fd for inode operations.
+///
+/// On Linux, borrows the O_PATH fd from InodeData (no close on drop).
+/// On macOS, may own a temporary fd opened via `/.vol/` (closed on drop).
+pub(crate) struct InodeFd {
+    fd: i32,
+    #[cfg(target_os = "macos")]
+    owned: bool,
+}
+
+impl InodeFd {
+    pub(crate) fn raw(&self) -> i32 {
+        self.fd
+    }
+}
+
+impl Drop for InodeFd {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        if self.owned && self.fd >= 0 {
+            unsafe { libc::close(self.fd) };
+        }
+    }
+}
+
+/// Linux guest open flag constants.
+///
+/// The guest kernel sends Linux flag values over virtio-fs. On Linux hosts these
+/// match `libc` constants, but on macOS the numeric values differ (e.g. Linux
+/// `O_TRUNC` 0x200 = macOS `O_CREAT` 0x200). This module defines the Linux
+/// values so we can translate them to host values on macOS.
+#[cfg(target_os = "macos")]
+mod linux_flags {
+    pub const O_APPEND: i32 = 0x400;
+    pub const O_CREAT: i32 = 0x40;
+    pub const O_TRUNC: i32 = 0x200;
+    pub const O_EXCL: i32 = 0x80;
+    pub const O_NOFOLLOW: i32 = 0x20000;
+    pub const O_NONBLOCK: i32 = 0x800;
+    pub const O_CLOEXEC: i32 = 0x80000;
+    pub const O_DIRECTORY: i32 = 0x10000;
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Translate Linux guest open flags to host open flags.
+///
+/// On Linux this is a no-op (flags match). On macOS, maps Linux numeric values
+/// to the corresponding macOS `libc` constants. Without this translation,
+/// Linux `O_TRUNC` (0x200) becomes macOS `O_CREAT` (0x200), and Linux
+/// `O_APPEND` (0x400) becomes macOS `O_TRUNC` (0x400).
+#[cfg(target_os = "linux")]
+pub(crate) fn translate_open_flags(flags: i32) -> i32 {
+    flags
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn translate_open_flags(linux_flags_val: i32) -> i32 {
+    // Access mode (O_RDONLY=0, O_WRONLY=1, O_RDWR=2) — same on both platforms.
+    let mut flags = linux_flags_val & 0b11;
+    if linux_flags_val & linux_flags::O_APPEND != 0 {
+        flags |= libc::O_APPEND;
+    }
+    if linux_flags_val & linux_flags::O_CREAT != 0 {
+        flags |= libc::O_CREAT;
+    }
+    if linux_flags_val & linux_flags::O_TRUNC != 0 {
+        flags |= libc::O_TRUNC;
+    }
+    if linux_flags_val & linux_flags::O_EXCL != 0 {
+        flags |= libc::O_EXCL;
+    }
+    if linux_flags_val & linux_flags::O_NOFOLLOW != 0 {
+        flags |= libc::O_NOFOLLOW;
+    }
+    if linux_flags_val & linux_flags::O_NONBLOCK != 0 {
+        flags |= libc::O_NONBLOCK;
+    }
+    if linux_flags_val & linux_flags::O_CLOEXEC != 0 {
+        flags |= libc::O_CLOEXEC;
+    }
+    if linux_flags_val & linux_flags::O_DIRECTORY != 0 {
+        flags |= libc::O_DIRECTORY;
+    }
+    flags
+}
 
 /// Look up a child name in a parent directory and return an [`Entry`].
 ///
@@ -43,10 +132,10 @@ pub(crate) fn do_lookup(fs: &PassthroughFs, parent: u64, name: &CStr) -> io::Res
     let parent_fd = get_inode_fd(fs, parent)?;
 
     #[cfg(target_os = "linux")]
-    return do_lookup_linux(fs, parent_fd, name);
+    return do_lookup_linux(fs, parent_fd.raw(), name);
 
     #[cfg(target_os = "macos")]
-    return do_lookup_macos(fs, parent_fd, name);
+    return do_lookup_macos(fs, parent_fd.raw(), name);
 }
 
 /// Linux lookup: open → statx(AT_EMPTY_PATH) → patched_stat (3 syscalls).
@@ -187,6 +276,8 @@ fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
         ino: st.st_ino as u64,
         dev: st.st_dev as u64,
         refcount: std::sync::atomic::AtomicU64::new(1),
+        #[cfg(target_os = "macos")]
+        unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
     });
 
     {
@@ -274,6 +365,14 @@ pub(crate) fn forget_one_locked(
                 .is_ok()
             {
                 if new == 0 {
+                    // Close the unlinked fd if one was preserved.
+                    #[cfg(target_os = "macos")]
+                    {
+                        let ufd = data.unlinked_fd.load(Ordering::Acquire);
+                        if ufd >= 0 {
+                            unsafe { libc::close(ufd as i32) };
+                        }
+                    }
                     inodes.remove(&inode);
                 }
                 break;
@@ -282,34 +381,75 @@ pub(crate) fn forget_one_locked(
     }
 }
 
-/// Get the raw fd for an inode. On Linux this is the O_PATH fd.
-/// On macOS this opens via `/.vol/dev/ino`.
-pub(crate) fn get_inode_fd(fs: &PassthroughFs, inode: u64) -> io::Result<i32> {
+/// Get an fd for an inode suitable for `*at()` syscalls.
+///
+/// On Linux, returns the borrowed O_PATH fd from InodeData (no close on drop).
+/// On macOS, opens a temporary fd via `/.vol/<dev>/<ino>` (closed on drop).
+/// Root inode (1) always borrows the stored root fd.
+pub(crate) fn get_inode_fd(fs: &PassthroughFs, inode: u64) -> io::Result<InodeFd> {
     // Root inode uses the stored root fd.
     if inode == 1 {
-        return Ok(fs.root_fd.as_raw_fd());
+        return Ok(InodeFd {
+            fd: fs.root_fd.as_raw_fd(),
+            #[cfg(target_os = "macos")]
+            owned: false,
+        });
     }
 
     let inodes = fs.inodes.read().unwrap();
     let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
 
-    Ok(inode_raw_fd(data))
+    #[cfg(target_os = "linux")]
+    {
+        Ok(InodeFd {
+            fd: data.file.as_raw_fd(),
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let fd = open_vol_fd(data.dev, data.ino)?;
+        Ok(InodeFd { fd, owned: true })
+    }
 }
 
-/// Get the raw fd from an InodeData.
+/// Get the raw fd from an InodeData (Linux only).
 #[cfg(target_os = "linux")]
 fn inode_raw_fd(data: &InodeData) -> i32 {
     data.file.as_raw_fd()
 }
 
-/// Get the raw fd from an InodeData on macOS.
-/// On macOS we don't store fds per inode; we open via `/.vol/dev/ino`.
-/// For the simple case, we return -1 and callers use path-based operations.
+/// Open a temporary fd via `/.vol/<dev>/<ino>` on macOS.
+///
+/// Tries `O_RDONLY | O_DIRECTORY` first (most callers need a parent directory fd),
+/// then falls back to plain `O_RDONLY` for non-directory inodes.
 #[cfg(target_os = "macos")]
-fn inode_raw_fd(_data: &InodeData) -> i32 {
-    // On macOS, we use path-based xattr operations.
-    // Return -1 to signal that path-based access is needed.
-    -1
+fn open_vol_fd(dev: u64, ino: u64) -> io::Result<i32> {
+    let path = format!("/.vol/{}/{}\0", dev, ino);
+
+    // Try directory open first (most callers want a parent fd).
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr() as *const libc::c_char,
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY,
+        )
+    };
+    if fd >= 0 {
+        return Ok(fd);
+    }
+
+    // Fall back to regular open.
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr() as *const libc::c_char,
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd >= 0 {
+        return Ok(fd);
+    }
+
+    Err(platform::linux_error(io::Error::last_os_error()))
 }
 
 /// Open a file for I/O by inode. Returns a real file descriptor (not O_PATH).
@@ -321,7 +461,7 @@ pub(crate) fn open_inode_fd(fs: &PassthroughFs, inode: u64, flags: i32) -> io::R
     {
         let inode_fd = get_inode_fd(fs, inode)?;
         let mut buf = [0u8; 20];
-        let fd_str = format_fd_cstr(inode_fd, &mut buf);
+        let fd_str = format_fd_cstr(inode_fd.raw(), &mut buf);
         let fd = unsafe {
             libc::openat(
                 fs.proc_self_fd.as_raw_fd(),
@@ -339,6 +479,17 @@ pub(crate) fn open_inode_fd(fs: &PassthroughFs, inode: u64, flags: i32) -> io::R
     {
         let inodes = fs.inodes.read().unwrap();
         let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
+
+        // If the file was unlinked, dup the preserved fd instead of using /.vol/ path.
+        let ufd = data.unlinked_fd.load(Ordering::Acquire);
+        if ufd >= 0 {
+            let fd = unsafe { libc::fcntl(ufd as i32, libc::F_DUPFD_CLOEXEC, 0) };
+            if fd >= 0 {
+                return Ok(fd);
+            }
+            // Fall through to /.vol/ path if dup fails.
+        }
+
         let path = format!("/.vol/{}/{}\0", data.dev, data.ino);
         let fd = unsafe {
             libc::open(
@@ -371,8 +522,8 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
     #[cfg(target_os = "linux")]
     {
         let fd = get_inode_fd(fs, inode)?;
-        let st = platform::fstat(fd)?;
-        crate::backends::shared::stat_override::patched_stat(fd, st)
+        let st = platform::fstat(fd.raw())?;
+        crate::backends::shared::stat_override::patched_stat(fd.raw(), st)
     }
 
     #[cfg(target_os = "macos")]

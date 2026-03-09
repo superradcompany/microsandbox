@@ -118,12 +118,12 @@ mod linux {
         Ok(())
     }
 
-    /// Mounts the virtiofs runtime filesystem at `/.msb`.
+    /// Mounts the virtiofs runtime filesystem at the canonical mount point.
     pub fn mount_runtime() -> AgentdResult<()> {
-        mkdir_ignore_exists("/.msb")?;
+        mkdir_ignore_exists(microsandbox_protocol::RUNTIME_MOUNT_POINT)?;
         mount_ignore_busy(
-            Some("msb_runtime"),
-            "/.msb",
+            Some(microsandbox_protocol::RUNTIME_FS_TAG),
+            microsandbox_protocol::RUNTIME_MOUNT_POINT,
             Some("virtiofs"),
             MsFlags::empty(),
             None::<&str>,
