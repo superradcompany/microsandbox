@@ -43,9 +43,12 @@ const MAX_INPUT_BUF_SIZE: usize = MAX_FRAME_SIZE as usize + 4;
 
 /// Runs the main agent loop.
 ///
-/// Discovers the virtio serial port, sends `core.ready`, then enters
-/// the main select loop handling serial I/O, process output, and heartbeat.
-pub async fn run() -> AgentdResult<()> {
+/// Discovers the virtio serial port, sends `core.ready` with boot timing data,
+/// then enters the main select loop handling serial I/O, process output, and heartbeat.
+///
+/// - `boot_time_ns`: `CLOCK_BOOTTIME` at `main()` start (kernel boot duration).
+/// - `init_time_ns`: nanoseconds spent in `init::init()`.
+pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
     // Discover serial port.
     let port_path = find_serial_port(AGENT_PORT_NAME)?;
 
@@ -84,9 +87,18 @@ pub async fn run() -> AgentdResult<()> {
     let mut last_activity = Utc::now();
     let mut heartbeat_timer = interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
 
-    // Send core.ready.
-    let ready_msg = Message::with_payload(MessageType::Ready, 0, &Ready {})
-        .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
+    // Send core.ready with boot timing data.
+    let ready_time_ns = crate::clock::boottime_ns();
+    let ready_msg = Message::with_payload(
+        MessageType::Ready,
+        0,
+        &Ready {
+            boot_time_ns,
+            init_time_ns,
+            ready_time_ns,
+        },
+    )
+    .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
     encode_to_buf(&ready_msg, &mut serial_out_buf)
         .map_err(|e| AgentdError::ExecSession(format!("encode ready frame: {e}")))?;
     flush_write_buf(&async_write, &mut serial_out_buf).await?;

@@ -1,5 +1,0 @@
-name = "get-microsandbox"
-main = "src/index.js"
-compatibility_date = "2024-01-01"
-
-routes = [{ pattern = "get.microsandbox.dev", custom_domain = true }]

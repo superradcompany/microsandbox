@@ -1,14 +1,6 @@
 //! Basic example demonstrating the microsandbox SDK.
 //!
-//! Prerequisites:
-//! - `just build-deps && just build` (builds agentd, libkrunfw, and msb)
-//! - The rootfs-alpine git submodule initialized (`git submodule update --init`)
-//!
-//! Usage:
-//!   cargo run -p basic-example
-//!
-//! On macOS, the binary must be codesigned with the hypervisor entitlement:
-//!   codesign --entitlements ../../entitlements.plist --force -s - target/debug/basic-example
+//! See [examples/README.md](../../README.md) for prerequisites and usage.
 
 use std::path::PathBuf;
 
@@ -34,6 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .image(rootfs_path)
         .cpus(1)
         .memory(512)
+
         .create()
         .await?;
 
