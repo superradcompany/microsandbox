@@ -1,9 +1,8 @@
 [workspace]
 resolver = "3"
-exclude = ["sdk/rust"]
+exclude = ["sdk/rust", "crates/agentd"]
 members = [
     "crates/microsandbox",
-    "crates/agentd",
     "crates/cli",
     "crates/db",
     "crates/filesystem",
