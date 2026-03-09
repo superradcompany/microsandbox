@@ -105,7 +105,14 @@ impl Sandbox {
     async fn create_inner(config: &SandboxConfig) -> MicrosandboxResult<Self> {
         let (handle, agent_host_fd) = spawn_supervisor(config).await?;
         let bridge = AgentBridge::new(agent_host_fd)?;
-        bridge.wait_ready().await?;
+        let ready = bridge.wait_ready().await?;
+
+        tracing::info!(
+            boot_time_ms = ready.boot_time_ns / 1_000_000,
+            init_time_ms = ready.init_time_ns / 1_000_000,
+            ready_time_ms = ready.ready_time_ns / 1_000_000,
+            "sandbox ready",
+        );
 
         Ok(Self {
             config: config.clone(),

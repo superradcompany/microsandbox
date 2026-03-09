@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use microsandbox_protocol::codec;
+use microsandbox_protocol::core::Ready;
 use microsandbox_protocol::message::{Message, MessageType};
 use tokio::io::AsyncRead;
 use tokio::sync::{Mutex, mpsc};
@@ -117,15 +118,20 @@ impl AgentBridge {
     /// Wait for agentd to report readiness (`core.ready` message).
     ///
     /// The ready message is dispatched to correlation ID 0 by convention.
-    pub async fn wait_ready(&self) -> MicrosandboxResult<()> {
+    /// Returns the [`Ready`] payload containing boot timing data.
+    pub async fn wait_ready(&self) -> MicrosandboxResult<Ready> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         self.pending.lock().await.insert(0, tx);
 
-        rx.recv().await.ok_or_else(|| {
+        let msg = rx.recv().await.ok_or_else(|| {
             crate::MicrosandboxError::Runtime("agent bridge closed before ready signal".into())
         })?;
 
-        Ok(())
+        let ready: Ready = msg.payload().map_err(|e| {
+            crate::MicrosandboxError::Runtime(format!("failed to decode ready payload: {e}"))
+        })?;
+
+        Ok(ready)
     }
 }
 
