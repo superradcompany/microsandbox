@@ -14,8 +14,11 @@ use super::platform;
 
 /// Validate a directory entry name, blocking traversal attacks.
 ///
-/// Rejects: empty names, `..`, names containing `/` or `\`, and names
-/// containing null bytes.
+/// Rejects: empty names, `..`, and names containing `/`.
+///
+/// Backslash is intentionally allowed — it is a valid filename character on
+/// Linux. The filesystem operates on raw bytes, not path-separator-aware
+/// strings.
 pub(crate) fn validate_name(name: &CStr) -> io::Result<()> {
     let bytes = name.to_bytes();
 
@@ -25,7 +28,7 @@ pub(crate) fn validate_name(name: &CStr) -> io::Result<()> {
     if bytes == b".." {
         return Err(platform::eperm());
     }
-    if bytes.contains(&b'/') || bytes.contains(&b'\\') {
+    if bytes.contains(&b'/') {
         return Err(platform::eperm());
     }
 

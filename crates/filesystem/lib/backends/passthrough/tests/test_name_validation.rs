@@ -22,10 +22,12 @@ fn test_lookup_slash() {
 }
 
 #[test]
-fn test_lookup_backslash() {
+fn test_lookup_backslash_allowed() {
+    // Backslash is a valid filename character on Linux — not rejected.
     let sb = TestSandbox::new();
+    sb.fuse_create_root("a\\b").unwrap();
     let result = sb.lookup_root("a\\b");
-    TestSandbox::assert_errno(result, LINUX_EPERM);
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -120,7 +122,8 @@ fn test_rename_old_dotdot() {
 }
 
 #[test]
-fn test_rename_new_backslash() {
+fn test_rename_new_backslash_allowed() {
+    // Backslash is a valid filename character on Linux — not rejected.
     let sb = TestSandbox::new();
     sb.fuse_create_root("source").unwrap();
     let result = sb.fs.rename(
@@ -131,7 +134,7 @@ fn test_rename_new_backslash() {
         &TestSandbox::cstr("a\\b"),
         0,
     );
-    TestSandbox::assert_errno(result, LINUX_EPERM);
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -158,7 +161,8 @@ fn test_link_name_slash() {
 }
 
 #[test]
-fn test_mknod_backslash() {
+fn test_mknod_backslash_allowed() {
+    // Backslash is a valid filename character on Linux — not rejected.
     let sb = TestSandbox::new();
     let result = sb.fs.mknod(
         sb.ctx(),
@@ -169,5 +173,5 @@ fn test_mknod_backslash() {
         0,
         Extensions::default(),
     );
-    TestSandbox::assert_errno(result, LINUX_EPERM);
+    assert!(result.is_ok());
 }
