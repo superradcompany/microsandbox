@@ -26,7 +26,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .image(rootfs_path)
         .cpus(1)
         .memory(512)
-
         .create()
         .await?;
 

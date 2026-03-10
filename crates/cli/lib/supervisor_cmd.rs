@@ -46,7 +46,6 @@ pub struct SupervisorArgs {
     pub forward_output: bool,
 
     // ── Supervisor policy ────────────────────────────────────────────────
-
     /// Shutdown mode: graceful, terminate, or kill.
     #[arg(long, default_value = "graceful")]
     pub shutdown_mode: ShutdownMode,
@@ -64,7 +63,6 @@ pub struct SupervisorArgs {
     pub idle_timeout: Option<u64>,
 
     // ── VM child policy ──────────────────────────────────────────────────
-
     /// VM exit action: shutdown-all, restart, or ignore.
     #[arg(long, default_value = "shutdown-all")]
     pub vm_on_exit: ExitAction,
@@ -86,7 +84,6 @@ pub struct SupervisorArgs {
     pub vm_shutdown_timeout_ms: u64,
 
     // ── VM passthrough args ──────────────────────────────────────────────
-
     /// Path to the libkrunfw shared library.
     #[arg(long)]
     pub libkrunfw_path: PathBuf,

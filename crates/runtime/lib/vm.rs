@@ -79,10 +79,7 @@ pub fn enter(config: VmConfig) -> ! {
 
 fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallible> {
     let mut builder = VmBuilder::new()
-        .machine(|m| {
-            m.vcpus(config.vcpus)
-                .memory_mib(config.memory_mib as usize)
-        })
+        .machine(|m| m.vcpus(config.vcpus).memory_mib(config.memory_mib as usize))
         .kernel(|k| {
             let k = k.krunfw_path(&config.libkrunfw_path);
             if let Some(ref init_path) = config.init_path {
@@ -101,8 +98,7 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
             ..Default::default()
         };
         let backend = PassthroughFs::new(cfg)?;
-        builder = builder
-            .fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+        builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
     }
 
     // Additional mounts (tag:host_path format).
@@ -114,8 +110,7 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
                 ..Default::default()
             };
             let backend = PassthroughFs::new(cfg)?;
-            builder = builder
-                .fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
+            builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
         } else {
             tracing::warn!(mount = %mount_spec, "skipping malformed mount spec (expected tag:path)");
         }

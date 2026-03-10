@@ -18,8 +18,8 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 
-use super::inode;
 use super::PassthroughFs;
+use super::inode;
 use crate::backends::shared::handle_table::HandleData;
 use crate::backends::shared::init_binary;
 use crate::backends::shared::platform;

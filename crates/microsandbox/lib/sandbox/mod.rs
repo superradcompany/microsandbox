@@ -17,20 +17,20 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use microsandbox_protocol::exec::{
-    ExecRlimit, ExecRequest, ExecStarted, ExecStdin, ExecStdout, ExecStderr, ExecExited,
+    ExecExited, ExecRequest, ExecRlimit, ExecStarted, ExecStderr, ExecStdin, ExecStdout,
 };
 use microsandbox_protocol::message::{Message, MessageType};
+use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set,
 };
-use sea_orm::sea_query::{Expr, OnConflict};
 use tokio::sync::{Mutex, mpsc};
 
+use crate::MicrosandboxResult;
 use crate::agent::AgentBridge;
 use crate::db::entity::sandbox as sandbox_entity;
 use crate::db::entity::sandbox::SandboxStatus;
 use crate::runtime::{SupervisorHandle, spawn_supervisor};
-use crate::MicrosandboxResult;
 
 use self::exec::{ExecEvent, ExecHandle, ExecOutput, ExecSink, IntoExecOptions, StdinMode};
 
@@ -38,16 +38,13 @@ use self::exec::{ExecEvent, ExecHandle, ExecOutput, ExecSink, IntoExecOptions, S
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use attach::{AttachConfig, AttachBuilder, IntoAttachConfig, SessionInfo};
+pub use attach::{AttachBuilder, AttachConfig, IntoAttachConfig, SessionInfo};
 pub use builder::SandboxBuilder;
 pub use config::SandboxConfig;
-pub use exec::{
-    ExecOptionsBuilder, ExitStatus as ExecExitStatus, Rlimit, RlimitResource, SizeExt,
-};
+pub use exec::{ExecOptionsBuilder, ExitStatus as ExecExitStatus, Rlimit, RlimitResource, SizeExt};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
 pub use types::{
-    MountBuilder, NetworkConfig, Patch, RootfsSource, SecretsConfig, SshConfig,
-    VolumeMount,
+    MountBuilder, NetworkConfig, Patch, RootfsSource, SecretsConfig, SshConfig, VolumeMount,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -83,9 +80,8 @@ impl Sandbox {
     /// any user workload — use `exec()`, `shell()`, etc. afterward.
     pub async fn create(config: SandboxConfig) -> MicrosandboxResult<Self> {
         // Initialize the database.
-        let db = crate::db::init_global(
-            Some(crate::config::config().database.max_connections),
-        ).await?;
+        let db =
+            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
         // Upsert sandbox record.
         upsert_sandbox_record(db, &config).await?;
@@ -123,9 +119,8 @@ impl Sandbox {
 
     /// Get sandbox info by name from the database.
     pub async fn get(name: &str) -> MicrosandboxResult<SandboxInfo> {
-        let db = crate::db::init_global(
-            Some(crate::config::config().database.max_connections),
-        ).await?;
+        let db =
+            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
         sandbox_entity::Entity::find()
             .filter(sandbox_entity::Column::Name.eq(name))
@@ -136,9 +131,8 @@ impl Sandbox {
 
     /// List all sandboxes from the database.
     pub async fn list() -> MicrosandboxResult<Vec<SandboxInfo>> {
-        let db = crate::db::init_global(
-            Some(crate::config::config().database.max_connections),
-        ).await?;
+        let db =
+            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
         sandbox_entity::Entity::find()
             .order_by_desc(sandbox_entity::Column::CreatedAt)
@@ -152,14 +146,13 @@ impl Sandbox {
         // Check if the sandbox exists and its status.
         let model = Self::get(name).await?;
         if model.status == SandboxStatus::Running || model.status == SandboxStatus::Draining {
-            return Err(crate::MicrosandboxError::SandboxStillRunning(
-                format!("cannot remove sandbox '{name}': still running"),
-            ));
+            return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                "cannot remove sandbox '{name}': still running"
+            )));
         }
 
-        let db = crate::db::init_global(
-            Some(crate::config::config().database.max_connections),
-        ).await?;
+        let db =
+            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
         model.into_active_model().delete(db).await?;
 
@@ -215,9 +208,9 @@ impl Sandbox {
         let status = self.handle.lock().await.wait().await?;
 
         // Update the DB status now that the supervisor has exited.
-        if let Ok(db) = crate::db::init_global(
-            Some(crate::config::config().database.max_connections),
-        ).await {
+        if let Ok(db) =
+            crate::db::init_global(Some(crate::config::config().database.max_connections)).await
+        {
             let _ = update_sandbox_status(db, &self.config.name, SandboxStatus::Stopped).await;
         }
 
@@ -246,8 +239,15 @@ impl Sandbox {
         let rx = self.bridge.subscribe(id).await;
 
         let req = build_exec_request(
-            &self.config, cmd, opts.args.clone(), opts.cwd.clone(),
-            &opts.env, &opts.rlimits, opts.tty, 24, 80,
+            &self.config,
+            cmd,
+            opts.args.clone(),
+            opts.cwd.clone(),
+            &opts.env,
+            &opts.rlimits,
+            opts.tty,
+            24,
+            80,
         );
         let msg = Message::with_payload(MessageType::ExecRequest, id, &req)?;
         self.bridge.send(&msg).await?;
@@ -279,7 +279,12 @@ impl Sandbox {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         tokio::spawn(event_mapper_task(rx, event_tx));
 
-        Ok(ExecHandle::new(id, event_rx, stdin, Arc::clone(&self.bridge)))
+        Ok(ExecHandle::new(
+            id,
+            event_rx,
+            stdin,
+            Arc::clone(&self.bridge),
+        ))
     }
 
     /// Execute a command and wait for completion.
@@ -308,7 +313,9 @@ impl Sandbox {
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(5),
                             handle.collect(),
-                        ).await {
+                        )
+                        .await
+                        {
                             Ok(result) => result,
                             Err(_) => Err(crate::MicrosandboxError::ExecTimeout(duration)),
                         }
@@ -402,10 +409,7 @@ impl Sandbox {
     /// - `sandbox.attach(())` — default shell
     /// - `sandbox.attach("bash")` — specific command
     /// - `sandbox.attach(|a| a.cmd("zsh").env("TERM", "xterm"))` — closure
-    pub async fn attach(
-        &self,
-        config: impl attach::IntoAttachConfig,
-    ) -> MicrosandboxResult<i32> {
+    pub async fn attach(&self, config: impl attach::IntoAttachConfig) -> MicrosandboxResult<i32> {
         use microsandbox_protocol::exec::ExecResize;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -416,9 +420,12 @@ impl Sandbox {
         };
 
         // Resolve command (default to sandbox shell).
-        let cmd = config
-            .cmd
-            .unwrap_or_else(|| self.config.shell.clone().unwrap_or_else(|| "/bin/sh".into()));
+        let cmd = config.cmd.unwrap_or_else(|| {
+            self.config
+                .shell
+                .clone()
+                .unwrap_or_else(|| "/bin/sh".into())
+        });
 
         // Get terminal size.
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
@@ -429,8 +436,15 @@ impl Sandbox {
 
         // Build ExecRequest with tty=true.
         let req = build_exec_request(
-            &self.config, cmd, config.args, config.cwd,
-            &config.env, &config.rlimits, true, rows, cols,
+            &self.config,
+            cmd,
+            config.args,
+            config.cwd,
+            &config.env,
+            &config.rlimits,
+            true,
+            rows,
+            cols,
         );
         let msg = Message::with_payload(MessageType::ExecRequest, id, &req)?;
         self.bridge.send(&msg).await?;
@@ -445,9 +459,9 @@ impl Sandbox {
         // Set up async I/O.
         let mut stdin = tokio::io::stdin();
         let mut stdout = tokio::io::stdout();
-        let mut sigwinch = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::window_change(),
-        ).map_err(|e| crate::MicrosandboxError::Runtime(format!("sigwinch: {e}")))?;
+        let mut sigwinch =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
+                .map_err(|e| crate::MicrosandboxError::Runtime(format!("sigwinch: {e}")))?;
 
         let mut exit_code: i32 = -1;
         let detach_seq = detach_keys.sequence();

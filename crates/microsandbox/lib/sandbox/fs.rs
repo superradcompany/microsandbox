@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use microsandbox_protocol::fs::{
-    FsData, FsEntryInfo, FsOp, FsRequest, FsResponse, FsResponseData, FS_CHUNK_SIZE,
+    FS_CHUNK_SIZE, FsData, FsEntryInfo, FsOp, FsRequest, FsResponse, FsResponseData,
 };
 use microsandbox_protocol::message::{Message, MessageType};
 use tokio::sync::mpsc;
@@ -176,11 +176,7 @@ impl<'a> SandboxFs<'a> {
     //----------------------------------------------------------------------------------------------
 
     /// Write bytes to a file.
-    pub async fn write(
-        &self,
-        path: &str,
-        data: impl AsRef<[u8]>,
-    ) -> MicrosandboxResult<()> {
+    pub async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
         let data = data.as_ref();
         let id = self.bridge.next_id();
         let mut rx = self.bridge.subscribe(id).await;
@@ -523,9 +519,7 @@ fn check_response(msg: Message) -> MicrosandboxResult<()> {
 }
 
 /// Wait for and check a terminal `FsResponse` from a subscription channel.
-async fn wait_for_ok_response(
-    rx: &mut mpsc::UnboundedReceiver<Message>,
-) -> MicrosandboxResult<()> {
+async fn wait_for_ok_response(rx: &mut mpsc::UnboundedReceiver<Message>) -> MicrosandboxResult<()> {
     while let Some(msg) = rx.recv().await {
         if msg.t == MessageType::FsResponse {
             return check_response(msg);

@@ -26,4 +26,3 @@ pub struct Ready {
     /// Represents total time from kernel boot to agent readiness.
     pub ready_time_ns: u64,
 }
-

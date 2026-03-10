@@ -151,12 +151,8 @@ mod tests {
     async fn test_codec_roundtrip_with_payload() {
         use crate::exec::ExecExited;
 
-        let msg = Message::with_payload(
-            MessageType::ExecExited,
-            7,
-            &ExecExited { code: 42 },
-        )
-        .unwrap();
+        let msg =
+            Message::with_payload(MessageType::ExecExited, 7, &ExecExited { code: 42 }).unwrap();
 
         let mut buf = Vec::new();
         write_message(&mut buf, &msg).await.unwrap();
@@ -204,12 +200,8 @@ mod tests {
     fn test_sync_encode_decode_roundtrip() {
         use crate::exec::ExecExited;
 
-        let msg = Message::with_payload(
-            MessageType::ExecExited,
-            5,
-            &ExecExited { code: 0 },
-        )
-        .unwrap();
+        let msg =
+            Message::with_payload(MessageType::ExecExited, 5, &ExecExited { code: 0 }).unwrap();
 
         let mut buf = Vec::new();
         encode_to_buf(&msg, &mut buf).unwrap();

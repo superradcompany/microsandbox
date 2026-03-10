@@ -113,9 +113,7 @@ static CONFIG: OnceLock<GlobalConfig> = OnceLock::new();
 impl GlobalConfig {
     /// Get the resolved home directory.
     pub fn home(&self) -> PathBuf {
-        self.home
-            .clone()
-            .unwrap_or_else(|| resolve_default_home())
+        self.home.clone().unwrap_or_else(|| resolve_default_home())
     }
 
     /// Resolve the `sandboxes` directory.

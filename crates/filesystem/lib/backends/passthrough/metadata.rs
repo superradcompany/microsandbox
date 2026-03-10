@@ -14,12 +14,12 @@
 use std::io;
 use std::time::Duration;
 
-use super::inode;
 use super::PassthroughFs;
+use super::inode;
 use crate::backends::shared::init_binary;
 use crate::backends::shared::platform;
 use crate::backends::shared::stat_override;
-use crate::{stat64, Context, SetattrValid};
+use crate::{Context, SetattrValid, stat64};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -62,10 +62,18 @@ pub(crate) fn do_setattr(
         libc::O_RDONLY
     };
     let fd = inode::open_inode_fd(fs, ino, open_flags)?;
-    let close_fd = scopeguard::guard(fd, |fd| unsafe { libc::close(fd); });
+    let close_fd = scopeguard::guard(fd, |fd| unsafe {
+        libc::close(fd);
+    });
+
+    // FUSE expects setattr-triggered truncate/chown to clear suid/sgid when
+    // requested. UID/GID changes always clear them; SIZE changes only do so
+    // when the kernel sets KILL_SUIDGID.
+    let kill_priv = valid.intersects(SetattrValid::UID | SetattrValid::GID)
+        || (valid.contains(SetattrValid::SIZE) && valid.contains(SetattrValid::KILL_SUIDGID));
 
     // Handle uid/gid/mode changes via xattr (not real chown/chmod).
-    if valid.intersects(SetattrValid::UID | SetattrValid::GID | SetattrValid::MODE) {
+    if valid.intersects(SetattrValid::UID | SetattrValid::GID | SetattrValid::MODE) || kill_priv {
         let current = stat_override::get_override(*close_fd)?;
         let (cur_uid, cur_gid, cur_mode, cur_rdev) = match current {
             Some(ovr) => (ovr.uid, ovr.gid, ovr.mode, ovr.rdev),
@@ -79,8 +87,16 @@ pub(crate) fn do_setattr(
             }
         };
 
-        let new_uid = if valid.contains(SetattrValid::UID) { attr.st_uid } else { cur_uid };
-        let new_gid = if valid.contains(SetattrValid::GID) { attr.st_gid } else { cur_gid };
+        let new_uid = if valid.contains(SetattrValid::UID) {
+            attr.st_uid
+        } else {
+            cur_uid
+        };
+        let new_gid = if valid.contains(SetattrValid::GID) {
+            attr.st_gid
+        } else {
+            cur_gid
+        };
         let new_mode = if valid.contains(SetattrValid::MODE) {
             #[cfg(target_os = "linux")]
             let attr_mode = attr.st_mode;
@@ -89,6 +105,11 @@ pub(crate) fn do_setattr(
             (cur_mode & libc::S_IFMT as u32) | (attr_mode & !libc::S_IFMT as u32)
         } else {
             cur_mode
+        };
+        let new_mode = if kill_priv {
+            new_mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32)
+        } else {
+            new_mode
         };
 
         stat_override::set_override(*close_fd, new_uid, new_gid, new_mode, cur_rdev)?;
@@ -104,7 +125,10 @@ pub(crate) fn do_setattr(
 
     // Handle timestamp changes.
     if valid.intersects(SetattrValid::ATIME | SetattrValid::MTIME) {
-        let mut times = [libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT }; 2];
+        let mut times = [libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        }; 2];
 
         if valid.contains(SetattrValid::ATIME) {
             if valid.contains(SetattrValid::ATIME_NOW) {
@@ -142,12 +166,7 @@ pub(crate) fn do_setattr(
 /// Uses `stat_inode` (which applies the override xattr) so permission checks honor
 /// the guest-visible ownership and mode bits, not the real host file permissions.
 /// Root (uid 0) bypasses read/write checks but still needs at least one execute bit.
-pub(crate) fn do_access(
-    fs: &PassthroughFs,
-    ctx: Context,
-    ino: u64,
-    mask: u32,
-) -> io::Result<()> {
+pub(crate) fn do_access(fs: &PassthroughFs, ctx: Context, ino: u64, mask: u32) -> io::Result<()> {
     if ino == init_binary::INIT_INODE {
         // init.krun is always readable and executable.
         return Ok(());

@@ -16,22 +16,22 @@ use microsandbox_db::entity::{
     microvm as microvm_entity, sandbox as sandbox_entity, supervisor as supervisor_entity,
 };
 use nix::sys::signal::Signal;
+use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait,
     QueryFilter, Set,
 };
-use sea_orm::sea_query::Expr;
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::signal::unix::SignalKind;
 
+use crate::RuntimeResult;
 use crate::drain::{DrainPhase, DrainState};
 use crate::heartbeat::HeartbeatReader;
 use crate::monitor::ChildProcess;
 use crate::policy::{ChildPolicies, ExitAction, SupervisorPolicy};
 use crate::termination::TerminationReason;
 use crate::vm::VmConfig;
-use crate::RuntimeResult;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -118,11 +118,15 @@ pub async fn run(config: SupervisorConfig) -> RuntimeResult<()> {
     })?;
 
     // Create microvm record.
-    let microvm_db_id =
-        insert_microvm_record(&db, sandbox_id, supervisor_db_id, vm_pid).await?;
+    let microvm_db_id = insert_microvm_record(&db, sandbox_id, supervisor_db_id, vm_pid).await?;
 
     // Update sandbox status to Running.
-    update_sandbox_status(&db, &config.sandbox_name, sandbox_entity::SandboxStatus::Running).await?;
+    update_sandbox_status(
+        &db,
+        &config.sandbox_name,
+        sandbox_entity::SandboxStatus::Running,
+    )
+    .await?;
 
     // Write startup info to stdout (the parent reads this).
     let startup = StartupInfo {
@@ -603,10 +607,7 @@ async fn connect_db(db_path: &Path) -> RuntimeResult<DatabaseConnection> {
     Ok(conn)
 }
 
-async fn insert_supervisor_record(
-    db: &DatabaseConnection,
-    sandbox_id: i32,
-) -> RuntimeResult<i32> {
+async fn insert_supervisor_record(db: &DatabaseConnection, sandbox_id: i32) -> RuntimeResult<i32> {
     let pid = i32::try_from(std::process::id()).map_err(|e| {
         crate::RuntimeError::Custom(format!("supervisor PID does not fit in i32: {e}"))
     })?;
@@ -630,9 +631,8 @@ async fn insert_microvm_record(
     supervisor_id: i32,
     vm_pid: u32,
 ) -> RuntimeResult<i32> {
-    let vm_pid = i32::try_from(vm_pid).map_err(|e| {
-        crate::RuntimeError::Custom(format!("VM PID does not fit in i32: {e}"))
-    })?;
+    let vm_pid = i32::try_from(vm_pid)
+        .map_err(|e| crate::RuntimeError::Custom(format!("VM PID does not fit in i32: {e}")))?;
     let now = chrono::Utc::now().naive_utc();
 
     let model = microvm_entity::ActiveModel {
@@ -664,7 +664,10 @@ async fn update_sandbox_status(
         .await?;
 
     if result.rows_affected == 0 {
-        tracing::warn!(sandbox = sandbox_name, "update_sandbox_status matched zero rows");
+        tracing::warn!(
+            sandbox = sandbox_name,
+            "update_sandbox_status matched zero rows"
+        );
     }
 
     Ok(())
@@ -689,10 +692,7 @@ async fn update_microvm_record(
             microvm_entity::Column::TerminationReason,
             Expr::value(reason),
         )
-        .col_expr(
-            microvm_entity::Column::SignalsSent,
-            Expr::value(signals),
-        )
+        .col_expr(microvm_entity::Column::SignalsSent, Expr::value(signals))
         .col_expr(microvm_entity::Column::TerminatedAt, Expr::value(now))
         .filter(microvm_entity::Column::Id.eq(microvm_id))
         .exec(db)
@@ -726,10 +726,9 @@ async fn get_sandbox_id(db: &DatabaseConnection, sandbox_name: &str) -> RuntimeR
         .one(db)
         .await?
         .ok_or_else(|| {
-            crate::RuntimeError::Custom(format!(
-                "sandbox '{}' not found in database",
-                sandbox_name,
-            ))
+            crate::RuntimeError::Custom(
+                format!("sandbox '{}' not found in database", sandbox_name,),
+            )
         })?;
 
     Ok(model.id)

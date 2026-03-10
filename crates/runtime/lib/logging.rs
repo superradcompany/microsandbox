@@ -48,10 +48,7 @@ impl RotatingLog {
 
         let path = log_dir.join(format!("{prefix}.log"));
         let written = path.metadata().map(|m| m.len()).unwrap_or(0);
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
 
         Ok(Self {
             path,

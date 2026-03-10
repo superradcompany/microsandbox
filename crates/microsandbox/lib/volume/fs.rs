@@ -54,11 +54,7 @@ impl<'a> VolumeFs<'a> {
     //----------------------------------------------------------------------------------------------
 
     /// Write bytes to a file.
-    pub async fn write(
-        &self,
-        path: &str,
-        data: impl AsRef<[u8]>,
-    ) -> MicrosandboxResult<()> {
+    pub async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
         let full = self.resolve(path)?;
 
         // Ensure parent directory exists.

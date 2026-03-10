@@ -104,12 +104,7 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(
-                        ColumnDef::new(Sandbox::Name)
-                            .text()
-                            .not_null()
-                            .unique_key(),
-                    )
+                    .col(ColumnDef::new(Sandbox::Name).text().not_null().unique_key())
                     .col(ColumnDef::new(Sandbox::Config).text().not_null())
                     .col(ColumnDef::new(Sandbox::Status).text().not_null())
                     .col(ColumnDef::new(Sandbox::CreatedAt).date_time())
@@ -131,11 +126,7 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(
-                        ColumnDef::new(Supervisor::SandboxId)
-                            .integer()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Supervisor::SandboxId).integer().not_null())
                     .col(ColumnDef::new(Supervisor::Pid).integer())
                     .col(ColumnDef::new(Supervisor::Status).text().not_null())
                     .col(ColumnDef::new(Supervisor::StartedAt).date_time())

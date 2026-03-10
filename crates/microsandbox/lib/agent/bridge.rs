@@ -10,8 +10,8 @@
 
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use microsandbox_protocol::codec;
 use microsandbox_protocol::core::Ready;

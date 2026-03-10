@@ -165,7 +165,8 @@ fn read_override(fd: RawFd) -> io::Result<Option<OverrideStat>> {
     }
 
     // SAFETY: buf is fully initialized and OVERRIDE_SIZE bytes long.
-    let ovr: OverrideStat = unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const OverrideStat) };
+    let ovr: OverrideStat =
+        unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const OverrideStat) };
 
     if ovr.version != OVERRIDE_VERSION {
         return Err(platform::eio());
@@ -185,8 +186,9 @@ pub(crate) fn set_override(fd: RawFd, uid: u32, gid: u32, mode: u32, rdev: u32) 
         rdev,
     };
 
-    let buf =
-        unsafe { std::slice::from_raw_parts(&ovr as *const OverrideStat as *const u8, OVERRIDE_SIZE) };
+    let buf = unsafe {
+        std::slice::from_raw_parts(&ovr as *const OverrideStat as *const u8, OVERRIDE_SIZE)
+    };
 
     #[cfg(target_os = "linux")]
     {

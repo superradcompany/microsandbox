@@ -94,7 +94,11 @@ impl Message {
     }
 
     /// Creates a new message by serializing the given payload to CBOR.
-    pub fn with_payload<T: Serialize>(t: MessageType, id: u32, payload: &T) -> ProtocolResult<Self> {
+    pub fn with_payload<T: Serialize>(
+        t: MessageType,
+        id: u32,
+        payload: &T,
+    ) -> ProtocolResult<Self> {
         let mut p = Vec::new();
         ciborium::into_writer(payload, &mut p)?;
         Ok(Self {
@@ -171,7 +175,8 @@ impl<'de> Deserialize<'de> for MessageType {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Self::from_wire_str(&s).ok_or_else(|| serde::de::Error::custom(format!("unknown message type: {s}")))
+        Self::from_wire_str(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown message type: {s}")))
     }
 }
 
@@ -242,12 +247,8 @@ mod tests {
     fn test_message_with_payload_roundtrip() {
         use crate::exec::ExecExited;
 
-        let msg = Message::with_payload(
-            MessageType::ExecExited,
-            7,
-            &ExecExited { code: 42 },
-        )
-        .unwrap();
+        let msg =
+            Message::with_payload(MessageType::ExecExited, 7, &ExecExited { code: 42 }).unwrap();
 
         assert_eq!(msg.t, MessageType::ExecExited);
         assert_eq!(msg.id, 7);

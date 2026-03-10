@@ -29,8 +29,8 @@ use crate::backends::shared::inode_table::{InodeAltKey, InodeData, MultikeyBTree
 use crate::backends::shared::platform;
 use crate::backends::shared::stat_override;
 use crate::{
-    stat64, statvfs64, Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions,
-    GetxattrReply, ListxattrReply, OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
+    Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions, GetxattrReply, ListxattrReply,
+    OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter, stat64, statvfs64,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -451,13 +451,7 @@ impl DynFileSystem for PassthroughFs {
         remove_ops::do_rename(self, ctx, olddir, oldname, newdir, newname, flags)
     }
 
-    fn link(
-        &self,
-        ctx: Context,
-        ino: u64,
-        newparent: u64,
-        newname: &CStr,
-    ) -> io::Result<Entry> {
+    fn link(&self, ctx: Context, ino: u64, newparent: u64, newname: &CStr) -> io::Result<Entry> {
         create_ops::do_link(self, ctx, ino, newparent, newname)
     }
 
@@ -483,7 +477,9 @@ impl DynFileSystem for PassthroughFs {
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<(Entry, Option<u64>, OpenOptions)> {
-        create_ops::do_create(self, ctx, parent, name, mode, kill_priv, flags, umask, extensions)
+        create_ops::do_create(
+            self, ctx, parent, name, mode, kill_priv, flags, umask, extensions,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -518,23 +514,11 @@ impl DynFileSystem for PassthroughFs {
         file_ops::do_write(self, ctx, ino, handle, r, size, offset, kill_priv)
     }
 
-    fn flush(
-        &self,
-        ctx: Context,
-        ino: u64,
-        handle: u64,
-        _lock_owner: u64,
-    ) -> io::Result<()> {
+    fn flush(&self, ctx: Context, ino: u64, handle: u64, _lock_owner: u64) -> io::Result<()> {
         file_ops::do_flush(self, ctx, ino, handle)
     }
 
-    fn fsync(
-        &self,
-        ctx: Context,
-        ino: u64,
-        datasync: bool,
-        handle: u64,
-    ) -> io::Result<()> {
+    fn fsync(&self, ctx: Context, ino: u64, datasync: bool, handle: u64) -> io::Result<()> {
         special::do_fsync(self, ctx, ino, datasync, handle)
     }
 
@@ -589,12 +573,7 @@ impl DynFileSystem for PassthroughFs {
         xattr_ops::do_getxattr(self, ctx, ino, name, size)
     }
 
-    fn listxattr(
-        &self,
-        ctx: Context,
-        ino: u64,
-        size: u32,
-    ) -> io::Result<ListxattrReply> {
+    fn listxattr(&self, ctx: Context, ino: u64, size: u32) -> io::Result<ListxattrReply> {
         xattr_ops::do_listxattr(self, ctx, ino, size)
     }
 
@@ -633,23 +612,11 @@ impl DynFileSystem for PassthroughFs {
         dir_ops::do_readdirplus(self, ctx, ino, handle, size, offset)
     }
 
-    fn fsyncdir(
-        &self,
-        ctx: Context,
-        ino: u64,
-        datasync: bool,
-        handle: u64,
-    ) -> io::Result<()> {
+    fn fsyncdir(&self, ctx: Context, ino: u64, datasync: bool, handle: u64) -> io::Result<()> {
         special::do_fsyncdir(self, ctx, ino, datasync, handle)
     }
 
-    fn releasedir(
-        &self,
-        ctx: Context,
-        ino: u64,
-        flags: u32,
-        handle: u64,
-    ) -> io::Result<()> {
+    fn releasedir(&self, ctx: Context, ino: u64, flags: u32, handle: u64) -> io::Result<()> {
         dir_ops::do_releasedir(self, ctx, ino, flags, handle)
     }
 
@@ -693,35 +660,4 @@ impl DynFileSystem for PassthroughFs {
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Regression test: after `init()`, `getattr` on root inode (inode 1) must succeed.
-    ///
-    /// The passthrough filesystem previously failed to register the root inode on
-    /// macOS, causing the guest kernel to panic with `Requested init /init.krun
-    /// failed (error -2)` because GETATTR(ROOT_ID) immediately after FUSE_INIT
-    /// returned ENOENT.
-    #[test]
-    fn test_root_inode_accessible_after_init() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cfg = PassthroughConfig {
-            root_dir: tmp.path().to_path_buf(),
-            ..Default::default()
-        };
-        let fs = PassthroughFs::new(cfg).unwrap();
-        fs.init(FsOptions::empty()).unwrap();
-
-        // ROOT_ID = 1. getattr must succeed after init.
-        let ctx = Context {
-            uid: 0,
-            gid: 0,
-            pid: 0,
-        };
-        let result = fs.getattr(ctx, 1, None);
-        assert!(
-            result.is_ok(),
-            "getattr on root inode must succeed after init: {result:?}"
-        );
-    }
-}
+mod tests;

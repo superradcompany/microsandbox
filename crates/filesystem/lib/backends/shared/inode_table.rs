@@ -5,9 +5,9 @@
 
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
-use std::sync::atomic::AtomicU64;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::AtomicI64;
+use std::sync::atomic::AtomicU64;
 
 //--------------------------------------------------------------------------------------------------
 // Types

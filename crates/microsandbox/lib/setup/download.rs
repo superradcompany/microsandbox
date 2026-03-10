@@ -6,7 +6,7 @@ use futures::StreamExt;
 use tokio::io::AsyncWriteExt;
 
 use crate::{MicrosandboxError, MicrosandboxResult};
-use microsandbox_utils::{BASE_DIR_NAME, LIBKRUNFW_ABI, LIB_SUBDIR};
+use microsandbox_utils::{BASE_DIR_NAME, LIB_SUBDIR, LIBKRUNFW_ABI};
 
 use super::verify::verify_installation;
 
@@ -152,10 +152,7 @@ async fn download_file(url: &str, dest: &Path) -> MicrosandboxResult<()> {
     Ok(())
 }
 
-async fn write_part_file(
-    part_path: &Path,
-    response: reqwest::Response,
-) -> MicrosandboxResult<()> {
+async fn write_part_file(part_path: &Path, response: reqwest::Response) -> MicrosandboxResult<()> {
     let mut stream = response.bytes_stream();
     let file = tokio::fs::File::create(part_path).await?;
     let mut writer = tokio::io::BufWriter::new(file);

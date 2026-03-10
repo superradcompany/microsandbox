@@ -83,10 +83,7 @@ impl SupervisorHandle {
 
     /// Send SIGUSR1 to the supervisor to trigger a graceful drain.
     pub fn drain_supervisor(&self) -> MicrosandboxResult<()> {
-        signal::kill(
-            Pid::from_raw(self.supervisor_pid as i32),
-            Signal::SIGUSR1,
-        )?;
+        signal::kill(Pid::from_raw(self.supervisor_pid as i32), Signal::SIGUSR1)?;
         Ok(())
     }
 
@@ -105,9 +102,6 @@ impl Drop for SupervisorHandle {
     fn drop(&mut self) {
         // Safety net: send SIGTERM to the supervisor so child processes
         // are cleaned up if the handle is dropped without an explicit stop.
-        let _ = signal::kill(
-            Pid::from_raw(self.supervisor_pid as i32),
-            Signal::SIGTERM,
-        );
+        let _ = signal::kill(Pid::from_raw(self.supervisor_pid as i32), Signal::SIGTERM);
     }
 }

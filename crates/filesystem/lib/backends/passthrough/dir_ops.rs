@@ -21,8 +21,8 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 
-use super::inode;
 use super::PassthroughFs;
+use super::inode;
 use crate::backends::shared::handle_table::HandleData;
 use crate::backends::shared::init_binary;
 use crate::backends::shared::platform;
@@ -157,9 +157,7 @@ pub(crate) fn do_releasedir(
 
 /// Inject the init.krun entry into a directory listing if not already present.
 fn inject_init_entry(entries: &mut Vec<DirEntry<'static>>) {
-    let already_present = entries
-        .iter()
-        .any(|e| e.name == init_binary::INIT_FILENAME);
+    let already_present = entries.iter().any(|e| e.name == init_binary::INIT_FILENAME);
 
     if !already_present {
         let next_offset = entries.last().map(|e| e.offset + 1).unwrap_or(1);
@@ -210,8 +208,7 @@ fn read_dir_entries(fd: i32, offset: u64, size: u32) -> io::Result<Vec<DirEntry<
     let mut names_buf: Vec<u8> = Vec::new();
 
     loop {
-        let nread =
-            unsafe { libc::syscall(libc::SYS_getdents64, fd, buf.as_mut_ptr(), buf.len()) };
+        let nread = unsafe { libc::syscall(libc::SYS_getdents64, fd, buf.as_mut_ptr(), buf.len()) };
 
         if nread < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
@@ -232,7 +229,10 @@ fn read_dir_entries(fd: i32, offset: u64, size: u32) -> io::Result<Vec<DirEntry<
             let name_start = pos + 19;
             let name_end = pos + d_reclen as usize;
             let name_slice = &buf[name_start..name_end];
-            let name_len = name_slice.iter().position(|&b| b == 0).unwrap_or(name_slice.len());
+            let name_len = name_slice
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(name_slice.len());
             let name_bytes = &name_slice[..name_len];
 
             let name_offset = names_buf.len();
@@ -305,16 +305,21 @@ fn read_dir_entries(fd: i32, offset: u64, _size: u32) -> io::Result<Vec<DirEntry
 
         let d = unsafe { &*ent };
         let name_len = d.d_namlen as usize;
-        let name_bytes = unsafe {
-            std::slice::from_raw_parts(d.d_name.as_ptr() as *const u8, name_len)
-        };
+        let name_bytes =
+            unsafe { std::slice::from_raw_parts(d.d_name.as_ptr() as *const u8, name_len) };
 
         let name_offset = names_buf.len();
         names_buf.extend_from_slice(name_bytes);
 
         let tell_offset = unsafe { libc::telldir(dirp) };
 
-        raw_entries.push((d.d_ino, tell_offset as u64, d.d_type as u32, name_offset, name_len));
+        raw_entries.push((
+            d.d_ino,
+            tell_offset as u64,
+            d.d_type as u32,
+            name_offset,
+            name_len,
+        ));
     }
 
     unsafe { libc::closedir(dirp) };

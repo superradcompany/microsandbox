@@ -9,10 +9,10 @@ mod error;
 // Exports
 //--------------------------------------------------------------------------------------------------
 
-#[allow(dead_code)]
-pub(crate) mod db;
 pub mod agent;
 pub mod config;
+#[allow(dead_code)]
+pub(crate) mod db;
 pub mod runtime;
 pub mod sandbox;
 pub mod setup;
