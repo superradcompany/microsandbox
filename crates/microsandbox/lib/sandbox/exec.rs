@@ -278,12 +278,7 @@ impl ExecOptionsBuilder {
     }
 
     /// Set a resource limit with different soft/hard values.
-    pub fn rlimit_range(
-        mut self,
-        resource: RlimitResource,
-        soft: u64,
-        hard: u64,
-    ) -> Self {
+    pub fn rlimit_range(mut self, resource: RlimitResource, soft: u64, hard: u64) -> Self {
         self.options.rlimits.push(Rlimit {
             resource,
             soft,
@@ -518,4 +513,3 @@ impl SizeExt for u64 {
         self * 1024 * 1024 * 1024
     }
 }
-

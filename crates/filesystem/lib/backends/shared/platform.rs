@@ -409,14 +409,10 @@ pub(crate) fn fstatat_nofollow(dirfd: RawFd, name: &std::ffi::CStr) -> io::Resul
     let mut st = unsafe { std::mem::zeroed::<stat64>() };
 
     #[cfg(target_os = "linux")]
-    let ret = unsafe {
-        libc::fstatat64(dirfd, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW)
-    };
+    let ret = unsafe { libc::fstatat64(dirfd, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
 
     #[cfg(target_os = "macos")]
-    let ret = unsafe {
-        libc::fstatat(dirfd, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW)
-    };
+    let ret = unsafe { libc::fstatat(dirfd, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
 
     if ret < 0 {
         Err(linux_error(io::Error::last_os_error()))

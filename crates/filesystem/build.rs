@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use microsandbox_utils::AGENTD_BINARY;
 #[cfg(feature = "prebuilt")]
@@ -11,6 +12,7 @@ fn main() {
     // This won't auto-rebuild agentd (that requires `just build-agentd`),
     // but it forces cargo to re-check that `build/agentd` is fresh.
     println!("cargo:rerun-if-changed=../agentd");
+    println!("cargo:rerun-if-changed=../protocol");
 
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
@@ -47,24 +49,63 @@ fn build_agentd(workspace_root: &Path, out_dir: &Path) {
             );
         }
 
-        // Warn if the binary is older than the agentd source directory.
+        // Fail fast if build/agentd is stale relative to the guest source tree.
+        // A warning is too easy to miss and leads to confusing runtime behavior
+        // when msb embeds an older guest payload than the source implies.
         let agentd_src = workspace_root.join("crates/agentd");
-        if let (Ok(bin_meta), Ok(src_meta)) =
-            (std::fs::metadata(&source), std::fs::metadata(&agentd_src))
-        {
-            if let (Ok(bin_time), Ok(src_time)) = (bin_meta.modified(), src_meta.modified()) {
-                if src_time > bin_time {
-                    println!(
-                        "cargo:warning=build/{AGENTD_BINARY} is older than crates/agentd source. \
-                         Run `just build-agentd` to rebuild."
-                    );
-                }
+        let protocol_src = workspace_root.join("crates/protocol");
+        if let Ok(bin_time) = std::fs::metadata(&source).and_then(|m| m.modified()) {
+            if newest_tree_mtime(&agentd_src)
+                .into_iter()
+                .chain(newest_tree_mtime(&protocol_src))
+                .any(|src_time| src_time > bin_time)
+            {
+                panic!(
+                    "build/{AGENTD_BINARY} is older than crates/agentd or crates/protocol source.\n\
+                     Run `just build-agentd` to rebuild the guest agent binary."
+                );
             }
         }
 
         let dest = out_dir.join(AGENTD_BINARY);
         std::fs::copy(&source, &dest).expect("failed to copy agentd to OUT_DIR");
     }
+}
+
+fn newest_tree_mtime(root: &Path) -> Option<SystemTime> {
+    fn walk(path: &Path, newest: &mut Option<SystemTime>) {
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            let meta = match entry.metadata() {
+                Ok(meta) => meta,
+                Err(_) => continue,
+            };
+
+            if meta.is_dir() {
+                walk(&entry_path, newest);
+                continue;
+            }
+
+            let modified = match meta.modified() {
+                Ok(modified) => modified,
+                Err(_) => continue,
+            };
+
+            match newest {
+                Some(current) if *current >= modified => {}
+                _ => *newest = Some(modified),
+            }
+        }
+    }
+
+    let mut newest = None;
+    walk(root, &mut newest);
+    newest
 }
 
 #[cfg(feature = "prebuilt")]

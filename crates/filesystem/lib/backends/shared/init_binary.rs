@@ -15,7 +15,7 @@ use std::io;
 use std::time::Duration;
 
 use crate::agentd::AGENTD_BYTES;
-use crate::{stat64, Entry, ZeroCopyWriter};
+use crate::{Entry, ZeroCopyWriter, stat64};
 
 //--------------------------------------------------------------------------------------------------
 // Constants

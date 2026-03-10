@@ -7,12 +7,12 @@
 use std::ffi::CStr;
 use std::io;
 
-use super::inode;
 use super::PassthroughFs;
+use super::inode;
+use crate::Context;
 use crate::backends::shared::init_binary;
 use crate::backends::shared::name_validation;
 use crate::backends::shared::platform;
-use crate::Context;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -151,7 +151,12 @@ pub(crate) fn do_rename(
     {
         if flags == 0 {
             let ret = unsafe {
-                libc::renameat(old_fd.raw(), oldname.as_ptr(), new_fd.raw(), newname.as_ptr())
+                libc::renameat(
+                    old_fd.raw(),
+                    oldname.as_ptr(),
+                    new_fd.raw(),
+                    newname.as_ptr(),
+                )
             };
             if ret < 0 {
                 return Err(platform::linux_error(io::Error::last_os_error()));

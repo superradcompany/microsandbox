@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use microsandbox_utils::libkrunfw_filename;
 #[cfg(feature = "prebuilt")]
 use microsandbox_utils::libkrunfw_download_url;
+use microsandbox_utils::libkrunfw_filename;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");

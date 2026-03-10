@@ -7,10 +7,10 @@ pub mod fs;
 
 use std::path::PathBuf;
 
+use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set,
 };
-use sea_orm::sea_query::OnConflict;
 
 use crate::MicrosandboxError;
 use crate::MicrosandboxResult;
@@ -59,9 +59,8 @@ impl Volume {
 
     /// Create a volume from a config.
     pub async fn create(config: VolumeConfig) -> MicrosandboxResult<Self> {
-        let db = crate::db::init_global(
-            Some(crate::config::config().database.max_connections),
-        ).await?;
+        let db =
+            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
         let volumes_dir = crate::config::config().volumes_dir();
         let path = volumes_dir.join(&config.name);
@@ -108,9 +107,8 @@ impl Volume {
 
     /// Get an existing volume by name.
     pub async fn get(name: &str) -> MicrosandboxResult<Self> {
-        let db = crate::db::init_global(
-            Some(crate::config::config().database.max_connections),
-        ).await?;
+        let db =
+            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
         volume_entity::Entity::find()
             .filter(volume_entity::Column::Name.eq(name))
@@ -128,9 +126,8 @@ impl Volume {
 
     /// List all volumes.
     pub async fn list() -> MicrosandboxResult<Vec<VolumeInfo>> {
-        let db = crate::db::init_global(
-            Some(crate::config::config().database.max_connections),
-        ).await?;
+        let db =
+            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
         volume_entity::Entity::find()
             .order_by_desc(volume_entity::Column::CreatedAt)
@@ -141,9 +138,8 @@ impl Volume {
 
     /// Remove a volume by name.
     pub async fn remove(name: &str) -> MicrosandboxResult<()> {
-        let db = crate::db::init_global(
-            Some(crate::config::config().database.max_connections),
-        ).await?;
+        let db =
+            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
         let model = volume_entity::Entity::find()
             .filter(volume_entity::Column::Name.eq(name))
@@ -181,9 +177,8 @@ impl Volume {
 
     /// Get volume info from the database.
     pub async fn info(&self) -> MicrosandboxResult<VolumeInfo> {
-        let db = crate::db::init_global(
-            Some(crate::config::config().database.max_connections),
-        ).await?;
+        let db =
+            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
         volume_entity::Entity::find()
             .filter(volume_entity::Column::Name.eq(&self.name))

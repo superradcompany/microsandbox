@@ -13,6 +13,7 @@ build-agentd:
     cargo build --release -p microsandbox-agentd --target x86_64-unknown-linux-musl
     mkdir -p build
     cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
+    touch build/agentd
 
 # Build agentd as a static Linux/musl binary via Docker cross-compilation. Requires: docker.
 [macos]
@@ -25,6 +26,7 @@ build-agentd:
     id=$(docker create microsandbox-agentd-build /dev/null)
     trap 'docker rm "$id" >/dev/null 2>&1' EXIT
     docker cp "$id:/agentd" build/agentd
+    touch build/agentd
 
 # Build libkrunfw on Linux. Requires: kernel build dependencies (gcc, make, flex, bison, etc.).
 [linux]

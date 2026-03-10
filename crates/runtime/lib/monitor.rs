@@ -7,8 +7,8 @@
 use nix::sys::signal::Signal;
 use nix::unistd::Pid;
 
-use crate::policy::ChildPolicy;
 use crate::RuntimeResult;
+use crate::policy::ChildPolicy;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -82,9 +82,8 @@ impl ChildProcess {
                 ?signal,
                 "sending signal to process group",
             );
-            let pid_i32 = i32::try_from(pid).map_err(|_| {
-                crate::RuntimeError::Custom(format!("PID {pid} exceeds i32 range"))
-            })?;
+            let pid_i32 = i32::try_from(pid)
+                .map_err(|_| crate::RuntimeError::Custom(format!("PID {pid} exceeds i32 range")))?;
             nix::sys::signal::kill(Pid::from_raw(-pid_i32), signal)?;
         }
         Ok(())

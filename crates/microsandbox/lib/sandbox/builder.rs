@@ -196,6 +196,9 @@ impl SandboxBuilder {
 
 impl From<SandboxConfig> for SandboxBuilder {
     fn from(config: SandboxConfig) -> Self {
-        Self { config, build_error: None }
+        Self {
+            config,
+            build_error: None,
+        }
     }
 }

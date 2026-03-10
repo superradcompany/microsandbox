@@ -24,8 +24,8 @@ use std::os::fd::FromRawFd;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 
-use super::inode;
 use super::PassthroughFs;
+use super::inode;
 use crate::backends::shared::handle_table::HandleData;
 use crate::backends::shared::init_binary;
 use crate::backends::shared::name_validation;
@@ -248,7 +248,8 @@ pub(crate) fn do_symlink(
 
         // Write the symlink target as file content.
         let target = linkname.to_bytes();
-        let written = unsafe { libc::write(fd, target.as_ptr() as *const libc::c_void, target.len()) };
+        let written =
+            unsafe { libc::write(fd, target.as_ptr() as *const libc::c_void, target.len()) };
         if written < 0 {
             let err = io::Error::last_os_error();
             unsafe { libc::close(fd) };
@@ -279,26 +280,9 @@ pub(crate) fn do_symlink(
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
 
-        // Set xattr on the symlink itself using XATTR_NOFOLLOW.
+        // Set override metadata on the symlink itself by opening it with
+        // O_SYMLINK and writing the xattr through that fd.
         let mode = libc::S_IFLNK as u32 | 0o777;
-        // Build path for lsetxattr equivalent.
-        let ovr = stat_override::OverrideStat {
-            version: 1,
-            _pad: [0; 3],
-            uid: ctx.uid,
-            gid: ctx.gid,
-            mode,
-            rdev: 0,
-        };
-        let buf = unsafe {
-            std::slice::from_raw_parts(
-                &ovr as *const stat_override::OverrideStat as *const u8,
-                std::mem::size_of::<stat_override::OverrideStat>(),
-            )
-        };
-
-        // Use path-based xattr with XATTR_NOFOLLOW on macOS.
-        // We need the full path, so open the parent and construct it.
         let fd = unsafe {
             libc::openat(
                 parent_fd.raw(),
@@ -311,21 +295,12 @@ pub(crate) fn do_symlink(
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
 
-        let xattr_ret = unsafe {
-            libc::fsetxattr(
-                fd,
-                stat_override::OVERRIDE_XATTR_KEY.as_ptr(),
-                buf.as_ptr() as *const libc::c_void,
-                buf.len(),
-                0,
-                libc::XATTR_NOFOLLOW,
-            )
-        };
+        let xattr_result = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0);
         unsafe { libc::close(fd) };
 
-        if xattr_ret < 0 {
+        if let Err(err) = xattr_result {
             unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
-            return Err(platform::linux_error(io::Error::last_os_error()));
+            return Err(err);
         }
     }
 
@@ -406,11 +381,7 @@ pub(crate) fn do_link(
 ///
 /// On macOS, verifies the inode is actually a symlink via `stat_inode` (which applies
 /// xattr patching) before calling readlinkat.
-pub(crate) fn do_readlink(
-    fs: &PassthroughFs,
-    _ctx: Context,
-    ino: u64,
-) -> io::Result<Vec<u8>> {
+pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Result<Vec<u8>> {
     if ino == init_binary::INIT_INODE {
         return Err(platform::einval());
     }
@@ -450,9 +421,12 @@ pub(crate) fn do_readlink(
         let fd = inode::open_inode_fd(fs, ino, libc::O_RDONLY)?;
         let mut buf = vec![0u8; libc::PATH_MAX as usize];
         let ret = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        let read_err = (ret < 0).then(io::Error::last_os_error);
         unsafe { libc::close(fd) };
         if ret < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
+            return Err(platform::linux_error(
+                read_err.unwrap_or_else(io::Error::last_os_error),
+            ));
         }
         buf.truncate(ret as usize);
         Ok(buf)

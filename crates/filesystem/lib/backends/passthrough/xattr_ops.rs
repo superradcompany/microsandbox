@@ -20,8 +20,8 @@
 use std::ffi::CStr;
 use std::io;
 
-use super::inode;
 use super::PassthroughFs;
+use super::inode;
 use crate::backends::shared::init_binary;
 use crate::backends::shared::platform;
 use crate::backends::shared::stat_override;
@@ -129,9 +129,7 @@ pub(crate) fn do_getxattr(
         };
 
         #[cfg(target_os = "macos")]
-        let ret = unsafe {
-            libc::fgetxattr(fd, name.as_ptr(), std::ptr::null_mut(), 0, 0, 0)
-        };
+        let ret = unsafe { libc::fgetxattr(fd, name.as_ptr(), std::ptr::null_mut(), 0, 0, 0) };
 
         if ret < 0 {
             let err = io::Error::last_os_error();
@@ -200,7 +198,13 @@ pub(crate) fn do_listxattr(
         #[cfg(target_os = "linux")]
         let raw_size = {
             let path = format!("/proc/self/fd/{fd}\0");
-            unsafe { libc::listxattr(path.as_ptr() as *const libc::c_char, std::ptr::null_mut(), 0) }
+            unsafe {
+                libc::listxattr(
+                    path.as_ptr() as *const libc::c_char,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            }
         };
 
         #[cfg(target_os = "macos")]
@@ -233,9 +237,8 @@ pub(crate) fn do_listxattr(
         };
 
         #[cfg(target_os = "macos")]
-        let ret = unsafe {
-            libc::flistxattr(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0)
-        };
+        let ret =
+            unsafe { libc::flistxattr(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0) };
 
         if ret < 0 {
             let err = io::Error::last_os_error();
@@ -264,14 +267,8 @@ pub(crate) fn do_listxattr(
         };
 
         #[cfg(target_os = "macos")]
-        let ret = unsafe {
-            libc::flistxattr(
-                fd,
-                buf.as_mut_ptr() as *mut libc::c_char,
-                buf.len(),
-                0,
-            )
-        };
+        let ret =
+            unsafe { libc::flistxattr(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0) };
 
         if ret < 0 {
             let err = io::Error::last_os_error();
@@ -310,12 +307,7 @@ pub(crate) fn do_removexattr(
     #[cfg(target_os = "linux")]
     {
         let path = format!("/proc/self/fd/{fd}\0");
-        let ret = unsafe {
-            libc::removexattr(
-                path.as_ptr() as *const libc::c_char,
-                name.as_ptr(),
-            )
-        };
+        let ret = unsafe { libc::removexattr(path.as_ptr() as *const libc::c_char, name.as_ptr()) };
         if ret < 0 {
             let err = io::Error::last_os_error();
             unsafe { libc::close(fd) };

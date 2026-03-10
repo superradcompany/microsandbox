@@ -259,12 +259,7 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(
-                        ColumnDef::new(Layer::Digest)
-                            .text()
-                            .not_null()
-                            .unique_key(),
-                    )
+                    .col(ColumnDef::new(Layer::Digest).text().not_null().unique_key())
                     .col(ColumnDef::new(Layer::DiffId).text().not_null())
                     .col(ColumnDef::new(Layer::MediaType).text())
                     .col(ColumnDef::new(Layer::SizeBytes).big_integer())
@@ -291,11 +286,7 @@ impl MigrationTrait for Migration {
                             .integer()
                             .not_null(),
                     )
-                    .col(
-                        ColumnDef::new(ManifestLayer::LayerId)
-                            .integer()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(ManifestLayer::LayerId).integer().not_null())
                     .col(ColumnDef::new(ManifestLayer::Position).integer().not_null())
                     .foreign_key(
                         ForeignKey::create()

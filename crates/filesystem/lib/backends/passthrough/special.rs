@@ -17,7 +17,7 @@ use std::os::fd::AsRawFd;
 use super::PassthroughFs;
 use crate::backends::shared::init_binary;
 use crate::backends::shared::platform;
-use crate::{statvfs64, Context};
+use crate::{Context, statvfs64};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -103,14 +103,21 @@ pub(crate) fn do_fallocate(
 
     #[cfg(target_os = "macos")]
     {
-        // macOS uses fcntl with F_PREALLOCATE + ftruncate.
-        let _ = mode; // mode flags not directly supported on macOS.
+        // macOS only supports the default "allocate space" mode here.
+        if mode != 0 {
+            return Err(platform::linux_error(io::Error::from_raw_os_error(
+                libc::EOPNOTSUPP,
+            )));
+        }
+
+        let alloc_len = i64::try_from(length)
+            .map_err(|_| platform::linux_error(io::Error::from_raw_os_error(libc::EOVERFLOW)))?;
 
         let mut store = libc::fstore_t {
             fst_flags: libc::F_ALLOCATECONTIG,
             fst_posmode: libc::F_PEOFPOSMODE,
             fst_offset: 0,
-            fst_length: length as i64,
+            fst_length: alloc_len,
             fst_bytesalloc: 0,
         };
 
@@ -125,8 +132,15 @@ pub(crate) fn do_fallocate(
         }
 
         // Extend file size if needed.
-        let new_size = offset + length;
-        let ret = unsafe { libc::ftruncate(fd, new_size as i64) };
+        let new_size = offset
+            .checked_add(length)
+            .ok_or_else(|| platform::linux_error(io::Error::from_raw_os_error(libc::EOVERFLOW)))
+            .and_then(|size| {
+                i64::try_from(size).map_err(|_| {
+                    platform::linux_error(io::Error::from_raw_os_error(libc::EOVERFLOW))
+                })
+            })?;
+        let ret = unsafe { libc::ftruncate(fd, new_size) };
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
@@ -213,22 +227,22 @@ pub(crate) fn do_copyfilerange(
 
     #[cfg(target_os = "macos")]
     {
-        let _ = (fs, offset_in, inode_out, handle_in, handle_out, offset_out, len, flags);
+        let _ = (
+            fs, offset_in, inode_out, handle_in, handle_out, offset_out, len, flags,
+        );
         Err(platform::enosys())
     }
 }
 
 /// Get filesystem statistics.
-pub(crate) fn do_statfs(
-    fs: &PassthroughFs,
-    _ctx: Context,
-    inode: u64,
-) -> io::Result<statvfs64> {
-    // For init binary and root, use root fd.
+pub(crate) fn do_statfs(fs: &PassthroughFs, _ctx: Context, inode: u64) -> io::Result<statvfs64> {
+    // Keep InodeFd guard alive so the fd isn't closed before fstatvfs uses it.
+    let inode_fd;
     let fd = if inode == init_binary::INIT_INODE || inode == 1 {
         fs.root_fd.as_raw_fd()
     } else {
-        super::inode::get_inode_fd(fs, inode)?.raw()
+        inode_fd = super::inode::get_inode_fd(fs, inode)?;
+        inode_fd.raw()
     };
 
     #[cfg(target_os = "linux")]

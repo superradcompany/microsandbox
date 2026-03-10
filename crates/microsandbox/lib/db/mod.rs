@@ -30,17 +30,24 @@ static PROJECT_POOL: OnceCell<(PathBuf, DatabaseConnection)> = OnceCell::const_n
 ///
 /// Migrations are applied automatically. This is idempotent — calling it
 /// multiple times returns the existing pool.
-pub async fn init_global(max_connections: Option<u32>) -> MicrosandboxResult<&'static DatabaseConnection> {
+pub async fn init_global(
+    max_connections: Option<u32>,
+) -> MicrosandboxResult<&'static DatabaseConnection> {
     GLOBAL_POOL
         .get_or_try_init(|| async {
-            let base = dirs::home_dir()
-                .ok_or_else(|| crate::MicrosandboxError::Custom("cannot determine home directory".into()))?;
+            let base = dirs::home_dir().ok_or_else(|| {
+                crate::MicrosandboxError::Custom("cannot determine home directory".into())
+            })?;
 
             let db_dir = base
                 .join(microsandbox_utils::BASE_DIR_NAME)
                 .join(microsandbox_utils::DB_SUBDIR);
 
-            connect_and_migrate(&db_dir, max_connections.unwrap_or(crate::config::DEFAULT_MAX_CONNECTIONS)).await
+            connect_and_migrate(
+                &db_dir,
+                max_connections.unwrap_or(crate::config::DEFAULT_MAX_CONNECTIONS),
+            )
+            .await
         })
         .await
 }
@@ -62,7 +69,11 @@ pub async fn init_project(
                 .join(microsandbox_utils::BASE_DIR_NAME)
                 .join(microsandbox_utils::DB_SUBDIR);
 
-            let conn = connect_and_migrate(&db_dir, max_connections.unwrap_or(crate::config::DEFAULT_MAX_CONNECTIONS)).await?;
+            let conn = connect_and_migrate(
+                &db_dir,
+                max_connections.unwrap_or(crate::config::DEFAULT_MAX_CONNECTIONS),
+            )
+            .await?;
             Ok::<_, crate::MicrosandboxError>((requested.clone(), conn))
         })
         .await?;

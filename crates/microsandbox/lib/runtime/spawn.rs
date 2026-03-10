@@ -12,10 +12,10 @@ use serde::Deserialize;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 
+use crate::MicrosandboxResult;
 use crate::config;
 use crate::runtime::handle::SupervisorHandle;
 use crate::sandbox::{RootfsSource, SandboxConfig, VolumeMount};
-use crate::MicrosandboxResult;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -71,11 +71,9 @@ pub async fn spawn_supervisor(
     // Write scripts to the runtime scripts directory.
     for (name, content) in &config.scripts {
         // Prevent path traversal: only use the filename component.
-        let safe_name = Path::new(name)
-            .file_name()
-            .ok_or_else(|| crate::MicrosandboxError::InvalidConfig(
-                format!("invalid script name: {name}")
-            ))?;
+        let safe_name = Path::new(name).file_name().ok_or_else(|| {
+            crate::MicrosandboxError::InvalidConfig(format!("invalid script name: {name}"))
+        })?;
         let script_path = scripts_dir.join(safe_name);
         tokio::fs::write(&script_path, content).await?;
     }
@@ -91,7 +89,8 @@ pub async fn spawn_supervisor(
 
     // Supervisor policy args.
     let sp = &config.supervisor_policy;
-    cmd.arg("--shutdown-mode").arg(shutdown_mode_str(&sp.shutdown_mode));
+    cmd.arg("--shutdown-mode")
+        .arg(shutdown_mode_str(&sp.shutdown_mode));
     cmd.arg("--grace-secs").arg(sp.grace_secs.to_string());
     if let Some(max_dur) = sp.max_duration_secs {
         cmd.arg("--max-duration").arg(max_dur.to_string());
@@ -103,10 +102,14 @@ pub async fn spawn_supervisor(
     // VM child policy args.
     let vp = &config.child_policies.vm;
     cmd.arg("--vm-on-exit").arg(exit_action_str(&vp.on_exit));
-    cmd.arg("--vm-max-restarts").arg(vp.max_restarts.to_string());
-    cmd.arg("--vm-restart-delay-ms").arg(vp.restart_delay_ms.to_string());
-    cmd.arg("--vm-restart-window").arg(vp.restart_window_secs.to_string());
-    cmd.arg("--vm-shutdown-timeout-ms").arg(vp.shutdown_timeout_ms.to_string());
+    cmd.arg("--vm-max-restarts")
+        .arg(vp.max_restarts.to_string());
+    cmd.arg("--vm-restart-delay-ms")
+        .arg(vp.restart_delay_ms.to_string());
+    cmd.arg("--vm-restart-window")
+        .arg(vp.restart_window_secs.to_string());
+    cmd.arg("--vm-shutdown-timeout-ms")
+        .arg(vp.shutdown_timeout_ms.to_string());
 
     // VM configuration args.
     cmd.arg("--libkrunfw-path").arg(&libkrunfw_path);
@@ -132,7 +135,11 @@ pub async fn spawn_supervisor(
     // Volume mounts.
     for mount in &config.mounts {
         match mount {
-            VolumeMount::Bind { host, guest, readonly } => {
+            VolumeMount::Bind {
+                host,
+                guest,
+                readonly,
+            } => {
                 // Format: "tag:host_path[:ro]" where tag is a sanitized guest path.
                 let tag = guest_mount_tag(guest);
                 let mut arg = format!("{tag}:{}", host.display());
@@ -141,7 +148,11 @@ pub async fn spawn_supervisor(
                 }
                 cmd.arg("--mount").arg(arg);
             }
-            VolumeMount::Named { name, guest, readonly } => {
+            VolumeMount::Named {
+                name,
+                guest,
+                readonly,
+            } => {
                 let vol_path = config::config().volumes_dir().join(name);
                 let tag = guest_mount_tag(guest);
                 let mut arg = format!("{tag}:{}", vol_path.display());
