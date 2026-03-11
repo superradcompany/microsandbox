@@ -34,3 +34,19 @@ pub(crate) fn validate_name(name: &CStr) -> io::Result<()> {
 
     Ok(())
 }
+
+/// Validate a directory entry name for overlay operations.
+///
+/// Extends [`validate_name`] with overlay-specific rejection of whiteout/opaque
+/// marker names (`.wh.*`), which are internal overlay artifacts that must not
+/// be created or accessed directly by the guest.
+pub(crate) fn validate_overlay_name(name: &CStr) -> io::Result<()> {
+    validate_name(name)?;
+
+    let bytes = name.to_bytes();
+    if bytes.starts_with(b".wh.") {
+        return Err(platform::einval());
+    }
+
+    Ok(())
+}

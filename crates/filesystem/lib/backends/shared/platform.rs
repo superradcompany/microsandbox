@@ -268,10 +268,27 @@ pub(crate) fn enodata() -> io::Error {
     io::Error::from_raw_os_error(LINUX_ENODATA)
 }
 
+/// Create an `io::Error` with Linux `EISDIR`.
+#[allow(dead_code)]
+pub(crate) fn eisdir() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_EISDIR)
+}
+
+/// Create an `io::Error` with Linux `ENOTDIR`.
+#[allow(dead_code)]
+pub(crate) fn enotdir() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_ENOTDIR)
+}
+
 /// Create an `io::Error` with Linux `ENOTEMPTY`.
 #[allow(dead_code)]
 pub(crate) fn enotempty() -> io::Error {
     io::Error::from_raw_os_error(LINUX_ENOTEMPTY)
+}
+
+/// Create an EROFS (read-only filesystem) error with Linux errno.
+pub(crate) fn erofs() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_EROFS)
 }
 
 /// Call `fstat` on a raw file descriptor and return a `stat64`.
