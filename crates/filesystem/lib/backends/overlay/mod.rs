@@ -140,24 +140,14 @@ impl DynFileSystem for OverlayFs {
 
         let mut opts = FsOptions::empty();
 
-        if capable.contains(FsOptions::DONT_MASK) {
-            opts |= FsOptions::DONT_MASK;
-        }
-        if capable.contains(FsOptions::BIG_WRITES) {
-            opts |= FsOptions::BIG_WRITES;
-        }
-        if capable.contains(FsOptions::ASYNC_READ) {
-            opts |= FsOptions::ASYNC_READ;
-        }
-        if capable.contains(FsOptions::PARALLEL_DIROPS) {
-            opts |= FsOptions::PARALLEL_DIROPS;
-        }
-        if capable.contains(FsOptions::MAX_PAGES) {
-            opts |= FsOptions::MAX_PAGES;
-        }
-        if capable.contains(FsOptions::HANDLE_KILLPRIV_V2) {
-            opts |= FsOptions::HANDLE_KILLPRIV_V2;
-        }
+        let wanted = FsOptions::DONT_MASK
+            | FsOptions::BIG_WRITES
+            | FsOptions::ASYNC_READ
+            | FsOptions::PARALLEL_DIROPS
+            | FsOptions::MAX_PAGES
+            | FsOptions::HANDLE_KILLPRIV_V2;
+        opts |= capable & wanted;
+
         if capable.contains(FsOptions::DO_READDIRPLUS) {
             opts |= FsOptions::DO_READDIRPLUS | FsOptions::READDIRPLUS_AUTO;
         }
@@ -201,13 +191,23 @@ impl DynFileSystem for OverlayFs {
     }
 
     fn batch_forget(&self, _ctx: Context, requests: Vec<(u64, u64)>) {
-        let mut nodes = self.nodes.write().unwrap();
-        let mut dentries = self.dentries.write().unwrap();
-        for (ino, count) in requests {
-            if ino == init_binary::INIT_INODE {
-                continue;
+        let removed = {
+            let mut nodes = self.nodes.write().unwrap();
+            let mut dentries = self.dentries.write().unwrap();
+            let mut removed = Vec::new();
+            for (ino, count) in requests {
+                if ino == init_binary::INIT_INODE {
+                    continue;
+                }
+                if let Some(origin) = inode::forget_one_locked(&mut nodes, &mut dentries, ino, count) {
+                    removed.push((ino, origin));
+                }
             }
-            inode::forget_one_locked(&mut nodes, &mut dentries, ino, count);
+            removed
+        };
+
+        if !removed.is_empty() {
+            inode::cleanup_dedup_maps_batch(self, &removed);
         }
     }
 

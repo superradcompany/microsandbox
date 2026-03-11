@@ -19,25 +19,17 @@ use crate::backends::shared::platform;
 /// if the whiteout file exists, false if it doesn't, and propagates errors
 /// other than ENOENT.
 pub(crate) fn check_whiteout(parent_fd: RawFd, name: &[u8]) -> io::Result<bool> {
-    // Build ".wh.<name>\0" in a stack buffer.
-    // NAME_MAX is typically 255; ".wh." prefix is 4 bytes.
     if name.len() > 251 {
         // Name too long for inline whiteout — check overflow tombstone xattr.
         return super::whiteout::check_overflow_whiteout(parent_fd, name);
     }
 
-    let mut wh_buf = [0u8; 260]; // 4 + 255 + 1 for NUL
-    wh_buf[..4].copy_from_slice(b".wh.");
-    wh_buf[4..4 + name.len()].copy_from_slice(name);
-    wh_buf[4 + name.len()] = 0; // NUL terminator
-
-    let wh_name = unsafe {
-        CStr::from_bytes_with_nul_unchecked(&wh_buf[..4 + name.len() + 1])
-    };
+    let mut wh_buf = [0u8; 260];
+    let wh_name = super::whiteout::build_whiteout_cstr(name, &mut wh_buf);
 
     match platform::fstatat_nofollow(parent_fd, wh_name) {
         Ok(_) => Ok(true),
-        Err(e) if is_enoent(&e) => Ok(false),
+        Err(e) if platform::is_enoent(&e) => Ok(false),
         Err(e) => Err(e),
     }
 }
@@ -46,7 +38,7 @@ pub(crate) fn check_whiteout(parent_fd: RawFd, name: &[u8]) -> io::Result<bool> 
 pub(crate) fn check_opaque(dir_fd: RawFd) -> io::Result<bool> {
     match platform::fstatat_nofollow(dir_fd, c".wh..wh..opq") {
         Ok(_) => Ok(true),
-        Err(e) if is_enoent(&e) => Ok(false),
+        Err(e) if platform::is_enoent(&e) => Ok(false),
         Err(e) => Err(e),
     }
 }
@@ -120,7 +112,7 @@ pub(crate) fn read_dir_entries_raw(fd: RawFd) -> io::Result<Vec<(Vec<u8>, u32)>>
         return Err(platform::linux_error(io::Error::last_os_error()));
     }
 
-    let mut buf = vec![0u8; 8192];
+    let mut buf = [0u8; 8192];
     let mut entries = Vec::new();
 
     loop {
@@ -161,7 +153,7 @@ pub(crate) fn read_dir_entries_raw(fd: RawFd) -> io::Result<Vec<(Vec<u8>, u32)>>
 /// Read all directory entries from an fd, returning (name, d_type) pairs.
 #[cfg(target_os = "macos")]
 pub(crate) fn read_dir_entries_raw(fd: RawFd) -> io::Result<Vec<(Vec<u8>, u32)>> {
-    let dup_fd = unsafe { libc::dup(fd) };
+    let dup_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
     if dup_fd < 0 {
         return Err(platform::linux_error(io::Error::last_os_error()));
     }
@@ -202,15 +194,4 @@ pub(crate) fn read_dir_entries_raw(fd: RawFd) -> io::Result<Vec<(Vec<u8>, u32)>>
 
     unsafe { libc::closedir(dirp) };
     Ok(entries)
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions: Helpers
-//--------------------------------------------------------------------------------------------------
-
-/// Check if an error is ENOENT (considering platform differences).
-fn is_enoent(err: &io::Error) -> bool {
-    // On Linux, raw_os_error is already Linux ENOENT (2).
-    // On macOS, linux_error() may have translated it; check both.
-    matches!(err.raw_os_error(), Some(2) | Some(libc::ENOENT))
 }

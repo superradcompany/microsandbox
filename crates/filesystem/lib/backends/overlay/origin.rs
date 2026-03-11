@@ -22,7 +22,7 @@ use crate::backends::shared::platform;
 //--------------------------------------------------------------------------------------------------
 
 /// Size of the serialized origin xattr value.
-pub(crate) const ORIGIN_XATTR_SIZE: usize = 12;
+const ORIGIN_XATTR_SIZE: usize = 12;
 
 /// Xattr key for origin tracking.
 pub(crate) const ORIGIN_XATTR_KEY: &CStr = c"user.containers.overlay_origin";
@@ -68,7 +68,8 @@ impl LowerOriginId {
 /// Serialize a `LowerOriginId` to a 12-byte binary representation.
 ///
 /// Format: `[u32_le layer_idx][u64_le object_id]`
-pub(crate) fn serialize_origin(origin: &LowerOriginId) -> [u8; ORIGIN_XATTR_SIZE] {
+fn serialize_origin(origin: &LowerOriginId) -> [u8; ORIGIN_XATTR_SIZE] {
+    debug_assert!(origin.layer_idx <= u32::MAX as usize, "layer_idx overflows u32");
     let mut buf = [0u8; ORIGIN_XATTR_SIZE];
     buf[..4].copy_from_slice(&(origin.layer_idx as u32).to_le_bytes());
     buf[4..12].copy_from_slice(&origin.object_id.to_le_bytes());
@@ -76,7 +77,7 @@ pub(crate) fn serialize_origin(origin: &LowerOriginId) -> [u8; ORIGIN_XATTR_SIZE
 }
 
 /// Deserialize a `LowerOriginId` from a 12-byte binary representation.
-pub(crate) fn deserialize_origin(bytes: &[u8]) -> Option<LowerOriginId> {
+fn deserialize_origin(bytes: &[u8]) -> Option<LowerOriginId> {
     if bytes.len() < ORIGIN_XATTR_SIZE {
         return None;
     }
@@ -180,11 +181,13 @@ pub(crate) fn get_origin_xattr(fd: RawFd) -> io::Result<Option<LowerOriginId>> {
 /// Serialize redirect path components to binary.
 ///
 /// Format: `[u16_le count][u16_le len][bytes][u16_le len][bytes]...`
-pub(crate) fn serialize_redirect(components: &[Vec<u8>]) -> Vec<u8> {
+fn serialize_redirect(components: &[Vec<u8>]) -> Vec<u8> {
+    debug_assert!(components.len() <= u16::MAX as usize, "too many redirect components");
     let total_size = 2 + components.iter().map(|c| 2 + c.len()).sum::<usize>();
     let mut buf = Vec::with_capacity(total_size);
     buf.extend_from_slice(&(components.len() as u16).to_le_bytes());
     for component in components {
+        debug_assert!(component.len() <= u16::MAX as usize, "redirect component too long");
         buf.extend_from_slice(&(component.len() as u16).to_le_bytes());
         buf.extend_from_slice(component);
     }
@@ -192,7 +195,7 @@ pub(crate) fn serialize_redirect(components: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// Deserialize redirect path components from binary.
-pub(crate) fn deserialize_redirect(bytes: &[u8]) -> Option<Vec<Vec<u8>>> {
+fn deserialize_redirect(bytes: &[u8]) -> Option<Vec<Vec<u8>>> {
     if bytes.len() < 2 {
         return None;
     }
@@ -259,85 +262,95 @@ pub(crate) fn set_redirect_xattr(fd: RawFd, components: &[Vec<u8>]) -> io::Resul
 
 /// Read the redirect xattr from an fd.
 pub(crate) fn get_redirect_xattr(fd: RawFd) -> io::Result<Option<Vec<Vec<u8>>>> {
-    // First, get the size.
+    // Build /proc/self/fd path once for all reads (Linux).
     #[cfg(target_os = "linux")]
-    let size = {
-        let path = format!("/proc/self/fd/{fd}\0");
-        unsafe {
+    let path = format!("/proc/self/fd/{fd}\0");
+
+    // Retry loop: the xattr may grow between sizing and reading (TOCTOU).
+    // Bounded to 3 attempts to prevent infinite loops.
+    for _ in 0..3 {
+        // Get the size.
+        #[cfg(target_os = "linux")]
+        let size = unsafe {
             libc::getxattr(
                 path.as_ptr() as *const libc::c_char,
                 REDIRECT_XATTR_KEY.as_ptr(),
                 std::ptr::null_mut(),
                 0,
             )
-        }
-    };
+        };
 
-    #[cfg(target_os = "macos")]
-    let size = unsafe {
-        libc::fgetxattr(
-            fd,
-            REDIRECT_XATTR_KEY.as_ptr(),
-            std::ptr::null_mut(),
-            0,
-            0,
-            0,
-        )
-    };
-
-    if size < 0 {
-        let err = io::Error::last_os_error();
-        let errno = err.raw_os_error().unwrap_or(0);
-        #[cfg(target_os = "linux")]
-        if errno == libc::ENODATA {
-            return Ok(None);
-        }
         #[cfg(target_os = "macos")]
-        if errno == libc::ENOATTR {
+        let size = unsafe {
+            libc::fgetxattr(
+                fd,
+                REDIRECT_XATTR_KEY.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+            )
+        };
+
+        if size < 0 {
+            let err = io::Error::last_os_error();
+            let errno = err.raw_os_error().unwrap_or(0);
+            #[cfg(target_os = "linux")]
+            if errno == libc::ENODATA {
+                return Ok(None);
+            }
+            #[cfg(target_os = "macos")]
+            if errno == libc::ENOATTR {
+                return Ok(None);
+            }
+            if errno == libc::EOPNOTSUPP {
+                return Ok(None);
+            }
+            return Err(platform::linux_error(err));
+        }
+
+        let size = size as usize;
+        if size == 0 {
             return Ok(None);
         }
-        if errno == libc::EOPNOTSUPP {
-            return Ok(None);
-        }
-        return Err(platform::linux_error(err));
-    }
 
-    let size = size as usize;
-    if size == 0 {
-        return Ok(None);
-    }
+        let mut buf = vec![0u8; size];
 
-    let mut buf = vec![0u8; size];
-
-    #[cfg(target_os = "linux")]
-    let ret = {
-        let path = format!("/proc/self/fd/{fd}\0");
-        unsafe {
+        #[cfg(target_os = "linux")]
+        let ret = unsafe {
             libc::getxattr(
                 path.as_ptr() as *const libc::c_char,
                 REDIRECT_XATTR_KEY.as_ptr(),
                 buf.as_mut_ptr() as *mut libc::c_void,
                 size,
             )
+        };
+
+        #[cfg(target_os = "macos")]
+        let ret = unsafe {
+            libc::fgetxattr(
+                fd,
+                REDIRECT_XATTR_KEY.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                size,
+                0,
+                0,
+            )
+        };
+
+        if ret < 0 {
+            let err = io::Error::last_os_error();
+            // ERANGE means the xattr grew between sizing and reading — retry.
+            if err.raw_os_error() == Some(libc::ERANGE) {
+                continue;
+            }
+            return Err(platform::linux_error(err));
         }
-    };
 
-    #[cfg(target_os = "macos")]
-    let ret = unsafe {
-        libc::fgetxattr(
-            fd,
-            REDIRECT_XATTR_KEY.as_ptr(),
-            buf.as_mut_ptr() as *mut libc::c_void,
-            size,
-            0,
-            0,
-        )
-    };
-
-    if ret < 0 {
-        return Err(platform::linux_error(io::Error::last_os_error()));
+        buf.truncate(ret as usize);
+        return Ok(deserialize_redirect(&buf));
     }
 
-    buf.truncate(ret as usize);
-    Ok(deserialize_redirect(&buf))
+    // Exhausted retries — the xattr keeps changing.
+    Err(platform::eio())
 }

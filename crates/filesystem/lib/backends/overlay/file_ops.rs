@@ -57,24 +57,24 @@ pub(crate) fn do_open(
     }
 
     let fd = inode::open_node_fd(fs, ino, open_flags)?;
+    let fd_guard = scopeguard::guard(fd, |fd| unsafe { libc::close(fd); });
 
     // kill_priv: clear SUID/SGID on open+truncate.
     if kill_priv && (open_flags & libc::O_TRUNC != 0) {
-        if let Ok(Some(ovr)) = stat_override::get_override(fd) {
+        if let Ok(Some(ovr)) = stat_override::get_override(*fd_guard) {
             let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
             if new_mode != ovr.mode {
-                let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+                stat_override::set_override(*fd_guard, ovr.uid, ovr.gid, new_mode, ovr.rdev)?;
             }
         }
     }
 
+    let fd = scopeguard::ScopeGuard::into_inner(fd_guard);
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
 
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);
     let data = Arc::new(FileHandle {
-        inode: ino,
         file: RwLock::new(file),
-        writable: is_write,
     });
 
     fs.file_handles.write().unwrap().insert(handle, data);
@@ -122,19 +122,18 @@ pub(crate) fn do_write(
     let handles = fs.file_handles.read().unwrap();
     let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
 
+    let f = data.file.read().unwrap();
+
     // kill_priv: clear SUID/SGID before first write.
     if kill_priv {
-        let f = data.file.read().unwrap();
         if let Ok(Some(ovr)) = stat_override::get_override(f.as_raw_fd()) {
             let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
             if new_mode != ovr.mode {
-                let _ =
-                    stat_override::set_override(f.as_raw_fd(), ovr.uid, ovr.gid, new_mode, ovr.rdev);
+                stat_override::set_override(f.as_raw_fd(), ovr.uid, ovr.gid, new_mode, ovr.rdev)?;
             }
         }
     }
 
-    let f = data.file.read().unwrap();
     r.read_to(&f, size as usize, offset)
 }
 
@@ -149,26 +148,38 @@ pub(crate) fn do_readlink(fs: &OverlayFs, _ctx: Context, ino: u64) -> io::Result
         nodes.get(&ino).cloned().ok_or_else(platform::enoent)?
     };
 
-    let state = node.state.read().unwrap();
-
     #[cfg(target_os = "linux")]
     {
-        // Get fd for the symlink.
-        let fd = match &*state {
-            NodeState::Lower { file, .. } | NodeState::Upper { file, .. } => {
-                inode::open_node_fd(fs, ino, libc::O_RDONLY)?
+        // Dup the O_PATH fd while the state lock is held to prevent a
+        // concurrent copy-up from closing it underneath us. open_node_fd
+        // reopens with O_NOFOLLOW which fails with ELOOP for real symlinks,
+        // so we use the O_PATH fd directly.
+        let (dup_fd, st) = {
+            let state = node.state.read().unwrap();
+            let fd = match &*state {
+                NodeState::Lower { file, .. } | NodeState::Upper { file, .. } => file.as_raw_fd(),
+                _ => return Err(platform::einval()),
+            };
+            let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+            if dup < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
             }
-            NodeState::Root { .. } => return Err(platform::einval()),
-            NodeState::Init => return Err(platform::einval()),
+            (dup, platform::fstat(fd)?)
         };
-        let _close = scopeguard::guard(fd, |fd| unsafe { libc::close(fd) });
+        let _close_dup = scopeguard::guard(dup_fd, |fd| unsafe { libc::close(fd); });
 
-        // Check if it's a real symlink or file-backed.
-        let st = platform::fstat(fd)?;
         if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
-            // Real symlink — readlinkat.
+            // Real symlink — read target via /proc/self/fd/<dup'd O_PATH>.
+            let proc_path = format!("/proc/self/fd/{}\0", dup_fd);
             let mut buf = vec![0u8; libc::PATH_MAX as usize];
-            let len = unsafe { libc::readlinkat(fd, c"".as_ptr(), buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+            let len = unsafe {
+                libc::readlinkat(
+                    libc::AT_FDCWD,
+                    proc_path.as_ptr() as *const libc::c_char,
+                    buf.as_mut_ptr() as *mut libc::c_char,
+                    buf.len(),
+                )
+            };
             if len < 0 {
                 return Err(platform::linux_error(io::Error::last_os_error()));
             }
@@ -176,47 +187,71 @@ pub(crate) fn do_readlink(fs: &OverlayFs, _ctx: Context, ino: u64) -> io::Result
             return Ok(buf);
         }
 
-        // File-backed symlink: verify xattr says S_IFLNK, then read content.
+        // File-backed symlink: reopen for reading (safe — it's a regular file).
+        let fd = inode::open_node_fd(fs, ino, libc::O_RDONLY)?;
+        let _close = scopeguard::guard(fd, |fd| unsafe { libc::close(fd) });
+
+        // Verify xattr says S_IFLNK — missing or wrong type is an integrity error.
         if let Some(ovr) = stat_override::get_override(fd)? {
             if ovr.mode & libc::S_IFMT as u32 != libc::S_IFLNK as u32 {
-                return Err(platform::einval());
+                return Err(platform::eio());
             }
         } else {
-            return Err(platform::einval());
+            return Err(platform::eio());
         }
 
-        // Read file content as link target.
-        let mut buf = vec![0u8; libc::PATH_MAX as usize];
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-        if n < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
+        // Fstat the reopened fd for authoritative size (O_PATH fstat may be
+        // stale if copy-up raced between the dup and open_node_fd).
+        let file_st = platform::fstat(fd)?;
+        let size = file_st.st_size as usize;
+        let mut buf = vec![0u8; size];
+        let mut pos = 0;
+        while pos < size {
+            let n = unsafe {
+                libc::pread(
+                    fd,
+                    buf[pos..].as_mut_ptr() as *mut libc::c_void,
+                    size - pos,
+                    pos as libc::off_t,
+                )
+            };
+            if n < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
+            if n == 0 {
+                break; // EOF
+            }
+            pos += n as usize;
         }
-        buf.truncate(n as usize);
+        buf.truncate(pos);
         Ok(buf)
     }
 
     #[cfg(target_os = "macos")]
     {
         // On macOS, symlinks are real. Use /.vol path.
-        match &*state {
-            NodeState::Lower { ino: node_ino, dev, .. } | NodeState::Upper { ino: node_ino, dev, .. } => {
-                let path = inode::vol_path(*dev, *node_ino);
-                let mut buf = vec![0u8; libc::PATH_MAX as usize];
-                let len = unsafe {
-                    libc::readlink(
-                        path.as_ptr(),
-                        buf.as_mut_ptr() as *mut libc::c_char,
-                        buf.len(),
-                    )
-                };
-                if len < 0 {
-                    return Err(platform::linux_error(io::Error::last_os_error()));
-                }
-                buf.truncate(len as usize);
-                Ok(buf)
+        // Extract dev/ino from the already-validated state (guard was dropped above).
+        let (node_dev, node_ino) = {
+            let state = node.state.read().unwrap();
+            match &*state {
+                NodeState::Lower { ino, dev, .. } | NodeState::Upper { ino, dev, .. } => (*dev, *ino),
+                _ => return Err(platform::einval()),
             }
-            _ => Err(platform::einval()),
+        };
+        let path = inode::vol_path(node_dev, node_ino);
+        let mut buf = vec![0u8; libc::PATH_MAX as usize];
+        let len = unsafe {
+            libc::readlink(
+                path.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+            )
+        };
+        if len < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
         }
+        buf.truncate(len as usize);
+        Ok(buf)
     }
 }
 
@@ -235,7 +270,7 @@ pub(crate) fn do_flush(
     let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
     let f = data.file.read().unwrap();
 
-    let newfd = unsafe { libc::dup(f.as_raw_fd()) };
+    let newfd = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
     if newfd < 0 {
         return Err(platform::linux_error(io::Error::last_os_error()));
     }

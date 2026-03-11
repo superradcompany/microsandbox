@@ -47,7 +47,6 @@ pub(crate) fn do_opendir(
 
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);
     let data = Arc::new(DirHandle {
-        inode: ino,
         snapshot: Mutex::new(None),
     });
 
@@ -64,80 +63,21 @@ pub(crate) fn do_readdir(
     _size: u32,
     offset: u64,
 ) -> io::Result<Vec<DirEntry<'static>>> {
-    let handles = fs.dir_handles.read().unwrap();
-    let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
-
-    // Build snapshot on first call.
-    let mut snapshot_lock = data.snapshot.lock().unwrap();
-    if snapshot_lock.is_none() {
-        *snapshot_lock = Some(build_snapshot(fs, ino)?);
-    }
-    let snapshot = snapshot_lock.as_ref().unwrap();
-
-    // Serve entries from offset.
-    let start = if offset == 0 {
-        0
-    } else {
-        // Find the first entry with offset > requested offset.
-        snapshot
-            .entries
-            .iter()
-            .position(|e| e.offset > offset)
-            .unwrap_or(snapshot.entries.len())
-    };
-
-    if start >= snapshot.entries.len() {
-        return Ok(Vec::new());
-    }
-
-    let slice = &snapshot.entries[start..];
-
-    // Collect names into a contiguous buffer for bounded leak.
-    let mut names_buf: Vec<u8> = Vec::new();
-    let mut raw_entries: Vec<(u64, u64, u32, usize, usize)> = Vec::new();
-
-    for entry in slice {
-        let name_offset = names_buf.len();
-        names_buf.extend_from_slice(&entry.name);
-        raw_entries.push((
-            0, // ino — not meaningful for overlay (guest sees synthetic inodes)
-            entry.offset,
-            entry.file_type,
-            name_offset,
-            entry.name.len(),
-        ));
-    }
-
-    if raw_entries.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Leak one contiguous buffer (bounded: one per readdir call).
-    let leaked: &'static [u8] = Box::leak(names_buf.into_boxed_slice());
-
-    let entries = raw_entries
-        .into_iter()
-        .map(|(ino, off, typ, start, len)| DirEntry {
-            ino,
-            offset: off,
-            type_: typ,
-            name: &leaked[start..start + len],
-        })
-        .collect();
-
-    Ok(entries)
+    let dir_entries = serve_snapshot_entries(fs, ino, handle, offset, true)?;
+    Ok(dir_entries)
 }
 
 /// Read directory entries with attributes (readdirplus).
 pub(crate) fn do_readdirplus(
     fs: &OverlayFs,
-    ctx: Context,
+    _ctx: Context,
     ino: u64,
     handle: u64,
-    size: u32,
+    _size: u32,
     offset: u64,
 ) -> io::Result<Vec<(DirEntry<'static>, Entry)>> {
-    let dir_entries = do_readdir(fs, ctx, ino, handle, size, offset)?;
+    // Skip dtype correction — readdirplus corrects from its own lookup results.
+    let dir_entries = serve_snapshot_entries(fs, ino, handle, offset, false)?;
     let mut result = Vec::with_capacity(dir_entries.len());
 
     for de in dir_entries {
@@ -190,6 +130,90 @@ pub(crate) fn do_releasedir(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
+/// Build or retrieve the snapshot and serve entries from the given offset.
+///
+/// When `correct_dtypes` is true (plain readdir), lazily corrects guest-visible
+/// d_types via stat override lookups. When false (readdirplus), skips correction
+/// since the caller corrects d_types from its own lookup results.
+fn serve_snapshot_entries(
+    fs: &OverlayFs,
+    ino: u64,
+    handle: u64,
+    offset: u64,
+    correct_dtypes: bool,
+) -> io::Result<Vec<DirEntry<'static>>> {
+    let handles = fs.dir_handles.read().unwrap();
+    let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
+
+    // Build snapshot on first call.
+    let mut snapshot_lock = data.snapshot.lock().unwrap();
+    if snapshot_lock.is_none() {
+        *snapshot_lock = Some(build_snapshot(fs, ino)?);
+    }
+
+    // Correct d_types lazily for readdir only.
+    if correct_dtypes {
+        let snapshot = snapshot_lock.as_mut().unwrap();
+        if !snapshot.dtypes_corrected {
+            correct_entry_dtypes(fs, ino, &mut snapshot.entries);
+            snapshot.dtypes_corrected = true;
+        }
+    }
+    let snapshot = snapshot_lock.as_ref().unwrap();
+
+    // Serve entries from offset.
+    let start = if offset == 0 {
+        0
+    } else {
+        snapshot
+            .entries
+            .iter()
+            .position(|e| e.offset > offset)
+            .unwrap_or(snapshot.entries.len())
+    };
+
+    if start >= snapshot.entries.len() {
+        return Ok(Vec::new());
+    }
+
+    let slice = &snapshot.entries[start..];
+
+    // Collect names into a contiguous buffer for bounded leak.
+    let mut names_buf: Vec<u8> = Vec::new();
+    let mut raw_entries: Vec<(u64, u64, u32, usize, usize)> = Vec::new();
+
+    for entry in slice {
+        let name_offset = names_buf.len();
+        names_buf.extend_from_slice(&entry.name);
+        raw_entries.push((
+            0, // ino — not meaningful for overlay (guest sees synthetic inodes)
+            entry.offset,
+            entry.file_type,
+            name_offset,
+            entry.name.len(),
+        ));
+    }
+
+    if raw_entries.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Leak one contiguous buffer (bounded: one per readdir call).
+    let leaked: &'static [u8] = Box::leak(names_buf.into_boxed_slice());
+
+    let entries = raw_entries
+        .into_iter()
+        .map(|(ino, off, typ, start, len)| DirEntry {
+            ino,
+            offset: off,
+            type_: typ,
+            name: &leaked[start..start + len],
+        })
+        .collect();
+
+    Ok(entries)
+}
+
 /// Build a merged directory snapshot across all layers.
 fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
     let node = {
@@ -199,10 +223,10 @@ fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
 
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     let mut entries: Vec<MergedDirEntry> = Vec::new();
-    let mut is_opaque = node.opaque.load(Ordering::Relaxed);
+    let mut is_opaque = node.opaque.load(Ordering::Acquire);
 
     // Phase 1: Scan upper layer.
-    let upper_dir_fd = get_dir_fd_for_scan(fs, &node);
+    let upper_dir_fd = inode::get_upper_dir_fd(fs, &node);
     if let Some(upper_fd_node) = upper_dir_fd {
         let upper_fd = upper_fd_node.raw();
         let raw_entries = layer::read_dir_entries_raw(upper_fd)?;
@@ -242,6 +266,7 @@ fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
                 Some(fd) => fd,
                 None => continue,
             };
+            let _close_lower = scopeguard::guard(lower_fd, |fd| unsafe { libc::close(fd); });
 
             let raw_entries = layer::read_dir_entries_raw(lower_fd)?;
 
@@ -249,8 +274,6 @@ fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
             for name in super::whiteout::get_tombstoned_names(lower_fd)? {
                 seen.insert(name);
             }
-
-            unsafe { libc::close(lower_fd) };
 
             let mut layer_opaque = false;
             for (name, d_type) in raw_entries {
@@ -299,7 +322,10 @@ fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
         entry.offset = (i + 1) as u64;
     }
 
-    Ok(DirSnapshot { entries })
+    Ok(DirSnapshot {
+        entries,
+        dtypes_corrected: false,
+    })
 }
 
 /// Check whether a merged directory has any guest-visible entries.
@@ -313,10 +339,10 @@ pub(crate) fn is_merged_dir_empty(fs: &OverlayFs, ino: u64) -> io::Result<bool> 
     };
 
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
-    let mut is_opaque = node.opaque.load(Ordering::Relaxed);
+    let mut is_opaque = node.opaque.load(Ordering::Acquire);
 
     // Phase 1: Scan upper layer.
-    let upper_dir_fd = get_dir_fd_for_scan(fs, &node);
+    let upper_dir_fd = inode::get_upper_dir_fd(fs, &node);
     if let Some(upper_fd_node) = upper_dir_fd {
         let upper_fd = upper_fd_node.raw();
         let raw_entries = layer::read_dir_entries_raw(upper_fd)?;
@@ -350,6 +376,7 @@ pub(crate) fn is_merged_dir_empty(fs: &OverlayFs, ino: u64) -> io::Result<bool> 
                 Some(fd) => fd,
                 None => continue,
             };
+            let _close_lower = scopeguard::guard(lower_fd, |fd| unsafe { libc::close(fd); });
 
             let raw_entries = layer::read_dir_entries_raw(lower_fd)?;
 
@@ -357,8 +384,6 @@ pub(crate) fn is_merged_dir_empty(fs: &OverlayFs, ino: u64) -> io::Result<bool> 
             for name in super::whiteout::get_tombstoned_names(lower_fd)? {
                 seen.insert(name);
             }
-
-            unsafe { libc::close(lower_fd) };
 
             let mut layer_opaque = false;
             for (name, _d_type) in raw_entries {
@@ -389,13 +414,6 @@ pub(crate) fn is_merged_dir_empty(fs: &OverlayFs, ino: u64) -> io::Result<bool> 
     Ok(true)
 }
 
-/// Get the directory fd for scanning the upper layer of a node.
-///
-/// Returns an `inode::NodeFd` that is automatically closed on drop if owned.
-fn get_dir_fd_for_scan(fs: &OverlayFs, node: &super::types::OverlayNode) -> Option<inode::NodeFd> {
-    inode::get_upper_dir_fd(fs, node)
-}
-
 /// Get a directory fd for scanning a lower layer.
 ///
 /// Uses the same path-resolution logic as lookup: handles Root, same-layer
@@ -406,15 +424,44 @@ fn get_lower_dir_fd(
     lower: &super::types::Layer,
     node: &super::types::OverlayNode,
 ) -> Option<i32> {
-    let path_components = inode::get_parent_lower_path(fs, node);
+    let path_components = inode::get_parent_lower_path(fs, node).ok()?;
     let node_fd = inode::open_lower_parent(lower, node, &path_components)?;
     // Caller expects an owned fd it will close — ensure we return one.
     if node_fd.is_owned() {
         Some(node_fd.into_raw())
     } else {
         // Borrowed fd (e.g. root) — dup it so caller can safely close.
-        let fd = unsafe { libc::dup(node_fd.raw()) };
+        let fd = unsafe { libc::fcntl(node_fd.raw(), libc::F_DUPFD_CLOEXEC, 0) };
         if fd >= 0 { Some(fd) } else { None }
+    }
+}
+
+/// Correct guest-visible d_type for snapshot entries.
+///
+/// On Linux, file-backed symlinks and virtual special files are stored as
+/// regular files on the host, so `DT_REG` from the host may not match the
+/// guest-visible type in the override xattr. This function opens each
+/// `DT_REG` entry, checks for an override, and corrects the `file_type`.
+fn correct_entry_dtypes(fs: &OverlayFs, parent_ino: u64, entries: &mut [MergedDirEntry]) {
+    for entry in entries.iter_mut() {
+        // Only DT_REG entries can have a different guest-visible type.
+        if entry.file_type != libc::DT_REG as u32 {
+            continue;
+        }
+
+        // Try to look up the entry to get its inode, then open + check override.
+        let name_cstr = match std::ffi::CString::new(entry.name.clone()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        if let Ok(lookup_entry) = inode::do_lookup(fs, parent_ino, &name_cstr) {
+            // do_lookup already patches attr.st_mode with the guest-visible type
+            // from the override xattr, so no separate open_node_fd + get_override needed.
+            let guest_type = lookup_entry.attr.st_mode as u32 & libc::S_IFMT as u32;
+            entry.file_type = mode_to_dtype(guest_type);
+            inode::forget_one(fs, lookup_entry.inode, 1);
+        }
     }
 }
 

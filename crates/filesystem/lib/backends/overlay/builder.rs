@@ -31,7 +31,6 @@ pub struct OverlayFsBuilder {
     lowers: Vec<PathBuf>,
     upper_dir: Option<PathBuf>,
     state_dir: Option<PathBuf>,
-    xattr: bool,
     strict: bool,
     entry_timeout: Duration,
     attr_timeout: Duration,
@@ -50,7 +49,6 @@ impl OverlayFsBuilder {
             lowers: Vec::new(),
             upper_dir: None,
             state_dir: None,
-            xattr: true,
             strict: true,
             entry_timeout: Duration::from_secs(5),
             attr_timeout: Duration::from_secs(5),
@@ -80,12 +78,6 @@ impl OverlayFsBuilder {
     /// Set the private staging directory (must be on same filesystem as upper).
     pub fn state_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.state_dir = Some(path.into());
-        self
-    }
-
-    /// Enable or disable xattr-based stat virtualization.
-    pub fn xattr(mut self, enabled: bool) -> Self {
-        self.xattr = enabled;
         self
     }
 
@@ -159,7 +151,6 @@ impl OverlayFsBuilder {
 
             lowers.push(Layer {
                 root_fd,
-                writable: false,
                 index,
                 #[cfg(target_os = "linux")]
                 proc_self_fd: layer_proc_fd,
@@ -173,7 +164,7 @@ impl OverlayFsBuilder {
         let upper_root_fd = open_dir(&upper_dir)?;
 
         // Probe xattr support on upper if strict mode.
-        if self.strict && self.xattr {
+        if self.strict {
             use std::os::fd::AsRawFd;
             let supported = stat_override::probe_xattr_support(upper_root_fd.as_raw_fd())?;
             if !supported {
@@ -189,7 +180,6 @@ impl OverlayFsBuilder {
 
         let upper = Layer {
             root_fd: upper_root_fd,
-            writable: true,
             index: upper_index,
             #[cfg(target_os = "linux")]
             proc_self_fd: upper_proc_fd,
@@ -220,16 +210,10 @@ impl OverlayFsBuilder {
         let init_file = init_binary::create_init_file()?;
 
         let cfg = OverlayConfig {
-            lowers: self.lowers,
-            upper_dir,
-            state_dir,
-            xattr: self.xattr,
-            strict: self.strict,
             entry_timeout: self.entry_timeout,
             attr_timeout: self.attr_timeout,
             cache_policy: self.cache_policy,
             writeback: self.writeback,
-            metacopy: false,
         };
 
         Ok(OverlayFs {
@@ -258,7 +242,7 @@ impl OverlayFsBuilder {
 //--------------------------------------------------------------------------------------------------
 
 /// Open a directory path as an fd.
-fn open_dir(path: &PathBuf) -> io::Result<File> {
+fn open_dir(path: &std::path::Path) -> io::Result<File> {
     let cpath = std::ffi::CString::new(
         path.to_str()
             .ok_or_else(platform::einval)?
@@ -293,7 +277,7 @@ fn dup_fd(f: &File) -> io::Result<File> {
 fn clean_state_dir(state_fd: &File) -> io::Result<()> {
     use std::os::fd::AsRawFd;
 
-    let dup_fd = unsafe { libc::dup(state_fd.as_raw_fd()) };
+    let dup_fd = unsafe { libc::fcntl(state_fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
     if dup_fd < 0 {
         return Err(platform::linux_error(io::Error::last_os_error()));
     }
@@ -316,6 +300,15 @@ fn clean_state_dir(state_fd: &File) -> io::Result<()> {
 
         let ent = unsafe { libc::readdir(dirp) };
         if ent.is_null() {
+            // Check errno — readdir returns NULL on both end-of-directory and error.
+            #[cfg(target_os = "linux")]
+            let errno = unsafe { *libc::__errno_location() };
+            #[cfg(target_os = "macos")]
+            let errno = unsafe { *libc::__error() };
+            if errno != 0 {
+                unsafe { libc::closedir(dirp) };
+                return Err(platform::linux_error(io::Error::from_raw_os_error(errno)));
+            }
             break;
         }
 
@@ -325,7 +318,14 @@ fn clean_state_dir(state_fd: &File) -> io::Result<()> {
 
         // Remove files starting with ".tmp." — our temp file prefix.
         if name_bytes.starts_with(b".tmp.") {
-            unsafe { libc::unlinkat(state_fd.as_raw_fd(), name.as_ptr(), 0) };
+            let ret = unsafe { libc::unlinkat(state_fd.as_raw_fd(), name.as_ptr(), 0) };
+            if ret < 0 {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::ENOENT) {
+                    unsafe { libc::closedir(dirp) };
+                    return Err(platform::linux_error(err));
+                }
+            }
         }
     }
 

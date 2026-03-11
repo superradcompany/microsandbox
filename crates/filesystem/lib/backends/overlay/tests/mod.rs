@@ -27,7 +27,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::{
     Context, DynFileSystem, Entry, Extensions, FsOptions, GetxattrReply, ListxattrReply,
-    OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
+    SetattrValid, ZeroCopyReader, ZeroCopyWriter,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -38,27 +38,19 @@ use crate::{
 ///
 /// The OverlayFs always returns Linux errno values regardless of host OS
 /// (macOS BSD errnos are translated via `platform::linux_error()`).
-const LINUX_EPERM: i32 = 1;
 const LINUX_ENOENT: i32 = 2;
-const LINUX_EIO: i32 = 5;
 const LINUX_EBADF: i32 = 9;
 const LINUX_EACCES: i32 = 13;
 const LINUX_EEXIST: i32 = 17;
 const LINUX_EINVAL: i32 = 22;
-const LINUX_ENOSYS: i32 = 38;
 const LINUX_ENOTEMPTY: i32 = 39;
 const LINUX_ENODATA: i32 = 61;
-const LINUX_EOVERFLOW: i32 = 75;
-const LINUX_EOPNOTSUPP: i32 = 95;
 
 /// Root inode number (FUSE convention).
 const ROOT_INODE: u64 = 1;
 
 /// Init binary inode number (ROOT_ID + 1).
 const INIT_INODE: u64 = 2;
-
-/// Init binary handle number (reserved handle 0).
-const INIT_HANDLE: u64 = 0;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -72,7 +64,6 @@ const INIT_HANDLE: u64 = 0;
 struct OverlayTestSandbox {
     fs: OverlayFs,
     _tmp: TempDir,
-    lower_roots: Vec<PathBuf>,
     upper_root: PathBuf,
 }
 
@@ -140,7 +131,6 @@ impl OverlayTestSandbox {
         Self {
             fs,
             _tmp: tmp,
-            lower_roots,
             upper_root,
         }
     }
@@ -265,68 +255,6 @@ impl OverlayTestSandbox {
         let names = entries.iter().map(|e| e.name.to_vec()).collect();
         self.fs.releasedir(self.ctx(), inode, 0, handle)?;
         Ok(names)
-    }
-
-    /// Get the permission mode bits (lower 12 bits) for an inode.
-    fn get_mode(&self, inode: u64) -> u32 {
-        let (st, _) = self.fs.getattr(self.ctx(), inode, None).unwrap();
-        st.st_mode as u32 & 0o7777
-    }
-
-    // -- Host filesystem helpers (bypass FUSE) --
-
-    /// Create a file in the first lower layer.
-    fn lower_create_file(&self, name: &str, contents: &[u8]) -> PathBuf {
-        let path = self.lower_roots[0].join(name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&path, contents).unwrap();
-        path
-    }
-
-    /// Create a directory in the first lower layer.
-    fn lower_create_dir(&self, name: &str) -> PathBuf {
-        let path = self.lower_roots[0].join(name);
-        std::fs::create_dir_all(&path).unwrap();
-        path
-    }
-
-    /// Create a whiteout marker (`.wh.<name>`) in the first lower layer.
-    fn lower_create_whiteout(&self, name: &str) -> PathBuf {
-        let parent_path = self.lower_roots[0].clone();
-        let wh_name = format!(".wh.{name}");
-        let path = parent_path.join(&wh_name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&path, b"").unwrap();
-        path
-    }
-
-    /// Create an opaque directory in the first lower layer.
-    fn lower_create_opaque_dir(&self, name: &str) -> PathBuf {
-        let path = self.lower_roots[0].join(name);
-        std::fs::create_dir_all(&path).unwrap();
-        std::fs::write(path.join(".wh..wh..opq"), b"").unwrap();
-        path
-    }
-
-    /// Create a file in the upper layer.
-    fn upper_create_file(&self, name: &str, contents: &[u8]) -> PathBuf {
-        let path = self.upper_root.join(name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&path, contents).unwrap();
-        path
-    }
-
-    /// Create a directory in the upper layer.
-    fn upper_create_dir(&self, name: &str) -> PathBuf {
-        let path = self.upper_root.join(name);
-        std::fs::create_dir_all(&path).unwrap();
-        path
     }
 
     /// Check if a whiteout marker exists on the upper layer.

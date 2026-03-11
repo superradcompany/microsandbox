@@ -98,24 +98,24 @@ pub(crate) fn do_create(
 
     // Reopen for the handle — strip O_CREAT since the file already exists.
     let open_fd = inode::open_node_fd(fs, entry.inode, open_flags & !libc::O_CREAT)?;
+    let fd_guard = scopeguard::guard(open_fd, |fd| unsafe { libc::close(fd); });
 
     // kill_priv handling.
     if kill_priv && (open_flags & libc::O_TRUNC != 0) {
-        if let Ok(Some(ovr)) = stat_override::get_override(open_fd) {
+        if let Ok(Some(ovr)) = stat_override::get_override(*fd_guard) {
             let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
             if new_mode != ovr.mode {
-                let _ = stat_override::set_override(open_fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+                stat_override::set_override(*fd_guard, ovr.uid, ovr.gid, new_mode, ovr.rdev)?;
             }
         }
     }
 
+    let open_fd = scopeguard::ScopeGuard::into_inner(fd_guard);
     let file = unsafe { std::fs::File::from_raw_fd(open_fd) };
 
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);
     let data = Arc::new(FileHandle {
-        inode: entry.inode,
         file: RwLock::new(file),
-        writable: true,
     });
     fs.file_handles.write().unwrap().insert(handle, data);
 
@@ -359,13 +359,14 @@ pub(crate) fn do_link(
     // Remove existing whiteout at target name.
     whiteout::remove_whiteout(newparent_fd, newname.to_bytes())?;
 
+    let node = {
+        let nodes = fs.nodes.read().unwrap();
+        nodes.get(&ino).cloned().ok_or_else(platform::enoent)?
+    };
+    let state = node.state.read().unwrap();
+
     #[cfg(target_os = "linux")]
     {
-        let node = {
-            let nodes = fs.nodes.read().unwrap();
-            nodes.get(&ino).cloned().ok_or_else(platform::enoent)?
-        };
-        let state = node.state.read().unwrap();
         if let super::types::NodeState::Upper { file, .. } = &*state {
             let path = format!("/proc/self/fd/{}\0", file.as_raw_fd());
             let ret = unsafe {
@@ -387,11 +388,6 @@ pub(crate) fn do_link(
 
     #[cfg(target_os = "macos")]
     {
-        let node = {
-            let nodes = fs.nodes.read().unwrap();
-            nodes.get(&ino).cloned().ok_or_else(platform::enoent)?
-        };
-        let state = node.state.read().unwrap();
         if let super::types::NodeState::Upper { ino: node_ino, dev, .. } = &*state {
             let src_path = format!("/.vol/{dev}/{node_ino}\0");
             let ret = unsafe {

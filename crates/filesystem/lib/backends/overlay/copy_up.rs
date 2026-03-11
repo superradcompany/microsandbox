@@ -27,6 +27,8 @@ use super::origin;
 use super::types::{NodeState, OverlayNode, ROOT_INODE};
 use crate::backends::shared::inode_table::InodeAltKey;
 use crate::backends::shared::platform;
+#[cfg(target_os = "linux")]
+use crate::backends::shared::stat_override;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -53,7 +55,7 @@ pub(crate) fn ensure_upper(fs: &OverlayFs, ino: u64) -> io::Result<()> {
     {
         let state = node.state.read().unwrap();
         match &*state {
-            NodeState::Upper { .. } | NodeState::Root { .. } | NodeState::Init => return Ok(()),
+            NodeState::Upper { .. } | NodeState::Root { .. } => return Ok(()),
             NodeState::Lower { .. } => {}
         }
     }
@@ -65,7 +67,7 @@ pub(crate) fn ensure_upper(fs: &OverlayFs, ino: u64) -> io::Result<()> {
     {
         let state = node.state.read().unwrap();
         match &*state {
-            NodeState::Upper { .. } | NodeState::Root { .. } | NodeState::Init => return Ok(()),
+            NodeState::Upper { .. } | NodeState::Root { .. } => return Ok(()),
             NodeState::Lower { .. } => {}
         }
     }
@@ -80,7 +82,7 @@ pub(crate) fn ensure_upper(fs: &OverlayFs, ino: u64) -> io::Result<()> {
     }
 
     // Get the parent's upper directory fd.
-    let parent_ino = node.primary_parent.load(Ordering::Relaxed);
+    let parent_ino = node.primary_parent.load(Ordering::Acquire);
     let upper_parent_fd = open_upper_parent_fd(fs, parent_ino)?;
     let _close_parent = scopeguard::guard(upper_parent_fd, |fd| unsafe {
         libc::close(fd);
@@ -91,7 +93,7 @@ pub(crate) fn ensure_upper(fs: &OverlayFs, ino: u64) -> io::Result<()> {
         let name_id = node.primary_name.read().unwrap();
         fs.names.resolve(*name_id)
     };
-    let name_cstr = std::ffi::CString::new(name_bytes.clone()).map_err(|_| platform::einval())?;
+    let name_cstr = std::ffi::CString::new(name_bytes).map_err(|_| platform::einval())?;
 
     // Dispatch by file type.
     let kind = node.kind;
@@ -194,17 +196,17 @@ fn copy_up_regular(
 
     // Copy file data.
     let st = platform::fstat(lower_fd)?;
-    #[cfg(target_os = "linux")]
-    let file_size = st.st_size as u64;
-    #[cfg(target_os = "macos")]
     let file_size = st.st_size as u64;
     copy_file_data(lower_fd, temp_fd, file_size)?;
 
     // Copy xattrs from lower to temp (non-internal only).
     copy_xattrs(lower_fd, temp_fd)?;
 
+    // Preserve source timestamps on the temp file before install.
+    apply_timestamps(temp_fd, &st)?;
+
     // fsync the temp file for crash safety.
-    unsafe { libc::fsync(temp_fd) };
+    fsync_fd(temp_fd)?;
 
     // Atomic rename from state_dir to upper parent.
     let ret = unsafe {
@@ -216,10 +218,14 @@ fn copy_up_regular(
         )
     };
     if ret < 0 {
+        let err = io::Error::last_os_error();
         // Clean up temp file on failure.
         unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
-        return Err(platform::linux_error(io::Error::last_os_error()));
+        return Err(platform::linux_error(err));
     }
+
+    // fsync the destination parent for durability.
+    fsync_fd(upper_parent_fd)?;
 
     // Update node state to Upper.
     transition_to_upper(fs, node, upper_parent_fd, name)?;
@@ -273,6 +279,13 @@ fn copy_up_directory(
 
     copy_xattrs(lower_fd, upper_dir_fd)?;
 
+    // Preserve lower directory timestamps.
+    let lower_st = platform::fstat(lower_fd)?;
+    apply_timestamps(upper_dir_fd, &lower_st)?;
+
+    // fsync the destination parent for durability.
+    fsync_fd(upper_parent_fd)?;
+
     // Update node state to Upper.
     transition_to_upper(fs, node, upper_parent_fd, name)?;
 
@@ -290,21 +303,24 @@ fn copy_up_symlink(
     upper_parent_fd: RawFd,
     name: &CStr,
 ) -> io::Result<()> {
-    // Read the symlink target from lower.
-    let lower_fd = inode::open_node_fd(fs, node.inode, libc::O_RDONLY)?;
-    let _close_lower = scopeguard::guard(lower_fd, |fd| unsafe {
-        libc::close(fd);
-    });
-
     #[cfg(target_os = "linux")]
     {
-        // On Linux, symlinks are file-backed. Read content from lower.
-        let st = platform::fstat(lower_fd)?;
+        // Get the O_PATH fd from node state to determine symlink type.
+        // This is safe because the copy_up_lock is held, preventing state changes.
+        let o_path_fd = {
+            let state = node.state.read().unwrap();
+            match &*state {
+                NodeState::Lower { file, .. } => file.as_raw_fd(),
+                _ => return Err(platform::einval()),
+            }
+        };
+
+        let st = platform::fstat(o_path_fd)?;
 
         if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
-            // Real symlink on lower: read via readlinkat.
+            // Real symlink on lower: read target via readlinkat on the O_PATH fd.
             let mut buf = vec![0u8; libc::PATH_MAX as usize];
-            let path = format!("/proc/self/fd/{lower_fd}\0");
+            let path = format!("/proc/self/fd/{o_path_fd}\0");
             let len = unsafe {
                 libc::readlinkat(
                     libc::AT_FDCWD,
@@ -318,7 +334,7 @@ fn copy_up_symlink(
             }
             buf.truncate(len as usize);
 
-            // Create file-backed symlink on upper.
+            // Create file-backed symlink on upper: write target as content + set override.
             let (temp_fd, temp_name) = create_temp_file(fs)?;
             let _close_temp = scopeguard::guard(temp_fd, |fd| unsafe {
                 libc::close(fd);
@@ -332,25 +348,23 @@ fn copy_up_symlink(
                 return Err(platform::eio());
             }
 
-            // Copy override xattr (S_IFLNK mode).
-            copy_xattrs(lower_fd, temp_fd)?;
-
-            unsafe { libc::fsync(temp_fd) };
-
-            let ret = unsafe {
-                libc::renameat(
-                    fs.state_fd.as_raw_fd(),
-                    temp_name.as_ptr(),
-                    upper_parent_fd,
-                    name.as_ptr(),
-                )
-            };
-            if ret < 0 {
+            // Create stat override (real symlinks don't have overlay xattrs).
+            let mode = libc::S_IFLNK as u32 | (st.st_mode as u32 & 0o7777);
+            if let Err(e) =
+                stat_override::set_override(temp_fd, st.st_uid, st.st_gid, mode, 0)
+            {
                 unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
-                return Err(platform::linux_error(io::Error::last_os_error()));
+                return Err(e);
             }
+
+            stage_and_install(fs, temp_fd, &temp_name, &st, upper_parent_fd, name)?;
         } else {
-            // File-backed symlink on lower: just copy data + xattrs.
+            // File-backed symlink on lower: reopen for data copy.
+            let lower_fd = inode::open_node_fd(fs, node.inode, libc::O_RDONLY)?;
+            let _close_lower = scopeguard::guard(lower_fd, |fd| unsafe {
+                libc::close(fd);
+            });
+
             let (temp_fd, temp_name) = create_temp_file(fs)?;
             let _close_temp = scopeguard::guard(temp_fd, |fd| unsafe {
                 libc::close(fd);
@@ -359,25 +373,18 @@ fn copy_up_symlink(
             copy_file_data(lower_fd, temp_fd, st.st_size as u64)?;
             copy_xattrs(lower_fd, temp_fd)?;
 
-            unsafe { libc::fsync(temp_fd) };
-
-            let ret = unsafe {
-                libc::renameat(
-                    fs.state_fd.as_raw_fd(),
-                    temp_name.as_ptr(),
-                    upper_parent_fd,
-                    name.as_ptr(),
-                )
-            };
-            if ret < 0 {
-                unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
-                return Err(platform::linux_error(io::Error::last_os_error()));
-            }
+            stage_and_install(fs, temp_fd, &temp_name, &st, upper_parent_fd, name)?;
         }
     }
 
     #[cfg(target_os = "macos")]
     {
+        // Open lower fd for xattr copy.
+        let lower_fd = inode::open_node_fd(fs, node.inode, libc::O_RDONLY)?;
+        let _close_lower = scopeguard::guard(lower_fd, |fd| unsafe {
+            libc::close(fd);
+        });
+
         // Read link target on macOS.
         let state = node.state.read().unwrap();
         let (node_dev, node_ino) = match &*state {
@@ -402,25 +409,67 @@ fn copy_up_symlink(
         buf.push(0); // NUL-terminate
         let target = unsafe { CStr::from_bytes_with_nul_unchecked(&buf) };
 
-        // Create real symlink on upper.
-        let ret = unsafe { libc::symlinkat(target.as_ptr(), upper_parent_fd, name.as_ptr()) };
+        // Stage: create symlink in state_dir, not directly in upper.
+        let temp_name = create_temp_symlink_name(fs);
+        let ret =
+            unsafe { libc::symlinkat(target.as_ptr(), fs.state_fd.as_raw_fd(), temp_name.as_ptr()) };
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
 
-        // Copy xattrs via O_SYMLINK fd.
+        // Fstat lower before opening the staged symlink so a failure here
+        // does not leak sym_fd or the temp file.
+        let lower_st = platform::fstat(lower_fd)?;
+
+        // Copy xattrs via O_SYMLINK fd on the staged symlink.
         let sym_fd = unsafe {
             libc::openat(
-                upper_parent_fd,
-                name.as_ptr(),
+                fs.state_fd.as_raw_fd(),
+                temp_name.as_ptr(),
                 libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK,
             )
         };
-        if sym_fd >= 0 {
-            let _ = copy_xattrs(lower_fd, sym_fd);
-            unsafe { libc::close(sym_fd) };
+        if sym_fd < 0 {
+            let err = io::Error::last_os_error();
+            unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+            return Err(platform::linux_error(err));
+        }
+
+        let xattr_result = copy_xattrs(lower_fd, sym_fd);
+        let ts_result = if xattr_result.is_ok() {
+            apply_timestamps(sym_fd, &lower_st)
+        } else {
+            Ok(())
+        };
+        unsafe { libc::close(sym_fd) };
+
+        if let Err(e) = xattr_result {
+            unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+            return Err(e);
+        }
+        if let Err(e) = ts_result {
+            unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+            return Err(e);
+        }
+
+        // Atomically install into upper.
+        let ret = unsafe {
+            libc::renameat(
+                fs.state_fd.as_raw_fd(),
+                temp_name.as_ptr(),
+                upper_parent_fd,
+                name.as_ptr(),
+            )
+        };
+        if ret < 0 {
+            let err = io::Error::last_os_error();
+            unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+            return Err(platform::linux_error(err));
         }
     }
+
+    // fsync the destination parent for durability.
+    fsync_fd(upper_parent_fd)?;
 
     // Update node state to Upper.
     transition_to_upper(fs, node, upper_parent_fd, name)?;
@@ -430,35 +479,64 @@ fn copy_up_symlink(
 
 /// Copy up a special file (device, fifo, socket).
 ///
-/// Creates a regular file on upper, stores the real type/rdev in override xattr.
+/// Creates a regular file in state_dir, copies override xattr (which holds the
+/// real type/rdev), then atomically renames into the upper layer.
 fn copy_up_special(
     fs: &OverlayFs,
     node: &OverlayNode,
     upper_parent_fd: RawFd,
     name: &CStr,
 ) -> io::Result<()> {
-    // Create an empty regular file on upper.
-    let fd = unsafe {
-        libc::openat(
-            upper_parent_fd,
-            name.as_ptr(),
-            libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_CLOEXEC,
-            (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
-        )
-    };
-    if fd < 0 {
-        return Err(platform::linux_error(io::Error::last_os_error()));
-    }
-    let _close = scopeguard::guard(fd, |fd| unsafe {
-        libc::close(fd);
-    });
-
-    // Copy xattrs from lower (which includes override with type/rdev info).
+    // Open lower fd for reading xattrs.
     let lower_fd = inode::open_node_fd(fs, node.inode, libc::O_RDONLY)?;
     let _close_lower = scopeguard::guard(lower_fd, |fd| unsafe {
         libc::close(fd);
     });
-    copy_xattrs(lower_fd, fd)?;
+
+    // Stage in state_dir.
+    let (temp_fd, temp_name) = create_temp_file(fs)?;
+    let _close_temp = scopeguard::guard(temp_fd, |fd| unsafe {
+        libc::close(fd);
+    });
+
+    // Fstat lower before creating temp file so failure doesn't leak it.
+    let st = platform::fstat(lower_fd)?;
+
+    // Copy xattrs from lower (which includes override with type/rdev info).
+    if let Err(e) = copy_xattrs(lower_fd, temp_fd) {
+        unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+        return Err(e);
+    }
+
+    // Preserve source timestamps.
+    if let Err(e) = apply_timestamps(temp_fd, &st) {
+        unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+        return Err(e);
+    }
+
+    // fsync temp file.
+    if let Err(e) = fsync_fd(temp_fd) {
+        unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+        return Err(e);
+    }
+
+    // Atomic rename from state_dir to upper parent.
+    let ret = unsafe {
+        libc::renameat(
+            fs.state_fd.as_raw_fd(),
+            temp_name.as_ptr(),
+            upper_parent_fd,
+            name.as_ptr(),
+        )
+    };
+    if ret < 0 {
+        let err = io::Error::last_os_error();
+        unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+        return Err(platform::linux_error(err));
+    }
+
+    // fsync the destination parent for durability.
+    fsync_fd(upper_parent_fd)?;
 
     // Update node state to Upper.
     transition_to_upper(fs, node, upper_parent_fd, name)?;
@@ -470,6 +548,45 @@ fn copy_up_special(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
+/// Apply timestamps, fsync, and atomically install a staged temp file into the upper layer.
+///
+/// On failure, cleans up the temp file. Used by `copy_up_symlink` to deduplicate
+/// the identical staging tail shared between the real-symlink and file-backed branches.
+#[cfg(target_os = "linux")]
+fn stage_and_install(
+    fs: &OverlayFs,
+    temp_fd: RawFd,
+    temp_name: &CStr,
+    st: &libc::stat64,
+    upper_parent_fd: RawFd,
+    name: &CStr,
+) -> io::Result<()> {
+    if let Err(e) = apply_timestamps(temp_fd, st) {
+        unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+        return Err(e);
+    }
+    if let Err(e) = fsync_fd(temp_fd) {
+        unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+        return Err(e);
+    }
+
+    let ret = unsafe {
+        libc::renameat(
+            fs.state_fd.as_raw_fd(),
+            temp_name.as_ptr(),
+            upper_parent_fd,
+            name.as_ptr(),
+        )
+    };
+    if ret < 0 {
+        let err = io::Error::last_os_error();
+        unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+        return Err(platform::linux_error(err));
+    }
+
+    Ok(())
+}
+
 /// Build the ancestor chain from an inode to root, returned in root-to-leaf order.
 ///
 /// Each element is (ancestor_inode, name_bytes). The chain excludes the root itself.
@@ -478,7 +595,7 @@ fn build_ancestor_chain(
     node: &OverlayNode,
 ) -> io::Result<Vec<(u64, Vec<u8>)>> {
     let mut chain = Vec::new();
-    let mut current_ino = node.primary_parent.load(Ordering::Relaxed);
+    let mut current_ino = node.primary_parent.load(Ordering::Acquire);
 
     // Walk up to root.
     while current_ino != ROOT_INODE && current_ino != 0 {
@@ -496,7 +613,7 @@ fn build_ancestor_chain(
         };
 
         chain.push((current_ino, name_bytes));
-        current_ino = cur_node.primary_parent.load(Ordering::Relaxed);
+        current_ino = cur_node.primary_parent.load(Ordering::Acquire);
     }
 
     // Reverse to get root-to-leaf order.
@@ -624,11 +741,11 @@ pub(crate) fn transition_to_upper(
 
         // Write origin xattr if this was a lower-layer node.
         if let Some(ref origin_id) = node.origin {
-            let _ = origin::set_origin_xattr(file.as_raw_fd(), origin_id);
+            origin::set_origin_xattr(file.as_raw_fd(), origin_id)?;
         }
 
         let mut stx: libc::statx = unsafe { std::mem::zeroed() };
-        unsafe {
+        let ret = unsafe {
             libc::statx(
                 file.as_raw_fd(),
                 c"".as_ptr(),
@@ -637,6 +754,9 @@ pub(crate) fn transition_to_upper(
                 &mut stx,
             )
         };
+        if ret < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
+        }
 
         let alt_key = InodeAltKey::new(
             stx.stx_ino,
@@ -676,10 +796,12 @@ pub(crate) fn transition_to_upper(
                     libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
                 )
             };
-            if xattr_fd >= 0 {
-                let _ = origin::set_origin_xattr(xattr_fd, origin_id);
-                unsafe { libc::close(xattr_fd) };
+            if xattr_fd < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
             }
+            let result = origin::set_origin_xattr(xattr_fd, origin_id);
+            unsafe { libc::close(xattr_fd) };
+            result?;
         }
 
         // Update node state.
@@ -744,8 +866,14 @@ fn copy_file_data(src_fd: RawFd, dst_fd: RawFd, size: u64) -> io::Result<()> {
                 if err.raw_os_error() == Some(libc::EXDEV)
                     || err.raw_os_error() == Some(libc::ENOSYS)
                 {
-                    // Fall back to buffered copy.
-                    return copy_file_data_buffered(src_fd, dst_fd, off_in as u64, size - remaining);
+                    // Fall back to buffered copy. This should only happen on the
+                    // first call (before any data is copied). If partial progress
+                    // was made, we cannot safely resume with a buffered fallback
+                    // because the dst already has partial data.
+                    if remaining != size {
+                        return Err(platform::linux_error(err));
+                    }
+                    return copy_file_data_buffered(src_fd, dst_fd);
                 }
                 return Err(platform::linux_error(err));
             }
@@ -754,27 +882,28 @@ fn copy_file_data(src_fd: RawFd, dst_fd: RawFd, size: u64) -> io::Result<()> {
             }
             remaining -= ret as u64;
         }
+        if remaining > 0 {
+            return Err(platform::eio());
+        }
         return Ok(());
     }
 
     // macOS: buffered copy.
     #[cfg(target_os = "macos")]
     {
-        copy_file_data_buffered(src_fd, dst_fd, 0, 0)?;
-        Ok(())
+        copy_file_data_buffered(src_fd, dst_fd)
     }
 }
 
 /// Buffered read/write copy fallback.
-fn copy_file_data_buffered(
-    src_fd: RawFd,
-    dst_fd: RawFd,
-    _src_offset: u64,
-    _already_copied: u64,
-) -> io::Result<()> {
-    // Seek src to beginning (or to src_offset if resuming).
-    unsafe { libc::lseek(src_fd, 0, libc::SEEK_SET) };
-    unsafe { libc::lseek(dst_fd, 0, libc::SEEK_SET) };
+fn copy_file_data_buffered(src_fd: RawFd, dst_fd: RawFd) -> io::Result<()> {
+    // Seek both fds to the beginning.
+    if unsafe { libc::lseek(src_fd, 0, libc::SEEK_SET) } < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    if unsafe { libc::lseek(dst_fd, 0, libc::SEEK_SET) } < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
 
     let mut buf = vec![0u8; COPY_BUF_SIZE];
     loop {
@@ -824,65 +953,44 @@ fn try_clone_file(src_fd: RawFd, dst_fd: RawFd) -> bool {
     }
 }
 
-/// Copy non-internal extended attributes from src_fd to dst_fd.
-fn copy_xattrs(src_fd: RawFd, dst_fd: RawFd) -> io::Result<()> {
-    // List xattrs on source.
-    #[cfg(target_os = "linux")]
-    let raw_list = {
-        let path = format!("/proc/self/fd/{src_fd}\0");
-        let size = unsafe {
-            libc::listxattr(
-                path.as_ptr() as *const libc::c_char,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if size < 0 {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EOPNOTSUPP) {
-                return Ok(());
-            }
-            return Err(platform::linux_error(err));
-        }
-        if size == 0 {
-            return Ok(());
-        }
-        let mut buf = vec![0u8; size as usize];
-        let ret = unsafe {
-            libc::listxattr(
-                path.as_ptr() as *const libc::c_char,
-                buf.as_mut_ptr() as *mut libc::c_char,
-                buf.len(),
-            )
-        };
-        if ret < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
-        buf.truncate(ret as usize);
-        buf
-    };
+/// Apply source timestamps (atime/mtime) to a destination file descriptor.
+///
+/// Preserves the original file's timestamps during copy-up so the guest sees
+/// consistent metadata after promotion to upper.
+fn apply_timestamps(dst_fd: RawFd, src_stat: &crate::stat64) -> io::Result<()> {
+    let times = [
+        libc::timespec {
+            tv_sec: src_stat.st_atime,
+            tv_nsec: src_stat.st_atime_nsec,
+        },
+        libc::timespec {
+            tv_sec: src_stat.st_mtime,
+            tv_nsec: src_stat.st_mtime_nsec,
+        },
+    ];
+    let ret = unsafe { libc::futimens(dst_fd, times.as_ptr()) };
+    if ret < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    Ok(())
+}
 
-    #[cfg(target_os = "macos")]
-    let raw_list = {
-        let size = unsafe { libc::flistxattr(src_fd, std::ptr::null_mut(), 0, 0) };
-        if size < 0 {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EOPNOTSUPP) {
-                return Ok(());
-            }
-            return Err(platform::linux_error(err));
-        }
-        if size == 0 {
-            return Ok(());
-        }
-        let mut buf = vec![0u8; size as usize];
-        let ret =
-            unsafe { libc::flistxattr(src_fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0) };
-        if ret < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
-        buf.truncate(ret as usize);
-        buf
+/// Checked fsync — propagates errors instead of ignoring them.
+pub(crate) fn fsync_fd(fd: RawFd) -> io::Result<()> {
+    let ret = unsafe { libc::fsync(fd) };
+    if ret < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+/// Copy non-internal extended attributes from src_fd to dst_fd.
+pub(crate) fn copy_xattrs(src_fd: RawFd, dst_fd: RawFd) -> io::Result<()> {
+    // List xattrs on source (with ERANGE retry for TOCTOU).
+    let raw_list = list_xattrs(src_fd)?;
+    let raw_list = match raw_list {
+        Some(list) => list,
+        None => return Ok(()),
     };
 
     // Iterate NUL-separated names and copy each non-internal one.
@@ -921,70 +1029,144 @@ fn is_internal_overlay_xattr(name: &CStr) -> bool {
         || name == c"user.containers.overlay_tombstones"
 }
 
+/// List xattr names on a file descriptor with ERANGE retry.
+///
+/// Returns `None` if xattrs are not supported or the list is empty.
+fn list_xattrs(fd: RawFd) -> io::Result<Option<Vec<u8>>> {
+    #[cfg(target_os = "linux")]
+    let path = format!("/proc/self/fd/{fd}\0");
+
+    for _ in 0..3 {
+        #[cfg(target_os = "linux")]
+        let size = unsafe {
+            libc::listxattr(
+                path.as_ptr() as *const libc::c_char,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+
+        #[cfg(target_os = "macos")]
+        let size = unsafe { libc::flistxattr(fd, std::ptr::null_mut(), 0, 0) };
+
+        if size < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EOPNOTSUPP) {
+                return Ok(None);
+            }
+            return Err(platform::linux_error(err));
+        }
+        if size == 0 {
+            return Ok(None);
+        }
+
+        let mut buf = vec![0u8; size as usize];
+
+        #[cfg(target_os = "linux")]
+        let ret = unsafe {
+            libc::listxattr(
+                path.as_ptr() as *const libc::c_char,
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+            )
+        };
+
+        #[cfg(target_os = "macos")]
+        let ret = unsafe {
+            libc::flistxattr(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0)
+        };
+
+        if ret < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ERANGE) {
+                continue;
+            }
+            return Err(platform::linux_error(err));
+        }
+
+        buf.truncate(ret as usize);
+        return Ok(Some(buf));
+    }
+
+    // Exhausted retries.
+    Err(platform::eio())
+}
+
 /// Read an xattr value from a file descriptor.
+///
+/// Uses a bounded ERANGE retry loop (3 attempts) to handle the TOCTOU race
+/// where the xattr value grows between the size query and the data read.
 fn read_xattr_value(fd: RawFd, name: &CStr) -> io::Result<Option<Vec<u8>>> {
     #[cfg(target_os = "linux")]
-    let ret = {
-        let path = format!("/proc/self/fd/{fd}\0");
-        unsafe {
+    let path = format!("/proc/self/fd/{fd}\0");
+
+    for _ in 0..3 {
+        // Size query.
+        #[cfg(target_os = "linux")]
+        let ret = unsafe {
             libc::getxattr(
                 path.as_ptr() as *const libc::c_char,
                 name.as_ptr(),
                 std::ptr::null_mut(),
                 0,
             )
-        }
-    };
+        };
 
-    #[cfg(target_os = "macos")]
-    let ret = unsafe { libc::fgetxattr(fd, name.as_ptr(), std::ptr::null_mut(), 0, 0, 0) };
-
-    if ret < 0 {
-        let err = io::Error::last_os_error();
-        #[cfg(target_os = "linux")]
-        if err.raw_os_error() == Some(libc::ENODATA) {
-            return Ok(None);
-        }
         #[cfg(target_os = "macos")]
-        if err.raw_os_error() == Some(libc::ENOATTR) {
-            return Ok(None);
+        let ret = unsafe { libc::fgetxattr(fd, name.as_ptr(), std::ptr::null_mut(), 0, 0, 0) };
+
+        if ret < 0 {
+            let err = io::Error::last_os_error();
+            #[cfg(target_os = "linux")]
+            if err.raw_os_error() == Some(libc::ENODATA) {
+                return Ok(None);
+            }
+            #[cfg(target_os = "macos")]
+            if err.raw_os_error() == Some(libc::ENOATTR) {
+                return Ok(None);
+            }
+            return Err(platform::linux_error(err));
         }
-        return Err(platform::linux_error(err));
-    }
 
-    let size = ret as usize;
-    let mut buf = vec![0u8; size];
+        let size = ret as usize;
+        let mut buf = vec![0u8; size];
 
-    #[cfg(target_os = "linux")]
-    let ret = {
-        let path = format!("/proc/self/fd/{fd}\0");
-        unsafe {
+        // Data read.
+        #[cfg(target_os = "linux")]
+        let ret = unsafe {
             libc::getxattr(
                 path.as_ptr() as *const libc::c_char,
                 name.as_ptr(),
                 buf.as_mut_ptr() as *mut libc::c_void,
                 buf.len(),
             )
+        };
+
+        #[cfg(target_os = "macos")]
+        let ret = unsafe {
+            libc::fgetxattr(
+                fd,
+                name.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                0,
+                0,
+            )
+        };
+
+        if ret < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ERANGE) {
+                continue;
+            }
+            return Err(platform::linux_error(err));
         }
-    };
-
-    #[cfg(target_os = "macos")]
-    let ret = unsafe {
-        libc::fgetxattr(
-            fd,
-            name.as_ptr(),
-            buf.as_mut_ptr() as *mut libc::c_void,
-            buf.len(),
-            0,
-            0,
-        )
-    };
-
-    if ret < 0 {
-        return Err(platform::linux_error(io::Error::last_os_error()));
+        buf.truncate(ret as usize);
+        return Ok(Some(buf));
     }
-    buf.truncate(ret as usize);
-    Ok(Some(buf))
+
+    // Exhausted retries.
+    Err(platform::eio())
 }
 
 /// Set an xattr value on a file descriptor.
@@ -1050,4 +1232,17 @@ fn create_temp_file(fs: &OverlayFs) -> io::Result<(RawFd, std::ffi::CString)> {
     }
 
     Ok((fd, name_cstr))
+}
+
+/// Generate a unique temporary name for staging a symlink in the state directory.
+///
+/// Returns a CString suitable for use with `symlinkat`/`renameat` relative to `state_fd`.
+#[cfg(target_os = "macos")]
+fn create_temp_symlink_name(fs: &OverlayFs) -> std::ffi::CString {
+    let id = fs
+        .next_handle
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = format!(".tmp.symlink.{id}");
+    // SAFETY: the generated name contains no NUL bytes.
+    std::ffi::CString::new(name).unwrap()
 }

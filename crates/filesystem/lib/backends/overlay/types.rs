@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Mutex, RwLock};
 use std::time::Duration;
@@ -25,22 +24,6 @@ pub(crate) const ROOT_INODE: u64 = 1;
 
 /// Configuration for the overlay filesystem.
 pub struct OverlayConfig {
-    /// Lower layers in bottom-to-top order. All treated as read-only.
-    pub lowers: Vec<PathBuf>,
-
-    /// Writable upper layer directory.
-    pub upper_dir: PathBuf,
-
-    /// Private same-filesystem staging area for atomic operations.
-    /// Must be on the same filesystem as upper_dir.
-    pub state_dir: PathBuf,
-
-    /// Enable xattr-based stat virtualization (default: true).
-    pub xattr: bool,
-
-    /// Fail mount if required primitives are unavailable (default: true).
-    pub strict: bool,
-
     /// FUSE entry cache timeout (default: 5s).
     pub entry_timeout: Duration,
 
@@ -52,9 +35,6 @@ pub struct OverlayConfig {
 
     /// Enable writeback caching (default: false).
     pub writeback: bool,
-
-    /// Metadata-only copy-up (default: false, V1 always off).
-    pub metacopy: bool,
 }
 
 /// Cache policy for FUSE open options.
@@ -109,9 +89,6 @@ pub(crate) enum NodeState {
         upper_fd: File,
     },
 
-    /// The virtual init.krun binary.
-    Init,
-
     /// Entry lives on a read-only lower layer.
     Lower {
         /// Which lower layer (index into OverlayFs::lowers).
@@ -159,9 +136,6 @@ pub(crate) struct Layer {
     /// Root directory fd (O_RDONLY | O_DIRECTORY | O_CLOEXEC).
     pub root_fd: File,
 
-    /// Whether this layer is writable (only the topmost layer).
-    pub writable: bool,
-
     /// Index in the layer stack (0 = bottommost lower).
     pub index: usize,
 
@@ -176,54 +150,18 @@ pub(crate) struct Layer {
 
 /// A directory entry linking a name to a node within a parent.
 pub(crate) struct Dentry {
-    /// Parent node's inode number (0 for root's parent).
-    pub parent: u64,
-
-    /// Interned name of this entry.
-    pub name: NameId,
-
     /// Node (inode) this entry points to.
     pub node: u64,
-
-    /// Dentry flags.
-    pub flags: DentryFlags,
-}
-
-/// Dentry flags (manual bitflags — no bitflags dep in workspace).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct DentryFlags(u8);
-
-impl DentryFlags {
-    /// Empty flags.
-    pub const EMPTY: Self = Self(0);
-    /// This dentry represents a whiteout (.wh.<name>).
-    pub const WHITEOUT: Self = Self(0x01);
-    /// This dentry is a negative cache entry (known not to exist).
-    pub const NEGATIVE: Self = Self(0x02);
-
-    /// Check if a flag is set.
-    pub fn contains(self, flag: Self) -> bool {
-        self.0 & flag.0 == flag.0
-    }
 }
 
 /// File handle for open regular files.
 pub(crate) struct FileHandle {
-    /// The overlay inode this handle belongs to.
-    pub inode: u64,
-
     /// Real open fd for I/O.
     pub file: RwLock<File>,
-
-    /// Whether this handle was opened for writing.
-    pub writable: bool,
 }
 
 /// Directory handle with lazy merged snapshot.
 pub(crate) struct DirHandle {
-    /// The overlay inode this handle belongs to.
-    pub inode: u64,
-
     /// Merged entry snapshot, built on first readdir call.
     pub snapshot: Mutex<Option<DirSnapshot>>,
 }
@@ -232,6 +170,11 @@ pub(crate) struct DirHandle {
 pub(crate) struct DirSnapshot {
     /// Merged entries across all layers.
     pub entries: Vec<MergedDirEntry>,
+
+    /// Whether guest-visible d_types have been corrected via stat override lookups.
+    /// Lazily set on first `do_readdir` call; skipped by `do_readdirplus` which
+    /// corrects d_types from its own lookup results.
+    pub dtypes_corrected: bool,
 }
 
 /// A single entry in a merged directory snapshot.
@@ -273,23 +216,6 @@ pub(crate) struct RedirectState {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl Default for OverlayConfig {
-    fn default() -> Self {
-        Self {
-            lowers: Vec::new(),
-            upper_dir: PathBuf::new(),
-            state_dir: PathBuf::new(),
-            xattr: true,
-            strict: true,
-            entry_timeout: Duration::from_secs(5),
-            attr_timeout: Duration::from_secs(5),
-            cache_policy: CachePolicy::Auto,
-            writeback: false,
-            metacopy: false,
-        }
-    }
-}
-
 impl NameTable {
     /// Create a new empty name table.
     pub fn new() -> Self {
@@ -317,9 +243,10 @@ impl NameTable {
         }
 
         let mut reverse = self.reverse.write().unwrap();
-        let id = NameId(reverse.len() as u32);
-        reverse.push(name.to_vec());
-        names.insert(name.to_vec(), id);
+        let id = NameId(reverse.len().try_into().expect("NameTable overflow"));
+        let owned = name.to_vec();
+        names.insert(owned.clone(), id);
+        reverse.push(owned);
         id
     }
 

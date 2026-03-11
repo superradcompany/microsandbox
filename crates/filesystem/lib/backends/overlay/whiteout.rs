@@ -26,11 +26,23 @@ use crate::backends::shared::platform;
 //--------------------------------------------------------------------------------------------------
 
 /// Xattr key for overflow whiteout tombstones on parent directories.
-const TOMBSTONES_XATTR_KEY: &CStr = c"user.containers.overlay_tombstones";
+pub(crate) const TOMBSTONES_XATTR_KEY: &CStr = c"user.containers.overlay_tombstones";
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Build a `.wh.<name>\0` CStr in a caller-provided stack buffer.
+///
+/// Requires `name.len() <= 251` (caller must check) and `buf.len() >= 260`.
+/// Returns a borrowed CStr referencing the buffer.
+pub(crate) fn build_whiteout_cstr<'a>(name: &[u8], buf: &'a mut [u8; 260]) -> &'a CStr {
+    debug_assert!(name.len() <= 251, "name too long for inline whiteout");
+    buf[..4].copy_from_slice(b".wh.");
+    buf[4..4 + name.len()].copy_from_slice(name);
+    buf[4 + name.len()] = 0;
+    unsafe { CStr::from_bytes_with_nul_unchecked(&buf[..4 + name.len() + 1]) }
+}
 
 /// Create a whiteout for a name in the upper parent directory.
 ///
@@ -41,21 +53,15 @@ pub(crate) fn create_whiteout(upper_parent_fd: RawFd, name: &[u8]) -> io::Result
         return create_overflow_whiteout(upper_parent_fd, name);
     }
 
-    // Build ".wh.<name>\0".
     let mut wh_buf = [0u8; 260];
-    wh_buf[..4].copy_from_slice(b".wh.");
-    wh_buf[4..4 + name.len()].copy_from_slice(name);
-    wh_buf[4 + name.len()] = 0;
-
-    let wh_name =
-        unsafe { CStr::from_bytes_with_nul_unchecked(&wh_buf[..4 + name.len() + 1]) };
+    let wh_name = build_whiteout_cstr(name, &mut wh_buf);
 
     let fd = unsafe {
         libc::openat(
             upper_parent_fd,
             wh_name.as_ptr(),
             libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_CLOEXEC,
-            (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
+            0o000 as libc::c_uint,
         )
     };
     if fd < 0 {
@@ -81,14 +87,8 @@ pub(crate) fn remove_whiteout(upper_parent_fd: RawFd, name: &[u8]) -> io::Result
         return remove_overflow_whiteout(upper_parent_fd, name);
     }
 
-    // Build ".wh.<name>\0".
     let mut wh_buf = [0u8; 260];
-    wh_buf[..4].copy_from_slice(b".wh.");
-    wh_buf[4..4 + name.len()].copy_from_slice(name);
-    wh_buf[4 + name.len()] = 0;
-
-    let wh_name =
-        unsafe { CStr::from_bytes_with_nul_unchecked(&wh_buf[..4 + name.len() + 1]) };
+    let wh_name = build_whiteout_cstr(name, &mut wh_buf);
 
     let ret = unsafe { libc::unlinkat(upper_parent_fd, wh_name.as_ptr(), 0) };
     if ret < 0 {
@@ -118,16 +118,22 @@ pub(crate) fn has_lower_entry(fs: &OverlayFs, parent_inode: u64, name: &[u8]) ->
     // If parent is opaque, no lower entries are visible.
     if parent_node
         .opaque
-        .load(std::sync::atomic::Ordering::Relaxed)
+        .load(std::sync::atomic::Ordering::Acquire)
     {
         return Ok(false);
     }
 
     let name_cstr = std::ffi::CString::new(name).map_err(|_| platform::einval())?;
 
+    // Precompute the path once — it depends only on parent_node, not the layer.
+    let path_components = match inode::get_parent_lower_path(fs, &parent_node) {
+        Ok(p) => p,
+        Err(_) => return Ok(false),
+    };
+
     // Check each lower layer (top-down).
     for lower in fs.lowers.iter().rev() {
-        let lower_parent_fd = match get_lower_parent_fd(fs, lower, &parent_node) {
+        let lower_parent_fd = match inode::open_lower_parent(lower, &parent_node, &path_components) {
             Some(fd) => fd,
             None => continue,
         };
@@ -140,7 +146,7 @@ pub(crate) fn has_lower_entry(fs: &OverlayFs, parent_inode: u64, name: &[u8]) ->
         // Check if entry exists on this layer.
         match platform::fstatat_nofollow(lower_parent_fd.raw(), &name_cstr) {
             Ok(_) => return Ok(true),
-            Err(e) if is_enoent(&e) => {}
+            Err(e) if platform::is_enoent(&e) => {}
             Err(e) => return Err(e),
         }
 
@@ -162,10 +168,9 @@ pub(crate) fn has_lower_entry(fs: &OverlayFs, parent_inode: u64, name: &[u8]) ->
 /// Reads `user.containers.overlay_tombstones` from `parent_fd` and searches
 /// the length-prefixed list for `name`.
 pub(crate) fn check_overflow_whiteout(parent_fd: RawFd, name: &[u8]) -> io::Result<bool> {
-    let blob = match read_tombstone_xattr(parent_fd) {
-        Ok(Some(blob)) => blob,
-        Ok(None) => return Ok(false),
-        Err(e) => return Err(e),
+    let blob = match read_tombstone_xattr(parent_fd)? {
+        Some(blob) => blob,
+        None => return Ok(false),
     };
 
     let entries = parse_tombstone_blob(&blob)?;
@@ -177,6 +182,10 @@ pub(crate) fn check_overflow_whiteout(parent_fd: RawFd, name: &[u8]) -> io::Resu
 /// Reads existing tombstone blob (if any), validates it, checks for
 /// duplicates, appends the new entry, and writes the blob back.
 fn create_overflow_whiteout(parent_fd: RawFd, name: &[u8]) -> io::Result<()> {
+    if name.len() > u16::MAX as usize {
+        return Err(platform::enametoolong());
+    }
+
     let mut blob = match read_tombstone_xattr(parent_fd) {
         Ok(Some(existing)) => {
             // Validate existing blob and check for duplicates.
@@ -203,10 +212,9 @@ fn create_overflow_whiteout(parent_fd: RawFd, name: &[u8]) -> io::Result<()> {
 /// If the resulting blob is empty, removes the xattr entirely.
 /// Returns `true` if the name was found and removed.
 fn remove_overflow_whiteout(parent_fd: RawFd, name: &[u8]) -> io::Result<bool> {
-    let blob = match read_tombstone_xattr(parent_fd) {
-        Ok(Some(existing)) => existing,
-        Ok(None) => return Ok(false),
-        Err(e) => return Err(e),
+    let blob = match read_tombstone_xattr(parent_fd)? {
+        Some(existing) => existing,
+        None => return Ok(false),
     };
 
     let entries = parse_tombstone_blob(&blob)?;
@@ -240,10 +248,9 @@ fn remove_overflow_whiteout(parent_fd: RawFd, name: &[u8]) -> io::Result<bool> {
 /// Returns an empty Vec if no tombstone xattr is present.
 /// Used by readdir to bulk-add overflow-whiteout names to the `seen` set.
 pub(crate) fn get_tombstoned_names(parent_fd: RawFd) -> io::Result<Vec<Vec<u8>>> {
-    let blob = match read_tombstone_xattr(parent_fd) {
-        Ok(Some(blob)) => blob,
-        Ok(None) => return Ok(Vec::new()),
-        Err(e) => return Err(e),
+    let blob = match read_tombstone_xattr(parent_fd)? {
+        Some(blob) => blob,
+        None => return Ok(Vec::new()),
     };
 
     let entries = parse_tombstone_blob(&blob)?;
@@ -276,89 +283,101 @@ fn parse_tombstone_blob(blob: &[u8]) -> io::Result<Vec<&[u8]>> {
 
 /// Read the tombstone xattr from a directory fd.
 fn read_tombstone_xattr(fd: RawFd) -> io::Result<Option<Vec<u8>>> {
-    // First, get the size.
+    // Build /proc/self/fd path once for all reads (Linux).
     #[cfg(target_os = "linux")]
-    let size = {
+    let path_cstr = {
         let path = format!("/proc/self/fd/{fd}");
-        let path_cstr = std::ffi::CString::new(path).map_err(|_| platform::eio())?;
-        unsafe {
+        std::ffi::CString::new(path).map_err(|_| platform::eio())?
+    };
+
+    // Retry loop: the xattr may grow between sizing and reading (TOCTOU).
+    // Bounded to 3 attempts to prevent infinite loops.
+    for _ in 0..3 {
+        // Get the size.
+        #[cfg(target_os = "linux")]
+        let size = unsafe {
             libc::getxattr(
                 path_cstr.as_ptr(),
                 TOMBSTONES_XATTR_KEY.as_ptr(),
                 std::ptr::null_mut(),
                 0,
             )
-        }
-    };
+        };
 
-    #[cfg(target_os = "macos")]
-    let size = unsafe {
-        libc::fgetxattr(
-            fd,
-            TOMBSTONES_XATTR_KEY.as_ptr(),
-            std::ptr::null_mut(),
-            0,
-            0,
-            0,
-        )
-    };
-
-    if size < 0 {
-        let err = io::Error::last_os_error();
-        let errno = err.raw_os_error().unwrap_or(0);
-        #[cfg(target_os = "linux")]
-        if errno == libc::ENODATA {
-            return Ok(None);
-        }
         #[cfg(target_os = "macos")]
-        if errno == libc::ENOATTR {
+        let size = unsafe {
+            libc::fgetxattr(
+                fd,
+                TOMBSTONES_XATTR_KEY.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+            )
+        };
+
+        if size < 0 {
+            let err = io::Error::last_os_error();
+            let errno = err.raw_os_error().unwrap_or(0);
+            #[cfg(target_os = "linux")]
+            if errno == libc::ENODATA {
+                return Ok(None);
+            }
+            #[cfg(target_os = "macos")]
+            if errno == libc::ENOATTR {
+                return Ok(None);
+            }
+            if errno == libc::EOPNOTSUPP {
+                return Ok(None);
+            }
+            return Err(platform::linux_error(err));
+        }
+
+        let size = size as usize;
+        if size == 0 {
             return Ok(None);
         }
-        if errno == libc::EOPNOTSUPP {
-            return Ok(None);
-        }
-        return Err(platform::linux_error(err));
-    }
 
-    let size = size as usize;
-    if size == 0 {
-        return Ok(None);
-    }
+        let mut buf = vec![0u8; size];
 
-    let mut buf = vec![0u8; size];
-
-    #[cfg(target_os = "linux")]
-    let ret = {
-        let path = format!("/proc/self/fd/{fd}");
-        let path_cstr = std::ffi::CString::new(path).map_err(|_| platform::eio())?;
-        unsafe {
+        #[cfg(target_os = "linux")]
+        let ret = unsafe {
             libc::getxattr(
                 path_cstr.as_ptr(),
                 TOMBSTONES_XATTR_KEY.as_ptr(),
                 buf.as_mut_ptr() as *mut libc::c_void,
                 size,
             )
+        };
+
+        #[cfg(target_os = "macos")]
+        let ret = unsafe {
+            libc::fgetxattr(
+                fd,
+                TOMBSTONES_XATTR_KEY.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                size,
+                0,
+                0,
+            )
+        };
+
+        if ret < 0 {
+            let err = io::Error::last_os_error();
+            // ERANGE means the xattr grew between sizing and reading.
+            // Retry from the top.
+            if err.raw_os_error() == Some(libc::ERANGE) {
+                continue;
+            }
+            return Err(platform::linux_error(err));
         }
-    };
 
-    #[cfg(target_os = "macos")]
-    let ret = unsafe {
-        libc::fgetxattr(
-            fd,
-            TOMBSTONES_XATTR_KEY.as_ptr(),
-            buf.as_mut_ptr() as *mut libc::c_void,
-            size,
-            0,
-            0,
-        )
-    };
-
-    if ret < 0 {
-        return Err(platform::linux_error(io::Error::last_os_error()));
+        buf.truncate(ret as usize);
+        return Ok(Some(buf));
     }
 
-    buf.truncate(ret as usize);
-    Ok(Some(buf))
+    // Exhausted retries — the xattr keeps changing.
+    Err(platform::eio())
 }
 
 /// Write the tombstone xattr on a directory fd.
@@ -449,20 +468,4 @@ pub(crate) fn remove_tombstone_xattr_if_present(fd: RawFd) {
     let _ = remove_tombstone_xattr(fd);
 }
 
-/// Open a parent directory in a lower layer.
-///
-/// Uses the same path-resolution logic as lookup: handles Root, same-layer
-/// Lower, cross-layer, Upper (copied-up), and redirected parents.
-fn get_lower_parent_fd(
-    fs: &OverlayFs,
-    lower: &super::types::Layer,
-    parent_node: &super::types::OverlayNode,
-) -> Option<inode::NodeFd> {
-    let path_components = inode::get_parent_lower_path(fs, parent_node);
-    inode::open_lower_parent(lower, parent_node, &path_components)
-}
 
-/// Check if an error is ENOENT.
-fn is_enoent(err: &io::Error) -> bool {
-    matches!(err.raw_os_error(), Some(2) | Some(libc::ENOENT))
-}
