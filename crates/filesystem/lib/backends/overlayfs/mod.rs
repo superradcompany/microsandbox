@@ -57,8 +57,8 @@ pub struct OverlayFs {
     /// Writable upper layer.
     pub(crate) upper: Layer,
 
-    /// State directory fd (same filesystem as upper, for atomic staging).
-    pub(crate) state_fd: File,
+    /// Work directory fd (same filesystem as upper, for atomic staging).
+    pub(crate) work_fd: File,
 
     /// Inode table: FUSE inode → OverlayNode.
     pub(crate) nodes: RwLock<BTreeMap<u64, Arc<OverlayNode>>>,

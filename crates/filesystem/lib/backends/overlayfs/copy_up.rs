@@ -2,7 +2,7 @@
 //!
 //! All mutation operations (write, setattr, setxattr, unlink, rmdir, rename)
 //! must call [`ensure_upper`] on the target inode before modifying it.
-//! Copy-up is atomic: data is staged in the state directory and moved to the
+//! Copy-up is atomic: data is staged in the work directory and moved to the
 //! upper layer with `renameat`.
 //!
 //! ## Ancestor copy-up
@@ -154,7 +154,7 @@ pub(crate) fn open_upper_parent_fd(fs: &OverlayFs, parent_ino: u64) -> io::Resul
 // Functions: Copy-up by type
 //--------------------------------------------------------------------------------------------------
 
-/// Copy up a regular file: stage in state_dir, copy data + xattrs, atomic rename.
+/// Copy up a regular file: stage in work_dir, copy data + xattrs, atomic rename.
 ///
 /// If another hardlink alias of this lower inode was already copied up, creates
 /// an upper hardlink instead of copying data again.
@@ -188,7 +188,7 @@ fn copy_up_regular(
         libc::close(fd);
     });
 
-    // Create temp file in state_dir.
+    // Create temp file in work_dir.
     let (temp_fd, temp_name) = create_temp_file(fs)?;
     let _close_temp = scopeguard::guard(temp_fd, |fd| unsafe {
         libc::close(fd);
@@ -208,10 +208,10 @@ fn copy_up_regular(
     // fsync the temp file for crash safety.
     fsync_fd(temp_fd)?;
 
-    // Atomic rename from state_dir to upper parent.
+    // Atomic rename from work_dir to upper parent.
     let ret = unsafe {
         libc::renameat(
-            fs.state_fd.as_raw_fd(),
+            fs.work_fd.as_raw_fd(),
             temp_name.as_ptr(),
             upper_parent_fd,
             name.as_ptr(),
@@ -220,7 +220,7 @@ fn copy_up_regular(
     if ret < 0 {
         let err = io::Error::last_os_error();
         // Clean up temp file on failure.
-        unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+        unsafe { libc::unlinkat(fs.work_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
         return Err(platform::linux_error(err));
     }
 
@@ -344,7 +344,7 @@ fn copy_up_symlink(
                 libc::write(temp_fd, buf.as_ptr() as *const libc::c_void, buf.len())
             };
             if written < 0 || (written as usize) != buf.len() {
-                unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+                unsafe { libc::unlinkat(fs.work_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
                 return Err(platform::eio());
             }
 
@@ -353,7 +353,7 @@ fn copy_up_symlink(
             if let Err(e) =
                 stat_override::set_override(temp_fd, st.st_uid, st.st_gid, mode, 0)
             {
-                unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+                unsafe { libc::unlinkat(fs.work_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
                 return Err(e);
             }
 
@@ -409,10 +409,10 @@ fn copy_up_symlink(
         buf.push(0); // NUL-terminate
         let target = unsafe { CStr::from_bytes_with_nul_unchecked(&buf) };
 
-        // Stage: create symlink in state_dir, not directly in upper.
+        // Stage: create symlink in work_dir, not directly in upper.
         let temp_name = create_temp_symlink_name(fs);
         let ret =
-            unsafe { libc::symlinkat(target.as_ptr(), fs.state_fd.as_raw_fd(), temp_name.as_ptr()) };
+            unsafe { libc::symlinkat(target.as_ptr(), fs.work_fd.as_raw_fd(), temp_name.as_ptr()) };
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
@@ -424,14 +424,14 @@ fn copy_up_symlink(
         // Copy xattrs via O_SYMLINK fd on the staged symlink.
         let sym_fd = unsafe {
             libc::openat(
-                fs.state_fd.as_raw_fd(),
+                fs.work_fd.as_raw_fd(),
                 temp_name.as_ptr(),
                 libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK,
             )
         };
         if sym_fd < 0 {
             let err = io::Error::last_os_error();
-            unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+            unsafe { libc::unlinkat(fs.work_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
             return Err(platform::linux_error(err));
         }
 
@@ -444,18 +444,18 @@ fn copy_up_symlink(
         unsafe { libc::close(sym_fd) };
 
         if let Err(e) = xattr_result {
-            unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+            unsafe { libc::unlinkat(fs.work_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
             return Err(e);
         }
         if let Err(e) = ts_result {
-            unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+            unsafe { libc::unlinkat(fs.work_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
             return Err(e);
         }
 
         // Atomically install into upper.
         let ret = unsafe {
             libc::renameat(
-                fs.state_fd.as_raw_fd(),
+                fs.work_fd.as_raw_fd(),
                 temp_name.as_ptr(),
                 upper_parent_fd,
                 name.as_ptr(),
@@ -463,7 +463,7 @@ fn copy_up_symlink(
         };
         if ret < 0 {
             let err = io::Error::last_os_error();
-            unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+            unsafe { libc::unlinkat(fs.work_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
             return Err(platform::linux_error(err));
         }
     }
@@ -479,7 +479,7 @@ fn copy_up_symlink(
 
 /// Copy up a special file (device, fifo, socket).
 ///
-/// Creates a regular file in state_dir, copies override xattr (which holds the
+/// Creates a regular file in work_dir, copies override xattr (which holds the
 /// real type/rdev), then atomically renames into the upper layer.
 fn copy_up_special(
     fs: &OverlayFs,
@@ -493,7 +493,7 @@ fn copy_up_special(
         libc::close(fd);
     });
 
-    // Stage in state_dir.
+    // Stage in work_dir.
     let (temp_fd, temp_name) = create_temp_file(fs)?;
     let _close_temp = scopeguard::guard(temp_fd, |fd| unsafe {
         libc::close(fd);
@@ -504,26 +504,26 @@ fn copy_up_special(
 
     // Copy xattrs from lower (which includes override with type/rdev info).
     if let Err(e) = copy_xattrs(lower_fd, temp_fd) {
-        unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+        unsafe { libc::unlinkat(fs.work_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
         return Err(e);
     }
 
     // Preserve source timestamps.
     if let Err(e) = apply_timestamps(temp_fd, &st) {
-        unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+        unsafe { libc::unlinkat(fs.work_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
         return Err(e);
     }
 
     // fsync temp file.
     if let Err(e) = fsync_fd(temp_fd) {
-        unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+        unsafe { libc::unlinkat(fs.work_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
         return Err(e);
     }
 
-    // Atomic rename from state_dir to upper parent.
+    // Atomic rename from work_dir to upper parent.
     let ret = unsafe {
         libc::renameat(
-            fs.state_fd.as_raw_fd(),
+            fs.work_fd.as_raw_fd(),
             temp_name.as_ptr(),
             upper_parent_fd,
             name.as_ptr(),
@@ -531,7 +531,7 @@ fn copy_up_special(
     };
     if ret < 0 {
         let err = io::Error::last_os_error();
-        unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+        unsafe { libc::unlinkat(fs.work_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
         return Err(platform::linux_error(err));
     }
 
@@ -562,17 +562,17 @@ fn stage_and_install(
     name: &CStr,
 ) -> io::Result<()> {
     if let Err(e) = apply_timestamps(temp_fd, st) {
-        unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+        unsafe { libc::unlinkat(fs.work_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
         return Err(e);
     }
     if let Err(e) = fsync_fd(temp_fd) {
-        unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+        unsafe { libc::unlinkat(fs.work_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
         return Err(e);
     }
 
     let ret = unsafe {
         libc::renameat(
-            fs.state_fd.as_raw_fd(),
+            fs.work_fd.as_raw_fd(),
             temp_name.as_ptr(),
             upper_parent_fd,
             name.as_ptr(),
@@ -580,7 +580,7 @@ fn stage_and_install(
     };
     if ret < 0 {
         let err = io::Error::last_os_error();
-        unsafe { libc::unlinkat(fs.state_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
+        unsafe { libc::unlinkat(fs.work_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
         return Err(platform::linux_error(err));
     }
 
@@ -1208,9 +1208,9 @@ fn set_xattr_value(fd: RawFd, name: &CStr, value: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// Create a temporary file in the state directory.
+/// Create a temporary file in the work directory.
 ///
-/// Returns (fd, name_cstring). The name is relative to `state_fd`.
+/// Returns (fd, name_cstring). The name is relative to `work_fd`.
 fn create_temp_file(fs: &OverlayFs) -> io::Result<(RawFd, std::ffi::CString)> {
     // Generate a unique name.
     let id = fs
@@ -1221,7 +1221,7 @@ fn create_temp_file(fs: &OverlayFs) -> io::Result<(RawFd, std::ffi::CString)> {
 
     let fd = unsafe {
         libc::openat(
-            fs.state_fd.as_raw_fd(),
+            fs.work_fd.as_raw_fd(),
             name_cstr.as_ptr(),
             libc::O_CREAT | libc::O_EXCL | libc::O_RDWR | libc::O_CLOEXEC,
             (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
@@ -1234,9 +1234,9 @@ fn create_temp_file(fs: &OverlayFs) -> io::Result<(RawFd, std::ffi::CString)> {
     Ok((fd, name_cstr))
 }
 
-/// Generate a unique temporary name for staging a symlink in the state directory.
+/// Generate a unique temporary name for staging a symlink in the work directory.
 ///
-/// Returns a CString suitable for use with `symlinkat`/`renameat` relative to `state_fd`.
+/// Returns a CString suitable for use with `symlinkat`/`renameat` relative to `work_fd`.
 #[cfg(target_os = "macos")]
 fn create_temp_symlink_name(fs: &OverlayFs) -> std::ffi::CString {
     let id = fs

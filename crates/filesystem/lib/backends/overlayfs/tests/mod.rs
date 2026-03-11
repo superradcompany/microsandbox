@@ -121,7 +121,7 @@ impl OverlayTestSandbox {
         }
         let fs = builder
             .writable(&upper)
-            .state_dir(&state)
+            .work_dir(&state)
             .build()
             .unwrap();
 

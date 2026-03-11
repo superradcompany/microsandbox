@@ -14,8 +14,8 @@ pub mod backends;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use backends::overlay::{CachePolicy as OverlayCachePolicy, OverlayConfig, OverlayFs};
-pub use backends::passthrough::{CachePolicy, PassthroughConfig, PassthroughFs};
+pub use backends::overlayfs::{CachePolicy as OverlayCachePolicy, OverlayConfig, OverlayFs};
+pub use backends::passthroughfs::{CachePolicy, PassthroughConfig, PassthroughFs};
 pub use msb_krun::backends::fs::{
     Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions, GetxattrReply, ListxattrReply,
     OpenOptions, RemovemappingOne, SetattrValid, ZeroCopyReader, ZeroCopyWriter, stat64, statvfs64,

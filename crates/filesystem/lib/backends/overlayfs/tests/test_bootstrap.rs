@@ -9,7 +9,7 @@ fn test_build_no_lower_fails() {
     std::fs::create_dir(&state).unwrap();
     let result = OverlayFs::builder()
         .writable(&upper)
-        .state_dir(&state)
+        .work_dir(&state)
         .build();
     assert!(result.is_err(), "should fail without lower layers");
 }
@@ -21,7 +21,7 @@ fn test_build_no_upper_fails() {
     let state = tmp.path().join("state");
     std::fs::create_dir(&lower).unwrap();
     std::fs::create_dir(&state).unwrap();
-    let result = OverlayFs::builder().layer(&lower).state_dir(&state).build();
+    let result = OverlayFs::builder().layer(&lower).work_dir(&state).build();
     assert!(result.is_err(), "should fail without upper layer");
 }
 
@@ -36,7 +36,7 @@ fn test_build_no_state_fails() {
         .layer(&lower)
         .writable(&upper)
         .build();
-    assert!(result.is_err(), "should fail without state dir");
+    assert!(result.is_err(), "should fail without work dir");
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn test_init_flag_negotiation() {
     let fs = OverlayFs::builder()
         .layer(&lower)
         .writable(&upper)
-        .state_dir(&state)
+        .work_dir(&state)
         .build()
         .unwrap();
     let caps = FsOptions::ASYNC_READ | FsOptions::BIG_WRITES | FsOptions::HANDLE_KILLPRIV_V2;

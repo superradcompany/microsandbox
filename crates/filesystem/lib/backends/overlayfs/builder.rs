@@ -5,7 +5,7 @@
 //!     .layer(lower0)
 //!     .layer(lower1)
 //!     .writable(upper)
-//!     .state_dir(state)
+//!     .work_dir(work)
 //!     .build()?
 //! ```
 
@@ -30,7 +30,7 @@ use crate::backends::shared::{init_binary, platform, stat_override};
 pub struct OverlayFsBuilder {
     lowers: Vec<PathBuf>,
     upper_dir: Option<PathBuf>,
-    state_dir: Option<PathBuf>,
+    work_dir: Option<PathBuf>,
     strict: bool,
     entry_timeout: Duration,
     attr_timeout: Duration,
@@ -48,7 +48,7 @@ impl OverlayFsBuilder {
         Self {
             lowers: Vec::new(),
             upper_dir: None,
-            state_dir: None,
+            work_dir: None,
             strict: true,
             entry_timeout: Duration::from_secs(5),
             attr_timeout: Duration::from_secs(5),
@@ -76,8 +76,8 @@ impl OverlayFsBuilder {
     }
 
     /// Set the private staging directory (must be on same filesystem as upper).
-    pub fn state_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.state_dir = Some(path.into());
+    pub fn work_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.work_dir = Some(path.into());
         self
     }
 
@@ -116,8 +116,8 @@ impl OverlayFsBuilder {
         let upper_dir = self.upper_dir.ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "upper directory not set")
         })?;
-        let state_dir = self.state_dir.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "state directory not set")
+        let work_dir = self.work_dir.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "work directory not set")
         })?;
 
         if self.lowers.is_empty() {
@@ -187,24 +187,24 @@ impl OverlayFsBuilder {
             has_openat2,
         };
 
-        // Open state directory.
-        let state_fd = open_dir(&state_dir)?;
+        // Open work directory.
+        let work_fd = open_dir(&work_dir)?;
 
-        // Verify state_dir is on same filesystem as upper_dir.
+        // Verify work_dir is on same filesystem as upper_dir.
         {
             use std::os::fd::AsRawFd;
             let upper_st = platform::fstat(upper.root_fd.as_raw_fd())?;
-            let state_st = platform::fstat(state_fd.as_raw_fd())?;
-            if upper_st.st_dev != state_st.st_dev {
+            let work_st = platform::fstat(work_fd.as_raw_fd())?;
+            if upper_st.st_dev != work_st.st_dev {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "state_dir must be on the same filesystem as upper_dir",
+                    "work_dir must be on the same filesystem as upper_dir",
                 ));
             }
         }
 
-        // Clean leftover temp files in state_dir.
-        clean_state_dir(&state_fd)?;
+        // Clean leftover temp files in work_dir.
+        clean_work_dir(&work_fd)?;
 
         // Create init binary file.
         let init_file = init_binary::create_init_file()?;
@@ -219,7 +219,7 @@ impl OverlayFsBuilder {
         Ok(OverlayFs {
             lowers,
             upper,
-            state_fd,
+            work_fd,
             nodes: RwLock::new(BTreeMap::new()),
             dentries: RwLock::new(BTreeMap::new()),
             upper_alt_keys: RwLock::new(BTreeMap::new()),
@@ -273,11 +273,11 @@ fn dup_fd(f: &File) -> io::Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-/// Clean leftover temp files in state_dir from prior crashes.
-fn clean_state_dir(state_fd: &File) -> io::Result<()> {
+/// Clean leftover temp files in work_dir from prior crashes.
+fn clean_work_dir(work_fd: &File) -> io::Result<()> {
     use std::os::fd::AsRawFd;
 
-    let dup_fd = unsafe { libc::fcntl(state_fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    let dup_fd = unsafe { libc::fcntl(work_fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
     if dup_fd < 0 {
         return Err(platform::linux_error(io::Error::last_os_error()));
     }
@@ -318,7 +318,7 @@ fn clean_state_dir(state_fd: &File) -> io::Result<()> {
 
         // Remove files starting with ".tmp." — our temp file prefix.
         if name_bytes.starts_with(b".tmp.") {
-            let ret = unsafe { libc::unlinkat(state_fd.as_raw_fd(), name.as_ptr(), 0) };
+            let ret = unsafe { libc::unlinkat(work_fd.as_raw_fd(), name.as_ptr(), 0) };
             if ret < 0 {
                 let err = io::Error::last_os_error();
                 if err.raw_os_error() != Some(libc::ENOENT) {
