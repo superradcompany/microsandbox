@@ -57,8 +57,6 @@ const LINUX_EROFS: i32 = 30;
 const LINUX_EMLINK: i32 = 31;
 const LINUX_EPIPE: i32 = 32;
 const LINUX_EDOM: i32 = 33;
-#[allow(dead_code)]
-pub(crate) const LINUX_ERANGE: i32 = 34;
 const LINUX_EDEADLK: i32 = 35;
 const LINUX_ENAMETOOLONG: i32 = 36;
 const LINUX_ENOLCK: i32 = 37;
@@ -258,7 +256,6 @@ pub(crate) fn enosys() -> io::Error {
 }
 
 /// Create an `io::Error` with Linux `ENOENT`.
-#[allow(dead_code)]
 pub(crate) fn enoent() -> io::Error {
     io::Error::from_raw_os_error(LINUX_ENOENT)
 }
@@ -268,10 +265,42 @@ pub(crate) fn enodata() -> io::Error {
     io::Error::from_raw_os_error(LINUX_ENODATA)
 }
 
+/// Create an `io::Error` with Linux `EISDIR`.
+pub(crate) fn eisdir() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_EISDIR)
+}
+
+/// Create an `io::Error` with Linux `ENOTDIR`.
+pub(crate) fn enotdir() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_ENOTDIR)
+}
+
 /// Create an `io::Error` with Linux `ENOTEMPTY`.
-#[allow(dead_code)]
 pub(crate) fn enotempty() -> io::Error {
     io::Error::from_raw_os_error(LINUX_ENOTEMPTY)
+}
+
+/// Create an `io::Error` with Linux `ELOOP`.
+pub(crate) fn eloop() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_ELOOP)
+}
+
+/// Create an `io::Error` with Linux `ENAMETOOLONG`.
+pub(crate) fn enametoolong() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_ENAMETOOLONG)
+}
+
+/// Create an `io::Error` with Linux `EEXIST`.
+pub(crate) fn eexist() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_EEXIST)
+}
+
+/// Check if an error is ENOENT.
+///
+/// ENOENT is 2 on both Linux and macOS, so a single check suffices
+/// regardless of whether `linux_error()` was applied.
+pub(crate) fn is_enoent(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(2)
 }
 
 /// Call `fstat` on a raw file descriptor and return a `stat64`.
@@ -295,9 +324,9 @@ pub(crate) fn fstat(fd: RawFd) -> io::Result<stat64> {
 #[cfg(target_os = "linux")]
 #[repr(C)]
 pub(crate) struct OpenHow {
-    pub flags: u64,
-    pub mode: u64,
-    pub resolve: u64,
+    flags: u64,
+    mode: u64,
+    resolve: u64,
 }
 
 /// `RESOLVE_BENEATH` flag — prevent path resolution from escaping the directory tree.
