@@ -1,0 +1,179 @@
+//! Builder API for constructing a PassthroughFs instance.
+//!
+//! ```ignore
+//! PassthroughFs::builder()
+//!     .root_dir("./rootfs")
+//!     .xattr(true)
+//!     .strict(true)
+//!     .build()?
+//! ```
+
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::RwLock;
+use std::time::Duration;
+
+use super::{CachePolicy, PassthroughFs};
+use crate::backends::shared::inode_table::MultikeyBTreeMap;
+use crate::backends::shared::{init_binary, platform, stat_override};
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Builder for constructing a [`PassthroughFs`] instance.
+pub struct PassthroughFsBuilder {
+    root_dir: Option<PathBuf>,
+    xattr: bool,
+    strict: bool,
+    entry_timeout: Duration,
+    attr_timeout: Duration,
+    cache_policy: CachePolicy,
+    writeback: bool,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl PassthroughFsBuilder {
+    /// Create a new builder with default settings.
+    pub(crate) fn new() -> Self {
+        Self {
+            root_dir: None,
+            xattr: true,
+            strict: true,
+            entry_timeout: Duration::from_secs(5),
+            attr_timeout: Duration::from_secs(5),
+            cache_policy: CachePolicy::Auto,
+            writeback: false,
+        }
+    }
+
+    /// Set the host directory to expose.
+    pub fn root_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.root_dir = Some(path.into());
+        self
+    }
+
+    /// Enable or disable xattr-based stat virtualization.
+    pub fn xattr(mut self, enabled: bool) -> Self {
+        self.xattr = enabled;
+        self
+    }
+
+    /// Enable or disable strict mode.
+    pub fn strict(mut self, enabled: bool) -> Self {
+        self.strict = enabled;
+        self
+    }
+
+    /// Set the FUSE entry cache timeout.
+    pub fn entry_timeout(mut self, timeout: Duration) -> Self {
+        self.entry_timeout = timeout;
+        self
+    }
+
+    /// Set the FUSE attribute cache timeout.
+    pub fn attr_timeout(mut self, timeout: Duration) -> Self {
+        self.attr_timeout = timeout;
+        self
+    }
+
+    /// Set the cache policy.
+    pub fn cache_policy(mut self, policy: CachePolicy) -> Self {
+        self.cache_policy = policy;
+        self
+    }
+
+    /// Enable or disable writeback caching.
+    pub fn writeback(mut self, enabled: bool) -> Self {
+        self.writeback = enabled;
+        self
+    }
+
+    /// Build the PassthroughFs instance.
+    pub fn build(self) -> io::Result<PassthroughFs> {
+        let root_dir = self.root_dir.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "root_dir not set")
+        })?;
+
+        // Open the root directory.
+        let root_path = std::ffi::CString::new(
+            root_dir
+                .to_str()
+                .ok_or_else(platform::einval)?
+                .as_bytes(),
+        )
+        .map_err(|_| platform::einval())?;
+
+        let root_fd_raw = unsafe {
+            libc::open(
+                root_path.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY,
+            )
+        };
+        if root_fd_raw < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
+        }
+        let root_fd = unsafe { File::from_raw_fd(root_fd_raw) };
+
+        // Probe xattr support if strict mode is enabled.
+        if self.strict && self.xattr {
+            let supported = stat_override::probe_xattr_support(root_fd.as_raw_fd())?;
+            if !supported {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "xattr not supported on root filesystem and strict mode is enabled",
+                ));
+            }
+        }
+
+        // Create the init binary file.
+        let init_file = init_binary::create_init_file()?;
+
+        // Probe openat2 / RESOLVE_BENEATH availability (Linux 5.6+).
+        #[cfg(target_os = "linux")]
+        let has_openat2 = AtomicBool::new(platform::probe_openat2());
+
+        // Open /proc/self/fd on Linux for efficient path resolution.
+        #[cfg(target_os = "linux")]
+        let proc_self_fd = {
+            let path = std::ffi::CString::new("/proc/self/fd").unwrap();
+            let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            if fd < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
+            unsafe { File::from_raw_fd(fd) }
+        };
+
+        let cfg = super::PassthroughConfig {
+            root_dir,
+            xattr: self.xattr,
+            strict: self.strict,
+            entry_timeout: self.entry_timeout,
+            attr_timeout: self.attr_timeout,
+            cache_policy: self.cache_policy,
+            writeback: self.writeback,
+        };
+
+        Ok(PassthroughFs {
+            cfg,
+            root_fd,
+            inodes: RwLock::new(MultikeyBTreeMap::new()),
+            next_inode: AtomicU64::new(3), // 1=root, 2=init
+            handles: RwLock::new(BTreeMap::new()),
+            next_handle: AtomicU64::new(1), // 0=init handle
+            writeback: AtomicBool::new(false),
+            init_file,
+            #[cfg(target_os = "linux")]
+            has_openat2,
+            #[cfg(target_os = "linux")]
+            proc_self_fd,
+        })
+    }
+}

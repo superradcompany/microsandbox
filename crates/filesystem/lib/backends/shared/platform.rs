@@ -295,6 +295,41 @@ pub(crate) fn eexist() -> io::Error {
     io::Error::from_raw_os_error(LINUX_EEXIST)
 }
 
+/// Create an `io::Error` with Linux `ENOSPC`.
+pub(crate) fn enospc() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_ENOSPC)
+}
+
+/// Create an `io::Error` with Linux `EFBIG`.
+pub(crate) fn efbig() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_EFBIG)
+}
+
+/// Create an `io::Error` with Linux `EOPNOTSUPP`.
+pub(crate) fn eopnotsupp() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_EOPNOTSUPP)
+}
+
+/// Create an `io::Error` with Linux `ENODEV`.
+pub(crate) fn enodev() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_ENODEV)
+}
+
+/// Create an `io::Error` with Linux `ENXIO`.
+pub(crate) fn enxio() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_ENXIO)
+}
+
+/// Create an `io::Error` with Linux `ERANGE`.
+pub(crate) fn erange() -> io::Error {
+    io::Error::from_raw_os_error(34) // LINUX_ERANGE
+}
+
+/// Create an `io::Error` with Linux `EXDEV`.
+pub(crate) fn exdev() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_EXDEV)
+}
+
 /// Check if an error is ENOENT.
 ///
 /// ENOENT is 2 on both Linux and macOS, so a single check suffices

@@ -4,6 +4,7 @@
 //! stat virtualization (uid/gid/mode via xattr), init.krun injection,
 //! and name validation.
 
+pub(crate) mod builder;
 mod create_ops;
 mod dir_ops;
 mod file_ops;
@@ -119,6 +120,11 @@ pub struct PassthroughFs {
 //--------------------------------------------------------------------------------------------------
 
 impl PassthroughFs {
+    /// Create a builder for constructing a `PassthroughFs` instance.
+    pub fn builder() -> builder::PassthroughFsBuilder {
+        builder::PassthroughFsBuilder::new()
+    }
+
     /// Create a new passthrough filesystem backend.
     ///
     /// Opens the root directory and optionally probes for xattr support.
@@ -654,6 +660,12 @@ impl DynFileSystem for PassthroughFs {
         )
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use builder::PassthroughFsBuilder;
 
 //--------------------------------------------------------------------------------------------------
 // Tests

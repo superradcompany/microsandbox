@@ -38,6 +38,26 @@ pub(crate) fn validate_name(name: &CStr) -> io::Result<()> {
 /// Maximum allowed component length (NAME_MAX on Linux).
 const NAME_MAX: usize = 255;
 
+/// Validate a directory entry name for in-memory filesystem operations.
+///
+/// Extends [`validate_name`] with rejection of:
+/// - `.` (would alias the directory itself)
+/// - Names longer than `NAME_MAX` (255 bytes)
+pub(crate) fn validate_memfs_name(name: &CStr) -> io::Result<()> {
+    validate_name(name)?;
+
+    let bytes = name.to_bytes();
+
+    if bytes == b"." {
+        return Err(platform::eperm());
+    }
+    if bytes.len() > NAME_MAX {
+        return Err(platform::enametoolong());
+    }
+
+    Ok(())
+}
+
 /// Validate a directory entry name for overlay operations.
 ///
 /// Extends [`validate_name`] with overlay-specific rejection of:
