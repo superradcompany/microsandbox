@@ -207,6 +207,11 @@ pub(crate) fn do_rmdir(fs: &DualFs, ctx: Context, parent: u64, name: &CStr) -> i
     Ok(())
 }
 
+/// Known rename flags.
+const RENAME_NOREPLACE: u32 = 1;
+const RENAME_EXCHANGE: u32 = 2;
+const KNOWN_RENAME_FLAGS: u32 = RENAME_NOREPLACE | RENAME_EXCHANGE;
+
 /// Handle rename.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn do_rename(
@@ -222,6 +227,15 @@ pub(crate) fn do_rename(
     let newname_bytes = newname.to_bytes();
     name_validation::validate_name(oldname)?;
     name_validation::validate_name(newname)?;
+
+    // Reject unknown flags.
+    if flags & !KNOWN_RENAME_FLAGS != 0 {
+        return Err(platform::einval());
+    }
+    // NOREPLACE and EXCHANGE are mutually exclusive.
+    if flags & RENAME_NOREPLACE != 0 && flags & RENAME_EXCHANGE != 0 {
+        return Err(platform::einval());
+    }
 
     // Protect init.krun.
     if (olddir == ROOT_INODE && init_binary::is_init_name(oldname_bytes))
@@ -265,7 +279,8 @@ pub(crate) fn do_rename(
     }
 
     // Materialize source if needed.
-    if let Some(current) = source_node.state.read().unwrap().current_backend() {
+    let current_backend = source_node.state.read().unwrap().current_backend();
+    if let Some(current) = current_backend {
         if current != target {
             super::materialize::do_materialize(fs, ctx, source_ino, current, target)?;
         }
@@ -277,7 +292,7 @@ pub(crate) fn do_rename(
     // Ensure deferred alias linkage on source before target-side mutation.
     ensure_alias_linked(&fs.state, source_ino, olddir, oldname_bytes)?;
 
-    // Handle destination: if exists, remove it first in namespace.
+    // Check destination.
     let dest_ino = fs
         .state
         .dentries
@@ -286,6 +301,79 @@ pub(crate) fn do_rename(
         .get(&(newdir, newname_bytes.to_vec()))
         .copied();
 
+    // RENAME_NOREPLACE: fail if destination exists.
+    if flags & RENAME_NOREPLACE != 0 && dest_ino.is_some() {
+        return Err(platform::eexist());
+    }
+
+    // RENAME_EXCHANGE: atomically swap source and destination.
+    if flags & RENAME_EXCHANGE != 0 {
+        let dest_guest_ino = dest_ino.ok_or_else(platform::enoent)?;
+        let dest_node = get_node(&fs.state, dest_guest_ino)?;
+
+        // Materialize destination if needed.
+        let dest_current = dest_node.state.read().unwrap().current_backend();
+        if let Some(current) = dest_current {
+            if current != target {
+                super::materialize::do_materialize(
+                    fs,
+                    ctx,
+                    dest_guest_ino,
+                    current,
+                    target,
+                )?;
+            }
+        }
+        ensure_alias_linked(&fs.state, dest_guest_ino, newdir, newname_bytes)?;
+
+        // Delegate exchange to target backend.
+        let olddir_target = resolve_backend_inode(&fs.state, olddir, target)
+            .ok_or_else(platform::enoent)?;
+        let newdir_target = resolve_backend_inode(&fs.state, newdir, target)
+            .ok_or_else(platform::enoent)?;
+        backend(fs, target).rename(
+            ctx,
+            olddir_target,
+            oldname,
+            newdir_target,
+            newname,
+            flags,
+        )?;
+
+        // Swap dentries.
+        {
+            let mut dentries = fs.state.dentries.write().unwrap();
+            dentries.insert((olddir, oldname_bytes.to_vec()), dest_guest_ino);
+            dentries.insert((newdir, newname_bytes.to_vec()), source_ino);
+        }
+
+        // Swap alias_index entries.
+        {
+            let mut alias = fs.state.alias_index.write().unwrap();
+            alias.entry(source_ino).and_modify(|s| {
+                s.remove(&(olddir, oldname_bytes.to_vec()));
+                s.insert((newdir, newname_bytes.to_vec()));
+            });
+            alias.entry(dest_guest_ino).and_modify(|s| {
+                s.remove(&(newdir, newname_bytes.to_vec()));
+                s.insert((olddir, oldname_bytes.to_vec()));
+            });
+        }
+
+        // Update anchors.
+        source_node
+            .anchor_parent
+            .store(newdir, Ordering::Relaxed);
+        *source_node.anchor_name.write().unwrap() = newname_bytes.to_vec();
+        dest_node
+            .anchor_parent
+            .store(olddir, Ordering::Relaxed);
+        *dest_node.anchor_name.write().unwrap() = oldname_bytes.to_vec();
+
+        return Ok(());
+    }
+
+    // Handle existing destination: remove it first.
     if let Some(dest_ino) = dest_ino {
         let dest_node = get_node(&fs.state, dest_ino)?;
 

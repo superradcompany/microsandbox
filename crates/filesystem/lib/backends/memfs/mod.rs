@@ -140,6 +140,8 @@ impl DynFileSystem for MemFs {
     }
 
     fn lookup(&self, _ctx: Context, parent: u64, name: &CStr) -> io::Result<Entry> {
+        crate::backends::shared::name_validation::validate_memfs_name(name)?;
+
         if parent == ROOT_INODE && init_binary::is_init_name(name.to_bytes()) {
             return Ok(init_binary::init_entry(
                 self.cfg.entry_timeout,
@@ -455,3 +457,6 @@ impl DynFileSystem for MemFs {
 //--------------------------------------------------------------------------------------------------
 
 pub use types::{CachePolicy, MemFsConfig};
+
+#[cfg(test)]
+mod tests;

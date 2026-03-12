@@ -517,3 +517,6 @@ pub use policies::{
     ReadBackendBWriteBackendA,
 };
 pub use types::{CachePolicy, DualFsConfig};
+
+#[cfg(test)]
+mod tests;
