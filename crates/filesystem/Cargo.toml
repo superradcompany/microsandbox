@@ -10,7 +10,8 @@ edition.workspace = true
 path = "lib/lib.rs"
 
 [dependencies]
-msb_krun = "0.1.0"
+msb_krun = "0.1.2"
+microsandbox-utils = { path = "../utils" }
 libc.workspace = true
 tracing.workspace = true
 scopeguard.workspace = true

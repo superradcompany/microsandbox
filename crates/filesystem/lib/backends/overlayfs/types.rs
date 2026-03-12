@@ -79,6 +79,11 @@ pub(crate) struct OverlayNode {
 
     /// Primary name for reverse lookup.
     pub primary_name: RwLock<NameId>,
+
+    /// Cached `(layer_idx, dir_record_idx)` for index-accelerated directory descent.
+    /// Set when a directory node is resolved from an indexed lower layer.
+    /// `None` for upper-only nodes, non-directories, or nodes from unindexed layers.
+    pub dir_record_cache: RwLock<Option<(usize, u32)>>,
 }
 
 /// Backing state for an overlay node.
@@ -138,6 +143,10 @@ pub(crate) struct Layer {
 
     /// Index in the layer stack (0 = bottommost lower).
     pub index: usize,
+
+    /// Mmap'd sidecar index for accelerated lookups (lower layers only).
+    /// `None` if no index was provided or the index failed validation.
+    pub lower_index: Option<microsandbox_utils::index::MmapIndex>,
 
     /// Linux: /proc/self/fd handle for secure inode reopening.
     #[cfg(target_os = "linux")]

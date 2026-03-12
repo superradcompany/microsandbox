@@ -7,6 +7,7 @@
 mod test_bootstrap;
 mod test_create_ops;
 mod test_file_ops;
+mod test_index;
 mod test_lookup;
 mod test_metadata;
 mod test_multi_layer;

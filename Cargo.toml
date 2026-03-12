@@ -38,6 +38,7 @@ axum = "0.8"
 base64 = "0.22"
 bytes = "1.9"
 cfg-if = "1.0"
+crc32c = "0.6"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
 clap = { version = "4.5", features = ["color", "derive"] }
@@ -103,15 +104,3 @@ rstest = "0.26"
 sea-orm = { version = "1.1", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
 sea-orm-migration = { version = "1.1", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 ureq = "3"
-
-[patch.crates-io]
-msb_krun = { path = "../libkrun/src/krun" }
-msb_krun_arch = { path = "../libkrun/src/arch" }
-msb_krun_arch_gen = { path = "../libkrun/src/arch_gen" }
-msb_krun_devices = { path = "../libkrun/src/devices" }
-msb_krun_hvf = { path = "../libkrun/src/hvf" }
-msb_krun_kernel = { path = "../libkrun/src/kernel" }
-msb_krun_polly = { path = "../libkrun/src/polly" }
-msb_krun_smbios = { path = "../libkrun/src/smbios" }
-msb_krun_utils = { path = "../libkrun/src/utils" }
-msb_krun_vmm = { path = "../libkrun/src/vmm" }

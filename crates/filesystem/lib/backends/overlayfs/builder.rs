@@ -19,6 +19,7 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use super::OverlayFs;
+use microsandbox_utils::index::MmapIndex;
 use super::types::{CachePolicy, Layer, NameTable, OverlayConfig};
 use crate::backends::shared::{init_binary, platform, stat_override};
 
@@ -29,6 +30,7 @@ use crate::backends::shared::{init_binary, platform, stat_override};
 /// Builder for constructing an [`OverlayFs`] instance.
 pub struct OverlayFsBuilder {
     lowers: Vec<PathBuf>,
+    lower_indexes: Vec<Option<PathBuf>>,
     upper_dir: Option<PathBuf>,
     staging_dir: Option<PathBuf>,
     strict: bool,
@@ -47,6 +49,7 @@ impl OverlayFsBuilder {
     pub(crate) fn new() -> Self {
         Self {
             lowers: Vec::new(),
+            lower_indexes: Vec::new(),
             upper_dir: None,
             staging_dir: None,
             strict: true,
@@ -60,12 +63,31 @@ impl OverlayFsBuilder {
     /// Add a lower layer (call repeatedly, bottom-to-top order).
     pub fn layer(mut self, path: impl Into<PathBuf>) -> Self {
         self.lowers.push(path.into());
+        self.lower_indexes.push(None);
+        self
+    }
+
+    /// Add a lower layer with a sidecar index for accelerated lookups.
+    ///
+    /// If the index file is missing or corrupt at `build()` time, the layer
+    /// falls back to live syscalls (graceful degradation).
+    pub fn layer_with_index(
+        mut self,
+        path: impl Into<PathBuf>,
+        index_path: impl Into<PathBuf>,
+    ) -> Self {
+        self.lowers.push(path.into());
+        self.lower_indexes.push(Some(index_path.into()));
         self
     }
 
     /// Add multiple lower layers at once (bottom-to-top order).
     pub fn layers(mut self, paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
-        self.lowers.extend(paths.into_iter().map(Into::into));
+        let iter = paths.into_iter().map(Into::into);
+        for path in iter {
+            self.lowers.push(path);
+            self.lower_indexes.push(None);
+        }
         self
     }
 
@@ -146,12 +168,20 @@ impl OverlayFsBuilder {
         for (index, lower_path) in self.lowers.iter().enumerate() {
             let root_fd = open_dir(lower_path)?;
 
+            // Try to open sidecar index (graceful fallback to None).
+            let lower_index = self
+                .lower_indexes
+                .get(index)
+                .and_then(|opt| opt.as_ref())
+                .and_then(|p| MmapIndex::open(p));
+
             #[cfg(target_os = "linux")]
             let layer_proc_fd = dup_fd(&proc_self_fd_main)?;
 
             lowers.push(Layer {
                 root_fd,
                 index,
+                lower_index,
                 #[cfg(target_os = "linux")]
                 proc_self_fd: layer_proc_fd,
                 #[cfg(target_os = "linux")]
@@ -181,6 +211,7 @@ impl OverlayFsBuilder {
         let upper = Layer {
             root_fd: upper_root_fd,
             index: upper_index,
+            lower_index: None,
             #[cfg(target_os = "linux")]
             proc_self_fd: upper_proc_fd,
             #[cfg(target_os = "linux")]

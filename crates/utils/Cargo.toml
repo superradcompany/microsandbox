@@ -9,3 +9,8 @@ edition.workspace = true
 
 [lib]
 path = "lib/lib.rs"
+
+[dependencies]
+libc.workspace = true
+crc32c.workspace = true
+scopeguard.workspace = true

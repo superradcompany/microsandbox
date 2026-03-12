@@ -132,6 +132,17 @@ pub(crate) fn register_root_inode(fs: &OverlayFs) -> io::Result<()> {
     let root_file = unsafe { File::from_raw_fd(root_fd_dup) };
 
     let root_name = fs.names.intern(b"");
+    // Seed dir_record_cache for root: DirRecord 0 on the topmost indexed lower layer.
+    let root_dir_record_cache = fs
+        .lowers
+        .iter()
+        .rev()
+        .find_map(|l| {
+            l.lower_index.as_ref().and_then(|idx| {
+                idx.find_dir(b"").map(|(dir_idx, _)| (l.index, dir_idx as u32))
+            })
+        });
+
     let root_node = Arc::new(OverlayNode {
         inode: ROOT_INODE,
         kind: libc::S_IFDIR as u32,
@@ -143,6 +154,7 @@ pub(crate) fn register_root_inode(fs: &OverlayFs) -> io::Result<()> {
         redirect: RwLock::new(None),
         primary_parent: std::sync::atomic::AtomicU64::new(0),
         primary_name: RwLock::new(root_name),
+        dir_record_cache: RwLock::new(root_dir_record_cache),
     });
 
     // Register root in tables.
@@ -453,6 +465,7 @@ fn hydrate_upper_entry(
             redirect: RwLock::new(None),
             primary_parent: std::sync::atomic::AtomicU64::new(parent_ino),
             primary_name: RwLock::new(name_id),
+            dir_record_cache: RwLock::new(None),
         });
 
         // Register.
@@ -510,6 +523,7 @@ fn hydrate_upper_entry(
             redirect: RwLock::new(None),
             primary_parent: std::sync::atomic::AtomicU64::new(parent_ino),
             primary_name: RwLock::new(name_id),
+            dir_record_cache: RwLock::new(None),
         });
 
         fs.nodes.write().unwrap().insert(inode, node);
@@ -586,11 +600,72 @@ pub(crate) fn do_lookup(fs: &OverlayFs, parent: u64, name: &CStr) -> io::Result<
     }
 
     // Search lower layers top-down.
-    let parent_name_bytes = get_parent_lower_path(fs, &parent_node)?;
+    // Lazily computed — only needed for layers without an index.
+    let mut parent_name_bytes: Option<Vec<Vec<u8>>> = None;
 
     for lower in fs.lowers.iter().rev() {
-        // Try to open the parent directory in this lower layer.
-        let lower_parent_fd = match open_lower_parent(lower, &parent_node, &parent_name_bytes) {
+        // Index fast path: use sidecar index to avoid syscalls.
+        if let Some(ref idx) = lower.lower_index {
+            let dir_rec = match find_dir_record_for_parent(fs, idx, lower.index, &parent_node) {
+                Some(rec) => rec,
+                None => continue, // Parent dir not on this layer.
+            };
+
+            // Check whiteout via index.
+            if idx.has_whiteout(dir_rec, name.to_bytes()) {
+                return Err(platform::enoent());
+            }
+
+            // Check if entry exists in index.
+            if let Some(entry_rec) = idx.find_entry(dir_rec, name.to_bytes()) {
+                // Entry found in index — open the real fd and resolve.
+                let name_bytes_lazy = parent_name_bytes.get_or_insert_with(|| {
+                    get_parent_lower_path(fs, &parent_node).unwrap_or_default()
+                });
+                let lower_parent_fd =
+                    match open_lower_parent(lower, &parent_node, name_bytes_lazy) {
+                        Some(fd) => fd,
+                        None => continue,
+                    };
+
+                match platform::fstatat_nofollow(lower_parent_fd.raw(), name) {
+                    Ok(st) => {
+                        let result = resolve_lower(fs, lower, parent, name, st);
+
+                        // Cache dir_record_idx on the new child node if it's a directory.
+                        if entry_rec.dir_record_idx
+                            != microsandbox_utils::index::DIR_RECORD_IDX_NONE
+                        {
+                            if let Ok(ref entry) = result {
+                                let nodes = fs.nodes.read().unwrap();
+                                if let Some(child_node) = nodes.get(&entry.inode) {
+                                    let mut cache =
+                                        child_node.dir_record_cache.write().unwrap();
+                                    *cache =
+                                        Some((lower.index, entry_rec.dir_record_idx));
+                                }
+                            }
+                        }
+
+                        return result;
+                    }
+                    Err(e) if platform::is_enoent(&e) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+
+            // Entry not found in index — check opaque.
+            if idx.is_opaque(dir_rec) {
+                break;
+            }
+            continue;
+        }
+
+        // Syscall fallback path (no index).
+        let name_bytes_lazy = parent_name_bytes.get_or_insert_with(|| {
+            get_parent_lower_path(fs, &parent_node).unwrap_or_default()
+        });
+        let lower_parent_fd = match open_lower_parent(lower, &parent_node, name_bytes_lazy) {
             Some(fd) => fd,
             None => continue,
         };
@@ -720,6 +795,7 @@ fn resolve_upper(
         redirect: RwLock::new(None),
         primary_parent: std::sync::atomic::AtomicU64::new(parent),
         primary_name: RwLock::new(name_id),
+        dir_record_cache: RwLock::new(None),
     });
 
     // Check opaque for directories.
@@ -878,6 +954,7 @@ fn resolve_lower(
         redirect: RwLock::new(None),
         primary_parent: std::sync::atomic::AtomicU64::new(parent),
         primary_name: RwLock::new(name_id),
+        dir_record_cache: RwLock::new(None),
     });
 
     // Check opaque for lower directories.
@@ -962,12 +1039,25 @@ pub(crate) fn forget_one_locked(
     };
 
     if should_remove {
-        // Extract origin before removing the node.
-        let origin = nodes.get(&inode).and_then(|n| n.origin);
+        // Extract origin and primary dentry key before removing the node.
+        let (origin, primary_parent, primary_name) = match nodes.get(&inode) {
+            Some(n) => (
+                n.origin,
+                n.primary_parent.load(Ordering::Acquire),
+                *n.primary_name.read().unwrap(),
+            ),
+            None => return None,
+        };
 
         nodes.remove(&inode);
-        // Remove all dentries pointing to this inode.
-        dentries.retain(|_, d| d.node != inode);
+
+        // Remove primary dentry in O(1).
+        dentries.remove(&(primary_parent, primary_name));
+
+        // If this node had hardlink aliases, scan for any remaining dentries.
+        if origin.is_some() {
+            dentries.retain(|_, d| d.node != inode);
+        }
 
         Some(origin)
     } else {
@@ -1182,14 +1272,14 @@ pub(crate) fn get_parent_lower_path(fs: &OverlayFs, parent_node: &OverlayNode) -
 
     // Walk the primary_parent/primary_name chain to root, collecting components.
     // Check each ancestor for a redirect along the way.
-    build_lower_path_from_chain(fs, parent_node)
+    walk_parent_chain(fs, parent_node)
 }
 
-/// Walk the dentry chain from a node to root, building lower path components.
+/// Walk the dentry chain from a node to root, building path components.
 ///
 /// At each step, checks if the ancestor has a redirect — if so, uses it
-/// as the base path prefix. Returns path in root-to-leaf order.
-fn build_lower_path_from_chain(fs: &OverlayFs, node: &OverlayNode) -> io::Result<Vec<Vec<u8>>> {
+/// as the base path prefix. Returns components in root-to-leaf order.
+fn walk_parent_chain(fs: &OverlayFs, node: &OverlayNode) -> io::Result<Vec<Vec<u8>>> {
     let mut components = Vec::new();
 
     // Collect this node's own name first.
@@ -1495,5 +1585,73 @@ fn open_macos_vol(path: &CStr) -> io::Result<RawFd> {
         return Ok(fd);
     }
     Err(platform::linux_error(io::Error::last_os_error()))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Sidecar Index Helpers
+//--------------------------------------------------------------------------------------------------
+
+/// Build the overlay path for a node by walking the `primary_parent`/`primary_name`
+/// chain to root, joining components with `/`.
+///
+/// Unlike `get_parent_lower_path`, this always walks the full chain (never
+/// short-circuits for Lower nodes) because the index is keyed by path string,
+/// not by fd.
+///
+/// Returns `b""` for root, `b"etc"`, `b"usr/bin"`, etc.
+pub(crate) fn build_overlay_path(fs: &OverlayFs, node: &OverlayNode) -> io::Result<Vec<u8>> {
+    // Root → empty path.
+    {
+        let state = node.state.read().unwrap();
+        if matches!(&*state, NodeState::Root { .. }) {
+            return Ok(Vec::new());
+        }
+    }
+
+    // If this node has a redirect, use its lower path directly.
+    {
+        let redirect = node.redirect.read().unwrap();
+        if let Some(ref redir) = *redirect {
+            return Ok(redir.lower_path.join(&b"/"[..]));
+        }
+    }
+
+    let components = walk_parent_chain(fs, node)?;
+    Ok(components.join(&b"/"[..]))
+}
+
+/// Find the `DirRecord` for a parent node in a given layer's sidecar index.
+///
+/// Fast path: uses `dir_record_cache` if it matches this layer.
+/// Slow path: builds the overlay path and binary-searches the directory table,
+/// then caches the result.
+pub(crate) fn find_dir_record_for_parent<'a>(
+    fs: &OverlayFs,
+    index: &'a microsandbox_utils::index::MmapIndex,
+    layer_idx: usize,
+    parent_node: &OverlayNode,
+) -> Option<&'a microsandbox_utils::index::DirRecord> {
+    // Fast path: check cache.
+    {
+        let cache = parent_node.dir_record_cache.read().unwrap();
+        if let Some((cached_layer, cached_idx)) = *cache {
+            if cached_layer == layer_idx {
+                let dirs = index.dir_records();
+                return dirs.get(cached_idx as usize);
+            }
+        }
+    }
+
+    // Slow path: build overlay path and binary search.
+    let path = build_overlay_path(fs, parent_node).ok()?;
+    let (dir_idx, dir_rec) = index.find_dir(&path)?;
+
+    // Cache the result.
+    {
+        let mut cache = parent_node.dir_record_cache.write().unwrap();
+        *cache = Some((layer_idx, dir_idx as u32));
+    }
+
+    Some(dir_rec)
 }
 

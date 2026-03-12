@@ -41,7 +41,7 @@ pub(crate) fn do_opendir(
         let nodes = fs.nodes.read().unwrap();
         let node = nodes.get(&ino).ok_or_else(platform::enoent)?;
         if node.kind != libc::S_IFDIR as u32 && ino != ROOT_INODE {
-            return Err(platform::enoent());
+            return Err(platform::enotdir());
         }
     }
 
@@ -261,6 +261,50 @@ fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
     // Phase 2: Scan lower layers (top-down), only if not opaque.
     if !is_opaque {
         for lower in fs.lowers.iter().rev() {
+            // Index fast path: iterate index entries directly (no getdents64).
+            if let Some(ref idx) = lower.lower_index {
+                let dir_rec =
+                    match inode::find_dir_record_for_parent(fs, idx, lower.index, &node) {
+                        Some(rec) => rec,
+                        None => continue,
+                    };
+
+                // Add tombstone names from index.
+                for name in idx.tombstone_names(dir_rec) {
+                    seen.insert(name.to_vec());
+                }
+
+                let layer_opaque = idx.is_opaque(dir_rec);
+                for entry_rec in idx.dir_entries(dir_rec) {
+                    let name = idx
+                        .get_str(entry_rec.name_off, entry_rec.name_len)
+                        .to_vec();
+
+                    if entry_rec.flags & microsandbox_utils::index::ENTRY_FLAG_WHITEOUT != 0 {
+                        seen.insert(name);
+                        continue;
+                    }
+
+                    if seen.contains(&name) {
+                        continue;
+                    }
+
+                    let d_type = (entry_rec.mode >> 12) & 0xF;
+                    seen.insert(name.clone());
+                    entries.push(MergedDirEntry {
+                        name,
+                        offset: 0,
+                        file_type: d_type,
+                    });
+                }
+
+                if layer_opaque {
+                    break;
+                }
+                continue;
+            }
+
+            // Syscall fallback path (no index).
             let lower_parent_fd = get_lower_dir_fd(fs, lower, &node);
             let lower_fd = match lower_parent_fd {
                 Some(fd) => fd,
@@ -372,6 +416,44 @@ pub(crate) fn is_merged_dir_empty(fs: &OverlayFs, ino: u64) -> io::Result<bool> 
     // Phase 2: Scan lower layers (top-down), only if not opaque.
     if !is_opaque {
         for lower in fs.lowers.iter().rev() {
+            // Index fast path.
+            if let Some(ref idx) = lower.lower_index {
+                let dir_rec =
+                    match inode::find_dir_record_for_parent(fs, idx, lower.index, &node) {
+                        Some(rec) => rec,
+                        None => continue,
+                    };
+
+                for name in idx.tombstone_names(dir_rec) {
+                    seen.insert(name.to_vec());
+                }
+
+                let layer_opaque = idx.is_opaque(dir_rec);
+                for entry_rec in idx.dir_entries(dir_rec) {
+                    let name = idx
+                        .get_str(entry_rec.name_off, entry_rec.name_len)
+                        .to_vec();
+
+                    if entry_rec.flags & microsandbox_utils::index::ENTRY_FLAG_WHITEOUT != 0 {
+                        seen.insert(name);
+                        continue;
+                    }
+
+                    if seen.contains(&name) {
+                        continue;
+                    }
+
+                    // Found a visible lower entry — not empty.
+                    return Ok(false);
+                }
+
+                if layer_opaque {
+                    break;
+                }
+                continue;
+            }
+
+            // Syscall fallback path (no index).
             let lower_fd = match get_lower_dir_fd(fs, lower, &node) {
                 Some(fd) => fd,
                 None => continue,
