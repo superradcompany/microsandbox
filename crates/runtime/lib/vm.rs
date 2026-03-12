@@ -7,7 +7,7 @@
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 
-use microsandbox_filesystem::{PassthroughConfig, PassthroughFs};
+use microsandbox_filesystem::{DynFileSystem, PassthroughConfig, PassthroughFs};
 use msb_krun::{NetBackend, VmBuilder};
 
 //--------------------------------------------------------------------------------------------------
@@ -15,7 +15,6 @@ use msb_krun::{NetBackend, VmBuilder};
 //--------------------------------------------------------------------------------------------------
 
 /// Configuration for the microVM process.
-#[derive(Debug, Clone)]
 pub struct VmConfig {
     /// Path to the libkrunfw shared library.
     pub libkrunfw_path: PathBuf,
@@ -31,6 +30,12 @@ pub struct VmConfig {
 
     /// Additional mounts as `tag:host_path` pairs.
     pub mounts: Vec<String>,
+
+    /// Pre-built filesystem backends as `(tag, backend)` pairs.
+    ///
+    /// These bypass the string-based mount path and are registered directly
+    /// with the VM builder. Used for mounts with hooks (e.g. ProxyFs wrappers).
+    pub backends: Vec<(String, Box<dyn DynFileSystem + Send + Sync>)>,
 
     /// Path to the init binary in the guest.
     pub init_path: Option<PathBuf>,
@@ -52,6 +57,30 @@ pub struct VmConfig {
 
     /// Agent FD for virtio-console (agentd communication).
     pub agent_fd: Option<RawFd>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl std::fmt::Debug for VmConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VmConfig")
+            .field("libkrunfw_path", &self.libkrunfw_path)
+            .field("vcpus", &self.vcpus)
+            .field("memory_mib", &self.memory_mib)
+            .field("rootfs_layers", &self.rootfs_layers)
+            .field("mounts", &self.mounts)
+            .field("backends", &format!("[{} backend(s)]", self.backends.len()))
+            .field("init_path", &self.init_path)
+            .field("env", &self.env)
+            .field("workdir", &self.workdir)
+            .field("exec_path", &self.exec_path)
+            .field("exec_args", &self.exec_args)
+            .field("net_fd", &self.net_fd)
+            .field("agent_fd", &self.agent_fd)
+            .finish()
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -114,6 +143,11 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
         } else {
             tracing::warn!(mount = %mount_spec, "skipping malformed mount spec (expected tag:path)");
         }
+    }
+
+    // Pre-built backend mounts (hooks, ProxyFs wrappers, etc.).
+    for (tag, backend) in config.backends {
+        builder = builder.fs(move |fs| fs.tag(&tag).custom(backend));
     }
 
     // Execution configuration.

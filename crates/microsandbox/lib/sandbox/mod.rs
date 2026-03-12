@@ -43,6 +43,7 @@ pub use builder::SandboxBuilder;
 pub use config::SandboxConfig;
 pub use exec::{ExecOptionsBuilder, ExitStatus as ExecExitStatus, Rlimit, RlimitResource, SizeExt};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
+pub use microsandbox_filesystem::AccessMode;
 pub use types::{
     MountBuilder, NetworkConfig, Patch, RootfsSource, SecretsConfig, SshConfig, VolumeMount,
 };
@@ -79,6 +80,19 @@ impl Sandbox {
     /// Boots the VM with agentd ready to accept commands. Does not run
     /// any user workload — use `exec()`, `shell()`, etc. afterward.
     pub async fn create(config: SandboxConfig) -> MicrosandboxResult<Self> {
+        // Backend mounts hold closures and cannot cross process boundaries.
+        // They will be supported when in-process VM mode is available.
+        let backend_count = config.mounts.iter().filter(|m| m.is_backend()).count();
+        if backend_count > 0 {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                format!(
+                    "hooked mounts (with on_read/on_write/on_access) are not yet supported \
+                     in subprocess mode ({backend_count} backend mount(s) provided). \
+                     Backend mounts require in-process VM mode, which is planned for a future release.",
+                ),
+            ));
+        }
+
         // Initialize the database.
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
@@ -86,20 +100,23 @@ impl Sandbox {
         // Upsert sandbox record.
         upsert_sandbox_record(db, &config).await?;
 
+        // Save the name before moving config into create_inner.
+        let name = config.name.clone();
+
         // Spawn supervisor + create bridge. On failure, mark the sandbox
         // as stopped so it doesn't appear as a phantom "Running" entry.
-        match Self::create_inner(&config).await {
+        match Self::create_inner(config).await {
             Ok(sandbox) => Ok(sandbox),
             Err(e) => {
-                let _ = update_sandbox_status(db, &config.name, SandboxStatus::Stopped).await;
+                let _ = update_sandbox_status(db, &name, SandboxStatus::Stopped).await;
                 Err(e)
             }
         }
     }
 
     /// Inner create logic separated for error-cleanup wrapper.
-    async fn create_inner(config: &SandboxConfig) -> MicrosandboxResult<Self> {
-        let (handle, agent_host_fd) = spawn_supervisor(config).await?;
+    async fn create_inner(config: SandboxConfig) -> MicrosandboxResult<Self> {
+        let (handle, agent_host_fd) = spawn_supervisor(&config).await?;
         let bridge = AgentBridge::new(agent_host_fd)?;
         let ready = bridge.wait_ready().await?;
 
@@ -111,7 +128,7 @@ impl Sandbox {
         );
 
         Ok(Self {
-            config: config.clone(),
+            config,
             handle: Arc::new(Mutex::new(handle)),
             bridge: Arc::new(bridge),
         })

@@ -155,6 +155,7 @@ pub async fn run(args: SupervisorArgs) -> RuntimeResult<()> {
         memory_mib: args.memory_mib,
         rootfs_layers: args.rootfs_layer,
         mounts: args.mount,
+        backends: vec![],
         init_path: args.init_path,
         env: args.env,
         workdir: args.workdir,
