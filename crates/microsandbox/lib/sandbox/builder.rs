@@ -133,6 +133,7 @@ impl SandboxBuilder {
     /// .volume("/config", |m| m.bind("/host/config").readonly())
     /// .volume("/cache", |m| m.named("my-cache"))
     /// .volume("/tmp", |m| m.tmpfs().size_mib(100))
+    /// .volume("/watched", |m| m.bind("/host/data").on_read(|_path, data| data.to_vec()))
     /// ```
     pub fn volume(
         mut self,

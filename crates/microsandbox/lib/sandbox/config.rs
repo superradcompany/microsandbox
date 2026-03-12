@@ -27,7 +27,7 @@ fn default_memory_mib() -> u32 {
 ///
 /// All config structs derive `Default` for direct construction and
 /// `Serialize`/`Deserialize` for file-based configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// Unique sandbox name (required).
     pub name: String,

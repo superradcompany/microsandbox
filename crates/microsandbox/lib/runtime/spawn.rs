@@ -164,6 +164,10 @@ pub async fn spawn_supervisor(
             VolumeMount::Tmpfs { .. } => {
                 // Tmpfs mounts are handled by the guest kernel, not virtiofs.
             }
+            VolumeMount::Backend { .. } => {
+                // Backend mounts are guarded at Sandbox::create() — they cannot
+                // reach this point in the subprocess path. If they do, skip them.
+            }
         }
     }
 
