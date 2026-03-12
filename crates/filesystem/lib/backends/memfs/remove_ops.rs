@@ -139,6 +139,11 @@ pub(crate) fn do_rmdir(
     Ok(())
 }
 
+/// Known rename flags.
+const RENAME_NOREPLACE: u32 = 1;
+const RENAME_EXCHANGE: u32 = 2;
+const KNOWN_RENAME_FLAGS: u32 = RENAME_NOREPLACE | RENAME_EXCHANGE;
+
 /// Rename a file or directory.
 pub(crate) fn do_rename(
     fs: &MemFs,
@@ -147,10 +152,19 @@ pub(crate) fn do_rename(
     oldname: &CStr,
     newdir: u64,
     newname: &CStr,
-    _flags: u32,
+    flags: u32,
 ) -> io::Result<()> {
     name_validation::validate_memfs_name(oldname)?;
     name_validation::validate_memfs_name(newname)?;
+
+    // Reject unknown flags.
+    if flags & !KNOWN_RENAME_FLAGS != 0 {
+        return Err(platform::einval());
+    }
+    // NOREPLACE and EXCHANGE are mutually exclusive.
+    if flags & RENAME_NOREPLACE != 0 && flags & RENAME_EXCHANGE != 0 {
+        return Err(platform::einval());
+    }
 
     let old_bytes = oldname.to_bytes().to_vec();
     let new_bytes = newname.to_bytes().to_vec();
@@ -197,6 +211,68 @@ pub(crate) fn do_rename(
         }
         _ => return Err(platform::enotdir()),
     };
+
+    // RENAME_EXCHANGE: atomically swap source and destination.
+    if flags & RENAME_EXCHANGE != 0 {
+        let dest = dest_ino.ok_or_else(platform::enoent)?;
+        let dest_node = inode::get_node(fs, dest)?;
+
+        // Swap entries in directories.
+        if olddir == newdir {
+            if let InodeContent::Directory { children, .. } = &old_parent.content {
+                let mut ch = children.write().unwrap();
+                ch.insert(old_bytes, dest);
+                ch.insert(new_bytes, source_ino);
+            }
+        } else {
+            if let InodeContent::Directory { children, .. } = &old_parent.content {
+                children.write().unwrap().insert(old_bytes, dest);
+            }
+            if let InodeContent::Directory { children, .. } = &new_parent.content {
+                children.write().unwrap().insert(new_bytes, source_ino);
+            }
+        }
+
+        // Update parent pointers for directories.
+        if source_is_dir && olddir != newdir {
+            if let InodeContent::Directory { parent, .. } = &source_node.content {
+                parent.store(newdir, Ordering::Relaxed);
+            }
+        }
+        let dest_is_dir = dest_node.kind == libc::S_IFDIR as u32;
+        if dest_is_dir && olddir != newdir {
+            if let InodeContent::Directory { parent, .. } = &dest_node.content {
+                parent.store(olddir, Ordering::Relaxed);
+            }
+        }
+
+        // Update timestamps.
+        {
+            let mut meta = source_node.meta.write().unwrap();
+            meta.ctime = now;
+        }
+        {
+            let mut meta = dest_node.meta.write().unwrap();
+            meta.ctime = now;
+        }
+        {
+            let mut meta = old_parent.meta.write().unwrap();
+            meta.mtime = now;
+            meta.ctime = now;
+        }
+        if olddir != newdir {
+            let mut meta = new_parent.meta.write().unwrap();
+            meta.mtime = now;
+            meta.ctime = now;
+        }
+
+        return Ok(());
+    }
+
+    // RENAME_NOREPLACE: fail if destination exists.
+    if flags & RENAME_NOREPLACE != 0 && dest_ino.is_some() {
+        return Err(platform::eexist());
+    }
 
     // Handle existing destination.
     let mut evict_dest = None;

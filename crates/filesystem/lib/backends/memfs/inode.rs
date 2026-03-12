@@ -41,9 +41,12 @@ pub(crate) fn alloc_inode(fs: &MemFs) -> io::Result<u64> {
 }
 
 /// Get a node by inode number.
+///
+/// Returns EBADF for unknown inodes — an inode is analogous to a file
+/// descriptor in the FUSE protocol.
 pub(crate) fn get_node(fs: &MemFs, ino: u64) -> io::Result<Arc<MemNode>> {
     let nodes = fs.nodes.read().unwrap();
-    nodes.get(&ino).cloned().ok_or_else(platform::enoent)
+    nodes.get(&ino).cloned().ok_or_else(platform::ebadf)
 }
 
 /// Build a `stat64` from a `MemNode`.

@@ -1,4 +1,4 @@
-use crate::backends::passthrough::inode::translate_open_flags;
+use crate::backends::passthroughfs::inode::translate_open_flags;
 
 //--------------------------------------------------------------------------------------------------
 // Tests: Identity (access mode bits are same on both platforms)

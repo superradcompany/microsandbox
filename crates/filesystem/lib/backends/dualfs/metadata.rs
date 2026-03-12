@@ -163,7 +163,8 @@ pub(crate) fn do_setattr(
         .unwrap_or(BackendId::BackendA);
 
     // Materialize if needed.
-    if let Some(current) = node.state.read().unwrap().current_backend() {
+    let current_backend = node.state.read().unwrap().current_backend();
+    if let Some(current) = current_backend {
         if current != target {
             super::materialize::do_materialize(fs, ctx, ino, current, target)?;
         }
