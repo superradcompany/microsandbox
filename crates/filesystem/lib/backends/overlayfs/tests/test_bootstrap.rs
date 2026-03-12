@@ -4,12 +4,12 @@ use super::*;
 fn test_build_no_lower_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let upper = tmp.path().join("upper");
-    let state = tmp.path().join("state");
+    let work = tmp.path().join("work");
     std::fs::create_dir(&upper).unwrap();
-    std::fs::create_dir(&state).unwrap();
+    std::fs::create_dir(&work).unwrap();
     let result = OverlayFs::builder()
         .writable(&upper)
-        .work_dir(&state)
+        .work_dir(&work)
         .build();
     assert!(result.is_err(), "should fail without lower layers");
 }
@@ -18,15 +18,15 @@ fn test_build_no_lower_fails() {
 fn test_build_no_upper_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let lower = tmp.path().join("lower");
-    let state = tmp.path().join("state");
+    let work = tmp.path().join("work");
     std::fs::create_dir(&lower).unwrap();
-    std::fs::create_dir(&state).unwrap();
-    let result = OverlayFs::builder().layer(&lower).work_dir(&state).build();
+    std::fs::create_dir(&work).unwrap();
+    let result = OverlayFs::builder().layer(&lower).work_dir(&work).build();
     assert!(result.is_err(), "should fail without upper layer");
 }
 
 #[test]
-fn test_build_no_state_fails() {
+fn test_build_no_work_dir_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let lower = tmp.path().join("lower");
     let upper = tmp.path().join("upper");
@@ -67,7 +67,7 @@ fn test_init_registers_root() {
 }
 
 #[test]
-fn test_destroy_clears_state() {
+fn test_destroy_clears_work_dir() {
     let sb = OverlayTestSandbox::new();
     sb.fuse_create_root("file.txt").unwrap();
     sb.fs.destroy();
@@ -81,14 +81,14 @@ fn test_init_flag_negotiation() {
     let tmp = tempfile::tempdir().unwrap();
     let lower = tmp.path().join("lower");
     let upper = tmp.path().join("upper");
-    let state = tmp.path().join("state");
+    let work = tmp.path().join("work");
     std::fs::create_dir(&lower).unwrap();
     std::fs::create_dir(&upper).unwrap();
-    std::fs::create_dir(&state).unwrap();
+    std::fs::create_dir(&work).unwrap();
     let fs = OverlayFs::builder()
         .layer(&lower)
         .writable(&upper)
-        .work_dir(&state)
+        .work_dir(&work)
         .build()
         .unwrap();
     let caps = FsOptions::ASYNC_READ | FsOptions::BIG_WRITES | FsOptions::HANDLE_KILLPRIV_V2;
