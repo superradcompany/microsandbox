@@ -8,16 +8,13 @@ use super::exec::Rlimit;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Configuration for attaching to a sandbox with an interactive session.
+/// Options for attaching to a sandbox with an interactive session.
 ///
 /// The host terminal is set to raw mode for the duration of the attach session.
 /// The guest process runs in a PTY, enabling terminal features (colors, line
 /// editing, Ctrl+C → SIGINT).
 #[derive(Debug, Clone, Default)]
-pub struct AttachConfig {
-    /// Command to run (default: sandbox's configured shell).
-    pub cmd: Option<String>,
-
+pub struct AttachOptions {
     /// Arguments.
     pub args: Vec<String>,
 
@@ -37,21 +34,30 @@ pub struct AttachConfig {
     pub rlimits: Vec<Rlimit>,
 }
 
-/// Builder for [`AttachConfig`].
-pub struct AttachBuilder {
-    config: AttachConfig,
+/// Builder for [`AttachOptions`].
+pub struct AttachOptionsBuilder {
+    options: AttachOptions,
 }
 
-/// Trait for types that can be converted to [`AttachConfig`].
+/// Trait for types that can be converted to an optional command string.
 ///
-/// Enables ergonomic calling patterns:
-/// - `sandbox.attach(())` — default shell
-/// - `sandbox.attach("bash")` — specific command
-/// - `sandbox.attach(|a| a.cmd("zsh").env("TERM", "xterm"))` — closure
-/// - `sandbox.attach(config)` — pre-built AttachConfig
-pub trait IntoAttachConfig {
-    /// Convert into attach configuration.
-    fn into_attach_config(self) -> AttachConfig;
+/// Enables ergonomic `cmd` patterns:
+/// - `sandbox.attach((), ())` — default shell
+/// - `sandbox.attach("bash", ())` — specific command
+pub trait IntoAttachCmd {
+    /// Convert into an optional command string.
+    fn into_attach_cmd(self) -> Option<String>;
+}
+
+/// Trait for types that can be converted to [`AttachOptions`].
+///
+/// Enables ergonomic `opts` patterns:
+/// - `sandbox.attach("bash", ())` — no options
+/// - `sandbox.attach("zsh", |a| a.env("TERM", "xterm"))` — closure
+/// - `sandbox.attach("bash", options)` — pre-built AttachOptions
+pub trait IntoAttachOptions {
+    /// Convert into attach options.
+    fn into_attach_options(self) -> AttachOptions;
 }
 
 /// Parsed detach key sequence.
@@ -87,34 +93,28 @@ pub struct SessionInfo {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl AttachBuilder {
-    /// Set the command to run.
-    pub fn cmd(mut self, cmd: impl Into<String>) -> Self {
-        self.config.cmd = Some(cmd.into());
-        self
-    }
-
+impl AttachOptionsBuilder {
     /// Add a single argument.
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
-        self.config.args.push(arg.into());
+        self.options.args.push(arg.into());
         self
     }
 
     /// Add multiple arguments.
     pub fn args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.config.args.extend(args.into_iter().map(Into::into));
+        self.options.args.extend(args.into_iter().map(Into::into));
         self
     }
 
     /// Set the working directory.
     pub fn cwd(mut self, cwd: impl Into<String>) -> Self {
-        self.config.cwd = Some(cwd.into());
+        self.options.cwd = Some(cwd.into());
         self
     }
 
     /// Add an environment variable.
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.config.env.push((key.into(), value.into()));
+        self.options.env.push((key.into(), value.into()));
         self
     }
 
@@ -123,7 +123,7 @@ impl AttachBuilder {
         mut self,
         vars: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
     ) -> Self {
-        self.config
+        self.options
             .env
             .extend(vars.into_iter().map(|(k, v)| (k.into(), v.into())));
         self
@@ -131,13 +131,13 @@ impl AttachBuilder {
 
     /// Set the detach key sequence.
     pub fn detach_keys(mut self, keys: impl Into<String>) -> Self {
-        self.config.detach_keys = Some(keys.into());
+        self.options.detach_keys = Some(keys.into());
         self
     }
 
     /// Set a resource limit (soft = hard).
     pub fn rlimit(mut self, resource: super::exec::RlimitResource, limit: u64) -> Self {
-        self.config.rlimits.push(Rlimit {
+        self.options.rlimits.push(Rlimit {
             resource,
             soft: limit,
             hard: limit,
@@ -152,7 +152,7 @@ impl AttachBuilder {
         soft: u64,
         hard: u64,
     ) -> Self {
-        self.config.rlimits.push(Rlimit {
+        self.options.rlimits.push(Rlimit {
             resource,
             soft,
             hard,
@@ -160,9 +160,9 @@ impl AttachBuilder {
         self
     }
 
-    /// Build the configuration.
-    pub fn build(self) -> AttachConfig {
-        self.config
+    /// Build the options.
+    pub fn build(self) -> AttachOptions {
+        self.options
     }
 }
 
@@ -240,55 +240,56 @@ impl DetachKeys {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
-impl Default for AttachBuilder {
+impl Default for AttachOptionsBuilder {
     fn default() -> Self {
         Self {
-            config: AttachConfig::default(),
+            options: AttachOptions::default(),
         }
     }
 }
 
-/// Unit type for default shell: `sandbox.attach(())`
-impl IntoAttachConfig for () {
-    fn into_attach_config(self) -> AttachConfig {
-        AttachConfig::default()
+/// Unit type for default shell: `sandbox.attach((), ())`
+impl IntoAttachCmd for () {
+    fn into_attach_cmd(self) -> Option<String> {
+        None
     }
 }
 
-/// Closure pattern: `sandbox.attach(|a| a.cmd("zsh").env("TERM", "xterm"))`
-impl<F> IntoAttachConfig for F
+/// String for specific command: `sandbox.attach("bash", ())`
+impl IntoAttachCmd for &str {
+    fn into_attach_cmd(self) -> Option<String> {
+        Some(self.to_string())
+    }
+}
+
+/// Owned string for specific command: `sandbox.attach(String::from("bash"), ())`
+impl IntoAttachCmd for String {
+    fn into_attach_cmd(self) -> Option<String> {
+        Some(self)
+    }
+}
+
+/// No options: `sandbox.attach("bash", ())`
+impl IntoAttachOptions for () {
+    fn into_attach_options(self) -> AttachOptions {
+        AttachOptions::default()
+    }
+}
+
+/// Closure pattern: `sandbox.attach("zsh", |a| a.env("TERM", "xterm"))`
+impl<F> IntoAttachOptions for F
 where
-    F: FnOnce(AttachBuilder) -> AttachBuilder,
+    F: FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
 {
-    fn into_attach_config(self) -> AttachConfig {
-        self(AttachBuilder::default()).build()
+    fn into_attach_options(self) -> AttachOptions {
+        self(AttachOptionsBuilder::default()).build()
     }
 }
 
-/// Direct config: `sandbox.attach(config)`
-impl IntoAttachConfig for AttachConfig {
-    fn into_attach_config(self) -> AttachConfig {
+/// Direct options: `sandbox.attach("bash", options)`
+impl IntoAttachOptions for AttachOptions {
+    fn into_attach_options(self) -> AttachOptions {
         self
-    }
-}
-
-/// Simple string for command: `sandbox.attach("bash")`
-impl IntoAttachConfig for &str {
-    fn into_attach_config(self) -> AttachConfig {
-        AttachConfig {
-            cmd: Some(self.to_string()),
-            ..Default::default()
-        }
-    }
-}
-
-/// String for command: `sandbox.attach(String::from("bash"))`
-impl IntoAttachConfig for String {
-    fn into_attach_config(self) -> AttachConfig {
-        AttachConfig {
-            cmd: Some(self),
-            ..Default::default()
-        }
     }
 }
 

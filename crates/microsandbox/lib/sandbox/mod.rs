@@ -38,7 +38,7 @@ use self::exec::{ExecEvent, ExecHandle, ExecOutput, ExecSink, IntoExecOptions, S
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use attach::{AttachBuilder, AttachConfig, IntoAttachConfig, SessionInfo};
+pub use attach::{AttachOptions, AttachOptionsBuilder, IntoAttachCmd, IntoAttachOptions, SessionInfo};
 pub use builder::SandboxBuilder;
 pub use config::SandboxConfig;
 pub use exec::{ExecOptionsBuilder, ExitStatus as ExecExitStatus, Rlimit, RlimitResource, SizeExt};
@@ -406,21 +406,26 @@ impl Sandbox {
     /// Bridges the host terminal to a guest process running in a PTY.
     /// Returns the exit code when the process exits or the user detaches.
     ///
-    /// - `sandbox.attach(())` — default shell
-    /// - `sandbox.attach("bash")` — specific command
-    /// - `sandbox.attach(|a| a.cmd("zsh").env("TERM", "xterm"))` — closure
-    pub async fn attach(&self, config: impl attach::IntoAttachConfig) -> MicrosandboxResult<i32> {
+    /// - `sandbox.attach((), ())` — default shell, no options
+    /// - `sandbox.attach("bash", ())` — specific command, no options
+    /// - `sandbox.attach((), |a| a.detach_keys("ctrl-q"))` — default shell with options
+    /// - `sandbox.attach("zsh", |a| a.env("TERM", "xterm"))` — command with options
+    pub async fn attach(
+        &self,
+        cmd: impl attach::IntoAttachCmd,
+        opts: impl attach::IntoAttachOptions,
+    ) -> MicrosandboxResult<i32> {
         use microsandbox_protocol::exec::ExecResize;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let config = config.into_attach_config();
-        let detach_keys = match &config.detach_keys {
+        let opts = opts.into_attach_options();
+        let detach_keys = match &opts.detach_keys {
             Some(spec) => attach::DetachKeys::parse(spec)?,
             None => attach::DetachKeys::default_keys(),
         };
 
         // Resolve command (default to sandbox shell).
-        let cmd = config.cmd.unwrap_or_else(|| {
+        let cmd = cmd.into_attach_cmd().unwrap_or_else(|| {
             self.config
                 .shell
                 .clone()
@@ -438,10 +443,10 @@ impl Sandbox {
         let req = build_exec_request(
             &self.config,
             cmd,
-            config.args,
-            config.cwd,
-            &config.env,
-            &config.rlimits,
+            opts.args,
+            opts.cwd,
+            &opts.env,
+            &opts.rlimits,
             true,
             rows,
             cols,
