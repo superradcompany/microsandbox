@@ -109,8 +109,8 @@ impl OverlayTestSandbox {
         let upper = tmp.path().join("upper");
         std::fs::create_dir(&upper).unwrap();
 
-        let work = tmp.path().join("work");
-        std::fs::create_dir(&work).unwrap();
+        let staging = tmp.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
 
         // Let caller populate layers before mount.
         f(&lower_roots, &upper);
@@ -121,7 +121,7 @@ impl OverlayTestSandbox {
         }
         let fs = builder
             .writable(&upper)
-            .work_dir(&work)
+            .staging(&staging)
             .build()
             .unwrap();
 

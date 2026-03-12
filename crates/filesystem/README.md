@@ -67,7 +67,7 @@ let fs = OverlayFs::builder()
     .layer("/layer0")       // bottom layer
     .layer("/layer1")       // stacked on top
     .writable("/upper")     // writable layer
-    .work_dir("/work")      // staging area (must be on same filesystem as upper)
+    .staging("/staging")     // staging area (must be on same filesystem as upper)
     .build()?;
 ```
 

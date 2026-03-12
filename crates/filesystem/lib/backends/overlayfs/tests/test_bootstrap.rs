@@ -4,12 +4,12 @@ use super::*;
 fn test_build_no_lower_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let upper = tmp.path().join("upper");
-    let work = tmp.path().join("work");
+    let staging = tmp.path().join("staging");
     std::fs::create_dir(&upper).unwrap();
-    std::fs::create_dir(&work).unwrap();
+    std::fs::create_dir(&staging).unwrap();
     let result = OverlayFs::builder()
         .writable(&upper)
-        .work_dir(&work)
+        .staging(&staging)
         .build();
     assert!(result.is_err(), "should fail without lower layers");
 }
@@ -18,15 +18,15 @@ fn test_build_no_lower_fails() {
 fn test_build_no_upper_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let lower = tmp.path().join("lower");
-    let work = tmp.path().join("work");
+    let staging = tmp.path().join("staging");
     std::fs::create_dir(&lower).unwrap();
-    std::fs::create_dir(&work).unwrap();
-    let result = OverlayFs::builder().layer(&lower).work_dir(&work).build();
+    std::fs::create_dir(&staging).unwrap();
+    let result = OverlayFs::builder().layer(&lower).staging(&staging).build();
     assert!(result.is_err(), "should fail without upper layer");
 }
 
 #[test]
-fn test_build_no_work_dir_fails() {
+fn test_build_no_staging_dir_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let lower = tmp.path().join("lower");
     let upper = tmp.path().join("upper");
@@ -36,7 +36,7 @@ fn test_build_no_work_dir_fails() {
         .layer(&lower)
         .writable(&upper)
         .build();
-    assert!(result.is_err(), "should fail without work dir");
+    assert!(result.is_err(), "should fail without staging dir");
 }
 
 #[test]
@@ -67,7 +67,7 @@ fn test_init_registers_root() {
 }
 
 #[test]
-fn test_destroy_clears_work_dir() {
+fn test_destroy_clears_staging_dir() {
     let sb = OverlayTestSandbox::new();
     sb.fuse_create_root("file.txt").unwrap();
     sb.fs.destroy();
@@ -81,14 +81,14 @@ fn test_init_flag_negotiation() {
     let tmp = tempfile::tempdir().unwrap();
     let lower = tmp.path().join("lower");
     let upper = tmp.path().join("upper");
-    let work = tmp.path().join("work");
+    let staging = tmp.path().join("staging");
     std::fs::create_dir(&lower).unwrap();
     std::fs::create_dir(&upper).unwrap();
-    std::fs::create_dir(&work).unwrap();
+    std::fs::create_dir(&staging).unwrap();
     let fs = OverlayFs::builder()
         .layer(&lower)
         .writable(&upper)
-        .work_dir(&work)
+        .staging(&staging)
         .build()
         .unwrap();
     let caps = FsOptions::ASYNC_READ | FsOptions::BIG_WRITES | FsOptions::HANDLE_KILLPRIV_V2;
