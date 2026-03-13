@@ -5,6 +5,7 @@ use microsandbox_runtime::policy::ShutdownMode;
 use super::config::SandboxConfig;
 use super::types::{MountBuilder, RootfsSource};
 use crate::MicrosandboxResult;
+use crate::size::Mebibytes;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -44,9 +45,16 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set guest memory in MiB.
-    pub fn memory(mut self, mib: u32) -> Self {
-        self.config.memory_mib = mib;
+    /// Set guest memory size.
+    ///
+    /// Accepts bare `u32` (interpreted as MiB) or a [`SizeExt`](crate::size::SizeExt) helper:
+    /// ```ignore
+    /// .memory(512)         // 512 MiB
+    /// .memory(512.mib())   // 512 MiB (explicit)
+    /// .memory(1.gib())     // 1 GiB = 1024 MiB
+    /// ```
+    pub fn memory(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.config.memory_mib = size.into().as_u32();
         self
     }
 
@@ -132,7 +140,7 @@ impl SandboxBuilder {
     /// .volume("/data", |m| m.bind("/host/data"))
     /// .volume("/config", |m| m.bind("/host/config").readonly())
     /// .volume("/cache", |m| m.named("my-cache"))
-    /// .volume("/tmp", |m| m.tmpfs().size_mib(100))
+    /// .volume("/tmp", |m| m.tmpfs().size(100))
     /// .volume("/watched", |m| m.bind("/host/data").on_read(|_path, data| data.to_vec()))
     /// ```
     pub fn volume(

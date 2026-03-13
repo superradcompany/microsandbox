@@ -16,6 +16,7 @@ pub(crate) mod db;
 pub mod runtime;
 pub mod sandbox;
 pub mod setup;
+pub mod size;
 pub mod volume;
 
 pub use error::*;

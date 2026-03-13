@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use microsandbox_filesystem::{AccessMode, DynFileSystem, PassthroughConfig, PassthroughFs, ProxyFs};
 use serde::{Deserialize, Serialize};
 
+use crate::size::Mebibytes;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -159,9 +161,16 @@ impl MountBuilder {
         self
     }
 
-    /// Set size limit in MiB (for tmpfs).
-    pub fn size_mib(mut self, size: u32) -> Self {
-        self.size_mib = Some(size);
+    /// Set size limit (for tmpfs).
+    ///
+    /// Accepts bare `u32` (interpreted as MiB) or a [`SizeExt`](crate::size::SizeExt) helper:
+    /// ```ignore
+    /// .tmpfs().size(100)         // 100 MiB
+    /// .tmpfs().size(100.mib())   // 100 MiB (explicit)
+    /// .tmpfs().size(1.gib())     // 1 GiB = 1024 MiB
+    /// ```
+    pub fn size(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.size_mib = Some(size.into().as_u32());
         self
     }
 

@@ -41,7 +41,7 @@ use self::exec::{ExecEvent, ExecHandle, ExecOutput, ExecSink, IntoExecOptions, S
 pub use attach::{AttachOptions, AttachOptionsBuilder, IntoAttachCmd, IntoAttachOptions, SessionInfo};
 pub use builder::SandboxBuilder;
 pub use config::SandboxConfig;
-pub use exec::{ExecOptionsBuilder, ExitStatus as ExecExitStatus, Rlimit, RlimitResource, SizeExt};
+pub use exec::{ExecOptionsBuilder, ExitStatus as ExecExitStatus, Rlimit, RlimitResource};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
 pub use microsandbox_filesystem::AccessMode;
 pub use types::{
