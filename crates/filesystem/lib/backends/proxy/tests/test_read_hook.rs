@@ -91,9 +91,7 @@ fn test_read_hook_receives_path() {
         .unwrap();
     // Need to lookup to register path since create_file_with_content does create+release.
     let entry = sb.lookup(dir.inode, "nested.txt").unwrap();
-    let (handle, _opts) = sb
-        .fuse_open(entry.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let (handle, _opts) = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     let handle = handle.unwrap();
     let _data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     let log = sb.read_log.lock().unwrap();

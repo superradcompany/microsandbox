@@ -3,9 +3,12 @@
 //! Configuration is loaded from `~/.microsandbox/config.json` on first access.
 //! All fields have sensible defaults — a missing config file is equivalent to `{}`.
 
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
+use microsandbox_runtime::logging::LogLevel;
 use serde::{Deserialize, Serialize};
 
 use crate::MicrosandboxResult;
@@ -30,12 +33,16 @@ pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 5;
 /// Global configuration for the microsandbox library.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct GlobalConfig {
     /// Root directory for all microsandbox data.
     pub home: Option<PathBuf>,
 
-    /// Log level.
-    pub log_level: String,
+    /// Default runtime log level for SDK-spawned sandbox processes.
+    ///
+    /// `None` means sandbox runtime processes are silent unless overridden
+    /// per-sandbox.
+    pub log_level: Option<LogLevel>,
 
     /// Database configuration.
     pub database: DatabaseConfig,
@@ -113,7 +120,7 @@ static CONFIG: OnceLock<GlobalConfig> = OnceLock::new();
 impl GlobalConfig {
     /// Get the resolved home directory.
     pub fn home(&self) -> PathBuf {
-        self.home.clone().unwrap_or_else(|| resolve_default_home())
+        self.home.clone().unwrap_or_else(resolve_default_home)
     }
 
     /// Resolve the `sandboxes` directory.
@@ -153,18 +160,6 @@ impl GlobalConfig {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
-impl Default for GlobalConfig {
-    fn default() -> Self {
-        Self {
-            home: None,
-            log_level: "info".into(),
-            database: DatabaseConfig::default(),
-            paths: PathsConfig::default(),
-            sandbox_defaults: SandboxDefaults::default(),
-        }
-    }
-}
-
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
@@ -198,6 +193,7 @@ pub fn config() -> &'static GlobalConfig {
 ///
 /// Must be called before the first call to [`config()`]. Returns `Err` with the
 /// provided config if the global has already been initialized.
+#[allow(clippy::result_large_err)]
 pub fn set_config(config: GlobalConfig) -> Result<(), GlobalConfig> {
     CONFIG.set(config)
 }
@@ -243,22 +239,71 @@ pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
 ///
 /// Resolution order:
 /// 1. `config().paths.libkrunfw`
-/// 2. `{home}/lib/libkrunfw.{so,dylib}`
-pub fn resolve_libkrunfw_path() -> PathBuf {
+/// 2. A sibling of the resolved `msb` binary (for `build/msb`)
+/// 3. `../lib/` next to the resolved `msb` binary (for installed layouts)
+/// 4. `{home}/lib/libkrunfw.{so,dylib}`
+pub fn resolve_libkrunfw_path() -> MicrosandboxResult<PathBuf> {
     if let Some(path) = &config().paths.libkrunfw {
-        return path.clone();
+        if path.is_file() {
+            return Ok(path.clone());
+        }
+        return Err(crate::MicrosandboxError::LibkrunfwNotFound(format!(
+            "configured path does not exist: {}",
+            path.display()
+        )));
     }
 
-    let filename = if cfg!(target_os = "macos") {
-        microsandbox_utils::libkrunfw_filename("macos")
+    let os = if cfg!(target_os = "macos") {
+        "macos"
     } else {
-        microsandbox_utils::libkrunfw_filename("linux")
+        "linux"
     };
-
-    config()
+    let filename = microsandbox_utils::libkrunfw_filename(os);
+    let home_fallback = config()
         .home()
         .join(microsandbox_utils::LIB_SUBDIR)
-        .join(filename)
+        .join(&filename);
+
+    let mut candidates = Vec::new();
+    if let Ok(msb_path) = resolve_msb_path() {
+        candidates.extend(libkrunfw_candidates_from_msb(&msb_path, &filename));
+    }
+    candidates.push(home_fallback);
+
+    if let Some(path) = candidates.iter().find(|path| path.is_file()) {
+        tracing::debug!(path = %path.display(), "resolved libkrunfw path");
+        return Ok(path.clone());
+    }
+
+    let searched = candidates
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(crate::MicrosandboxError::LibkrunfwNotFound(format!(
+        "searched: {searched}"
+    )))
+}
+
+fn libkrunfw_candidates_from_msb(msb_path: &Path, filename: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(msb_dir) = msb_path.parent() {
+        candidates.push(msb_dir.join(filename));
+
+        if let Some(parent) = msb_dir.parent() {
+            candidates.push(parent.join(microsandbox_utils::LIB_SUBDIR).join(filename));
+        }
+    }
+
+    let mut deduped = Vec::new();
+    for path in candidates {
+        if !deduped.iter().any(|existing| existing == &path) {
+            deduped.push(path);
+        }
+    }
+
+    deduped
 }
 
 /// Resolve the default home directory (`~/.microsandbox`).
@@ -294,7 +339,7 @@ mod tests {
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
         assert_eq!(cfg.sandbox_defaults.shell, "/bin/sh");
-        assert_eq!(cfg.log_level, "info");
+        assert_eq!(cfg.log_level, None);
         assert_eq!(cfg.database.max_connections, 5);
     }
 
@@ -311,6 +356,13 @@ mod tests {
         let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.sandbox_defaults.cpus, 4);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
+    }
+
+    #[test]
+    fn test_deserialize_log_level() {
+        let json = r#"{"log_level":"debug"}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.log_level, Some(LogLevel::Debug));
     }
 
     #[test]
@@ -338,5 +390,28 @@ mod tests {
     fn test_load_config_from_missing_file() {
         let result = load_config_from(Path::new("/nonexistent/config.json"));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_libkrunfw_candidates_for_build_msb() {
+        let msb = PathBuf::from("/repo/build/msb");
+        let paths = libkrunfw_candidates_from_msb(&msb, "libkrunfw.5.dylib");
+        assert_eq!(paths[0], PathBuf::from("/repo/build/libkrunfw.5.dylib"));
+        assert_eq!(paths[1], PathBuf::from("/repo/lib/libkrunfw.5.dylib"));
+    }
+
+    #[test]
+    fn test_libkrunfw_candidates_for_target_msb() {
+        let msb = PathBuf::from("/repo/target/debug/msb");
+        let paths = libkrunfw_candidates_from_msb(&msb, "libkrunfw.5.dylib");
+        assert_eq!(
+            paths[0],
+            PathBuf::from("/repo/target/debug/libkrunfw.5.dylib")
+        );
+        assert_eq!(
+            paths[1],
+            PathBuf::from("/repo/target/lib/libkrunfw.5.dylib")
+        );
+        assert_eq!(paths.len(), 2);
     }
 }

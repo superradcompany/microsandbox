@@ -7,15 +7,14 @@ pub mod fs;
 
 use std::path::PathBuf;
 
-use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set,
+    sea_query::OnConflict,
 };
 
-use crate::MicrosandboxError;
-use crate::MicrosandboxResult;
-use crate::db::entity::volume as volume_entity;
-use crate::size::Mebibytes;
+use crate::{
+    MicrosandboxError, MicrosandboxResult, db::entity::volume as volume_entity, size::Mebibytes,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types

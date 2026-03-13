@@ -1,5 +1,4 @@
-use std::ffi::CString;
-use std::os::fd::AsRawFd;
+use std::{ffi::CString, os::fd::AsRawFd};
 
 use super::*;
 use crate::backends::shared::stat_override::OVERRIDE_XATTR_KEY;

@@ -3,15 +3,14 @@
 //! All stat results are built directly from in-memory metadata.
 //! No xattr-based stat virtualization is needed — MemFs owns all metadata.
 
-use std::io;
-use std::time::Duration;
+use std::{io, time::Duration};
 
-use super::MemFs;
-use super::inode;
-use super::types::InodeContent;
-use crate::backends::shared::init_binary;
-use crate::backends::shared::platform;
-use crate::{Context, SetattrValid, stat64};
+use super::{MemFs, inode, types::InodeContent};
+use crate::{
+    Context, SetattrValid,
+    backends::shared::{init_binary, platform},
+    stat64,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions

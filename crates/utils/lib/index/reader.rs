@@ -132,20 +132,16 @@ impl MmapIndex {
         let header = self.header();
         let offset = size_of::<IndexHeader>();
         let count = header.dir_count as usize;
-        unsafe {
-            std::slice::from_raw_parts(self.ptr.add(offset) as *const DirRecord, count)
-        }
+        unsafe { std::slice::from_raw_parts(self.ptr.add(offset) as *const DirRecord, count) }
     }
 
     /// Get the entry records table.
     fn entry_records(&self) -> &[EntryRecord] {
         let header = self.header();
-        let offset = size_of::<IndexHeader>()
-            + (header.dir_count as usize) * size_of::<DirRecord>();
+        let offset =
+            size_of::<IndexHeader>() + (header.dir_count as usize) * size_of::<DirRecord>();
         let count = header.entry_count as usize;
-        unsafe {
-            std::slice::from_raw_parts(self.ptr.add(offset) as *const EntryRecord, count)
-        }
+        unsafe { std::slice::from_raw_parts(self.ptr.add(offset) as *const EntryRecord, count) }
     }
 
     /// Get a string from the string pool by offset and length.
@@ -174,9 +170,7 @@ impl MmapIndex {
     pub fn find_dir(&self, path: &[u8]) -> Option<(usize, &DirRecord)> {
         let dirs = self.dir_records();
         let idx = dirs
-            .binary_search_by(|rec| {
-                self.get_str(rec.path_off, rec.path_len).cmp(path)
-            })
+            .binary_search_by(|rec| self.get_str(rec.path_off, rec.path_len).cmp(path))
             .ok()?;
         Some((idx, &dirs[idx]))
     }
@@ -187,9 +181,7 @@ impl MmapIndex {
     pub fn find_entry<'a>(&'a self, dir: &DirRecord, name: &[u8]) -> Option<&'a EntryRecord> {
         let entries = self.dir_entries(dir);
         let idx = entries
-            .binary_search_by(|rec| {
-                self.get_str(rec.name_off, rec.name_len).cmp(name)
-            })
+            .binary_search_by(|rec| self.get_str(rec.name_off, rec.name_len).cmp(name))
             .ok()?;
         Some(&entries[idx])
     }
@@ -232,9 +224,7 @@ impl MmapIndex {
         let start = self.pool_offset + dir.tombstone_off as usize;
         // We don't know the exact end, but it's bounded by the file length.
         let data = if start < self.len {
-            unsafe {
-                std::slice::from_raw_parts(self.ptr.add(start), self.len - start)
-            }
+            unsafe { std::slice::from_raw_parts(self.ptr.add(start), self.len - start) }
         } else {
             &[]
         };
@@ -250,9 +240,7 @@ impl MmapIndex {
         let header = self.header();
         let count = header.hardlink_ref_count as usize;
         let offset = self.pool_offset - count * size_of::<HardlinkRef>();
-        unsafe {
-            std::slice::from_raw_parts(self.ptr.add(offset) as *const HardlinkRef, count)
-        }
+        unsafe { std::slice::from_raw_parts(self.ptr.add(offset) as *const HardlinkRef, count) }
     }
 
     /// Find all aliases of a hardlinked file by host inode number.

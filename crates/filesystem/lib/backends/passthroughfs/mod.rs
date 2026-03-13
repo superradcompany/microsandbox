@@ -14,24 +14,30 @@ mod remove_ops;
 mod special;
 mod xattr_ops;
 
-use std::collections::BTreeMap;
-use std::ffi::CStr;
-use std::fs::File;
-use std::io;
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    ffi::CStr,
+    fs::File,
+    io,
+    os::fd::{AsRawFd, FromRawFd},
+    path::PathBuf,
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
-use crate::backends::shared::handle_table::HandleData;
-use crate::backends::shared::init_binary;
-use crate::backends::shared::inode_table::{InodeAltKey, InodeData, MultikeyBTreeMap};
-use crate::backends::shared::platform;
-use crate::backends::shared::stat_override;
 use crate::{
     Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions, GetxattrReply, ListxattrReply,
-    OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter, stat64, statvfs64,
+    OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
+    backends::shared::{
+        handle_table::HandleData,
+        init_binary,
+        inode_table::{InodeAltKey, InodeData, MultikeyBTreeMap},
+        platform, stat_override,
+    },
+    stat64, statvfs64,
 };
 
 //--------------------------------------------------------------------------------------------------

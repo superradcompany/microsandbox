@@ -186,7 +186,15 @@ fn test_hook_add_hint() {
     assert!(result.is_ok(), "operation should succeed with hint");
     if let Ok((entry, handle)) = result {
         sb.fs
-            .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+            .release(
+                DualFsTestSandbox::ctx(),
+                entry.inode,
+                0,
+                handle,
+                false,
+                false,
+                None,
+            )
             .unwrap();
     }
 }
@@ -230,7 +238,11 @@ fn test_hook_ordering() {
     let sb = DualFsTestSandbox::with_hooks(vec![h0, h1, h2]);
     let _ = sb.lookup_root("trigger_ordering");
     let logged = order.lock().unwrap();
-    assert_eq!(&*logged, &[0, 1, 2], "hooks should fire in registration order");
+    assert_eq!(
+        &*logged,
+        &[0, 1, 2],
+        "hooks should fire in registration order"
+    );
 }
 
 #[test]
@@ -254,7 +266,15 @@ fn test_hook_observer_phases_fire_and_forget() {
     // Create a file to trigger after_commit (create fires after_commit for dentry registration).
     let (entry, handle) = sb.fuse_create_root("observer.txt").unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     assert!(
         tracker.after_commit_called.load(Ordering::SeqCst),
@@ -289,7 +309,15 @@ fn test_hook_cannot_mutate_core_state() {
     // Create a file and verify state is intact — the hook could only observe, not corrupt.
     let (entry, handle) = sb.fuse_create_root("test_mut.txt").unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     let lookup = sb.lookup_root("test_mut.txt");
     assert!(lookup.is_ok(), "filesystem state should be intact");

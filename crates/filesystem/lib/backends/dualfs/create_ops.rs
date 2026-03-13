@@ -1,22 +1,27 @@
 //! Create, mkdir, mknod, symlink, link operations.
 
-use std::ffi::CStr;
-use std::io;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::{
+    ffi::CStr,
+    io,
+    sync::{Arc, Mutex, atomic::Ordering},
+};
 
-use super::hooks::{
-    CommitEvent, DentryChange, HookCtx, decode_entry, handle_hook_decision, notify_observers,
-    run_decision_hooks,
+use super::{
+    DualFs,
+    hooks::{
+        CommitEvent, DentryChange, HookCtx, decode_entry, handle_hook_decision, notify_observers,
+        run_decision_hooks,
+    },
+    lookup::{
+        backend, ensure_backend_presence, get_node, mark_metadata_authority, resolve_backend_inode,
+    },
+    policy::{DualNamespaceView, HintBag, OpKind, RequestCtx},
+    types::{AtomicBackendId, BackendId, FileKind, GuestNode, NodeState},
 };
-use super::lookup::{
-    backend, ensure_backend_presence, get_node, mark_metadata_authority, resolve_backend_inode,
+use crate::{
+    Context, Entry, Extensions, OpenOptions,
+    backends::shared::{init_binary, name_validation, platform},
 };
-use super::policy::{DualNamespaceView, HintBag, OpKind, RequestCtx};
-use super::types::{AtomicBackendId, BackendId, FileKind, GuestNode, NodeState};
-use super::DualFs;
-use crate::backends::shared::{init_binary, name_validation, platform};
-use crate::{Context, Entry, Extensions, OpenOptions};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -64,9 +69,7 @@ pub(crate) fn do_create(
         return Ok((entry, None, OpenOptions::empty()));
     }
 
-    let view = DualNamespaceView {
-        state: &fs.state,
-    };
+    let view = DualNamespaceView { state: &fs.state };
     let plan = fs.policy.plan(&hook_ctx.req, &view, &hook_ctx.hints)?;
     let target = plan.target_backend().unwrap_or(BackendId::BackendA);
 
@@ -77,8 +80,8 @@ pub(crate) fn do_create(
     check_name_available(fs, parent, name_bytes, target)?;
 
     // Resolve parent on target.
-    let parent_target_inode = resolve_backend_inode(&fs.state, parent, target)
-        .ok_or_else(platform::enoent)?;
+    let parent_target_inode =
+        resolve_backend_inode(&fs.state, parent, target).ok_or_else(platform::enoent)?;
 
     // Delegate.
     let (child_entry, child_handle, opts) = backend(fs, target).create(
@@ -98,7 +101,14 @@ pub(crate) fn do_create(
     mark_metadata_authority(&fs.state, parent, target);
 
     // Register new node.
-    let guest_inode = register_new_node(fs, child_entry.inode, name_bytes, parent, target, FileKind::RegularFile);
+    let guest_inode = register_new_node(
+        fs,
+        child_entry.inode,
+        name_bytes,
+        parent,
+        target,
+        FileKind::RegularFile,
+    );
 
     // Create file handle.
     let child_handle_val = child_handle.unwrap_or(0);
@@ -203,15 +213,23 @@ pub(crate) fn do_mkdir(
         check_name_available(fs, parent, name_bytes, target)?;
     }
 
-    let parent_target_inode = resolve_backend_inode(&fs.state, parent, target)
-        .ok_or_else(platform::enoent)?;
+    let parent_target_inode =
+        resolve_backend_inode(&fs.state, parent, target).ok_or_else(platform::enoent)?;
 
-    let child_entry = backend(fs, target).mkdir(ctx, parent_target_inode, name, mode, umask, extensions)?;
+    let child_entry =
+        backend(fs, target).mkdir(ctx, parent_target_inode, name, mode, umask, extensions)?;
 
     clear_whiteout(fs, parent, name_bytes, target);
     mark_metadata_authority(&fs.state, parent, target);
 
-    let guest_inode = register_new_node(fs, child_entry.inode, name_bytes, parent, target, FileKind::Directory);
+    let guest_inode = register_new_node(
+        fs,
+        child_entry.inode,
+        name_bytes,
+        parent,
+        target,
+        FileKind::Directory,
+    );
 
     // If recreating over a deleted dir, make opaque against the other backend.
     if had_whiteout {
@@ -267,10 +285,18 @@ pub(crate) fn do_mknod(
     ensure_backend_presence(fs, ctx, parent, target)?;
     check_name_available(fs, parent, name_bytes, target)?;
 
-    let parent_target_inode = resolve_backend_inode(&fs.state, parent, target)
-        .ok_or_else(platform::enoent)?;
+    let parent_target_inode =
+        resolve_backend_inode(&fs.state, parent, target).ok_or_else(platform::enoent)?;
 
-    let child_entry = backend(fs, target).mknod(ctx, parent_target_inode, name, mode, rdev, umask, extensions)?;
+    let child_entry = backend(fs, target).mknod(
+        ctx,
+        parent_target_inode,
+        name,
+        mode,
+        rdev,
+        umask,
+        extensions,
+    )?;
 
     clear_whiteout(fs, parent, name_bytes, target);
     mark_metadata_authority(&fs.state, parent, target);
@@ -320,15 +346,23 @@ pub(crate) fn do_symlink(
     ensure_backend_presence(fs, ctx, parent, target)?;
     check_name_available(fs, parent, name_bytes, target)?;
 
-    let parent_target_inode = resolve_backend_inode(&fs.state, parent, target)
-        .ok_or_else(platform::enoent)?;
+    let parent_target_inode =
+        resolve_backend_inode(&fs.state, parent, target).ok_or_else(platform::enoent)?;
 
-    let child_entry = backend(fs, target).symlink(ctx, linkname, parent_target_inode, name, extensions)?;
+    let child_entry =
+        backend(fs, target).symlink(ctx, linkname, parent_target_inode, name, extensions)?;
 
     clear_whiteout(fs, parent, name_bytes, target);
     mark_metadata_authority(&fs.state, parent, target);
 
-    let guest_inode = register_new_node(fs, child_entry.inode, name_bytes, parent, target, FileKind::Symlink);
+    let guest_inode = register_new_node(
+        fs,
+        child_entry.inode,
+        name_bytes,
+        parent,
+        target,
+        FileKind::Symlink,
+    );
 
     let mut st = child_entry.attr;
     st.st_ino = guest_inode;
@@ -373,21 +407,22 @@ pub(crate) fn do_link(
     let target = plan.target_backend().unwrap_or(BackendId::BackendA);
 
     // Materialize source if not on target.
-    if let Some(current) = source_node.state.read().unwrap().current_backend() {
-        if current != target {
-            super::materialize::do_materialize(fs, ctx, ino, current, target)?;
-        }
+    if let Some(current) = source_node.state.read().unwrap().current_backend()
+        && current != target
+    {
+        super::materialize::do_materialize(fs, ctx, ino, current, target)?;
     }
 
     ensure_backend_presence(fs, ctx, newparent, target)?;
     check_name_available(fs, newparent, newname_bytes, target)?;
 
-    let source_target_inode = resolve_backend_inode(&fs.state, ino, target)
-        .ok_or_else(platform::einval)?;
-    let newparent_target_inode = resolve_backend_inode(&fs.state, newparent, target)
-        .ok_or_else(platform::enoent)?;
+    let source_target_inode =
+        resolve_backend_inode(&fs.state, ino, target).ok_or_else(platform::einval)?;
+    let newparent_target_inode =
+        resolve_backend_inode(&fs.state, newparent, target).ok_or_else(platform::enoent)?;
 
-    let child_entry = backend(fs, target).link(ctx, source_target_inode, newparent_target_inode, newname)?;
+    let child_entry =
+        backend(fs, target).link(ctx, source_target_inode, newparent_target_inode, newname)?;
 
     mark_metadata_authority(&fs.state, newparent, target);
 
@@ -487,12 +522,12 @@ fn check_name_available(
     target: BackendId,
 ) -> io::Result<()> {
     // If whited out against other backend, the name is "deleted" — available.
-    let whited_out = fs
-        .state
-        .whiteouts
-        .read()
-        .unwrap()
-        .contains(&(parent, name.to_vec(), target.other()));
+    let whited_out =
+        fs.state
+            .whiteouts
+            .read()
+            .unwrap()
+            .contains(&(parent, name.to_vec(), target.other()));
     if whited_out {
         return Ok(());
     }

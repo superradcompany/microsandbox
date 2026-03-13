@@ -40,9 +40,7 @@ fn test_path_lookup_populates() {
     let _ = sb.lookup_root("looked_up.txt").unwrap();
     sb.access_log.lock().unwrap().clear();
     // Open — should get path from path table.
-    let (handle, _opts) = sb
-        .fuse_open(entry.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let (handle, _opts) = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     sb.fs
         .release(
             ProxyFsTestSandbox::ctx(),
@@ -82,9 +80,7 @@ fn test_path_nested() {
         .unwrap();
     let _ = sb.lookup(dir_b.inode, "c").unwrap();
     sb.access_log.lock().unwrap().clear();
-    let (handle, _opts) = sb
-        .fuse_open(entry.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let (handle, _opts) = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     sb.fs
         .release(
             ProxyFsTestSandbox::ctx(),
@@ -167,9 +163,7 @@ fn test_path_mknod_populates() {
         )
         .unwrap();
     sb.access_log.lock().unwrap().clear();
-    let (handle, _opts) = sb
-        .fuse_open(entry.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let (handle, _opts) = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     sb.fs
         .release(
             ProxyFsTestSandbox::ctx(),
@@ -244,9 +238,7 @@ fn test_path_link_updates() {
         .unwrap();
     sb.access_log.lock().unwrap().clear();
     // Open the linked inode — path should be updated to "linked".
-    let (handle, _opts) = sb
-        .fuse_open(entry.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let (handle, _opts) = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     sb.fs
         .release(
             ProxyFsTestSandbox::ctx(),
@@ -353,9 +345,7 @@ fn test_path_rename_directory_updates_descendants() {
 
     sb.access_log.lock().unwrap().clear();
     // Open the child — path should be "renamed/child.txt".
-    let (handle, _opts) = sb
-        .fuse_open(child.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let (handle, _opts) = sb.fuse_open(child.inode, libc::O_RDONLY as u32).unwrap();
     sb.fs
         .release(
             ProxyFsTestSandbox::ctx(),
@@ -369,8 +359,7 @@ fn test_path_rename_directory_updates_descendants() {
         .unwrap();
     let log = sb.access_log.lock().unwrap();
     assert!(
-        log.iter()
-            .any(|(path, _)| path == "renamed/child.txt"),
+        log.iter().any(|(path, _)| path == "renamed/child.txt"),
         "renaming parent should update child path to 'renamed/child.txt', got: {:?}",
         log.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>()
     );
@@ -395,8 +384,7 @@ fn test_path_forget_removes() {
     let _ = sb.lookup_root("forgettable").unwrap();
 
     // Forget the inode.
-    sb.fs
-        .forget(ProxyFsTestSandbox::ctx(), entry.inode, 1);
+    sb.fs.forget(ProxyFsTestSandbox::ctx(), entry.inode, 1);
 
     sb.access_log.lock().unwrap().clear();
     // After forget, the path should be removed from the table.
@@ -444,9 +432,7 @@ fn test_path_open_copies_to_handle() {
         .unwrap();
     // Lookup to register path.
     let entry = sb.lookup(dir.inode, "hfile.txt").unwrap();
-    let (handle, _opts) = sb
-        .fuse_open(entry.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let (handle, _opts) = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     let handle = handle.unwrap();
     let _data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     let log = sb.read_log.lock().unwrap();
@@ -496,8 +482,7 @@ fn test_path_release_removes_handle() {
     let _data = sb.fuse_read(ino, handle2, 4096, 0).unwrap();
     let log = sb.read_log.lock().unwrap();
     assert!(
-        log.iter()
-            .any(|(path, _)| path == "release_test.txt"),
+        log.iter().any(|(path, _)| path == "release_test.txt"),
         "new handle after release should have correct path"
     );
 }
@@ -555,9 +540,7 @@ fn test_path_unknown_inode_fallback() {
     // For the "unknown" case, it's hard to construct without internal access.
     // Instead, verify the fallback produces empty string for handle_paths.
     // We accept that this test verifies the default behavior.
-    let (handle, _opts) = sb
-        .fuse_open(entry2.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let (handle, _opts) = sb.fuse_open(entry2.inode, libc::O_RDONLY as u32).unwrap();
     let handle = handle.unwrap();
     // Write some data first so read has something.
     sb.fuse_write(entry2.inode, handle, b"data", 0).unwrap();
@@ -574,9 +557,7 @@ fn test_path_unknown_inode_fallback() {
         .unwrap();
 
     // Re-open for read.
-    let (handle2, _opts) = sb
-        .fuse_open(entry2.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let (handle2, _opts) = sb.fuse_open(entry2.inode, libc::O_RDONLY as u32).unwrap();
     let handle2 = handle2.unwrap();
     read_log.lock().unwrap().clear();
     let _data = sb.fuse_read(entry2.inode, handle2, 4096, 0).unwrap();
@@ -618,15 +599,9 @@ fn test_path_concurrent_rename_read() {
             if let Ok((handle, _)) = sb.fuse_open(ino, libc::O_RDONLY as u32) {
                 if let Some(h) = handle {
                     let _ = sb.fuse_read(ino, h, 4096, 0);
-                    let _ = sb.fs.release(
-                        ProxyFsTestSandbox::ctx(),
-                        ino,
-                        0,
-                        h,
-                        false,
-                        false,
-                        None,
-                    );
+                    let _ = sb
+                        .fs
+                        .release(ProxyFsTestSandbox::ctx(), ino, 0, h, false, false, None);
                 }
             }
         });

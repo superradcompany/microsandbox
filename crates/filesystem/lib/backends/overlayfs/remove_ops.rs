@@ -11,22 +11,17 @@
 //! layer presence, redirect xattrs are written before the swap to preserve
 //! lower-child visibility at the new positions.
 
-use std::ffi::CStr;
-use std::io;
-use std::sync::atomic::Ordering;
+use std::{ffi::CStr, io, sync::atomic::Ordering};
 
-use super::OverlayFs;
-use super::copy_up;
-use super::dir_ops;
-use super::inode;
-use super::layer;
-use super::origin;
-use super::types::{NodeState, RedirectState, ROOT_INODE};
-use super::whiteout;
-use crate::backends::shared::init_binary;
-use crate::backends::shared::name_validation;
-use crate::backends::shared::platform;
-use crate::Context;
+use super::{
+    OverlayFs, copy_up, dir_ops, inode, layer, origin,
+    types::{NodeState, ROOT_INODE, RedirectState},
+    whiteout,
+};
+use crate::{
+    Context,
+    backends::shared::{init_binary, name_validation, platform},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -50,12 +45,7 @@ const KNOWN_RENAME_FLAGS: u32 = RENAME_NOREPLACE | RENAME_EXCHANGE;
 /// Resolves the target using overlay-visible semantics to verify it exists
 /// and is not a directory. Ensures the parent is on upper, unlinks the upper
 /// entry if present, and creates a whiteout if the name exists on lower layers.
-pub(crate) fn do_unlink(
-    fs: &OverlayFs,
-    _ctx: Context,
-    parent: u64,
-    name: &CStr,
-) -> io::Result<()> {
+pub(crate) fn do_unlink(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr) -> io::Result<()> {
     name_validation::validate_overlay_name(name)?;
 
     if init_binary::is_init_name(name.to_bytes()) {
@@ -109,12 +99,7 @@ pub(crate) fn do_unlink(
 /// Resolves the target using overlay-visible semantics to verify it exists,
 /// is a directory, and is empty across all layers. Ensures the parent is on
 /// upper, removes the upper entry and creates a whiteout if needed.
-pub(crate) fn do_rmdir(
-    fs: &OverlayFs,
-    _ctx: Context,
-    parent: u64,
-    name: &CStr,
-) -> io::Result<()> {
+pub(crate) fn do_rmdir(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr) -> io::Result<()> {
     name_validation::validate_overlay_name(name)?;
 
     if init_binary::is_init_name(name.to_bytes()) {
@@ -230,10 +215,8 @@ pub(crate) fn do_rename(
     // RENAME_NOREPLACE: fail if the destination already exists in the
     // merged overlay view. The host renameat2 only sees the upper layer,
     // so a lower-visible destination would be silently overwritten.
-    if flags & RENAME_NOREPLACE != 0 {
-        if dest_entry.is_ok() {
-            return Err(platform::eexist());
-        }
+    if flags & RENAME_NOREPLACE != 0 && dest_entry.is_ok() {
+        return Err(platform::eexist());
     }
 
     if let Ok(ref de) = dest_entry {
@@ -246,10 +229,8 @@ pub(crate) fn do_rename(
         if source_is_dir && !dest_is_dir {
             return Err(platform::enotdir());
         }
-        if source_is_dir && dest_is_dir {
-            if !dir_ops::is_merged_dir_empty(fs, de.inode)? {
-                return Err(platform::enotempty());
-            }
+        if source_is_dir && dest_is_dir && !dir_ops::is_merged_dir_empty(fs, de.inode)? {
+            return Err(platform::enotempty());
         }
     }
 
@@ -262,36 +243,48 @@ pub(crate) fn do_rename(
     }
 
     // Handle directory rename with redirect support.
-    if let Some(ref node) = source_node {
-        if source_is_dir {
-            let is_lower = {
-                let state = node.state.read().unwrap();
-                matches!(&*state, NodeState::Lower { .. })
-            };
+    if let Some(ref node) = source_node
+        && source_is_dir
+    {
+        let is_lower = {
+            let state = node.state.read().unwrap();
+            matches!(&*state, NodeState::Lower { .. })
+        };
 
-            if is_lower {
-                return rename_lower_directory(
-                    fs, node, olddir, oldname, oldname_id, newdir, newname,
-                    &dest_entry,
-                );
-            }
-
-            // Check if this is a merged directory (has lower presence or redirect).
-            // An opaque pure-upper dir is masking someone else's lower subtree,
-            // not merged with it — it must stay on the pure-upper rename path.
-            let has_redirect = node.redirect.read().unwrap().is_some();
-            let is_opaque = node.opaque.load(Ordering::Acquire);
-            let has_lower =
-                !is_opaque && whiteout::has_lower_entry(fs, olddir, oldname.to_bytes())?;
-            if has_redirect || has_lower {
-                return rename_merged_directory(
-                    fs, node, olddir, oldname, oldname_id, newdir, newname, flags,
-                    &dest_entry,
-                );
-            }
-
-            // Pure-upper directory: fall through to simple renameat below.
+        if is_lower {
+            return rename_lower_directory(
+                fs,
+                node,
+                olddir,
+                oldname,
+                oldname_id,
+                newdir,
+                newname,
+                &dest_entry,
+            );
         }
+
+        // Check if this is a merged directory (has lower presence or redirect).
+        // An opaque pure-upper dir is masking someone else's lower subtree,
+        // not merged with it — it must stay on the pure-upper rename path.
+        let has_redirect = node.redirect.read().unwrap().is_some();
+        let is_opaque = node.opaque.load(Ordering::Acquire);
+        let has_lower = !is_opaque && whiteout::has_lower_entry(fs, olddir, oldname.to_bytes())?;
+        if has_redirect || has_lower {
+            return rename_merged_directory(
+                fs,
+                node,
+                olddir,
+                oldname,
+                oldname_id,
+                newdir,
+                newname,
+                flags,
+                &dest_entry,
+            );
+        }
+
+        // Pure-upper directory: fall through to simple renameat below.
     }
 
     // Copy-up source if needed (files and pure-upper dirs).
@@ -333,20 +326,29 @@ pub(crate) fn do_rename(
 
     // For pure-upper directory rename: if destination had lower presence,
     // mark the directory opaque to suppress those lower entries.
-    if let Some(ref node) = source_node {
-        if source_is_dir {
-            let dest_has_lower = whiteout::has_lower_entry(fs, newdir, newname.to_bytes())?;
-            if dest_has_lower {
-                let dir_fd = open_dir_by_name(new_parent_fd, newname)?;
-                let _close = scopeguard::guard(dir_fd, |fd| unsafe { libc::close(fd); });
-                create_opaque_marker(dir_fd)?;
-                node.opaque.store(true, Ordering::Release);
-            }
+    if let Some(ref node) = source_node
+        && source_is_dir
+    {
+        let dest_has_lower = whiteout::has_lower_entry(fs, newdir, newname.to_bytes())?;
+        if dest_has_lower {
+            let dir_fd = open_dir_by_name(new_parent_fd, newname)?;
+            let _close = scopeguard::guard(dir_fd, |fd| unsafe {
+                libc::close(fd);
+            });
+            create_opaque_marker(dir_fd)?;
+            node.opaque.store(true, Ordering::Release);
         }
     }
 
     // Update dentry cache.
-    update_dentry_cache(fs, olddir, oldname_id, newdir, newname, source_node.as_deref());
+    update_dentry_cache(
+        fs,
+        olddir,
+        oldname_id,
+        newdir,
+        newname,
+        source_node.as_deref(),
+    );
 
     Ok(())
 }
@@ -380,10 +382,8 @@ fn do_rename_exchange(
     inode::forget_one(fs, source_entry.inode, 1);
     inode::forget_one(fs, dest_entry.inode, 1);
 
-    let src_is_dir =
-        source_entry.attr.st_mode as u32 & libc::S_IFMT as u32 == libc::S_IFDIR as u32;
-    let dst_is_dir =
-        dest_entry.attr.st_mode as u32 & libc::S_IFMT as u32 == libc::S_IFDIR as u32;
+    let src_is_dir = source_entry.attr.st_mode as u32 & libc::S_IFMT as u32 == libc::S_IFDIR as u32;
+    let dst_is_dir = dest_entry.attr.st_mode as u32 & libc::S_IFMT as u32 == libc::S_IFDIR as u32;
 
     // For directory entries, determine if they need redirect metadata after
     // exchange. A directory needs a redirect if it has any lower-layer presence
@@ -414,39 +414,57 @@ fn do_rename_exchange(
     copy_up::ensure_upper(fs, newdir)?;
 
     let old_parent_fd = copy_up::open_upper_parent_fd(fs, olddir)?;
-    let _close_old = scopeguard::guard(old_parent_fd, |fd| unsafe { libc::close(fd); });
+    let _close_old = scopeguard::guard(old_parent_fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     let new_parent_fd = copy_up::open_upper_parent_fd(fs, newdir)?;
-    let _close_new = scopeguard::guard(new_parent_fd, |fd| unsafe { libc::close(fd); });
+    let _close_new = scopeguard::guard(new_parent_fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     // Write redirect xattrs BEFORE the exchange so the metadata is in place
     // when the directories land at their new positions.
     if let Some(ref redirect_path) = src_redirect {
         let dir_fd = open_dir_by_name(old_parent_fd, oldname)?;
-        let _close = scopeguard::guard(dir_fd, |fd| unsafe { libc::close(fd); });
+        let _close = scopeguard::guard(dir_fd, |fd| unsafe {
+            libc::close(fd);
+        });
         origin::set_redirect_xattr(dir_fd, redirect_path)?;
     }
     if let Some(ref redirect_path) = dst_redirect {
         let dir_fd = open_dir_by_name(new_parent_fd, newname)?;
-        let _close = scopeguard::guard(dir_fd, |fd| unsafe { libc::close(fd); });
+        let _close = scopeguard::guard(dir_fd, |fd| unsafe {
+            libc::close(fd);
+        });
         origin::set_redirect_xattr(dir_fd, redirect_path)?;
     }
 
     // Perform the atomic exchange on upper.
-    do_renameat(old_parent_fd, oldname, new_parent_fd, newname, RENAME_EXCHANGE)?;
+    do_renameat(
+        old_parent_fd,
+        oldname,
+        new_parent_fd,
+        newname,
+        RENAME_EXCHANGE,
+    )?;
 
     // Post-exchange opaque marking:
     // Source (now at newname): if the destination position had lower entries
     // and source has no redirect, mark opaque to suppress those entries.
     if src_is_dir && new_has_lower && src_redirect.is_none() {
         let dir_fd = open_dir_by_name(new_parent_fd, newname)?;
-        let _close = scopeguard::guard(dir_fd, |fd| unsafe { libc::close(fd); });
+        let _close = scopeguard::guard(dir_fd, |fd| unsafe {
+            libc::close(fd);
+        });
         create_opaque_marker(dir_fd)?;
     }
     // Dest (now at oldname): same logic in reverse.
     if dst_is_dir && old_has_lower && dst_redirect.is_none() {
         let dir_fd = open_dir_by_name(old_parent_fd, oldname)?;
-        let _close = scopeguard::guard(dir_fd, |fd| unsafe { libc::close(fd); });
+        let _close = scopeguard::guard(dir_fd, |fd| unsafe {
+            libc::close(fd);
+        });
         create_opaque_marker(dir_fd)?;
     }
 
@@ -462,8 +480,9 @@ fn do_rename_exchange(
                 src_node.opaque.store(true, Ordering::Release);
             }
             if let Some(redirect_path) = src_redirect {
-                *src_node.redirect.write().unwrap() =
-                    Some(RedirectState { lower_path: redirect_path });
+                *src_node.redirect.write().unwrap() = Some(RedirectState {
+                    lower_path: redirect_path,
+                });
             }
             src_node.primary_parent.store(newdir, Ordering::Release);
             *src_node.primary_name.write().unwrap() = newname_id;
@@ -473,8 +492,9 @@ fn do_rename_exchange(
                 dst_node.opaque.store(true, Ordering::Release);
             }
             if let Some(redirect_path) = dst_redirect {
-                *dst_node.redirect.write().unwrap() =
-                    Some(RedirectState { lower_path: redirect_path });
+                *dst_node.redirect.write().unwrap() = Some(RedirectState {
+                    lower_path: redirect_path,
+                });
             }
             dst_node.primary_parent.store(olddir, Ordering::Release);
             *dst_node.primary_name.write().unwrap() = oldname_id;
@@ -535,9 +555,7 @@ fn compute_exchange_redirect(
     // Upper directory — check if it has lower presence (merged).
     // An opaque pure-upper dir is masking someone else's lower subtree at this
     // position, not merged with it. It should not get a redirect.
-    if !node.opaque.load(Ordering::Acquire)
-        && whiteout::has_lower_entry(fs, parent_ino, name)?
-    {
+    if !node.opaque.load(Ordering::Acquire) && whiteout::has_lower_entry(fs, parent_ino, name)? {
         return Ok(Some(compute_redirect_path(fs, &node, parent_ino, name)?));
     }
 
@@ -553,6 +571,7 @@ fn compute_exchange_redirect(
 /// Creates a new directory on the upper layer at the destination, attaches a
 /// redirect xattr pointing to the source's lower path, and creates a whiteout
 /// at the old location.
+#[allow(clippy::too_many_arguments)]
 fn rename_lower_directory(
     fs: &OverlayFs,
     node: &std::sync::Arc<super::types::OverlayNode>,
@@ -571,10 +590,14 @@ fn rename_lower_directory(
     copy_up::ensure_upper(fs, newdir)?;
 
     let old_parent_fd = copy_up::open_upper_parent_fd(fs, olddir)?;
-    let _close_old = scopeguard::guard(old_parent_fd, |fd| unsafe { libc::close(fd); });
+    let _close_old = scopeguard::guard(old_parent_fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     let new_parent_fd = copy_up::open_upper_parent_fd(fs, newdir)?;
-    let _close_new = scopeguard::guard(new_parent_fd, |fd| unsafe { libc::close(fd); });
+    let _close_new = scopeguard::guard(new_parent_fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     // Remove whiteout at destination.
     whiteout::remove_whiteout(new_parent_fd, newname.to_bytes())?;
@@ -597,11 +620,15 @@ fn rename_lower_directory(
     // Copy all xattrs from lower source to the new upper directory
     // (same contract as copy_up_directory: stat override + user xattrs).
     let lower_fd = inode::open_node_fd(fs, node.inode, libc::O_RDONLY)?;
-    let _close_lower = scopeguard::guard(lower_fd, |fd| unsafe { libc::close(fd); });
+    let _close_lower = scopeguard::guard(lower_fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     // Open the newly created upper directory to write xattrs and redirect.
     let dir_fd = open_dir_by_name(new_parent_fd, newname)?;
-    let _close_dir = scopeguard::guard(dir_fd, |fd| unsafe { libc::close(fd); });
+    let _close_dir = scopeguard::guard(dir_fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     copy_up::copy_xattrs(lower_fd, dir_fd)?;
 
@@ -629,6 +656,7 @@ fn rename_lower_directory(
 ///
 /// Moves the upper fragment via renameat and updates the redirect xattr to
 /// point to the original lower path.
+#[allow(clippy::too_many_arguments)]
 fn rename_merged_directory(
     fs: &OverlayFs,
     node: &std::sync::Arc<super::types::OverlayNode>,
@@ -648,10 +676,14 @@ fn rename_merged_directory(
     copy_up::ensure_upper(fs, newdir)?;
 
     let old_parent_fd = copy_up::open_upper_parent_fd(fs, olddir)?;
-    let _close_old = scopeguard::guard(old_parent_fd, |fd| unsafe { libc::close(fd); });
+    let _close_old = scopeguard::guard(old_parent_fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     let new_parent_fd = copy_up::open_upper_parent_fd(fs, newdir)?;
-    let _close_new = scopeguard::guard(new_parent_fd, |fd| unsafe { libc::close(fd); });
+    let _close_new = scopeguard::guard(new_parent_fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     // Remove whiteout at destination.
     whiteout::remove_whiteout(new_parent_fd, newname.to_bytes())?;
@@ -667,7 +699,9 @@ fn rename_merged_directory(
 
     // Open the renamed directory to update redirect xattr.
     let dir_fd = open_dir_by_name(new_parent_fd, newname)?;
-    let _close_dir = scopeguard::guard(dir_fd, |fd| unsafe { libc::close(fd); });
+    let _close_dir = scopeguard::guard(dir_fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     // Write/update redirect xattr.
     origin::set_redirect_xattr(dir_fd, &redirect_path)?;
@@ -843,9 +877,7 @@ fn update_dentry_cache(
         // Insert new dentry.
         dentries.insert(
             (newdir, newname_id),
-            super::types::Dentry {
-                node: dentry.node,
-            },
+            super::types::Dentry { node: dentry.node },
         );
     }
 }
@@ -904,7 +936,9 @@ fn remove_upper_dir_artifacts(parent_fd: i32, name: &CStr) -> io::Result<()> {
         Err(e) if platform::is_enoent(&e) => return Ok(()),
         Err(e) => return Err(e),
     };
-    let _close = scopeguard::guard(dir_fd, |fd| unsafe { libc::close(fd); });
+    let _close = scopeguard::guard(dir_fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     let entries = layer::read_dir_entries_raw(dir_fd)?;
 

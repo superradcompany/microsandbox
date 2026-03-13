@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
-exclude = ["sdk/rust", "crates/agentd"]
+exclude = ["crates/agentd", "sdk/rust"]
 members = [
-    "crates/microsandbox",
     "crates/cli",
     "crates/db",
     "crates/filesystem",
     "crates/image",
+    "crates/microsandbox",
     "crates/migration",
     "crates/network",
     "crates/protocol",
@@ -71,8 +71,8 @@ psutil = "3.3.0"
 rand = "0.9"
 regex = "1.10"
 reqwest = { version = "0.13", features = ["json", "stream"] }
-reqwest-middleware = "0.3"                                                  # Cannot upgrade to 0.4 due to https://github.com/TrueLayer/reqwest-middleware/issues/204
-reqwest-retry = "0.8"                                                       # Cannot upgrade to 0.7 due to https://github.com/TrueLayer/reqwest-middleware/issues/204
+reqwest-middleware = "0.3" # Cannot upgrade to 0.4 due to https://github.com/TrueLayer/reqwest-middleware/issues/204
+reqwest-retry = "0.8" # Cannot upgrade to 0.7 due to https://github.com/TrueLayer/reqwest-middleware/issues/204
 scopeguard = "1.2"
 semver = { version = "1.0.24", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -101,6 +101,13 @@ walkdir = "2.4"
 which = "8"
 xattr = "1.3"
 rstest = "0.26"
-sea-orm = { version = "1.1", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
-sea-orm-migration = { version = "1.1", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+sea-orm = { version = "1.1", features = [
+    "macros",
+    "runtime-tokio-rustls",
+    "sqlx-sqlite",
+] }
+sea-orm-migration = { version = "1.1", features = [
+    "runtime-tokio-rustls",
+    "sqlx-sqlite",
+] }
 ureq = "3"

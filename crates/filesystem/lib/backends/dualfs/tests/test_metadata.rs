@@ -114,13 +114,29 @@ fn test_setattr_triggers_materialization() {
             SetattrValid::MODE,
         )
         .unwrap();
-    assert_eq!(st.st_mode as u32 & 0o777, 0o600, "mode should be updated after materialization");
+    assert_eq!(
+        st.st_mode as u32 & 0o777,
+        0o600,
+        "mode should be updated after materialization"
+    );
     // File should still be readable.
     let handle = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
-    assert_eq!(&data[..], b"original", "data should be preserved after materialization");
+    assert_eq!(
+        &data[..],
+        b"original",
+        "data should be preserved after materialization"
+    );
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -137,8 +153,14 @@ fn test_getattr_metadata_backend() {
     let ino_a = sb
         .create_file_with_content(ROOT_INODE, "meta_a.txt", b"hello_a")
         .unwrap();
-    let (st_a, _) = sb.fs.getattr(DualFsTestSandbox::ctx(), ino_a, None).unwrap();
-    assert_eq!(st_a.st_ino, ino_a, "getattr should rewrite st_ino to guest inode");
+    let (st_a, _) = sb
+        .fs
+        .getattr(DualFsTestSandbox::ctx(), ino_a, None)
+        .unwrap();
+    assert_eq!(
+        st_a.st_ino, ino_a,
+        "getattr should rewrite st_ino to guest inode"
+    );
     let mode_a = st_a.st_mode as u32;
     assert_eq!(
         mode_a & libc::S_IFMT as u32,
@@ -156,22 +178,30 @@ fn test_getattr_metadata_backend() {
         .fs
         .getattr(DualFsTestSandbox::ctx(), entry_b.inode, None)
         .unwrap();
-    assert_eq!(st_b.st_ino, entry_b.inode, "getattr should rewrite st_ino to guest inode");
+    assert_eq!(
+        st_b.st_ino, entry_b.inode,
+        "getattr should rewrite st_ino to guest inode"
+    );
     let mode_b = st_b.st_mode as u32;
     assert_eq!(
         mode_b & libc::S_IFMT as u32,
         libc::S_IFREG as u32,
         "should be a regular file from backend_b"
     );
-    assert!(
-        st_b.st_size >= 14,
-        "size should reflect backend_b content"
-    );
+    assert!(st_b.st_size >= 14, "size should reflect backend_b content");
 
     // Test 3: after materialization, getattr should still work and reflect backend_a attrs.
     let handle = sb2.fuse_open(entry_b.inode, libc::O_RDWR as u32).unwrap();
     sb2.fs
-        .release(DualFsTestSandbox::ctx(), entry_b.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry_b.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     let (st_after, _) = sb2
         .fs

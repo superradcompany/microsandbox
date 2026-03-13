@@ -1,29 +1,26 @@
 //! Deletion operations: unlink, rmdir, rename.
 
-use std::ffi::CStr;
-use std::io;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::{
+    ffi::CStr,
+    io,
+    sync::{Arc, atomic::Ordering},
+};
 
-use super::MemFs;
-use super::inode;
-use super::types::{InodeContent, ROOT_INODE};
-use crate::backends::shared::init_binary;
-use crate::backends::shared::name_validation;
-use crate::backends::shared::platform;
-use crate::Context;
+use super::{
+    MemFs, inode,
+    types::{InodeContent, ROOT_INODE},
+};
+use crate::{
+    Context,
+    backends::shared::{init_binary, name_validation, platform},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
 /// Unlink a file (remove directory entry).
-pub(crate) fn do_unlink(
-    fs: &MemFs,
-    _ctx: Context,
-    parent: u64,
-    name: &CStr,
-) -> io::Result<()> {
+pub(crate) fn do_unlink(fs: &MemFs, _ctx: Context, parent: u64, name: &CStr) -> io::Result<()> {
     name_validation::validate_memfs_name(name)?;
 
     if parent == ROOT_INODE && init_binary::is_init_name(name.to_bytes()) {
@@ -74,12 +71,7 @@ pub(crate) fn do_unlink(
 }
 
 /// Remove an empty directory.
-pub(crate) fn do_rmdir(
-    fs: &MemFs,
-    _ctx: Context,
-    parent: u64,
-    name: &CStr,
-) -> io::Result<()> {
+pub(crate) fn do_rmdir(fs: &MemFs, _ctx: Context, parent: u64, name: &CStr) -> io::Result<()> {
     name_validation::validate_memfs_name(name)?;
 
     if parent == ROOT_INODE && init_binary::is_init_name(name.to_bytes()) {
@@ -107,10 +99,10 @@ pub(crate) fn do_rmdir(
     }
 
     // Verify it's empty.
-    if let InodeContent::Directory { children, .. } = &child_node.content {
-        if !children.read().unwrap().is_empty() {
-            return Err(platform::enotempty());
-        }
+    if let InodeContent::Directory { children, .. } = &child_node.content
+        && !children.read().unwrap().is_empty()
+    {
+        return Err(platform::enotempty());
     }
 
     // Now remove from parent.
@@ -234,16 +226,18 @@ pub(crate) fn do_rename(
         }
 
         // Update parent pointers for directories.
-        if source_is_dir && olddir != newdir {
-            if let InodeContent::Directory { parent, .. } = &source_node.content {
-                parent.store(newdir, Ordering::Relaxed);
-            }
+        if source_is_dir
+            && olddir != newdir
+            && let InodeContent::Directory { parent, .. } = &source_node.content
+        {
+            parent.store(newdir, Ordering::Relaxed);
         }
         let dest_is_dir = dest_node.kind == libc::S_IFDIR as u32;
-        if dest_is_dir && olddir != newdir {
-            if let InodeContent::Directory { parent, .. } = &dest_node.content {
-                parent.store(olddir, Ordering::Relaxed);
-            }
+        if dest_is_dir
+            && olddir != newdir
+            && let InodeContent::Directory { parent, .. } = &dest_node.content
+        {
+            parent.store(olddir, Ordering::Relaxed);
         }
 
         // Update timestamps.
@@ -289,12 +283,11 @@ pub(crate) fn do_rename(
         }
 
         // If destination is a directory, it must be empty.
-        if dest_is_dir {
-            if let InodeContent::Directory { children, .. } = &dest_node.content {
-                if !children.read().unwrap().is_empty() {
-                    return Err(platform::enotempty());
-                }
-            }
+        if dest_is_dir
+            && let InodeContent::Directory { children, .. } = &dest_node.content
+            && !children.read().unwrap().is_empty()
+        {
+            return Err(platform::enotempty());
         }
 
         // Decrement destination nlink.

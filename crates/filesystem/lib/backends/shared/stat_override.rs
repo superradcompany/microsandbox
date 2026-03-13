@@ -17,9 +17,7 @@
 //! skips the xattr read for real host symlinks (detected via `S_IFLNK` in the unpatched stat).
 //! File-backed symlinks (regular files with S_IFLNK in xattr) are handled normally.
 
-use std::ffi::CStr;
-use std::io;
-use std::os::fd::RawFd;
+use std::{ffi::CStr, io, os::fd::RawFd};
 
 use crate::stat64;
 

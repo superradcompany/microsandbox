@@ -7,16 +7,14 @@
 //! setattr triggers copy-up, then applies changes: UID/GID/mode via xattr,
 //! size via ftruncate, timestamps via futimens.
 
-use std::io;
-use std::time::Duration;
+use std::{io, time::Duration};
 
-use super::OverlayFs;
-use super::copy_up;
-use super::inode;
-use crate::backends::shared::init_binary;
-use crate::backends::shared::platform;
-use crate::backends::shared::stat_override;
-use crate::{Context, SetattrValid, stat64};
+use super::{OverlayFs, copy_up, inode};
+use crate::{
+    Context, SetattrValid,
+    backends::shared::{init_binary, platform, stat_override},
+    stat64,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions

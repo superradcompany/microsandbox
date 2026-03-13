@@ -3,19 +3,20 @@
 //! Write-mode opens trigger copy-up of lower-layer files to the upper layer.
 //! Subsequent reads and writes operate on the upper copy.
 
-use std::io;
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, RwLock};
+use std::{
+    io,
+    os::fd::{AsRawFd, FromRawFd},
+    sync::{Arc, RwLock, atomic::Ordering},
+};
 
-use super::OverlayFs;
-use super::copy_up;
-use super::inode;
-use super::types::{FileHandle, NodeState};
-use crate::backends::shared::init_binary;
-use crate::backends::shared::platform;
-use crate::backends::shared::stat_override;
-use crate::{Context, OpenOptions, ZeroCopyReader, ZeroCopyWriter};
+use super::{
+    OverlayFs, copy_up, inode,
+    types::{FileHandle, NodeState},
+};
+use crate::{
+    Context, OpenOptions, ZeroCopyReader, ZeroCopyWriter,
+    backends::shared::{init_binary, platform, stat_override},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -57,15 +58,18 @@ pub(crate) fn do_open(
     }
 
     let fd = inode::open_node_fd(fs, ino, open_flags)?;
-    let fd_guard = scopeguard::guard(fd, |fd| unsafe { libc::close(fd); });
+    let fd_guard = scopeguard::guard(fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     // kill_priv: clear SUID/SGID on open+truncate.
-    if kill_priv && (open_flags & libc::O_TRUNC != 0) {
-        if let Ok(Some(ovr)) = stat_override::get_override(*fd_guard) {
-            let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
-            if new_mode != ovr.mode {
-                stat_override::set_override(*fd_guard, ovr.uid, ovr.gid, new_mode, ovr.rdev)?;
-            }
+    if kill_priv
+        && (open_flags & libc::O_TRUNC != 0)
+        && let Ok(Some(ovr)) = stat_override::get_override(*fd_guard)
+    {
+        let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+        if new_mode != ovr.mode {
+            stat_override::set_override(*fd_guard, ovr.uid, ovr.gid, new_mode, ovr.rdev)?;
         }
     }
 
@@ -105,6 +109,7 @@ pub(crate) fn do_read(
 ///
 /// The file must already be on the upper layer (do_open triggers copy-up for
 /// write opens). kill_priv clears SUID/SGID on first write.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn do_write(
     fs: &OverlayFs,
     _ctx: Context,
@@ -125,12 +130,10 @@ pub(crate) fn do_write(
     let f = data.file.read().unwrap();
 
     // kill_priv: clear SUID/SGID before first write.
-    if kill_priv {
-        if let Ok(Some(ovr)) = stat_override::get_override(f.as_raw_fd()) {
-            let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
-            if new_mode != ovr.mode {
-                stat_override::set_override(f.as_raw_fd(), ovr.uid, ovr.gid, new_mode, ovr.rdev)?;
-            }
+    if kill_priv && let Ok(Some(ovr)) = stat_override::get_override(f.as_raw_fd()) {
+        let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+        if new_mode != ovr.mode {
+            stat_override::set_override(f.as_raw_fd(), ovr.uid, ovr.gid, new_mode, ovr.rdev)?;
         }
     }
 
@@ -166,7 +169,9 @@ pub(crate) fn do_readlink(fs: &OverlayFs, _ctx: Context, ino: u64) -> io::Result
             }
             (dup, platform::fstat(fd)?)
         };
-        let _close_dup = scopeguard::guard(dup_fd, |fd| unsafe { libc::close(fd); });
+        let _close_dup = scopeguard::guard(dup_fd, |fd| unsafe {
+            libc::close(fd);
+        });
 
         if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
             // Real symlink — read target via /proc/self/fd/<dup'd O_PATH>.
@@ -234,7 +239,9 @@ pub(crate) fn do_readlink(fs: &OverlayFs, _ctx: Context, ino: u64) -> io::Result
         let (node_dev, node_ino) = {
             let state = node.state.read().unwrap();
             match &*state {
-                NodeState::Lower { ino, dev, .. } | NodeState::Upper { ino, dev, .. } => (*dev, *ino),
+                NodeState::Lower { ino, dev, .. } | NodeState::Upper { ino, dev, .. } => {
+                    (*dev, *ino)
+                }
                 _ => return Err(platform::einval()),
             }
         };
@@ -256,12 +263,7 @@ pub(crate) fn do_readlink(fs: &OverlayFs, _ctx: Context, ino: u64) -> io::Result
 }
 
 /// Flush pending data for a file handle.
-pub(crate) fn do_flush(
-    fs: &OverlayFs,
-    _ctx: Context,
-    ino: u64,
-    handle: u64,
-) -> io::Result<()> {
+pub(crate) fn do_flush(fs: &OverlayFs, _ctx: Context, ino: u64, handle: u64) -> io::Result<()> {
     if ino == init_binary::INIT_INODE {
         return Ok(());
     }
@@ -282,12 +284,7 @@ pub(crate) fn do_flush(
 }
 
 /// Release an open file handle.
-pub(crate) fn do_release(
-    fs: &OverlayFs,
-    _ctx: Context,
-    ino: u64,
-    handle: u64,
-) -> io::Result<()> {
+pub(crate) fn do_release(fs: &OverlayFs, _ctx: Context, ino: u64, handle: u64) -> io::Result<()> {
     if ino == init_binary::INIT_INODE {
         return Ok(());
     }

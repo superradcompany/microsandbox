@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
 
-use crate::MicrosandboxError;
-use crate::MicrosandboxResult;
-use crate::sandbox::fs::{FsEntry, FsEntryKind, FsMetadata};
+use crate::{
+    MicrosandboxError, MicrosandboxResult,
+    sandbox::fs::{FsEntry, FsEntryKind, FsMetadata},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types

@@ -1,19 +1,24 @@
 //! Open, read, write, flush, release for regular files.
 
-use std::io;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-
-use super::hooks::{
-    DispatchStep, HookCtx, StepResult, decode_ok, decode_open, handle_hook_decision,
-    notify_observers, run_decision_hooks,
+use std::{
+    io,
+    sync::{Arc, atomic::Ordering},
 };
-use super::lookup::{backend, get_node, resolve_backend_inode};
-use super::policy::{DualDispatchPlan, DualNamespaceView, HintBag, OpKind, RequestCtx};
-use super::types::{BackendId, DualHandle, NodeState};
-use super::DualFs;
-use crate::backends::shared::{init_binary, platform};
-use crate::{Context, OpenOptions, ZeroCopyReader, ZeroCopyWriter};
+
+use super::{
+    DualFs,
+    hooks::{
+        DispatchStep, HookCtx, StepResult, decode_ok, decode_open, handle_hook_decision,
+        notify_observers, run_decision_hooks,
+    },
+    lookup::{backend, get_node, resolve_backend_inode},
+    policy::{DualDispatchPlan, DualNamespaceView, HintBag, OpKind, RequestCtx},
+    types::{BackendId, DualHandle, NodeState},
+};
+use crate::{
+    Context, OpenOptions, ZeroCopyReader, ZeroCopyWriter,
+    backends::shared::{init_binary, platform},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -65,9 +70,7 @@ pub(crate) fn do_open(
         return r;
     }
 
-    let view = DualNamespaceView {
-        state: &fs.state,
-    };
+    let view = DualNamespaceView { state: &fs.state };
 
     // hooks.after_resolve
     if let std::ops::ControlFlow::Break(r) = handle_hook_decision(
@@ -91,9 +94,7 @@ pub(crate) fn do_open(
 
     // hooks.after_plan
     if let std::ops::ControlFlow::Break(r) = handle_hook_decision(
-        run_decision_hooks(&fs.hooks, &mut hook_ctx, |h, ctx| {
-            h.after_plan(ctx, &plan)
-        }),
+        run_decision_hooks(&fs.hooks, &mut hook_ctx, |h, ctx| h.after_plan(ctx, &plan)),
         decode_open,
     ) {
         return r;
@@ -101,20 +102,28 @@ pub(crate) fn do_open(
 
     // Dispatch.
     match plan {
-        DualDispatchPlan::MaterializeToBackendThen {
-            source,
-            target,
-            ..
-        } => {
+        DualDispatchPlan::MaterializeToBackendThen { source, target, .. } => {
             super::materialize::do_materialize(fs, ctx, ino, source, target)?;
             open_on_backend(fs, ctx, ino, kill_priv, flags, target, &mut hook_ctx)
         }
-        DualDispatchPlan::UseBackendA { .. } => {
-            open_on_backend(fs, ctx, ino, kill_priv, flags, BackendId::BackendA, &mut hook_ctx)
-        }
-        DualDispatchPlan::UseBackendB { .. } => {
-            open_on_backend(fs, ctx, ino, kill_priv, flags, BackendId::BackendB, &mut hook_ctx)
-        }
+        DualDispatchPlan::UseBackendA { .. } => open_on_backend(
+            fs,
+            ctx,
+            ino,
+            kill_priv,
+            flags,
+            BackendId::BackendA,
+            &mut hook_ctx,
+        ),
+        DualDispatchPlan::UseBackendB { .. } => open_on_backend(
+            fs,
+            ctx,
+            ino,
+            kill_priv,
+            flags,
+            BackendId::BackendB,
+            &mut hook_ctx,
+        ),
         DualDispatchPlan::Deny { errno } => Err(io::Error::from_raw_os_error(errno)),
         _ => Err(platform::einval()),
     }
@@ -363,12 +372,16 @@ pub(crate) fn do_flush(
             backend_a_inode,
             backend_a_handle,
             ..
-        } => fs.backend_a.flush(ctx, *backend_a_inode, *backend_a_handle, lock_owner),
+        } => fs
+            .backend_a
+            .flush(ctx, *backend_a_inode, *backend_a_handle, lock_owner),
         DualHandle::BackendB {
             backend_b_inode,
             backend_b_handle,
             ..
-        } => fs.backend_b.flush(ctx, *backend_b_inode, *backend_b_handle, lock_owner),
+        } => fs
+            .backend_b
+            .flush(ctx, *backend_b_inode, *backend_b_handle, lock_owner),
     };
 
     notify_observers(&fs.hooks, |h| {
@@ -439,32 +452,28 @@ pub(crate) fn do_release(
             backend_a_inode,
             backend_a_handle,
             ..
-        } => {
-            fs.backend_a.release(
-                ctx,
-                *backend_a_inode,
-                flags,
-                *backend_a_handle,
-                flush,
-                flock_release,
-                lock_owner,
-            )
-        }
+        } => fs.backend_a.release(
+            ctx,
+            *backend_a_inode,
+            flags,
+            *backend_a_handle,
+            flush,
+            flock_release,
+            lock_owner,
+        ),
         DualHandle::BackendB {
             backend_b_inode,
             backend_b_handle,
             ..
-        } => {
-            fs.backend_b.release(
-                ctx,
-                *backend_b_inode,
-                flags,
-                *backend_b_handle,
-                flush,
-                flock_release,
-                lock_owner,
-            )
-        }
+        } => fs.backend_b.release(
+            ctx,
+            *backend_b_inode,
+            flags,
+            *backend_b_handle,
+            flush,
+            flock_release,
+            lock_owner,
+        ),
     };
 
     notify_observers(&fs.hooks, |h| {
@@ -517,8 +526,8 @@ fn open_on_backend(
     target: BackendId,
     hook_ctx: &mut HookCtx,
 ) -> io::Result<(Option<u64>, OpenOptions)> {
-    let target_inode = resolve_backend_inode(&fs.state, ino, target)
-        .ok_or_else(platform::einval)?;
+    let target_inode =
+        resolve_backend_inode(&fs.state, ino, target).ok_or_else(platform::einval)?;
 
     let step = DispatchStep {
         backend: target,
@@ -528,9 +537,7 @@ fn open_on_backend(
     };
 
     if let std::ops::ControlFlow::Break(r) = handle_hook_decision(
-        run_decision_hooks(&fs.hooks, hook_ctx, |h, ctx| {
-            h.before_dispatch(ctx, &step)
-        }),
+        run_decision_hooks(&fs.hooks, hook_ctx, |h, ctx| h.before_dispatch(ctx, &step)),
         decode_open,
     ) {
         return r;
@@ -539,10 +546,7 @@ fn open_on_backend(
     let (child_handle, opts) = backend(fs, target).open(ctx, target_inode, kill_priv, flags)?;
     let child_handle_val = child_handle.unwrap_or(0);
 
-    let guest_handle = fs
-        .state
-        .next_handle
-        .fetch_add(1, Ordering::Relaxed);
+    let guest_handle = fs.state.next_handle.fetch_add(1, Ordering::Relaxed);
 
     let dual_handle = match target {
         BackendId::BackendA => DualHandle::BackendA {
@@ -564,11 +568,7 @@ fn open_on_backend(
         .insert(guest_handle, Arc::new(dual_handle));
 
     notify_observers(&fs.hooks, |h| {
-        h.after_dispatch(
-            hook_ctx,
-            &step,
-            &StepResult::Handle(guest_handle, opts),
-        );
+        h.after_dispatch(hook_ctx, &step, &StepResult::Handle(guest_handle, opts));
     });
 
     Ok((Some(guest_handle), opts))

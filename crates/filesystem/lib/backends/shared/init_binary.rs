@@ -10,12 +10,9 @@
 //! Reads use `ZeroCopyWriter::write_from` for zero-copy transfer from the backing file
 //! to the FUSE response buffer, avoiding intermediate copies of the binary data.
 
-use std::fs::File;
-use std::io;
-use std::time::Duration;
+use std::{fs::File, io, time::Duration};
 
-use crate::agentd::AGENTD_BYTES;
-use crate::{Entry, ZeroCopyWriter, stat64};
+use crate::{Entry, ZeroCopyWriter, agentd::AGENTD_BYTES, stat64};
 
 //--------------------------------------------------------------------------------------------------
 // Constants

@@ -3,8 +3,7 @@
 //! Every operation that accepts a guest-provided directory entry name must
 //! call [`validate_name`] to prevent path traversal attacks.
 
-use std::ffi::CStr;
-use std::io;
+use std::{ffi::CStr, io};
 
 use super::platform;
 

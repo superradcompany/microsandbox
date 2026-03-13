@@ -1,7 +1,6 @@
 //! Handle table for open file descriptors.
 
-use std::fs::File;
-use std::sync::RwLock;
+use std::{fs::File, sync::RwLock};
 
 //--------------------------------------------------------------------------------------------------
 // Types

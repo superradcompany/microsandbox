@@ -4,12 +4,11 @@
 //! to generate per-layer sidecar indexes, and by tests to construct valid/corrupt
 //! index data.
 
-use std::io;
-use std::path::Path;
+use std::{io, path::Path};
 
 use super::{
-    DIR_FLAG_OPAQUE, DIR_RECORD_IDX_NONE, DirRecord, ENTRY_FLAG_WHITEOUT, EntryRecord,
-    HardlinkRef, INDEX_MAGIC, INDEX_VERSION, IndexHeader,
+    DIR_FLAG_OPAQUE, DIR_RECORD_IDX_NONE, DirRecord, ENTRY_FLAG_WHITEOUT, EntryRecord, HardlinkRef,
+    INDEX_MAGIC, INDEX_VERSION, IndexHeader,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -321,20 +320,19 @@ impl IndexBuilder {
                 let (name_off, name_len) = entry_name_offsets[dir_idx][entry_idx];
 
                 // Auto-compute dir_record_idx for directory entries.
-                let dir_record_idx =
-                    if entry.mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32 {
-                        let child_path = if dir.path.is_empty() {
-                            entry.name.clone()
-                        } else {
-                            format!("{}/{}", dir.path, entry.name)
-                        };
-                        sorted_paths
-                            .binary_search(&child_path.as_str())
-                            .map(|i| i as u32)
-                            .unwrap_or(DIR_RECORD_IDX_NONE)
+                let dir_record_idx = if entry.mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32 {
+                    let child_path = if dir.path.is_empty() {
+                        entry.name.clone()
                     } else {
-                        DIR_RECORD_IDX_NONE
+                        format!("{}/{}", dir.path, entry.name)
                     };
+                    sorted_paths
+                        .binary_search(&child_path.as_str())
+                        .map(|i| i as u32)
+                        .unwrap_or(DIR_RECORD_IDX_NONE)
+                } else {
+                    DIR_RECORD_IDX_NONE
+                };
 
                 buf.extend_from_slice(&entry.host_ino.to_le_bytes());
                 buf.extend_from_slice(&entry.size.to_le_bytes());
@@ -372,5 +370,15 @@ impl IndexBuilder {
     /// Write valid index to a file.
     pub fn build_to_file(self, path: &Path) -> io::Result<()> {
         std::fs::write(path, self.build())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl Default for IndexBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }

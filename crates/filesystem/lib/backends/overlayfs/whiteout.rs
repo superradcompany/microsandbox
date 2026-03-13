@@ -12,13 +12,9 @@
 //! these names are stored in the `user.containers.overlay_tombstones` xattr
 //! on the parent directory as a length-prefixed binary blob.
 
-use std::ffi::CStr;
-use std::io;
-use std::os::fd::RawFd;
+use std::{ffi::CStr, io, os::fd::RawFd};
 
-use super::OverlayFs;
-use super::inode;
-use super::layer;
+use super::{OverlayFs, inode, layer};
 use crate::backends::shared::platform;
 
 //--------------------------------------------------------------------------------------------------
@@ -133,7 +129,8 @@ pub(crate) fn has_lower_entry(fs: &OverlayFs, parent_inode: u64, name: &[u8]) ->
 
     // Check each lower layer (top-down).
     for lower in fs.lowers.iter().rev() {
-        let lower_parent_fd = match inode::open_lower_parent(lower, &parent_node, &path_components) {
+        let lower_parent_fd = match inode::open_lower_parent(lower, &parent_node, &path_components)
+        {
             Some(fd) => fd,
             None => continue,
         };
@@ -174,7 +171,7 @@ pub(crate) fn check_overflow_whiteout(parent_fd: RawFd, name: &[u8]) -> io::Resu
     };
 
     let entries = parse_tombstone_blob(&blob)?;
-    Ok(entries.iter().any(|e| *e == name))
+    Ok(entries.contains(&name))
 }
 
 /// Add a long name to the parent's overflow tombstone xattr.
@@ -190,7 +187,7 @@ fn create_overflow_whiteout(parent_fd: RawFd, name: &[u8]) -> io::Result<()> {
         Ok(Some(existing)) => {
             // Validate existing blob and check for duplicates.
             let entries = parse_tombstone_blob(&existing)?;
-            if entries.iter().any(|e| *e == name) {
+            if entries.contains(&name) {
                 return Ok(()); // Already tombstoned.
             }
             existing
@@ -426,9 +423,7 @@ fn remove_tombstone_xattr(fd: RawFd) -> io::Result<()> {
     {
         let path = format!("/proc/self/fd/{fd}");
         let path_cstr = std::ffi::CString::new(path).map_err(|_| platform::eio())?;
-        let ret = unsafe {
-            libc::removexattr(path_cstr.as_ptr(), TOMBSTONES_XATTR_KEY.as_ptr())
-        };
+        let ret = unsafe { libc::removexattr(path_cstr.as_ptr(), TOMBSTONES_XATTR_KEY.as_ptr()) };
         if ret < 0 {
             let err = io::Error::last_os_error();
             let errno = err.raw_os_error().unwrap_or(0);
@@ -441,9 +436,7 @@ fn remove_tombstone_xattr(fd: RawFd) -> io::Result<()> {
 
     #[cfg(target_os = "macos")]
     {
-        let ret = unsafe {
-            libc::fremovexattr(fd, TOMBSTONES_XATTR_KEY.as_ptr(), 0)
-        };
+        let ret = unsafe { libc::fremovexattr(fd, TOMBSTONES_XATTR_KEY.as_ptr(), 0) };
         if ret < 0 {
             let err = io::Error::last_os_error();
             let errno = err.raw_os_error().unwrap_or(0);
@@ -467,5 +460,3 @@ fn remove_tombstone_xattr(fd: RawFd) -> io::Result<()> {
 pub(crate) fn remove_tombstone_xattr_if_present(fd: RawFd) {
     let _ = remove_tombstone_xattr(fd);
 }
-
-

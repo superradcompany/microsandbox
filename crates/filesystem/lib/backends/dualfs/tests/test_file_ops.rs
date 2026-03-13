@@ -10,14 +10,24 @@ fn test_read_from_backend_b() {
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"backend_b_data");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
 #[test]
 fn test_read_from_backend_a() {
     let sb = DualFsTestSandbox::new();
-    let ino = sb.create_file_with_content(ROOT_INODE, "a_file.txt", b"backend_a_data").unwrap();
+    let ino = sb
+        .create_file_with_content(ROOT_INODE, "a_file.txt", b"backend_a_data")
+        .unwrap();
     let handle = sb.fuse_open(ino, libc::O_RDONLY as u32).unwrap();
     let data = sb.fuse_read(ino, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"backend_a_data");
@@ -30,12 +40,22 @@ fn test_read_from_backend_a() {
 fn test_write_to_backend_a() {
     let sb = DualFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("writable.txt").unwrap();
-    let written = sb.fuse_write(entry.inode, handle, b"hello world", 0).unwrap();
+    let written = sb
+        .fuse_write(entry.inode, handle, b"hello world", 0)
+        .unwrap();
     assert_eq!(written, 11);
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"hello world");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -46,20 +66,34 @@ fn test_write_triggers_materialization() {
     });
     let entry = sb.lookup_root("b_file.txt").unwrap();
     // Open for write -> triggers materialization from backend_b to backend_a.
-    let handle = sb
-        .fuse_open(entry.inode, libc::O_RDWR as u32)
-        .unwrap();
+    let handle = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
     let written = sb.fuse_write(entry.inode, handle, b"modified", 0).unwrap();
     assert_eq!(written, 8);
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // Read back should show modified data.
     let handle = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"modified");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -75,7 +109,15 @@ fn test_write_preserves_data() {
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], original);
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -87,7 +129,15 @@ fn test_handle_dispatch_backend_a() {
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"data_a");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -101,7 +151,15 @@ fn test_handle_dispatch_backend_b() {
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"data_b");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -114,7 +172,15 @@ fn test_read_after_write() {
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"write_then_read");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -125,11 +191,21 @@ fn test_write_large() {
     let large_data = vec![0xABu8; 1024 * 1024]; // 1 MB
     let written = sb.fuse_write(entry.inode, handle, &large_data, 0).unwrap();
     assert_eq!(written, 1024 * 1024);
-    let read_data = sb.fuse_read(entry.inode, handle, 1024 * 1024 + 1, 0).unwrap();
+    let read_data = sb
+        .fuse_read(entry.inode, handle, 1024 * 1024 + 1, 0)
+        .unwrap();
     assert_eq!(read_data.len(), 1024 * 1024);
     assert!(read_data.iter().all(|&b| b == 0xAB));
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -138,7 +214,15 @@ fn test_read_invalid_handle() {
     let sb = DualFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("valid.txt").unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // Use a bogus handle.
     let bad_handle = 999999;
@@ -167,16 +251,16 @@ fn test_try_backend_a_then_b_fallback() {
     // with BackendAFallbackToBackendBRead policy, lookup uses BackendAFirst precedence.
     // A file only in backend_b is found via fallback from backend_a to backend_b.
     // The file is then readable via getattr (which dispatches from node state, not policy).
-    let sb = DualFsTestSandbox::with_policy_and_backend_b(
-        BackendAFallbackToBackendBRead,
-        |b| {
-            memfs_create_file(b, 1, "fallback_b.txt", b"backend_b_content");
-        },
-    );
+    let sb = DualFsTestSandbox::with_policy_and_backend_b(BackendAFallbackToBackendBRead, |b| {
+        memfs_create_file(b, 1, "fallback_b.txt", b"backend_b_content");
+    });
 
     // Lookup should find the file via backend_b fallback.
     let entry = sb.lookup_root("fallback_b.txt").unwrap();
-    assert!(entry.inode >= 3, "file should be found via BackendA->BackendB fallback");
+    assert!(
+        entry.inode >= 3,
+        "file should be found via BackendA->BackendB fallback"
+    );
 
     // getattr dispatches from node state (not policy-routed), so it works for
     // backend_b-only files regardless of policy.
@@ -184,7 +268,10 @@ fn test_try_backend_a_then_b_fallback() {
         .fs
         .getattr(DualFsTestSandbox::ctx(), entry.inode, None)
         .unwrap();
-    assert_eq!(st.st_ino, entry.inode, "getattr should return correct guest inode");
+    assert_eq!(
+        st.st_ino, entry.inode,
+        "getattr should return correct guest inode"
+    );
     let mode = st.st_mode as u32;
     assert_eq!(
         mode & libc::S_IFMT as u32,
@@ -207,13 +294,24 @@ fn test_try_backend_b_then_a_fallback() {
     // Lookup should find the file. With BackendBFirst, backend_b is tried first (ENOENT),
     // then falls back to backend_a where the file exists.
     let entry = sb.lookup_root("fallback_a.txt").unwrap();
-    assert_eq!(entry.inode, ino, "file should be found via backend_a fallback");
+    assert_eq!(
+        entry.inode, ino,
+        "file should be found via backend_a fallback"
+    );
 
     // Open for read and verify content.
     let handle = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"backend_a_content");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }

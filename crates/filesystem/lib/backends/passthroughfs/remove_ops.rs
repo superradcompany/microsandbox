@@ -4,15 +4,13 @@
 //! On Linux, `renameat2` is used for flag support (RENAME_NOREPLACE, RENAME_EXCHANGE).
 //! On macOS, `renameatx_np` is used with translated flag values.
 
-use std::ffi::CStr;
-use std::io;
+use std::{ffi::CStr, io};
 
-use super::PassthroughFs;
-use super::inode;
-use crate::Context;
-use crate::backends::shared::init_binary;
-use crate::backends::shared::name_validation;
-use crate::backends::shared::platform;
+use super::{PassthroughFs, inode};
+use crate::{
+    Context,
+    backends::shared::{init_binary, name_validation, platform},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -66,10 +64,8 @@ pub(crate) fn do_unlink(
         // Look up the inode by stat identity from the pre-unlink fd.
         let st = platform::fstat(fd);
         if let Ok(st) = st {
-            let alt_key = crate::backends::shared::inode_table::InodeAltKey::new(
-                st.st_ino as u64,
-                st.st_dev as u64,
-            );
+            let alt_key =
+                crate::backends::shared::inode_table::InodeAltKey::new(st.st_ino, st.st_dev as u64);
             let inodes = fs.inodes.read().unwrap();
             if let Some(data) = inodes.get_alt(&alt_key) {
                 use std::sync::atomic::Ordering;

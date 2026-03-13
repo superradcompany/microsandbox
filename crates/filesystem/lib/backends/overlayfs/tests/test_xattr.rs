@@ -54,9 +54,7 @@ fn test_removexattr() {
     sb.fs
         .setxattr(sb.ctx(), entry.inode, &key, b"val", 0)
         .unwrap();
-    sb.fs
-        .removexattr(sb.ctx(), entry.inode, &key)
-        .unwrap();
+    sb.fs.removexattr(sb.ctx(), entry.inode, &key).unwrap();
     let result = sb.fs.getxattr(sb.ctx(), entry.inode, &key, 256);
     OverlayTestSandbox::assert_errno(result, LINUX_ENODATA);
 }

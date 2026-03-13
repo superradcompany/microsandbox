@@ -13,11 +13,13 @@ pub(crate) mod builder;
 mod hooks;
 mod path_tracking;
 
-use std::collections::HashMap;
-use std::ffi::CStr;
-use std::fs::File;
-use std::io;
-use std::sync::{Mutex, RwLock};
+use std::{
+    collections::HashMap,
+    ffi::CStr,
+    fs::File,
+    io,
+    sync::{Mutex, RwLock},
+};
 
 use crate::{
     Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions, GetxattrReply, ListxattrReply,
@@ -33,6 +35,7 @@ use crate::{
 /// Wraps any [`DynFileSystem`] and intercepts specific FUSE operations for
 /// user-supplied hooks. All non-intercepted operations are delegated
 /// transparently to the inner backend.
+#[allow(clippy::type_complexity)]
 pub struct ProxyFs {
     /// The wrapped filesystem backend.
     inner: Box<dyn DynFileSystem>,
@@ -144,7 +147,9 @@ impl DynFileSystem for ProxyFs {
         name: &CStr,
         extensions: Extensions,
     ) -> io::Result<Entry> {
-        let entry = self.inner.symlink(ctx, linkname, parent, name, extensions)?;
+        let entry = self
+            .inner
+            .symlink(ctx, linkname, parent, name, extensions)?;
         let path = path_tracking::build_path(self, parent, name);
         path_tracking::register_path(self, entry.inode, path);
         Ok(entry)
@@ -161,7 +166,9 @@ impl DynFileSystem for ProxyFs {
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<Entry> {
-        let entry = self.inner.mknod(ctx, parent, name, mode, rdev, umask, extensions)?;
+        let entry = self
+            .inner
+            .mknod(ctx, parent, name, mode, rdev, umask, extensions)?;
         let path = path_tracking::build_path(self, parent, name);
         path_tracking::register_path(self, entry.inode, path);
         Ok(entry)
@@ -176,7 +183,9 @@ impl DynFileSystem for ProxyFs {
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<Entry> {
-        let entry = self.inner.mkdir(ctx, parent, name, mode, umask, extensions)?;
+        let entry = self
+            .inner
+            .mkdir(ctx, parent, name, mode, umask, extensions)?;
         let path = path_tracking::build_path(self, parent, name);
         path_tracking::register_path(self, entry.inode, path);
         Ok(entry)
@@ -200,20 +209,15 @@ impl DynFileSystem for ProxyFs {
         flags: u32,
     ) -> io::Result<()> {
         let renamed_inode = path_tracking::resolve_inode(self, olddir, oldname);
-        self.inner.rename(ctx, olddir, oldname, newdir, newname, flags)?;
+        self.inner
+            .rename(ctx, olddir, oldname, newdir, newname, flags)?;
         if let Some(ino) = renamed_inode {
             path_tracking::update_paths_after_rename(self, olddir, oldname, newdir, newname, ino);
         }
         Ok(())
     }
 
-    fn link(
-        &self,
-        ctx: Context,
-        ino: u64,
-        newparent: u64,
-        newname: &CStr,
-    ) -> io::Result<Entry> {
+    fn link(&self, ctx: Context, ino: u64, newparent: u64, newname: &CStr) -> io::Result<Entry> {
         let entry = self.inner.link(ctx, ino, newparent, newname)?;
         let path = path_tracking::build_path(self, newparent, newname);
         path_tracking::register_path(self, entry.inode, path);
@@ -250,9 +254,9 @@ impl DynFileSystem for ProxyFs {
         let path = path_tracking::build_path(self, parent, name);
         hooks::check_access_by_path(self, &path, AccessMode::Write)?;
 
-        let (entry, handle, opts) =
-            self.inner
-                .create(ctx, parent, name, mode, kill_priv, flags, umask, extensions)?;
+        let (entry, handle, opts) = self
+            .inner
+            .create(ctx, parent, name, mode, kill_priv, flags, umask, extensions)?;
 
         path_tracking::register_path(self, entry.inode, path.clone());
         if let Some(h) = handle {
@@ -342,8 +346,7 @@ impl DynFileSystem for ProxyFs {
         offset: u64,
         length: u64,
     ) -> io::Result<()> {
-        self.inner
-            .fallocate(ctx, ino, handle, mode, offset, length)
+        self.inner.fallocate(ctx, ino, handle, mode, offset, length)
     }
 
     #[allow(clippy::too_many_arguments)]

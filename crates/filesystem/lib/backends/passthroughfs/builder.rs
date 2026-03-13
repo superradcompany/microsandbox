@@ -8,18 +8,23 @@
 //!     .build()?
 //! ```
 
-use std::collections::BTreeMap;
-use std::fs::File;
-use std::io;
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::RwLock;
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io,
+    os::fd::{AsRawFd, FromRawFd},
+    path::PathBuf,
+    sync::{
+        RwLock,
+        atomic::{AtomicBool, AtomicU64},
+    },
+    time::Duration,
+};
 
 use super::{CachePolicy, PassthroughFs};
-use crate::backends::shared::inode_table::MultikeyBTreeMap;
-use crate::backends::shared::{init_binary, platform, stat_override};
+use crate::backends::shared::{
+    init_binary, inode_table::MultikeyBTreeMap, platform, stat_override,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -98,18 +103,14 @@ impl PassthroughFsBuilder {
 
     /// Build the PassthroughFs instance.
     pub fn build(self) -> io::Result<PassthroughFs> {
-        let root_dir = self.root_dir.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "root_dir not set")
-        })?;
+        let root_dir = self
+            .root_dir
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "root_dir not set"))?;
 
         // Open the root directory.
-        let root_path = std::ffi::CString::new(
-            root_dir
-                .to_str()
-                .ok_or_else(platform::einval)?
-                .as_bytes(),
-        )
-        .map_err(|_| platform::einval())?;
+        let root_path =
+            std::ffi::CString::new(root_dir.to_str().ok_or_else(platform::einval)?.as_bytes())
+                .map_err(|_| platform::einval())?;
 
         let root_fd_raw = unsafe {
             libc::open(

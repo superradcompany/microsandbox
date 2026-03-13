@@ -98,10 +98,7 @@ pub enum Hint {
     /// Prefer a specific backend for this operation.
     PreferBackend(BackendId),
     /// Subtree affinity.
-    SubtreeAffinity {
-        root_inode: u64,
-        backend: BackendId,
-    },
+    SubtreeAffinity { root_inode: u64, backend: BackendId },
     /// Custom string hint for policy-specific use.
     Custom(String),
 }

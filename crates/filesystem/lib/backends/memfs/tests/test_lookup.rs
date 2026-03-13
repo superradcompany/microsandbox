@@ -74,11 +74,23 @@ fn test_lookup_after_forget() {
     let (entry, handle) = sb.fuse_create_root("ephemeral.txt").unwrap();
     let handle = handle.unwrap();
     sb.fs
-        .release(MemFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // Unlink file.
     sb.fs
-        .unlink(MemFsTestSandbox::ctx(), ROOT_INODE, &MemFsTestSandbox::cstr("ephemeral.txt"))
+        .unlink(
+            MemFsTestSandbox::ctx(),
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("ephemeral.txt"),
+        )
         .unwrap();
     // Forget the lookup ref from create.
     sb.fs.forget(MemFsTestSandbox::ctx(), entry.inode, 1);

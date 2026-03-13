@@ -1,9 +1,10 @@
 //! Type definitions for the in-memory filesystem backend.
 
-use std::collections::BTreeMap;
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, RwLock, atomic::AtomicU64},
+    time::Duration,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -128,21 +129,15 @@ pub(crate) enum InodeContent {
 
 /// Open file handle.
 pub(crate) struct FileHandle {
-    /// Inode this handle refers to.
-    pub inode: u64,
-
     /// Reference to the node (keeps it alive after unlink).
     pub node: Arc<MemNode>,
 
-    /// Open flags.
+    /// Open flags. MemFs uses these to honor handle-bound semantics like append mode.
     pub flags: u32,
 }
 
 /// Open directory handle.
 pub(crate) struct DirHandle {
-    /// Inode this handle refers to.
-    pub inode: u64,
-
     /// Reference to the node (keeps it alive after rmdir).
     pub node: Arc<MemNode>,
 

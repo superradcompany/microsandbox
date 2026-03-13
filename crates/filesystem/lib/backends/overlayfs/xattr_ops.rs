@@ -14,23 +14,22 @@
 //!
 //! setxattr and removexattr trigger copy-up before modification.
 
-use std::ffi::CStr;
-use std::io;
+use std::{ffi::CStr, io};
 
-use super::OverlayFs;
-use super::copy_up;
-use super::inode;
-use crate::backends::shared::init_binary;
-use crate::backends::shared::platform;
-use crate::backends::shared::stat_override;
-use crate::{Context, GetxattrReply, ListxattrReply};
+use super::{OverlayFs, copy_up, inode};
+use crate::{
+    Context, GetxattrReply, ListxattrReply,
+    backends::shared::{init_binary, platform, stat_override},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-use super::origin::{ORIGIN_XATTR_KEY, REDIRECT_XATTR_KEY};
-use super::whiteout::TOMBSTONES_XATTR_KEY;
+use super::{
+    origin::{ORIGIN_XATTR_KEY, REDIRECT_XATTR_KEY},
+    whiteout::TOMBSTONES_XATTR_KEY,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -70,7 +69,9 @@ pub(crate) fn do_getxattr(
     }
 
     let fd = inode::open_node_fd(fs, ino, libc::O_RDONLY)?;
-    let _close = scopeguard::guard(fd, |fd| unsafe { libc::close(fd); });
+    let _close = scopeguard::guard(fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     // Build /proc/self/fd path once for all reads (Linux).
     #[cfg(target_os = "linux")]
@@ -140,7 +141,9 @@ pub(crate) fn do_listxattr(
     }
 
     let fd = inode::open_node_fd(fs, ino, libc::O_RDONLY)?;
-    let _close = scopeguard::guard(fd, |fd| unsafe { libc::close(fd); });
+    let _close = scopeguard::guard(fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     // Build /proc/self/fd path once for all reads (Linux).
     #[cfg(target_os = "linux")]
@@ -204,7 +207,7 @@ pub(crate) fn do_listxattr(
         }
 
         // Exhausted retries — the xattr list keeps changing.
-        return Err(platform::eio());
+        Err(platform::eio())
     } else {
         let mut buf = vec![0u8; size as usize];
 
@@ -253,7 +256,9 @@ pub(crate) fn do_setxattr(
     copy_up::ensure_upper(fs, ino)?;
 
     let fd = inode::open_node_fd(fs, ino, libc::O_RDONLY)?;
-    let _close = scopeguard::guard(fd, |fd| unsafe { libc::close(fd); });
+    let _close = scopeguard::guard(fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     #[cfg(target_os = "linux")]
     {
@@ -313,17 +318,14 @@ pub(crate) fn do_removexattr(
     copy_up::ensure_upper(fs, ino)?;
 
     let fd = inode::open_node_fd(fs, ino, libc::O_RDONLY)?;
-    let _close = scopeguard::guard(fd, |fd| unsafe { libc::close(fd); });
+    let _close = scopeguard::guard(fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     #[cfg(target_os = "linux")]
     {
         let path = format!("/proc/self/fd/{fd}\0");
-        let ret = unsafe {
-            libc::removexattr(
-                path.as_ptr() as *const libc::c_char,
-                name.as_ptr(),
-            )
-        };
+        let ret = unsafe { libc::removexattr(path.as_ptr() as *const libc::c_char, name.as_ptr()) };
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
@@ -331,9 +333,7 @@ pub(crate) fn do_removexattr(
 
     #[cfg(target_os = "macos")]
     {
-        let ret = unsafe {
-            libc::fremovexattr(fd, name.as_ptr(), 0)
-        };
+        let ret = unsafe { libc::fremovexattr(fd, name.as_ptr(), 0) };
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }

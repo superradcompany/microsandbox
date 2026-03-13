@@ -132,7 +132,10 @@ fn test_readdirplus_merged() {
     assert!(names.contains(&"b_plus.txt".to_string()));
     // Each entry should have valid attrs.
     for (_, entry) in &entries {
-        assert!(entry.inode > 0, "readdirplus entries should have valid inodes");
+        assert!(
+            entry.inode > 0,
+            "readdirplus entries should have valid inodes"
+        );
     }
     sb.fs
         .releasedir(DualFsTestSandbox::ctx(), ROOT_INODE, 0, handle)
@@ -174,12 +177,9 @@ fn test_readdir_backend_a_precedence() {
     // With MergeReadsBackendAPrecedence policy, readdir uses MergeReaddir with
     // BackendAFirst precedence. When the same file name exists in both backends,
     // readdir should show it only once (deduplicated).
-    let sb = DualFsTestSandbox::with_policy_and_backend_b(
-        MergeReadsBackendAPrecedence,
-        |b| {
-            memfs_create_file(b, 1, "shared.txt", b"from_b");
-        },
-    );
+    let sb = DualFsTestSandbox::with_policy_and_backend_b(MergeReadsBackendAPrecedence, |b| {
+        memfs_create_file(b, 1, "shared.txt", b"from_b");
+    });
     // Create a file with the same name in backend_a via DualFs.
     sb.create_file_with_content(ROOT_INODE, "shared.txt", b"from_a")
         .unwrap();

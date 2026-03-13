@@ -29,7 +29,8 @@ fn test_roundtrip_xor_cipher() {
     sb.fuse_write(entry.inode, handle, original, 0).unwrap();
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(
-        &data[..], original,
+        &data[..],
+        original,
         "XOR encrypt on write + XOR decrypt on read should recover original"
     );
 }
@@ -50,7 +51,8 @@ fn test_roundtrip_byte_shift() {
     sb.fuse_write(entry.inode, handle, original, 0).unwrap();
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(
-        &data[..], original,
+        &data[..],
+        original,
         "shift encode on write + shift decode on read should recover original"
     );
 }
@@ -68,9 +70,7 @@ fn test_roundtrip_compress_decompress() {
         while i < data.len() {
             let b = data[i];
             let mut count = 1u8;
-            while i + (count as usize) < data.len()
-                && data[i + count as usize] == b
-                && count < 255
+            while i + (count as usize) < data.len() && data[i + count as usize] == b && count < 255
             {
                 count += 1;
             }
@@ -102,7 +102,8 @@ fn test_roundtrip_compress_decompress() {
     sb.fuse_write(entry.inode, handle, original, 0).unwrap();
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(
-        &data[..], &original[..],
+        &data[..],
+        &original[..],
         "RLE encode/decode roundtrip should recover original"
     );
 }
@@ -160,8 +161,7 @@ fn test_inner_stores_transformed() {
     let log = write_log.lock().unwrap();
     let expected_transformed: Vec<u8> = b"hello".iter().map(|b| b ^ 0xFF).collect();
     assert!(
-        log.iter()
-            .any(|(_, data)| *data == expected_transformed),
+        log.iter().any(|(_, data)| *data == expected_transformed),
         "inner should store XOR-transformed data"
     );
 

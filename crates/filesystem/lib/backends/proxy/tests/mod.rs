@@ -12,17 +12,18 @@ mod test_read_hook;
 mod test_roundtrip;
 mod test_write_hook;
 
-use std::ffi::CString;
-use std::fs::File;
-use std::io;
-use std::os::fd::AsRawFd;
-use std::sync::{Arc, Mutex};
+use std::{
+    ffi::CString,
+    fs::File,
+    io,
+    os::fd::AsRawFd,
+    sync::{Arc, Mutex},
+};
 
 use super::*;
-use crate::backends::memfs::MemFs;
 use crate::{
     Context, DynFileSystem, Entry, Extensions, FsOptions, GetxattrReply, ListxattrReply,
-    OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
+    OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter, backends::memfs::MemFs,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -364,12 +365,7 @@ impl ProxyFsTestSandbox {
     }
 
     /// Create a file and write content. Returns the inode.
-    fn create_file_with_content(
-        &self,
-        parent: u64,
-        name: &str,
-        data: &[u8],
-    ) -> io::Result<u64> {
+    fn create_file_with_content(&self, parent: u64, name: &str, data: &[u8]) -> io::Result<u64> {
         let (entry, handle) = self.fuse_create(parent, name, 0o644)?;
         let handle = handle.unwrap();
         self.fuse_write(entry.inode, handle, data, 0)?;

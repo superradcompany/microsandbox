@@ -12,23 +12,25 @@
 //! On Linux, nodes in Lower/Upper state hold an O_PATH fd pinning the inode.
 //! On macOS, nodes store (dev, ino) and open fds on demand via `/.vol/<dev>/<ino>`.
 
-use std::collections::HashSet;
-use std::ffi::{CStr, CString};
-use std::fs::File;
-use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, RwLock};
-
-use super::layer;
-use super::origin::LowerOriginId;
-use super::types::{
-    Dentry, Layer, NameId, NodeState, OverlayNode, ROOT_INODE,
+use std::{
+    collections::HashSet,
+    ffi::{CStr, CString},
+    fs::File,
+    io,
+    os::fd::{AsRawFd, FromRawFd, RawFd},
+    sync::{Arc, Mutex, RwLock, atomic::Ordering},
 };
-use super::OverlayFs;
-use crate::backends::shared::inode_table::InodeAltKey;
-use crate::backends::shared::{init_binary, platform, stat_override};
-use crate::{Entry, stat64};
+
+use super::{
+    OverlayFs, layer,
+    origin::LowerOriginId,
+    types::{Dentry, Layer, NameId, NodeState, OverlayNode, ROOT_INODE},
+};
+use crate::{
+    Entry,
+    backends::shared::{init_binary, inode_table::InodeAltKey, platform, stat_override},
+    stat64,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -133,21 +135,20 @@ pub(crate) fn register_root_inode(fs: &OverlayFs) -> io::Result<()> {
 
     let root_name = fs.names.intern(b"");
     // Seed dir_record_cache for root: DirRecord 0 on the topmost indexed lower layer.
-    let root_dir_record_cache = fs
-        .lowers
-        .iter()
-        .rev()
-        .find_map(|l| {
-            l.lower_index.as_ref().and_then(|idx| {
-                idx.find_dir(b"").map(|(dir_idx, _)| (l.index, dir_idx as u32))
-            })
-        });
+    let root_dir_record_cache = fs.lowers.iter().rev().find_map(|l| {
+        l.lower_index.as_ref().and_then(|idx| {
+            idx.find_dir(b"")
+                .map(|(dir_idx, _)| (l.index, dir_idx as u32))
+        })
+    });
 
     let root_node = Arc::new(OverlayNode {
         inode: ROOT_INODE,
         kind: libc::S_IFDIR as u32,
         lookup_refs: std::sync::atomic::AtomicU64::new(2), // libfuse convention
-        state: RwLock::new(NodeState::Root { upper_fd: root_file }),
+        state: RwLock::new(NodeState::Root {
+            upper_fd: root_file,
+        }),
         opaque: std::sync::atomic::AtomicBool::new(false),
         copy_up_lock: Mutex::new(()),
         origin: None,
@@ -177,7 +178,11 @@ pub(crate) fn register_root_inode(fs: &OverlayFs) -> io::Result<()> {
             )
         };
         if ret >= 0 {
-            let alt_key = InodeAltKey::new(stx.stx_ino, stx.stx_dev_major as u64 * 256 + stx.stx_dev_minor as u64, stx.stx_mnt_id);
+            let alt_key = InodeAltKey::new(
+                stx.stx_ino,
+                stx.stx_dev_major as u64 * 256 + stx.stx_dev_minor as u64,
+                stx.stx_mnt_id,
+            );
             let mut upper_alt = fs.upper_alt_keys.write().unwrap();
             upper_alt.insert(alt_key, ROOT_INODE);
         }
@@ -212,9 +217,8 @@ pub(crate) fn register_root_inode(fs: &OverlayFs) -> io::Result<()> {
 ///
 /// Must complete before the first guest operation.
 fn bfs_hydrate_upper(fs: &OverlayFs) -> io::Result<()> {
+    use super::{origin, types::RedirectState};
     use std::collections::VecDeque;
-    use super::origin;
-    use super::types::RedirectState;
 
     let upper_fd = fs.upper.root_fd.as_raw_fd();
     let root_dir_fd = dup_fd_raw(upper_fd)?;
@@ -375,12 +379,7 @@ fn bfs_hydrate_upper(fs: &OverlayFs) -> io::Result<()> {
 ///
 /// Allocates a guest inode, creates an OverlayNode with Upper state, and
 /// registers it in nodes/dentries/upper_alt_keys. Returns the guest inode.
-fn hydrate_upper_entry(
-    fs: &OverlayFs,
-    parent_ino: u64,
-    name: &CStr,
-    fd: RawFd,
-) -> io::Result<u64> {
+fn hydrate_upper_entry(fs: &OverlayFs, parent_ino: u64, name: &CStr, fd: RawFd) -> io::Result<u64> {
     let name_id = fs.names.intern(name.to_bytes());
 
     // Check if already registered via upper_alt_keys.
@@ -417,12 +416,7 @@ fn hydrate_upper_entry(
                 }
                 drop(nodes);
                 let mut dentries = fs.dentries.write().unwrap();
-                dentries.insert(
-                    (parent_ino, name_id),
-                    Dentry {
-                        node: existing_ino,
-                    },
-                );
+                dentries.insert((parent_ino, name_id), Dentry { node: existing_ino });
                 return Ok(existing_ino);
             }
         }
@@ -471,12 +465,10 @@ fn hydrate_upper_entry(
         // Register.
         fs.nodes.write().unwrap().insert(inode, node);
         fs.upper_alt_keys.write().unwrap().insert(alt_key, inode);
-        fs.dentries.write().unwrap().insert(
-            (parent_ino, name_id),
-            Dentry {
-                node: inode,
-            },
-        );
+        fs.dentries
+            .write()
+            .unwrap()
+            .insert((parent_ino, name_id), Dentry { node: inode });
 
         return Ok(inode);
     }
@@ -496,12 +488,7 @@ fn hydrate_upper_entry(
                 }
                 drop(nodes);
                 let mut dentries = fs.dentries.write().unwrap();
-                dentries.insert(
-                    (parent_ino, name_id),
-                    Dentry {
-                        node: existing_ino,
-                    },
-                );
+                dentries.insert((parent_ino, name_id), Dentry { node: existing_ino });
                 return Ok(existing_ino);
             }
         }
@@ -528,12 +515,10 @@ fn hydrate_upper_entry(
 
         fs.nodes.write().unwrap().insert(inode, node);
         fs.upper_alt_keys.write().unwrap().insert(alt_key, inode);
-        fs.dentries.write().unwrap().insert(
-            (parent_ino, name_id),
-            Dentry {
-                node: inode,
-            },
-        );
+        fs.dentries
+            .write()
+            .unwrap()
+            .insert((parent_ino, name_id), Dentry { node: inode });
 
         Ok(inode)
     }
@@ -622,11 +607,11 @@ pub(crate) fn do_lookup(fs: &OverlayFs, parent: u64, name: &CStr) -> io::Result<
                 let name_bytes_lazy = parent_name_bytes.get_or_insert_with(|| {
                     get_parent_lower_path(fs, &parent_node).unwrap_or_default()
                 });
-                let lower_parent_fd =
-                    match open_lower_parent(lower, &parent_node, name_bytes_lazy) {
-                        Some(fd) => fd,
-                        None => continue,
-                    };
+                let lower_parent_fd = match open_lower_parent(lower, &parent_node, name_bytes_lazy)
+                {
+                    Some(fd) => fd,
+                    None => continue,
+                };
 
                 match platform::fstatat_nofollow(lower_parent_fd.raw(), name) {
                     Ok(st) => {
@@ -635,15 +620,12 @@ pub(crate) fn do_lookup(fs: &OverlayFs, parent: u64, name: &CStr) -> io::Result<
                         // Cache dir_record_idx on the new child node if it's a directory.
                         if entry_rec.dir_record_idx
                             != microsandbox_utils::index::DIR_RECORD_IDX_NONE
+                            && let Ok(ref entry) = result
                         {
-                            if let Ok(ref entry) = result {
-                                let nodes = fs.nodes.read().unwrap();
-                                if let Some(child_node) = nodes.get(&entry.inode) {
-                                    let mut cache =
-                                        child_node.dir_record_cache.write().unwrap();
-                                    *cache =
-                                        Some((lower.index, entry_rec.dir_record_idx));
-                                }
+                            let nodes = fs.nodes.read().unwrap();
+                            if let Some(child_node) = nodes.get(&entry.inode) {
+                                let mut cache = child_node.dir_record_cache.write().unwrap();
+                                *cache = Some((lower.index, entry_rec.dir_record_idx));
                             }
                         }
 
@@ -662,9 +644,8 @@ pub(crate) fn do_lookup(fs: &OverlayFs, parent: u64, name: &CStr) -> io::Result<
         }
 
         // Syscall fallback path (no index).
-        let name_bytes_lazy = parent_name_bytes.get_or_insert_with(|| {
-            get_parent_lower_path(fs, &parent_node).unwrap_or_default()
-        });
+        let name_bytes_lazy = parent_name_bytes
+            .get_or_insert_with(|| get_parent_lower_path(fs, &parent_node).unwrap_or_default());
         let lower_parent_fd = match open_lower_parent(lower, &parent_node, name_bytes_lazy) {
             Some(fd) => fd,
             None => continue,
@@ -694,13 +675,10 @@ pub(crate) fn do_lookup(fs: &OverlayFs, parent: u64, name: &CStr) -> io::Result<
 }
 
 /// RESOLVE step for an upper layer entry.
-fn resolve_upper(
-    fs: &OverlayFs,
-    parent: u64,
-    name: &CStr,
-    fd: RawFd,
-) -> io::Result<Entry> {
-    let _close_guard = scopeguard::guard(fd, |fd| unsafe { libc::close(fd); });
+fn resolve_upper(fs: &OverlayFs, parent: u64, name: &CStr, fd: RawFd) -> io::Result<Entry> {
+    let _close_guard = scopeguard::guard(fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     // Get stat.
     let st = platform::fstat(fd)?;
@@ -723,7 +701,11 @@ fn resolve_upper(
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
-        InodeAltKey::new(stx.stx_ino, stx.stx_dev_major as u64 * 256 + stx.stx_dev_minor as u64, stx.stx_mnt_id)
+        InodeAltKey::new(
+            stx.stx_ino,
+            stx.stx_dev_major as u64 * 256 + stx.stx_dev_minor as u64,
+            stx.stx_mnt_id,
+        )
     };
 
     #[cfg(target_os = "macos")]
@@ -742,14 +724,14 @@ fn resolve_upper(
                 // Register dentry for this (parent, name) → existing node.
                 drop(nodes);
                 let mut dentries = fs.dentries.write().unwrap();
-                dentries.insert(
-                    (parent, name_id),
-                    Dentry {
-                        node: existing_ino,
-                    },
-                );
+                dentries.insert((parent, name_id), Dentry { node: existing_ino });
 
-                return make_entry(existing_ino, patched, fs.cfg.entry_timeout, fs.cfg.attr_timeout);
+                return make_entry(
+                    existing_ino,
+                    patched,
+                    fs.cfg.entry_timeout,
+                    fs.cfg.attr_timeout,
+                );
             }
         }
     }
@@ -806,13 +788,13 @@ fn resolve_upper(
             let nodes = fs.nodes.read().unwrap();
             nodes.get(&parent).cloned().unwrap()
         };
-        if let Some(upper_parent_fd_node) = get_upper_dir_fd(fs, &parent_node) {
-            if let Ok(child_dir_fd) = layer::open_subdir(upper_parent_fd_node.raw(), name) {
-                if layer::check_opaque(child_dir_fd).unwrap_or(false) {
-                    node.opaque.store(true, Ordering::Release);
-                }
-                unsafe { libc::close(child_dir_fd) };
+        if let Some(upper_parent_fd_node) = get_upper_dir_fd(fs, &parent_node)
+            && let Ok(child_dir_fd) = layer::open_subdir(upper_parent_fd_node.raw(), name)
+        {
+            if layer::check_opaque(child_dir_fd).unwrap_or(false) {
+                node.opaque.store(true, Ordering::Release);
             }
+            unsafe { libc::close(child_dir_fd) };
         }
     }
 
@@ -827,12 +809,7 @@ fn resolve_upper(
     }
     {
         let mut dentries = fs.dentries.write().unwrap();
-        dentries.insert(
-            (parent, name_id),
-            Dentry {
-                node: inode,
-            },
-        );
+        dentries.insert((parent, name_id), Dentry { node: inode });
     }
 
     make_entry(inode, patched, fs.cfg.entry_timeout, fs.cfg.attr_timeout)
@@ -849,11 +826,13 @@ fn resolve_lower(
     // Open fd to get xattr override. On Linux, keep the fd for reuse as the
     // O_PATH pinning fd (avoids a redundant second open_lower_child_fd call).
     let lower_fd = open_lower_child_fd(lower_layer, parent, name, fs)?;
-    let _close = scopeguard::guard(lower_fd, |fd| unsafe { libc::close(fd); });
+    let _close = scopeguard::guard(lower_fd, |fd| unsafe {
+        libc::close(fd);
+    });
     let patched = stat_override::patched_stat(lower_fd, st)?;
 
     // Construct origin ID for hardlink unification.
-    let origin_id = LowerOriginId::new(lower_layer.index, st.st_ino as u64);
+    let origin_id = LowerOriginId::new(lower_layer.index, st.st_ino);
     let name_id = fs.names.intern(name.to_bytes());
 
     // Check if this origin was already copied up (cross-copy-up dedup).
@@ -868,14 +847,14 @@ fn resolve_lower(
                 // Register new dentry for the existing upper node.
                 drop(nodes);
                 let mut dentries = fs.dentries.write().unwrap();
-                dentries.insert(
-                    (parent, name_id),
-                    Dentry {
-                        node: existing_ino,
-                    },
-                );
+                dentries.insert((parent, name_id), Dentry { node: existing_ino });
 
-                return make_entry(existing_ino, patched, fs.cfg.entry_timeout, fs.cfg.attr_timeout);
+                return make_entry(
+                    existing_ino,
+                    patched,
+                    fs.cfg.entry_timeout,
+                    fs.cfg.attr_timeout,
+                );
             }
         }
     }
@@ -891,14 +870,14 @@ fn resolve_lower(
                 // Register new dentry for same node.
                 drop(nodes);
                 let mut dentries = fs.dentries.write().unwrap();
-                dentries.insert(
-                    (parent, name_id),
-                    Dentry {
-                        node: existing_ino,
-                    },
-                );
+                dentries.insert((parent, name_id), Dentry { node: existing_ino });
 
-                return make_entry(existing_ino, patched, fs.cfg.entry_timeout, fs.cfg.attr_timeout);
+                return make_entry(
+                    existing_ino,
+                    patched,
+                    fs.cfg.entry_timeout,
+                    fs.cfg.attr_timeout,
+                );
             }
         }
     }
@@ -934,7 +913,7 @@ fn resolve_lower(
     #[cfg(target_os = "macos")]
     let state = NodeState::Lower {
         layer_idx: lower_layer.index,
-        ino: st.st_ino as u64,
+        ino: st.st_ino,
         dev: st.st_dev as u64,
     };
 
@@ -958,13 +937,13 @@ fn resolve_lower(
     });
 
     // Check opaque for lower directories.
-    if kind == libc::S_IFDIR as u32 {
-        if let Some(lower_dir_fd) = open_lower_dir(lower_layer, parent, name, fs) {
-            if layer::check_opaque(lower_dir_fd).unwrap_or(false) {
-                node.opaque.store(true, Ordering::Release);
-            }
-            unsafe { libc::close(lower_dir_fd) };
+    if kind == libc::S_IFDIR as u32
+        && let Some(lower_dir_fd) = open_lower_dir(lower_layer, parent, name, fs)
+    {
+        if layer::check_opaque(lower_dir_fd).unwrap_or(false) {
+            node.opaque.store(true, Ordering::Release);
         }
+        unsafe { libc::close(lower_dir_fd) };
     }
 
     // Register in tables.
@@ -978,12 +957,7 @@ fn resolve_lower(
     }
     {
         let mut dentries = fs.dentries.write().unwrap();
-        dentries.insert(
-            (parent, name_id),
-            Dentry {
-                node: inode,
-            },
-        );
+        dentries.insert((parent, name_id), Dentry { node: inode });
     }
 
     make_entry(inode, patched, fs.cfg.entry_timeout, fs.cfg.attr_timeout)
@@ -1069,13 +1043,12 @@ pub(crate) fn forget_one_locked(
 ///
 /// Must be called AFTER releasing nodes/dentries write locks to avoid
 /// lock ordering deadlocks.
-fn cleanup_dedup_maps(
-    fs: &OverlayFs,
-    inode: u64,
-    origin: Option<LowerOriginId>,
-) {
+fn cleanup_dedup_maps(fs: &OverlayFs, inode: u64, origin: Option<LowerOriginId>) {
     // Remove from upper_alt_keys (scan — alt_key not stored on node).
-    fs.upper_alt_keys.write().unwrap().retain(|_, &mut v| v != inode);
+    fs.upper_alt_keys
+        .write()
+        .unwrap()
+        .retain(|_, &mut v| v != inode);
 
     // Remove from origin-based maps if the node had an origin.
     if let Some(origin_id) = origin {
@@ -1087,14 +1060,14 @@ fn cleanup_dedup_maps(
 /// Batch-clean dedup maps after multiple inodes are removed.
 ///
 /// Called from batch_forget after releasing nodes/dentries locks.
-pub(crate) fn cleanup_dedup_maps_batch(
-    fs: &OverlayFs,
-    removed: &[(u64, Option<LowerOriginId>)],
-) {
+pub(crate) fn cleanup_dedup_maps_batch(fs: &OverlayFs, removed: &[(u64, Option<LowerOriginId>)]) {
     // Collect removed inodes for efficient set lookup.
     let removed_set: HashSet<u64> = removed.iter().map(|(ino, _)| *ino).collect();
 
-    fs.upper_alt_keys.write().unwrap().retain(|_, v| !removed_set.contains(v));
+    fs.upper_alt_keys
+        .write()
+        .unwrap()
+        .retain(|_, v| !removed_set.contains(v));
 
     let mut origin_keys = fs.lower_origin_keys.write().unwrap();
     let mut origin_idx = fs.origin_index.write().unwrap();
@@ -1135,7 +1108,9 @@ pub(crate) fn stat_node(fs: &OverlayFs, inode: u64) -> io::Result<stat64> {
         NodeState::Lower { ino, dev, .. } | NodeState::Upper { ino, dev, .. } => {
             let path = vol_path(*dev, *ino);
             let fd = open_macos_vol(&path)?;
-            let _close = scopeguard::guard(fd, |fd| unsafe { libc::close(fd); });
+            let _close = scopeguard::guard(fd, |fd| unsafe {
+                libc::close(fd);
+            });
             let st = platform::fstat(fd)?;
             stat_override::patched_stat(fd, st)
         }
@@ -1165,12 +1140,8 @@ pub(crate) fn open_node_fd(fs: &OverlayFs, inode: u64, flags: i32) -> io::Result
         #[cfg(target_os = "macos")]
         NodeState::Lower { ino, dev, .. } | NodeState::Upper { ino, dev, .. } => {
             let path = vol_path(*dev, *ino);
-            let fd = unsafe {
-                libc::open(
-                    path.as_ptr(),
-                    flags | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                )
-            };
+            let fd =
+                unsafe { libc::open(path.as_ptr(), flags | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
             if fd < 0 {
                 return Err(platform::linux_error(io::Error::last_os_error()));
             }
@@ -1251,7 +1222,10 @@ pub(crate) fn get_upper_dir_fd(fs: &OverlayFs, parent_node: &OverlayNode) -> Opt
 ///
 /// Returns empty Vec for root nodes or nodes whose parent can be
 /// opened directly via their fd (same-layer Lower).
-pub(crate) fn get_parent_lower_path(fs: &OverlayFs, parent_node: &OverlayNode) -> io::Result<Vec<Vec<u8>>> {
+pub(crate) fn get_parent_lower_path(
+    fs: &OverlayFs,
+    parent_node: &OverlayNode,
+) -> io::Result<Vec<Vec<u8>>> {
     // Check redirect first.
     let redirect = parent_node.redirect.read().unwrap();
     if let Some(ref redir) = *redirect {
@@ -1453,8 +1427,8 @@ fn open_lower_child_fd(
     };
 
     let path_components = get_parent_lower_path(fs, &parent_node)?;
-    let parent_fd_node = open_lower_parent(layer, &parent_node, &path_components)
-        .ok_or_else(platform::enoent)?;
+    let parent_fd_node =
+        open_lower_parent(layer, &parent_node, &path_components).ok_or_else(platform::enoent)?;
 
     #[cfg(target_os = "linux")]
     return layer::open_child_beneath(
@@ -1493,12 +1467,7 @@ fn open_lower_child_fd(
 }
 
 /// Try to open a lower child as a directory.
-fn open_lower_dir(
-    layer: &Layer,
-    parent: u64,
-    name: &CStr,
-    fs: &OverlayFs,
-) -> Option<RawFd> {
+fn open_lower_dir(layer: &Layer, parent: u64, name: &CStr, fs: &OverlayFs) -> Option<RawFd> {
     let parent_node = {
         let nodes = fs.nodes.read().unwrap();
         nodes.get(&parent).cloned()?
@@ -1528,7 +1497,11 @@ pub(crate) fn dup_fd_raw(fd: RawFd) -> io::Result<RawFd> {
 
 /// Reopen an O_PATH fd for I/O via /proc/self/fd (Linux only).
 #[cfg(target_os = "linux")]
-pub(crate) fn reopen_fd_linux(proc_self_fd: &File, o_path_fd: RawFd, flags: i32) -> io::Result<RawFd> {
+pub(crate) fn reopen_fd_linux(
+    proc_self_fd: &File,
+    o_path_fd: RawFd,
+    flags: i32,
+) -> io::Result<RawFd> {
     let mut buf = [0u8; 20];
     let fd_str = format_fd_cstr(o_path_fd, &mut buf);
     let fd = unsafe {
@@ -1634,11 +1607,11 @@ pub(crate) fn find_dir_record_for_parent<'a>(
     // Fast path: check cache.
     {
         let cache = parent_node.dir_record_cache.read().unwrap();
-        if let Some((cached_layer, cached_idx)) = *cache {
-            if cached_layer == layer_idx {
-                let dirs = index.dir_records();
-                return dirs.get(cached_idx as usize);
-            }
+        if let Some((cached_layer, cached_idx)) = *cache
+            && cached_layer == layer_idx
+        {
+            let dirs = index.dir_records();
+            return dirs.get(cached_idx as usize);
         }
     }
 
@@ -1654,4 +1627,3 @@ pub(crate) fn find_dir_record_for_parent<'a>(
 
     Some(dir_rec)
 }
-

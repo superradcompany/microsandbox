@@ -1,23 +1,24 @@
 //! Lookup pipeline, REGISTER, whiteout/opaque checking, and backend pin management.
 
-use std::ffi::CStr;
-use std::io;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::{
+    ffi::CStr,
+    io,
+    sync::{Arc, Mutex, atomic::Ordering},
+};
 
-use super::hooks::{
-    CommitEvent, DentryChange, DispatchStep, HookCtx, StepResult,
-    decode_entry, handle_hook_decision, notify_observers, run_decision_hooks,
+use super::{
+    DualFs,
+    hooks::{
+        CommitEvent, DentryChange, DispatchStep, HookCtx, StepResult, decode_entry,
+        handle_hook_decision, notify_observers, run_decision_hooks,
+    },
+    policy::{BackendChoice, DualDispatchPlan, DualNamespaceView, HintBag, OpKind, RequestCtx},
+    types::{AtomicBackendId, BackendId, DualState, FileKind, GuestNode, NodeState, ROOT_INODE},
 };
-use super::policy::{
-    BackendChoice, DualDispatchPlan, DualNamespaceView, HintBag, OpKind, RequestCtx,
+use crate::{
+    Context, Entry,
+    backends::shared::{init_binary, name_validation, platform},
 };
-use super::types::{
-    AtomicBackendId, BackendId, DualState, FileKind, GuestNode, NodeState, ROOT_INODE,
-};
-use super::DualFs;
-use crate::backends::shared::{init_binary, name_validation, platform};
-use crate::{Context, Entry};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -86,9 +87,7 @@ pub(crate) fn do_lookup(fs: &DualFs, ctx: Context, parent: u64, name: &CStr) -> 
     }
 
     // hooks.after_resolve
-    let view = DualNamespaceView {
-        state: &fs.state,
-    };
+    let view = DualNamespaceView { state: &fs.state };
     if let std::ops::ControlFlow::Break(r) = handle_hook_decision(
         run_decision_hooks(&fs.hooks, &mut hook_ctx, |h, ctx| {
             h.after_resolve(ctx, &view)
@@ -111,9 +110,7 @@ pub(crate) fn do_lookup(fs: &DualFs, ctx: Context, parent: u64, name: &CStr) -> 
 
     // hooks.after_plan
     if let std::ops::ControlFlow::Break(r) = handle_hook_decision(
-        run_decision_hooks(&fs.hooks, &mut hook_ctx, |h, ctx| {
-            h.after_plan(ctx, &plan)
-        }),
+        run_decision_hooks(&fs.hooks, &mut hook_ctx, |h, ctx| h.after_plan(ctx, &plan)),
         decode_entry,
     ) {
         return r;
@@ -126,24 +123,10 @@ pub(crate) fn do_lookup(fs: &DualFs, ctx: Context, parent: u64, name: &CStr) -> 
         }
         DualDispatchPlan::UseBackendA { .. } => {
             // Single-backend lookup (e.g., BackendAOnly policy).
-            execute_single_backend_lookup(
-                fs,
-                ctx,
-                parent,
-                name,
-                BackendId::BackendA,
-                &mut hook_ctx,
-            )
+            execute_single_backend_lookup(fs, ctx, parent, name, BackendId::BackendA, &mut hook_ctx)
         }
         DualDispatchPlan::UseBackendB { .. } => {
-            execute_single_backend_lookup(
-                fs,
-                ctx,
-                parent,
-                name,
-                BackendId::BackendB,
-                &mut hook_ctx,
-            )
+            execute_single_backend_lookup(fs, ctx, parent, name, BackendId::BackendB, &mut hook_ctx)
         }
         DualDispatchPlan::Deny { errno } => Err(io::Error::from_raw_os_error(errno)),
         _ => Err(platform::einval()),
@@ -154,9 +137,10 @@ pub(crate) fn do_lookup(fs: &DualFs, ctx: Context, parent: u64, name: &CStr) -> 
         h.after_response(&super::hooks::ResponseEvent {
             op: OpKind::Lookup,
             guest_inode: parent,
-            result: result.as_ref().map(|_| ()).map_err(|e| {
-                e.raw_os_error().unwrap_or(libc::EIO)
-            }),
+            result: result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|e| e.raw_os_error().unwrap_or(libc::EIO)),
             latency: std::time::Duration::ZERO,
         });
     });
@@ -198,7 +182,11 @@ pub(crate) fn get_node(state: &DualState, ino: u64) -> io::Result<Arc<GuestNode>
 }
 
 /// Resolve a child backend inode for a given backend.
-pub(crate) fn resolve_backend_inode(state: &DualState, guest_inode: u64, backend: BackendId) -> Option<u64> {
+pub(crate) fn resolve_backend_inode(
+    state: &DualState,
+    guest_inode: u64,
+    backend: BackendId,
+) -> Option<u64> {
     let nodes = state.nodes.read().unwrap();
     let node = nodes.get(&guest_inode)?;
     node.state.read().unwrap().backend_inode(backend)
@@ -248,12 +236,21 @@ pub(crate) fn backend(fs: &DualFs, id: BackendId) -> &dyn DynFileSystem {
 }
 
 /// Check if a name is whited out for a specific backend.
-pub(crate) fn is_whited_out(state: &DualState, parent: u64, name: &[u8], hidden_backend: BackendId) -> bool {
+pub(crate) fn is_whited_out(
+    state: &DualState,
+    parent: u64,
+    name: &[u8],
+    hidden_backend: BackendId,
+) -> bool {
     state.is_whited_out(parent, name, hidden_backend)
 }
 
 /// Check if a directory is opaque against a specific backend.
-pub(crate) fn is_opaque_against(state: &DualState, dir_inode: u64, hidden_backend: BackendId) -> bool {
+pub(crate) fn is_opaque_against(
+    state: &DualState,
+    dir_inode: u64,
+    hidden_backend: BackendId,
+) -> bool {
     state.is_opaque(dir_inode, hidden_backend)
 }
 
@@ -360,9 +357,7 @@ fn get_child_attrs(fs: &DualFs, node: &GuestNode, guest_inode: u64) -> io::Resul
         NodeState::Init => Ok(init_binary::init_stat()),
         _ => {
             let (backend_id, child_inode) = match &*state {
-                NodeState::Root {
-                    backend_a_root, ..
-                } => (BackendId::BackendA, *backend_a_root),
+                NodeState::Root { backend_a_root, .. } => (BackendId::BackendA, *backend_a_root),
                 NodeState::BackendA {
                     backend_a_inode, ..
                 } => (BackendId::BackendA, *backend_a_inode),
@@ -374,7 +369,10 @@ fn get_child_attrs(fs: &DualFs, node: &GuestNode, guest_inode: u64) -> io::Resul
                 } => {
                     let md = node.metadata_backend.load(Ordering::Relaxed);
                     if md == BackendId::BackendB {
-                        (BackendId::BackendB, state.backend_inode(BackendId::BackendB).unwrap())
+                        (
+                            BackendId::BackendB,
+                            state.backend_inode(BackendId::BackendB).unwrap(),
+                        )
                     } else {
                         (BackendId::BackendA, *backend_a_inode)
                     }
@@ -383,7 +381,11 @@ fn get_child_attrs(fs: &DualFs, node: &GuestNode, guest_inode: u64) -> io::Resul
             };
             drop(state);
 
-            let ctx = Context { uid: 0, gid: 0, pid: 0 };
+            let ctx = Context {
+                uid: 0,
+                gid: 0,
+                pid: 0,
+            };
             let (mut st, _) = backend(fs, backend_id).getattr(ctx, child_inode, None)?;
             st.st_ino = guest_inode;
             Ok(st)
@@ -410,53 +412,54 @@ fn execute_merge_lookup(
     // Try preferred backend.
     if !is_whited_out(&fs.state, parent, name_bytes, first_id)
         && !is_opaque_against(&fs.state, parent, first_id)
+        && let Some(first_parent) = resolve_backend_inode(&fs.state, parent, first_id)
     {
-        if let Some(first_parent) = resolve_backend_inode(&fs.state, parent, first_id) {
-            let step = DispatchStep {
-                backend: first_id,
-                op: OpKind::Lookup,
-                inode: first_parent,
-                handle: None,
-            };
+        let step = DispatchStep {
+            backend: first_id,
+            op: OpKind::Lookup,
+            inode: first_parent,
+            handle: None,
+        };
 
-            if let std::ops::ControlFlow::Break(r) = handle_hook_decision(
-                run_decision_hooks(&fs.hooks, hook_ctx, |h, ctx| {
-                    h.before_dispatch(ctx, &step)
-                }),
-                decode_entry,
-            ) {
-                return r;
+        if let std::ops::ControlFlow::Break(r) = handle_hook_decision(
+            run_decision_hooks(&fs.hooks, hook_ctx, |h, ctx| h.before_dispatch(ctx, &step)),
+            decode_entry,
+        ) {
+            return r;
+        }
+
+        match backend(fs, first_id).lookup(ctx, first_parent, name) {
+            Ok(entry) => {
+                notify_observers(&fs.hooks, |h| {
+                    h.after_dispatch(
+                        hook_ctx,
+                        &step,
+                        &StepResult::Entry(super::hooks::copy_entry(&entry)),
+                    );
+                });
+                return register(fs, ctx, entry, parent, name_bytes, first_id);
             }
-
-            match backend(fs, first_id).lookup(ctx, first_parent, name) {
-                Ok(entry) => {
-                    notify_observers(&fs.hooks, |h| {
-                        h.after_dispatch(hook_ctx, &step, &StepResult::Entry(super::hooks::copy_entry(&entry)));
-                    });
-                    return register(fs, ctx, entry, parent, name_bytes, first_id);
-                }
-                Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
-                    notify_observers(&fs.hooks, |h| {
-                        h.after_dispatch(
-                            hook_ctx,
-                            &step,
-                            &StepResult::Err(io::Error::from_raw_os_error(libc::ENOENT)),
-                        );
-                    });
-                    // Fall through to second backend.
-                }
-                Err(e) => {
-                    notify_observers(&fs.hooks, |h| {
-                        h.after_dispatch(
-                            hook_ctx,
-                            &step,
-                            &StepResult::Err(io::Error::from_raw_os_error(
-                                e.raw_os_error().unwrap_or(libc::EIO),
-                            )),
-                        );
-                    });
-                    return Err(e);
-                }
+            Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
+                notify_observers(&fs.hooks, |h| {
+                    h.after_dispatch(
+                        hook_ctx,
+                        &step,
+                        &StepResult::Err(io::Error::from_raw_os_error(libc::ENOENT)),
+                    );
+                });
+                // Fall through to second backend.
+            }
+            Err(e) => {
+                notify_observers(&fs.hooks, |h| {
+                    h.after_dispatch(
+                        hook_ctx,
+                        &step,
+                        &StepResult::Err(io::Error::from_raw_os_error(
+                            e.raw_os_error().unwrap_or(libc::EIO),
+                        )),
+                    );
+                });
+                return Err(e);
             }
         }
     }
@@ -477,9 +480,7 @@ fn execute_merge_lookup(
         };
 
         if let std::ops::ControlFlow::Break(r) = handle_hook_decision(
-            run_decision_hooks(&fs.hooks, hook_ctx, |h, ctx| {
-                h.before_dispatch(ctx, &step)
-            }),
+            run_decision_hooks(&fs.hooks, hook_ctx, |h, ctx| h.before_dispatch(ctx, &step)),
             decode_entry,
         ) {
             return r;
@@ -488,7 +489,11 @@ fn execute_merge_lookup(
         match backend(fs, second_id).lookup(ctx, second_parent, name) {
             Ok(entry) => {
                 notify_observers(&fs.hooks, |h| {
-                    h.after_dispatch(hook_ctx, &step, &StepResult::Entry(super::hooks::copy_entry(&entry)));
+                    h.after_dispatch(
+                        hook_ctx,
+                        &step,
+                        &StepResult::Entry(super::hooks::copy_entry(&entry)),
+                    );
                 });
                 return register(fs, ctx, entry, parent, name_bytes, second_id);
             }
@@ -521,8 +526,8 @@ fn execute_single_backend_lookup(
 ) -> io::Result<Entry> {
     let name_bytes = name.to_bytes();
 
-    let parent_inode = resolve_backend_inode(&fs.state, parent, backend_id)
-        .ok_or_else(platform::enoent)?;
+    let parent_inode =
+        resolve_backend_inode(&fs.state, parent, backend_id).ok_or_else(platform::enoent)?;
 
     let step = DispatchStep {
         backend: backend_id,
@@ -532,9 +537,7 @@ fn execute_single_backend_lookup(
     };
 
     if let std::ops::ControlFlow::Break(r) = handle_hook_decision(
-        run_decision_hooks(&fs.hooks, hook_ctx, |h, ctx| {
-            h.before_dispatch(ctx, &step)
-        }),
+        run_decision_hooks(&fs.hooks, hook_ctx, |h, ctx| h.before_dispatch(ctx, &step)),
         decode_entry,
     ) {
         return r;
@@ -543,7 +546,11 @@ fn execute_single_backend_lookup(
     match backend(fs, backend_id).lookup(ctx, parent_inode, name) {
         Ok(entry) => {
             notify_observers(&fs.hooks, |h| {
-                h.after_dispatch(hook_ctx, &step, &StepResult::Entry(super::hooks::copy_entry(&entry)));
+                h.after_dispatch(
+                    hook_ctx,
+                    &step,
+                    &StepResult::Entry(super::hooks::copy_entry(&entry)),
+                );
             });
             register(fs, ctx, entry, parent, name_bytes, backend_id)
         }
@@ -598,7 +605,11 @@ pub(crate) fn register(
 
                 // Immediately forget the transient lookup ref.
                 backend(fs, source).forget(
-                    Context { uid: 0, gid: 0, pid: 0 },
+                    Context {
+                        uid: 0,
+                        gid: 0,
+                        pid: 0,
+                    },
                     child_entry.inode,
                     1,
                 );
@@ -619,10 +630,7 @@ pub(crate) fn register(
     }
 
     // New entry — assign a guest inode.
-    let guest_inode = fs
-        .state
-        .next_inode
-        .fetch_add(1, Ordering::Relaxed);
+    let guest_inode = fs.state.next_inode.fetch_add(1, Ordering::Relaxed);
     let kind = FileKind::from_mode(child_entry.attr.st_mode as u32);
 
     let node_state = match source {
@@ -647,11 +655,7 @@ pub(crate) fn register(
         copy_up_lock: Mutex::new(()),
     });
 
-    fs.state
-        .nodes
-        .write()
-        .unwrap()
-        .insert(guest_inode, node);
+    fs.state.nodes.write().unwrap().insert(guest_inode, node);
     inode_map
         .write()
         .unwrap()
@@ -697,6 +701,7 @@ pub(crate) fn register(
 }
 
 /// Auto-register a backend entry discovered via readdir.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn auto_register_readdir(
     fs: &DualFs,
     ctx: Context,
@@ -732,10 +737,7 @@ pub(crate) fn auto_register_readdir(
         Err(_) => return None,
     };
 
-    let guest_ino = fs
-        .state
-        .next_inode
-        .fetch_add(1, Ordering::Relaxed);
+    let guest_ino = fs.state.next_inode.fetch_add(1, Ordering::Relaxed);
     let kind = FileKind::from_dtype(dtype);
 
     let node_state = match source {
@@ -760,15 +762,8 @@ pub(crate) fn auto_register_readdir(
         copy_up_lock: Mutex::new(()),
     });
 
-    fs.state
-        .nodes
-        .write()
-        .unwrap()
-        .insert(guest_ino, node);
-    inode_map
-        .write()
-        .unwrap()
-        .insert(backend_inode, guest_ino);
+    fs.state.nodes.write().unwrap().insert(guest_ino, node);
+    inode_map.write().unwrap().insert(backend_inode, guest_ino);
     fs.state
         .dentries
         .write()
@@ -813,7 +808,7 @@ fn forget_one(fs: &DualFs, ino: u64, count: u64) {
             .read()
             .unwrap()
             .get(&ino)
-            .map_or(true, |s| s.is_empty());
+            .is_none_or(|s| s.is_empty());
 
         if aliases_empty {
             // Evict: release retained child pins.
@@ -827,8 +822,15 @@ fn forget_one(fs: &DualFs, ino: u64, count: u64) {
                     let former = *former_backend_b_inode;
                     drop(state);
 
-                    fs.backend_a
-                        .forget(Context { uid: 0, gid: 0, pid: 0 }, ba_ino, 1);
+                    fs.backend_a.forget(
+                        Context {
+                            uid: 0,
+                            gid: 0,
+                            pid: 0,
+                        },
+                        ba_ino,
+                        1,
+                    );
                     fs.state
                         .backend_a_inode_map
                         .write()
@@ -850,8 +852,15 @@ fn forget_one(fs: &DualFs, ino: u64, count: u64) {
                     let former = *former_backend_a_inode;
                     drop(state);
 
-                    fs.backend_b
-                        .forget(Context { uid: 0, gid: 0, pid: 0 }, bb_ino, 1);
+                    fs.backend_b.forget(
+                        Context {
+                            uid: 0,
+                            gid: 0,
+                            pid: 0,
+                        },
+                        bb_ino,
+                        1,
+                    );
                     fs.state
                         .backend_b_inode_map
                         .write()
@@ -873,15 +882,29 @@ fn forget_one(fs: &DualFs, ino: u64, count: u64) {
                     let bb_ino = *backend_b_inode;
                     drop(state);
 
-                    fs.backend_a
-                        .forget(Context { uid: 0, gid: 0, pid: 0 }, ba_ino, 1);
+                    fs.backend_a.forget(
+                        Context {
+                            uid: 0,
+                            gid: 0,
+                            pid: 0,
+                        },
+                        ba_ino,
+                        1,
+                    );
                     fs.state
                         .backend_a_inode_map
                         .write()
                         .unwrap()
                         .remove(&ba_ino);
-                    fs.backend_b
-                        .forget(Context { uid: 0, gid: 0, pid: 0 }, bb_ino, 1);
+                    fs.backend_b.forget(
+                        Context {
+                            uid: 0,
+                            gid: 0,
+                            pid: 0,
+                        },
+                        bb_ino,
+                        1,
+                    );
                     fs.state
                         .backend_b_inode_map
                         .write()

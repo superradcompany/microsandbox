@@ -1,6 +1,4 @@
-use std::path::PathBuf;
-use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::{path::PathBuf, sync::atomic::Ordering, time::Duration};
 
 use super::*;
 

@@ -47,7 +47,8 @@ fn test_fallocate_within_size() {
     let sb = MemFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("falloc_noop.txt").unwrap();
     let handle = handle.unwrap();
-    sb.fuse_write(entry.inode, handle, b"hello world", 0).unwrap();
+    sb.fuse_write(entry.inode, handle, b"hello world", 0)
+        .unwrap();
     // fallocate within existing size should be a no-op.
     sb.fs
         .fallocate(MemFsTestSandbox::ctx(), entry.inode, handle, 0, 0, 5)
@@ -64,7 +65,8 @@ fn test_lseek_data() {
     let sb = MemFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("lseek_data.txt").unwrap();
     let handle = handle.unwrap();
-    sb.fuse_write(entry.inode, handle, b"some data here", 0).unwrap();
+    sb.fuse_write(entry.inode, handle, b"some data here", 0)
+        .unwrap();
     // SEEK_DATA from offset 0 should return 0 (data starts at beginning).
     let pos = sb
         .fs
@@ -78,7 +80,8 @@ fn test_lseek_hole() {
     let sb = MemFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("lseek_hole.txt").unwrap();
     let handle = handle.unwrap();
-    sb.fuse_write(entry.inode, handle, b"file content", 0).unwrap();
+    sb.fuse_write(entry.inode, handle, b"file content", 0)
+        .unwrap();
     // SEEK_HOLE from offset 0 should return file size.
     let pos = sb
         .fs
@@ -90,10 +93,7 @@ fn test_lseek_hole() {
 #[test]
 fn test_statfs() {
     let sb = MemFsTestSandbox::new();
-    let st = sb
-        .fs
-        .statfs(MemFsTestSandbox::ctx(), ROOT_INODE)
-        .unwrap();
+    let st = sb.fs.statfs(MemFsTestSandbox::ctx(), ROOT_INODE).unwrap();
     assert!(st.f_bsize > 0);
     assert!(st.f_namemax > 0);
 }
@@ -101,11 +101,9 @@ fn test_statfs() {
 #[test]
 fn test_statfs_capacity() {
     let sb = MemFsTestSandbox::with_capacity(1024 * 1024); // 1MB
-    sb.create_file_with_content(ROOT_INODE, "some.txt", &[0u8; 4096]).unwrap();
-    let st = sb
-        .fs
-        .statfs(MemFsTestSandbox::ctx(), ROOT_INODE)
+    sb.create_file_with_content(ROOT_INODE, "some.txt", &[0u8; 4096])
         .unwrap();
+    let st = sb.fs.statfs(MemFsTestSandbox::ctx(), ROOT_INODE).unwrap();
     // Free blocks should be less than total blocks.
     assert!(st.f_bfree < st.f_blocks);
 }

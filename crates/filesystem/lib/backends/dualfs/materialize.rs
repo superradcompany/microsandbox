@@ -1,13 +1,13 @@
 //! Materialization orchestration: chunked streaming, directory promotion,
 //! ancestor materialization.
 
-use std::ffi::CString;
-use std::io;
-use std::sync::atomic::Ordering;
-use super::lookup::{backend, get_node, resolve_backend_inode};
-use super::types::{BackendId, FileKind, NodeState, ROOT_INODE};
-use super::DualFs;
+use super::{
+    DualFs,
+    lookup::{backend, get_node, resolve_backend_inode},
+    types::{BackendId, FileKind, NodeState, ROOT_INODE},
+};
 use crate::{Context, Extensions, SetattrValid};
+use std::{ffi::CString, io, sync::atomic::Ordering};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -57,34 +57,51 @@ pub(crate) fn do_materialize(
 
     // Resolve parent's inode on target.
     let (parent_ino, name) = {
-        let alias = fs
-            .state
+        fs.state
             .alias_index
             .read()
             .unwrap()
             .get(&guest_inode)
             .and_then(|s| s.iter().next().cloned())
-            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?;
-        alias
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?
     };
 
     let parent_target_inode = resolve_backend_inode(&fs.state, parent_ino, target)
         .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?;
 
-    let cname = CString::new(name.clone())
-        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    let cname =
+        CString::new(name.clone()).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
 
     // Copy based on file type.
     let target_inode = match node.kind {
-        FileKind::RegularFile => {
-            materialize_regular_file(fs, ctx, source, target, source_inode, parent_target_inode, &cname, guest_inode)?
-        }
-        FileKind::Symlink => {
-            materialize_symlink(fs, ctx, source, target, source_inode, parent_target_inode, &cname)?
-        }
-        FileKind::Special => {
-            materialize_special(fs, ctx, source, target, source_inode, parent_target_inode, &cname)?
-        }
+        FileKind::RegularFile => materialize_regular_file(
+            fs,
+            ctx,
+            source,
+            target,
+            source_inode,
+            parent_target_inode,
+            &cname,
+            guest_inode,
+        )?,
+        FileKind::Symlink => materialize_symlink(
+            fs,
+            ctx,
+            source,
+            target,
+            source_inode,
+            parent_target_inode,
+            &cname,
+        )?,
+        FileKind::Special => materialize_special(
+            fs,
+            ctx,
+            source,
+            target,
+            source_inode,
+            parent_target_inode,
+            &cname,
+        )?,
         FileKind::Directory => {
             // Directories are handled by promote_directory_to_merged, not materialize.
             return Err(io::Error::from_raw_os_error(libc::EISDIR));
@@ -114,7 +131,15 @@ pub(crate) fn do_materialize(
         .insert(target_inode, guest_inode);
 
     // Release retained source pin.
-    backend(fs, source).forget(Context { uid: 0, gid: 0, pid: 0 }, source_inode, 1);
+    backend(fs, source).forget(
+        Context {
+            uid: 0,
+            gid: 0,
+            pid: 0,
+        },
+        source_inode,
+        1,
+    );
 
     // hooks.after_commit
     super::hooks::notify_observers(&fs.hooks, |h| {
@@ -142,18 +167,22 @@ pub(crate) fn promote_directory_to_merged(
         let state = node.state.read().unwrap();
         match &*state {
             NodeState::MergedDir { .. } | NodeState::Root { .. } => return Ok(()),
-            NodeState::BackendA { backend_a_inode, .. } if target == BackendId::BackendA => {
+            NodeState::BackendA {
+                backend_a_inode, ..
+            } if target == BackendId::BackendA => {
                 return Ok(());
             }
-            NodeState::BackendB { backend_b_inode, .. } if target == BackendId::BackendB => {
+            NodeState::BackendB {
+                backend_b_inode, ..
+            } if target == BackendId::BackendB => {
                 return Ok(());
             }
-            NodeState::BackendA { backend_a_inode, .. } => {
-                (BackendId::BackendA, *backend_a_inode)
-            }
-            NodeState::BackendB { backend_b_inode, .. } => {
-                (BackendId::BackendB, *backend_b_inode)
-            }
+            NodeState::BackendA {
+                backend_a_inode, ..
+            } => (BackendId::BackendA, *backend_a_inode),
+            NodeState::BackendB {
+                backend_b_inode, ..
+            } => (BackendId::BackendB, *backend_b_inode),
             NodeState::Init => return Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
         }
     };
@@ -177,12 +206,18 @@ pub(crate) fn promote_directory_to_merged(
     let parent_target_inode = resolve_backend_inode(&fs.state, parent_ino, target)
         .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?;
 
-    let cname = CString::new(name)
-        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    let cname = CString::new(name).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
 
     // Create directory in target backend.
     let mode = (src_stat.st_mode as u32) & 0o7777;
-    let entry = backend(fs, target).mkdir(ctx, parent_target_inode, &cname, mode, 0, Extensions::default())?;
+    let entry = backend(fs, target).mkdir(
+        ctx,
+        parent_target_inode,
+        &cname,
+        mode,
+        0,
+        Extensions::default(),
+    )?;
 
     // Copy xattrs.
     copy_xattrs(fs, ctx, src_backend, src_inode, target, entry.inode)?;
@@ -321,6 +356,7 @@ fn ensure_backend_presence_recursive(
 }
 
 /// Materialize a regular file.
+#[allow(clippy::too_many_arguments)]
 fn materialize_regular_file(
     fs: &DualFs,
     ctx: Context,
@@ -345,8 +381,8 @@ fn materialize_regular_file(
         .ok_or_else(|| io::Error::from_raw_os_error(libc::EIO))?;
 
     let temp_name_str = format!("tmp_{}", guest_inode);
-    let temp_name = CString::new(temp_name_str)
-        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    let temp_name =
+        CString::new(temp_name_str).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
 
     let mode = (src_stat.st_mode as u32) & 0o7777;
     let (temp_entry, temp_handle, _) = backend(fs, target).create(
@@ -362,12 +398,14 @@ fn materialize_regular_file(
 
     // Stream data from source to target in chunks.
     if file_size > 0 {
-        let (src_handle, _) = backend(fs, source).open(ctx, source_inode, false, libc::O_RDONLY as u32)?;
+        let (src_handle, _) =
+            backend(fs, source).open(ctx, source_inode, false, libc::O_RDONLY as u32)?;
         let src_handle = src_handle.unwrap_or(0);
 
         let mut offset = 0u64;
         while offset < file_size {
-            let chunk_size = std::cmp::min(fs.cfg.copy_chunk_size as u64, file_size - offset) as u32;
+            let chunk_size =
+                std::cmp::min(fs.cfg.copy_chunk_size as u64, file_size - offset) as u32;
 
             // Use a pipe/staging approach: read from source, write to target.
             // We use the init_file as a staging buffer for the transfer.
@@ -407,7 +445,15 @@ fn materialize_regular_file(
     }
 
     let temp_handle_val = temp_handle.unwrap_or(0);
-    backend(fs, target).release(ctx, temp_entry.inode, 0, temp_handle_val, false, false, None)?;
+    backend(fs, target).release(
+        ctx,
+        temp_entry.inode,
+        0,
+        temp_handle_val,
+        false,
+        false,
+        None,
+    )?;
 
     // Copy xattrs.
     copy_xattrs(fs, ctx, source, source_inode, target, temp_entry.inode)?;
@@ -434,8 +480,8 @@ fn materialize_symlink(
     let link_target = backend(fs, source).readlink(ctx, source_inode)?;
     let (src_stat, _) = backend(fs, source).getattr(ctx, source_inode, None)?;
 
-    let link_cstr = CString::new(link_target)
-        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    let link_cstr =
+        CString::new(link_target).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
 
     let entry = backend(fs, target).symlink(
         ctx,
@@ -522,10 +568,7 @@ fn copy_metadata(
     target_inode: u64,
     src_stat: &crate::stat64,
 ) -> io::Result<()> {
-    let valid = SetattrValid::UID
-        | SetattrValid::GID
-        | SetattrValid::ATIME
-        | SetattrValid::MTIME;
+    let valid = SetattrValid::UID | SetattrValid::GID | SetattrValid::ATIME | SetattrValid::MTIME;
 
     backend(fs, target).setattr(ctx, target_inode, *src_stat, None, valid)?;
 
@@ -542,19 +585,19 @@ struct StagingWriter<'a> {
 }
 
 impl crate::ZeroCopyWriter for StagingWriter<'_> {
-    fn write_from(
-        &mut self,
-        f: &std::fs::File,
-        count: usize,
-        off: u64,
-    ) -> io::Result<usize> {
+    fn write_from(&mut self, f: &std::fs::File, count: usize, off: u64) -> io::Result<usize> {
         // Read from f at off, write to our staging file at 0.
         use std::os::fd::AsRawFd;
 
         let mut buf = vec![0u8; count];
         let fd = f.as_raw_fd();
         let n = unsafe {
-            libc::pread(fd, buf.as_mut_ptr() as *mut libc::c_void, count, off as libc::off_t)
+            libc::pread(
+                fd,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                count,
+                off as libc::off_t,
+            )
         };
         if n < 0 {
             return Err(io::Error::last_os_error());
@@ -562,9 +605,7 @@ impl crate::ZeroCopyWriter for StagingWriter<'_> {
         let n = n as usize;
 
         let staging_fd = self.file.as_raw_fd();
-        let w = unsafe {
-            libc::pwrite(staging_fd, buf.as_ptr() as *const libc::c_void, n, 0)
-        };
+        let w = unsafe { libc::pwrite(staging_fd, buf.as_ptr() as *const libc::c_void, n, 0) };
         if w < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -580,12 +621,7 @@ struct StagingReader<'a> {
 }
 
 impl crate::ZeroCopyReader for StagingReader<'_> {
-    fn read_to(
-        &mut self,
-        f: &std::fs::File,
-        count: usize,
-        off: u64,
-    ) -> io::Result<usize> {
+    fn read_to(&mut self, f: &std::fs::File, count: usize, off: u64) -> io::Result<usize> {
         use std::os::fd::AsRawFd;
 
         let to_read = std::cmp::min(count, self.size);
@@ -593,7 +629,12 @@ impl crate::ZeroCopyReader for StagingReader<'_> {
 
         let staging_fd = self.file.as_raw_fd();
         let n = unsafe {
-            libc::pread(staging_fd, buf.as_mut_ptr() as *mut libc::c_void, to_read, 0)
+            libc::pread(
+                staging_fd,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                to_read,
+                0,
+            )
         };
         if n < 0 {
             return Err(io::Error::last_os_error());
@@ -602,7 +643,12 @@ impl crate::ZeroCopyReader for StagingReader<'_> {
 
         let fd = f.as_raw_fd();
         let w = unsafe {
-            libc::pwrite(fd, buf.as_ptr() as *const libc::c_void, n, off as libc::off_t)
+            libc::pwrite(
+                fd,
+                buf.as_ptr() as *const libc::c_void,
+                n,
+                off as libc::off_t,
+            )
         };
         if w < 0 {
             return Err(io::Error::last_os_error());

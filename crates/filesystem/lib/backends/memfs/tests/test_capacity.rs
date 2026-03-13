@@ -35,13 +35,7 @@ fn test_capacity_truncate_reclaims() {
     let mut attr: stat64 = unsafe { std::mem::zeroed() };
     attr.st_size = 0;
     sb.fs
-        .setattr(
-            MemFsTestSandbox::ctx(),
-            ino,
-            attr,
-            None,
-            SetattrValid::SIZE,
-        )
+        .setattr(MemFsTestSandbox::ctx(), ino, attr, None, SetattrValid::SIZE)
         .unwrap();
 
     let used_after = sb.fs.used_bytes.load(Ordering::Relaxed);
@@ -113,9 +107,12 @@ fn test_capacity_unlink_open_file() {
 #[test]
 fn test_capacity_multiple_files() {
     let sb = MemFsTestSandbox::with_capacity(1024);
-    sb.create_file_with_content(ROOT_INODE, "a.txt", &[0u8; 256]).unwrap();
-    sb.create_file_with_content(ROOT_INODE, "b.txt", &[0u8; 256]).unwrap();
-    sb.create_file_with_content(ROOT_INODE, "c.txt", &[0u8; 256]).unwrap();
+    sb.create_file_with_content(ROOT_INODE, "a.txt", &[0u8; 256])
+        .unwrap();
+    sb.create_file_with_content(ROOT_INODE, "b.txt", &[0u8; 256])
+        .unwrap();
+    sb.create_file_with_content(ROOT_INODE, "c.txt", &[0u8; 256])
+        .unwrap();
 
     let used = sb.fs.used_bytes.load(Ordering::Relaxed);
     assert_eq!(used, 768);
@@ -145,7 +142,15 @@ fn test_inode_limit_unlink_reclaims() {
     let (entry, handle) = sb.fuse_create_root("temp.txt").unwrap();
     let handle = handle.unwrap();
     sb.fs
-        .release(MemFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     sb.fuse_create_root("temp2.txt").unwrap();
 

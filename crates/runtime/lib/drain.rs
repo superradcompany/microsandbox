@@ -5,8 +5,7 @@
 //! it cannot be cancelled. The drain progresses through phases based on the
 //! supervisor's `ShutdownMode`.
 
-use crate::policy::ShutdownMode;
-use crate::termination::TerminationReason;
+use crate::{policy::ShutdownMode, termination::TerminationReason};
 
 //--------------------------------------------------------------------------------------------------
 // Types

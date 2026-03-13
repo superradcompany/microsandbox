@@ -4,18 +4,21 @@
 //! assembles CLI arguments from [`SandboxConfig`], fork+execs `msb supervisor`,
 //! and reads the startup JSON to obtain child PIDs.
 
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
-use std::path::Path;
-use std::process::Stdio;
+use std::{
+    ffi::OsString,
+    os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
+    path::Path,
+    process::Stdio,
+};
 
 use serde::Deserialize;
-use tokio::io::AsyncBufReadExt;
-use tokio::process::Command;
+use tokio::{io::AsyncBufReadExt, process::Command};
 
-use crate::MicrosandboxResult;
-use crate::config;
-use crate::runtime::handle::SupervisorHandle;
-use crate::sandbox::{RootfsSource, SandboxConfig, VolumeMount};
+use crate::{
+    MicrosandboxResult, config,
+    runtime::handle::SupervisorHandle,
+    sandbox::{RootfsSource, SandboxConfig, VolumeMount},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -46,6 +49,7 @@ struct StartupInfo {
 /// 6. Reads startup JSON from stdout to get child PIDs
 pub async fn spawn_supervisor(
     config: &SandboxConfig,
+    sandbox_id: i32,
 ) -> MicrosandboxResult<(SupervisorHandle, RawFd)> {
     // Create the agent socket pair.
     let (host_fd, guest_fd) = create_socketpair()?;
@@ -53,7 +57,7 @@ pub async fn spawn_supervisor(
 
     // Resolve paths.
     let msb_path = config::resolve_msb_path()?;
-    let libkrunfw_path = config::resolve_libkrunfw_path();
+    let libkrunfw_path = config::resolve_libkrunfw_path()?;
     let global = config::config();
     let sandbox_dir = global.sandboxes_dir().join(&config.name);
     let log_dir = sandbox_dir.join("logs");
@@ -80,101 +84,15 @@ pub async fn spawn_supervisor(
 
     // Build the command.
     let mut cmd = Command::new(&msb_path);
-    cmd.arg("supervisor");
-    cmd.arg("--name").arg(&config.name);
-    cmd.arg("--db-path").arg(&db_path);
-    cmd.arg("--log-dir").arg(&log_dir);
-    cmd.arg("--runtime-dir").arg(&runtime_dir);
-    cmd.arg("--agent-fd").arg(guest_raw_fd.to_string());
-
-    // Supervisor policy args.
-    let sp = &config.supervisor_policy;
-    cmd.arg("--shutdown-mode")
-        .arg(shutdown_mode_str(&sp.shutdown_mode));
-    cmd.arg("--grace-secs").arg(sp.grace_secs.to_string());
-    if let Some(max_dur) = sp.max_duration_secs {
-        cmd.arg("--max-duration").arg(max_dur.to_string());
-    }
-    if let Some(idle) = sp.idle_timeout_secs {
-        cmd.arg("--idle-timeout").arg(idle.to_string());
-    }
-
-    // VM child policy args.
-    let vp = &config.child_policies.vm;
-    cmd.arg("--vm-on-exit").arg(exit_action_str(&vp.on_exit));
-    cmd.arg("--vm-max-restarts")
-        .arg(vp.max_restarts.to_string());
-    cmd.arg("--vm-restart-delay-ms")
-        .arg(vp.restart_delay_ms.to_string());
-    cmd.arg("--vm-restart-window")
-        .arg(vp.restart_window_secs.to_string());
-    cmd.arg("--vm-shutdown-timeout-ms")
-        .arg(vp.shutdown_timeout_ms.to_string());
-
-    // VM configuration args.
-    cmd.arg("--libkrunfw-path").arg(&libkrunfw_path);
-    cmd.arg("--vcpus").arg(config.cpus.to_string());
-    cmd.arg("--memory-mib").arg(config.memory_mib.to_string());
-
-    // Root filesystem layers.
-    match &config.image {
-        RootfsSource::Bind(path) => {
-            cmd.arg("--rootfs-layer").arg(path);
-        }
-        RootfsSource::Oci(_) => {
-            // OCI image resolution is handled in Phase 8.
-            // For now, this would be resolved to layer paths before calling spawn.
-        }
-    }
-
-    // Environment variables.
-    for (key, value) in &config.env {
-        cmd.arg("--env").arg(format!("{key}={value}"));
-    }
-
-    // Volume mounts.
-    for mount in &config.mounts {
-        match mount {
-            VolumeMount::Bind {
-                host,
-                guest,
-                readonly,
-            } => {
-                // Format: "tag:host_path[:ro]" where tag is a sanitized guest path.
-                let tag = guest_mount_tag(guest);
-                let mut arg = format!("{tag}:{}", host.display());
-                if *readonly {
-                    arg.push_str(":ro");
-                }
-                cmd.arg("--mount").arg(arg);
-            }
-            VolumeMount::Named {
-                name,
-                guest,
-                readonly,
-            } => {
-                let vol_path = config::config().volumes_dir().join(name);
-                let tag = guest_mount_tag(guest);
-                let mut arg = format!("{tag}:{}", vol_path.display());
-                if *readonly {
-                    arg.push_str(":ro");
-                }
-                cmd.arg("--mount").arg(arg);
-            }
-            VolumeMount::Tmpfs { .. } => {
-                // Tmpfs mounts are handled by the guest kernel, not virtiofs.
-            }
-            VolumeMount::Backend { .. } => {
-                // Backend mounts are guarded at Sandbox::create() — they cannot
-                // reach this point in the subprocess path. If they do, skip them.
-            }
-        }
-    }
-
-    // Working directory.
-    if let Some(ref workdir) = config.workdir {
-        cmd.arg("--workdir").arg(workdir);
-    }
+    cmd.args(supervisor_cli_args(
+        config,
+        sandbox_id,
+        &db_path,
+        &log_dir,
+        &runtime_dir,
+        guest_raw_fd,
+        &libkrunfw_path,
+    ));
 
     // Capture stdout (for startup JSON), inherit stderr so errors are visible.
     cmd.stdout(Stdio::piped());
@@ -309,5 +227,187 @@ fn exit_action_str(action: &microsandbox_runtime::policy::ExitAction) -> &'stati
         ExitAction::ShutdownAll => "shutdown-all",
         ExitAction::Restart => "restart",
         ExitAction::Ignore => "ignore",
+    }
+}
+
+/// Build the `msb supervisor` CLI args for a sandbox.
+fn supervisor_cli_args(
+    config: &SandboxConfig,
+    sandbox_id: i32,
+    db_path: &Path,
+    log_dir: &Path,
+    runtime_dir: &Path,
+    agent_fd: RawFd,
+    libkrunfw_path: &Path,
+) -> Vec<OsString> {
+    let mut args = vec![OsString::from("supervisor")];
+
+    if let Some(log_level) = config.log_level {
+        args.push(OsString::from(log_level.as_cli_flag()));
+    }
+
+    args.push(OsString::from("--name"));
+    args.push(OsString::from(&config.name));
+    args.push(OsString::from("--sandbox-id"));
+    args.push(OsString::from(sandbox_id.to_string()));
+    args.push(OsString::from("--db-path"));
+    args.push(db_path.as_os_str().to_os_string());
+    args.push(OsString::from("--log-dir"));
+    args.push(log_dir.as_os_str().to_os_string());
+    args.push(OsString::from("--runtime-dir"));
+    args.push(runtime_dir.as_os_str().to_os_string());
+    args.push(OsString::from("--agent-fd"));
+    args.push(OsString::from(agent_fd.to_string()));
+
+    let sp = &config.supervisor_policy;
+    args.push(OsString::from("--shutdown-mode"));
+    args.push(OsString::from(shutdown_mode_str(&sp.shutdown_mode)));
+    args.push(OsString::from("--grace-secs"));
+    args.push(OsString::from(sp.grace_secs.to_string()));
+    if let Some(max_dur) = sp.max_duration_secs {
+        args.push(OsString::from("--max-duration"));
+        args.push(OsString::from(max_dur.to_string()));
+    }
+    if let Some(idle) = sp.idle_timeout_secs {
+        args.push(OsString::from("--idle-timeout"));
+        args.push(OsString::from(idle.to_string()));
+    }
+
+    let vp = &config.child_policies.vm;
+    args.push(OsString::from("--vm-on-exit"));
+    args.push(OsString::from(exit_action_str(&vp.on_exit)));
+    args.push(OsString::from("--vm-max-restarts"));
+    args.push(OsString::from(vp.max_restarts.to_string()));
+    args.push(OsString::from("--vm-restart-delay-ms"));
+    args.push(OsString::from(vp.restart_delay_ms.to_string()));
+    args.push(OsString::from("--vm-restart-window"));
+    args.push(OsString::from(vp.restart_window_secs.to_string()));
+    args.push(OsString::from("--vm-shutdown-timeout-ms"));
+    args.push(OsString::from(vp.shutdown_timeout_ms.to_string()));
+
+    args.push(OsString::from("--libkrunfw-path"));
+    args.push(libkrunfw_path.as_os_str().to_os_string());
+    args.push(OsString::from("--vcpus"));
+    args.push(OsString::from(config.cpus.to_string()));
+    args.push(OsString::from("--memory-mib"));
+    args.push(OsString::from(config.memory_mib.to_string()));
+
+    match &config.image {
+        RootfsSource::Bind(path) => {
+            args.push(OsString::from("--rootfs-layer"));
+            args.push(path.as_os_str().to_os_string());
+        }
+        RootfsSource::Oci(reference) => {
+            unimplemented!("OCI image references are not yet supported: {reference}");
+        }
+    }
+
+    for (key, value) in &config.env {
+        args.push(OsString::from("--env"));
+        args.push(OsString::from(format!("{key}={value}")));
+    }
+
+    for mount in &config.mounts {
+        match mount {
+            VolumeMount::Bind {
+                host,
+                guest,
+                readonly,
+            } => {
+                let tag = guest_mount_tag(guest);
+                let mut arg = format!("{tag}:{}", host.display());
+                if *readonly {
+                    arg.push_str(":ro");
+                }
+                args.push(OsString::from("--mount"));
+                args.push(OsString::from(arg));
+            }
+            VolumeMount::Named {
+                name,
+                guest,
+                readonly,
+            } => {
+                let vol_path = config::config().volumes_dir().join(name);
+                let tag = guest_mount_tag(guest);
+                let mut arg = format!("{tag}:{}", vol_path.display());
+                if *readonly {
+                    arg.push_str(":ro");
+                }
+                args.push(OsString::from("--mount"));
+                args.push(OsString::from(arg));
+            }
+            VolumeMount::Tmpfs { .. } => {
+                // Tmpfs mounts are handled by the guest kernel, not virtiofs.
+            }
+            VolumeMount::Backend { .. } => {
+                // Backend mounts are guarded at Sandbox::create() — they cannot
+                // reach this point in the subprocess path. If they do, skip them.
+            }
+        }
+    }
+
+    if let Some(ref workdir) = config.workdir {
+        args.push(OsString::from("--workdir"));
+        args.push(OsString::from(workdir));
+    }
+
+    args
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::supervisor_cli_args;
+    use crate::{LogLevel, sandbox::SandboxBuilder};
+
+    #[test]
+    fn test_supervisor_cli_args_include_selected_log_level() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .log_level(LogLevel::Debug)
+            .build()
+            .unwrap();
+
+        let args = supervisor_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            9,
+            Path::new("/tmp/libkrunfw.dylib"),
+        );
+
+        assert!(args.iter().any(|arg| arg == "--debug"));
+    }
+
+    #[test]
+    fn test_supervisor_cli_args_are_silent_by_default() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .unwrap();
+
+        let args = supervisor_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            9,
+            Path::new("/tmp/libkrunfw.dylib"),
+        );
+
+        assert!(!args.iter().any(|arg| {
+            matches!(
+                arg.to_str(),
+                Some("--error" | "--warn" | "--info" | "--debug" | "--trace")
+            )
+        }));
     }
 }

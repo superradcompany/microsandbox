@@ -10,12 +10,12 @@ edition.workspace = true
 path = "lib/lib.rs"
 
 [dependencies]
-msb_krun = "0.1.2"
-microsandbox-utils = { path = "../utils" }
 libc.workspace = true
-tracing.workspace = true
+microsandbox-utils = { path = "../utils" }
+msb_krun = "0.1.2"
 scopeguard.workspace = true
 tempfile.workspace = true
+tracing.workspace = true
 
 [features]
 prebuilt = ["dep:ureq"]

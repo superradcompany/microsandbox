@@ -4,17 +4,20 @@
 //! staging file (memfd/tmpfile) to bridge the ZeroCopy traits, which
 //! operate on file descriptors rather than byte slices.
 
-use std::os::fd::AsRawFd;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::{cmp, io};
+use std::{
+    cmp, io,
+    os::fd::AsRawFd,
+    sync::{Arc, atomic::Ordering},
+};
 
-use super::MemFs;
-use super::inode;
-use super::types::{FileHandle, InodeContent};
-use crate::backends::shared::init_binary;
-use crate::backends::shared::platform;
-use crate::{Context, OpenOptions, ZeroCopyReader, ZeroCopyWriter};
+use super::{
+    MemFs, inode,
+    types::{FileHandle, InodeContent},
+};
+use crate::{
+    Context, OpenOptions, ZeroCopyReader, ZeroCopyWriter,
+    backends::shared::{init_binary, platform},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -38,35 +41,27 @@ pub(crate) fn do_open(
         return Err(platform::eisdir());
     }
 
-    let mut open_flags = flags as i32;
-
-    // Writeback cache adjustments.
-    if fs.writeback.load(Ordering::Relaxed) {
-        if open_flags & libc::O_WRONLY != 0 {
-            open_flags = (open_flags & !libc::O_WRONLY) | libc::O_RDWR;
-        }
-        open_flags &= !libc::O_APPEND;
-    }
+    let open_flags = super::normalize_handle_flags(fs.writeback.load(Ordering::Relaxed), flags);
 
     // Handle O_TRUNC: truncate file data.
-    if open_flags & libc::O_TRUNC != 0 {
-        if let InodeContent::RegularFile { ref data } = node.content {
-            let mut data = data.write().unwrap();
-            let old_len = data.len() as u64;
-            data.clear();
-            if old_len > 0 {
-                inode::release_bytes(fs, old_len);
-            }
-            let mut meta = node.meta.write().unwrap();
-            meta.size = 0;
-            let now = inode::current_time();
-            meta.mtime = now;
-            meta.ctime = now;
+    if open_flags & super::GUEST_O_TRUNC != 0
+        && let InodeContent::RegularFile { ref data } = node.content
+    {
+        let mut data = data.write().unwrap();
+        let old_len = data.len() as u64;
+        data.clear();
+        if old_len > 0 {
+            inode::release_bytes(fs, old_len);
         }
+        let mut meta = node.meta.write().unwrap();
+        meta.size = 0;
+        let now = inode::current_time();
+        meta.mtime = now;
+        meta.ctime = now;
     }
 
     // Handle kill_priv: clear SUID/SGID on truncate.
-    if kill_priv && (open_flags & libc::O_TRUNC != 0) {
+    if kill_priv && (open_flags & super::GUEST_O_TRUNC != 0) {
         let mut meta = node.meta.write().unwrap();
         if meta.mode & (libc::S_ISUID as u32 | libc::S_ISGID as u32) != 0 {
             meta.mode &= !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
@@ -76,9 +71,8 @@ pub(crate) fn do_open(
 
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);
     let fh = Arc::new(FileHandle {
-        inode: ino,
         node: Arc::clone(&node),
-        flags: open_flags as u32,
+        flags: open_flags,
     });
 
     fs.file_handles.write().unwrap().insert(handle, fh);
@@ -135,12 +129,13 @@ pub(crate) fn do_read(
         return Err(platform::linux_error(io::Error::last_os_error()));
     }
 
-    w.write_from(&*staging, count, 0)
+    w.write_from(&staging, count, 0)
 }
 
 /// Write data to a file.
 ///
 /// Uses the staging file to bridge ZeroCopyReader data to the in-memory buffer.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn do_write(
     fs: &MemFs,
     _ctx: Context,
@@ -162,18 +157,21 @@ pub(crate) fn do_write(
         InodeContent::RegularFile { data } => data,
         _ => return Err(platform::eisdir()),
     };
+    let append_mode = fh.flags & super::GUEST_O_APPEND != 0;
 
     // Validate that the write won't exceed stat64 representable size.
-    let requested_end = (offset as u64)
-        .checked_add(size as u64)
-        .ok_or_else(platform::einval)?;
-    if requested_end > i64::MAX as u64 {
-        return Err(platform::efbig());
+    if !append_mode {
+        let requested_end = offset
+            .checked_add(size as u64)
+            .ok_or_else(platform::einval)?;
+        if requested_end > i64::MAX as u64 {
+            return Err(platform::efbig());
+        }
     }
 
     // Read from guest into staging file.
     let staging = fs.staging_file.lock().unwrap();
-    let count = r.read_to(&*staging, size as usize, 0)?;
+    let count = r.read_to(&staging, size as usize, 0)?;
 
     if count == 0 {
         return Ok(0);
@@ -195,26 +193,28 @@ pub(crate) fn do_write(
     drop(staging);
 
     let count = read_back as usize;
-    let start = offset as usize;
-    let new_end = start
-        .checked_add(count)
-        .ok_or_else(platform::efbig)?;
 
-    // Reserve capacity for growth.
-    {
-        let current_len = data_lock.read().unwrap().len();
-        if new_end > current_len {
-            let delta = (new_end - current_len) as u64;
-            inode::reserve_bytes(fs, delta)?;
-        }
-    }
-
-    // Write to in-memory data.
+    // Write to in-memory data. Append mode must observe the current EOF under
+    // the write lock so concurrent appenders serialize correctly.
     {
         let mut data = data_lock.write().unwrap();
+        let start = if append_mode {
+            data.len()
+        } else {
+            usize::try_from(offset).map_err(|_| platform::efbig())?
+        };
+        let new_end = start.checked_add(count).ok_or_else(platform::efbig)?;
+
+        if (new_end as u64) > i64::MAX as u64 {
+            return Err(platform::efbig());
+        }
+
         if new_end > data.len() {
+            let delta = (new_end - data.len()) as u64;
+            inode::reserve_bytes(fs, delta)?;
             data.resize(new_end, 0);
         }
+
         data[start..new_end].copy_from_slice(&buf[..count]);
 
         // Update metadata.
@@ -247,12 +247,7 @@ pub(crate) fn do_readlink(fs: &MemFs, _ctx: Context, ino: u64) -> io::Result<Vec
 }
 
 /// Flush pending data for a file handle.
-pub(crate) fn do_flush(
-    _fs: &MemFs,
-    _ctx: Context,
-    ino: u64,
-    _handle: u64,
-) -> io::Result<()> {
+pub(crate) fn do_flush(_fs: &MemFs, _ctx: Context, ino: u64, _handle: u64) -> io::Result<()> {
     if ino == init_binary::INIT_INODE {
         return Ok(());
     }
@@ -261,12 +256,7 @@ pub(crate) fn do_flush(
 }
 
 /// Release an open file handle.
-pub(crate) fn do_release(
-    fs: &MemFs,
-    _ctx: Context,
-    ino: u64,
-    handle: u64,
-) -> io::Result<()> {
+pub(crate) fn do_release(fs: &MemFs, _ctx: Context, ino: u64, handle: u64) -> io::Result<()> {
     if ino == init_binary::INIT_INODE {
         return Ok(());
     }
@@ -274,12 +264,13 @@ pub(crate) fn do_release(
     if let Some(fh) = fs.file_handles.write().unwrap().remove(&handle) {
         // If this was the last reference to a regular file already evicted
         // from the nodes table, release the capacity.
-        if fh.node.kind == libc::S_IFREG as u32 && Arc::strong_count(&fh.node) == 1 {
-            if let InodeContent::RegularFile { ref data } = fh.node.content {
-                let size = data.read().unwrap().len() as u64;
-                if size > 0 {
-                    inode::release_bytes(fs, size);
-                }
+        if fh.node.kind == libc::S_IFREG as u32
+            && Arc::strong_count(&fh.node) == 1
+            && let InodeContent::RegularFile { ref data } = fh.node.content
+        {
+            let size = data.read().unwrap().len() as u64;
+            if size > 0 {
+                inode::release_bytes(fs, size);
             }
         }
     }

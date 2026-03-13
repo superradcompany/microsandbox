@@ -5,7 +5,15 @@ fn test_lookup_backend_a_file() {
     let sb = DualFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("a_only.txt").unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     let e = sb.lookup_root("a_only.txt").unwrap();
     assert_eq!(e.inode, entry.inode);
@@ -34,7 +42,15 @@ fn test_lookup_precedence_a_over_b() {
     // Also create in backend_a via DualFs.
     let (entry_a, handle_a) = sb.fuse_create_root("shared_a.txt").unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry_a.inode, 0, handle_a, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry_a.inode,
+            0,
+            handle_a,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // The backend_b file should be discoverable.
     let entry_b = sb.lookup_root("shared.txt").unwrap();
@@ -56,7 +72,11 @@ fn test_lookup_whiteout_hides_backend_b() {
     // Lookup to register, then unlink -> creates whiteout.
     let _entry = sb.lookup_root("hidden.txt").unwrap();
     sb.fs
-        .unlink(DualFsTestSandbox::ctx(), ROOT_INODE, &DualFsTestSandbox::cstr("hidden.txt"))
+        .unlink(
+            DualFsTestSandbox::ctx(),
+            ROOT_INODE,
+            &DualFsTestSandbox::cstr("hidden.txt"),
+        )
         .unwrap();
     // Now lookup should fail.
     let result = sb.lookup_root("hidden.txt");
@@ -79,7 +99,10 @@ fn test_lookup_nested_path() {
 #[test]
 fn test_lookup_root_is_merged() {
     let sb = DualFsTestSandbox::new();
-    let (st, _) = sb.fs.getattr(DualFsTestSandbox::ctx(), ROOT_INODE, None).unwrap();
+    let (st, _) = sb
+        .fs
+        .getattr(DualFsTestSandbox::ctx(), ROOT_INODE, None)
+        .unwrap();
     let mode = st.st_mode as u32;
     assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFDIR as u32);
 }
@@ -91,7 +114,10 @@ fn test_lookup_guest_inode_stable() {
     });
     let e1 = sb.lookup_root("stable.txt").unwrap();
     let e2 = sb.lookup_root("stable.txt").unwrap();
-    assert_eq!(e1.inode, e2.inode, "same file should return same guest inode");
+    assert_eq!(
+        e1.inode, e2.inode,
+        "same file should return same guest inode"
+    );
 }
 
 #[test]
@@ -185,7 +211,15 @@ fn test_lookup_dedup_backend_a() {
     let sb = DualFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("dedup_a.txt").unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     let e1 = sb.lookup_root("dedup_a.txt").unwrap();
     let e2 = sb.lookup_root("dedup_a.txt").unwrap();

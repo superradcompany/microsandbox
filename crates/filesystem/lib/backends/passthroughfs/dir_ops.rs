@@ -16,17 +16,17 @@
 //! each entry already gets a full `do_lookup` that reads the override xattr — making d_type
 //! correction free.
 
-use std::io;
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, RwLock};
+use std::{
+    io,
+    os::fd::{AsRawFd, FromRawFd},
+    sync::{Arc, RwLock, atomic::Ordering},
+};
 
-use super::PassthroughFs;
-use super::inode;
-use crate::backends::shared::handle_table::HandleData;
-use crate::backends::shared::init_binary;
-use crate::backends::shared::platform;
-use crate::{Context, DirEntry, Entry, OpenOptions};
+use super::{PassthroughFs, inode};
+use crate::{
+    Context, DirEntry, Entry, OpenOptions,
+    backends::shared::{handle_table::HandleData, init_binary, platform},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions

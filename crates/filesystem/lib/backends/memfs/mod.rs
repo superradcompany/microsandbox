@@ -17,21 +17,33 @@ mod special;
 pub mod types;
 mod xattr_ops;
 
-use std::collections::BTreeMap;
-use std::ffi::CStr;
-use std::fs::File;
-use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    ffi::CStr,
+    fs::File,
+    io,
+    sync::{
+        Mutex, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use types::{DirHandle, FileHandle, MemNode, ROOT_INODE};
 
-use crate::backends::shared::init_binary;
 use crate::{
     Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions, GetxattrReply, ListxattrReply,
-    OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter, stat64, statvfs64,
+    OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter, backends::shared::init_binary,
+    stat64, statvfs64,
 };
+
+// Guest Linux open flag constants. MemFs interprets flags directly instead of
+// translating them through host syscalls, so it must use guest values on every
+// host platform.
+pub(crate) const GUEST_O_WRONLY: u32 = 1;
+pub(crate) const GUEST_O_RDWR: u32 = 2;
+pub(crate) const GUEST_O_TRUNC: u32 = 0x200;
+pub(crate) const GUEST_O_APPEND: u32 = 0x400;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -105,6 +117,23 @@ impl MemFs {
     }
 }
 
+/// Normalize Linux open flags for a MemFs handle.
+///
+/// When writeback is active, the guest kernel owns append positioning, so the
+/// backend must not apply append semantics a second time.
+pub(crate) fn normalize_handle_flags(writeback: bool, flags: u32) -> u32 {
+    let mut flags = flags;
+
+    if writeback {
+        if flags & GUEST_O_WRONLY != 0 {
+            flags = (flags & !GUEST_O_WRONLY) | GUEST_O_RDWR;
+        }
+        flags &= !GUEST_O_APPEND;
+    }
+
+    flags
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -155,7 +184,8 @@ impl DynFileSystem for MemFs {
         let child_ino = match &parent_node.content {
             types::InodeContent::Directory { children, .. } => {
                 let ch = children.read().unwrap();
-                *ch.get(name_bytes).ok_or_else(crate::backends::shared::platform::enoent)?
+                *ch.get(name_bytes)
+                    .ok_or_else(crate::backends::shared::platform::enoent)?
             }
             _ => return Err(crate::backends::shared::platform::enotdir()),
         };
@@ -263,13 +293,7 @@ impl DynFileSystem for MemFs {
         remove_ops::do_rename(self, ctx, olddir, oldname, newdir, newname, flags)
     }
 
-    fn link(
-        &self,
-        ctx: Context,
-        ino: u64,
-        newparent: u64,
-        newname: &CStr,
-    ) -> io::Result<Entry> {
+    fn link(&self, ctx: Context, ino: u64, newparent: u64, newname: &CStr) -> io::Result<Entry> {
         create_ops::do_link(self, ctx, ino, newparent, newname)
     }
 
@@ -295,7 +319,9 @@ impl DynFileSystem for MemFs {
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<(Entry, Option<u64>, OpenOptions)> {
-        create_ops::do_create(self, ctx, parent, name, mode, kill_priv, flags, umask, extensions)
+        create_ops::do_create(
+            self, ctx, parent, name, mode, kill_priv, flags, umask, extensions,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

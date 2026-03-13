@@ -15,7 +15,8 @@ fn test_create_file_with_content() {
     let sb = MemFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("data.txt").unwrap();
     let handle = handle.unwrap();
-    sb.fuse_write(entry.inode, handle, b"hello world", 0).unwrap();
+    sb.fuse_write(entry.inode, handle, b"hello world", 0)
+        .unwrap();
     let data = sb.fuse_read(entry.inode, handle, 1024, 0).unwrap();
     assert_eq!(&data[..], b"hello world");
 }
@@ -23,16 +24,19 @@ fn test_create_file_with_content() {
 #[test]
 fn test_create_with_umask() {
     let sb = MemFsTestSandbox::new();
-    let (entry, _handle, _opts) = sb.fs.create(
-        MemFsTestSandbox::ctx(),
-        ROOT_INODE,
-        &MemFsTestSandbox::cstr("masked.txt"),
-        0o777,
-        false,
-        libc::O_RDWR as u32,
-        0o022,
-        Extensions::default(),
-    ).unwrap();
+    let (entry, _handle, _opts) = sb
+        .fs
+        .create(
+            MemFsTestSandbox::ctx(),
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("masked.txt"),
+            0o777,
+            false,
+            libc::O_RDWR as u32,
+            0o022,
+            Extensions::default(),
+        )
+        .unwrap();
     let mode = entry.attr.st_mode as u32;
     assert_eq!(mode & 0o777, 0o755);
 }
@@ -57,7 +61,10 @@ fn test_create_duplicate() {
 fn test_mkdir() {
     let sb = MemFsTestSandbox::new();
     // Get root nlink before.
-    let (st_before, _) = sb.fs.getattr(MemFsTestSandbox::ctx(), ROOT_INODE, None).unwrap();
+    let (st_before, _) = sb
+        .fs
+        .getattr(MemFsTestSandbox::ctx(), ROOT_INODE, None)
+        .unwrap();
     let nlink_before = st_before.st_nlink;
 
     let entry = sb.fuse_mkdir_root("mydir").unwrap();
@@ -69,7 +76,10 @@ fn test_mkdir() {
     assert_eq!(entry.attr.st_nlink, 2);
 
     // Parent nlink should have been incremented.
-    let (st_after, _) = sb.fs.getattr(MemFsTestSandbox::ctx(), ROOT_INODE, None).unwrap();
+    let (st_after, _) = sb
+        .fs
+        .getattr(MemFsTestSandbox::ctx(), ROOT_INODE, None)
+        .unwrap();
     assert_eq!(st_after.st_nlink, nlink_before + 1);
 }
 
@@ -87,15 +97,18 @@ fn test_mkdir_nested() {
 #[test]
 fn test_mknod_fifo() {
     let sb = MemFsTestSandbox::new();
-    let entry = sb.fs.mknod(
-        MemFsTestSandbox::ctx(),
-        ROOT_INODE,
-        &MemFsTestSandbox::cstr("myfifo"),
-        libc::S_IFIFO as u32 | 0o644,
-        0,
-        0,
-        Extensions::default(),
-    ).unwrap();
+    let entry = sb
+        .fs
+        .mknod(
+            MemFsTestSandbox::ctx(),
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("myfifo"),
+            libc::S_IFIFO as u32 | 0o644,
+            0,
+            0,
+            Extensions::default(),
+        )
+        .unwrap();
     let mode = entry.attr.st_mode as u32;
     assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFIFO as u32);
 }
@@ -103,15 +116,18 @@ fn test_mknod_fifo() {
 #[test]
 fn test_mknod_socket() {
     let sb = MemFsTestSandbox::new();
-    let entry = sb.fs.mknod(
-        MemFsTestSandbox::ctx(),
-        ROOT_INODE,
-        &MemFsTestSandbox::cstr("mysock"),
-        libc::S_IFSOCK as u32 | 0o644,
-        0,
-        0,
-        Extensions::default(),
-    ).unwrap();
+    let entry = sb
+        .fs
+        .mknod(
+            MemFsTestSandbox::ctx(),
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("mysock"),
+            libc::S_IFSOCK as u32 | 0o644,
+            0,
+            0,
+            Extensions::default(),
+        )
+        .unwrap();
     let mode = entry.attr.st_mode as u32;
     assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFSOCK as u32);
 }
@@ -119,15 +135,18 @@ fn test_mknod_socket() {
 #[test]
 fn test_mknod_block_device() {
     let sb = MemFsTestSandbox::new();
-    let entry = sb.fs.mknod(
-        MemFsTestSandbox::ctx(),
-        ROOT_INODE,
-        &MemFsTestSandbox::cstr("blkdev"),
-        libc::S_IFBLK as u32 | 0o660,
-        42,
-        0,
-        Extensions::default(),
-    ).unwrap();
+    let entry = sb
+        .fs
+        .mknod(
+            MemFsTestSandbox::ctx(),
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("blkdev"),
+            libc::S_IFBLK as u32 | 0o660,
+            42,
+            0,
+            Extensions::default(),
+        )
+        .unwrap();
     let mode = entry.attr.st_mode as u32;
     assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFBLK as u32);
     #[cfg(target_os = "linux")]
@@ -139,15 +158,18 @@ fn test_mknod_block_device() {
 #[test]
 fn test_mknod_char_device() {
     let sb = MemFsTestSandbox::new();
-    let entry = sb.fs.mknod(
-        MemFsTestSandbox::ctx(),
-        ROOT_INODE,
-        &MemFsTestSandbox::cstr("chrdev"),
-        libc::S_IFCHR as u32 | 0o660,
-        99,
-        0,
-        Extensions::default(),
-    ).unwrap();
+    let entry = sb
+        .fs
+        .mknod(
+            MemFsTestSandbox::ctx(),
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("chrdev"),
+            libc::S_IFCHR as u32 | 0o660,
+            99,
+            0,
+            Extensions::default(),
+        )
+        .unwrap();
     let mode = entry.attr.st_mode as u32;
     assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFCHR as u32);
     #[cfg(target_os = "linux")]
@@ -159,16 +181,22 @@ fn test_mknod_char_device() {
 #[test]
 fn test_symlink() {
     let sb = MemFsTestSandbox::new();
-    let entry = sb.fs.symlink(
-        MemFsTestSandbox::ctx(),
-        &MemFsTestSandbox::cstr("/target/path"),
-        ROOT_INODE,
-        &MemFsTestSandbox::cstr("mylink"),
-        Extensions::default(),
-    ).unwrap();
+    let entry = sb
+        .fs
+        .symlink(
+            MemFsTestSandbox::ctx(),
+            &MemFsTestSandbox::cstr("/target/path"),
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("mylink"),
+            Extensions::default(),
+        )
+        .unwrap();
     let mode = entry.attr.st_mode as u32;
     assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFLNK as u32);
-    let target = sb.fs.readlink(MemFsTestSandbox::ctx(), entry.inode).unwrap();
+    let target = sb
+        .fs
+        .readlink(MemFsTestSandbox::ctx(), entry.inode)
+        .unwrap();
     assert_eq!(&target[..], b"/target/path");
 }
 
@@ -176,13 +204,16 @@ fn test_symlink() {
 fn test_symlink_size() {
     let sb = MemFsTestSandbox::new();
     let target = "/some/long/target/path";
-    let entry = sb.fs.symlink(
-        MemFsTestSandbox::ctx(),
-        &MemFsTestSandbox::cstr(target),
-        ROOT_INODE,
-        &MemFsTestSandbox::cstr("sizelink"),
-        Extensions::default(),
-    ).unwrap();
+    let entry = sb
+        .fs
+        .symlink(
+            MemFsTestSandbox::ctx(),
+            &MemFsTestSandbox::cstr(target),
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("sizelink"),
+            Extensions::default(),
+        )
+        .unwrap();
     assert_eq!(entry.attr.st_size, target.len() as i64);
 }
 
@@ -192,19 +223,33 @@ fn test_link() {
     let (entry, handle) = sb.fuse_create_root("original.txt").unwrap();
     let handle = handle.unwrap();
     sb.fs
-        .release(MemFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
-    let link_entry = sb.fs.link(
-        MemFsTestSandbox::ctx(),
-        entry.inode,
-        ROOT_INODE,
-        &MemFsTestSandbox::cstr("hardlink.txt"),
-    ).unwrap();
+    let link_entry = sb
+        .fs
+        .link(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("hardlink.txt"),
+        )
+        .unwrap();
     // Same inode.
     assert_eq!(link_entry.inode, entry.inode);
     // nlink should be 2 now.
-    let (st, _) = sb.fs.getattr(MemFsTestSandbox::ctx(), entry.inode, None).unwrap();
+    let (st, _) = sb
+        .fs
+        .getattr(MemFsTestSandbox::ctx(), entry.inode, None)
+        .unwrap();
     #[cfg(target_os = "linux")]
     assert_eq!(st.st_nlink, 2);
     #[cfg(target_os = "macos")]
@@ -231,18 +276,30 @@ fn test_link_shared_content() {
     // Create a file and write through it.
     let (entry, handle) = sb.fuse_create_root("original.txt").unwrap();
     let handle = handle.unwrap();
-    sb.fuse_write(entry.inode, handle, b"shared data", 0).unwrap();
+    sb.fuse_write(entry.inode, handle, b"shared data", 0)
+        .unwrap();
     sb.fs
-        .release(MemFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // Create a hardlink to the same inode.
-    let link_entry = sb.fs.link(
-        MemFsTestSandbox::ctx(),
-        entry.inode,
-        ROOT_INODE,
-        &MemFsTestSandbox::cstr("hardlink.txt"),
-    ).unwrap();
+    let link_entry = sb
+        .fs
+        .link(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("hardlink.txt"),
+        )
+        .unwrap();
     assert_eq!(link_entry.inode, entry.inode);
 
     // Open the hardlink and read — should see the same content.
@@ -252,9 +309,18 @@ fn test_link_shared_content() {
     assert_eq!(&data[..], b"shared data");
 
     // Write new content through the hardlink.
-    sb.fuse_write(link_entry.inode, handle2, b"updated", 0).unwrap();
+    sb.fuse_write(link_entry.inode, handle2, b"updated", 0)
+        .unwrap();
     sb.fs
-        .release(MemFsTestSandbox::ctx(), link_entry.inode, 0, handle2, false, false, None)
+        .release(
+            MemFsTestSandbox::ctx(),
+            link_entry.inode,
+            0,
+            handle2,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // Open the original name and verify the update is visible.

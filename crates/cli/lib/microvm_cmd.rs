@@ -3,12 +3,10 @@
 //! Parses CLI arguments, builds a `VmConfig`, and delegates to
 //! `microsandbox_runtime::vm::enter()`. This function never returns.
 
-use std::os::fd::RawFd;
-use std::path::PathBuf;
+use std::{os::fd::RawFd, path::PathBuf};
 
 use clap::Args;
-use microsandbox_runtime::RuntimeResult;
-use microsandbox_runtime::vm::VmConfig;
+use microsandbox_runtime::{RuntimeResult, vm::VmConfig};
 
 //--------------------------------------------------------------------------------------------------
 // Types

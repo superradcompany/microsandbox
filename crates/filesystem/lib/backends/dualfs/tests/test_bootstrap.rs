@@ -80,7 +80,10 @@ fn test_init_writeback_one_child_unsupported() {
 #[test]
 fn test_root_exists_after_init() {
     let sb = DualFsTestSandbox::new();
-    let (st, _) = sb.fs.getattr(DualFsTestSandbox::ctx(), ROOT_INODE, None).unwrap();
+    let (st, _) = sb
+        .fs
+        .getattr(DualFsTestSandbox::ctx(), ROOT_INODE, None)
+        .unwrap();
     let mode = st.st_mode as u32;
     assert_eq!(
         mode & libc::S_IFMT as u32,

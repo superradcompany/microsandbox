@@ -4,12 +4,12 @@
 //! They run at defined pipeline points and can add hints, deny operations,
 //! or short-circuit responses.
 
-use std::collections::HashMap;
-use std::io;
-use std::time::Duration;
+use std::{collections::HashMap, io, time::Duration};
 
-use super::policy::{DualDispatchPlan, DualNamespaceView, HintBag, Hint, OpKind, RequestCtx};
-use super::types::{BackendId, NodeState};
+use super::{
+    policy::{DualDispatchPlan, DualNamespaceView, Hint, HintBag, OpKind, RequestCtx},
+    types::{BackendId, NodeState},
+};
 use crate::{Entry, OpenOptions, stat64};
 
 //--------------------------------------------------------------------------------------------------
@@ -239,10 +239,8 @@ where
 }
 
 /// Notify observer hooks (fire-and-forget).
-pub(crate) fn notify_observers<F>(
-    hooks: &[std::sync::Arc<dyn DualDispatchHook>],
-    invoke: F,
-) where
+pub(crate) fn notify_observers<F>(hooks: &[std::sync::Arc<dyn DualDispatchHook>], invoke: F)
+where
     F: Fn(&dyn DualDispatchHook),
 {
     for hook in hooks {

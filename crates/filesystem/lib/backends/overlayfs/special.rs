@@ -1,12 +1,13 @@
 //! Special operations: statfs, fsync, fsyncdir, lseek, fallocate, copyfilerange.
 
-use std::io;
-use std::os::fd::AsRawFd;
+use std::{io, os::fd::AsRawFd};
 
 use super::OverlayFs;
-use crate::backends::shared::init_binary;
-use crate::backends::shared::platform;
-use crate::{Context, statvfs64};
+use crate::{
+    Context,
+    backends::shared::{init_binary, platform},
+    statvfs64,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -90,7 +91,9 @@ pub(crate) fn do_fsyncdir(
 
     // Open the directory for syncing.
     let fd = super::inode::open_node_fd(fs, ino, libc::O_RDONLY)?;
-    let _close = scopeguard::guard(fd, |fd| unsafe { libc::close(fd); });
+    let _close = scopeguard::guard(fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     #[cfg(target_os = "linux")]
     let ret = if datasync {

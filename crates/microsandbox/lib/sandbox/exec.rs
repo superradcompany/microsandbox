@@ -1,16 +1,16 @@
 //! Execution types for running commands inside sandboxes.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use microsandbox_protocol::exec::{ExecSignal, ExecStdin};
-use microsandbox_protocol::message::{Message, MessageType};
+use microsandbox_protocol::{
+    exec::{ExecSignal, ExecStdin},
+    message::{Message, MessageType},
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::MicrosandboxResult;
-use crate::agent::AgentBridge;
+use crate::{MicrosandboxResult, agent::AgentBridge};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -42,6 +42,7 @@ pub struct ExecOptions {
 }
 
 /// Builder for [`ExecOptions`].
+#[derive(Default)]
 pub struct ExecOptionsBuilder {
     options: ExecOptions,
 }
@@ -186,7 +187,6 @@ pub trait IntoExecOptions {
     /// Convert into exec options.
     fn into_exec_options(self) -> ExecOptions;
 }
-
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -422,14 +422,6 @@ impl RlimitResource {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
-impl Default for ExecOptionsBuilder {
-    fn default() -> Self {
-        Self {
-            options: ExecOptions::default(),
-        }
-    }
-}
-
 /// No options: `sandbox.exec("cat", ())`
 impl IntoExecOptions for () {
     fn into_exec_options(self) -> ExecOptions {
@@ -492,4 +484,3 @@ impl TryFrom<&str> for RlimitResource {
         }
     }
 }
-

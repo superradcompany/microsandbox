@@ -11,9 +11,7 @@
 //! xattr (12 bytes: `[u32_le layer_idx][u64_le object_id]`). At mount time, BFS
 //! hydration reads these xattrs to rebuild the `origin_index`.
 
-use std::ffi::CStr;
-use std::io;
-use std::os::fd::RawFd;
+use std::{ffi::CStr, io, os::fd::RawFd};
 
 use crate::backends::shared::platform;
 
@@ -69,7 +67,10 @@ impl LowerOriginId {
 ///
 /// Format: `[u32_le layer_idx][u64_le object_id]`
 fn serialize_origin(origin: &LowerOriginId) -> [u8; ORIGIN_XATTR_SIZE] {
-    debug_assert!(origin.layer_idx <= u32::MAX as usize, "layer_idx overflows u32");
+    debug_assert!(
+        origin.layer_idx <= u32::MAX as usize,
+        "layer_idx overflows u32"
+    );
     let mut buf = [0u8; ORIGIN_XATTR_SIZE];
     buf[..4].copy_from_slice(&(origin.layer_idx as u32).to_le_bytes());
     buf[4..12].copy_from_slice(&origin.object_id.to_le_bytes());
@@ -182,12 +183,18 @@ pub(crate) fn get_origin_xattr(fd: RawFd) -> io::Result<Option<LowerOriginId>> {
 ///
 /// Format: `[u16_le count][u16_le len][bytes][u16_le len][bytes]...`
 fn serialize_redirect(components: &[Vec<u8>]) -> Vec<u8> {
-    debug_assert!(components.len() <= u16::MAX as usize, "too many redirect components");
+    debug_assert!(
+        components.len() <= u16::MAX as usize,
+        "too many redirect components"
+    );
     let total_size = 2 + components.iter().map(|c| 2 + c.len()).sum::<usize>();
     let mut buf = Vec::with_capacity(total_size);
     buf.extend_from_slice(&(components.len() as u16).to_le_bytes());
     for component in components {
-        debug_assert!(component.len() <= u16::MAX as usize, "redirect component too long");
+        debug_assert!(
+            component.len() <= u16::MAX as usize,
+            "redirect component too long"
+        );
         buf.extend_from_slice(&(component.len() as u16).to_le_bytes());
         buf.extend_from_slice(component);
     }

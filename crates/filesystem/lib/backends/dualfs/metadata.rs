@@ -1,18 +1,22 @@
 //! Getattr, setattr, access dispatch.
 
-use std::io;
-use std::time::Duration;
+use std::{io, time::Duration};
 
-use super::hooks::{
-    DispatchStep, HookCtx, StepResult, decode_attr, decode_ok, handle_hook_decision,
-    notify_observers, run_decision_hooks,
+use super::{
+    DualFs,
+    hooks::{
+        DispatchStep, HookCtx, StepResult, decode_attr, decode_ok, handle_hook_decision,
+        notify_observers, run_decision_hooks,
+    },
+    lookup::{backend, get_node, mark_metadata_authority, resolve_active_backend_inode},
+    policy::{DualNamespaceView, HintBag, OpKind, RequestCtx},
+    types::BackendId,
 };
-use super::lookup::{backend, get_node, mark_metadata_authority, resolve_active_backend_inode};
-use super::policy::{DualNamespaceView, HintBag, OpKind, RequestCtx};
-use super::types::BackendId;
-use super::DualFs;
-use crate::backends::shared::{init_binary, platform};
-use crate::{Context, SetattrValid, stat64};
+use crate::{
+    Context, SetattrValid,
+    backends::shared::{init_binary, platform},
+    stat64,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -123,9 +127,7 @@ pub(crate) fn do_setattr(
         return r;
     }
 
-    let view = DualNamespaceView {
-        state: &fs.state,
-    };
+    let view = DualNamespaceView { state: &fs.state };
 
     // hooks.after_resolve
     if let std::ops::ControlFlow::Break(r) = handle_hook_decision(
@@ -149,25 +151,21 @@ pub(crate) fn do_setattr(
 
     // hooks.after_plan
     if let std::ops::ControlFlow::Break(r) = handle_hook_decision(
-        run_decision_hooks(&fs.hooks, &mut hook_ctx, |h, ctx| {
-            h.after_plan(ctx, &plan)
-        }),
+        run_decision_hooks(&fs.hooks, &mut hook_ctx, |h, ctx| h.after_plan(ctx, &plan)),
         decode_attr,
     ) {
         return r;
     }
 
     // Determine target backend.
-    let target = plan
-        .target_backend()
-        .unwrap_or(BackendId::BackendA);
+    let target = plan.target_backend().unwrap_or(BackendId::BackendA);
 
     // Materialize if needed.
     let current_backend = node.state.read().unwrap().current_backend();
-    if let Some(current) = current_backend {
-        if current != target {
-            super::materialize::do_materialize(fs, ctx, ino, current, target)?;
-        }
+    if let Some(current) = current_backend
+        && current != target
+    {
+        super::materialize::do_materialize(fs, ctx, ino, current, target)?;
     }
 
     // Dispatch setattr.

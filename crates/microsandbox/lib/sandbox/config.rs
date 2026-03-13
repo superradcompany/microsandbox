@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use microsandbox_runtime::policy::{ChildPolicies, SupervisorPolicy};
+use microsandbox_runtime::{
+    logging::LogLevel,
+    policy::{ChildPolicies, SupervisorPolicy},
+};
 use serde::{Deserialize, Serialize};
 
 use super::types::{NetworkConfig, Patch, RootfsSource, SecretsConfig, SshConfig, VolumeMount};
@@ -17,6 +20,10 @@ fn default_cpus() -> u8 {
 
 fn default_memory_mib() -> u32 {
     crate::config::config().sandbox_defaults.memory_mib
+}
+
+fn default_log_level() -> Option<LogLevel> {
+    crate::config::config().log_level
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -43,6 +50,12 @@ pub struct SandboxConfig {
     /// Guest memory in MiB.
     #[serde(default = "default_memory_mib")]
     pub memory_mib: u32,
+
+    /// Runtime log level for `msb supervisor` and `msb microvm`.
+    ///
+    /// `None` means sandbox runtime processes stay silent.
+    #[serde(default = "default_log_level")]
+    pub log_level: Option<LogLevel>,
 
     /// Working directory inside the sandbox.
     #[serde(default)]
@@ -104,6 +117,7 @@ impl Default for SandboxConfig {
             image: RootfsSource::default(),
             cpus: default_cpus(),
             memory_mib: default_memory_mib(),
+            log_level: default_log_level(),
             workdir: None,
             shell: None,
             init: None,

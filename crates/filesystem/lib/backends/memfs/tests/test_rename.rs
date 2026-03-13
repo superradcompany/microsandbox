@@ -98,8 +98,11 @@ fn test_rename_nonempty_dir() {
 #[test]
 fn test_rename_replace_file() {
     let sb = MemFsTestSandbox::new();
-    let ino_a = sb.create_file_with_content(ROOT_INODE, "a.txt", b"data_a").unwrap();
-    sb.create_file_with_content(ROOT_INODE, "b.txt", b"data_b").unwrap();
+    let ino_a = sb
+        .create_file_with_content(ROOT_INODE, "a.txt", b"data_a")
+        .unwrap();
+    sb.create_file_with_content(ROOT_INODE, "b.txt", b"data_b")
+        .unwrap();
     sb.fs
         .rename(
             MemFsTestSandbox::ctx(),
@@ -142,7 +145,8 @@ fn test_rename_replace_nonempty_dir() {
     let sb = MemFsTestSandbox::new();
     sb.fuse_mkdir_root("src_dir").unwrap();
     let dst_dir = sb.fuse_mkdir_root("dst_dir").unwrap();
-    sb.fuse_create(dst_dir.inode, "occupant.txt", 0o644).unwrap();
+    sb.fuse_create(dst_dir.inode, "occupant.txt", 0o644)
+        .unwrap();
     let result = sb.fs.rename(
         MemFsTestSandbox::ctx(),
         ROOT_INODE,
@@ -173,8 +177,12 @@ fn test_rename_noreplace() {
 #[test]
 fn test_rename_exchange() {
     let sb = MemFsTestSandbox::new();
-    let ino_a = sb.create_file_with_content(ROOT_INODE, "swap_a.txt", b"data_a").unwrap();
-    let ino_b = sb.create_file_with_content(ROOT_INODE, "swap_b.txt", b"data_b").unwrap();
+    let ino_a = sb
+        .create_file_with_content(ROOT_INODE, "swap_a.txt", b"data_a")
+        .unwrap();
+    let ino_b = sb
+        .create_file_with_content(ROOT_INODE, "swap_b.txt", b"data_b")
+        .unwrap();
     sb.fs
         .rename(
             MemFsTestSandbox::ctx(),

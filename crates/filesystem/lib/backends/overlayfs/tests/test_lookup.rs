@@ -134,7 +134,10 @@ fn test_lookup_refcount_and_forget() {
     // After two lookups, refcount is 2. Forget once — inode should still exist.
     sb.fs.forget(sb.ctx(), e1.inode, 1);
     let result = sb.fs.getattr(sb.ctx(), e1.inode, None);
-    assert!(result.is_ok(), "inode should still exist after partial forget");
+    assert!(
+        result.is_ok(),
+        "inode should still exist after partial forget"
+    );
 }
 
 #[test]

@@ -4,8 +4,10 @@
 //! from msb_krun and never returns. The calling process is effectively
 //! replaced by the VMM event loop, which calls `_exit()` on guest shutdown.
 
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
-use std::path::PathBuf;
+use std::{
+    os::fd::{FromRawFd, OwnedFd, RawFd},
+    path::PathBuf,
+};
 
 use microsandbox_filesystem::{DynFileSystem, PassthroughConfig, PassthroughFs};
 use msb_krun::{NetBackend, VmBuilder};

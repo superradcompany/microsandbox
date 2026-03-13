@@ -2,24 +2,12 @@
 //!
 //! See [examples/README.md](../../README.md) for prerequisites and usage.
 
-use std::path::PathBuf;
-
 use microsandbox::sandbox::Sandbox;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let rootfs_path = std::env::var("ROOTFS_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            format!(
-                "{}/rootfs-alpine/{}",
-                env!("CARGO_MANIFEST_DIR"),
-                std::env::consts::ARCH,
-            )
-            .into()
-        });
-
-    eprintln!("Creating sandbox (rootfs={rootfs_path:?})");
+    let rootfs_path = rootfs_path();
+    println!("Creating sandbox (rootfs={rootfs_path:?})");
 
     // Create a sandbox with a bind-mounted rootfs.
     let sandbox = Sandbox::builder("basic-example")
@@ -46,6 +34,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sandbox.stop().await?;
     sandbox.wait().await?;
 
-    eprintln!("Sandbox stopped.");
+    println!("Sandbox stopped.");
     Ok(())
+}
+
+fn rootfs_path() -> String {
+    format!(
+        "{}/rootfs-alpine/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        std::env::consts::ARCH,
+    )
 }

@@ -15,7 +15,7 @@ ciborium.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util"] }
+tokio = { version = "1.42", default-features = false, features = ["io-util"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full"] }
+tokio = { version = "1.42", features = ["full"] }

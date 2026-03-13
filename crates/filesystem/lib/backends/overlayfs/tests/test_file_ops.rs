@@ -27,9 +27,7 @@ fn test_write_triggers_copy_up() {
         std::fs::write(lower.join("lower_file.txt"), b"original").unwrap();
     });
     let entry = sb.lookup_root("lower_file.txt").unwrap();
-    let handle = sb
-        .fuse_open(entry.inode, libc::O_RDWR as u32)
-        .unwrap();
+    let handle = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
     // Write triggers copy-up.
     sb.fuse_write(entry.inode, handle, b"modified", 0).unwrap();
     // File should now exist on upper.
@@ -46,9 +44,7 @@ fn test_copy_up_preserves_data() {
     });
     let entry = sb.lookup_root("data.txt").unwrap();
     // Read the original data first.
-    let handle = sb
-        .fuse_open(entry.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let handle = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     let original = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&original[..], b"preserve me");
     sb.fs
@@ -56,9 +52,7 @@ fn test_copy_up_preserves_data() {
         .unwrap();
 
     // Open for write (triggers copy-up), then read back.
-    let handle = sb
-        .fuse_open(entry.inode, libc::O_RDWR as u32)
-        .unwrap();
+    let handle = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
     // Write at offset 11 so original data is preserved.
     sb.fuse_write(entry.inode, handle, b" more", 11).unwrap();
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
@@ -71,9 +65,7 @@ fn test_write_after_copy_up() {
         std::fs::write(lower.join("file.txt"), b"old").unwrap();
     });
     let entry = sb.lookup_root("file.txt").unwrap();
-    let handle = sb
-        .fuse_open(entry.inode, libc::O_RDWR as u32)
-        .unwrap();
+    let handle = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
     sb.fuse_write(entry.inode, handle, b"new data", 0).unwrap();
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"new data");

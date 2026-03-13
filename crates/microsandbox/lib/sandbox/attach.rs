@@ -35,6 +35,7 @@ pub struct AttachOptions {
 }
 
 /// Builder for [`AttachOptions`].
+#[derive(Default)]
 pub struct AttachOptionsBuilder {
     options: AttachOptions,
 }
@@ -239,14 +240,6 @@ impl DetachKeys {
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
-
-impl Default for AttachOptionsBuilder {
-    fn default() -> Self {
-        Self {
-            options: AttachOptions::default(),
-        }
-    }
-}
 
 /// Unit type for default shell: `sandbox.attach((), ())`
 impl IntoAttachCmd for () {

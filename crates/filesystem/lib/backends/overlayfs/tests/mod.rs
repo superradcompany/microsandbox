@@ -17,11 +17,13 @@ mod test_rename;
 mod test_special_ops;
 mod test_xattr;
 
-use std::ffi::CString;
-use std::fs::File;
-use std::io;
-use std::os::fd::AsRawFd;
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::CString,
+    fs::File,
+    io,
+    os::fd::AsRawFd,
+    path::{Path, PathBuf},
+};
 
 use tempfile::TempDir;
 
@@ -120,11 +122,7 @@ impl OverlayTestSandbox {
         for lower in &lower_roots {
             builder = builder.layer(lower);
         }
-        let fs = builder
-            .writable(&upper)
-            .staging(&staging)
-            .build()
-            .unwrap();
+        let fs = builder.writable(&upper).staging(&staging).build().unwrap();
 
         fs.init(FsOptions::empty()).unwrap();
 

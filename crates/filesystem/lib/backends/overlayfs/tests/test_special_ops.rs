@@ -52,7 +52,10 @@ fn test_init_binary_read() {
     let sb = OverlayTestSandbox::new();
     let entry = sb.lookup_root("init.krun").unwrap();
     assert_eq!(entry.inode, INIT_INODE);
-    let (handle, _opts) = sb.fs.open(sb.ctx(), INIT_INODE, false, libc::O_RDONLY as u32).unwrap();
+    let (handle, _opts) = sb
+        .fs
+        .open(sb.ctx(), INIT_INODE, false, libc::O_RDONLY as u32)
+        .unwrap();
     let handle = handle.unwrap();
     let data = sb.fuse_read(INIT_INODE, handle, 4096, 0).unwrap();
     assert!(!data.is_empty(), "init binary should return data");

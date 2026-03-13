@@ -3,16 +3,16 @@
 //! Parses CLI arguments, builds a `SupervisorConfig`, and delegates to
 //! `microsandbox_runtime::supervisor::run()`.
 
-use std::os::fd::RawFd;
-use std::path::PathBuf;
+use std::{os::fd::RawFd, path::PathBuf};
 
 use clap::Args;
-use microsandbox_runtime::RuntimeResult;
-use microsandbox_runtime::policy::{
-    ChildPolicies, ChildPolicy, ExitAction, ShutdownMode, SupervisorPolicy,
+use microsandbox_runtime::{
+    RuntimeResult,
+    logging::LogLevel,
+    policy::{ChildPolicies, ChildPolicy, ExitAction, ShutdownMode, SupervisorPolicy},
+    supervisor::SupervisorConfig,
+    vm::VmConfig,
 };
-use microsandbox_runtime::supervisor::SupervisorConfig;
-use microsandbox_runtime::vm::VmConfig;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -24,6 +24,10 @@ pub struct SupervisorArgs {
     /// Name of the sandbox.
     #[arg(long = "name")]
     pub sandbox_name: String,
+
+    /// Database ID of the sandbox.
+    #[arg(long = "sandbox-id")]
+    pub sandbox_id: i32,
 
     /// Path to the sandbox database file.
     #[arg(long = "db-path")]
@@ -130,7 +134,7 @@ pub struct SupervisorArgs {
 //--------------------------------------------------------------------------------------------------
 
 /// Run the supervisor with the given CLI arguments.
-pub async fn run(args: SupervisorArgs) -> RuntimeResult<()> {
+pub async fn run(args: SupervisorArgs, log_level: Option<LogLevel>) -> RuntimeResult<()> {
     let child_policies = ChildPolicies {
         vm: ChildPolicy {
             on_exit: args.vm_on_exit,
@@ -167,6 +171,8 @@ pub async fn run(args: SupervisorArgs) -> RuntimeResult<()> {
 
     let config = SupervisorConfig {
         sandbox_name: args.sandbox_name,
+        sandbox_id: args.sandbox_id,
+        log_level,
         sandbox_db_path: args.sandbox_db_path,
         log_dir: args.log_dir,
         runtime_dir: args.runtime_dir,

@@ -1,5 +1,4 @@
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::{Arc, atomic::Ordering};
 
 use super::*;
 
@@ -26,10 +25,7 @@ fn test_concurrent_writes_same_file() {
     // Each 100-byte region should be filled with its writer's byte value.
     for i in 0..8u64 {
         let region = &data[(i * 100) as usize..((i + 1) * 100) as usize];
-        assert!(
-            region.iter().all(|&b| b == i as u8),
-            "region {i} corrupted"
-        );
+        assert!(region.iter().all(|&b| b == i as u8), "region {i} corrupted");
     }
 }
 
@@ -91,7 +87,15 @@ fn test_concurrent_forget_lookup() {
     let (entry, handle) = sb.fuse_create_root("contested.txt").unwrap();
     let handle = handle.unwrap();
     sb.fs
-        .release(MemFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     std::thread::scope(|s| {

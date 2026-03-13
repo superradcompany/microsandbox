@@ -3,19 +3,16 @@
 //! [`SandboxFs`] provides methods to read, write, list, and manipulate files
 //! inside a running sandbox via the `core.fs.*` protocol messages.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use bytes::Bytes;
-use microsandbox_protocol::fs::{
-    FS_CHUNK_SIZE, FsData, FsEntryInfo, FsOp, FsRequest, FsResponse, FsResponseData,
+use microsandbox_protocol::{
+    fs::{FS_CHUNK_SIZE, FsData, FsEntryInfo, FsOp, FsRequest, FsResponse, FsResponseData},
+    message::{Message, MessageType},
 };
-use microsandbox_protocol::message::{Message, MessageType};
 use tokio::sync::mpsc;
 
-use crate::MicrosandboxError;
-use crate::MicrosandboxResult;
-use crate::agent::AgentBridge;
+use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentBridge};
 
 //--------------------------------------------------------------------------------------------------
 // Types

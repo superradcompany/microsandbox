@@ -12,23 +12,24 @@
 //! `primary_parent`/`primary_name`, and each ancestor is ensured upper
 //! before proceeding to the next.
 
-use std::ffi::CStr;
 #[cfg(target_os = "linux")]
 use std::fs::File;
-use std::io;
-use std::os::fd::{AsRawFd, RawFd};
 #[cfg(target_os = "linux")]
 use std::os::fd::FromRawFd;
-use std::sync::atomic::Ordering;
+use std::{
+    ffi::CStr,
+    io,
+    os::fd::{AsRawFd, RawFd},
+    sync::atomic::Ordering,
+};
 
-use super::OverlayFs;
-use super::inode;
-use super::origin;
-use super::types::{NodeState, OverlayNode, ROOT_INODE};
-use crate::backends::shared::inode_table::InodeAltKey;
-use crate::backends::shared::platform;
+use super::{
+    OverlayFs, inode, origin,
+    types::{NodeState, OverlayNode, ROOT_INODE},
+};
 #[cfg(target_os = "linux")]
 use crate::backends::shared::stat_override;
+use crate::backends::shared::{inode_table::InodeAltKey, platform};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -171,13 +172,13 @@ fn copy_up_regular(
             idx.get(origin_id).copied()
         };
 
-        if let Some(existing_ino) = existing_upper_ino {
-            if existing_ino != node.inode {
-                // Another alias was already copied up — create hardlink.
-                if try_link_to_existing(fs, existing_ino, upper_parent_fd, name)? {
-                    transition_to_upper(fs, node, upper_parent_fd, name)?;
-                    return Ok(());
-                }
+        if let Some(existing_ino) = existing_upper_ino
+            && existing_ino != node.inode
+        {
+            // Another alias was already copied up — create hardlink.
+            if try_link_to_existing(fs, existing_ino, upper_parent_fd, name)? {
+                transition_to_upper(fs, node, upper_parent_fd, name)?;
+                return Ok(());
             }
         }
     }
@@ -340,9 +341,8 @@ fn copy_up_symlink(
                 libc::close(fd);
             });
 
-            let written = unsafe {
-                libc::write(temp_fd, buf.as_ptr() as *const libc::c_void, buf.len())
-            };
+            let written =
+                unsafe { libc::write(temp_fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
             if written < 0 || (written as usize) != buf.len() {
                 unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
                 return Err(platform::eio());
@@ -350,9 +350,7 @@ fn copy_up_symlink(
 
             // Create stat override (real symlinks don't have overlay xattrs).
             let mode = libc::S_IFLNK as u32 | (st.st_mode as u32 & 0o7777);
-            if let Err(e) =
-                stat_override::set_override(temp_fd, st.st_uid, st.st_gid, mode, 0)
-            {
+            if let Err(e) = stat_override::set_override(temp_fd, st.st_uid, st.st_gid, mode, 0) {
                 unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
                 return Err(e);
             }
@@ -411,8 +409,13 @@ fn copy_up_symlink(
 
         // Stage: create symlink in staging_dir, not directly in upper.
         let temp_name = create_temp_symlink_name(fs);
-        let ret =
-            unsafe { libc::symlinkat(target.as_ptr(), fs.staging_fd.as_raw_fd(), temp_name.as_ptr()) };
+        let ret = unsafe {
+            libc::symlinkat(
+                target.as_ptr(),
+                fs.staging_fd.as_raw_fd(),
+                temp_name.as_ptr(),
+            )
+        };
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
@@ -590,10 +593,7 @@ fn stage_and_install(
 /// Build the ancestor chain from an inode to root, returned in root-to-leaf order.
 ///
 /// Each element is (ancestor_inode, name_bytes). The chain excludes the root itself.
-fn build_ancestor_chain(
-    fs: &OverlayFs,
-    node: &OverlayNode,
-) -> io::Result<Vec<(u64, Vec<u8>)>> {
+fn build_ancestor_chain(fs: &OverlayFs, node: &OverlayNode) -> io::Result<Vec<(u64, Vec<u8>)>> {
     let mut chain = Vec::new();
     let mut current_ino = node.primary_parent.load(Ordering::Acquire);
 
@@ -852,14 +852,7 @@ fn copy_file_data(src_fd: RawFd, dst_fd: RawFd, size: u64) -> io::Result<()> {
         while remaining > 0 {
             let to_copy = std::cmp::min(remaining, COPY_BUF_SIZE as u64) as usize;
             let ret = unsafe {
-                libc::copy_file_range(
-                    src_fd,
-                    &mut off_in,
-                    dst_fd,
-                    &mut off_out,
-                    to_copy,
-                    0,
-                )
+                libc::copy_file_range(src_fd, &mut off_in, dst_fd, &mut off_out, to_copy, 0)
             };
             if ret < 0 {
                 let err = io::Error::last_os_error();
@@ -1072,9 +1065,8 @@ fn list_xattrs(fd: RawFd) -> io::Result<Option<Vec<u8>>> {
         };
 
         #[cfg(target_os = "macos")]
-        let ret = unsafe {
-            libc::flistxattr(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0)
-        };
+        let ret =
+            unsafe { libc::flistxattr(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0) };
 
         if ret < 0 {
             let err = io::Error::last_os_error();

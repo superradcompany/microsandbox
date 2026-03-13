@@ -7,9 +7,7 @@ fn test_access_allow_all() {
     let (entry, handle) = sb.fuse_create_root("allowed.txt").unwrap();
     let handle = handle.unwrap();
     // Open the file.
-    let (open_handle, _opts) = sb
-        .fuse_open(entry.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let (open_handle, _opts) = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     assert!(open_handle.is_some());
     // Release handles.
     sb.fs
@@ -38,7 +36,12 @@ fn test_access_allow_all() {
     let (dir_handle, _opts) = sb.fuse_opendir(ROOT_INODE).unwrap();
     assert!(dir_handle.is_some());
     sb.fs
-        .releasedir(ProxyFsTestSandbox::ctx(), ROOT_INODE, 0, dir_handle.unwrap())
+        .releasedir(
+            ProxyFsTestSandbox::ctx(),
+            ROOT_INODE,
+            0,
+            dir_handle.unwrap(),
+        )
         .unwrap();
 }
 
@@ -105,7 +108,12 @@ fn test_access_deny_write_allow_read() {
     let (dir_handle, _opts) = sb.fuse_opendir(ROOT_INODE).unwrap();
     assert!(dir_handle.is_some());
     sb.fs
-        .releasedir(ProxyFsTestSandbox::ctx(), ROOT_INODE, 0, dir_handle.unwrap())
+        .releasedir(
+            ProxyFsTestSandbox::ctx(),
+            ROOT_INODE,
+            0,
+            dir_handle.unwrap(),
+        )
         .unwrap();
 }
 
@@ -238,9 +246,7 @@ fn test_access_open_flags_mapping() {
     sb.access_log.lock().unwrap().clear();
 
     // O_RDONLY → Read
-    let (h1, _) = sb
-        .fuse_open(entry.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let (h1, _) = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     sb.fs
         .release(
             ProxyFsTestSandbox::ctx(),
@@ -254,9 +260,7 @@ fn test_access_open_flags_mapping() {
         .unwrap();
 
     // O_WRONLY → Write
-    let (h2, _) = sb
-        .fuse_open(entry.inode, libc::O_WRONLY as u32)
-        .unwrap();
+    let (h2, _) = sb.fuse_open(entry.inode, libc::O_WRONLY as u32).unwrap();
     sb.fs
         .release(
             ProxyFsTestSandbox::ctx(),
@@ -270,9 +274,7 @@ fn test_access_open_flags_mapping() {
         .unwrap();
 
     // O_RDWR → Read + Write
-    let (h3, _) = sb
-        .fuse_open(entry.inode, libc::O_RDWR as u32)
-        .unwrap();
+    let (h3, _) = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
     sb.fs
         .release(
             ProxyFsTestSandbox::ctx(),
@@ -291,11 +293,7 @@ fn test_access_open_flags_mapping() {
     // O_WRONLY logs one Write.
     assert_eq!(log[1].1, AccessMode::Write, "O_WRONLY should map to Write");
     // O_RDWR logs Read then Write.
-    assert_eq!(
-        log[2].1,
-        AccessMode::Read,
-        "O_RDWR should first check Read"
-    );
+    assert_eq!(log[2].1, AccessMode::Read, "O_RDWR should first check Read");
     assert_eq!(
         log[3].1,
         AccessMode::Write,
@@ -358,9 +356,7 @@ fn test_access_hook_receives_correct_path() {
     sb.access_log.lock().unwrap().clear();
 
     // Open the file.
-    let (handle, _opts) = sb
-        .fuse_open(entry.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let (handle, _opts) = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     sb.fs
         .release(
             ProxyFsTestSandbox::ctx(),

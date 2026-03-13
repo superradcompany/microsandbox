@@ -40,15 +40,21 @@ fn test_concurrent_materialization() {
         let sb = &sb;
         let mut handles = Vec::new();
         for _ in 0..8 {
-            handles.push(s.spawn(move || {
-                sb.fuse_open(inode, libc::O_RDWR as u32)
-            }));
+            handles.push(s.spawn(move || sb.fuse_open(inode, libc::O_RDWR as u32)));
         }
         for h in handles {
             let result = h.join().unwrap();
             if let Ok(handle) = result {
                 sb.fs
-                    .release(DualFsTestSandbox::ctx(), inode, 0, handle, false, false, None)
+                    .release(
+                        DualFsTestSandbox::ctx(),
+                        inode,
+                        0,
+                        handle,
+                        false,
+                        false,
+                        None,
+                    )
                     .unwrap();
             }
         }
@@ -59,7 +65,15 @@ fn test_concurrent_materialization() {
     let data = sb.fuse_read(inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"concurrent data");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -81,7 +95,15 @@ fn test_concurrent_creates_different_files() {
             .map(|h| {
                 let (entry, handle) = h.join().unwrap();
                 sb.fs
-                    .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+                    .release(
+                        DualFsTestSandbox::ctx(),
+                        entry.inode,
+                        0,
+                        handle,
+                        false,
+                        false,
+                        None,
+                    )
                     .unwrap();
                 entry.inode
             })
@@ -97,7 +119,10 @@ fn test_concurrent_creates_different_files() {
     for i in 0..8 {
         let name = format!("concurrent_{i}.txt");
         let entry = sb.lookup_root(&name).unwrap();
-        assert!(entry.inode >= 3, "created file {name} should be discoverable");
+        assert!(
+            entry.inode >= 3,
+            "created file {name} should be discoverable"
+        );
     }
 }
 
@@ -163,5 +188,8 @@ fn test_concurrent_policy_plan() {
 
     // No crash or deadlock means success.
     let entry = sb.lookup_root("pre_0.txt").unwrap();
-    assert!(entry.inode >= 3, "filesystem should be functional after concurrent plans");
+    assert!(
+        entry.inode >= 3,
+        "filesystem should be functional after concurrent plans"
+    );
 }

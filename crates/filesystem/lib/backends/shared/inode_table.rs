@@ -3,11 +3,9 @@
 //! Provides [`MultikeyBTreeMap`] (a BTreeMap with two key types), [`InodeData`]
 //! for per-inode state, and [`InodeAltKey`] for host-identity-based deduplication.
 
-use std::borrow::Borrow;
-use std::collections::BTreeMap;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::AtomicI64;
-use std::sync::atomic::AtomicU64;
+use std::{borrow::Borrow, collections::BTreeMap, sync::atomic::AtomicU64};
 
 //--------------------------------------------------------------------------------------------------
 // Types

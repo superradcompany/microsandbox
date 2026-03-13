@@ -116,9 +116,7 @@ fn test_write_in_multi_layer() {
         std::fs::write(lowers[0].join("deep.txt"), b"deep").unwrap();
     });
     let entry = sb.lookup_root("deep.txt").unwrap();
-    let handle = sb
-        .fuse_open(entry.inode, libc::O_RDWR as u32)
-        .unwrap();
+    let handle = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
     sb.fuse_write(entry.inode, handle, b"MODIFIED", 0).unwrap();
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"MODIFIED");

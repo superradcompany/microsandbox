@@ -45,13 +45,10 @@ fn test_setattr_mode() {
     let entry = sb.lookup_root("file.txt").unwrap();
     let mut attr: crate::stat64 = unsafe { std::mem::zeroed() };
     attr.st_mode = 0o755;
-    let (st, _) = sb.fs.setattr(
-        sb.ctx(),
-        entry.inode,
-        attr,
-        None,
-        SetattrValid::MODE,
-    ).unwrap();
+    let (st, _) = sb
+        .fs
+        .setattr(sb.ctx(), entry.inode, attr, None, SetattrValid::MODE)
+        .unwrap();
     assert_eq!(st.st_mode as u32 & 0o7777, 0o755);
     // Should have been copied up to upper.
     assert!(sb.upper_has_file("file.txt"));
@@ -65,13 +62,9 @@ fn test_setattr_size_truncate() {
         .unwrap();
     let mut attr: crate::stat64 = unsafe { std::mem::zeroed() };
     attr.st_size = 5;
-    sb.fs.setattr(
-        sb.ctx(),
-        entry.inode,
-        attr,
-        None,
-        SetattrValid::SIZE,
-    ).unwrap();
+    sb.fs
+        .setattr(sb.ctx(), entry.inode, attr, None, SetattrValid::SIZE)
+        .unwrap();
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(data.len(), 5);
     assert_eq!(&data[..], b"hello");
@@ -84,13 +77,16 @@ fn test_setattr_timestamps() {
     let mut attr: crate::stat64 = unsafe { std::mem::zeroed() };
     attr.st_atime = 1000;
     attr.st_mtime = 2000;
-    let (st, _) = sb.fs.setattr(
-        sb.ctx(),
-        entry.inode,
-        attr,
-        None,
-        SetattrValid::ATIME | SetattrValid::MTIME,
-    ).unwrap();
+    let (st, _) = sb
+        .fs
+        .setattr(
+            sb.ctx(),
+            entry.inode,
+            attr,
+            None,
+            SetattrValid::ATIME | SetattrValid::MTIME,
+        )
+        .unwrap();
     assert_eq!(st.st_atime, 1000);
     assert_eq!(st.st_mtime, 2000);
 }
@@ -98,7 +94,9 @@ fn test_setattr_timestamps() {
 #[test]
 fn test_access_root() {
     let sb = OverlayTestSandbox::new();
-    sb.fs.access(sb.ctx(), ROOT_INODE, libc::F_OK as u32).unwrap();
+    sb.fs
+        .access(sb.ctx(), ROOT_INODE, libc::F_OK as u32)
+        .unwrap();
 }
 
 #[test]
@@ -107,7 +105,9 @@ fn test_access_lower_file() {
         std::fs::write(lower.join("accessible.txt"), b"data").unwrap();
     });
     let entry = sb.lookup_root("accessible.txt").unwrap();
-    sb.fs.access(sb.ctx(), entry.inode, libc::F_OK as u32).unwrap();
+    sb.fs
+        .access(sb.ctx(), entry.inode, libc::F_OK as u32)
+        .unwrap();
 }
 
 #[test]

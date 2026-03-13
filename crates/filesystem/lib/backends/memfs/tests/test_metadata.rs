@@ -161,13 +161,7 @@ fn test_setattr_size_truncate() {
     let mut attr: stat64 = unsafe { std::mem::zeroed() };
     attr.st_size = 5;
     sb.fs
-        .setattr(
-            MemFsTestSandbox::ctx(),
-            ino,
-            attr,
-            None,
-            SetattrValid::SIZE,
-        )
+        .setattr(MemFsTestSandbox::ctx(), ino, attr, None, SetattrValid::SIZE)
         .unwrap();
 
     let (st, _) = sb.fs.getattr(MemFsTestSandbox::ctx(), ino, None).unwrap();
@@ -190,13 +184,7 @@ fn test_setattr_size_extend() {
     let mut attr: stat64 = unsafe { std::mem::zeroed() };
     attr.st_size = 10;
     sb.fs
-        .setattr(
-            MemFsTestSandbox::ctx(),
-            ino,
-            attr,
-            None,
-            SetattrValid::SIZE,
-        )
+        .setattr(MemFsTestSandbox::ctx(), ino, attr, None, SetattrValid::SIZE)
         .unwrap();
 
     let (st, _) = sb.fs.getattr(MemFsTestSandbox::ctx(), ino, None).unwrap();
@@ -413,11 +401,9 @@ fn test_access_other() {
     assert!(result.is_ok());
 
     // The owner (uid=1000) should be denied — owner bits are 0.
-    let result = sb.fs.access(
-        MemFsTestSandbox::ctx(),
-        entry.inode,
-        libc::R_OK as u32,
-    );
+    let result = sb
+        .fs
+        .access(MemFsTestSandbox::ctx(), entry.inode, libc::R_OK as u32);
     MemFsTestSandbox::assert_errno(result, LINUX_EACCES);
 }
 
@@ -427,10 +413,14 @@ fn test_access_f_ok() {
     let (entry, _) = sb.fuse_create_root("exists.txt").unwrap();
 
     // F_OK on an existing inode should succeed.
-    let result = sb.fs.access(MemFsTestSandbox::ctx(), entry.inode, libc::F_OK as u32);
+    let result = sb
+        .fs
+        .access(MemFsTestSandbox::ctx(), entry.inode, libc::F_OK as u32);
     assert!(result.is_ok());
 
     // F_OK on a nonexistent inode should fail with EBADF (unknown inode).
-    let result = sb.fs.access(MemFsTestSandbox::ctx(), 999999, libc::F_OK as u32);
+    let result = sb
+        .fs
+        .access(MemFsTestSandbox::ctx(), 999999, libc::F_OK as u32);
     MemFsTestSandbox::assert_errno(result, LINUX_EBADF);
 }

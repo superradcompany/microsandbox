@@ -16,8 +16,8 @@ name = "microsandbox_cli"
 path = "lib/lib.rs"
 
 [dependencies]
-microsandbox-runtime = { path = "../runtime" }
 clap.workspace = true
+microsandbox-runtime = { path = "../runtime" }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -5,11 +5,12 @@
 //! - `on_read`: After inner.read() to transform data before returning to guest.
 //! - `on_write`: After reading from guest, before inner.write() to transform data.
 
-use std::io;
-use std::os::fd::AsRawFd;
+use std::{io, os::fd::AsRawFd};
 
-use super::adapters::{SliceReader, VecWriter};
-use super::{AccessMode, ProxyFs};
+use super::{
+    AccessMode, ProxyFs,
+    adapters::{SliceReader, VecWriter},
+};
 use crate::{ZeroCopyReader, ZeroCopyWriter};
 
 //--------------------------------------------------------------------------------------------------
@@ -50,11 +51,7 @@ pub(crate) fn check_access(fs: &ProxyFs, inode: u64, flags: u32) -> io::Result<(
 }
 
 /// Check access for a path (used by create where the file doesn't exist yet).
-pub(crate) fn check_access_by_path(
-    fs: &ProxyFs,
-    path: &str,
-    mode: AccessMode,
-) -> io::Result<()> {
+pub(crate) fn check_access_by_path(fs: &ProxyFs, path: &str, mode: AccessMode) -> io::Result<()> {
     if let Some(ref on_access) = fs.on_access {
         on_access(path, mode)?;
     }
@@ -123,7 +120,7 @@ pub(crate) fn do_intercepted_read(
         return Err(io::Error::last_os_error());
     }
 
-    w.write_from(&*staging, transformed.len(), 0)
+    w.write_from(&staging, transformed.len(), 0)
 }
 
 /// Intercepted write: capture guest input, transform via hook, write to inner.
@@ -154,7 +151,7 @@ pub(crate) fn do_intercepted_write(
 
     // Step 1: Read guest data via staging file.
     let staging = fs.staging_file.as_ref().unwrap().lock().unwrap();
-    let count = r.read_to(&*staging, size as usize, 0)?;
+    let count = r.read_to(&staging, size as usize, 0)?;
 
     if count == 0 {
         return Ok(0);

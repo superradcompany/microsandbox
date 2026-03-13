@@ -1,14 +1,13 @@
 //! Special operations: statfs, lseek, fallocate, fsync, fsyncdir.
 
-use std::io;
-use std::sync::atomic::Ordering;
+use std::{io, sync::atomic::Ordering};
 
-use super::MemFs;
-use super::inode;
-use super::types::InodeContent;
-use crate::backends::shared::init_binary;
-use crate::backends::shared::platform;
-use crate::{Context, statvfs64};
+use super::{MemFs, inode, types::InodeContent};
+use crate::{
+    Context,
+    backends::shared::{init_binary, platform},
+    statvfs64,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -149,9 +148,7 @@ pub(crate) fn do_fallocate(
 
     if mode == 0 {
         // Allocate space: extend file if needed.
-        let new_end = offset
-            .checked_add(length)
-            .ok_or_else(platform::einval)?;
+        let new_end = offset.checked_add(length).ok_or_else(platform::einval)?;
         if new_end > i64::MAX as u64 {
             return Err(platform::efbig());
         }
@@ -172,7 +169,7 @@ pub(crate) fn do_fallocate(
         if let InodeContent::RegularFile { ref data } = fh.node.content {
             let mut d = data.write().unwrap();
             let start = std::cmp::min(offset as usize, d.len());
-            let end_offset = offset.checked_add(length).unwrap_or(u64::MAX);
+            let end_offset = offset.saturating_add(length);
             let end = std::cmp::min(end_offset as usize, d.len());
             if start < end {
                 d[start..end].fill(0);

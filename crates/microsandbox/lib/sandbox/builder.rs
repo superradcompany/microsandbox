@@ -2,10 +2,11 @@
 
 use microsandbox_runtime::policy::ShutdownMode;
 
-use super::config::SandboxConfig;
-use super::types::{MountBuilder, RootfsSource};
-use crate::MicrosandboxResult;
-use crate::size::Mebibytes;
+use super::{
+    config::SandboxConfig,
+    types::{ImageSource, MountBuilder, RootfsSource},
+};
+use crate::{LogLevel, MicrosandboxResult, size::Mebibytes};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -33,9 +34,32 @@ impl SandboxBuilder {
         }
     }
 
-    /// Set the root filesystem source.
-    pub fn image(mut self, image: impl Into<RootfsSource>) -> Self {
-        self.config.image = image.into();
+    /// Set the root filesystem image source.
+    ///
+    /// Accepts a string or path:
+    /// - **`&str` / `String`**: Paths starting with `/`, `./`, or `../` are treated as local
+    ///   bind mounts. Everything else is treated as an OCI image reference.
+    /// - **`PathBuf`**: Always treated as a local bind mount.
+    ///
+    /// ```ignore
+    /// .image("python:3.12")           // OCI image
+    /// .image("./rootfs")              // local directory (bind mount)
+    /// .image("/abs/path/to/rootfs")   // local directory (bind mount)
+    /// .image(PathBuf::from("./rootfs")) // local directory (bind mount)
+    /// ```
+    ///
+    /// Disk image formats (`.qcow2`, `.raw`, `.vmdk`) are not yet supported and
+    /// will produce a build error.
+    pub fn image(mut self, image: impl Into<ImageSource>) -> Self {
+        let source: ImageSource = image.into();
+        match source.into_rootfs_source() {
+            Ok(rootfs) => self.config.image = rootfs,
+            Err(e) => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(e);
+                }
+            }
+        }
         self
     }
 
@@ -55,6 +79,21 @@ impl SandboxBuilder {
     /// ```
     pub fn memory(mut self, size: impl Into<Mebibytes>) -> Self {
         self.config.memory_mib = size.into().as_u32();
+        self
+    }
+
+    /// Set the runtime log level for sandbox child processes.
+    ///
+    /// This controls the verbosity of `msb supervisor` and `msb microvm`
+    /// for this sandbox only.
+    pub fn log_level(mut self, level: LogLevel) -> Self {
+        self.config.log_level = Some(level);
+        self
+    }
+
+    /// Disable runtime logs for this sandbox, even if a global default exists.
+    pub fn quiet_logs(mut self) -> Self {
+        self.config.log_level = None;
         self
     }
 
@@ -209,5 +248,38 @@ impl From<SandboxConfig> for SandboxBuilder {
             config,
             build_error: None,
         }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::SandboxBuilder;
+    use crate::LogLevel;
+
+    #[test]
+    fn test_builder_sets_runtime_log_level() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine:3.23")
+            .log_level(LogLevel::Debug)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.log_level, Some(LogLevel::Debug));
+    }
+
+    #[test]
+    fn test_builder_quiet_logs_clears_runtime_log_level() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine:3.23")
+            .log_level(LogLevel::Trace)
+            .quiet_logs()
+            .build()
+            .unwrap();
+
+        assert_eq!(config.log_level, None);
     }
 }

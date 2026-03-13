@@ -150,7 +150,10 @@ fn test_rename_creates_whiteout() {
         .unwrap();
     // Old name still visible through backend_b (no whiteout is created).
     let entry_old = sb.lookup_root("b_file.txt");
-    assert!(entry_old.is_ok(), "backend_b file still visible after rename");
+    assert!(
+        entry_old.is_ok(),
+        "backend_b file still visible after rename"
+    );
     // New name should also exist.
     let entry = sb.lookup_root("renamed.txt").unwrap();
     assert!(entry.inode >= 3);
@@ -178,7 +181,15 @@ fn test_rename_backend_b_to_backend_a() {
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"backend_b_data");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 

@@ -12,25 +12,25 @@ pub mod exec;
 pub mod fs;
 mod types;
 
-use std::process::ExitStatus;
-use std::sync::Arc;
+use std::{process::ExitStatus, sync::Arc};
 
 use bytes::Bytes;
-use microsandbox_protocol::exec::{
-    ExecExited, ExecRequest, ExecRlimit, ExecStarted, ExecStderr, ExecStdin, ExecStdout,
+use microsandbox_protocol::{
+    exec::{ExecExited, ExecRequest, ExecRlimit, ExecStarted, ExecStderr, ExecStdin, ExecStdout},
+    message::{Message, MessageType},
 };
-use microsandbox_protocol::message::{Message, MessageType};
-use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set,
+    sea_query::{Expr, OnConflict},
 };
 use tokio::sync::{Mutex, mpsc};
 
-use crate::MicrosandboxResult;
-use crate::agent::AgentBridge;
-use crate::db::entity::sandbox as sandbox_entity;
-use crate::db::entity::sandbox::SandboxStatus;
-use crate::runtime::{SupervisorHandle, spawn_supervisor};
+use crate::{
+    MicrosandboxResult,
+    agent::AgentBridge,
+    db::entity::{sandbox as sandbox_entity, sandbox::SandboxStatus},
+    runtime::{SupervisorHandle, spawn_supervisor},
+};
 
 use self::exec::{ExecEvent, ExecHandle, ExecOutput, ExecSink, IntoExecOptions, StdinMode};
 
@@ -38,14 +38,18 @@ use self::exec::{ExecEvent, ExecHandle, ExecOutput, ExecSink, IntoExecOptions, S
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use attach::{AttachOptions, AttachOptionsBuilder, IntoAttachCmd, IntoAttachOptions, SessionInfo};
+pub use attach::{
+    AttachOptions, AttachOptionsBuilder, IntoAttachCmd, IntoAttachOptions, SessionInfo,
+};
 pub use builder::SandboxBuilder;
 pub use config::SandboxConfig;
 pub use exec::{ExecOptionsBuilder, ExitStatus as ExecExitStatus, Rlimit, RlimitResource};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
 pub use microsandbox_filesystem::AccessMode;
+pub use microsandbox_runtime::logging::LogLevel;
 pub use types::{
-    MountBuilder, NetworkConfig, Patch, RootfsSource, SecretsConfig, SshConfig, VolumeMount,
+    ImageSource, MountBuilder, NetworkConfig, Patch, RootfsSource, SecretsConfig, SshConfig,
+    VolumeMount,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -84,39 +88,36 @@ impl Sandbox {
         // They will be supported when in-process VM mode is available.
         let backend_count = config.mounts.iter().filter(|m| m.is_backend()).count();
         if backend_count > 0 {
-            return Err(crate::MicrosandboxError::InvalidConfig(
-                format!(
-                    "hooked mounts (with on_read/on_write/on_access) are not yet supported \
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "hooked mounts (with on_read/on_write/on_access) are not yet supported \
                      in subprocess mode ({backend_count} backend mount(s) provided). \
                      Backend mounts require in-process VM mode, which is planned for a future release.",
-                ),
-            ));
+            )));
         }
+
+        validate_rootfs_source(&config.image)?;
 
         // Initialize the database.
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
-        // Upsert sandbox record.
-        upsert_sandbox_record(db, &config).await?;
-
-        // Save the name before moving config into create_inner.
-        let name = config.name.clone();
+        // Upsert the sandbox record and keep its stable database ID.
+        let sandbox_id = upsert_sandbox_record(db, &config).await?;
 
         // Spawn supervisor + create bridge. On failure, mark the sandbox
         // as stopped so it doesn't appear as a phantom "Running" entry.
-        match Self::create_inner(config).await {
+        match Self::create_inner(config, sandbox_id).await {
             Ok(sandbox) => Ok(sandbox),
             Err(e) => {
-                let _ = update_sandbox_status(db, &name, SandboxStatus::Stopped).await;
+                let _ = update_sandbox_status(db, sandbox_id, SandboxStatus::Stopped).await;
                 Err(e)
             }
         }
     }
 
     /// Inner create logic separated for error-cleanup wrapper.
-    async fn create_inner(config: SandboxConfig) -> MicrosandboxResult<Self> {
-        let (handle, agent_host_fd) = spawn_supervisor(&config).await?;
+    async fn create_inner(config: SandboxConfig, sandbox_id: i32) -> MicrosandboxResult<Self> {
+        let (handle, agent_host_fd) = spawn_supervisor(&config, sandbox_id).await?;
         let bridge = AgentBridge::new(agent_host_fd)?;
         let ready = bridge.wait_ready().await?;
 
@@ -219,19 +220,8 @@ impl Sandbox {
     }
 
     /// Wait for the supervisor process to exit.
-    ///
-    /// Updates the sandbox status in the database to `Stopped` after exit.
     pub async fn wait(&self) -> MicrosandboxResult<ExitStatus> {
-        let status = self.handle.lock().await.wait().await?;
-
-        // Update the DB status now that the supervisor has exited.
-        if let Ok(db) =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await
-        {
-            let _ = update_sandbox_status(db, &self.config.name, SandboxStatus::Stopped).await;
-        }
-
-        Ok(status)
+        self.handle.lock().await.wait().await
     }
 }
 
@@ -573,6 +563,7 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 
 /// Build an `ExecRequest` by merging sandbox config with caller-provided overrides.
+#[allow(clippy::too_many_arguments)]
 fn build_exec_request(
     config: &SandboxConfig,
     cmd: String,
@@ -657,7 +648,7 @@ async fn event_mapper_task(
 /// Update the sandbox status in the database.
 async fn update_sandbox_status(
     db: &sea_orm::DatabaseConnection,
-    name: &str,
+    sandbox_id: i32,
     status: SandboxStatus,
 ) -> MicrosandboxResult<()> {
     sandbox_entity::Entity::update_many()
@@ -666,18 +657,42 @@ async fn update_sandbox_status(
             sandbox_entity::Column::UpdatedAt,
             Expr::value(chrono::Utc::now().naive_utc()),
         )
-        .filter(sandbox_entity::Column::Name.eq(name))
+        .filter(sandbox_entity::Column::Id.eq(sandbox_id))
         .exec(db)
         .await?;
 
     Ok(())
 }
 
-/// Insert or update the sandbox record in the database.
+/// Validate rootfs configuration that depends on host filesystem state.
+fn validate_rootfs_source(rootfs: &RootfsSource) -> MicrosandboxResult<()> {
+    match rootfs {
+        RootfsSource::Bind(path) => {
+            if !path.exists() {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "rootfs bind path does not exist: {}",
+                    path.display()
+                )));
+            }
+
+            if !path.is_dir() {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "rootfs bind path is not a directory: {}",
+                    path.display()
+                )));
+            }
+        }
+        RootfsSource::Oci(_) => {}
+    }
+
+    Ok(())
+}
+
+/// Insert or update the sandbox record in the database and return its ID.
 async fn upsert_sandbox_record(
     db: &sea_orm::DatabaseConnection,
     config: &SandboxConfig,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxResult<i32> {
     let now = chrono::Utc::now().naive_utc();
     let config_json = serde_json::to_string(config)?;
 
@@ -703,5 +718,78 @@ async fn upsert_sandbox_record(
         .exec(db)
         .await?;
 
-    Ok(())
+    sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(&config.name))
+        .one(db)
+        .await?
+        .map(|model| model.id)
+        .ok_or_else(|| {
+            crate::MicrosandboxError::Custom(format!(
+                "sandbox '{}' missing after upsert",
+                config.name
+            ))
+        })
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{RootfsSource, validate_rootfs_source};
+
+    fn unique_temp_path(suffix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("microsandbox-rootfs-{suffix}-{nanos}"))
+    }
+
+    #[test]
+    fn test_validate_rootfs_source_missing_bind_path() {
+        let path = unique_temp_path("missing");
+        let err = validate_rootfs_source(&RootfsSource::Bind(path.clone())).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "invalid config: rootfs bind path does not exist: {}",
+                path.display()
+            )
+        );
+    }
+
+    #[test]
+    fn test_validate_rootfs_source_bind_path_must_be_directory() {
+        let path = unique_temp_path("file");
+        fs::write(&path, b"not a directory").unwrap();
+
+        let err = validate_rootfs_source(&RootfsSource::Bind(path.clone())).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "invalid config: rootfs bind path is not a directory: {}",
+                path.display()
+            )
+        );
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_validate_rootfs_source_existing_bind_directory() {
+        let path = unique_temp_path("dir");
+        fs::create_dir(&path).unwrap();
+
+        validate_rootfs_source(&RootfsSource::Bind(path.clone())).unwrap();
+
+        fs::remove_dir(path).unwrap();
+    }
 }

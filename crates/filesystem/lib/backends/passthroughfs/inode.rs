@@ -17,16 +17,22 @@
 //! escaping the exported root. Using `openat` relative to `/proc/self/fd` with `O_NOFOLLOW`
 //! ensures the kernel resolves the fd reference without following any symlinks.
 
-use std::ffi::{CStr, CString};
-use std::io;
-use std::os::fd::AsRawFd;
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::{
+    ffi::{CStr, CString},
+    io,
+    os::fd::AsRawFd,
+    sync::{Arc, atomic::Ordering},
+};
 
 use super::PassthroughFs;
-use crate::backends::shared::inode_table::{InodeAltKey, InodeData, MultikeyBTreeMap};
-use crate::backends::shared::platform;
-use crate::{Entry, stat64};
+use crate::{
+    Entry,
+    backends::shared::{
+        inode_table::{InodeAltKey, InodeData, MultikeyBTreeMap},
+        platform,
+    },
+    stat64,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types

@@ -6,10 +6,22 @@ fn test_unlink_file() {
     let (entry, handle) = sb.fuse_create_root("doomed.txt").unwrap();
     let handle = handle.unwrap();
     sb.fs
-        .release(MemFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     sb.fs
-        .unlink(MemFsTestSandbox::ctx(), ROOT_INODE, &MemFsTestSandbox::cstr("doomed.txt"))
+        .unlink(
+            MemFsTestSandbox::ctx(),
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("doomed.txt"),
+        )
         .unwrap();
     let result = sb.lookup_root("doomed.txt");
     MemFsTestSandbox::assert_errno(result, LINUX_ENOENT);
@@ -32,7 +44,15 @@ fn test_unlink_decrements_nlink() {
     let (entry, handle) = sb.fuse_create_root("linked.txt").unwrap();
     let handle = handle.unwrap();
     sb.fs
-        .release(MemFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // Create a hard link.
@@ -57,7 +77,11 @@ fn test_unlink_decrements_nlink() {
 
     // Unlink one.
     sb.fs
-        .unlink(MemFsTestSandbox::ctx(), ROOT_INODE, &MemFsTestSandbox::cstr("linked.txt"))
+        .unlink(
+            MemFsTestSandbox::ctx(),
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("linked.txt"),
+        )
         .unwrap();
 
     // nlink should be 1.
@@ -77,10 +101,22 @@ fn test_unlink_last_link() {
     let (entry, handle) = sb.fuse_create_root("last.txt").unwrap();
     let handle = handle.unwrap();
     sb.fs
-        .release(MemFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     sb.fs
-        .unlink(MemFsTestSandbox::ctx(), ROOT_INODE, &MemFsTestSandbox::cstr("last.txt"))
+        .unlink(
+            MemFsTestSandbox::ctx(),
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("last.txt"),
+        )
         .unwrap();
     // Forget the lookup ref from create.
     sb.fs.forget(MemFsTestSandbox::ctx(), entry.inode, 1);
@@ -94,11 +130,16 @@ fn test_unlink_open_file() {
     let sb = MemFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("open_unlink.txt").unwrap();
     let handle = handle.unwrap();
-    sb.fuse_write(entry.inode, handle, b"still here", 0).unwrap();
+    sb.fuse_write(entry.inode, handle, b"still here", 0)
+        .unwrap();
 
     // Unlink while handle is still open.
     sb.fs
-        .unlink(MemFsTestSandbox::ctx(), ROOT_INODE, &MemFsTestSandbox::cstr("open_unlink.txt"))
+        .unlink(
+            MemFsTestSandbox::ctx(),
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("open_unlink.txt"),
+        )
         .unwrap();
 
     // Handle should still work.
@@ -107,7 +148,15 @@ fn test_unlink_open_file() {
 
     // Clean up.
     sb.fs
-        .release(MemFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -116,7 +165,11 @@ fn test_rmdir_empty() {
     let sb = MemFsTestSandbox::new();
     sb.fuse_mkdir_root("empty_dir").unwrap();
     sb.fs
-        .rmdir(MemFsTestSandbox::ctx(), ROOT_INODE, &MemFsTestSandbox::cstr("empty_dir"))
+        .rmdir(
+            MemFsTestSandbox::ctx(),
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("empty_dir"),
+        )
         .unwrap();
     let result = sb.lookup_root("empty_dir");
     MemFsTestSandbox::assert_errno(result, LINUX_ENOENT);
@@ -165,7 +218,11 @@ fn test_rmdir_decrements_parent_nlink() {
     assert_eq!(st_mid.st_nlink, nlink_before + 1);
 
     sb.fs
-        .rmdir(MemFsTestSandbox::ctx(), ROOT_INODE, &MemFsTestSandbox::cstr("child_dir"))
+        .rmdir(
+            MemFsTestSandbox::ctx(),
+            ROOT_INODE,
+            &MemFsTestSandbox::cstr("child_dir"),
+        )
         .unwrap();
     let (st_after, _) = sb
         .fs

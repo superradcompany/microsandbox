@@ -2,8 +2,10 @@
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::error::{ProtocolError, ProtocolResult};
-use crate::message::Message;
+use crate::{
+    error::{ProtocolError, ProtocolResult},
+    message::Message,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants

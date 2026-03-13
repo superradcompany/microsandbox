@@ -14,14 +14,16 @@ pub mod backends;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use backends::dualfs::{
-    BackendAFallbackToBackendBRead, BackendAOnly, CachePolicy as DualCachePolicy, DualFs,
-    DualFsConfig, MergeReadsBackendAPrecedence, ReadBackendBWriteBackendA,
+pub use backends::{
+    dualfs::{
+        BackendAFallbackToBackendBRead, BackendAOnly, CachePolicy as DualCachePolicy, DualFs,
+        DualFsConfig, MergeReadsBackendAPrecedence, ReadBackendBWriteBackendA,
+    },
+    memfs::{CachePolicy as MemCachePolicy, MemFs, MemFsConfig},
+    overlayfs::{CachePolicy as OverlayCachePolicy, OverlayConfig, OverlayFs},
+    passthroughfs::{CachePolicy, PassthroughConfig, PassthroughFs, PassthroughFsBuilder},
+    proxy::{AccessMode, ProxyFs, ProxyFsBuilder},
 };
-pub use backends::memfs::{CachePolicy as MemCachePolicy, MemFs, MemFsConfig};
-pub use backends::overlayfs::{CachePolicy as OverlayCachePolicy, OverlayConfig, OverlayFs};
-pub use backends::passthroughfs::{CachePolicy, PassthroughConfig, PassthroughFs, PassthroughFsBuilder};
-pub use backends::proxy::{AccessMode, ProxyFs, ProxyFsBuilder};
 pub use msb_krun::backends::fs::{
     Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions, GetxattrReply, ListxattrReply,
     OpenOptions, RemovemappingOne, SetattrValid, ZeroCopyReader, ZeroCopyWriter, stat64, statvfs64,

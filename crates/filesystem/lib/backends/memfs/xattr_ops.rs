@@ -3,14 +3,13 @@
 //! Xattrs are stored entirely in memory as raw byte key-value pairs.
 //! No internal xattrs are used — MemFs stores metadata directly.
 
-use std::ffi::CStr;
-use std::io;
+use std::{ffi::CStr, io};
 
-use super::MemFs;
-use super::inode;
-use crate::backends::shared::init_binary;
-use crate::backends::shared::platform;
-use crate::{Context, GetxattrReply, ListxattrReply};
+use super::{MemFs, inode};
+use crate::{
+    Context, GetxattrReply, ListxattrReply,
+    backends::shared::{init_binary, platform},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -118,12 +117,7 @@ pub(crate) fn do_listxattr(
 }
 
 /// Remove an extended attribute.
-pub(crate) fn do_removexattr(
-    fs: &MemFs,
-    _ctx: Context,
-    ino: u64,
-    name: &CStr,
-) -> io::Result<()> {
+pub(crate) fn do_removexattr(fs: &MemFs, _ctx: Context, ino: u64, name: &CStr) -> io::Result<()> {
     if ino == init_binary::INIT_INODE {
         return Err(platform::eacces());
     }

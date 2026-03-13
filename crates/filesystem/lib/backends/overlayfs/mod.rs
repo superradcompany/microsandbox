@@ -23,22 +23,26 @@ pub mod types;
 mod whiteout;
 mod xattr_ops;
 
-use std::collections::BTreeMap;
-use std::ffi::CStr;
-use std::fs::File;
-use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    ffi::CStr,
+    fs::File,
+    io,
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use origin::LowerOriginId;
 use types::{Dentry, DirHandle, FileHandle, Layer, NameTable, OverlayNode, ROOT_INODE};
 
-use crate::backends::shared::inode_table::InodeAltKey;
-use crate::backends::shared::init_binary;
 use crate::{
     Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions, GetxattrReply, ListxattrReply,
-    OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter, stat64, statvfs64,
+    OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
+    backends::shared::{init_binary, inode_table::InodeAltKey},
+    stat64, statvfs64,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -199,7 +203,9 @@ impl DynFileSystem for OverlayFs {
                 if ino == init_binary::INIT_INODE {
                     continue;
                 }
-                if let Some(origin) = inode::forget_one_locked(&mut nodes, &mut dentries, ino, count) {
+                if let Some(origin) =
+                    inode::forget_one_locked(&mut nodes, &mut dentries, ino, count)
+                {
                     removed.push((ino, origin));
                 }
             }
@@ -292,13 +298,7 @@ impl DynFileSystem for OverlayFs {
         remove_ops::do_rename(self, ctx, olddir, oldname, newdir, newname, flags)
     }
 
-    fn link(
-        &self,
-        ctx: Context,
-        ino: u64,
-        newparent: u64,
-        newname: &CStr,
-    ) -> io::Result<Entry> {
+    fn link(&self, ctx: Context, ino: u64, newparent: u64, newname: &CStr) -> io::Result<Entry> {
         create_ops::do_link(self, ctx, ino, newparent, newname)
     }
 
@@ -324,7 +324,9 @@ impl DynFileSystem for OverlayFs {
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<(Entry, Option<u64>, OpenOptions)> {
-        create_ops::do_create(self, ctx, parent, name, mode, kill_priv, flags, umask, extensions)
+        create_ops::do_create(
+            self, ctx, parent, name, mode, kill_priv, flags, umask, extensions,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

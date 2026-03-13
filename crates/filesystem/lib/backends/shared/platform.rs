@@ -16,8 +16,7 @@
 //! atomically. Availability is probed at init time and cached in `PassthroughFs::has_openat2`.
 //! Falls back to `openat(O_NOFOLLOW)` on older kernels.
 
-use std::io;
-use std::os::fd::RawFd;
+use std::{io, os::fd::RawFd};
 
 use crate::stat64;
 
@@ -323,11 +322,6 @@ pub(crate) fn enxio() -> io::Error {
 /// Create an `io::Error` with Linux `ERANGE`.
 pub(crate) fn erange() -> io::Error {
     io::Error::from_raw_os_error(34) // LINUX_ERANGE
-}
-
-/// Create an `io::Error` with Linux `EXDEV`.
-pub(crate) fn exdev() -> io::Error {
-    io::Error::from_raw_os_error(LINUX_EXDEV)
 }
 
 /// Check if an error is ENOENT.

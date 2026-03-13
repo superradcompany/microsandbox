@@ -103,7 +103,15 @@ fn test_unlink_merged_file() {
     let handle = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
     sb.fuse_write(entry.inode, handle, b"modified", 0).unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // Unlink — removes backend_a copy.
     sb.fs
@@ -121,7 +129,15 @@ fn test_unlink_merged_file() {
     // Content reflects materialized data since the node maps through backend dispatch.
     assert_eq!(&data[..], b"modified");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry2.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry2.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 

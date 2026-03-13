@@ -1,17 +1,23 @@
 //! Creation operations: create, mkdir, mknod, symlink, link.
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
-use std::{ffi::CStr, io};
+use std::{
+    collections::BTreeMap,
+    ffi::CStr,
+    io,
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
-use super::MemFs;
-use super::inode;
-use super::types::{FileHandle, InodeContent, InodeMeta, MemNode, ROOT_INODE};
-use crate::backends::shared::init_binary;
-use crate::backends::shared::name_validation;
-use crate::backends::shared::platform;
-use crate::{Context, Entry, Extensions, OpenOptions};
+use super::{
+    MemFs, inode,
+    types::{FileHandle, InodeContent, InodeMeta, MemNode, ROOT_INODE},
+};
+use crate::{
+    Context, Entry, Extensions, OpenOptions,
+    backends::shared::{init_binary, name_validation, platform},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -69,15 +75,13 @@ pub(crate) fn do_create(
             let mut ch = children.write().unwrap();
             if ch.contains_key(&name_bytes) {
                 // Undo inode allocation.
-                fs.inode_count
-                    .fetch_sub(1, Ordering::Relaxed);
+                fs.inode_count.fetch_sub(1, Ordering::Relaxed);
                 return Err(platform::eexist());
             }
             ch.insert(name_bytes, ino);
         }
         _ => {
-            fs.inode_count
-                .fetch_sub(1, Ordering::Relaxed);
+            fs.inode_count.fetch_sub(1, Ordering::Relaxed);
             return Err(platform::enotdir());
         }
     }
@@ -94,10 +98,10 @@ pub(crate) fn do_create(
 
     // Create file handle.
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);
+    let handle_flags = super::normalize_handle_flags(fs.writeback.load(Ordering::Relaxed), flags);
     let fh = Arc::new(FileHandle {
-        inode: ino,
-        node: node.clone(),
-        flags,
+        node: Arc::clone(&node),
+        flags: handle_flags,
     });
     fs.file_handles.write().unwrap().insert(handle, fh);
 
@@ -154,15 +158,13 @@ pub(crate) fn do_mkdir(
         InodeContent::Directory { children, .. } => {
             let mut ch = children.write().unwrap();
             if ch.contains_key(&name_bytes) {
-                fs.inode_count
-                    .fetch_sub(1, Ordering::Relaxed);
+                fs.inode_count.fetch_sub(1, Ordering::Relaxed);
                 return Err(platform::eexist());
             }
             ch.insert(name_bytes, ino);
         }
         _ => {
-            fs.inode_count
-                .fetch_sub(1, Ordering::Relaxed);
+            fs.inode_count.fetch_sub(1, Ordering::Relaxed);
             return Err(platform::enotdir());
         }
     }
@@ -222,8 +224,7 @@ pub(crate) fn do_mknod(
             (file_type, InodeContent::Special)
         }
         _ => {
-            fs.inode_count
-                .fetch_sub(1, Ordering::Relaxed);
+            fs.inode_count.fetch_sub(1, Ordering::Relaxed);
             return Err(platform::einval());
         }
     };
@@ -253,15 +254,13 @@ pub(crate) fn do_mknod(
         InodeContent::Directory { children, .. } => {
             let mut ch = children.write().unwrap();
             if ch.contains_key(&name_bytes) {
-                fs.inode_count
-                    .fetch_sub(1, Ordering::Relaxed);
+                fs.inode_count.fetch_sub(1, Ordering::Relaxed);
                 return Err(platform::eexist());
             }
             ch.insert(name_bytes, ino);
         }
         _ => {
-            fs.inode_count
-                .fetch_sub(1, Ordering::Relaxed);
+            fs.inode_count.fetch_sub(1, Ordering::Relaxed);
             return Err(platform::enotdir());
         }
     }
@@ -324,15 +323,13 @@ pub(crate) fn do_symlink(
         InodeContent::Directory { children, .. } => {
             let mut ch = children.write().unwrap();
             if ch.contains_key(&name_bytes) {
-                fs.inode_count
-                    .fetch_sub(1, Ordering::Relaxed);
+                fs.inode_count.fetch_sub(1, Ordering::Relaxed);
                 return Err(platform::eexist());
             }
             ch.insert(name_bytes, ino);
         }
         _ => {
-            fs.inode_count
-                .fetch_sub(1, Ordering::Relaxed);
+            fs.inode_count.fetch_sub(1, Ordering::Relaxed);
             return Err(platform::enotdir());
         }
     }

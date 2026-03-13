@@ -6,7 +6,15 @@ fn test_create_routes_to_policy_target() {
     let sb = DualFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("new_file.txt").unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // File should be discoverable via lookup.
     let e = sb.lookup_root("new_file.txt").unwrap();
@@ -21,7 +29,15 @@ fn test_create_file() {
     let written = sb.fuse_write(entry.inode, handle, b"hello", 0).unwrap();
     assert_eq!(written, 5);
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // Lookup succeeds.
     let e = sb.lookup_root("writable.txt").unwrap();
@@ -82,7 +98,10 @@ fn test_symlink() {
     let mode = entry.attr.st_mode as u32;
     assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFLNK as u32);
     // readlink should return the target.
-    let link = sb.fs.readlink(DualFsTestSandbox::ctx(), entry.inode).unwrap();
+    let link = sb
+        .fs
+        .readlink(DualFsTestSandbox::ctx(), entry.inode)
+        .unwrap();
     assert_eq!(link, b"/some/target");
 }
 
@@ -91,22 +110,32 @@ fn test_link() {
     let sb = DualFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("original.txt").unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // Hard link.
     let link_name = DualFsTestSandbox::cstr("hardlink.txt");
     let link_entry = sb
         .fs
-        .link(DualFsTestSandbox::ctx(), entry.inode, ROOT_INODE, &link_name)
+        .link(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            ROOT_INODE,
+            &link_name,
+        )
         .unwrap();
     assert_eq!(
         link_entry.inode, entry.inode,
         "hard link should share the same guest inode"
     );
-    assert!(
-        link_entry.attr.st_nlink >= 2,
-        "nlink should be incremented"
-    );
+    assert!(link_entry.attr.st_nlink >= 2, "nlink should be incremented");
 }
 
 #[test]
@@ -138,7 +167,15 @@ fn test_create_registers_dentry() {
     let sb = DualFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("registered.txt").unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // Lookup should succeed (dentry registered).
     let e = sb.lookup_root("registered.txt").unwrap();
@@ -150,7 +187,15 @@ fn test_create_duplicate() {
     let sb = DualFsTestSandbox::new();
     let (_entry, handle) = sb.fuse_create_root("dup.txt").unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), _entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            _entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // Second create with same name should fail.
     let result = sb.fuse_create_root("dup.txt");
@@ -165,23 +210,42 @@ fn test_create_updates_alias_index() {
     let sb = DualFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("aliased.txt").unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // Verify the file can be looked up (which proves the dentry and alias were registered).
     let e = sb.lookup_root("aliased.txt").unwrap();
-    assert_eq!(e.inode, entry.inode, "dentry should map to the created inode");
+    assert_eq!(
+        e.inode, entry.inode,
+        "dentry should map to the created inode"
+    );
 
     // Verify stability: a second lookup returns the same inode, proving the alias_index
     // dedup path works correctly.
     let e2 = sb.lookup_root("aliased.txt").unwrap();
-    assert_eq!(e2.inode, entry.inode, "repeated lookup should return same guest inode");
+    assert_eq!(
+        e2.inode, entry.inode,
+        "repeated lookup should return same guest inode"
+    );
 
     // Create a hard link to the same file. This adds a second alias entry.
     let link_name = DualFsTestSandbox::cstr("alias_link.txt");
     let link_entry = sb
         .fs
-        .link(DualFsTestSandbox::ctx(), entry.inode, ROOT_INODE, &link_name)
+        .link(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            ROOT_INODE,
+            &link_name,
+        )
         .unwrap();
     assert_eq!(
         link_entry.inode, entry.inode,
@@ -191,5 +255,8 @@ fn test_create_updates_alias_index() {
     // Both names should resolve to the same guest inode.
     let e_orig = sb.lookup_root("aliased.txt").unwrap();
     let e_link = sb.lookup_root("alias_link.txt").unwrap();
-    assert_eq!(e_orig.inode, e_link.inode, "both aliases should resolve to the same inode");
+    assert_eq!(
+        e_orig.inode, e_link.inode,
+        "both aliases should resolve to the same inode"
+    );
 }

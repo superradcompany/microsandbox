@@ -3,10 +3,14 @@
 //! Defines guest-visible inode state, handle types, namespace tables,
 //! and configuration. DualFs owns no storage — all data lives in child backends.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use super::policy::DualDispatchPlan;
 
@@ -167,6 +171,7 @@ pub(crate) struct DualState {
     pub dentries: RwLock<BTreeMap<(u64, Vec<u8>), u64>>,
 
     /// Reverse dentry index: guest_inode -> { (parent, name), ... }
+    #[allow(clippy::type_complexity)]
     pub alias_index: RwLock<BTreeMap<u64, BTreeSet<(u64, Vec<u8>)>>>,
 
     /// Backend_a inode -> guest inode dedup map.
@@ -201,11 +206,12 @@ pub(crate) struct DualState {
 }
 
 /// Cache policy for FUSE caching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CachePolicy {
     /// Never cache.
     Never,
     /// Cache based on FUSE defaults.
+    #[default]
     Auto,
     /// Always cache.
     Always,
@@ -280,8 +286,9 @@ impl DualHandle {
     #[allow(dead_code)]
     pub(crate) fn guest_inode(&self) -> u64 {
         match self {
-            DualHandle::BackendA { guest_inode, .. }
-            | DualHandle::BackendB { guest_inode, .. } => *guest_inode,
+            DualHandle::BackendA { guest_inode, .. } | DualHandle::BackendB { guest_inode, .. } => {
+                *guest_inode
+            }
         }
     }
 
@@ -331,10 +338,7 @@ impl DualState {
     }
 
     /// Get the inode map for a given backend.
-    pub(crate) fn inode_map(
-        &self,
-        backend: BackendId,
-    ) -> &RwLock<BTreeMap<u64, u64>> {
+    pub(crate) fn inode_map(&self, backend: BackendId) -> &RwLock<BTreeMap<u64, u64>> {
         match backend {
             BackendId::BackendA => &self.backend_a_inode_map,
             BackendId::BackendB => &self.backend_b_inode_map,
@@ -342,7 +346,12 @@ impl DualState {
     }
 
     /// Check if a name is hidden for a specific backend.
-    pub(crate) fn is_whited_out(&self, parent: u64, name: &[u8], hidden_backend: BackendId) -> bool {
+    pub(crate) fn is_whited_out(
+        &self,
+        parent: u64,
+        name: &[u8],
+        hidden_backend: BackendId,
+    ) -> bool {
         self.whiteouts
             .read()
             .unwrap()
@@ -403,18 +412,30 @@ impl NodeState {
         match (self, backend) {
             (NodeState::Root { backend_a_root, .. }, BackendId::BackendA) => Some(*backend_a_root),
             (NodeState::Root { backend_b_root, .. }, BackendId::BackendB) => Some(*backend_b_root),
-            (NodeState::BackendA { backend_a_inode, .. }, BackendId::BackendA) => {
-                Some(*backend_a_inode)
-            }
-            (NodeState::BackendB { backend_b_inode, .. }, BackendId::BackendB) => {
-                Some(*backend_b_inode)
-            }
-            (NodeState::MergedDir { backend_a_inode, .. }, BackendId::BackendA) => {
-                Some(*backend_a_inode)
-            }
-            (NodeState::MergedDir { backend_b_inode, .. }, BackendId::BackendB) => {
-                Some(*backend_b_inode)
-            }
+            (
+                NodeState::BackendA {
+                    backend_a_inode, ..
+                },
+                BackendId::BackendA,
+            ) => Some(*backend_a_inode),
+            (
+                NodeState::BackendB {
+                    backend_b_inode, ..
+                },
+                BackendId::BackendB,
+            ) => Some(*backend_b_inode),
+            (
+                NodeState::MergedDir {
+                    backend_a_inode, ..
+                },
+                BackendId::BackendA,
+            ) => Some(*backend_a_inode),
+            (
+                NodeState::MergedDir {
+                    backend_b_inode, ..
+                },
+                BackendId::BackendB,
+            ) => Some(*backend_b_inode),
             _ => None,
         }
     }
@@ -430,23 +451,17 @@ impl NodeState {
 
     /// Check if this is a pure single-backed directory on the given backend.
     pub(crate) fn is_pure_on(&self, backend: BackendId) -> bool {
-        match (self, backend) {
-            (NodeState::BackendA { .. }, BackendId::BackendA) => true,
-            (NodeState::BackendB { .. }, BackendId::BackendB) => true,
-            _ => false,
-        }
+        matches!(
+            (self, backend),
+            (NodeState::BackendA { .. }, BackendId::BackendA)
+                | (NodeState::BackendB { .. }, BackendId::BackendB)
+        )
     }
 }
 
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
-
-impl Default for CachePolicy {
-    fn default() -> Self {
-        CachePolicy::Auto
-    }
-}
 
 impl Default for DualFsConfig {
     fn default() -> Self {

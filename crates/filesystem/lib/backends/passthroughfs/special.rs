@@ -11,13 +11,14 @@
 //! On macOS, uses `fcntl(F_PREALLOCATE)` + `ftruncate` since `fallocate64` doesn't exist.
 //! Tries contiguous allocation first, falls back to non-contiguous.
 
-use std::io;
-use std::os::fd::AsRawFd;
+use std::{io, os::fd::AsRawFd};
 
 use super::PassthroughFs;
-use crate::backends::shared::init_binary;
-use crate::backends::shared::platform;
-use crate::{Context, statvfs64};
+use crate::{
+    Context,
+    backends::shared::{init_binary, platform},
+    statvfs64,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions

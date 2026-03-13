@@ -87,9 +87,7 @@ fn test_removexattr() {
     sb.fs
         .removexattr(DualFsTestSandbox::ctx(), ino, &xname)
         .unwrap();
-    let result = sb
-        .fs
-        .getxattr(DualFsTestSandbox::ctx(), ino, &xname, 256);
+    let result = sb.fs.getxattr(DualFsTestSandbox::ctx(), ino, &xname, 256);
     DualFsTestSandbox::assert_errno(result, LINUX_ENODATA);
 }
 

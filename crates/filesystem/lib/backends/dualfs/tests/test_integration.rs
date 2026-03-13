@@ -27,21 +27,45 @@ fn test_profile_memfs_memfs_backend_a_only() {
     let data = sb.fuse_read(ino1, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"content_1");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), ino1, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            ino1,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     let handle = sb.fuse_open(ino2, libc::O_RDONLY as u32).unwrap();
     let data = sb.fuse_read(ino2, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"content_2");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), ino2, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            ino2,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     let handle = sb.fuse_open(ino3, libc::O_RDONLY as u32).unwrap();
     let data = sb.fuse_read(ino3, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"nested_content");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), ino3, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            ino3,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // Readdir at root should show only backend_a files (plus . .. init.krun).
@@ -65,19 +89,33 @@ fn test_profile_memfs_memfs_read_b_write_a() {
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"read_from_b");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // Writing to backend_b file should materialize to backend_a.
-    let handle = sb
-        .fuse_open(entry.inode, libc::O_RDWR as u32)
-        .unwrap();
+    let handle = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
     sb.fuse_write(entry.inode, handle, b"written_to_a", 0)
         .unwrap();
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"written_to_a");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // Creating new files goes to backend_a.
@@ -108,29 +146,39 @@ fn test_non_target_backend_unchanged() {
 
     // Read the original content.
     let entry = sb.lookup_root("original.txt").unwrap();
-    let handle = sb
-        .fuse_open(entry.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let handle = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     let data_before = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data_before[..], b"original_content");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // Write to trigger materialization to backend_a.
-    let handle = sb
-        .fuse_open(entry.inode, libc::O_RDWR as u32)
-        .unwrap();
+    let handle = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
     sb.fuse_write(entry.inode, handle, b"modified_content", 0)
         .unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // Re-read: should see the modified content (from backend_a).
-    let handle = sb
-        .fuse_open(entry.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let handle = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     let data_after = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(
         &data_after[..],
@@ -138,7 +186,15 @@ fn test_non_target_backend_unchanged() {
         "after materialization, reads should come from backend_a"
     );
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // Guest inode should remain stable.
@@ -176,7 +232,15 @@ fn test_hook_observer_sees_profiled_dispatch() {
     // Create a file. This triggers the dispatch pipeline.
     let (entry, handle) = sb.fuse_create_root("hook_test.txt").unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // The after_dispatch hook may not fire for create (it depends on whether create
@@ -233,7 +297,15 @@ fn test_profile_symmetric_memfs_memfs() {
     let data = sb.fuse_read(e_a.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"a_data");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), e_a.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            e_a.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // Read from backend_b-only file (default policy reads backend_b directly).
@@ -241,7 +313,15 @@ fn test_profile_symmetric_memfs_memfs() {
     let data = sb.fuse_read(e_b.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"b_data");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), e_b.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            e_b.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // With BackendBFirst precedence (default), the shared file lookup finds backend_b's
@@ -249,10 +329,19 @@ fn test_profile_symmetric_memfs_memfs() {
     let handle = sb.fuse_open(e_shared.inode, libc::O_RDONLY as u32).unwrap();
     let data = sb.fuse_read(e_shared.inode, handle, 4096, 0).unwrap();
     assert_eq!(
-        &data[..], b"from_b",
+        &data[..],
+        b"from_b",
         "with BackendBFirst precedence (default), shared file should return backend_b content"
     );
     sb.fs
-        .release(DualFsTestSandbox::ctx(), e_shared.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            e_shared.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }

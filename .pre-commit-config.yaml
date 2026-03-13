@@ -54,7 +54,7 @@ repos:
     rev: v4.3.0
     hooks:
       - id: no-commit-to-branch
-        args: ["-b", "main"]
+        args: ["-b", "main", "-b", "microsandbox"]
       - id: check-merge-conflict
       - id: trailing-whitespace
       - id: end-of-file-fixer

@@ -3,9 +3,7 @@
 //! These functions operate on individual layer directories and are used by the
 //! lookup and readdir algorithms to implement overlay merge semantics.
 
-use std::ffi::CStr;
-use std::io;
-use std::os::fd::RawFd;
+use std::{ffi::CStr, io, os::fd::RawFd};
 
 use crate::backends::shared::platform;
 

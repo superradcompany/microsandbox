@@ -6,8 +6,13 @@ use super::*;
 fn test_build_default() {
     let fs = MemFs::builder().build().unwrap();
     fs.init(FsOptions::empty()).unwrap();
-    let (st, _) = fs.getattr(MemFsTestSandbox::ctx(), ROOT_INODE, None).unwrap();
-    assert_eq!(st.st_mode as u32 & libc::S_IFMT as u32, libc::S_IFDIR as u32);
+    let (st, _) = fs
+        .getattr(MemFsTestSandbox::ctx(), ROOT_INODE, None)
+        .unwrap();
+    assert_eq!(
+        st.st_mode as u32 & libc::S_IFMT as u32,
+        libc::S_IFDIR as u32
+    );
 }
 
 #[test]
@@ -78,7 +83,10 @@ fn test_init_no_writeback() {
 #[test]
 fn test_root_exists_after_init() {
     let sb = MemFsTestSandbox::new();
-    let (st, _) = sb.fs.getattr(MemFsTestSandbox::ctx(), ROOT_INODE, None).unwrap();
+    let (st, _) = sb
+        .fs
+        .getattr(MemFsTestSandbox::ctx(), ROOT_INODE, None)
+        .unwrap();
     let mode = st.st_mode as u32;
     assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFDIR as u32);
     assert_eq!(mode & 0o777, 0o755);
@@ -89,7 +97,10 @@ fn test_root_exists_after_init() {
 #[test]
 fn test_root_nlink() {
     let sb = MemFsTestSandbox::new();
-    let (st, _) = sb.fs.getattr(MemFsTestSandbox::ctx(), ROOT_INODE, None).unwrap();
+    let (st, _) = sb
+        .fs
+        .getattr(MemFsTestSandbox::ctx(), ROOT_INODE, None)
+        .unwrap();
     #[cfg(target_os = "linux")]
     assert_eq!(st.st_nlink, 2);
     #[cfg(target_os = "macos")]

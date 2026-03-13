@@ -1,18 +1,18 @@
 //! Statfs (merge both backends), lseek, fallocate, fsync, fsyncdir.
 
-use std::io;
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
-use super::hooks::{
-    DispatchStep, HookCtx, StepResult, decode_ok, handle_hook_decision, notify_observers,
-    run_decision_hooks,
+use super::{
+    DualFs,
+    hooks::{
+        DispatchStep, HookCtx, StepResult, decode_ok, handle_hook_decision, notify_observers,
+        run_decision_hooks,
+    },
+    lookup::get_node,
+    policy::{HintBag, OpKind, RequestCtx},
+    types::{DualHandle, FileKind, NodeState, ROOT_INODE},
 };
-use super::lookup::get_node;
-use super::policy::{HintBag, OpKind, RequestCtx};
-use super::types::{DualHandle, FileKind, NodeState, ROOT_INODE};
-use super::DualFs;
-use crate::backends::shared::init_binary;
-use crate::{Context, statvfs64};
+use crate::{Context, backends::shared::init_binary, statvfs64};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -69,17 +69,17 @@ pub(crate) fn do_statfs(fs: &DualFs, ctx: Context, _ino: u64) -> io::Result<stat
         st.f_bsize = unit;
         st.f_frsize = unit;
         st.f_blocks = to_units(ba_stat.f_blocks as u64, ba_stat.f_frsize)
-            .saturating_add(to_units(bb_stat.f_blocks as u64, bb_stat.f_frsize)) as u32;
+            .saturating_add(to_units(bb_stat.f_blocks as u64, bb_stat.f_frsize))
+            as u32;
         st.f_bfree = to_units(ba_stat.f_bfree as u64, ba_stat.f_frsize)
-            .saturating_add(to_units(bb_stat.f_bfree as u64, bb_stat.f_frsize)) as u32;
+            .saturating_add(to_units(bb_stat.f_bfree as u64, bb_stat.f_frsize))
+            as u32;
         st.f_bavail = to_units(ba_stat.f_bavail as u64, ba_stat.f_frsize)
-            .saturating_add(to_units(bb_stat.f_bavail as u64, bb_stat.f_frsize)) as u32;
-        st.f_files = (ba_stat.f_files as u64)
-            .saturating_add(bb_stat.f_files as u64) as u32;
-        st.f_ffree = (ba_stat.f_ffree as u64)
-            .saturating_add(bb_stat.f_ffree as u64) as u32;
-        st.f_favail = (ba_stat.f_favail as u64)
-            .saturating_add(bb_stat.f_favail as u64) as u32;
+            .saturating_add(to_units(bb_stat.f_bavail as u64, bb_stat.f_frsize))
+            as u32;
+        st.f_files = (ba_stat.f_files as u64).saturating_add(bb_stat.f_files as u64) as u32;
+        st.f_ffree = (ba_stat.f_ffree as u64).saturating_add(bb_stat.f_ffree as u64) as u32;
+        st.f_favail = (ba_stat.f_favail as u64).saturating_add(bb_stat.f_favail as u64) as u32;
         st.f_namemax = std::cmp::min(ba_stat.f_namemax, bb_stat.f_namemax);
     }
 
@@ -131,12 +131,16 @@ pub(crate) fn do_fsync(
             backend_a_inode,
             backend_a_handle,
             ..
-        } => fs.backend_a.fsync(ctx, *backend_a_inode, datasync, *backend_a_handle),
+        } => fs
+            .backend_a
+            .fsync(ctx, *backend_a_inode, datasync, *backend_a_handle),
         DualHandle::BackendB {
             backend_b_inode,
             backend_b_handle,
             ..
-        } => fs.backend_b.fsync(ctx, *backend_b_inode, datasync, *backend_b_handle),
+        } => fs
+            .backend_b
+            .fsync(ctx, *backend_b_inode, datasync, *backend_b_handle),
     };
 
     notify_observers(&fs.hooks, |h| {
@@ -222,12 +226,16 @@ pub(crate) fn do_lseek(
             backend_a_inode,
             backend_a_handle,
             ..
-        } => fs.backend_a.lseek(ctx, *backend_a_inode, *backend_a_handle, offset, whence),
+        } => fs
+            .backend_a
+            .lseek(ctx, *backend_a_inode, *backend_a_handle, offset, whence),
         DualHandle::BackendB {
             backend_b_inode,
             backend_b_handle,
             ..
-        } => fs.backend_b.lseek(ctx, *backend_b_inode, *backend_b_handle, offset, whence),
+        } => fs
+            .backend_b
+            .lseek(ctx, *backend_b_inode, *backend_b_handle, offset, whence),
     };
 
     notify_observers(&fs.hooks, |h| {
@@ -297,12 +305,26 @@ pub(crate) fn do_fallocate(
             backend_a_inode,
             backend_a_handle,
             ..
-        } => fs.backend_a.fallocate(ctx, *backend_a_inode, *backend_a_handle, mode, offset, length),
+        } => fs.backend_a.fallocate(
+            ctx,
+            *backend_a_inode,
+            *backend_a_handle,
+            mode,
+            offset,
+            length,
+        ),
         DualHandle::BackendB {
             backend_b_inode,
             backend_b_handle,
             ..
-        } => fs.backend_b.fallocate(ctx, *backend_b_inode, *backend_b_handle, mode, offset, length),
+        } => fs.backend_b.fallocate(
+            ctx,
+            *backend_b_inode,
+            *backend_b_handle,
+            mode,
+            offset,
+            length,
+        ),
     };
 
     notify_observers(&fs.hooks, |h| {

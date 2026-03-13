@@ -1,13 +1,15 @@
 //! Inode management: allocation, lookup, forget, stat building, capacity tracking.
 
-use std::io;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::{
+    io,
+    sync::{Arc, atomic::Ordering},
+};
 
-use super::MemFs;
-use super::types::{InodeContent, InodeMeta, MemNode, Timespec};
-use crate::backends::shared::platform;
-use crate::{Entry, stat64};
+use super::{
+    MemFs,
+    types::{InodeContent, InodeMeta, MemNode, Timespec},
+};
+use crate::{Entry, backends::shared::platform, stat64};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -21,8 +23,8 @@ pub(crate) fn current_time() -> Timespec {
     };
     unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut tp) };
     Timespec {
-        sec: tp.tv_sec as i64,
-        nsec: tp.tv_nsec as i64,
+        sec: tp.tv_sec,
+        nsec: tp.tv_nsec,
     }
 }
 
@@ -159,12 +161,12 @@ fn evict_inode(fs: &MemFs, ino: u64) {
     let removed = fs.nodes.write().unwrap().remove(&ino);
     if let Some(node) = removed {
         // Only release bytes if this is the last Arc holder (no open handles).
-        if Arc::strong_count(&node) == 1 {
-            if let InodeContent::RegularFile { ref data } = node.content {
-                let size = data.read().unwrap().len() as u64;
-                if size > 0 {
-                    release_bytes(fs, size);
-                }
+        if Arc::strong_count(&node) == 1
+            && let InodeContent::RegularFile { ref data } = node.content
+        {
+            let size = data.read().unwrap().len() as u64;
+            if size > 0 {
+                release_bytes(fs, size);
             }
         }
         fs.inode_count.fetch_sub(1, Ordering::Relaxed);

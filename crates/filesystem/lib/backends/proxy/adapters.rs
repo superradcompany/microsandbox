@@ -6,9 +6,7 @@
 //! `SliceReader` presents a `&[u8]` slice as a `ZeroCopyReader`,
 //! used to feed transformed data from the `on_write` hook to the inner backend.
 
-use std::fs::File;
-use std::io;
-use std::os::fd::AsRawFd;
+use std::{fs::File, io, os::fd::AsRawFd};
 
 use crate::{ZeroCopyReader, ZeroCopyWriter};
 

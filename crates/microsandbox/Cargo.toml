@@ -16,29 +16,29 @@ name = "microsandbox"
 path = "lib/lib.rs"
 
 [features]
-prebuilt = ["microsandbox-filesystem/prebuilt", "dep:ureq"]
+prebuilt = ["dep:ureq", "microsandbox-filesystem/prebuilt"]
 
 [dependencies]
-microsandbox-db = { path = "../db" }
-microsandbox-filesystem = { path = "../filesystem" }
-microsandbox-migration = { path = "../migration" }
-microsandbox-protocol = { path = "../protocol" }
-microsandbox-runtime = { path = "../runtime" }
-microsandbox-utils = { path = "../utils" }
 bytes.workspace = true
 chrono.workspace = true
 crossterm.workspace = true
 dirs.workspace = true
 futures.workspace = true
 libc.workspace = true
+microsandbox-db = { path = "../db" }
+microsandbox-filesystem = { path = "../filesystem" }
+microsandbox-migration = { path = "../migration" }
+microsandbox-protocol = { path = "../protocol" }
+microsandbox-runtime = { path = "../runtime" }
+microsandbox-utils = { path = "../utils" }
 nix = { workspace = true, features = ["process", "signal"] }
 reqwest.workspace = true
 scopeguard.workspace = true
 sea-orm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 typed-builder.workspace = true
 which.workspace = true

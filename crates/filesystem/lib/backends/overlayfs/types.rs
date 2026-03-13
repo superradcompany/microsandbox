@@ -3,11 +3,15 @@
 //! All core types used across overlay modules are defined here to avoid
 //! circular dependencies between modules.
 
-use std::collections::HashMap;
-use std::fs::File;
-use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::{Mutex, RwLock};
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    fs::File,
+    sync::{
+        Mutex, RwLock,
+        atomic::{AtomicBool, AtomicU64},
+    },
+    time::Duration,
+};
 
 use super::origin::LowerOriginId;
 

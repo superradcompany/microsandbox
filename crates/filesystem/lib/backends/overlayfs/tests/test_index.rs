@@ -1,7 +1,9 @@
 //! Tests for the sidecar index (MmapIndex) and index-accelerated overlay operations.
 
-use std::ffi::CString;
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::CString,
+    path::{Path, PathBuf},
+};
 
 use microsandbox_utils::index::{
     DIR_FLAG_OPAQUE, DIR_RECORD_IDX_NONE, ENTRY_FLAG_WHITEOUT, INDEX_MAGIC, INDEX_VERSION,
@@ -125,10 +127,7 @@ fn readdir_entries(fs: &OverlayFs, ino: u64) -> Vec<(Vec<u8>, u32)> {
     let (handle, _) = fs.opendir(ctx(), ino, 0).unwrap();
     let handle = handle.unwrap();
     let entries = fs.readdir(ctx(), ino, handle, 65536, 0).unwrap();
-    let result: Vec<(Vec<u8>, u32)> = entries
-        .iter()
-        .map(|e| (e.name.to_vec(), e.type_))
-        .collect();
+    let result: Vec<(Vec<u8>, u32)> = entries.iter().map(|e| (e.name.to_vec(), e.type_)).collect();
     fs.releasedir(ctx(), ino, 0, handle).unwrap();
     result
 }
@@ -274,10 +273,7 @@ fn test_find_entry_exists() {
 
 #[test]
 fn test_find_entry_missing() {
-    let data = IndexBuilder::new()
-        .dir("")
-        .file("", "bar", 0o644)
-        .build();
+    let data = IndexBuilder::new().dir("").file("", "bar", 0o644).build();
     let (_tmp, path) = write_index(&data);
     let idx = MmapIndex::open(&path).unwrap();
     let (_, dir) = idx.find_dir(b"").unwrap();
@@ -316,10 +312,7 @@ fn test_find_entry_binary_search_boundaries() {
 
 #[test]
 fn test_find_entry_single_entry_dir() {
-    let data = IndexBuilder::new()
-        .dir("")
-        .file("", "only", 0o644)
-        .build();
+    let data = IndexBuilder::new().dir("").file("", "only", 0o644).build();
     let (_tmp, path) = write_index(&data);
     let idx = MmapIndex::open(&path).unwrap();
     let (_, dir) = idx.find_dir(b"").unwrap();
@@ -389,10 +382,7 @@ fn test_is_opaque_false() {
 
 #[test]
 fn test_has_whiteout_true() {
-    let data = IndexBuilder::new()
-        .dir("")
-        .whiteout("", "deleted")
-        .build();
+    let data = IndexBuilder::new().dir("").whiteout("", "deleted").build();
     let (_tmp, path) = write_index(&data);
     let idx = MmapIndex::open(&path).unwrap();
     let (_, dir) = idx.find_dir(b"").unwrap();
@@ -575,7 +565,10 @@ fn test_builder_layer_no_index() {
 fn test_builder_layer_with_valid_index() {
     let tmp = tempfile::tempdir().unwrap();
     let (lower, upper, staging, index_path) = setup_dirs(&tmp);
-    IndexBuilder::new().dir("").build_to_file(&index_path).unwrap();
+    IndexBuilder::new()
+        .dir("")
+        .build_to_file(&index_path)
+        .unwrap();
     let fs = OverlayFs::builder()
         .layer_with_index(&lower, &index_path)
         .writable(&upper)
@@ -671,7 +664,8 @@ fn test_index_lookup_hit() {
     IndexBuilder::new()
         .dir("")
         .file("", "hello.txt", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let entry = fs.lookup(ctx(), ROOT_INODE, &cstr("hello.txt")).unwrap();
@@ -686,7 +680,10 @@ fn test_index_lookup_miss() {
     let (lower, upper, staging, index_path) = setup_dirs(&tmp);
 
     // Index lists no entries — lookup should fail.
-    IndexBuilder::new().dir("").build_to_file(&index_path).unwrap();
+    IndexBuilder::new()
+        .dir("")
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let result = fs.lookup(ctx(), ROOT_INODE, &cstr("nonexistent.txt"));
@@ -704,7 +701,8 @@ fn test_index_lookup_whiteout() {
     IndexBuilder::new()
         .dir("")
         .whiteout("", "deleted.txt")
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let result = fs.lookup(ctx(), ROOT_INODE, &cstr("deleted.txt"));
@@ -730,12 +728,14 @@ fn test_index_lookup_opaque_stops_search() {
     IndexBuilder::new()
         .dir("")
         .file("", "hidden.txt", 0o644)
-        .build_to_file(&index0).unwrap();
+        .build_to_file(&index0)
+        .unwrap();
 
     // Layer 1 (top) is opaque — should block search into layer 0.
     IndexBuilder::new()
         .opaque_dir("")
-        .build_to_file(&index1).unwrap();
+        .build_to_file(&index1)
+        .unwrap();
 
     let fs = OverlayFs::builder()
         .layer_with_index(&lower0, &index0)
@@ -767,7 +767,8 @@ fn test_index_lookup_nested_dir() {
         .subdir("a", "b", 0o755)
         .subdir("a/b", "c", 0o755)
         .file("a/b/c", "deep.txt", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let a = fs.lookup(ctx(), ROOT_INODE, &cstr("a")).unwrap();
@@ -791,7 +792,8 @@ fn test_index_lookup_dir_record_idx_caching() {
         .subdir("", "mydir", 0o755)
         .file("mydir", "file_a", 0o644)
         .file("mydir", "file_b", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let dir = fs.lookup(ctx(), ROOT_INODE, &cstr("mydir")).unwrap();
@@ -804,7 +806,10 @@ fn test_index_lookup_dir_record_idx_caching() {
         let nodes = fs.nodes.read().unwrap();
         let node = nodes.get(&dir.inode).unwrap();
         let cache = node.dir_record_cache.read().unwrap();
-        assert!(cache.is_some(), "dir_record_cache should be populated after first lookup");
+        assert!(
+            cache.is_some(),
+            "dir_record_cache should be populated after first lookup"
+        );
     }
 
     // Second lookup should use the cached DirRecord (still succeeds).
@@ -829,7 +834,8 @@ fn test_index_lookup_cross_layer() {
     IndexBuilder::new()
         .dir("")
         .file("", "bottom.txt", 0o644)
-        .build_to_file(&index0).unwrap();
+        .build_to_file(&index0)
+        .unwrap();
 
     // Layer 1 (top) has no entries — index should skip it.
     IndexBuilder::new().dir("").build_to_file(&index1).unwrap();
@@ -857,13 +863,16 @@ fn test_index_lookup_shadowed_by_upper() {
     IndexBuilder::new()
         .dir("")
         .file("", "file.txt", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let entry = fs.lookup(ctx(), ROOT_INODE, &cstr("file.txt")).unwrap();
 
     // Read the file — should get upper data.
-    let (handle, _) = fs.open(ctx(), entry.inode, false, libc::O_RDONLY as u32).unwrap();
+    let (handle, _) = fs
+        .open(ctx(), entry.inode, false, libc::O_RDONLY as u32)
+        .unwrap();
     let handle = handle.unwrap();
     let mut writer = MockZeroCopyWriter::new();
     let n = fs
@@ -885,7 +894,8 @@ fn test_index_lookup_upper_whiteout_over_indexed_lower() {
     IndexBuilder::new()
         .dir("")
         .file("", "victim.txt", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let result = fs.lookup(ctx(), ROOT_INODE, &cstr("victim.txt"));
@@ -903,7 +913,10 @@ fn test_index_lookup_absent_dir_not_indexed() {
     // Index describes root but has no entry for "known". The index is authoritative,
     // so the overlay won't fall back to syscalls — "known" returns ENOENT even though
     // it exists on disk.
-    IndexBuilder::new().dir("").build_to_file(&index_path).unwrap();
+    IndexBuilder::new()
+        .dir("")
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let result = fs.lookup(ctx(), ROOT_INODE, &cstr("known"));
@@ -932,7 +945,8 @@ fn test_index_lookup_matches_syscall_path() {
         .subdir("", "etc", 0o755)
         .file("", "hello.txt", 0o644)
         .file("etc", "passwd", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     // With index.
     let fs_idx = mount_indexed(&lower, &index_path, &upper1, &staging1);
@@ -991,7 +1005,8 @@ fn test_index_readdir_basic() {
         .file("", "delta", 0o644)
         .file("", "epsilon", 0o644)
         .file("", "gamma", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let names = readdir_names(&fs, ROOT_INODE);
@@ -1016,7 +1031,8 @@ fn test_index_readdir_skips_whiteouts() {
         .file("", "also_visible", 0o644)
         .whiteout("", "hidden")
         .file("", "visible", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let names = readdir_names(&fs, ROOT_INODE);
@@ -1035,11 +1051,15 @@ fn test_index_readdir_dedup_with_upper() {
     IndexBuilder::new()
         .dir("")
         .file("", "shared.txt", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let names = readdir_names(&fs, ROOT_INODE);
-    let count = names.iter().filter(|n| n.as_slice() == b"shared.txt").count();
+    let count = names
+        .iter()
+        .filter(|n| n.as_slice() == b"shared.txt")
+        .count();
     assert_eq!(count, 1, "shared.txt should appear exactly once");
 }
 
@@ -1053,7 +1073,8 @@ fn test_index_readdir_whiteout_masks_indexed_entry() {
     IndexBuilder::new()
         .dir("")
         .file("", "victim.txt", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let names = readdir_names(&fs, ROOT_INODE);
@@ -1072,7 +1093,8 @@ fn test_index_readdir_opaque_stops_lower() {
     IndexBuilder::new()
         .dir("")
         .file("", "lower_only.txt", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let names = readdir_names(&fs, ROOT_INODE);
@@ -1102,12 +1124,14 @@ fn test_index_readdir_multi_layer() {
         .dir("")
         .file("", "base.txt", 0o644)
         .file("", "shared.txt", 0o644)
-        .build_to_file(&index0).unwrap();
+        .build_to_file(&index0)
+        .unwrap();
     IndexBuilder::new()
         .dir("")
         .file("", "shared.txt", 0o644)
         .file("", "top.txt", 0o644)
-        .build_to_file(&index1).unwrap();
+        .build_to_file(&index1)
+        .unwrap();
 
     let fs = OverlayFs::builder()
         .layer_with_index(&lower0, &index0)
@@ -1122,7 +1146,10 @@ fn test_index_readdir_multi_layer() {
     assert!(names.iter().any(|n| n == b"base.txt"));
     assert!(names.iter().any(|n| n == b"top.txt"));
     // shared.txt should appear only once (top layer wins).
-    let count = names.iter().filter(|n| n.as_slice() == b"shared.txt").count();
+    let count = names
+        .iter()
+        .filter(|n| n.as_slice() == b"shared.txt")
+        .count();
     assert_eq!(count, 1);
 }
 
@@ -1139,7 +1166,8 @@ fn test_index_readdir_tombstones() {
         .file("", "tombstoned", 0o644)
         .tombstone("", "tombstoned")
         .file("", "visible", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let names = readdir_names(&fs, ROOT_INODE);
@@ -1158,7 +1186,8 @@ fn test_index_readdir_empty_dir() {
         .dir("")
         .dir("emptydir")
         .subdir("", "emptydir", 0o755)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let dir = fs.lookup(ctx(), ROOT_INODE, &cstr("emptydir")).unwrap();
@@ -1194,7 +1223,8 @@ fn test_index_readdir_matches_syscall_path() {
         .file("", "aaa", 0o644)
         .file("", "bbb", 0o644)
         .file("", "ccc", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs_idx = mount_indexed(&lower, &index_path, &upper1, &staging1);
     let fs_plain = mount_plain(&lower, &upper2, &staging2);
@@ -1300,7 +1330,8 @@ fn test_index_mixed_indexed_unindexed() {
     IndexBuilder::new()
         .dir("")
         .file("", "from_indexed.txt", 0o644)
-        .build_to_file(&index0).unwrap();
+        .build_to_file(&index0)
+        .unwrap();
 
     let fs = OverlayFs::builder()
         .layer_with_index(&lower0, &index0) // indexed
@@ -1312,8 +1343,12 @@ fn test_index_mixed_indexed_unindexed() {
     fs.init(FsOptions::empty()).unwrap();
 
     // Both files should be findable.
-    let e1 = fs.lookup(ctx(), ROOT_INODE, &cstr("from_indexed.txt")).unwrap();
-    let e2 = fs.lookup(ctx(), ROOT_INODE, &cstr("from_plain.txt")).unwrap();
+    let e1 = fs
+        .lookup(ctx(), ROOT_INODE, &cstr("from_indexed.txt"))
+        .unwrap();
+    let e2 = fs
+        .lookup(ctx(), ROOT_INODE, &cstr("from_plain.txt"))
+        .unwrap();
     assert_ne!(e1.inode, 0);
     assert_ne!(e2.inode, 0);
 }
@@ -1322,7 +1357,10 @@ fn test_index_mixed_indexed_unindexed() {
 fn test_index_does_not_affect_upper_ops() {
     let tmp = tempfile::tempdir().unwrap();
     let (lower, upper, staging, index_path) = setup_dirs(&tmp);
-    IndexBuilder::new().dir("").build_to_file(&index_path).unwrap();
+    IndexBuilder::new()
+        .dir("")
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
 
@@ -1343,8 +1381,19 @@ fn test_index_does_not_affect_upper_ops() {
 
     // Write to it.
     let mut reader = MockZeroCopyReader::new(b"hello".to_vec());
-    fs.write(ctx(), entry.inode, handle, &mut reader, 5, 0, None, false, false, 0)
-        .unwrap();
+    fs.write(
+        ctx(),
+        entry.inode,
+        handle,
+        &mut reader,
+        5,
+        0,
+        None,
+        false,
+        false,
+        0,
+    )
+    .unwrap();
 
     // Release and re-lookup.
     fs.release(ctx(), entry.inode, 0, handle, false, false, None)
@@ -1362,7 +1411,8 @@ fn test_index_copy_up_from_indexed_lower() {
     IndexBuilder::new()
         .dir("")
         .file("", "file.txt", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
 
@@ -1377,8 +1427,19 @@ fn test_index_copy_up_from_indexed_lower() {
 
     // Write new data.
     let mut reader = MockZeroCopyReader::new(b"modified".to_vec());
-    fs.write(ctx(), entry.inode, handle, &mut reader, 8, 0, None, false, false, 0)
-        .unwrap();
+    fs.write(
+        ctx(),
+        entry.inode,
+        handle,
+        &mut reader,
+        8,
+        0,
+        None,
+        false,
+        false,
+        0,
+    )
+    .unwrap();
 
     // Read back.
     let mut writer = MockZeroCopyWriter::new();
@@ -1407,7 +1468,8 @@ fn test_index_empty_check_truly_empty() {
         .dir("")
         .dir("emptydir")
         .subdir("", "emptydir", 0o755)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let dir = fs.lookup(ctx(), ROOT_INODE, &cstr("emptydir")).unwrap();
@@ -1428,7 +1490,8 @@ fn test_index_empty_check_has_entry() {
         .dir("notempty")
         .subdir("", "notempty", 0o755)
         .file("notempty", "file.txt", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let dir = fs.lookup(ctx(), ROOT_INODE, &cstr("notempty")).unwrap();
@@ -1448,7 +1511,8 @@ fn test_index_empty_check_only_whiteouts() {
         .dir("wh_only")
         .subdir("", "wh_only", 0o755)
         .whiteout("wh_only", "deleted")
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let dir = fs.lookup(ctx(), ROOT_INODE, &cstr("wh_only")).unwrap();
@@ -1473,7 +1537,8 @@ fn test_index_empty_check_entry_masked() {
         .dir("masked")
         .subdir("", "masked", 0o755)
         .file("masked", "file.txt", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let dir = fs.lookup(ctx(), ROOT_INODE, &cstr("masked")).unwrap();
@@ -1497,7 +1562,8 @@ fn test_index_empty_check_opaque_upper() {
         .dir("opq")
         .subdir("", "opq", 0o755)
         .file("opq", "lower_file.txt", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let dir = fs.lookup(ctx(), ROOT_INODE, &cstr("opq")).unwrap();
@@ -1515,7 +1581,10 @@ fn test_index_empty_check_opaque_upper() {
 fn test_overlay_path_root() {
     let tmp = tempfile::tempdir().unwrap();
     let (lower, upper, staging, index_path) = setup_dirs(&tmp);
-    IndexBuilder::new().dir("").build_to_file(&index_path).unwrap();
+    IndexBuilder::new()
+        .dir("")
+        .build_to_file(&index_path)
+        .unwrap();
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
 
     let nodes = fs.nodes.read().unwrap();
@@ -1534,7 +1603,8 @@ fn test_overlay_path_one_level() {
         .dir("")
         .dir("etc")
         .subdir("", "etc", 0o755)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let entry = fs.lookup(ctx(), ROOT_INODE, &cstr("etc")).unwrap();
@@ -1557,7 +1627,8 @@ fn test_overlay_path_nested() {
         .dir("usr/bin")
         .subdir("", "usr", 0o755)
         .subdir("usr", "bin", 0o755)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let usr = fs.lookup(ctx(), ROOT_INODE, &cstr("usr")).unwrap();
@@ -1583,7 +1654,8 @@ fn test_index_stale_single_layer() {
     IndexBuilder::new()
         .dir("")
         .file("", "ghost.txt", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
     let result = fs.lookup(ctx(), ROOT_INODE, &cstr("ghost.txt"));
@@ -1613,7 +1685,8 @@ fn test_index_stale_fallthrough_to_next_layer() {
     IndexBuilder::new()
         .dir("")
         .file("", "real.txt", 0o644)
-        .build_to_file(&index1).unwrap();
+        .build_to_file(&index1)
+        .unwrap();
 
     let fs = OverlayFs::builder()
         .layer(&lower0) // bottom, no index
@@ -1647,7 +1720,8 @@ fn test_index_without_root_dir_record() {
     IndexBuilder::new()
         .dir("etc")
         .file("etc", "hosts", 0o644)
-        .build_to_file(&index_path).unwrap();
+        .build_to_file(&index_path)
+        .unwrap();
 
     let fs = mount_indexed(&lower, &index_path, &upper, &staging);
 
@@ -1656,7 +1730,10 @@ fn test_index_without_root_dir_record() {
         let nodes = fs.nodes.read().unwrap();
         let root_node = nodes.get(&ROOT_INODE).unwrap();
         let cache = root_node.dir_record_cache.read().unwrap();
-        assert!(cache.is_none(), "root cache should be None when index has no root dir");
+        assert!(
+            cache.is_none(),
+            "root cache should be None when index has no root dir"
+        );
     }
 
     // "top.txt" exists on disk but the index has no root dir, so the index

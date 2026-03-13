@@ -15,22 +15,18 @@
 //! On Linux, symlinks are file-backed (regular file with S_IFLNK in xattr).
 //! On macOS, real symlinks are used with xattr via O_SYMLINK.
 
-use std::ffi::CStr;
-use std::io;
-use std::os::fd::FromRawFd;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, RwLock};
+use std::{
+    ffi::CStr,
+    io,
+    os::fd::FromRawFd,
+    sync::{Arc, RwLock, atomic::Ordering},
+};
 
-use super::OverlayFs;
-use super::copy_up;
-use super::inode;
-use super::types::FileHandle;
-use super::whiteout;
-use crate::backends::shared::init_binary;
-use crate::backends::shared::name_validation;
-use crate::backends::shared::platform;
-use crate::backends::shared::stat_override;
-use crate::{Context, Entry, Extensions, OpenOptions};
+use super::{OverlayFs, copy_up, inode, types::FileHandle, whiteout};
+use crate::{
+    Context, Entry, Extensions, OpenOptions,
+    backends::shared::{init_binary, name_validation, platform, stat_override},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -98,15 +94,18 @@ pub(crate) fn do_create(
 
     // Reopen for the handle — strip O_CREAT since the file already exists.
     let open_fd = inode::open_node_fd(fs, entry.inode, open_flags & !libc::O_CREAT)?;
-    let fd_guard = scopeguard::guard(open_fd, |fd| unsafe { libc::close(fd); });
+    let fd_guard = scopeguard::guard(open_fd, |fd| unsafe {
+        libc::close(fd);
+    });
 
     // kill_priv handling.
-    if kill_priv && (open_flags & libc::O_TRUNC != 0) {
-        if let Ok(Some(ovr)) = stat_override::get_override(*fd_guard) {
-            let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
-            if new_mode != ovr.mode {
-                stat_override::set_override(*fd_guard, ovr.uid, ovr.gid, new_mode, ovr.rdev)?;
-            }
+    if kill_priv
+        && (open_flags & libc::O_TRUNC != 0)
+        && let Ok(Some(ovr)) = stat_override::get_override(*fd_guard)
+    {
+        let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+        if new_mode != ovr.mode {
+            stat_override::set_override(*fd_guard, ovr.uid, ovr.gid, new_mode, ovr.rdev)?;
         }
     }
 
@@ -388,7 +387,10 @@ pub(crate) fn do_link(
 
     #[cfg(target_os = "macos")]
     {
-        if let super::types::NodeState::Upper { ino: node_ino, dev, .. } = &*state {
+        if let super::types::NodeState::Upper {
+            ino: node_ino, dev, ..
+        } = &*state
+        {
             let src_path = format!("/.vol/{dev}/{node_ino}\0");
             let ret = unsafe {
                 libc::linkat(

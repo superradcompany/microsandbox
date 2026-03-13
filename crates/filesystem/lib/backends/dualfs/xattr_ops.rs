@@ -1,14 +1,14 @@
 //! Extended attribute operations: getxattr, listxattr, setxattr, removexattr.
 
-use std::ffi::CStr;
-use std::io;
+use std::{ffi::CStr, io};
 
-use super::lookup::{backend, get_node, mark_metadata_authority, resolve_active_backend_inode};
-use super::policy::{DualNamespaceView, HintBag, OpKind, RequestCtx};
-use super::types::BackendId;
-use super::DualFs;
-use crate::backends::shared::init_binary;
-use crate::{Context, GetxattrReply, ListxattrReply};
+use super::{
+    DualFs,
+    lookup::{backend, get_node, mark_metadata_authority, resolve_active_backend_inode},
+    policy::{DualNamespaceView, HintBag, OpKind, RequestCtx},
+    types::BackendId,
+};
+use crate::{Context, GetxattrReply, ListxattrReply, backends::shared::init_binary};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -82,10 +82,10 @@ pub(crate) fn do_setxattr(
 
     // Materialize if needed.
     let current_backend = node.state.read().unwrap().current_backend();
-    if let Some(current) = current_backend {
-        if current != target {
-            super::materialize::do_materialize(fs, ctx, ino, current, target)?;
-        }
+    if let Some(current) = current_backend
+        && current != target
+    {
+        super::materialize::do_materialize(fs, ctx, ino, current, target)?;
     }
 
     let target_inode = super::lookup::resolve_backend_inode(&fs.state, ino, target)
@@ -98,12 +98,7 @@ pub(crate) fn do_setxattr(
 }
 
 /// Handle removexattr. Full pipeline with policy routing.
-pub(crate) fn do_removexattr(
-    fs: &DualFs,
-    ctx: Context,
-    ino: u64,
-    name: &CStr,
-) -> io::Result<()> {
+pub(crate) fn do_removexattr(fs: &DualFs, ctx: Context, ino: u64, name: &CStr) -> io::Result<()> {
     if ino == init_binary::INIT_INODE {
         return Err(io::Error::from_raw_os_error(libc::EACCES));
     }
@@ -125,10 +120,10 @@ pub(crate) fn do_removexattr(
 
     // Materialize if needed.
     let current_backend = node.state.read().unwrap().current_backend();
-    if let Some(current) = current_backend {
-        if current != target {
-            super::materialize::do_materialize(fs, ctx, ino, current, target)?;
-        }
+    if let Some(current) = current_backend
+        && current != target
+    {
+        super::materialize::do_materialize(fs, ctx, ino, current, target)?;
     }
 
     let target_inode = super::lookup::resolve_backend_inode(&fs.state, ino, target)

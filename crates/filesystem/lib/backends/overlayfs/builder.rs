@@ -9,19 +9,25 @@
 //!     .build()?
 //! ```
 
-use std::collections::BTreeMap;
-use std::fs::File;
-use std::io;
-use std::os::fd::FromRawFd;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::RwLock;
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io,
+    os::fd::FromRawFd,
+    path::PathBuf,
+    sync::{
+        RwLock,
+        atomic::{AtomicBool, AtomicU64},
+    },
+    time::Duration,
+};
 
-use super::OverlayFs;
-use microsandbox_utils::index::MmapIndex;
-use super::types::{CachePolicy, Layer, NameTable, OverlayConfig};
+use super::{
+    OverlayFs,
+    types::{CachePolicy, Layer, NameTable, OverlayConfig},
+};
 use crate::backends::shared::{init_binary, platform, stat_override};
+use microsandbox_utils::index::MmapIndex;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -274,12 +280,8 @@ impl OverlayFsBuilder {
 
 /// Open a directory path as an fd.
 fn open_dir(path: &std::path::Path) -> io::Result<File> {
-    let cpath = std::ffi::CString::new(
-        path.to_str()
-            .ok_or_else(platform::einval)?
-            .as_bytes(),
-    )
-    .map_err(|_| platform::einval())?;
+    let cpath = std::ffi::CString::new(path.to_str().ok_or_else(platform::einval)?.as_bytes())
+        .map_err(|_| platform::einval())?;
 
     let fd = unsafe {
         libc::open(

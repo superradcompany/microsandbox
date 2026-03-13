@@ -22,17 +22,12 @@ mod test_special_ops;
 mod test_whiteouts;
 mod test_xattr;
 
-use std::ffi::CString;
-use std::fs::File;
-use std::io;
-use std::os::fd::AsRawFd;
-use std::sync::Arc;
+use std::{ffi::CString, fs::File, io, os::fd::AsRawFd, sync::Arc};
 
 use super::*;
-use crate::backends::memfs::MemFs;
 use crate::{
     Context, DynFileSystem, Entry, Extensions, FsOptions, GetxattrReply, ListxattrReply,
-    SetattrValid, ZeroCopyReader, ZeroCopyWriter,
+    SetattrValid, ZeroCopyReader, ZeroCopyWriter, backends::memfs::MemFs,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -167,9 +162,7 @@ impl DualFsTestSandbox {
     fn with_hooks(hooks_list: Vec<Arc<dyn hooks::DualDispatchHook>>) -> Self {
         let backend_a = MemFs::builder().build().unwrap();
         let backend_b = MemFs::builder().build().unwrap();
-        let mut builder = DualFs::builder()
-            .backend_a(backend_a)
-            .backend_b(backend_b);
+        let mut builder = DualFs::builder().backend_a(backend_a).backend_b(backend_b);
         for h in hooks_list {
             builder = builder.hook(h);
         }
@@ -299,12 +292,7 @@ impl DualFsTestSandbox {
     }
 
     /// Create a file in the given parent with content, then release the handle.
-    fn create_file_with_content(
-        &self,
-        parent: u64,
-        name: &str,
-        data: &[u8],
-    ) -> io::Result<u64> {
+    fn create_file_with_content(&self, parent: u64, name: &str, data: &[u8]) -> io::Result<u64> {
         let (entry, handle) = self.fuse_create(parent, name, 0o644)?;
         self.fuse_write(entry.inode, handle, data, 0)?;
         self.fs

@@ -23,23 +23,25 @@ mod special;
 pub mod types;
 mod xattr_ops;
 
-use std::ffi::CStr;
-use std::fs::File;
-use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    ffi::CStr,
+    fs::File,
+    io,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use hooks::DualDispatchHook;
 use policy::DualDispatchPolicy;
-use types::{
-    AtomicBackendId, BackendId, DualState, FileKind, GuestNode, NodeState, ROOT_INODE,
-};
+use types::{AtomicBackendId, BackendId, DualState, FileKind, GuestNode, NodeState, ROOT_INODE};
 
-use crate::backends::shared::init_binary;
 use crate::{
     Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions, GetxattrReply, ListxattrReply,
-    OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter, stat64, statvfs64,
+    OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter, backends::shared::init_binary,
+    stat64, statvfs64,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -121,22 +123,31 @@ impl DynFileSystem for DualFs {
             && child_support.contains(FsOptions::WRITEBACK_CACHE)
         {
             opts |= FsOptions::WRITEBACK_CACHE;
-            self.state
-                .writeback
-                .store(true, Ordering::Relaxed);
+            self.state.writeback.store(true, Ordering::Relaxed);
         }
 
         // Create staging directories in both backends.
-        let staging_name =
-            std::ffi::CString::new(STAGING_DIR_NAME).unwrap();
+        let staging_name = std::ffi::CString::new(STAGING_DIR_NAME).unwrap();
 
         // Get root inodes from both backends.
         let ba_root_entry = self
             .backend_a
-            .lookup(Context { uid: 0, gid: 0, pid: 0 }, 1, &staging_name)
+            .lookup(
+                Context {
+                    uid: 0,
+                    gid: 0,
+                    pid: 0,
+                },
+                1,
+                &staging_name,
+            )
             .or_else(|_| {
                 self.backend_a.mkdir(
-                    Context { uid: 0, gid: 0, pid: 0 },
+                    Context {
+                        uid: 0,
+                        gid: 0,
+                        pid: 0,
+                    },
                     1,
                     &staging_name,
                     0o700,
@@ -147,10 +158,22 @@ impl DynFileSystem for DualFs {
 
         let bb_root_entry = self
             .backend_b
-            .lookup(Context { uid: 0, gid: 0, pid: 0 }, 1, &staging_name)
+            .lookup(
+                Context {
+                    uid: 0,
+                    gid: 0,
+                    pid: 0,
+                },
+                1,
+                &staging_name,
+            )
             .or_else(|_| {
                 self.backend_b.mkdir(
-                    Context { uid: 0, gid: 0, pid: 0 },
+                    Context {
+                        uid: 0,
+                        gid: 0,
+                        pid: 0,
+                    },
                     1,
                     &staging_name,
                     0o700,
@@ -307,13 +330,7 @@ impl DynFileSystem for DualFs {
         remove_ops::do_rename(self, ctx, olddir, oldname, newdir, newname, flags)
     }
 
-    fn link(
-        &self,
-        ctx: Context,
-        ino: u64,
-        newparent: u64,
-        newname: &CStr,
-    ) -> io::Result<Entry> {
+    fn link(&self, ctx: Context, ino: u64, newparent: u64, newname: &CStr) -> io::Result<Entry> {
         create_ops::do_link(self, ctx, ino, newparent, newname)
     }
 
@@ -339,7 +356,9 @@ impl DynFileSystem for DualFs {
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<(Entry, Option<u64>, OpenOptions)> {
-        create_ops::do_create(self, ctx, parent, name, mode, kill_priv, flags, umask, extensions)
+        create_ops::do_create(
+            self, ctx, parent, name, mode, kill_priv, flags, umask, extensions,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -417,7 +436,16 @@ impl DynFileSystem for DualFs {
         flock_release: bool,
         lock_owner: Option<u64>,
     ) -> io::Result<()> {
-        file_ops::do_release(self, ctx, ino, flags, handle, flush, flock_release, lock_owner)
+        file_ops::do_release(
+            self,
+            ctx,
+            ino,
+            flags,
+            handle,
+            flush,
+            flock_release,
+            lock_owner,
+        )
     }
 
     fn statfs(&self, ctx: Context, ino: u64) -> io::Result<statvfs64> {

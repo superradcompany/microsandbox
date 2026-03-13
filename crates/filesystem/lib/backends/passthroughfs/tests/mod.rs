@@ -17,11 +17,7 @@ mod test_special_ops;
 mod test_vol_lookup;
 mod test_xattr_ops;
 
-use std::ffi::CString;
-use std::fs::File;
-use std::io;
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::{ffi::CString, fs::File, io, os::fd::AsRawFd, path::PathBuf};
 
 use tempfile::TempDir;
 

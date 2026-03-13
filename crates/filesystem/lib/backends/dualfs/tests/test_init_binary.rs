@@ -28,13 +28,26 @@ fn test_init_krun_read() {
     let sb = DualFsTestSandbox::new();
     let (handle, _opts) = sb
         .fs
-        .open(DualFsTestSandbox::ctx(), INIT_INODE, false, libc::O_RDONLY as u32)
+        .open(
+            DualFsTestSandbox::ctx(),
+            INIT_INODE,
+            false,
+            libc::O_RDONLY as u32,
+        )
         .unwrap();
     let handle = handle.unwrap();
     let data = sb.fuse_read(INIT_INODE, handle, 4096, 0).unwrap();
     assert!(!data.is_empty(), "init.krun should return data on read");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), INIT_INODE, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            INIT_INODE,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -43,7 +56,12 @@ fn test_init_krun_write_fails() {
     let sb = DualFsTestSandbox::new();
     let (handle, _opts) = sb
         .fs
-        .open(DualFsTestSandbox::ctx(), INIT_INODE, false, libc::O_RDONLY as u32)
+        .open(
+            DualFsTestSandbox::ctx(),
+            INIT_INODE,
+            false,
+            libc::O_RDONLY as u32,
+        )
         .unwrap();
     let handle = handle.unwrap();
     let mut reader = MockZeroCopyReader::new(vec![0u8; 10]);
@@ -61,7 +79,15 @@ fn test_init_krun_write_fails() {
     );
     DualFsTestSandbox::assert_errno(result, LINUX_EACCES);
     sb.fs
-        .release(DualFsTestSandbox::ctx(), INIT_INODE, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            INIT_INODE,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 

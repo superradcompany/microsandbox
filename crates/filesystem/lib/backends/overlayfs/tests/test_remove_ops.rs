@@ -42,11 +42,7 @@ fn test_unlink_lower_lookup_enoent() {
     });
     sb.lookup_root("gone.txt").unwrap();
     sb.fs
-        .unlink(
-            sb.ctx(),
-            ROOT_INODE,
-            &OverlayTestSandbox::cstr("gone.txt"),
-        )
+        .unlink(sb.ctx(), ROOT_INODE, &OverlayTestSandbox::cstr("gone.txt"))
         .unwrap();
     let result = sb.lookup_root("gone.txt");
     OverlayTestSandbox::assert_errno(result, LINUX_ENOENT);
@@ -77,11 +73,7 @@ fn test_rmdir_upper_empty() {
     let sb = OverlayTestSandbox::new();
     sb.fuse_mkdir_root("empty_dir").unwrap();
     sb.fs
-        .rmdir(
-            sb.ctx(),
-            ROOT_INODE,
-            &OverlayTestSandbox::cstr("empty_dir"),
-        )
+        .rmdir(sb.ctx(), ROOT_INODE, &OverlayTestSandbox::cstr("empty_dir"))
         .unwrap();
     let result = sb.lookup_root("empty_dir");
     OverlayTestSandbox::assert_errno(result, LINUX_ENOENT);
@@ -94,11 +86,7 @@ fn test_rmdir_lower_empty() {
     });
     sb.lookup_root("lower_dir").unwrap();
     sb.fs
-        .rmdir(
-            sb.ctx(),
-            ROOT_INODE,
-            &OverlayTestSandbox::cstr("lower_dir"),
-        )
+        .rmdir(sb.ctx(), ROOT_INODE, &OverlayTestSandbox::cstr("lower_dir"))
         .unwrap();
     let result = sb.lookup_root("lower_dir");
     OverlayTestSandbox::assert_errno(result, LINUX_ENOENT);

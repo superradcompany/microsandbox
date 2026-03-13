@@ -32,10 +32,7 @@ fn test_build_no_staging_dir_fails() {
     let upper = tmp.path().join("upper");
     std::fs::create_dir(&lower).unwrap();
     std::fs::create_dir(&upper).unwrap();
-    let result = OverlayFs::builder()
-        .layer(&lower)
-        .writable(&upper)
-        .build();
+    let result = OverlayFs::builder().layer(&lower).writable(&upper).build();
     assert!(result.is_err(), "should fail without staging dir");
 }
 

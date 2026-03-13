@@ -1,14 +1,38 @@
 //! Log file management with rotation for capturing VM console output.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+};
+
+use serde::{Deserialize, Serialize};
 
 use crate::RuntimeResult;
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// CLI-selectable tracing verbosity level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    /// Emit only error logs.
+    Error,
+
+    /// Emit warning and error logs.
+    Warn,
+
+    /// Emit info, warning, and error logs.
+    Info,
+
+    /// Emit debug and higher-severity logs.
+    Debug,
+
+    /// Emit trace and higher-severity logs.
+    Trace,
+}
 
 /// A simple rotating log writer.
 ///
@@ -38,6 +62,30 @@ const MAX_ROTATED_FILES: u32 = 3;
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl LogLevel {
+    /// Return the CLI flag corresponding to this level.
+    pub const fn as_cli_flag(self) -> &'static str {
+        match self {
+            Self::Error => "--error",
+            Self::Warn => "--warn",
+            Self::Info => "--info",
+            Self::Debug => "--debug",
+            Self::Trace => "--trace",
+        }
+    }
+
+    /// Return the tracing level corresponding to this selection.
+    pub const fn as_tracing_level(self) -> tracing::Level {
+        match self {
+            Self::Error => tracing::Level::ERROR,
+            Self::Warn => tracing::Level::WARN,
+            Self::Info => tracing::Level::INFO,
+            Self::Debug => tracing::Level::DEBUG,
+            Self::Trace => tracing::Level::TRACE,
+        }
+    }
+}
 
 impl RotatingLog {
     /// Create a new rotating log writer.
@@ -105,5 +153,23 @@ impl RotatingLog {
         self.written = 0;
 
         Ok(())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::LogLevel;
+
+    #[test]
+    fn test_log_level_cli_flags() {
+        assert_eq!(LogLevel::Error.as_cli_flag(), "--error");
+        assert_eq!(LogLevel::Warn.as_cli_flag(), "--warn");
+        assert_eq!(LogLevel::Info.as_cli_flag(), "--info");
+        assert_eq!(LogLevel::Debug.as_cli_flag(), "--debug");
+        assert_eq!(LogLevel::Trace.as_cli_flag(), "--trace");
     }
 }

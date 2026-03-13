@@ -28,6 +28,47 @@ build-agentd:
     docker cp "$id:/agentd" build/agentd
     touch build/agentd
 
+# Check for libkrunfw and build it only if not found in build/, ~/.microsandbox/lib/, or system paths.
+[linux]
+_ensure-libkrunfw:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Check build/ directory.
+    if [ -f build/libkrunfw.so.{{ LIBKRUNFW_VERSION }} ]; then
+        echo "Found libkrunfw in build/"
+        exit 0
+    fi
+    # Check ~/.microsandbox/lib/.
+    if [ -f ~/.microsandbox/lib/libkrunfw.so.{{ LIBKRUNFW_VERSION }} ]; then
+        echo "Found libkrunfw in ~/.microsandbox/lib/"
+        exit 0
+    fi
+    # Check system library paths via ldconfig.
+    if ldconfig -p 2>/dev/null | grep -q libkrunfw; then
+        echo "Found libkrunfw in system library paths"
+        exit 0
+    fi
+    echo "libkrunfw not found — building from source..."
+    just build-libkrunfw
+
+# Check for libkrunfw and build it only if not found in build/, ~/.microsandbox/lib/, or system paths.
+[macos]
+_ensure-libkrunfw:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Check build/ directory.
+    if [ -f build/libkrunfw.{{ LIBKRUNFW_ABI }}.dylib ]; then
+        echo "Found libkrunfw in build/"
+        exit 0
+    fi
+    # Check ~/.microsandbox/lib/.
+    if [ -f ~/.microsandbox/lib/libkrunfw.{{ LIBKRUNFW_ABI }}.dylib ]; then
+        echo "Found libkrunfw in ~/.microsandbox/lib/"
+        exit 0
+    fi
+    echo "libkrunfw not found — building from source..."
+    just build-libkrunfw
+
 # Build libkrunfw on Linux. Requires: kernel build dependencies (gcc, make, flex, bison, etc.).
 [linux]
 build-libkrunfw:
@@ -56,16 +97,16 @@ build-libkrunfw:
     cd build
     ln -sf libkrunfw.{{ LIBKRUNFW_ABI }}.dylib libkrunfw.dylib
 
-# Build the msb CLI binary (release mode). Rebuilds agentd first if needed.
+# Build the msb CLI binary (release mode). Rebuilds agentd and ensures libkrunfw is available.
 [linux]
-build: build-agentd
+build: build-agentd _ensure-libkrunfw
     cargo build --release -p microsandbox-cli
     mkdir -p build
     cp target/release/msb build/msb
 
-# Build and sign the msb CLI binary (release mode). Rebuilds agentd first if needed.
+# Build and sign the msb CLI binary (release mode). Rebuilds agentd and ensures libkrunfw is available.
 [macos]
-build: build-agentd
+build: build-agentd _ensure-libkrunfw
     cargo build --release -p microsandbox-cli
     mkdir -p build
     cp target/release/msb build/msb

@@ -2,10 +2,11 @@
 //!
 //! These types are referenced by [`SandboxConfig`](super::SandboxConfig).
 
-use std::io;
-use std::path::PathBuf;
+use std::{io, path::PathBuf};
 
-use microsandbox_filesystem::{AccessMode, DynFileSystem, PassthroughConfig, PassthroughFs, ProxyFs};
+use microsandbox_filesystem::{
+    AccessMode, DynFileSystem, PassthroughConfig, PassthroughFs, ProxyFs,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::size::Mebibytes;
@@ -23,6 +24,28 @@ pub enum RootfsSource {
     /// Use an OCI image reference (e.g. `python:3.12`).
     Oci(String),
 }
+
+/// Intermediate type for parsing user input into a [`RootfsSource`].
+///
+/// Accepts `&str`, `String`, or `PathBuf` and resolves to the correct
+/// [`RootfsSource`] variant:
+///
+/// - **`PathBuf`** → always [`RootfsSource::Bind`].
+/// - **`&str` / `String`** → local path if prefixed with `/`, `./`, or `../`;
+///   otherwise [`RootfsSource::Oci`].
+///
+/// Disk image formats (`.qcow2`, `.raw`, `.vmdk`) are detected but not yet
+/// supported and will return an error from [`into_rootfs_source`](Self::into_rootfs_source).
+pub enum ImageSource {
+    /// A string that needs to be resolved.
+    Text(String),
+
+    /// An explicit path (always local).
+    Path(PathBuf),
+}
+
+/// Extensions that indicate unsupported disk image formats.
+const UNSUPPORTED_DISK_IMAGE_EXTENSIONS: &[&str] = &["qcow2", "raw", "vmdk"];
 
 /// A volume mount specification for a sandbox.
 pub enum VolumeMount {
@@ -77,6 +100,7 @@ pub enum VolumeMount {
 /// the builder produces a [`VolumeMount::Backend`] with a [`ProxyFs`]-wrapped
 /// backend. Otherwise it produces a [`VolumeMount::Bind`], [`VolumeMount::Named`],
 /// or [`VolumeMount::Tmpfs`].
+#[allow(clippy::type_complexity)]
 pub struct MountBuilder {
     guest: String,
     mount: MountKind,
@@ -260,8 +284,8 @@ impl MountBuilder {
     /// Build a [`VolumeMount::Backend`] with a [`ProxyFs`]-wrapped backend.
     fn build_backend(self) -> crate::MicrosandboxResult<VolumeMount> {
         let root_dir = match self.mount {
-            MountKind::Bind(ref host) => host.clone(),
-            MountKind::Named(ref name) => crate::config::config().volumes_dir().join(name),
+            MountKind::Bind(host) => host,
+            MountKind::Named(name) => crate::config::config().volumes_dir().join(name),
             MountKind::Tmpfs => {
                 return Err(crate::MicrosandboxError::InvalidConfig(
                     "hooks are not supported on tmpfs mounts (tmpfs is handled by the guest kernel)"
@@ -281,10 +305,9 @@ impl MountBuilder {
             ..Default::default()
         };
         let inner = PassthroughFs::new(cfg).map_err(|e| {
-            crate::MicrosandboxError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                format!("failed to create passthrough backend: {e}"),
-            ))
+            crate::MicrosandboxError::Io(io::Error::other(format!(
+                "failed to create passthrough backend: {e}"
+            )))
         })?;
 
         // Wrap in ProxyFs with hooks.
@@ -298,7 +321,9 @@ impl MountBuilder {
         if let Some(hook) = self.on_write {
             proxy_builder = proxy_builder.on_write(hook);
         }
-        let proxy = proxy_builder.build().map_err(crate::MicrosandboxError::Io)?;
+        let proxy = proxy_builder
+            .build()
+            .map_err(crate::MicrosandboxError::Io)?;
 
         Ok(VolumeMount::Backend {
             guest: self.guest,
@@ -326,6 +351,46 @@ impl VolumeMount {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods: ImageSource
+//--------------------------------------------------------------------------------------------------
+
+impl ImageSource {
+    /// Resolve into a [`RootfsSource`].
+    ///
+    /// Returns an error for unsupported disk image formats (`.qcow2`, `.raw`, `.vmdk`).
+    pub fn into_rootfs_source(self) -> crate::MicrosandboxResult<RootfsSource> {
+        match self {
+            Self::Path(path) => {
+                Self::check_unsupported_extension(path.to_string_lossy().as_ref())?;
+                Ok(RootfsSource::Bind(path))
+            }
+            Self::Text(s) => {
+                if s.starts_with('/') || s.starts_with("./") || s.starts_with("../") {
+                    Self::check_unsupported_extension(&s)?;
+                    Ok(RootfsSource::Bind(PathBuf::from(s)))
+                } else {
+                    Ok(RootfsSource::Oci(s))
+                }
+            }
+        }
+    }
+
+    /// Return an error if the path has an unsupported disk image extension.
+    fn check_unsupported_extension(path: &str) -> crate::MicrosandboxResult<()> {
+        if let Some(ext) = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            && UNSUPPORTED_DISK_IMAGE_EXTENSIONS.contains(&ext)
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "disk image format '.{ext}' is not yet supported: {path}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
@@ -335,21 +400,21 @@ impl Default for RootfsSource {
     }
 }
 
-impl From<&str> for RootfsSource {
+impl From<&str> for ImageSource {
     fn from(s: &str) -> Self {
-        Self::Oci(s.to_string())
+        Self::Text(s.to_string())
     }
 }
 
-impl From<String> for RootfsSource {
+impl From<String> for ImageSource {
     fn from(s: String) -> Self {
-        Self::Oci(s)
+        Self::Text(s)
     }
 }
 
-impl From<PathBuf> for RootfsSource {
+impl From<PathBuf> for ImageSource {
     fn from(p: PathBuf) -> Self {
-        Self::Bind(p)
+        Self::Path(p)
     }
 }
 

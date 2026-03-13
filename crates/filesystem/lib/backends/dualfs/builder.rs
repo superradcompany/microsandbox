@@ -2,15 +2,15 @@
 
 use std::sync::Arc;
 
-use super::hooks::DualDispatchHook;
-use super::policies::ReadBackendBWriteBackendA;
-use super::policy::DualDispatchPolicy;
-use super::types::{CachePolicy, DualFsConfig, DualState};
-use crate::backends::shared::init_binary;
-use crate::DynFileSystem;
+use super::{
+    hooks::DualDispatchHook,
+    policies::ReadBackendBWriteBackendA,
+    policy::DualDispatchPolicy,
+    types::{CachePolicy, DualFsConfig, DualState},
+};
+use crate::{DynFileSystem, backends::shared::init_binary};
 
-use std::io;
-use std::time::Duration;
+use std::{io, time::Duration};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -106,12 +106,12 @@ impl DualFsBuilder {
 
     /// Build the `DualFs` backend.
     pub fn build(self) -> io::Result<super::DualFs> {
-        let backend_a = self.backend_a.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "backend_a is required")
-        })?;
-        let backend_b = self.backend_b.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "backend_b is required")
-        })?;
+        let backend_a = self
+            .backend_a
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "backend_a is required"))?;
+        let backend_b = self
+            .backend_b
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "backend_b is required"))?;
 
         let policy: Arc<dyn DualDispatchPolicy> = self
             .policy

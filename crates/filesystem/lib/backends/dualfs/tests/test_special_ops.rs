@@ -5,10 +5,20 @@ fn test_fsync() {
     let sb = DualFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("sync.txt").unwrap();
     sb.fuse_write(entry.inode, handle, b"data", 0).unwrap();
-    let result = sb.fs.fsync(DualFsTestSandbox::ctx(), entry.inode, false, handle);
+    let result = sb
+        .fs
+        .fsync(DualFsTestSandbox::ctx(), entry.inode, false, handle);
     assert!(result.is_ok(), "fsync should succeed");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -21,10 +31,20 @@ fn test_fsync_handle_bound_dispatch() {
     let entry = sb.lookup_root("b_sync.txt").unwrap();
     let handle = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     // fsync should dispatch to backend_b (handle-bound).
-    let result = sb.fs.fsync(DualFsTestSandbox::ctx(), entry.inode, false, handle);
+    let result = sb
+        .fs
+        .fsync(DualFsTestSandbox::ctx(), entry.inode, false, handle);
     assert!(result.is_ok(), "fsync on backend_b handle should succeed");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -39,9 +59,20 @@ fn test_fallocate() {
         .fs
         .getattr(DualFsTestSandbox::ctx(), entry.inode, None)
         .unwrap();
-    assert!(st.st_size >= 1024, "file size should be at least 1024 after fallocate");
+    assert!(
+        st.st_size >= 1024,
+        "file size should be at least 1024 after fallocate"
+    );
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -57,7 +88,15 @@ fn test_lseek() {
         .unwrap();
     assert_eq!(offset, 0);
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -94,7 +133,10 @@ fn test_statfs_policy_independent() {
     // statfs always merges both backends regardless of policy.
     let sb = DualFsTestSandbox::with_policy(BackendAOnly);
     let st = sb.fs.statfs(DualFsTestSandbox::ctx(), ROOT_INODE).unwrap();
-    assert!(st.f_bsize > 0, "statfs should work even with BackendAOnly policy");
+    assert!(
+        st.f_bsize > 0,
+        "statfs should work even with BackendAOnly policy"
+    );
     assert!(st.f_frsize > 0, "fragment size should be positive");
     #[cfg(target_os = "linux")]
     assert!(st.f_blocks > 0, "merged blocks should be positive");

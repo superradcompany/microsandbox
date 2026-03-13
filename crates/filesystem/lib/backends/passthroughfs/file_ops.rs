@@ -13,18 +13,17 @@
 //! coherency. `do_open` adjusts `O_WRONLY` → `O_RDWR` and strips `O_APPEND` (which races with
 //! the kernel's cached view of the file).
 
-use std::io;
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, RwLock};
+use std::{
+    io,
+    os::fd::{AsRawFd, FromRawFd},
+    sync::{Arc, RwLock, atomic::Ordering},
+};
 
-use super::PassthroughFs;
-use super::inode;
-use crate::backends::shared::handle_table::HandleData;
-use crate::backends::shared::init_binary;
-use crate::backends::shared::platform;
-use crate::backends::shared::stat_override;
-use crate::{Context, OpenOptions, ZeroCopyReader, ZeroCopyWriter};
+use super::{PassthroughFs, inode};
+use crate::{
+    Context, OpenOptions, ZeroCopyReader, ZeroCopyWriter,
+    backends::shared::{handle_table::HandleData, init_binary, platform, stat_override},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -62,12 +61,13 @@ pub(crate) fn do_open(
     let fd = inode::open_inode_fd(fs, inode, open_flags)?;
 
     // Clear SUID/SGID on open+truncate (HANDLE_KILLPRIV_V2).
-    if kill_priv && (open_flags & libc::O_TRUNC != 0) {
-        if let Ok(Some(ovr)) = stat_override::get_override(fd) {
-            let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
-            if new_mode != ovr.mode {
-                let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
-            }
+    if kill_priv
+        && (open_flags & libc::O_TRUNC != 0)
+        && let Ok(Some(ovr)) = stat_override::get_override(fd)
+    {
+        let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+        if new_mode != ovr.mode {
+            let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
         }
     }
 
@@ -108,6 +108,7 @@ pub(crate) fn do_read(
 /// When `kill_priv` is true (HANDLE_KILLPRIV_V2 negotiated), clears SUID/SGID
 /// bits from the override xattr after a successful write — the guest kernel
 /// expects the filesystem to handle this.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn do_write(
     fs: &PassthroughFs,
     _ctx: Context,

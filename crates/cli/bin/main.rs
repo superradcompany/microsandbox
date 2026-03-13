@@ -1,8 +1,11 @@
 //! Entry point for the `msb` CLI binary.
 
 use clap::{Parser, Subcommand};
-use microsandbox_cli::microvm_cmd::{self, MicrovmArgs};
-use microsandbox_cli::supervisor_cmd::{self, SupervisorArgs};
+use microsandbox_cli::{
+    log_args::{self, LogArgs},
+    microvm_cmd::{self, MicrovmArgs},
+    supervisor_cmd::{self, SupervisorArgs},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -12,6 +15,9 @@ use microsandbox_cli::supervisor_cmd::{self, SupervisorArgs};
 #[derive(Parser)]
 #[command(name = "msb", version, about = "Microsandbox CLI", styles = microsandbox_cli::styles::styles())]
 struct Cli {
+    #[command(flatten)]
+    logs: LogArgs,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -35,20 +41,18 @@ async fn main() {
     // Auto-set MSB_PATH so the library can find the msb binary
     // when spawning supervisor processes.
     // Safety: called before any threads are spawned (single-threaded at this point).
-    if std::env::var("MSB_PATH").is_err() {
-        if let Ok(exe) = std::env::current_exe() {
-            unsafe { std::env::set_var("MSB_PATH", &exe) };
-        }
+    if std::env::var("MSB_PATH").is_err()
+        && let Ok(exe) = std::env::current_exe()
+    {
+        unsafe { std::env::set_var("MSB_PATH", &exe) };
     }
 
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .init();
-
     let cli = Cli::parse();
+    let log_level = cli.logs.selected_level();
+    log_args::init_tracing(log_level);
 
     let result = match cli.command {
-        Commands::Supervisor(args) => supervisor_cmd::run(args).await,
+        Commands::Supervisor(args) => supervisor_cmd::run(args, log_level).await,
         Commands::Microvm(args) => microvm_cmd::run(args),
     };
 

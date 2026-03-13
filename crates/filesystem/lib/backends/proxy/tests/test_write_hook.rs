@@ -80,9 +80,7 @@ fn test_write_return_value() {
     });
     let (entry, handle) = sb.fuse_create_root("retval.txt").unwrap();
     let handle = handle.unwrap();
-    let written = sb
-        .fuse_write(entry.inode, handle, b"hello", 0)
-        .unwrap();
+    let written = sb.fuse_write(entry.inode, handle, b"hello", 0).unwrap();
     assert_eq!(
         written, 5,
         "write should return guest bytes consumed (5), not transformed length (10)"

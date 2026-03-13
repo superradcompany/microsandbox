@@ -12,9 +12,7 @@ fn test_concurrent_reads_with_hook() {
         let mut handles = Vec::new();
         for _ in 0..8 {
             handles.push(s.spawn(move || {
-                let (handle, _opts) = sb
-                    .fuse_open(ino, libc::O_RDONLY as u32)
-                    .unwrap();
+                let (handle, _opts) = sb.fuse_open(ino, libc::O_RDONLY as u32).unwrap();
                 let handle = handle.unwrap();
                 let data = sb.fuse_read(ino, handle, 4096, 0).unwrap();
                 sb.fs
@@ -133,9 +131,7 @@ fn test_concurrent_access_checks() {
         let mut handles = Vec::new();
         for &ino in &inodes {
             handles.push(s.spawn(move || {
-                let (handle, _opts) = sb
-                    .fuse_open(ino, libc::O_RDONLY as u32)
-                    .unwrap();
+                let (handle, _opts) = sb.fuse_open(ino, libc::O_RDONLY as u32).unwrap();
                 let handle = handle.unwrap();
                 sb.fs
                     .release(

@@ -13,10 +13,7 @@ mod test_rename;
 mod test_special_ops;
 mod test_xattr;
 
-use std::ffi::CString;
-use std::fs::File;
-use std::io;
-use std::os::fd::AsRawFd;
+use std::{ffi::CString, fs::File, io, os::fd::AsRawFd};
 
 use super::*;
 use crate::{
@@ -113,8 +110,14 @@ impl MemFsTestSandbox {
     }
 
     fn fuse_mkdir(&self, parent: u64, name: &str, mode: u32) -> io::Result<Entry> {
-        self.fs
-            .mkdir(Self::ctx(), parent, &Self::cstr(name), mode, 0, Extensions::default())
+        self.fs.mkdir(
+            Self::ctx(),
+            parent,
+            &Self::cstr(name),
+            mode,
+            0,
+            Extensions::default(),
+        )
     }
 
     fn fuse_mkdir_root(&self, name: &str) -> io::Result<Entry> {

@@ -2,11 +2,13 @@
 
 use std::io;
 
-use crate::backends::dualfs::policy::{
-    BackendChoice, BackendOp, DualDispatchPlan, DualDispatchPolicy, DualNamespaceView, HintBag,
-    OpKind, RequestCtx,
+use crate::backends::dualfs::{
+    policy::{
+        BackendChoice, BackendOp, DualDispatchPlan, DualDispatchPolicy, DualNamespaceView, HintBag,
+        OpKind, RequestCtx,
+    },
+    types::{BackendId, NodeState},
 };
-use crate::backends::dualfs::types::{BackendId, NodeState};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -84,20 +86,16 @@ impl DualDispatchPolicy for ReadBackendBWriteBackendA {
                 op: BackendOp::passthrough(),
             }),
 
-            OpKind::Setattr | OpKind::Setxattr | OpKind::Removexattr => {
-                match &req.node_state {
-                    NodeState::BackendB { .. } => {
-                        Ok(DualDispatchPlan::MaterializeToBackendThen {
-                            source: BackendId::BackendB,
-                            target: BackendId::BackendA,
-                            then: BackendOp::passthrough(),
-                        })
-                    }
-                    _ => Ok(DualDispatchPlan::UseBackendA {
-                        op: BackendOp::passthrough(),
-                    }),
-                }
-            }
+            OpKind::Setattr | OpKind::Setxattr | OpKind::Removexattr => match &req.node_state {
+                NodeState::BackendB { .. } => Ok(DualDispatchPlan::MaterializeToBackendThen {
+                    source: BackendId::BackendB,
+                    target: BackendId::BackendA,
+                    then: BackendOp::passthrough(),
+                }),
+                _ => Ok(DualDispatchPlan::UseBackendA {
+                    op: BackendOp::passthrough(),
+                }),
+            },
 
             OpKind::Readdir | OpKind::Readdirplus => Ok(DualDispatchPlan::MergeReaddir {
                 precedence: BackendChoice::BackendBFirst,

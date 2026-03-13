@@ -8,17 +8,25 @@
 //! (`request()`, `wait_ready()`) simply read one message and drop the receiver.
 //! Multi-message callers (`subscribe()`) keep reading until the session ends.
 
-use std::collections::HashMap;
-use std::os::unix::io::RawFd;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::{
+    collections::HashMap,
+    os::unix::io::RawFd,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+};
 
-use microsandbox_protocol::codec;
-use microsandbox_protocol::core::Ready;
-use microsandbox_protocol::message::{Message, MessageType};
-use tokio::io::AsyncRead;
-use tokio::sync::{Mutex, mpsc};
-use tokio::task::JoinHandle;
+use microsandbox_protocol::{
+    codec,
+    core::Ready,
+    message::{Message, MessageType},
+};
+use tokio::{
+    io::AsyncRead,
+    sync::{Mutex, mpsc},
+    task::JoinHandle,
+};
 
 use crate::MicrosandboxResult;
 

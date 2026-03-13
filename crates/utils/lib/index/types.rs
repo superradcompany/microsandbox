@@ -11,7 +11,7 @@
 //--------------------------------------------------------------------------------------------------
 
 /// Magic bytes: "MSBi" in little-endian.
-pub const INDEX_MAGIC: u32 = 0x694253_4D;
+pub const INDEX_MAGIC: u32 = 0x6942_534D;
 
 /// Current wire format version.
 pub const INDEX_VERSION: u32 = 1;

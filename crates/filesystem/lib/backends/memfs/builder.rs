@@ -7,17 +7,20 @@
 //!     .build()?
 //! ```
 
-use std::collections::BTreeMap;
-use std::fs::File;
-use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io,
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, AtomicU64},
+    },
+    time::Duration,
+};
 
-use super::MemFs;
-use super::inode;
-use super::types::{
-    CachePolicy, InodeContent, InodeMeta, MemFsConfig, MemNode, ROOT_INODE,
+use super::{
+    MemFs, inode,
+    types::{CachePolicy, InodeContent, InodeMeta, MemFsConfig, MemNode, ROOT_INODE},
 };
 use crate::backends::shared::init_binary;
 
@@ -133,7 +136,7 @@ impl MemFsBuilder {
             nodes: RwLock::new(nodes),
             file_handles: RwLock::new(BTreeMap::new()),
             dir_handles: RwLock::new(BTreeMap::new()),
-            next_inode: AtomicU64::new(3), // 1=root, 2=init
+            next_inode: AtomicU64::new(3),  // 1=root, 2=init
             next_handle: AtomicU64::new(1), // 0=init handle
             used_bytes: AtomicU64::new(0),
             inode_count: AtomicU64::new(1), // root

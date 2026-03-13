@@ -192,7 +192,10 @@ fn test_delegation_symlink_readlink() {
         )
         .unwrap();
     assert!(entry.inode >= 3);
-    let target = sb.fs.readlink(ProxyFsTestSandbox::ctx(), entry.inode).unwrap();
+    let target = sb
+        .fs
+        .readlink(ProxyFsTestSandbox::ctx(), entry.inode)
+        .unwrap();
     assert_eq!(&target[..], b"/target/path");
 }
 
@@ -221,7 +224,9 @@ fn test_delegation_mknod() {
 #[test]
 fn test_delegation_link() {
     let sb = ProxyFsTestSandbox::new();
-    let ino = sb.create_file_with_content(ROOT_INODE, "original.txt", b"link data").unwrap();
+    let ino = sb
+        .create_file_with_content(ROOT_INODE, "original.txt", b"link data")
+        .unwrap();
     let link_entry = sb
         .fs
         .link(
@@ -255,9 +260,6 @@ fn test_delegation_init() {
 #[test]
 fn test_delegation_statfs() {
     let sb = ProxyFsTestSandbox::new();
-    let st = sb
-        .fs
-        .statfs(ProxyFsTestSandbox::ctx(), ROOT_INODE)
-        .unwrap();
+    let st = sb.fs.statfs(ProxyFsTestSandbox::ctx(), ROOT_INODE).unwrap();
     assert!(st.f_bsize > 0);
 }

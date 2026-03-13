@@ -4,16 +4,19 @@
 //! immutable for the handle's lifetime. Names use the bounded-leak technique
 //! for `DirEntry<'static>` lifetime requirements.
 
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
-use std::io;
+use std::{
+    io,
+    sync::{Arc, Mutex, atomic::Ordering},
+};
 
-use super::MemFs;
-use super::inode;
-use super::types::{DirHandle, DirSnapshot, InodeContent, MemDirEntry, ROOT_INODE};
-use crate::backends::shared::init_binary;
-use crate::backends::shared::platform;
-use crate::{Context, DirEntry, Entry, OpenOptions};
+use super::{
+    MemFs, inode,
+    types::{DirHandle, DirSnapshot, InodeContent, MemDirEntry, ROOT_INODE},
+};
+use crate::{
+    Context, DirEntry, Entry, OpenOptions,
+    backends::shared::{init_binary, platform},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -34,7 +37,6 @@ pub(crate) fn do_opendir(
 
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);
     let dh = Arc::new(DirHandle {
-        inode: ino,
         node: Arc::clone(&node),
         snapshot: Mutex::new(None),
     });
@@ -181,11 +183,7 @@ fn serve_snapshot_entries(
 }
 
 /// Build a point-in-time snapshot of a directory's entries.
-fn build_snapshot(
-    fs: &MemFs,
-    ino: u64,
-    node: &super::types::MemNode,
-) -> io::Result<DirSnapshot> {
+fn build_snapshot(fs: &MemFs, ino: u64, node: &super::types::MemNode) -> io::Result<DirSnapshot> {
     let children = match &node.content {
         InodeContent::Directory { children, .. } => children.read().unwrap(),
         _ => return Err(platform::enotdir()),

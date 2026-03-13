@@ -11,14 +11,30 @@ fn test_materialize_regular_file() {
     let handle = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
     sb.fuse_write(entry.inode, handle, b"replaced", 0).unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // Read back through DualFs — same-length overwrite replaces content exactly.
     let handle = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"replaced");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -34,7 +50,15 @@ fn test_materialize_preserves_content() {
     let handle = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
     // Just close — materialization should have copied content.
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // Read back.
     let handle = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
@@ -42,9 +66,20 @@ fn test_materialize_preserves_content() {
         .fuse_read(entry.inode, handle, (1024 * 1024 + 1) as u32, 0)
         .unwrap();
     assert_eq!(data.len(), 1024 * 1024);
-    assert!(data.iter().all(|&b| b == 0xCD), "content should be preserved");
+    assert!(
+        data.iter().all(|&b| b == 0xCD),
+        "content should be preserved"
+    );
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -75,7 +110,15 @@ fn test_materialize_preserves_metadata() {
     // Trigger materialization.
     let handle = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     let (st_after, _) = sb
@@ -130,7 +173,9 @@ fn test_materialize_directory() {
     });
     let dir_entry = sb.lookup_root("b_dir").unwrap();
     // Create a file in the backend_b dir -> forces dir promotion.
-    let (file_entry, handle) = sb.fuse_create(dir_entry.inode, "new_child.txt", 0o644).unwrap();
+    let (file_entry, handle) = sb
+        .fuse_create(dir_entry.inode, "new_child.txt", 0o644)
+        .unwrap();
     sb.fs
         .release(
             DualFsTestSandbox::ctx(),
@@ -163,14 +208,30 @@ fn test_materialize_ancestor_chain() {
     let handle = sb.fuse_open(c.inode, libc::O_RDWR as u32).unwrap();
     sb.fuse_write(c.inode, handle, b"modified", 0).unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), c.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            c.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // Verify file is readable.
     let handle = sb.fuse_open(c.inode, libc::O_RDONLY as u32).unwrap();
     let data = sb.fuse_read(c.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"modified");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), c.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            c.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -185,20 +246,44 @@ fn test_materialize_idempotent() {
     let handle = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
     sb.fuse_write(entry.inode, handle, b"first", 0).unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // Second write -> already materialized, should still work.
     let handle = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
     sb.fuse_write(entry.inode, handle, b"second", 0).unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // Read back -> should see "second".
     let handle = sb.fuse_open(entry.inode, libc::O_RDONLY as u32).unwrap();
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"second");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 
@@ -219,7 +304,10 @@ fn test_materialize_symlink() {
     let mode = entry.attr.st_mode as u32;
     assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFLNK as u32);
     // Readlink should return the target.
-    let link = sb.fs.readlink(DualFsTestSandbox::ctx(), entry.inode).unwrap();
+    let link = sb
+        .fs
+        .readlink(DualFsTestSandbox::ctx(), entry.inode)
+        .unwrap();
     assert_eq!(link, b"/some/target");
 }
 
@@ -253,9 +341,19 @@ fn test_materialize_guest_inode_stable() {
     let entry_before = sb.lookup_root("stable.txt").unwrap();
     let inode_before = entry_before.inode;
     // Trigger materialization.
-    let handle = sb.fuse_open(entry_before.inode, libc::O_RDWR as u32).unwrap();
+    let handle = sb
+        .fuse_open(entry_before.inode, libc::O_RDWR as u32)
+        .unwrap();
     sb.fs
-        .release(DualFsTestSandbox::ctx(), entry_before.inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            entry_before.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // Guest inode should remain the same.
     let entry_after = sb.lookup_root("stable.txt").unwrap();
@@ -287,7 +385,15 @@ fn test_materialize_serialized() {
             let result = h.join().unwrap();
             if let Ok(handle) = result {
                 sb.fs
-                    .release(DualFsTestSandbox::ctx(), inode, 0, handle, false, false, None)
+                    .release(
+                        DualFsTestSandbox::ctx(),
+                        inode,
+                        0,
+                        handle,
+                        false,
+                        false,
+                        None,
+                    )
                     .unwrap();
             }
         }
@@ -298,7 +404,15 @@ fn test_materialize_serialized() {
     let data = sb.fuse_read(inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"concurrent data");
     sb.fs
-        .release(DualFsTestSandbox::ctx(), inode, 0, handle, false, false, None)
+        .release(
+            DualFsTestSandbox::ctx(),
+            inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 }
 

@@ -18,20 +18,20 @@
 //! xattr mode (file-backed symlinks), because Linux `user.*` xattrs cannot be set on symlinks.
 //! On macOS, real symlinks are used with `XATTR_NOFOLLOW` for xattr operations.
 
-use std::ffi::CStr;
-use std::io;
-use std::os::fd::FromRawFd;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, RwLock};
+use std::{
+    ffi::CStr,
+    io,
+    os::fd::FromRawFd,
+    sync::{Arc, RwLock, atomic::Ordering},
+};
 
-use super::PassthroughFs;
-use super::inode;
-use crate::backends::shared::handle_table::HandleData;
-use crate::backends::shared::init_binary;
-use crate::backends::shared::name_validation;
-use crate::backends::shared::platform;
-use crate::backends::shared::stat_override;
-use crate::{Context, Entry, Extensions, OpenOptions};
+use super::{PassthroughFs, inode};
+use crate::{
+    Context, Entry, Extensions, OpenOptions,
+    backends::shared::{
+        handle_table::HandleData, init_binary, name_validation, platform, stat_override,
+    },
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -98,12 +98,13 @@ pub(crate) fn do_create(
     let open_fd = inode::open_inode_fd(fs, entry.inode, open_flags & !libc::O_CREAT)?;
 
     // Clear SUID/SGID on create+truncate of existing file (HANDLE_KILLPRIV_V2).
-    if kill_priv && (open_flags & libc::O_TRUNC != 0) {
-        if let Ok(Some(ovr)) = stat_override::get_override(open_fd) {
-            let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
-            if new_mode != ovr.mode {
-                let _ = stat_override::set_override(open_fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
-            }
+    if kill_priv
+        && (open_flags & libc::O_TRUNC != 0)
+        && let Ok(Some(ovr)) = stat_override::get_override(open_fd)
+    {
+        let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+        if new_mode != ovr.mode {
+            let _ = stat_override::set_override(open_fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
         }
     }
 

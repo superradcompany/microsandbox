@@ -42,10 +42,14 @@ fn test_rename_lower_file() {
     // New name should exist with data preserved through copy-up + rename.
     let new_entry = sb.lookup_root("renamed.txt").unwrap();
     assert!(new_entry.inode >= 3);
-    let handle = sb.fuse_open(new_entry.inode, libc::O_RDONLY as u32).unwrap();
+    let handle = sb
+        .fuse_open(new_entry.inode, libc::O_RDONLY as u32)
+        .unwrap();
     let data = sb.fuse_read(new_entry.inode, handle, 1024, 0).unwrap();
     assert_eq!(&data, b"lower data");
-    sb.fs.release(sb.ctx(), new_entry.inode, 0, handle, false, false, Some(0)).unwrap();
+    sb.fs
+        .release(sb.ctx(), new_entry.inode, 0, handle, false, false, Some(0))
+        .unwrap();
 }
 
 #[test]
@@ -216,9 +220,7 @@ fn test_rename_lower_dir_children_accessible() {
     let child = sb.lookup(new_dir.inode, "file.txt").unwrap();
     assert!(child.inode >= 3);
     // Read the child's data to verify it's intact.
-    let handle = sb
-        .fuse_open(child.inode, libc::O_RDONLY as u32)
-        .unwrap();
+    let handle = sb.fuse_open(child.inode, libc::O_RDONLY as u32).unwrap();
     let data = sb.fuse_read(child.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"child content");
 }
@@ -472,7 +474,8 @@ fn test_rename_exchange_opaque_dir_no_redirect() {
     // Create a pure-upper dir and rename it onto the empty lower dir.
     // This marks it opaque (suppressing the lower "slot" dir).
     let new_dir = sb.fuse_mkdir_root("temp_dir").unwrap();
-    sb.fuse_create(new_dir.inode, "upper_child.txt", 0o644).unwrap();
+    sb.fuse_create(new_dir.inode, "upper_child.txt", 0o644)
+        .unwrap();
     sb.fs
         .rename(
             sb.ctx(),

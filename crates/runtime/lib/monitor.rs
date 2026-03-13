@@ -4,11 +4,9 @@
 //! policy and restart state. The supervisor polls children and applies policies
 //! on exit.
 
-use nix::sys::signal::Signal;
-use nix::unistd::Pid;
+use nix::{sys::signal::Signal, unistd::Pid};
 
-use crate::RuntimeResult;
-use crate::policy::ChildPolicy;
+use crate::{RuntimeResult, policy::ChildPolicy};
 
 //--------------------------------------------------------------------------------------------------
 // Types

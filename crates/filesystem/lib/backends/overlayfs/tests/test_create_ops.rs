@@ -78,13 +78,16 @@ fn test_create_in_lower_dir() {
 #[cfg(target_os = "linux")]
 fn test_symlink() {
     let sb = OverlayTestSandbox::new();
-    let entry = sb.fs.symlink(
-        sb.ctx(),
-        &OverlayTestSandbox::cstr("/target/path"),
-        ROOT_INODE,
-        &OverlayTestSandbox::cstr("mylink"),
-        Extensions::default(),
-    ).unwrap();
+    let entry = sb
+        .fs
+        .symlink(
+            sb.ctx(),
+            &OverlayTestSandbox::cstr("/target/path"),
+            ROOT_INODE,
+            &OverlayTestSandbox::cstr("mylink"),
+            Extensions::default(),
+        )
+        .unwrap();
     assert!(entry.inode >= 3);
     let target = sb.fs.readlink(sb.ctx(), entry.inode).unwrap();
     assert_eq!(&target[..], b"/target/path");
@@ -95,12 +98,15 @@ fn test_link_upper_file() {
     let sb = OverlayTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("original.txt").unwrap();
     sb.fuse_write(entry.inode, handle, b"link data", 0).unwrap();
-    let link_entry = sb.fs.link(
-        sb.ctx(),
-        entry.inode,
-        ROOT_INODE,
-        &OverlayTestSandbox::cstr("hard_link.txt"),
-    ).unwrap();
+    let link_entry = sb
+        .fs
+        .link(
+            sb.ctx(),
+            entry.inode,
+            ROOT_INODE,
+            &OverlayTestSandbox::cstr("hard_link.txt"),
+        )
+        .unwrap();
     assert!(link_entry.inode >= 3);
     // Read via the link.
     let link_handle = sb

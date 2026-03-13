@@ -12,18 +12,20 @@
 //! Same bounded-leak pattern as passthrough: names for `DirEntry<'static>` are
 //! collected into a single contiguous buffer, leaked once per readdir call.
 
-use std::collections::HashSet;
-use std::io;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashSet,
+    io,
+    sync::{Arc, Mutex, atomic::Ordering},
+};
 
-use super::OverlayFs;
-use super::inode;
-use super::layer;
-use super::types::{DirHandle, DirSnapshot, MergedDirEntry, ROOT_INODE};
-use crate::backends::shared::init_binary;
-use crate::backends::shared::platform;
-use crate::{Context, DirEntry, Entry, OpenOptions};
+use super::{
+    OverlayFs, inode, layer,
+    types::{DirHandle, DirSnapshot, MergedDirEntry, ROOT_INODE},
+};
+use crate::{
+    Context, DirEntry, Entry, OpenOptions,
+    backends::shared::{init_binary, platform},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -263,11 +265,10 @@ fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
         for lower in fs.lowers.iter().rev() {
             // Index fast path: iterate index entries directly (no getdents64).
             if let Some(ref idx) = lower.lower_index {
-                let dir_rec =
-                    match inode::find_dir_record_for_parent(fs, idx, lower.index, &node) {
-                        Some(rec) => rec,
-                        None => continue,
-                    };
+                let dir_rec = match inode::find_dir_record_for_parent(fs, idx, lower.index, &node) {
+                    Some(rec) => rec,
+                    None => continue,
+                };
 
                 // Add tombstone names from index.
                 for name in idx.tombstone_names(dir_rec) {
@@ -276,9 +277,7 @@ fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
 
                 let layer_opaque = idx.is_opaque(dir_rec);
                 for entry_rec in idx.dir_entries(dir_rec) {
-                    let name = idx
-                        .get_str(entry_rec.name_off, entry_rec.name_len)
-                        .to_vec();
+                    let name = idx.get_str(entry_rec.name_off, entry_rec.name_len).to_vec();
 
                     if entry_rec.flags & microsandbox_utils::index::ENTRY_FLAG_WHITEOUT != 0 {
                         seen.insert(name);
@@ -310,7 +309,9 @@ fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
                 Some(fd) => fd,
                 None => continue,
             };
-            let _close_lower = scopeguard::guard(lower_fd, |fd| unsafe { libc::close(fd); });
+            let _close_lower = scopeguard::guard(lower_fd, |fd| unsafe {
+                libc::close(fd);
+            });
 
             let raw_entries = layer::read_dir_entries_raw(lower_fd)?;
 
@@ -418,11 +419,10 @@ pub(crate) fn is_merged_dir_empty(fs: &OverlayFs, ino: u64) -> io::Result<bool> 
         for lower in fs.lowers.iter().rev() {
             // Index fast path.
             if let Some(ref idx) = lower.lower_index {
-                let dir_rec =
-                    match inode::find_dir_record_for_parent(fs, idx, lower.index, &node) {
-                        Some(rec) => rec,
-                        None => continue,
-                    };
+                let dir_rec = match inode::find_dir_record_for_parent(fs, idx, lower.index, &node) {
+                    Some(rec) => rec,
+                    None => continue,
+                };
 
                 for name in idx.tombstone_names(dir_rec) {
                     seen.insert(name.to_vec());
@@ -430,9 +430,7 @@ pub(crate) fn is_merged_dir_empty(fs: &OverlayFs, ino: u64) -> io::Result<bool> 
 
                 let layer_opaque = idx.is_opaque(dir_rec);
                 for entry_rec in idx.dir_entries(dir_rec) {
-                    let name = idx
-                        .get_str(entry_rec.name_off, entry_rec.name_len)
-                        .to_vec();
+                    let name = idx.get_str(entry_rec.name_off, entry_rec.name_len).to_vec();
 
                     if entry_rec.flags & microsandbox_utils::index::ENTRY_FLAG_WHITEOUT != 0 {
                         seen.insert(name);
@@ -458,7 +456,9 @@ pub(crate) fn is_merged_dir_empty(fs: &OverlayFs, ino: u64) -> io::Result<bool> 
                 Some(fd) => fd,
                 None => continue,
             };
-            let _close_lower = scopeguard::guard(lower_fd, |fd| unsafe { libc::close(fd); });
+            let _close_lower = scopeguard::guard(lower_fd, |fd| unsafe {
+                libc::close(fd);
+            });
 
             let raw_entries = layer::read_dir_entries_raw(lower_fd)?;
 

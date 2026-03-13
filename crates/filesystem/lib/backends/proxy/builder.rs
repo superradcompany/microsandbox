@@ -1,8 +1,10 @@
 //! ProxyFs builder.
 
-use std::collections::HashMap;
-use std::io;
-use std::sync::{Mutex, RwLock};
+use std::{
+    collections::HashMap,
+    io,
+    sync::{Mutex, RwLock},
+};
 
 use super::{AccessMode, ProxyFs};
 use crate::DynFileSystem;
@@ -12,6 +14,7 @@ use crate::DynFileSystem;
 //--------------------------------------------------------------------------------------------------
 
 /// Builder for constructing a [`ProxyFs`].
+#[allow(clippy::type_complexity)]
 pub struct ProxyFsBuilder {
     inner: Box<dyn DynFileSystem>,
     on_access: Option<Box<dyn Fn(&str, AccessMode) -> Result<(), io::Error> + Send + Sync>>,
@@ -114,8 +117,7 @@ fn create_staging_file() -> io::Result<std::fs::File> {
         }
         // Pre-allocate a 128KB buffer for typical FUSE read/write chunks.
         let buf = vec![0u8; 128 * 1024];
-        let written =
-            unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
+        let written = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
         if written < 0 {
             let err = io::Error::last_os_error();
             unsafe { libc::close(fd) };

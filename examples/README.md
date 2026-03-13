@@ -22,10 +22,10 @@ That's it. You don't need `just build-deps` unless you've never built agentd and
 
 ## Running examples
 
-All examples are run from the **repo root**. Point `MSB_PATH` to your freshly built `msb` binary:
+All examples are run from the **repo root**. Point `MSB_PATH` to the binary produced by `just build`:
 
 ```sh
-MSB_PATH="$PWD/target/debug/msb" cargo run -p <example-name>
+MSB_PATH="$PWD/build/msb" cargo run -p <example-name>
 ```
 
 ## Examples

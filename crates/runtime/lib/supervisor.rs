@@ -8,30 +8,37 @@
 //! The supervisor does NOT handle agent protocol communication — that stays
 //! in the user application process via AgentBridge.
 
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::Duration;
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 
 use microsandbox_db::entity::{
     microvm as microvm_entity, sandbox as sandbox_entity, supervisor as supervisor_entity,
 };
 use nix::sys::signal::Signal;
-use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait,
-    QueryFilter, Set,
+    ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait, QueryFilter, Set,
+    sea_query::Expr,
 };
 use serde::Serialize;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::signal::unix::SignalKind;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    signal::unix::SignalKind,
+};
 
-use crate::RuntimeResult;
-use crate::drain::{DrainPhase, DrainState};
-use crate::heartbeat::HeartbeatReader;
-use crate::monitor::ChildProcess;
-use crate::policy::{ChildPolicies, ExitAction, SupervisorPolicy};
-use crate::termination::TerminationReason;
-use crate::vm::VmConfig;
+use crate::{
+    RuntimeResult,
+    drain::{DrainPhase, DrainState},
+    heartbeat::HeartbeatReader,
+    logging::LogLevel,
+    monitor::ChildProcess,
+    policy::{ChildPolicies, ExitAction, SupervisorPolicy},
+    termination::TerminationReason,
+    vm::VmConfig,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -42,6 +49,12 @@ use crate::vm::VmConfig;
 pub struct SupervisorConfig {
     /// Name of the sandbox.
     pub sandbox_name: String,
+
+    /// Database ID of the sandbox row.
+    pub sandbox_id: i32,
+
+    /// Selected tracing verbosity to apply to the supervisor and its children.
+    pub log_level: Option<LogLevel>,
 
     /// Path to the sandbox database file.
     pub sandbox_db_path: PathBuf,
@@ -98,11 +111,8 @@ pub async fn run(config: SupervisorConfig) -> RuntimeResult<()> {
     // Connect to the database.
     let db = connect_db(&config.sandbox_db_path).await?;
 
-    // Resolve sandbox ID once (used by both insert functions).
-    let sandbox_id = get_sandbox_id(&db, &config.sandbox_name).await?;
-
     // Create supervisor record.
-    let supervisor_db_id = insert_supervisor_record(&db, sandbox_id).await?;
+    let supervisor_db_id = insert_supervisor_record(&db, config.sandbox_id).await?;
 
     // Set up runtime directory.
     std::fs::create_dir_all(&config.runtime_dir)?;
@@ -118,15 +128,8 @@ pub async fn run(config: SupervisorConfig) -> RuntimeResult<()> {
     })?;
 
     // Create microvm record.
-    let microvm_db_id = insert_microvm_record(&db, sandbox_id, supervisor_db_id, vm_pid).await?;
-
-    // Update sandbox status to Running.
-    update_sandbox_status(
-        &db,
-        &config.sandbox_name,
-        sandbox_entity::SandboxStatus::Running,
-    )
-    .await?;
+    let microvm_db_id =
+        insert_microvm_record(&db, config.sandbox_id, supervisor_db_id, vm_pid).await?;
 
     // Write startup info to stdout (the parent reads this).
     let startup = StartupInfo {
@@ -354,7 +357,7 @@ pub async fn run(config: SupervisorConfig) -> RuntimeResult<()> {
         | TerminationReason::MaxDurationExceeded => sandbox_entity::SandboxStatus::Stopped,
         _ => sandbox_entity::SandboxStatus::Crashed,
     };
-    update_sandbox_status(&db, &config.sandbox_name, final_status).await?;
+    update_sandbox_status(&db, config.sandbox_id, final_status).await?;
 
     tracing::info!(
         sandbox = %config.sandbox_name,
@@ -375,52 +378,7 @@ fn spawn_vm_process(
     config: &SupervisorConfig,
 ) -> RuntimeResult<tokio::process::Child> {
     let mut cmd = tokio::process::Command::new(msb_path);
-    cmd.arg("microvm");
-
-    cmd.arg("--libkrunfw-path")
-        .arg(&config.vm_config.libkrunfw_path);
-    cmd.arg("--vcpus").arg(config.vm_config.vcpus.to_string());
-    cmd.arg("--memory-mib")
-        .arg(config.vm_config.memory_mib.to_string());
-
-    for layer in &config.vm_config.rootfs_layers {
-        cmd.arg("--rootfs-layer").arg(layer);
-    }
-
-    for mount in &config.vm_config.mounts {
-        cmd.arg("--mount").arg(mount);
-    }
-
-    // Inject the runtime directory as a virtiofs mount so the guest can access
-    // scripts and write heartbeat at the canonical mount point (/.msb).
-    cmd.arg("--mount").arg(format!(
-        "{}:{}",
-        microsandbox_protocol::RUNTIME_FS_TAG,
-        config.runtime_dir.display()
-    ));
-
-    if let Some(ref init_path) = config.vm_config.init_path {
-        cmd.arg("--init-path").arg(init_path);
-    }
-
-    for env_var in &config.vm_config.env {
-        cmd.arg("--env").arg(env_var);
-    }
-
-    if let Some(ref workdir) = config.vm_config.workdir {
-        cmd.arg("--workdir").arg(workdir);
-    }
-
-    if let Some(ref exec_path) = config.vm_config.exec_path {
-        cmd.arg("--exec-path").arg(exec_path);
-    }
-
-    cmd.arg("--agent-fd").arg(config.agent_fd.to_string());
-
-    if !config.vm_config.exec_args.is_empty() {
-        cmd.arg("--");
-        cmd.args(&config.vm_config.exec_args);
-    }
+    cmd.args(microvm_cli_args(config));
 
     // Spawn in its own process group for clean signal delivery.
     cmd.process_group(0);
@@ -451,10 +409,76 @@ fn spawn_vm_process(
     Ok(child)
 }
 
+fn microvm_cli_args(config: &SupervisorConfig) -> Vec<OsString> {
+    let mut args = Vec::new();
+    args.push(OsString::from("microvm"));
+
+    if let Some(log_level) = config.log_level {
+        args.push(OsString::from(log_level.as_cli_flag()));
+    }
+
+    args.push(OsString::from("--libkrunfw-path"));
+    args.push(config.vm_config.libkrunfw_path.clone().into_os_string());
+    args.push(OsString::from("--vcpus"));
+    args.push(OsString::from(config.vm_config.vcpus.to_string()));
+    args.push(OsString::from("--memory-mib"));
+    args.push(OsString::from(config.vm_config.memory_mib.to_string()));
+
+    for layer in &config.vm_config.rootfs_layers {
+        args.push(OsString::from("--rootfs-layer"));
+        args.push(layer.clone().into_os_string());
+    }
+
+    for mount in &config.vm_config.mounts {
+        args.push(OsString::from("--mount"));
+        args.push(OsString::from(mount));
+    }
+
+    // Inject the runtime directory as a virtiofs mount so the guest can access
+    // scripts and write heartbeat at the canonical mount point (/.msb).
+    args.push(OsString::from("--mount"));
+    args.push(OsString::from(format!(
+        "{}:{}",
+        microsandbox_protocol::RUNTIME_FS_TAG,
+        config.runtime_dir.display()
+    )));
+
+    if let Some(ref init_path) = config.vm_config.init_path {
+        args.push(OsString::from("--init-path"));
+        args.push(init_path.clone().into_os_string());
+    }
+
+    for env_var in &config.vm_config.env {
+        args.push(OsString::from("--env"));
+        args.push(OsString::from(env_var));
+    }
+
+    if let Some(ref workdir) = config.vm_config.workdir {
+        args.push(OsString::from("--workdir"));
+        args.push(workdir.clone().into_os_string());
+    }
+
+    if let Some(ref exec_path) = config.vm_config.exec_path {
+        args.push(OsString::from("--exec-path"));
+        args.push(exec_path.clone().into_os_string());
+    }
+
+    args.push(OsString::from("--agent-fd"));
+    args.push(OsString::from(config.agent_fd.to_string()));
+
+    if !config.vm_config.exec_args.is_empty() {
+        args.push(OsString::from("--"));
+        args.extend(config.vm_config.exec_args.iter().map(OsString::from));
+    }
+
+    args
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Drain Management
 //--------------------------------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn try_start_drain(
     reason: TerminationReason,
     msg: &str,
@@ -533,20 +557,12 @@ fn spawn_log_tasks(
 ) {
     if let Some(stdout) = stdout {
         let path = log_dir.join("vm.stdout.log");
-        tokio::spawn(pipe_to_log(
-            stdout,
-            path,
-            forward.then(|| tokio::io::stdout()),
-        ));
+        tokio::spawn(pipe_to_log(stdout, path, forward.then(tokio::io::stdout)));
     }
 
     if let Some(stderr) = stderr {
         let path = log_dir.join("vm.stderr.log");
-        tokio::spawn(pipe_to_log(
-            stderr,
-            path,
-            forward.then(|| tokio::io::stderr()),
-        ));
+        tokio::spawn(pipe_to_log(stderr, path, forward.then(tokio::io::stderr)));
     }
 }
 
@@ -621,8 +637,8 @@ async fn insert_supervisor_record(db: &DatabaseConnection, sandbox_id: i32) -> R
         ..Default::default()
     };
 
-    let result = model.insert(db).await?;
-    Ok(result.id)
+    let result = supervisor_entity::Entity::insert(model).exec(db).await?;
+    Ok(result.last_insert_id)
 }
 
 async fn insert_microvm_record(
@@ -644,13 +660,13 @@ async fn insert_microvm_record(
         ..Default::default()
     };
 
-    let result = model.insert(db).await?;
-    Ok(result.id)
+    let result = microvm_entity::Entity::insert(model).exec(db).await?;
+    Ok(result.last_insert_id)
 }
 
 async fn update_sandbox_status(
     db: &DatabaseConnection,
-    sandbox_name: &str,
+    sandbox_id: i32,
     status: sandbox_entity::SandboxStatus,
 ) -> RuntimeResult<()> {
     let result = sandbox_entity::Entity::update_many()
@@ -659,15 +675,12 @@ async fn update_sandbox_status(
             sandbox_entity::Column::UpdatedAt,
             Expr::value(chrono::Utc::now().naive_utc()),
         )
-        .filter(sandbox_entity::Column::Name.eq(sandbox_name))
+        .filter(sandbox_entity::Column::Id.eq(sandbox_id))
         .exec(db)
         .await?;
 
     if result.rows_affected == 0 {
-        tracing::warn!(
-            sandbox = sandbox_name,
-            "update_sandbox_status matched zero rows"
-        );
+        tracing::warn!(sandbox_id, "update_sandbox_status matched zero rows");
     }
 
     Ok(())
@@ -720,16 +733,71 @@ async fn update_supervisor_record(
     Ok(())
 }
 
-async fn get_sandbox_id(db: &DatabaseConnection, sandbox_name: &str) -> RuntimeResult<i32> {
-    let model = sandbox_entity::Entity::find()
-        .filter(sandbox_entity::Column::Name.eq(sandbox_name))
-        .one(db)
-        .await?
-        .ok_or_else(|| {
-            crate::RuntimeError::Custom(
-                format!("sandbox '{}' not found in database", sandbox_name,),
-            )
-        })?;
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
 
-    Ok(model.id)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::{ChildPolicies, SupervisorPolicy};
+
+    fn test_supervisor_config(log_level: Option<LogLevel>) -> SupervisorConfig {
+        SupervisorConfig {
+            sandbox_name: "test".into(),
+            sandbox_id: 1,
+            log_level,
+            sandbox_db_path: PathBuf::from("/tmp/test.db"),
+            log_dir: PathBuf::from("/tmp/logs"),
+            runtime_dir: PathBuf::from("/tmp/runtime"),
+            agent_fd: 7,
+            forward_output: false,
+            child_policies: ChildPolicies::default(),
+            supervisor_policy: SupervisorPolicy::default(),
+            vm_config: VmConfig {
+                libkrunfw_path: PathBuf::from("/tmp/libkrunfw.dylib"),
+                vcpus: 1,
+                memory_mib: 512,
+                rootfs_layers: vec![PathBuf::from("/tmp/rootfs")],
+                mounts: vec!["data:/tmp/data".into()],
+                backends: Vec::new(),
+                init_path: None,
+                env: vec!["FOO=bar".into()],
+                workdir: Some(PathBuf::from("/work")),
+                exec_path: Some(PathBuf::from("/bin/sh")),
+                exec_args: vec!["-lc".into(), "echo hi".into()],
+                net_fd: None,
+                agent_fd: None,
+            },
+        }
+    }
+
+    #[test]
+    fn test_microvm_cli_args_include_selected_log_level() {
+        let args = microvm_cli_args(&test_supervisor_config(Some(LogLevel::Debug)));
+        let rendered = args
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered[0], "microvm");
+        assert!(rendered.contains(&"--debug".to_string()));
+        assert!(rendered.contains(&"--agent-fd".to_string()));
+    }
+
+    #[test]
+    fn test_microvm_cli_args_are_silent_by_default() {
+        let args = microvm_cli_args(&test_supervisor_config(None));
+        let rendered = args
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered[0], "microvm");
+        assert!(!rendered.iter().any(|arg| arg == "--error"));
+        assert!(!rendered.iter().any(|arg| arg == "--warn"));
+        assert!(!rendered.iter().any(|arg| arg == "--info"));
+        assert!(!rendered.iter().any(|arg| arg == "--debug"));
+        assert!(!rendered.iter().any(|arg| arg == "--trace"));
+    }
 }

@@ -4,13 +4,14 @@
 //! non-blocking async I/O. Used by [`AgentBridge`](super::AgentBridge) for
 //! communication with agentd over the virtio-console FD pair.
 
-use std::io;
-use std::os::unix::io::{FromRawFd, OwnedFd, RawFd};
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::{
+    io,
+    os::unix::io::{FromRawFd, OwnedFd, RawFd},
+    pin::Pin,
+    task::{Context, Poll},
+};
 
-use tokio::io::unix::AsyncFd;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, unix::AsyncFd};
 
 //--------------------------------------------------------------------------------------------------
 // Types

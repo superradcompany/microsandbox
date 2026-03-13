@@ -6,7 +6,15 @@ fn test_forget_removes_path() {
     let (entry, handle) = sb.fuse_create_root("forget_me.txt").unwrap();
     let handle = handle.unwrap();
     sb.fs
-        .release(MemFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // Unlink sets nlink=0.
@@ -32,7 +40,15 @@ fn test_forget_partial() {
     let (entry, handle) = sb.fuse_create_root("partial.txt").unwrap();
     let handle = handle.unwrap();
     sb.fs
-        .release(MemFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // Three more lookups (create gives 1, so total refs = 4).
@@ -54,7 +70,15 @@ fn test_nlink_zero_lookup_refs_positive() {
     let (entry, handle) = sb.fuse_create_root("nlink_test.txt").unwrap();
     let handle = handle.unwrap();
     sb.fs
-        .release(MemFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
     // Do an extra lookup to increase refs (create=1, lookup=1 => refs=2).
@@ -86,7 +110,8 @@ fn test_handle_pins_node() {
     let sb = MemFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("pinned.txt").unwrap();
     let handle = handle.unwrap();
-    sb.fuse_write(entry.inode, handle, b"pinned data", 0).unwrap();
+    sb.fuse_write(entry.inode, handle, b"pinned data", 0)
+        .unwrap();
 
     // Unlink and forget.
     sb.fs
@@ -189,7 +214,19 @@ fn test_batch_forget() {
     );
 
     // All should be evicted.
-    assert!(sb.fs.getattr(MemFsTestSandbox::ctx(), e1.inode, None).is_err());
-    assert!(sb.fs.getattr(MemFsTestSandbox::ctx(), e2.inode, None).is_err());
-    assert!(sb.fs.getattr(MemFsTestSandbox::ctx(), e3.inode, None).is_err());
+    assert!(
+        sb.fs
+            .getattr(MemFsTestSandbox::ctx(), e1.inode, None)
+            .is_err()
+    );
+    assert!(
+        sb.fs
+            .getattr(MemFsTestSandbox::ctx(), e2.inode, None)
+            .is_err()
+    );
+    assert!(
+        sb.fs
+            .getattr(MemFsTestSandbox::ctx(), e3.inode, None)
+            .is_err()
+    );
 }

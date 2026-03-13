@@ -1,11 +1,16 @@
 use super::*;
 
+const LINUX_O_APPEND: u32 = 0x400;
+const LINUX_O_TRUNC: u32 = 0x200;
+const LINUX_O_WRONLY: u32 = 1;
+
 #[test]
 fn test_read_basic() {
     let sb = MemFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("read_basic.txt").unwrap();
     let handle = handle.unwrap();
-    sb.fuse_write(entry.inode, handle, b"hello world", 0).unwrap();
+    sb.fuse_write(entry.inode, handle, b"hello world", 0)
+        .unwrap();
     let data = sb.fuse_read(entry.inode, handle, 1024, 0).unwrap();
     assert_eq!(&data[..], b"hello world");
 }
@@ -15,7 +20,8 @@ fn test_read_partial() {
     let sb = MemFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("partial.txt").unwrap();
     let handle = handle.unwrap();
-    sb.fuse_write(entry.inode, handle, b"hello world", 0).unwrap();
+    sb.fuse_write(entry.inode, handle, b"hello world", 0)
+        .unwrap();
     let data = sb.fuse_read(entry.inode, handle, 5, 6).unwrap();
     assert_eq!(&data[..], b"world");
 }
@@ -76,6 +82,37 @@ fn test_write_multiple() {
 }
 
 #[test]
+fn test_write_append_ignores_offset() {
+    let sb = MemFsTestSandbox::new();
+    let (entry, handle) = sb.fuse_create_root("append.txt").unwrap();
+    let handle = handle.unwrap();
+    sb.fuse_write(entry.inode, handle, b"hello", 0).unwrap();
+    sb.fs
+        .release(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+
+    let (append_handle, _) = sb
+        .fuse_open(entry.inode, LINUX_O_WRONLY | LINUX_O_APPEND)
+        .unwrap();
+    let append_handle = append_handle.unwrap();
+    sb.fuse_write(entry.inode, append_handle, b" world", 0)
+        .unwrap();
+
+    let (read_handle, _) = sb.fuse_open(entry.inode, 0).unwrap();
+    let read_handle = read_handle.unwrap();
+    let data = sb.fuse_read(entry.inode, read_handle, 1024, 0).unwrap();
+    assert_eq!(&data[..], b"hello world");
+}
+
+#[test]
 fn test_write_large() {
     let sb = MemFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("large.bin").unwrap();
@@ -83,7 +120,9 @@ fn test_write_large() {
     let big_data: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
     let n = sb.fuse_write(entry.inode, handle, &big_data, 0).unwrap();
     assert_eq!(n, big_data.len());
-    let read_back = sb.fuse_read(entry.inode, handle, big_data.len() as u32, 0).unwrap();
+    let read_back = sb
+        .fuse_read(entry.inode, handle, big_data.len() as u32, 0)
+        .unwrap();
     assert_eq!(read_back.len(), big_data.len());
     assert_eq!(&read_back[..], &big_data[..]);
 }
@@ -121,13 +160,22 @@ fn test_open_truncate() {
     let sb = MemFsTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("truncate.txt").unwrap();
     let handle = handle.unwrap();
-    sb.fuse_write(entry.inode, handle, b"initial content", 0).unwrap();
+    sb.fuse_write(entry.inode, handle, b"initial content", 0)
+        .unwrap();
     sb.fs
-        .release(MemFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
 
-    // Open with O_TRUNC (use libc constant for platform portability).
-    let (new_handle, _) = sb.fuse_open(entry.inode, libc::O_TRUNC as u32).unwrap();
+    // Open with the guest Linux O_TRUNC flag.
+    let (new_handle, _) = sb.fuse_open(entry.inode, LINUX_O_TRUNC).unwrap();
     let new_handle = new_handle.unwrap();
     let data = sb.fuse_read(entry.inode, new_handle, 1024, 0).unwrap();
     assert_eq!(data.len(), 0);
@@ -148,7 +196,15 @@ fn test_release_handle() {
     let handle = handle.unwrap();
     sb.fuse_write(entry.inode, handle, b"data", 0).unwrap();
     sb.fs
-        .release(MemFsTestSandbox::ctx(), entry.inode, 0, handle, false, false, None)
+        .release(
+            MemFsTestSandbox::ctx(),
+            entry.inode,
+            0,
+            handle,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     // After release, using the old handle should fail.
     let result = sb.fuse_read(entry.inode, handle, 1024, 0);

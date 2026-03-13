@@ -50,7 +50,10 @@ fn test_readdir_upper_shadows_lower() {
     });
     let names = sb.readdir_names(ROOT_INODE).unwrap();
     // Should appear exactly once.
-    let count = names.iter().filter(|n| n.as_slice() == b"shared.txt").count();
+    let count = names
+        .iter()
+        .filter(|n| n.as_slice() == b"shared.txt")
+        .count();
     assert_eq!(count, 1, "same name should appear exactly once");
 }
 

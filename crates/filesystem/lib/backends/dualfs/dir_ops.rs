@@ -1,18 +1,20 @@
 //! Opendir, readdir, readdirplus, releasedir, and snapshot building.
 
-use std::collections::HashSet;
-use std::io;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-
-use super::lookup::{auto_register_readdir, backend, get_node};
-use super::policy::{BackendChoice, DualDispatchPlan, DualNamespaceView, HintBag, OpKind, RequestCtx};
-use super::types::{
-    BackendId, DirSnapshot, DualDirHandle, FileKind, MergedDirEntry, NodeState, ROOT_INODE,
+use std::{
+    collections::HashSet,
+    io,
+    sync::{Arc, atomic::Ordering},
 };
-use super::DualFs;
-use crate::backends::shared::init_binary;
-use crate::{Context, DirEntry, Entry, OpenOptions};
+
+use super::{
+    DualFs,
+    lookup::{auto_register_readdir, backend, get_node},
+    policy::{BackendChoice, DualDispatchPlan, DualNamespaceView, HintBag, OpKind, RequestCtx},
+    types::{
+        BackendId, DirSnapshot, DualDirHandle, FileKind, MergedDirEntry, NodeState, ROOT_INODE,
+    },
+};
+use crate::{Context, DirEntry, Entry, OpenOptions, backends::shared::init_binary};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -48,9 +50,7 @@ pub(crate) fn do_opendir(
         name: Vec::new(),
         parent_inode: 0,
     };
-    let view = DualNamespaceView {
-        state: &fs.state,
-    };
+    let view = DualNamespaceView { state: &fs.state };
     let hints = HintBag::new();
 
     let readdir_plan = fs.policy.plan(&req_ctx, &view, &hints)?;
@@ -85,10 +85,7 @@ pub(crate) fn do_opendir(
         }
     };
 
-    let handle = fs
-        .state
-        .next_handle
-        .fetch_add(1, Ordering::Relaxed);
+    let handle = fs.state.next_handle.fetch_add(1, Ordering::Relaxed);
 
     fs.state.dir_handles.write().unwrap().insert(
         handle,
@@ -271,21 +268,19 @@ fn build_readdir_snapshot(
             precedence: BackendChoice::BackendBFirst,
         } => {
             // Pass 1: backend_b via readdir.
-            if !opaque_b {
-                if let Some(bb_inode) = dh.backend_b_inode {
-                    collect_backend_entries(
-                        fs,
-                        ctx,
-                        BackendId::BackendB,
-                        bb_inode,
-                        guest_inode,
-                        &mut seen,
-                        &mut entries,
-                        &mut off,
-                        &whiteouts,
-                        BackendId::BackendB,
-                    )?;
-                }
+            if !opaque_b && let Some(bb_inode) = dh.backend_b_inode {
+                collect_backend_entries(
+                    fs,
+                    ctx,
+                    BackendId::BackendB,
+                    bb_inode,
+                    guest_inode,
+                    &mut seen,
+                    &mut entries,
+                    &mut off,
+                    &whiteouts,
+                    BackendId::BackendB,
+                )?;
             }
 
             // Pass 2: backend_a children from dentries.
@@ -306,77 +301,69 @@ fn build_readdir_snapshot(
             precedence: BackendChoice::BackendAFirst,
         } => {
             // Pass 1: backend_a via readdir.
-            if !opaque_a {
-                if let Some(ba_inode) = dh.backend_a_inode {
-                    collect_backend_entries(
-                        fs,
-                        ctx,
-                        BackendId::BackendA,
-                        ba_inode,
-                        guest_inode,
-                        &mut seen,
-                        &mut entries,
-                        &mut off,
-                        &whiteouts,
-                        BackendId::BackendA,
-                    )?;
-                }
+            if !opaque_a && let Some(ba_inode) = dh.backend_a_inode {
+                collect_backend_entries(
+                    fs,
+                    ctx,
+                    BackendId::BackendA,
+                    ba_inode,
+                    guest_inode,
+                    &mut seen,
+                    &mut entries,
+                    &mut off,
+                    &whiteouts,
+                    BackendId::BackendA,
+                )?;
             }
 
             // Pass 2: backend_b via readdir.
-            if !opaque_b {
-                if let Some(bb_inode) = dh.backend_b_inode {
-                    collect_backend_entries(
-                        fs,
-                        ctx,
-                        BackendId::BackendB,
-                        bb_inode,
-                        guest_inode,
-                        &mut seen,
-                        &mut entries,
-                        &mut off,
-                        &whiteouts,
-                        BackendId::BackendB,
-                    )?;
-                }
+            if !opaque_b && let Some(bb_inode) = dh.backend_b_inode {
+                collect_backend_entries(
+                    fs,
+                    ctx,
+                    BackendId::BackendB,
+                    bb_inode,
+                    guest_inode,
+                    &mut seen,
+                    &mut entries,
+                    &mut off,
+                    &whiteouts,
+                    BackendId::BackendB,
+                )?;
             }
         }
 
         DualDispatchPlan::UseBackendA { .. } => {
-            if !opaque_a {
-                if let Some(ba_inode) = dh.backend_a_inode {
-                    collect_backend_entries(
-                        fs,
-                        ctx,
-                        BackendId::BackendA,
-                        ba_inode,
-                        guest_inode,
-                        &mut seen,
-                        &mut entries,
-                        &mut off,
-                        &whiteouts,
-                        BackendId::BackendA,
-                    )?;
-                }
+            if !opaque_a && let Some(ba_inode) = dh.backend_a_inode {
+                collect_backend_entries(
+                    fs,
+                    ctx,
+                    BackendId::BackendA,
+                    ba_inode,
+                    guest_inode,
+                    &mut seen,
+                    &mut entries,
+                    &mut off,
+                    &whiteouts,
+                    BackendId::BackendA,
+                )?;
             }
         }
 
         DualDispatchPlan::UseBackendB { .. } => {
-            if !opaque_b {
-                if let Some(bb_inode) = dh.backend_b_inode {
-                    collect_backend_entries(
-                        fs,
-                        ctx,
-                        BackendId::BackendB,
-                        bb_inode,
-                        guest_inode,
-                        &mut seen,
-                        &mut entries,
-                        &mut off,
-                        &whiteouts,
-                        BackendId::BackendB,
-                    )?;
-                }
+            if !opaque_b && let Some(bb_inode) = dh.backend_b_inode {
+                collect_backend_entries(
+                    fs,
+                    ctx,
+                    BackendId::BackendB,
+                    bb_inode,
+                    guest_inode,
+                    &mut seen,
+                    &mut entries,
+                    &mut off,
+                    &whiteouts,
+                    BackendId::BackendB,
+                )?;
             }
         }
 
@@ -403,7 +390,8 @@ fn collect_backend_entries(
     let (dir_handle, _) = backend(fs, backend_id).opendir(ctx, backend_inode, 0)?;
     let dir_handle_val = dir_handle.unwrap_or(0);
 
-    let child_entries = backend(fs, backend_id).readdir(ctx, backend_inode, dir_handle_val, u32::MAX, 0)?;
+    let child_entries =
+        backend(fs, backend_id).readdir(ctx, backend_inode, dir_handle_val, u32::MAX, 0)?;
     let _ = backend(fs, backend_id).releasedir(ctx, backend_inode, 0, dir_handle_val);
 
     for entry in child_entries {
@@ -486,12 +474,12 @@ fn collect_dentry_entries(
 
         // Only include nodes that are on the filter backend or merged.
         let state = child_node.state.read().unwrap();
-        let include = match (&*state, backend_filter) {
-            (NodeState::BackendA { .. }, BackendId::BackendA) => true,
-            (NodeState::BackendB { .. }, BackendId::BackendB) => true,
-            (NodeState::MergedDir { .. }, _) => true,
-            _ => false,
-        };
+        let include = matches!(
+            (&*state, backend_filter),
+            (NodeState::BackendA { .. }, BackendId::BackendA)
+                | (NodeState::BackendB { .. }, BackendId::BackendB)
+                | (NodeState::MergedDir { .. }, _)
+        );
 
         if include {
             seen.insert(name.clone());
@@ -507,10 +495,7 @@ fn collect_dentry_entries(
 }
 
 /// Serve readdir results from a snapshot starting at the given offset.
-fn serve_readdir(
-    snapshot: &DirSnapshot,
-    offset: u64,
-) -> io::Result<Vec<DirEntry<'static>>> {
+fn serve_readdir(snapshot: &DirSnapshot, offset: u64) -> io::Result<Vec<DirEntry<'static>>> {
     let start = snapshot
         .entries
         .iter()
@@ -529,7 +514,13 @@ fn serve_readdir(
     for entry in result_entries {
         let name_start = names_buf.len();
         names_buf.extend_from_slice(&entry.name);
-        offsets_vec.push((name_start, entry.name.len(), entry.inode, entry.offset, entry.file_type));
+        offsets_vec.push((
+            name_start,
+            entry.name.len(),
+            entry.inode,
+            entry.offset,
+            entry.file_type,
+        ));
     }
 
     let leaked: &'static [u8] = Box::leak(names_buf.into_boxed_slice());

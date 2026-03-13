@@ -5,8 +5,10 @@
 
 use std::process::ExitStatus;
 
-use nix::sys::signal::{self, Signal};
-use nix::unistd::Pid;
+use nix::{
+    sys::signal::{self, Signal},
+    unistd::Pid,
+};
 use tokio::process::Child;
 
 use crate::MicrosandboxResult;

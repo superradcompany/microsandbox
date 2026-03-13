@@ -17,15 +17,13 @@
 //! kernel count would leak the hidden xattr's existence (the guest could compare the
 //! unfiltered count with the filtered list to infer the xattr exists).
 
-use std::ffi::CStr;
-use std::io;
+use std::{ffi::CStr, io};
 
-use super::PassthroughFs;
-use super::inode;
-use crate::backends::shared::init_binary;
-use crate::backends::shared::platform;
-use crate::backends::shared::stat_override;
-use crate::{Context, GetxattrReply, ListxattrReply};
+use super::{PassthroughFs, inode};
+use crate::{
+    Context, GetxattrReply, ListxattrReply,
+    backends::shared::{init_binary, platform, stat_override},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions

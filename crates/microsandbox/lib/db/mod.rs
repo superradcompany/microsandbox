@@ -4,7 +4,6 @@
 //! project-local (`.microsandbox/db/msb.db`) databases. Migrations are
 //! automatically applied on first connection.
 
-#[allow(missing_docs)]
 pub use microsandbox_db::entity;
 
 use std::path::{Path, PathBuf};

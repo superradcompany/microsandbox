@@ -1,5 +1,7 @@
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::{
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 use microsandbox_utils::AGENTD_BINARY;
 #[cfg(feature = "prebuilt")]
@@ -54,17 +56,16 @@ fn build_agentd(workspace_root: &Path, out_dir: &Path) {
         // when msb embeds an older guest payload than the source implies.
         let agentd_src = workspace_root.join("crates/agentd");
         let protocol_src = workspace_root.join("crates/protocol");
-        if let Ok(bin_time) = std::fs::metadata(&source).and_then(|m| m.modified()) {
-            if newest_tree_mtime(&agentd_src)
+        if let Ok(bin_time) = std::fs::metadata(&source).and_then(|m| m.modified())
+            && newest_tree_mtime(&agentd_src)
                 .into_iter()
                 .chain(newest_tree_mtime(&protocol_src))
                 .any(|src_time| src_time > bin_time)
-            {
-                panic!(
-                    "build/{AGENTD_BINARY} is older than crates/agentd or crates/protocol source.\n\
-                     Run `just build-agentd` to rebuild the guest agent binary."
-                );
-            }
+        {
+            panic!(
+                "build/{AGENTD_BINARY} is older than crates/agentd or crates/protocol source.\n\
+                 Run `just build-agentd` to rebuild the guest agent binary."
+            );
         }
 
         let dest = out_dir.join(AGENTD_BINARY);

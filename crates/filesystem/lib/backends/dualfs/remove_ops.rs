@@ -1,19 +1,21 @@
 //! Unlink, rmdir, rename, and whiteout management.
 
-use std::ffi::CStr;
-use std::io;
-use std::sync::atomic::Ordering;
+use std::{ffi::CStr, io, sync::atomic::Ordering};
 
-use super::hooks::{CommitEvent, DentryChange, notify_observers};
-use super::lookup::{
-    backend, ensure_alias_linked, ensure_backend_presence, get_node, mark_metadata_authority,
-    resolve_backend_inode,
+use super::{
+    DualFs,
+    hooks::{CommitEvent, DentryChange, notify_observers},
+    lookup::{
+        backend, ensure_alias_linked, ensure_backend_presence, get_node, mark_metadata_authority,
+        resolve_backend_inode,
+    },
+    policy::{DualNamespaceView, HintBag, OpKind, RequestCtx},
+    types::{BackendId, FileKind, GuestNode, ROOT_INODE},
 };
-use super::policy::{DualNamespaceView, HintBag, OpKind, RequestCtx};
-use super::types::{BackendId, FileKind, GuestNode, ROOT_INODE};
-use super::DualFs;
-use crate::backends::shared::{init_binary, name_validation, platform};
-use crate::Context;
+use crate::{
+    Context,
+    backends::shared::{init_binary, name_validation, platform},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -61,15 +63,20 @@ pub(crate) fn do_unlink(fs: &DualFs, ctx: Context, parent: u64, name: &CStr) -> 
     ensure_alias_linked(&fs.state, child_ino, parent, name_bytes)?;
 
     // If child has presence on target, unlink it there.
-    if let Some(_target_child_inode) = child_node.state.read().unwrap().backend_inode(target) {
-        if let Some(parent_target_inode) = resolve_backend_inode(&fs.state, parent, target) {
-            backend(fs, target).unlink(ctx, parent_target_inode, name)?;
-        }
+    if let Some(_target_child_inode) = child_node.state.read().unwrap().backend_inode(target)
+        && let Some(parent_target_inode) = resolve_backend_inode(&fs.state, parent, target)
+    {
+        backend(fs, target).unlink(ctx, parent_target_inode, name)?;
     }
 
     // If child still has visible presence on the other backend, create whiteout.
     let other = target.other();
-    if child_node.state.read().unwrap().backend_inode(other).is_some()
+    if child_node
+        .state
+        .read()
+        .unwrap()
+        .backend_inode(other)
+        .is_some()
         && !super::lookup::is_opaque_against(&fs.state, parent, other)
     {
         fs.state
@@ -99,13 +106,13 @@ pub(crate) fn do_unlink(fs: &DualFs, ctx: Context, parent: u64, name: &CStr) -> 
     // Anchor repair.
     let anchor_parent = child_node.anchor_parent.load(Ordering::Relaxed);
     let anchor_name = child_node.anchor_name.read().unwrap().clone();
-    if anchor_parent == parent && anchor_name == name_bytes {
-        if let Some(aliases) = fs.state.alias_index.read().unwrap().get(&child_ino) {
-            if let Some((new_p, new_n)) = aliases.iter().next() {
-                child_node.anchor_parent.store(*new_p, Ordering::Relaxed);
-                *child_node.anchor_name.write().unwrap() = new_n.clone();
-            }
-        }
+    if anchor_parent == parent
+        && anchor_name == name_bytes
+        && let Some(aliases) = fs.state.alias_index.read().unwrap().get(&child_ino)
+        && let Some((new_p, new_n)) = aliases.iter().next()
+    {
+        child_node.anchor_parent.store(*new_p, Ordering::Relaxed);
+        *child_node.anchor_name.write().unwrap() = new_n.clone();
     }
 
     // hooks.after_commit
@@ -169,15 +176,25 @@ pub(crate) fn do_rmdir(fs: &DualFs, ctx: Context, parent: u64, name: &CStr) -> i
     check_merged_dir_empty(fs, ctx, child_ino, &child_node, target)?;
 
     // If child has target presence, rmdir it there.
-    if child_node.state.read().unwrap().backend_inode(target).is_some() {
-        if let Some(parent_target_inode) = resolve_backend_inode(&fs.state, parent, target) {
-            backend(fs, target).rmdir(ctx, parent_target_inode, name)?;
-        }
+    if child_node
+        .state
+        .read()
+        .unwrap()
+        .backend_inode(target)
+        .is_some()
+        && let Some(parent_target_inode) = resolve_backend_inode(&fs.state, parent, target)
+    {
+        backend(fs, target).rmdir(ctx, parent_target_inode, name)?;
     }
 
     // Whiteout if other side still has the dir.
     let other = target.other();
-    if child_node.state.read().unwrap().backend_inode(other).is_some()
+    if child_node
+        .state
+        .read()
+        .unwrap()
+        .backend_inode(other)
+        .is_some()
         && !super::lookup::is_opaque_against(&fs.state, parent, other)
     {
         fs.state
@@ -280,10 +297,10 @@ pub(crate) fn do_rename(
 
     // Materialize source if needed.
     let current_backend = source_node.state.read().unwrap().current_backend();
-    if let Some(current) = current_backend {
-        if current != target {
-            super::materialize::do_materialize(fs, ctx, source_ino, current, target)?;
-        }
+    if let Some(current) = current_backend
+        && current != target
+    {
+        super::materialize::do_materialize(fs, ctx, source_ino, current, target)?;
     }
 
     ensure_backend_presence(fs, ctx, olddir, target)?;
@@ -313,32 +330,19 @@ pub(crate) fn do_rename(
 
         // Materialize destination if needed.
         let dest_current = dest_node.state.read().unwrap().current_backend();
-        if let Some(current) = dest_current {
-            if current != target {
-                super::materialize::do_materialize(
-                    fs,
-                    ctx,
-                    dest_guest_ino,
-                    current,
-                    target,
-                )?;
-            }
+        if let Some(current) = dest_current
+            && current != target
+        {
+            super::materialize::do_materialize(fs, ctx, dest_guest_ino, current, target)?;
         }
         ensure_alias_linked(&fs.state, dest_guest_ino, newdir, newname_bytes)?;
 
         // Delegate exchange to target backend.
-        let olddir_target = resolve_backend_inode(&fs.state, olddir, target)
-            .ok_or_else(platform::enoent)?;
-        let newdir_target = resolve_backend_inode(&fs.state, newdir, target)
-            .ok_or_else(platform::enoent)?;
-        backend(fs, target).rename(
-            ctx,
-            olddir_target,
-            oldname,
-            newdir_target,
-            newname,
-            flags,
-        )?;
+        let olddir_target =
+            resolve_backend_inode(&fs.state, olddir, target).ok_or_else(platform::enoent)?;
+        let newdir_target =
+            resolve_backend_inode(&fs.state, newdir, target).ok_or_else(platform::enoent)?;
+        backend(fs, target).rename(ctx, olddir_target, oldname, newdir_target, newname, flags)?;
 
         // Swap dentries.
         {
@@ -361,13 +365,9 @@ pub(crate) fn do_rename(
         }
 
         // Update anchors.
-        source_node
-            .anchor_parent
-            .store(newdir, Ordering::Relaxed);
+        source_node.anchor_parent.store(newdir, Ordering::Relaxed);
         *source_node.anchor_name.write().unwrap() = newname_bytes.to_vec();
-        dest_node
-            .anchor_parent
-            .store(olddir, Ordering::Relaxed);
+        dest_node.anchor_parent.store(olddir, Ordering::Relaxed);
         *dest_node.anchor_name.write().unwrap() = oldname_bytes.to_vec();
 
         return Ok(());
@@ -378,19 +378,29 @@ pub(crate) fn do_rename(
         let dest_node = get_node(&fs.state, dest_ino)?;
 
         // If dest has target presence, unlink/rmdir it there.
-        if dest_node.state.read().unwrap().backend_inode(target).is_some() {
-            if let Some(newdir_target) = resolve_backend_inode(&fs.state, newdir, target) {
-                if dest_node.kind == FileKind::Directory {
-                    backend(fs, target).rmdir(ctx, newdir_target, newname)?;
-                } else {
-                    backend(fs, target).unlink(ctx, newdir_target, newname)?;
-                }
+        if dest_node
+            .state
+            .read()
+            .unwrap()
+            .backend_inode(target)
+            .is_some()
+            && let Some(newdir_target) = resolve_backend_inode(&fs.state, newdir, target)
+        {
+            if dest_node.kind == FileKind::Directory {
+                backend(fs, target).rmdir(ctx, newdir_target, newname)?;
+            } else {
+                backend(fs, target).unlink(ctx, newdir_target, newname)?;
             }
         }
 
         // Whiteout if dest still has other-backend presence.
         let other = target.other();
-        if dest_node.state.read().unwrap().backend_inode(other).is_some()
+        if dest_node
+            .state
+            .read()
+            .unwrap()
+            .backend_inode(other)
+            .is_some()
             && !super::lookup::is_opaque_against(&fs.state, newdir, other)
         {
             fs.state
@@ -417,10 +427,10 @@ pub(crate) fn do_rename(
     }
 
     // Delegate rename in target backend.
-    let olddir_target = resolve_backend_inode(&fs.state, olddir, target)
-        .ok_or_else(platform::enoent)?;
-    let newdir_target = resolve_backend_inode(&fs.state, newdir, target)
-        .ok_or_else(platform::enoent)?;
+    let olddir_target =
+        resolve_backend_inode(&fs.state, olddir, target).ok_or_else(platform::enoent)?;
+    let newdir_target =
+        resolve_backend_inode(&fs.state, newdir, target).ok_or_else(platform::enoent)?;
 
     backend(fs, target).rename(ctx, olddir_target, oldname, newdir_target, newname, flags)?;
 
@@ -463,9 +473,7 @@ pub(crate) fn do_rename(
         });
 
     // Update anchor.
-    source_node
-        .anchor_parent
-        .store(newdir, Ordering::Relaxed);
+    source_node.anchor_parent.store(newdir, Ordering::Relaxed);
     *source_node.anchor_name.write().unwrap() = newname_bytes.to_vec();
 
     Ok(())
