@@ -15,6 +15,7 @@ use sea_orm::{
 use crate::MicrosandboxError;
 use crate::MicrosandboxResult;
 use crate::db::entity::volume as volume_entity;
+use crate::size::Mebibytes;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -209,9 +210,16 @@ impl VolumeBuilder {
         }
     }
 
-    /// Set the size quota in MiB.
-    pub fn quota(mut self, mib: u32) -> Self {
-        self.config.quota_mib = Some(mib);
+    /// Set the size quota.
+    ///
+    /// Accepts bare `u32` (interpreted as MiB) or a [`SizeExt`](crate::size::SizeExt) helper:
+    /// ```ignore
+    /// .quota(1024)         // 1024 MiB
+    /// .quota(1024.mib())   // 1024 MiB (explicit)
+    /// .quota(1.gib())      // 1 GiB = 1024 MiB
+    /// ```
+    pub fn quota(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.config.quota_mib = Some(size.into().as_u32());
         self
     }
 

@@ -187,15 +187,6 @@ pub trait IntoExecOptions {
     fn into_exec_options(self) -> ExecOptions;
 }
 
-/// Helper trait for readable byte sizes.
-pub trait SizeExt {
-    /// Convert to kibibytes.
-    fn kib(self) -> u64;
-    /// Convert to mebibytes.
-    fn mib(self) -> u64;
-    /// Convert to gibibytes.
-    fn gib(self) -> u64;
-}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -502,14 +493,3 @@ impl TryFrom<&str> for RlimitResource {
     }
 }
 
-impl SizeExt for u64 {
-    fn kib(self) -> u64 {
-        self * 1024
-    }
-    fn mib(self) -> u64 {
-        self * 1024 * 1024
-    }
-    fn gib(self) -> u64 {
-        self * 1024 * 1024 * 1024
-    }
-}
