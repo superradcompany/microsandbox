@@ -1,5 +1,6 @@
 [package]
 name = "microsandbox-image"
+description = "OCI image pulling, layer extraction, and caching for microsandbox."
 version.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -8,3 +9,25 @@ edition.workspace = true
 
 [lib]
 path = "lib/lib.rs"
+
+[dependencies]
+astral-tokio-tar = { workspace = true }
+async-compression = { workspace = true, features = ["gzip", "tokio", "zstd"] }
+futures.workspace = true
+hex.workspace = true
+libc.workspace = true
+microsandbox-utils = { path = "../utils" }
+oci-client.workspace = true
+oci-spec.workspace = true
+scopeguard.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync"] }
+tokio-util.workspace = true
+tracing.workspace = true
+xattr.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

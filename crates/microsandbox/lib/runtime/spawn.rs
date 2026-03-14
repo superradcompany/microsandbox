@@ -63,6 +63,9 @@ pub async fn spawn_supervisor(
     let log_dir = sandbox_dir.join("logs");
     let runtime_dir = sandbox_dir.join("runtime");
     let scripts_dir = runtime_dir.join("scripts");
+    let empty_rootfs_dir = sandbox_dir.join("rootfs-base");
+    let rw_dir = sandbox_dir.join("rw");
+    let staging_dir = sandbox_dir.join("staging");
     let db_dir = global.home().join(microsandbox_utils::DB_SUBDIR);
     let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
 
@@ -70,6 +73,9 @@ pub async fn spawn_supervisor(
     tokio::try_join!(
         tokio::fs::create_dir_all(&log_dir),
         tokio::fs::create_dir_all(&scripts_dir),
+        tokio::fs::create_dir_all(&empty_rootfs_dir),
+        tokio::fs::create_dir_all(&rw_dir),
+        tokio::fs::create_dir_all(&staging_dir),
     )?;
 
     // Write scripts to the runtime scripts directory.
@@ -90,6 +96,9 @@ pub async fn spawn_supervisor(
         &db_path,
         &log_dir,
         &runtime_dir,
+        &empty_rootfs_dir,
+        &rw_dir,
+        &staging_dir,
         guest_raw_fd,
         &libkrunfw_path,
     ));
@@ -231,12 +240,16 @@ fn exit_action_str(action: &microsandbox_runtime::policy::ExitAction) -> &'stati
 }
 
 /// Build the `msb supervisor` CLI args for a sandbox.
+#[allow(clippy::too_many_arguments)]
 fn supervisor_cli_args(
     config: &SandboxConfig,
     sandbox_id: i32,
     db_path: &Path,
     log_dir: &Path,
     runtime_dir: &Path,
+    empty_rootfs_dir: &Path,
+    rw_dir: &Path,
+    staging_dir: &Path,
     agent_fd: RawFd,
     libkrunfw_path: &Path,
 ) -> Vec<OsString> {
@@ -294,11 +307,28 @@ fn supervisor_cli_args(
 
     match &config.image {
         RootfsSource::Bind(path) => {
-            args.push(OsString::from("--rootfs-layer"));
+            args.push(OsString::from("--rootfs-path"));
             args.push(path.as_os_str().to_os_string());
         }
-        RootfsSource::Oci(reference) => {
-            unimplemented!("OCI image references are not yet supported: {reference}");
+        RootfsSource::Oci(_) => {
+            args.push(OsString::from("--rootfs-upper"));
+            args.push(rw_dir.as_os_str().to_os_string());
+            args.push(OsString::from("--rootfs-staging"));
+            args.push(staging_dir.as_os_str().to_os_string());
+
+            // Scratch-style OCI images can legitimately have zero filesystem layers.
+            let synthetic_empty_lower;
+            let lowers: &[std::path::PathBuf] = if config.resolved_rootfs_layers.is_empty() {
+                synthetic_empty_lower = vec![empty_rootfs_dir.to_path_buf()];
+                &synthetic_empty_lower
+            } else {
+                &config.resolved_rootfs_layers
+            };
+
+            for layer_dir in lowers {
+                args.push(OsString::from("--rootfs-lower"));
+                args.push(layer_dir.as_os_str().to_os_string());
+            }
         }
     }
 
@@ -363,7 +393,10 @@ mod tests {
     use std::path::Path;
 
     use super::supervisor_cli_args;
-    use crate::{LogLevel, sandbox::SandboxBuilder};
+    use crate::{
+        LogLevel,
+        sandbox::{RootfsSource, SandboxBuilder},
+    };
 
     #[test]
     fn test_supervisor_cli_args_include_selected_log_level() {
@@ -379,6 +412,9 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
+            Path::new("/tmp/rootfs-base"),
+            Path::new("/tmp/rw"),
+            Path::new("/tmp/staging"),
             9,
             Path::new("/tmp/libkrunfw.dylib"),
         );
@@ -399,6 +435,9 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
+            Path::new("/tmp/rootfs-base"),
+            Path::new("/tmp/rw"),
+            Path::new("/tmp/staging"),
             9,
             Path::new("/tmp/libkrunfw.dylib"),
         );
@@ -409,5 +448,134 @@ mod tests {
                 Some("--error" | "--warn" | "--info" | "--debug" | "--trace")
             )
         }));
+    }
+
+    #[test]
+    fn test_supervisor_cli_args_use_passthrough_for_bind_rootfs() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .unwrap();
+
+        let args = supervisor_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/rootfs-base"),
+            Path::new("/tmp/rw"),
+            Path::new("/tmp/staging"),
+            9,
+            Path::new("/tmp/libkrunfw.dylib"),
+        );
+
+        let rendered = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(rendered.contains(&"--rootfs-path".to_string()));
+        assert!(rendered.contains(&"/tmp/rootfs".to_string()));
+        assert!(!rendered.contains(&"--rootfs-lower".to_string()));
+        assert!(!rendered.contains(&"--rootfs-upper".to_string()));
+        assert!(!rendered.contains(&"--rootfs-staging".to_string()));
+    }
+
+    #[test]
+    fn test_supervisor_cli_args_use_overlay_for_oci_rootfs() {
+        let mut config = SandboxBuilder::new("test")
+            .image("alpine:latest")
+            .build()
+            .unwrap();
+        assert!(matches!(config.image, RootfsSource::Oci(_)));
+        config.resolved_rootfs_layers = vec!["/tmp/layer0".into(), "/tmp/layer1".into()];
+
+        let args = supervisor_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/rootfs-base"),
+            Path::new("/tmp/rw"),
+            Path::new("/tmp/staging"),
+            9,
+            Path::new("/tmp/libkrunfw.dylib"),
+        );
+
+        let rendered = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(rendered.contains(&"--rootfs-lower".to_string()));
+        assert!(rendered.contains(&"/tmp/layer0".to_string()));
+        assert!(rendered.contains(&"/tmp/layer1".to_string()));
+        assert!(rendered.contains(&"--rootfs-upper".to_string()));
+        assert!(rendered.contains(&"/tmp/rw".to_string()));
+        assert!(rendered.contains(&"--rootfs-staging".to_string()));
+        assert!(rendered.contains(&"/tmp/staging".to_string()));
+    }
+
+    #[test]
+    fn test_supervisor_cli_args_use_overlay_for_single_oci_lower_without_index_args() {
+        let mut config = SandboxBuilder::new("test")
+            .image("alpine:latest")
+            .build()
+            .unwrap();
+        assert!(matches!(config.image, RootfsSource::Oci(_)));
+        config.resolved_rootfs_layers = vec!["/tmp/layer0".into()];
+
+        let args = supervisor_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/rootfs-base"),
+            Path::new("/tmp/rw"),
+            Path::new("/tmp/staging"),
+            9,
+            Path::new("/tmp/libkrunfw.dylib"),
+        );
+
+        let rendered = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(!rendered.contains(&"--rootfs-path".to_string()));
+        assert!(rendered.contains(&"--rootfs-lower".to_string()));
+        assert!(rendered.contains(&"/tmp/layer0".to_string()));
+        assert!(rendered.contains(&"--rootfs-upper".to_string()));
+        assert!(rendered.contains(&"--rootfs-staging".to_string()));
+        assert!(!rendered.iter().any(|arg| arg.ends_with(".index")));
+    }
+
+    #[test]
+    fn test_supervisor_cli_args_use_synthetic_lower_for_zero_layer_oci_rootfs() {
+        let config = SandboxBuilder::new("test")
+            .image("scratch:latest")
+            .build()
+            .unwrap();
+
+        let args = supervisor_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/rootfs-base"),
+            Path::new("/tmp/rw"),
+            Path::new("/tmp/staging"),
+            9,
+            Path::new("/tmp/libkrunfw.dylib"),
+        );
+
+        let rendered = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(!rendered.contains(&"--rootfs-path".to_string()));
+        assert!(rendered.contains(&"--rootfs-lower".to_string()));
+        assert!(rendered.contains(&"/tmp/rootfs-base".to_string()));
     }
 }

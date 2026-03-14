@@ -175,6 +175,7 @@ mod tests {
             "microvm",
             "msbnet",
             "sandbox",
+            "sandbox_image",
             "sandbox_metric",
             "snapshot",
             "supervisor",

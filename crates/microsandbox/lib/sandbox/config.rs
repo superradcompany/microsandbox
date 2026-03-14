@@ -1,12 +1,14 @@
 //! Sandbox configuration.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 use microsandbox_runtime::{
     logging::LogLevel,
     policy::{ChildPolicies, SupervisorPolicy},
 };
 use serde::{Deserialize, Serialize};
+
+use microsandbox_image::RegistryAuth;
 
 use super::types::{NetworkConfig, Patch, RootfsSource, SecretsConfig, SshConfig, VolumeMount};
 
@@ -104,6 +106,28 @@ pub struct SandboxConfig {
     /// Per-child process policies.
     #[serde(default)]
     pub child_policies: ChildPolicies,
+
+    /// Registry authentication for private OCI registries.
+    ///
+    /// Redacted (set to `None`) before serialization to database — credentials
+    /// are only needed during the pull.
+    #[serde(default, skip_serializing)]
+    pub registry_auth: Option<RegistryAuth>,
+
+    /// Replace an existing stopped sandbox with the same name during create.
+    ///
+    /// This is an operation flag, not persisted sandbox state.
+    #[serde(skip)]
+    pub replace_existing: bool,
+
+    /// Resolved rootfs lower layer paths (populated at create time for OCI images).
+    ///
+    /// Sidecar indexes are discovered by naming convention in the runtime as
+    /// `<lower>.index`, so only the lower directory path is carried here.
+    /// Persisted so existing sandboxes can reuse the pinned lower stack
+    /// without re-resolving a mutable OCI reference.
+    #[serde(default)]
+    pub(crate) resolved_rootfs_layers: Vec<PathBuf>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -130,6 +154,47 @@ impl Default for SandboxConfig {
             ssh: SshConfig::default(),
             supervisor_policy: SupervisorPolicy::default(),
             child_policies: ChildPolicies::default(),
+            registry_auth: None,
+            replace_existing: false,
+            resolved_rootfs_layers: Vec::new(),
         }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use microsandbox_image::RegistryAuth;
+
+    use super::SandboxConfig;
+
+    #[test]
+    fn test_sandbox_config_serializes_pinned_rootfs_layers_but_redacts_registry_auth() {
+        let mut config = SandboxConfig {
+            name: "persisted".into(),
+            ..Default::default()
+        };
+        config.registry_auth = Some(RegistryAuth::Basic {
+            username: "alice".into(),
+            password: "secret".into(),
+        });
+        config.replace_existing = true;
+        config.resolved_rootfs_layers = vec!["/tmp/layer0".into(), "/tmp/layer1".into()];
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains("registry_auth"));
+        assert!(!json.contains("replace_existing"));
+        assert!(json.contains("resolved_rootfs_layers"));
+
+        let decoded: SandboxConfig = serde_json::from_str(&json).unwrap();
+        assert!(decoded.registry_auth.is_none());
+        assert!(!decoded.replace_existing);
+        assert_eq!(
+            decoded.resolved_rootfs_layers,
+            config.resolved_rootfs_layers
+        );
     }
 }

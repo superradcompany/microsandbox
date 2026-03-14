@@ -27,6 +27,7 @@ futures.workspace = true
 libc.workspace = true
 microsandbox-db = { path = "../db" }
 microsandbox-filesystem = { path = "../filesystem" }
+microsandbox-image = { path = "../image" }
 microsandbox-migration = { path = "../migration" }
 microsandbox-protocol = { path = "../protocol" }
 microsandbox-runtime = { path = "../runtime" }

@@ -396,7 +396,11 @@ fn spawn_vm_process(
     let agent_fd = config.agent_fd;
     unsafe {
         cmd.pre_exec(move || {
-            if libc::fcntl(agent_fd, libc::F_SETFD, 0) == -1 {
+            let flags = libc::fcntl(agent_fd, libc::F_GETFD);
+            if flags == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fcntl(agent_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -424,9 +428,22 @@ fn microvm_cli_args(config: &SupervisorConfig) -> Vec<OsString> {
     args.push(OsString::from("--memory-mib"));
     args.push(OsString::from(config.vm_config.memory_mib.to_string()));
 
-    for layer in &config.vm_config.rootfs_layers {
-        args.push(OsString::from("--rootfs-layer"));
-        args.push(layer.clone().into_os_string());
+    if let Some(ref rootfs_path) = config.vm_config.rootfs_path {
+        args.push(OsString::from("--rootfs-path"));
+        args.push(rootfs_path.clone().into_os_string());
+    }
+
+    for lower in &config.vm_config.rootfs_lowers {
+        args.push(OsString::from("--rootfs-lower"));
+        args.push(lower.clone().into_os_string());
+    }
+    if let Some(ref upper_dir) = config.vm_config.rootfs_upper {
+        args.push(OsString::from("--rootfs-upper"));
+        args.push(upper_dir.clone().into_os_string());
+    }
+    if let Some(ref staging_dir) = config.vm_config.rootfs_staging {
+        args.push(OsString::from("--rootfs-staging"));
+        args.push(staging_dir.clone().into_os_string());
     }
 
     for mount in &config.vm_config.mounts {
@@ -758,7 +775,10 @@ mod tests {
                 libkrunfw_path: PathBuf::from("/tmp/libkrunfw.dylib"),
                 vcpus: 1,
                 memory_mib: 512,
-                rootfs_layers: vec![PathBuf::from("/tmp/rootfs")],
+                rootfs_path: Some(PathBuf::from("/tmp/rootfs")),
+                rootfs_lowers: Vec::new(),
+                rootfs_upper: None,
+                rootfs_staging: None,
                 mounts: vec!["data:/tmp/data".into()],
                 backends: Vec::new(),
                 init_path: None,
@@ -799,5 +819,27 @@ mod tests {
         assert!(!rendered.iter().any(|arg| arg == "--info"));
         assert!(!rendered.iter().any(|arg| arg == "--debug"));
         assert!(!rendered.iter().any(|arg| arg == "--trace"));
+    }
+
+    #[test]
+    fn test_microvm_cli_args_include_overlay_rootfs_paths() {
+        let mut config = test_supervisor_config(None);
+        config.vm_config.rootfs_path = None;
+        config.vm_config.rootfs_lowers = vec![PathBuf::from("/tmp/layer0")];
+        config.vm_config.rootfs_upper = Some(PathBuf::from("/tmp/rw"));
+        config.vm_config.rootfs_staging = Some(PathBuf::from("/tmp/staging"));
+
+        let args = microvm_cli_args(&config);
+        let rendered = args
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(rendered.contains(&"--rootfs-lower".to_string()));
+        assert!(rendered.contains(&"/tmp/layer0".to_string()));
+        assert!(rendered.contains(&"--rootfs-upper".to_string()));
+        assert!(rendered.contains(&"/tmp/rw".to_string()));
+        assert!(rendered.contains(&"--rootfs-staging".to_string()));
+        assert!(rendered.contains(&"/tmp/staging".to_string()));
     }
 }

@@ -78,6 +78,10 @@ pub enum MicrosandboxError {
     #[error("volume already exists: {0}")]
     VolumeAlreadyExists(String),
 
+    /// An OCI image operation failed.
+    #[error("image error: {0}")]
+    Image(#[from] microsandbox_image::ImageError),
+
     /// A custom error message.
     #[error("{0}")]
     Custom(String),

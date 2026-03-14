@@ -20,4 +20,5 @@ pub mod size;
 pub mod volume;
 
 pub use error::*;
+pub use microsandbox_image::RegistryAuth;
 pub use microsandbox_runtime::logging::LogLevel;
