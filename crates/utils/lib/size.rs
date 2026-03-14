@@ -1,11 +1,11 @@
 //! Byte-size types and conversion helpers.
 //!
 //! Provides [`ByteSize`], [`Bytes`], and [`Mebibytes`] for type-safe size
-//! specification across the SDK.  The [`SizeExt`] trait adds `.bytes()`,
+//! specification across the project. The [`SizeExt`] trait adds `.bytes()`,
 //! `.kib()`, `.mib()`, and `.gib()` helpers to integer literals.
 //!
 //! ```ignore
-//! use microsandbox::size::{SizeExt, Mebibytes};
+//! use microsandbox_utils::size::{SizeExt, Mebibytes};
 //!
 //! // All equivalent — 512 MiB:
 //! let a: Mebibytes = 512.into();    // bare integer

@@ -45,6 +45,7 @@ pub(crate) struct Layer {
     extracted_dir: PathBuf,
     extracting_dir: PathBuf,
     index_path: PathBuf,
+    implicit_dirs_path: PathBuf,
     lock_path: PathBuf,
     download_lock_path: PathBuf,
     part_path: PathBuf,
@@ -68,6 +69,7 @@ impl Layer {
             extracted_dir: cache.extracted_dir(&digest),
             extracting_dir: cache.extracting_dir(&digest),
             index_path: cache.index_path(&digest),
+            implicit_dirs_path: cache.implicit_dirs_path(&digest),
             lock_path: cache.lock_path(&digest),
             download_lock_path: cache.download_lock_path(&digest),
             part_path: cache.part_path(&digest),
@@ -257,14 +259,16 @@ impl Layer {
     /// Extract this layer (decompress + untar).
     ///
     /// Uses cross-process `flock()` to prevent concurrent extraction.
+    /// Returns an `ExtractionResult` containing the list of implicitly-created
+    /// directories that may need xattr fixup from lower layers.
     pub async fn extract(
         &self,
-        parent_extracted_dirs: &[PathBuf],
         progress: Option<&crate::progress::PullProgressSender>,
         layer_index: usize,
         media_type: Option<&str>,
         diff_id: &str,
-    ) -> ImageResult<()> {
+        force: bool,
+    ) -> ImageResult<extraction::ExtractionResult> {
         // Cross-process lock.
         let lock_file = open_lock_file(&self.lock_path)?;
         flock_exclusive(&lock_file)?;
@@ -273,8 +277,10 @@ impl Layer {
         });
 
         // Re-check after lock.
-        if self.is_extracted() {
-            return Ok(());
+        if self.is_extracted() && !force {
+            return Ok(extraction::ExtractionResult {
+                implicit_dirs: read_pending_implicit_dirs(&self.implicit_dirs_path)?,
+            });
         }
 
         let diff_id_arc: std::sync::Arc<str> = diff_id.into();
@@ -289,28 +295,30 @@ impl Layer {
         let extracting_dir = &self.extracting_dir;
         let extracted_dir = &self.extracted_dir;
 
+        if force {
+            let _ = std::fs::remove_dir_all(extracted_dir);
+            remove_file_if_exists(&self.implicit_dirs_path)?;
+        }
+
         // Clean up any previous incomplete extraction.
         let _ = std::fs::remove_dir_all(extracting_dir);
+        remove_file_if_exists(&self.implicit_dirs_path)?;
         std::fs::create_dir_all(extracting_dir).map_err(|e| ImageError::Cache {
             path: extracting_dir.clone(),
             source: e,
         })?;
 
         // Run the extraction pipeline.
-        match extraction::extract_layer(
-            &self.tar_path,
-            extracting_dir,
-            parent_extracted_dirs,
-            media_type,
-        )
-        .await
-        {
-            Ok(()) => {}
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(extracting_dir);
-                return Err(e);
-            }
-        }
+        let result =
+            match extraction::extract_layer(&self.tar_path, extracting_dir, media_type).await {
+                Ok(result) => result,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(extracting_dir);
+                    return Err(e);
+                }
+            };
+
+        write_pending_implicit_dirs(&self.implicit_dirs_path, &result.implicit_dirs)?;
 
         // Write .complete marker.
         let marker_path = extracting_dir.join(store::COMPLETE_MARKER);
@@ -334,12 +342,23 @@ impl Layer {
             });
         }
 
-        Ok(())
+        Ok(result)
     }
 
     /// Generate the binary sidecar index for this layer's extracted tree.
     pub async fn build_index(&self) -> ImageResult<()> {
         index::build_sidecar_index(&self.extracted_dir, &self.index_path).await
+    }
+
+    /// Load any pending implicit directories that still need fixup.
+    pub fn pending_implicit_dirs(&self) -> ImageResult<Vec<PathBuf>> {
+        read_pending_implicit_dirs(&self.implicit_dirs_path)
+    }
+
+    /// Clear the pending implicit directory marker after fixup completes.
+    pub fn clear_pending_implicit_dirs(&self) -> ImageResult<()> {
+        remove_file_if_exists(&self.implicit_dirs_path)?;
+        Ok(())
     }
 }
 
@@ -450,15 +469,101 @@ fn determine_download_start(
     Ok(DownloadStart::Resume(part_size))
 }
 
+fn write_pending_implicit_dirs(path: &Path, implicit_dirs: &[PathBuf]) -> ImageResult<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    if implicit_dirs.is_empty() {
+        remove_file_if_exists(path)?;
+        return Ok(());
+    }
+
+    let mut data = Vec::new();
+    for entry in implicit_dirs {
+        let bytes = entry.as_os_str().as_bytes();
+        let len = u32::try_from(bytes.len()).map_err(|_| ImageError::Cache {
+            path: path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("implicit dir path too long: {}", entry.display()),
+            ),
+        })?;
+        data.extend_from_slice(&len.to_le_bytes());
+        data.extend_from_slice(bytes);
+    }
+
+    std::fs::write(path, data).map_err(|e| ImageError::Cache {
+        path: path.to_path_buf(),
+        source: e,
+    })
+}
+
+fn read_pending_implicit_dirs(path: &Path) -> ImageResult<Vec<PathBuf>> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(ImageError::Cache {
+                path: path.to_path_buf(),
+                source: err,
+            });
+        }
+    };
+
+    let mut offset = 0usize;
+    let mut paths = Vec::new();
+    while offset < data.len() {
+        let len_end = offset + 4;
+        if len_end > data.len() {
+            return Err(ImageError::Cache {
+                path: path.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "truncated implicit dirs sidecar",
+                ),
+            });
+        }
+        let len = u32::from_le_bytes(data[offset..len_end].try_into().unwrap()) as usize;
+        offset = len_end;
+        let path_end = offset + len;
+        if path_end > data.len() {
+            return Err(ImageError::Cache {
+                path: path.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid implicit dirs sidecar entry length",
+                ),
+            });
+        }
+        paths.push(PathBuf::from(std::ffi::OsString::from_vec(
+            data[offset..path_end].to_vec(),
+        )));
+        offset = path_end;
+    }
+
+    Ok(paths)
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+
     use tempfile::tempdir;
 
-    use super::{DownloadStart, determine_download_start, remove_file_if_exists};
+    use crate::{
+        digest::Digest,
+        store::{COMPLETE_MARKER, GlobalCache},
+    };
+
+    use super::{
+        DownloadStart, Layer, determine_download_start, read_pending_implicit_dirs,
+        remove_file_if_exists, write_pending_implicit_dirs,
+    };
 
     #[test]
     fn test_determine_download_start_returns_fresh_when_part_missing() {
@@ -536,5 +641,79 @@ mod tests {
         remove_file_if_exists(&path).unwrap();
 
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_extract_reads_pending_implicit_dirs_from_existing_layer() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let digest: Digest =
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                .parse()
+                .unwrap();
+        let layer = Layer::new(digest.clone(), &cache);
+
+        let extracted_dir = cache.extracted_dir(&digest);
+        let implicit_dirs_path = cache.implicit_dirs_path(&digest);
+        std::fs::create_dir_all(&extracted_dir).unwrap();
+        std::fs::write(extracted_dir.join(COMPLETE_MARKER), b"").unwrap();
+        write_pending_implicit_dirs(
+            &implicit_dirs_path,
+            &[PathBuf::from("usr"), PathBuf::from("usr/local/bin")],
+        )
+        .unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime
+            .block_on(layer.extract(
+                None,
+                0,
+                Some("application/vnd.oci.image.layer.v1.tar"),
+                "sha256:deadbeef",
+                false,
+            ))
+            .unwrap();
+
+        assert_eq!(
+            result.implicit_dirs,
+            vec![PathBuf::from("usr"), PathBuf::from("usr/local/bin")]
+        );
+    }
+
+    #[test]
+    fn test_clear_pending_implicit_dirs_removes_marker() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let digest: Digest =
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                .parse()
+                .unwrap();
+        let layer = Layer::new(digest.clone(), &cache);
+
+        let extracted_dir = cache.extracted_dir(&digest);
+        let implicit_dirs_path = cache.implicit_dirs_path(&digest);
+        std::fs::create_dir_all(&extracted_dir).unwrap();
+        write_pending_implicit_dirs(&implicit_dirs_path, &[PathBuf::from("usr")]).unwrap();
+
+        layer.clear_pending_implicit_dirs().unwrap();
+
+        assert!(!implicit_dirs_path.exists());
+    }
+
+    #[test]
+    fn test_pending_implicit_dirs_round_trip_raw_bytes() {
+        let temp = tempdir().unwrap();
+        let sidecar_path = temp.path().join("layer.implicit_dirs");
+        let raw_path = PathBuf::from(OsString::from_vec(vec![
+            b'u', b's', b'r', b'/', b'b', b'i', b'n', b'/', 0xff, b'\n', b'x',
+        ]));
+
+        write_pending_implicit_dirs(&sidecar_path, std::slice::from_ref(&raw_path)).unwrap();
+        let round_tripped = read_pending_implicit_dirs(&sidecar_path).unwrap();
+
+        assert_eq!(round_tripped, vec![raw_path]);
     }
 }

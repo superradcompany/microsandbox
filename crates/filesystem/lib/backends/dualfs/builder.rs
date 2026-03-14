@@ -8,6 +8,8 @@ use super::{
     policy::DualDispatchPolicy,
     types::{CachePolicy, DualFsConfig, DualState},
 };
+use microsandbox_utils::size::Bytes;
+
 use crate::{DynFileSystem, backends::shared::init_binary};
 
 use std::{io, time::Duration};
@@ -99,8 +101,15 @@ impl DualFsBuilder {
     }
 
     /// Set the materialization chunk size.
-    pub fn copy_chunk_size(mut self, s: usize) -> Self {
-        self.copy_chunk_size = s;
+    ///
+    /// Accepts bare `u64` (interpreted as bytes) or a [`SizeExt`](microsandbox_utils::size::SizeExt) helper:
+    ///
+    /// ```ignore
+    /// .copy_chunk_size(1.mib())   // 1 MiB chunks
+    /// .copy_chunk_size(4096)      // 4096-byte chunks
+    /// ```
+    pub fn copy_chunk_size(mut self, size: impl Into<Bytes>) -> Self {
+        self.copy_chunk_size = size.into().as_u64() as usize;
         self
     }
 

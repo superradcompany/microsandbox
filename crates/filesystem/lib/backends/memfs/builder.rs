@@ -1,8 +1,10 @@
 //! Builder API for constructing a MemFs instance.
 //!
 //! ```ignore
+//! use microsandbox_filesystem::SizeExt;
+//!
 //! MemFs::builder()
-//!     .capacity(1024 * 1024 * 64)
+//!     .capacity(64.mib())
 //!     .max_inodes(10_000)
 //!     .build()?
 //! ```
@@ -17,6 +19,8 @@ use std::{
     },
     time::Duration,
 };
+
+use microsandbox_utils::size::Bytes;
 
 use super::{
     MemFs, inode,
@@ -55,9 +59,17 @@ impl MemFsBuilder {
         }
     }
 
-    /// Set the maximum capacity in bytes for file data.
-    pub fn capacity(mut self, bytes: u64) -> Self {
-        self.capacity = Some(bytes);
+    /// Set the maximum capacity for file data.
+    ///
+    /// Accepts bare `u64` (interpreted as bytes) or a [`SizeExt`](microsandbox_utils::size::SizeExt) helper:
+    ///
+    /// ```ignore
+    /// .capacity(64.mib())   // 64 MiB
+    /// .capacity(1.gib())    // 1 GiB
+    /// .capacity(4096)       // 4096 bytes
+    /// ```
+    pub fn capacity(mut self, size: impl Into<Bytes>) -> Self {
+        self.capacity = Some(size.into().as_u64());
         self
     }
 

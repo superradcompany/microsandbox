@@ -36,6 +36,7 @@ pub(crate) const COMPLETE_MARKER: &str = ".complete";
 /// ~/.microsandbox/cache/layers/<digest_safe>.tar.gz            # compressed downloads
 /// ~/.microsandbox/cache/layers/<digest_safe>.extracted/        # extracted layer trees
 /// ~/.microsandbox/cache/layers/<digest_safe>.index             # binary sidecar indexes
+/// ~/.microsandbox/cache/layers/<digest_safe>.implicit_dirs     # pending implicit-dir fixups
 /// ~/.microsandbox/cache/layers/<digest_safe>.lock              # extraction flock files
 /// ~/.microsandbox/cache/layers/<digest_safe>.download.lock     # download flock files
 /// ```
@@ -129,6 +130,12 @@ impl GlobalCache {
     pub fn index_path(&self, digest: &Digest) -> PathBuf {
         self.layers_dir
             .join(format!("{}.index", digest.to_path_safe()))
+    }
+
+    /// Path to the pending implicit-dir fixup sidecar for a layer.
+    pub fn implicit_dirs_path(&self, digest: &Digest) -> PathBuf {
+        self.layers_dir
+            .join(format!("{}.implicit_dirs", digest.to_path_safe()))
     }
 
     /// Path to the extraction lock file for a layer.

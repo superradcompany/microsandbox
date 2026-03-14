@@ -30,4 +30,5 @@ tracing.workspace = true
 xattr.workspace = true
 
 [dev-dependencies]
+tar.workspace = true
 tempfile.workspace = true

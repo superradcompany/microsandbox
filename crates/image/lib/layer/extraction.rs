@@ -5,6 +5,7 @@
 //! platform-aware symlinks, special file handling, and whiteout markers.
 
 use std::{
+    collections::BTreeSet,
     io::Read,
     path::{Component, Path, PathBuf},
 };
@@ -47,6 +48,17 @@ const S_IFIFO: u32 = libc::S_IFIFO as u32;
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Result of layer extraction.
+pub(crate) struct ExtractionResult {
+    /// Relative paths of directories created implicitly (not from tar entries).
+    ///
+    /// These directories were created by `ensure_parent_dir` because a tar entry
+    /// referenced a path whose parent didn't exist in this layer. Their xattrs
+    /// have default values (uid=0, gid=0, mode=S_IFDIR|0o755) and may need
+    /// correction from lower layers in a post-extraction fixup pass.
+    pub implicit_dirs: Vec<PathBuf>,
+}
+
 /// Deferred hardlink to create in the second pass.
 struct DeferredHardlink {
     path: PathBuf,
@@ -73,9 +85,8 @@ enum LayerCompression {
 pub(crate) async fn extract_layer(
     tar_path: &Path,
     dest: &Path,
-    parent_layers: &[PathBuf],
     media_type: Option<&str>,
-) -> ImageResult<()> {
+) -> ImageResult<ExtractionResult> {
     use tar::Archive;
 
     let compression = detect_layer_compression(tar_path, media_type)?;
@@ -95,6 +106,7 @@ pub(crate) async fn extract_layer(
     let mut archive = Archive::new(archive_reader);
 
     let mut deferred_hardlinks: Vec<DeferredHardlink> = Vec::new();
+    let mut implicit_dirs: BTreeSet<PathBuf> = BTreeSet::new();
     let mut total_size: u64 = 0;
     let mut entry_count: u64 = 0;
 
@@ -165,6 +177,7 @@ pub(crate) async fn extract_layer(
             // Set stat xattr.
             let mode = S_IFDIR | (tar_mode & 0o7777);
             set_override_stat(&full_path, uid, gid, mode, 0)?;
+            clear_implicit_entry(&full_path, dest, &mut implicit_dirs);
         } else if entry_type == tar::EntryType::Symlink {
             let link_target = entry
                 .link_name()
@@ -173,16 +186,13 @@ pub(crate) async fn extract_layer(
                 .unwrap_or_default();
 
             // Ensure parent directory exists.
-            ensure_parent_dir(&full_path, dest, parent_layers)?;
+            ensure_parent_dir(&full_path, dest, &mut implicit_dirs)?;
 
             let mode = S_IFLNK | 0o777;
 
             if cfg!(target_os = "linux") {
                 // Linux: store as regular file with content = target path.
                 // (xattrs can't be set on symlinks on most Linux filesystems.)
-                if let Some(parent) = full_path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| extraction_err(tar_path, e))?;
-                }
                 // Remove any existing entry (could be a directory from a lower layer).
                 let _ = std::fs::remove_dir_all(&full_path);
                 let _ = std::fs::remove_file(&full_path);
@@ -190,16 +200,16 @@ pub(crate) async fn extract_layer(
                     .map_err(|e| extraction_err(tar_path, e))?;
                 set_host_permissions(&full_path, 0o600)?;
                 set_override_stat(&full_path, uid, gid, mode, 0)?;
+                clear_implicit_entry(&full_path, dest, &mut implicit_dirs);
             } else {
                 // macOS: real symlink with XATTR_NOFOLLOW.
-                if let Some(parent) = full_path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| extraction_err(tar_path, e))?;
-                }
-                // Remove any existing file at the target.
+                // Remove any existing entry (could be a directory from a lower layer).
+                let _ = std::fs::remove_dir_all(&full_path);
                 let _ = std::fs::remove_file(&full_path);
                 std::os::unix::fs::symlink(&link_target, &full_path)
                     .map_err(|e| extraction_err(tar_path, e))?;
                 set_override_stat_symlink(&full_path, uid, gid, mode, 0)?;
+                clear_implicit_entry(&full_path, dest, &mut implicit_dirs);
             }
         } else if entry_type == tar::EntryType::Regular || entry_type == tar::EntryType::Continuous
         {
@@ -220,7 +230,7 @@ pub(crate) async fn extract_layer(
                 });
             }
 
-            ensure_parent_dir(&full_path, dest, parent_layers)?;
+            ensure_parent_dir(&full_path, dest, &mut implicit_dirs)?;
 
             let mut file = tokio::fs::File::create(&full_path)
                 .await
@@ -233,9 +243,10 @@ pub(crate) async fn extract_layer(
             set_host_permissions(&full_path, 0o600)?;
             let mode = S_IFREG | (tar_mode & 0o7777);
             set_override_stat(&full_path, uid, gid, mode, 0)?;
+            clear_implicit_entry(&full_path, dest, &mut implicit_dirs);
         } else if entry_type == tar::EntryType::Block || entry_type == tar::EntryType::Char {
             // Block/char device: store as empty regular file with device info in xattr.
-            ensure_parent_dir(&full_path, dest, parent_layers)?;
+            ensure_parent_dir(&full_path, dest, &mut implicit_dirs)?;
             std::fs::write(&full_path, b"").map_err(|e| extraction_err(tar_path, e))?;
             set_host_permissions(&full_path, 0o600)?;
 
@@ -249,13 +260,15 @@ pub(crate) async fn extract_layer(
             };
             let mode = type_bits | (tar_mode & 0o7777);
             set_override_stat(&full_path, uid, gid, mode, rdev)?;
+            clear_implicit_entry(&full_path, dest, &mut implicit_dirs);
         } else if entry_type == tar::EntryType::Fifo {
             // FIFO: store as empty regular file.
-            ensure_parent_dir(&full_path, dest, parent_layers)?;
+            ensure_parent_dir(&full_path, dest, &mut implicit_dirs)?;
             std::fs::write(&full_path, b"").map_err(|e| extraction_err(tar_path, e))?;
             set_host_permissions(&full_path, 0o600)?;
             let mode = S_IFIFO | (tar_mode & 0o7777);
             set_override_stat(&full_path, uid, gid, mode, 0)?;
+            clear_implicit_entry(&full_path, dest, &mut implicit_dirs);
         }
         // Skip other types (GNUSparse, XHeader, etc.)
     }
@@ -270,7 +283,7 @@ pub(crate) async fn extract_layer(
             );
             continue;
         }
-        ensure_parent_dir(&hl.path, dest, parent_layers)?;
+        ensure_parent_dir(&hl.path, dest, &mut implicit_dirs)?;
         let _ = std::fs::remove_file(&hl.path);
         std::fs::hard_link(&hl.target, &hl.path).map_err(|e| ImageError::Extraction {
             digest: tar_path.display().to_string(),
@@ -281,9 +294,12 @@ pub(crate) async fn extract_layer(
             ),
             source: Some(Box::new(e)),
         })?;
+        clear_implicit_entry(&hl.path, dest, &mut implicit_dirs);
     }
 
-    Ok(())
+    Ok(ExtractionResult {
+        implicit_dirs: implicit_dirs.into_iter().collect(),
+    })
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -334,8 +350,17 @@ fn validate_entry_path(dest: &Path, entry_path: &Path, tar_path: &Path) -> Image
     Ok(full_path)
 }
 
-/// Ensure parent directories exist, searching parent layers if needed.
-fn ensure_parent_dir(path: &Path, dest: &Path, parent_layers: &[PathBuf]) -> ImageResult<()> {
+/// Ensure parent directories exist, tracking implicitly-created ones for post-fixup.
+///
+/// Directories created here (not from tar entries) get a default xattr
+/// (`uid=0, gid=0, mode=S_IFDIR|0o755`). Their relative paths are appended
+/// to `implicit_dirs` so a post-extraction fixup pass can copy the correct
+/// xattr from the lower layer that originally defined the directory.
+fn ensure_parent_dir(
+    path: &Path,
+    dest: &Path,
+    implicit_dirs: &mut BTreeSet<PathBuf>,
+) -> ImageResult<()> {
     if let Some(parent) = path.parent() {
         if parent.exists() {
             return Ok(());
@@ -353,32 +378,33 @@ fn ensure_parent_dir(path: &Path, dest: &Path, parent_layers: &[PathBuf]) -> Ima
             }
         }
 
-        // Create missing directories, copying xattrs from parent layers if found.
+        // Create missing directories with default xattrs (top-down after reverse).
         for dir in missing.into_iter().rev() {
-            std::fs::create_dir_all(&dir).map_err(|e| ImageError::Extraction {
+            std::fs::create_dir(&dir).map_err(|e| ImageError::Extraction {
                 digest: String::new(),
                 message: format!("failed to create dir {}: {e}", dir.display()),
                 source: Some(Box::new(e)),
             })?;
 
-            // Try to copy xattrs from a parent layer.
-            if let Ok(rel) = dir.strip_prefix(dest) {
-                for parent_dir in parent_layers.iter().rev() {
-                    let parent_path = parent_dir.join(rel);
-                    if parent_path.exists() {
-                        // Copy the override stat xattr.
-                        if let Ok(Some(data)) = xattr::get(&parent_path, OVERRIDE_XATTR_KEY) {
-                            let _ = xattr::set(&dir, OVERRIDE_XATTR_KEY, &data);
-                        }
-                        break;
-                    }
-                }
-            }
-
             set_host_permissions(&dir, 0o700)?;
+
+            // Default xattr — may be corrected in the fixup pass.
+            let mode = S_IFDIR | 0o755;
+            set_override_stat(&dir, 0, 0, mode, 0)?;
+
+            // Track for post-fixup.
+            if let Ok(rel) = dir.strip_prefix(dest) {
+                implicit_dirs.insert(rel.to_path_buf());
+            }
         }
     }
     Ok(())
+}
+
+fn clear_implicit_entry(path: &Path, dest: &Path, implicit_dirs: &mut BTreeSet<PathBuf>) {
+    if let Ok(rel) = path.strip_prefix(dest) {
+        implicit_dirs.remove(rel);
+    }
 }
 
 /// Set host file permissions (minimum readable/writable by owner).
@@ -488,6 +514,47 @@ fn extraction_err(
     }
 }
 
+/// Fix xattrs on implicitly-created directories by copying from lower layers.
+///
+/// After parallel extraction, directories that were created by `ensure_parent_dir`
+/// (not from tar entries) have default xattrs. This pass searches lower layers
+/// bottom-to-top and copies the correct xattr from the first layer that defines
+/// the directory.
+///
+/// This is typically a no-op — most OCI layers include explicit directory entries
+/// for all paths they touch.
+pub(crate) fn fixup_implicit_dirs(
+    layer_dir: &Path,
+    implicit_dirs: &[PathBuf],
+    lower_layers: &[PathBuf],
+) -> ImageResult<()> {
+    for rel_dir in implicit_dirs {
+        let target = layer_dir.join(rel_dir);
+        if !target.exists() {
+            continue;
+        }
+
+        // Search lower layers top-to-bottom (most recent first).
+        for lower in lower_layers.iter().rev() {
+            let source = lower.join(rel_dir);
+            if source.exists() {
+                if let Ok(Some(data)) = xattr::get(&source, OVERRIDE_XATTR_KEY)
+                    && let Err(e) = xattr::set(&target, OVERRIDE_XATTR_KEY, &data)
+                {
+                    tracing::warn!(
+                        target = %target.display(),
+                        source = %source.display(),
+                        error = %e,
+                        "failed to copy override_stat xattr during fixup"
+                    );
+                }
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Ensure the deepest existing ancestor of `path` still resolves under `dest`.
 fn ensure_host_path_contained(dest: &Path, path: &Path, tar_path: &Path) -> ImageResult<()> {
     let root = std::fs::canonicalize(dest).map_err(|e| ImageError::Extraction {
@@ -578,7 +645,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{LayerCompression, detect_layer_compression, validate_entry_path};
+    use super::{
+        LayerCompression, OVERRIDE_XATTR_KEY, detect_layer_compression, extract_layer,
+        validate_entry_path,
+    };
 
     #[test]
     fn test_detect_layer_compression_from_media_type() {
@@ -620,5 +690,78 @@ mod tests {
         let err = validate_entry_path(&root, Path::new("escape/file.txt"), Path::new("layer.tar"))
             .unwrap_err();
         assert!(err.to_string().contains("escapes extraction root"));
+    }
+
+    #[test]
+    fn test_extract_layer_clears_explicit_dirs_from_fixup_set() {
+        let temp = tempdir().unwrap();
+        let tar_path = temp.path().join("layer.tar");
+        let dest = temp.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+
+        let tar_file = std::fs::File::create(&tar_path).unwrap();
+        let mut builder = tar::Builder::new(tar_file);
+
+        let file_contents = b"tool";
+        let mut file_header = tar::Header::new_gnu();
+        file_header.set_size(file_contents.len() as u64);
+        file_header.set_mode(0o644);
+        file_header.set_uid(0);
+        file_header.set_gid(0);
+        file_header.set_cksum();
+        builder
+            .append_data(&mut file_header, "usr/local/bin/tool", &file_contents[..])
+            .unwrap();
+
+        let mut dir_header = tar::Header::new_gnu();
+        dir_header.set_entry_type(tar::EntryType::Directory);
+        dir_header.set_size(0);
+        dir_header.set_mode(0o700);
+        dir_header.set_uid(42);
+        dir_header.set_gid(7);
+        dir_header.set_cksum();
+        builder
+            .append_data(&mut dir_header, "usr/local", std::io::empty())
+            .unwrap();
+        builder.finish().unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime
+            .block_on(extract_layer(
+                &tar_path,
+                &dest,
+                Some("application/vnd.oci.image.layer.v1.tar"),
+            ))
+            .unwrap();
+
+        assert!(
+            !result
+                .implicit_dirs
+                .contains(&Path::new("usr/local").to_path_buf())
+        );
+        assert!(
+            result
+                .implicit_dirs
+                .contains(&Path::new("usr").to_path_buf())
+        );
+        assert!(
+            result
+                .implicit_dirs
+                .contains(&Path::new("usr/local/bin").to_path_buf())
+        );
+
+        let xattr = xattr::get(dest.join("usr/local"), OVERRIDE_XATTR_KEY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(xattr.len(), 20);
+        assert_eq!(u32::from_le_bytes(xattr[4..8].try_into().unwrap()), 42);
+        assert_eq!(u32::from_le_bytes(xattr[8..12].try_into().unwrap()), 7);
+        assert_eq!(
+            u32::from_le_bytes(xattr[12..16].try_into().unwrap()) & 0o7777,
+            0o700
+        );
     }
 }

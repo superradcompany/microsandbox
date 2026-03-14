@@ -45,6 +45,17 @@ struct CachedPullInfo {
     metadata: CachedImageMetadata,
 }
 
+struct LayerPipelineSuccess {
+    layer_index: usize,
+    layer: Layer,
+    extracted_dir: PathBuf,
+    implicit_dirs: Vec<PathBuf>,
+}
+
+struct LayerPipelineFailure {
+    error: ImageError,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -78,7 +89,7 @@ impl Registry {
         })
     }
 
-    /// Pull an image. Downloads layers concurrently, extracts sequentially.
+    /// Pull an image. Downloads, extracts, and indexes layers concurrently.
     pub async fn pull(
         &self,
         reference: &oci_client::Reference,
@@ -211,8 +222,13 @@ impl Registry {
             });
         }
 
-        // Step 5: Download layers concurrently.
-        let download_futures: Vec<_> = layer_descriptors
+        // Step 5+6: Download, extract, and index ALL layers in parallel.
+        //
+        // Each layer's pipeline (download → extract → index) runs independently.
+        // Extraction no longer depends on other layers being extracted first.
+        // A fast post-fixup pass corrects xattrs on any implicitly-created
+        // directories that need metadata from lower layers.
+        let layer_futures: Vec<_> = layer_descriptors
             .iter()
             .enumerate()
             .map(|(i, layer_desc)| {
@@ -220,57 +236,109 @@ impl Registry {
                 let client = self.client.clone();
                 let oci_ref = oci_ref.clone();
                 let size = layer_desc.size;
+                let force = options.force;
+                let build_index = options.build_index;
                 let progress = progress.clone();
+                let media_type = layer_desc.media_type.clone();
+                let diff_id = diff_ids.get(i).cloned().unwrap_or_default();
 
                 async move {
-                    layer
-                        .download(&client, &oci_ref, size, options.force, progress.as_ref(), i)
+                    // Download.
+                    if let Err(error) = layer
+                        .download(&client, &oci_ref, size, force, progress.as_ref(), i)
                         .await
+                    {
+                        return Err(LayerPipelineFailure { error });
+                    }
+
+                    // Extract (no parent layer dependency — parallel safe).
+                    let result = if !layer.is_extracted() || force {
+                        let result = match layer
+                            .extract(progress.as_ref(), i, media_type.as_deref(), &diff_id, force)
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => return Err(LayerPipelineFailure { error }),
+                        };
+
+                        // Index.
+                        if build_index {
+                            if let Some(ref p) = progress {
+                                p.send(PullProgress::LayerIndexStarted { layer_index: i });
+                            }
+                            if let Err(error) = layer.build_index().await {
+                                return Err(LayerPipelineFailure { error });
+                            }
+                            if let Some(ref p) = progress {
+                                p.send(PullProgress::LayerIndexComplete { layer_index: i });
+                            }
+                        }
+
+                        result
+                    } else {
+                        crate::layer::extraction::ExtractionResult {
+                            implicit_dirs: match layer.pending_implicit_dirs() {
+                                Ok(implicit_dirs) => implicit_dirs,
+                                Err(error) => return Err(LayerPipelineFailure { error }),
+                            },
+                        }
+                    };
+
+                    Ok::<_, LayerPipelineFailure>(LayerPipelineSuccess {
+                        layer_index: i,
+                        extracted_dir: layer.extracted_dir(),
+                        implicit_dirs: result.implicit_dirs,
+                        layer,
+                    })
                 }
             })
             .collect();
 
-        futures::future::try_join_all(download_futures).await?;
+        let outcomes = futures::future::join_all(layer_futures).await;
+        let mut results: Vec<LayerPipelineSuccess> = Vec::with_capacity(layer_count);
+        let mut first_error: Option<ImageError> = None;
 
-        // Step 6: Extract layers sequentially (bottom-to-top).
-        let mut extracted_dirs: Vec<PathBuf> = Vec::with_capacity(layer_count);
-
-        for (i, layer_desc) in layer_descriptors.iter().enumerate() {
-            let layer = Layer::new(layer_desc.digest.clone(), &self.cache);
-
-            let diff_id = diff_ids.get(i).map(String::as_str).unwrap_or("");
-
-            if !layer.is_extracted() || options.force {
-                layer
-                    .extract(
-                        &extracted_dirs,
-                        progress.as_ref(),
-                        i,
-                        layer_desc.media_type.as_deref(),
-                        diff_id,
-                    )
-                    .await?;
-
-                // Build sidecar index if requested.
-                if options.build_index {
-                    if let Some(ref p) = progress {
-                        p.send(PullProgress::LayerIndexStarted { layer_index: i });
-                    }
-                    layer.build_index().await?;
-                    if let Some(ref p) = progress {
-                        p.send(PullProgress::LayerIndexComplete { layer_index: i });
+        for outcome in outcomes {
+            match outcome {
+                Ok(result) => results.push(result),
+                Err(failure) => {
+                    if first_error.is_none() {
+                        first_error = Some(failure.error);
                     }
                 }
             }
+        }
 
-            extracted_dirs.push(layer.extracted_dir());
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+
+        // Sort results by layer index (futures may complete out of order).
+        results.sort_by_key(|result| result.layer_index);
+
+        // Step 6b: Sequential fixup pass for implicitly-created directories.
+        //
+        // Most layers are self-contained (their tars include all parent directory
+        // entries), so this is typically a no-op. For the rare case where a layer
+        // references a path whose parent was defined by a lower layer, we copy
+        // the correct override_stat xattr from that lower layer.
+        let extracted_dirs: Vec<PathBuf> = results
+            .iter()
+            .map(|result| result.extracted_dir.clone())
+            .collect();
+        for result in &results {
+            if !result.implicit_dirs.is_empty() && result.layer_index > 0 {
+                crate::layer::extraction::fixup_implicit_dirs(
+                    &extracted_dirs[result.layer_index],
+                    &result.implicit_dirs,
+                    &extracted_dirs[..result.layer_index],
+                )?;
+            }
+            result.layer.clear_pending_implicit_dirs()?;
         }
 
         // Step 7: Return result.
-        let layers: Vec<PathBuf> = layer_descriptors
-            .iter()
-            .map(|ld| self.cache.extracted_dir(&ld.digest))
-            .collect();
+        let layers = extracted_dirs;
         let cached_image = CachedImageMetadata {
             manifest_digest: manifest_digest.to_string(),
             config: image_config.clone(),

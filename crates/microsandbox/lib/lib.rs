@@ -16,9 +16,9 @@ pub(crate) mod db;
 pub mod runtime;
 pub mod sandbox;
 pub mod setup;
-pub mod size;
 pub mod volume;
 
 pub use error::*;
 pub use microsandbox_image::RegistryAuth;
 pub use microsandbox_runtime::logging::LogLevel;
+pub use microsandbox_utils::size;

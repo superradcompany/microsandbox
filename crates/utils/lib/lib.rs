@@ -1,6 +1,7 @@
 //! Shared constants and utilities for the microsandbox project.
 
 pub mod index;
+pub mod size;
 
 //--------------------------------------------------------------------------------------------------
 // Constants: Directory Layout

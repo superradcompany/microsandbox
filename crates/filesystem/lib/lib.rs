@@ -24,6 +24,7 @@ pub use backends::{
     passthroughfs::{CachePolicy, PassthroughConfig, PassthroughFs, PassthroughFsBuilder},
     proxy::{AccessMode, ProxyFs, ProxyFsBuilder},
 };
+pub use microsandbox_utils::size::{ByteSize, Bytes, Mebibytes, SizeExt};
 pub use msb_krun::backends::fs::{
     Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions, GetxattrReply, ListxattrReply,
     OpenOptions, RemovemappingOne, SetattrValid, ZeroCopyReader, ZeroCopyWriter, stat64, statvfs64,
