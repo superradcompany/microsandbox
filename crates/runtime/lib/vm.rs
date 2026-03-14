@@ -9,7 +9,7 @@ use std::{
     path::PathBuf,
 };
 
-use microsandbox_filesystem::{DynFileSystem, PassthroughConfig, PassthroughFs};
+use microsandbox_filesystem::{DynFileSystem, OverlayFs, PassthroughConfig, PassthroughFs};
 use msb_krun::{NetBackend, VmBuilder};
 
 //--------------------------------------------------------------------------------------------------
@@ -27,8 +27,17 @@ pub struct VmConfig {
     /// Memory in MiB.
     pub memory_mib: u32,
 
-    /// Root filesystem layer paths (single = passthrough, multiple = overlay).
-    pub rootfs_layers: Vec<PathBuf>,
+    /// Root filesystem path for direct passthrough mounts.
+    pub rootfs_path: Option<PathBuf>,
+
+    /// Root filesystem lower layer paths in bottom-to-top order.
+    pub rootfs_lowers: Vec<PathBuf>,
+
+    /// Writable upper layer directory for OverlayFs rootfs.
+    pub rootfs_upper: Option<PathBuf>,
+
+    /// Private staging directory for OverlayFs atomic operations.
+    pub rootfs_staging: Option<PathBuf>,
 
     /// Additional mounts as `tag:host_path` pairs.
     pub mounts: Vec<String>,
@@ -71,7 +80,10 @@ impl std::fmt::Debug for VmConfig {
             .field("libkrunfw_path", &self.libkrunfw_path)
             .field("vcpus", &self.vcpus)
             .field("memory_mib", &self.memory_mib)
-            .field("rootfs_layers", &self.rootfs_layers)
+            .field("rootfs_path", &self.rootfs_path)
+            .field("rootfs_lowers", &self.rootfs_lowers)
+            .field("rootfs_upper", &self.rootfs_upper)
+            .field("rootfs_staging", &self.rootfs_staging)
             .field("mounts", &self.mounts)
             .field("backends", &format!("[{} backend(s)]", self.backends.len()))
             .field("init_path", &self.init_path)
@@ -120,16 +132,36 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
             }
         });
 
-    // Root filesystem — single layer uses passthrough via virtio-fs with stat virtualization.
-    // TODO: Multiple layers should use OverlayFs via `fs.custom(Box::new(overlay))`
-    // from the microsandbox-filesystem crate (DynFileSystem backend with COW and whiteouts).
-    if let Some(first_layer) = config.rootfs_layers.first() {
+    // Root filesystem — either direct passthrough or OverlayFs, never both.
+    if let Some(rootfs_path) = config.rootfs_path.as_ref() {
+        if !config.rootfs_lowers.is_empty()
+            || config.rootfs_upper.is_some()
+            || config.rootfs_staging.is_some()
+        {
+            return Err(msb_krun::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "rootfs_path cannot be combined with overlay rootfs fields",
+            )));
+        }
+
         let cfg = PassthroughConfig {
-            root_dir: first_layer.clone(),
+            root_dir: rootfs_path.clone(),
             ..Default::default()
         };
         let backend = PassthroughFs::new(cfg)?;
         builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+    } else if !config.rootfs_lowers.is_empty() {
+        let overlay = build_overlay_rootfs(
+            &config.rootfs_lowers,
+            config.rootfs_upper.as_deref(),
+            config.rootfs_staging.as_deref(),
+        )?;
+        builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(overlay)));
+    } else if config.rootfs_upper.is_some() || config.rootfs_staging.is_some() {
+        return Err(msb_krun::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "overlay rootfs requires at least one lower layer",
+        )));
     }
 
     // Additional mounts (tag:host_path format).
@@ -196,4 +228,195 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
     }
 
     builder.build()?.enter()
+}
+
+/// Build an OverlayFs backend from rootfs lower layers.
+///
+/// Layers are ordered bottom-to-top: the first entry is the lowest (base) layer.
+fn build_overlay_rootfs(
+    layers: &[PathBuf],
+    upper_dir: Option<&std::path::Path>,
+    staging_dir: Option<&std::path::Path>,
+) -> msb_krun::Result<OverlayFs> {
+    debug_assert!(
+        !layers.is_empty(),
+        "overlay rootfs requires at least one lower layer"
+    );
+
+    let upper_dir = upper_dir.ok_or_else(|| {
+        msb_krun::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "overlay rootfs requires a writable upper directory",
+        ))
+    })?;
+    let staging_dir = staging_dir.ok_or_else(|| {
+        msb_krun::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "overlay rootfs requires a staging directory",
+        ))
+    })?;
+
+    let mut overlay_builder = OverlayFs::builder();
+
+    for layer in layers {
+        // Check if a sidecar index exists for this layer.
+        let index_path = layer.with_extension("index");
+        if index_path.exists() {
+            overlay_builder = overlay_builder.layer_with_index(layer, &index_path);
+        } else {
+            overlay_builder = overlay_builder.layer(layer);
+        }
+    }
+
+    overlay_builder = overlay_builder.writable(upper_dir).staging(staging_dir);
+
+    overlay_builder.build().map_err(msb_krun::Error::Io)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use microsandbox_utils::index::IndexBuilder;
+    use tempfile::tempdir;
+
+    use super::{VmConfig, build_and_enter, build_overlay_rootfs};
+
+    #[test]
+    fn test_build_and_enter_rejects_rootfs_path_combined_with_overlay_fields() {
+        let err = build_and_enter(VmConfig {
+            libkrunfw_path: PathBuf::from("/tmp/libkrunfw"),
+            vcpus: 1,
+            memory_mib: 512,
+            rootfs_path: Some(PathBuf::from("/tmp/rootfs")),
+            rootfs_lowers: vec![PathBuf::from("/tmp/layer0")],
+            rootfs_upper: Some(PathBuf::from("/tmp/rw")),
+            rootfs_staging: Some(PathBuf::from("/tmp/staging")),
+            mounts: Vec::new(),
+            backends: Vec::new(),
+            init_path: None,
+            env: Vec::new(),
+            workdir: None,
+            exec_path: None,
+            exec_args: Vec::new(),
+            net_fd: None,
+            agent_fd: None,
+        })
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("rootfs_path cannot be combined with overlay rootfs fields")
+        );
+    }
+
+    #[test]
+    fn test_build_and_enter_rejects_overlay_dirs_without_lowers() {
+        let err = build_and_enter(VmConfig {
+            libkrunfw_path: PathBuf::from("/tmp/libkrunfw"),
+            vcpus: 1,
+            memory_mib: 512,
+            rootfs_path: None,
+            rootfs_lowers: Vec::new(),
+            rootfs_upper: Some(PathBuf::from("/tmp/rw")),
+            rootfs_staging: Some(PathBuf::from("/tmp/staging")),
+            mounts: Vec::new(),
+            backends: Vec::new(),
+            init_path: None,
+            env: Vec::new(),
+            workdir: None,
+            exec_path: None,
+            exec_args: Vec::new(),
+            net_fd: None,
+            agent_fd: None,
+        })
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("overlay rootfs requires at least one lower layer")
+        );
+    }
+
+    #[test]
+    fn test_build_overlay_rootfs_requires_upper() {
+        let temp = tempdir().unwrap();
+        let lower = create_dir(temp.path(), "lower.extracted");
+        let staging = create_dir(temp.path(), "staging");
+
+        let err = match build_overlay_rootfs(&[lower], None, Some(&staging)) {
+            Ok(_) => panic!("expected missing upper dir to be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("overlay rootfs requires a writable upper directory")
+        );
+    }
+
+    #[test]
+    fn test_build_overlay_rootfs_requires_staging() {
+        let temp = tempdir().unwrap();
+        let lower = create_dir(temp.path(), "lower.extracted");
+        let upper = create_dir(temp.path(), "rw");
+
+        let err = match build_overlay_rootfs(&[lower], Some(&upper), None) {
+            Ok(_) => panic!("expected missing staging dir to be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("overlay rootfs requires a staging directory")
+        );
+    }
+
+    #[test]
+    fn test_build_overlay_rootfs_accepts_single_lower_without_index() {
+        let temp = tempdir().unwrap();
+        let lower = create_dir(temp.path(), "lower.extracted");
+        let upper = create_dir(temp.path(), "rw");
+        let staging = create_dir(temp.path(), "staging");
+
+        assert!(build_overlay_rootfs(&[lower], Some(&upper), Some(&staging)).is_ok());
+    }
+
+    #[test]
+    fn test_build_overlay_rootfs_accepts_single_lower_with_conventional_index() {
+        let temp = tempdir().unwrap();
+        let lower = create_dir(temp.path(), "lower.extracted");
+        let upper = create_dir(temp.path(), "rw");
+        let staging = create_dir(temp.path(), "staging");
+        let index_path = lower.with_extension("index");
+        let index = IndexBuilder::new()
+            .dir("")
+            .file("", "hello.txt", 0o644)
+            .build();
+        std::fs::write(&index_path, index).unwrap();
+
+        assert!(build_overlay_rootfs(&[lower], Some(&upper), Some(&staging)).is_ok());
+    }
+
+    #[test]
+    fn test_build_overlay_rootfs_falls_back_when_conventional_index_is_corrupt() {
+        let temp = tempdir().unwrap();
+        let lower = create_dir(temp.path(), "lower.extracted");
+        let upper = create_dir(temp.path(), "rw");
+        let staging = create_dir(temp.path(), "staging");
+        let index_path = lower.with_extension("index");
+        std::fs::write(&index_path, b"definitely not a valid index").unwrap();
+
+        assert!(build_overlay_rootfs(&[lower], Some(&upper), Some(&staging)).is_ok());
+    }
+
+    fn create_dir(root: &Path, name: &str) -> PathBuf {
+        let path = root.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
 }

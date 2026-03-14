@@ -4,10 +4,12 @@
 //! All fields have sensible defaults — a missing config file is equivalent to `{}`.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
 
+use microsandbox_image::RegistryAuth;
 use microsandbox_runtime::logging::LogLevel;
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +54,9 @@ pub struct GlobalConfig {
 
     /// Default values for sandbox configuration.
     pub sandbox_defaults: SandboxDefaults,
+
+    /// Registry authentication configuration.
+    pub registries: RegistriesConfig,
 }
 
 /// Database configuration.
@@ -111,6 +116,39 @@ pub struct SandboxDefaults {
     pub workdir: Option<String>,
 }
 
+/// Registry authentication configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RegistriesConfig {
+    /// Per-registry authentication entries, keyed by registry hostname.
+    ///
+    /// Example:
+    /// ```json
+    /// {
+    ///   "registries": {
+    ///     "auth": {
+    ///       "ghcr.io": { "username": "user", "password_env": "GHCR_TOKEN" },
+    ///       "docker.io": { "username": "user", "secret_name": "dockerhub" }
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    pub auth: HashMap<String, RegistryAuthEntry>,
+}
+
+/// A single registry authentication entry from global config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryAuthEntry {
+    /// Registry username.
+    pub username: String,
+
+    /// Environment variable containing the password/token.
+    pub password_env: Option<String>,
+
+    /// Secret name — password is read from `{home}/secrets/registries/<secret_name>`.
+    pub secret_name: Option<String>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -153,6 +191,56 @@ impl GlobalConfig {
             .cache
             .clone()
             .unwrap_or_else(|| self.home().join(microsandbox_utils::CACHE_SUBDIR))
+    }
+
+    /// Resolve the `secrets` directory.
+    pub fn secrets_dir(&self) -> PathBuf {
+        self.paths
+            .secrets
+            .clone()
+            .unwrap_or_else(|| self.home().join(microsandbox_utils::SECRETS_SUBDIR))
+    }
+
+    /// Resolve registry authentication for a given hostname.
+    ///
+    /// Looks up `registries.auth` in global config, resolving credentials from
+    /// either `password_env` (environment variable) or `secret_name` (file-backed
+    /// secret in `{home}/secrets/registries/<name>`).
+    ///
+    /// Returns `Anonymous` if no entry matches.
+    pub fn resolve_registry_auth(&self, hostname: &str) -> MicrosandboxResult<RegistryAuth> {
+        let entry = match self.registries.auth.get(hostname) {
+            Some(entry) => entry,
+            None => return Ok(RegistryAuth::Anonymous),
+        };
+
+        let password = if let Some(ref env_var) = entry.password_env {
+            std::env::var(env_var).map_err(|_| {
+                crate::MicrosandboxError::InvalidConfig(format!(
+                    "registry auth for {hostname}: environment variable `{env_var}` is not set"
+                ))
+            })?
+        } else if let Some(ref secret_name) = entry.secret_name {
+            let secret_path = self.secrets_dir().join("registries").join(secret_name);
+            std::fs::read_to_string(&secret_path)
+                .map_err(|e| {
+                    crate::MicrosandboxError::InvalidConfig(format!(
+                        "registry auth for {hostname}: failed to read secret `{}`: {e}",
+                        secret_path.display()
+                    ))
+                })?
+                .trim()
+                .to_string()
+        } else {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "registry auth for {hostname}: entry has neither `password_env` nor `secret_name`"
+            )));
+        };
+
+        Ok(RegistryAuth::Basic {
+            username: entry.username.clone(),
+            password,
+        })
     }
 }
 

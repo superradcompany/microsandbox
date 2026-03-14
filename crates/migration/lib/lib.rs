@@ -3,6 +3,7 @@
 mod m20260305_000001_create_image_tables;
 mod m20260305_000002_create_sandbox_tables;
 mod m20260305_000003_create_storage_tables;
+mod m20260305_000004_create_sandbox_images_table;
 
 use sea_orm_migration::prelude::*;
 
@@ -30,6 +31,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260305_000001_create_image_tables::Migration),
             Box::new(m20260305_000002_create_sandbox_tables::Migration),
             Box::new(m20260305_000003_create_storage_tables::Migration),
+            Box::new(m20260305_000004_create_sandbox_images_table::Migration),
         ]
     }
 }

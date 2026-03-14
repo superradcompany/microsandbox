@@ -12,7 +12,7 @@ pub mod exec;
 pub mod fs;
 mod types;
 
-use std::{process::ExitStatus, sync::Arc};
+use std::{path::Path, process::ExitStatus, sync::Arc};
 
 use bytes::Bytes;
 use microsandbox_protocol::{
@@ -20,7 +20,8 @@ use microsandbox_protocol::{
     message::{Message, MessageType},
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel, QueryFilter,
+    QueryOrder, Set, TransactionTrait,
     sea_query::{Expr, OnConflict},
 };
 use tokio::sync::{Mutex, mpsc};
@@ -28,7 +29,10 @@ use tokio::sync::{Mutex, mpsc};
 use crate::{
     MicrosandboxResult,
     agent::AgentBridge,
-    db::entity::{sandbox as sandbox_entity, sandbox::SandboxStatus},
+    db::entity::{
+        image as image_entity, sandbox as sandbox_entity, sandbox::SandboxStatus,
+        sandbox_image as sandbox_image_entity,
+    },
     runtime::{SupervisorHandle, spawn_supervisor},
 };
 
@@ -83,7 +87,10 @@ impl Sandbox {
     ///
     /// Boots the VM with agentd ready to accept commands. Does not run
     /// any user workload — use `exec()`, `shell()`, etc. afterward.
-    pub async fn create(config: SandboxConfig) -> MicrosandboxResult<Self> {
+    pub async fn create(mut config: SandboxConfig) -> MicrosandboxResult<Self> {
+        let mut pinned_manifest_digest: Option<String> = None;
+        let mut pinned_reference: Option<String> = None;
+
         // Backend mounts hold closures and cannot cross process boundaries.
         // They will be supported when in-process VM mode is available.
         let backend_count = config.mounts.iter().filter(|m| m.is_backend()).count();
@@ -97,20 +104,82 @@ impl Sandbox {
 
         validate_rootfs_source(&config.image)?;
 
-        // Initialize the database.
+        // Initialize the database before any expensive image pull so we can
+        // fail fast on conflicting persisted sandbox state.
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let sandbox_dir = crate::config::config().sandboxes_dir().join(&config.name);
+        prepare_create_target(db, &config, &sandbox_dir).await?;
 
-        // Upsert the sandbox record and keep its stable database ID.
-        let sandbox_id = upsert_sandbox_record(db, &config).await?;
+        // Resolve OCI images before spawning the supervisor.
+        if let RootfsSource::Oci(ref reference) = config.image {
+            let pull_result = pull_oci_image(reference, config.registry_auth.take()).await?;
+
+            // Store resolved layer paths for spawn_supervisor.
+            config.resolved_rootfs_layers = pull_result.layers;
+            pinned_manifest_digest = Some(pull_result.manifest_digest.to_string());
+            pinned_reference = Some(reference.clone());
+        }
+
+        // Insert the sandbox record and keep its stable database ID.
+        let sandbox_id = insert_sandbox_record(db, &config).await?;
 
         // Spawn supervisor + create bridge. On failure, mark the sandbox
         // as stopped so it doesn't appear as a phantom "Running" entry.
-        match Self::create_inner(config, sandbox_id).await {
-            Ok(sandbox) => Ok(sandbox),
+        let sandbox = match Self::create_inner(config, sandbox_id).await {
+            Ok(sandbox) => sandbox,
             Err(e) => {
                 let _ = update_sandbox_status(db, sandbox_id, SandboxStatus::Stopped).await;
-                Err(e)
+                return Err(e);
+            }
+        };
+
+        if let (Some(reference), Some(manifest_digest)) = (
+            pinned_reference.as_deref(),
+            pinned_manifest_digest.as_deref(),
+        ) && let Err(err) =
+            persist_oci_manifest_pin(db, sandbox_id, reference, manifest_digest).await
+        {
+            let _ = sandbox.stop().await;
+            let _ = update_sandbox_status(db, sandbox_id, SandboxStatus::Stopped).await;
+            return Err(err);
+        }
+
+        Ok(sandbox)
+    }
+
+    /// Start an existing stopped sandbox from persisted state.
+    ///
+    /// Reuses the serialized sandbox config and pinned rootfs state without
+    /// re-resolving the original OCI reference.
+    pub async fn start(name: &str) -> MicrosandboxResult<Self> {
+        let db =
+            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let model = load_sandbox_record(db, name).await?;
+
+        if model.status == SandboxStatus::Running || model.status == SandboxStatus::Draining {
+            return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                "cannot start sandbox '{name}': already running"
+            )));
+        }
+
+        if model.status != SandboxStatus::Stopped {
+            return Err(crate::MicrosandboxError::Custom(format!(
+                "cannot start sandbox '{name}': status is {:?} (expected Stopped)",
+                model.status
+            )));
+        }
+
+        let config: SandboxConfig = serde_json::from_str(&model.config)?;
+        validate_rootfs_source(&config.image)?;
+        validate_start_state(&config, &crate::config::config().sandboxes_dir().join(name))?;
+        update_sandbox_status(db, model.id, SandboxStatus::Running).await?;
+
+        match Self::create_inner(config, model.id).await {
+            Ok(sandbox) => Ok(sandbox),
+            Err(err) => {
+                let _ = update_sandbox_status(db, model.id, SandboxStatus::Stopped).await;
+                Err(err)
             }
         }
     }
@@ -168,6 +237,8 @@ impl Sandbox {
                 "cannot remove sandbox '{name}': still running"
             )));
         }
+
+        remove_dir_if_exists(&crate::config::config().sandboxes_dir().join(name))?;
 
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
@@ -388,18 +459,6 @@ impl Sandbox {
         }
         let script_path = format!("/.msb/scripts/{name}");
         self.shell_stream(&format!("sh {script_path}"), opts).await
-    }
-
-    /// Start the sandbox by running the `"start"` script.
-    ///
-    /// Returns error if no `"start"` script is defined.
-    pub async fn start(&self) -> MicrosandboxResult<ExecOutput> {
-        self.run("start", ()).await
-    }
-
-    /// Start the sandbox with streaming I/O.
-    pub async fn start_stream(&self) -> MicrosandboxResult<ExecHandle> {
-        self.run_stream("start", ()).await
     }
 }
 
@@ -664,6 +723,34 @@ async fn update_sandbox_status(
     Ok(())
 }
 
+/// Pull an OCI image and return the pull result.
+///
+/// Auth resolution:
+/// 1. Explicit `RegistryAuth` from `SandboxBuilder::registry_auth()` (if provided)
+/// 2. Global config `registries.auth` matched by registry hostname
+/// 3. Anonymous fallback
+async fn pull_oci_image(
+    reference: &str,
+    explicit_auth: Option<microsandbox_image::RegistryAuth>,
+) -> MicrosandboxResult<microsandbox_image::PullResult> {
+    let global = crate::config::config();
+    let cache = microsandbox_image::GlobalCache::new(&global.cache_dir())?;
+    let platform = microsandbox_image::Platform::host_linux();
+    let image_ref: microsandbox_image::Reference = reference.parse().map_err(|e| {
+        crate::MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
+    })?;
+
+    let auth = match explicit_auth {
+        Some(auth) => auth,
+        None => global.resolve_registry_auth(image_ref.registry())?,
+    };
+
+    let registry = microsandbox_image::Registry::with_auth(platform, cache, auth)?;
+    let options = microsandbox_image::PullOptions::default();
+    let result = registry.pull(&image_ref, &options).await?;
+    Ok(result)
+}
+
 /// Validate rootfs configuration that depends on host filesystem state.
 fn validate_rootfs_source(rootfs: &RootfsSource) -> MicrosandboxResult<()> {
     match rootfs {
@@ -688,8 +775,93 @@ fn validate_rootfs_source(rootfs: &RootfsSource) -> MicrosandboxResult<()> {
     Ok(())
 }
 
-/// Insert or update the sandbox record in the database and return its ID.
-async fn upsert_sandbox_record(
+fn remove_dir_if_exists(path: &Path) -> MicrosandboxResult<()> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Load a sandbox row by name.
+async fn load_sandbox_record(
+    db: &sea_orm::DatabaseConnection,
+    name: &str,
+) -> MicrosandboxResult<sandbox_entity::Model> {
+    sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(name))
+        .one(db)
+        .await?
+        .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(name.into()))
+}
+
+async fn prepare_create_target(
+    db: &sea_orm::DatabaseConnection,
+    config: &SandboxConfig,
+    sandbox_dir: &Path,
+) -> MicrosandboxResult<()> {
+    let existing = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(&config.name))
+        .one(db)
+        .await?;
+
+    let dir_exists = sandbox_dir.exists();
+
+    if !config.replace_existing {
+        if existing.is_some() || dir_exists {
+            return Err(crate::MicrosandboxError::Custom(format!(
+                "sandbox '{}' already exists; remove it, start the stopped sandbox, or recreate with .force()",
+                config.name
+            )));
+        }
+
+        return Ok(());
+    }
+
+    if let Some(model) = existing {
+        if matches!(
+            model.status,
+            SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
+        ) {
+            return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                "cannot replace sandbox '{}': existing sandbox is still active",
+                config.name
+            )));
+        }
+
+        model.into_active_model().delete(db).await?;
+    }
+
+    remove_dir_if_exists(sandbox_dir)?;
+    Ok(())
+}
+
+fn validate_start_state(config: &SandboxConfig, sandbox_dir: &Path) -> MicrosandboxResult<()> {
+    if !sandbox_dir.exists() {
+        return Err(crate::MicrosandboxError::Custom(format!(
+            "sandbox state missing for '{}': {}",
+            config.name,
+            sandbox_dir.display()
+        )));
+    }
+
+    if let RootfsSource::Oci(_) = &config.image {
+        for lower in &config.resolved_rootfs_layers {
+            if !lower.is_dir() {
+                return Err(crate::MicrosandboxError::Custom(format!(
+                    "sandbox '{}' cannot start: pinned OCI lower is missing: {}",
+                    config.name,
+                    lower.display()
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Insert the sandbox record in the database and return its ID.
+async fn insert_sandbox_record(
     db: &sea_orm::DatabaseConnection,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<i32> {
@@ -705,29 +877,85 @@ async fn upsert_sandbox_record(
         ..Default::default()
     };
 
-    sandbox_entity::Entity::insert(model)
-        .on_conflict(
-            OnConflict::column(sandbox_entity::Column::Name)
-                .update_columns([
-                    sandbox_entity::Column::Status,
-                    sandbox_entity::Column::Config,
-                    sandbox_entity::Column::UpdatedAt,
-                ])
-                .to_owned(),
-        )
+    let result = sandbox_entity::Entity::insert(model).exec(db).await?;
+    Ok(result.last_insert_id)
+}
+
+async fn persist_oci_manifest_pin(
+    db: &sea_orm::DatabaseConnection,
+    sandbox_id: i32,
+    reference: &str,
+    manifest_digest: &str,
+) -> MicrosandboxResult<()> {
+    let reference = reference.to_string();
+    let manifest_digest = manifest_digest.to_string();
+
+    db.transaction::<_, (), crate::MicrosandboxError>(|txn| {
+        Box::pin(async move {
+            replace_oci_manifest_pin(txn, sandbox_id, &reference, &manifest_digest).await
+        })
+    })
+    .await
+    .map_err(|err| match err {
+        sea_orm::TransactionError::Connection(db_err) => db_err.into(),
+        sea_orm::TransactionError::Transaction(err) => err,
+    })
+}
+
+async fn replace_oci_manifest_pin<C: ConnectionTrait>(
+    db: &C,
+    sandbox_id: i32,
+    reference: &str,
+    manifest_digest: &str,
+) -> MicrosandboxResult<()> {
+    let image_id = upsert_image_record(db, reference).await?;
+    let now = chrono::Utc::now().naive_utc();
+
+    sandbox_image_entity::Entity::delete_many()
+        .filter(sandbox_image_entity::Column::SandboxId.eq(sandbox_id))
         .exec(db)
         .await?;
 
-    sandbox_entity::Entity::find()
-        .filter(sandbox_entity::Column::Name.eq(&config.name))
+    sandbox_image_entity::Entity::insert(sandbox_image_entity::ActiveModel {
+        sandbox_id: Set(sandbox_id),
+        image_id: Set(image_id),
+        manifest_digest: Set(manifest_digest.to_string()),
+        created_at: Set(Some(now)),
+        ..Default::default()
+    })
+    .exec(db)
+    .await?;
+
+    Ok(())
+}
+
+async fn upsert_image_record<C: ConnectionTrait>(
+    db: &C,
+    reference: &str,
+) -> MicrosandboxResult<i32> {
+    let now = chrono::Utc::now().naive_utc();
+
+    image_entity::Entity::insert(image_entity::ActiveModel {
+        reference: Set(reference.to_string()),
+        last_used_at: Set(Some(now)),
+        created_at: Set(Some(now)),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::column(image_entity::Column::Reference)
+            .update_columns([image_entity::Column::LastUsedAt])
+            .to_owned(),
+    )
+    .exec(db)
+    .await?;
+
+    image_entity::Entity::find()
+        .filter(image_entity::Column::Reference.eq(reference))
         .one(db)
         .await?
         .map(|model| model.id)
         .ok_or_else(|| {
-            crate::MicrosandboxError::Custom(format!(
-                "sandbox '{}' missing after upsert",
-                config.name
-            ))
+            crate::MicrosandboxError::Custom(format!("image '{}' missing after upsert", reference))
         })
 }
 
@@ -743,7 +971,15 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{RootfsSource, validate_rootfs_source};
+    use microsandbox_db::entity::{image as image_entity, sandbox_image as sandbox_image_entity};
+    use microsandbox_migration::{Migrator, MigratorTrait};
+    use sea_orm::{ConnectOptions, Database, EntityTrait};
+    use tempfile::tempdir;
+
+    use super::{
+        RootfsSource, SandboxConfig, insert_sandbox_record, persist_oci_manifest_pin,
+        prepare_create_target, remove_dir_if_exists, validate_rootfs_source,
+    };
 
     fn unique_temp_path(suffix: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -791,5 +1027,299 @@ mod tests {
         validate_rootfs_source(&RootfsSource::Bind(path.clone())).unwrap();
 
         fs::remove_dir(path).unwrap();
+    }
+
+    #[test]
+    fn test_remove_dir_if_exists_removes_existing_sandbox_tree() {
+        let temp = tempdir().unwrap();
+        let sandbox_dir = temp.path().join("sandbox");
+        fs::create_dir_all(sandbox_dir.join("runtime/scripts")).unwrap();
+        fs::write(sandbox_dir.join("runtime/scripts/start.sh"), b"echo hi").unwrap();
+        fs::create_dir_all(sandbox_dir.join("rw")).unwrap();
+
+        remove_dir_if_exists(&sandbox_dir).unwrap();
+
+        assert!(!sandbox_dir.exists());
+    }
+
+    #[test]
+    fn test_remove_dir_if_exists_ignores_missing_directory() {
+        let temp = tempdir().unwrap();
+        let sandbox_dir = temp.path().join("missing");
+
+        remove_dir_if_exists(&sandbox_dir).unwrap();
+
+        assert!(!sandbox_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn test_persist_oci_manifest_pin_upserts_image_and_manifest_digest() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let conn = Database::connect(ConnectOptions::new(&db_url))
+            .await
+            .unwrap();
+        Migrator::up(&conn, None).await.unwrap();
+
+        let mut config = SandboxConfig {
+            name: "pinned".into(),
+            image: RootfsSource::Oci("docker.io/library/alpine:latest".into()),
+            ..Default::default()
+        };
+        config.resolved_rootfs_layers = vec!["/tmp/layer0".into()];
+        let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
+
+        persist_oci_manifest_pin(
+            &conn,
+            sandbox_id,
+            "docker.io/library/alpine:latest",
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        )
+        .await
+        .unwrap();
+
+        persist_oci_manifest_pin(
+            &conn,
+            sandbox_id,
+            "docker.io/library/alpine:latest",
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        )
+        .await
+        .unwrap();
+
+        let images = image_entity::Entity::find().all(&conn).await.unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].reference, "docker.io/library/alpine:latest");
+
+        let pins = sandbox_image_entity::Entity::find()
+            .all(&conn)
+            .await
+            .unwrap();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].sandbox_id, sandbox_id);
+        assert_eq!(pins[0].image_id, images[0].id);
+        assert_eq!(
+            pins[0].manifest_digest,
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_persist_oci_manifest_pin_replaces_stale_pin_for_different_reference() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let conn = Database::connect(ConnectOptions::new(&db_url))
+            .await
+            .unwrap();
+        Migrator::up(&conn, None).await.unwrap();
+
+        let mut config = SandboxConfig {
+            name: "recreated".into(),
+            image: RootfsSource::Oci("docker.io/library/alpine:latest".into()),
+            ..Default::default()
+        };
+        config.resolved_rootfs_layers = vec!["/tmp/layer0".into()];
+        let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
+
+        persist_oci_manifest_pin(
+            &conn,
+            sandbox_id,
+            "docker.io/library/alpine:latest",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .await
+        .unwrap();
+
+        persist_oci_manifest_pin(
+            &conn,
+            sandbox_id,
+            "docker.io/library/busybox:latest",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .await
+        .unwrap();
+
+        let images = image_entity::Entity::find().all(&conn).await.unwrap();
+        assert_eq!(images.len(), 2);
+
+        let pins = sandbox_image_entity::Entity::find()
+            .all(&conn)
+            .await
+            .unwrap();
+        assert_eq!(pins.len(), 1);
+
+        let busybox_id = images
+            .iter()
+            .find(|image| image.reference == "docker.io/library/busybox:latest")
+            .unwrap()
+            .id;
+        assert_eq!(pins[0].sandbox_id, sandbox_id);
+        assert_eq!(pins[0].image_id, busybox_id);
+        assert_eq!(
+            pins[0].manifest_digest,
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_sandbox_record_persists_resolved_rootfs_layers_in_config_json() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let conn = Database::connect(ConnectOptions::new(&db_url))
+            .await
+            .unwrap();
+        Migrator::up(&conn, None).await.unwrap();
+
+        let mut config = SandboxConfig {
+            name: "persisted-lowers".into(),
+            image: RootfsSource::Oci("docker.io/library/alpine:latest".into()),
+            ..Default::default()
+        };
+        config.resolved_rootfs_layers = vec!["/tmp/layer0".into(), "/tmp/layer1".into()];
+
+        let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
+        let row = super::sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(&conn)
+            .await
+            .unwrap()
+            .unwrap();
+        let decoded: SandboxConfig = serde_json::from_str(&row.config).unwrap();
+
+        assert_eq!(
+            decoded.resolved_rootfs_layers,
+            config.resolved_rootfs_layers
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_create_target_rejects_existing_state_without_force() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let conn = Database::connect(ConnectOptions::new(&db_url))
+            .await
+            .unwrap();
+        Migrator::up(&conn, None).await.unwrap();
+
+        let sandbox_dir = temp.path().join("sandboxes").join("existing");
+        fs::create_dir_all(&sandbox_dir).unwrap();
+
+        let config = SandboxConfig {
+            name: "existing".into(),
+            ..Default::default()
+        };
+
+        let err = prepare_create_target(&conn, &config, &sandbox_dir)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn test_prepare_create_target_force_replaces_stopped_sandbox_state() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let conn = Database::connect(ConnectOptions::new(&db_url))
+            .await
+            .unwrap();
+        Migrator::up(&conn, None).await.unwrap();
+
+        let sandbox_dir = temp.path().join("sandboxes").join("replaceable");
+        fs::create_dir_all(sandbox_dir.join("rw")).unwrap();
+        let config = SandboxConfig {
+            name: "replaceable".into(),
+            ..Default::default()
+        };
+        let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
+        super::update_sandbox_status(&conn, sandbox_id, super::SandboxStatus::Stopped)
+            .await
+            .unwrap();
+
+        let mut forced = SandboxConfig {
+            name: "replaceable".into(),
+            ..Default::default()
+        };
+        forced.replace_existing = true;
+
+        prepare_create_target(&conn, &forced, &sandbox_dir)
+            .await
+            .unwrap();
+
+        assert!(!sandbox_dir.exists());
+        assert!(
+            super::sandbox_entity::Entity::find_by_id(sandbox_id)
+                .one(&conn)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_create_target_force_rejects_running_sandbox() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let conn = Database::connect(ConnectOptions::new(&db_url))
+            .await
+            .unwrap();
+        Migrator::up(&conn, None).await.unwrap();
+
+        let sandbox_dir = temp.path().join("sandboxes").join("running");
+        fs::create_dir_all(&sandbox_dir).unwrap();
+        let config = SandboxConfig {
+            name: "running".into(),
+            ..Default::default()
+        };
+        insert_sandbox_record(&conn, &config).await.unwrap();
+
+        let mut forced = SandboxConfig {
+            name: "running".into(),
+            ..Default::default()
+        };
+        forced.replace_existing = true;
+
+        let err = prepare_create_target(&conn, &forced, &sandbox_dir)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::MicrosandboxError::SandboxStillRunning(_)
+        ));
+        assert!(sandbox_dir.exists());
+    }
+
+    #[test]
+    fn test_validate_start_state_requires_existing_sandbox_dir() {
+        let temp = tempdir().unwrap();
+        let sandbox_dir = temp.path().join("missing");
+        let config = SandboxConfig {
+            name: "missing".into(),
+            ..Default::default()
+        };
+
+        let err = super::validate_start_state(&config, &sandbox_dir).unwrap_err();
+        assert!(err.to_string().contains("sandbox state missing"));
+    }
+
+    #[test]
+    fn test_validate_start_state_requires_persisted_oci_lowers() {
+        let temp = tempdir().unwrap();
+        let sandbox_dir = temp.path().join("persisted");
+        fs::create_dir_all(&sandbox_dir).unwrap();
+
+        let mut config = SandboxConfig {
+            name: "persisted".into(),
+            image: RootfsSource::Oci("docker.io/library/alpine:latest".into()),
+            ..Default::default()
+        };
+        config.resolved_rootfs_layers = vec![temp.path().join("missing-lower")];
+
+        let err = super::validate_start_state(&config, &sandbox_dir).unwrap_err();
+        assert!(err.to_string().contains("pinned OCI lower is missing"));
     }
 }

@@ -100,9 +100,21 @@ pub struct SupervisorArgs {
     #[arg(long, default_value_t = 512)]
     pub memory_mib: u32,
 
-    /// Root filesystem layer paths (repeatable).
+    /// Root filesystem path for direct passthrough mounts.
     #[arg(long)]
-    pub rootfs_layer: Vec<PathBuf>,
+    pub rootfs_path: Option<PathBuf>,
+
+    /// Root filesystem lower layer paths for OverlayFs (repeatable).
+    #[arg(long)]
+    pub rootfs_lower: Vec<PathBuf>,
+
+    /// Writable upper layer directory for OverlayFs rootfs.
+    #[arg(long)]
+    pub rootfs_upper: Option<PathBuf>,
+
+    /// Staging directory for OverlayFs rootfs.
+    #[arg(long)]
+    pub rootfs_staging: Option<PathBuf>,
 
     /// Additional mounts as `tag:host_path` (repeatable).
     #[arg(long)]
@@ -157,7 +169,10 @@ pub async fn run(args: SupervisorArgs, log_level: Option<LogLevel>) -> RuntimeRe
         libkrunfw_path: args.libkrunfw_path,
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,
-        rootfs_layers: args.rootfs_layer,
+        rootfs_path: args.rootfs_path,
+        rootfs_lowers: args.rootfs_lower,
+        rootfs_upper: args.rootfs_upper,
+        rootfs_staging: args.rootfs_staging,
         mounts: args.mount,
         backends: vec![],
         init_path: args.init_path,

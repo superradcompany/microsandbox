@@ -2,6 +2,8 @@
 
 use microsandbox_runtime::policy::ShutdownMode;
 
+use microsandbox_image::RegistryAuth;
+
 use super::{
     config::SandboxConfig,
     types::{ImageSource, MountBuilder, RootfsSource},
@@ -106,6 +108,18 @@ impl SandboxBuilder {
     /// Set the default shell.
     pub fn shell(mut self, shell: impl Into<String>) -> Self {
         self.config.shell = Some(shell.into());
+        self
+    }
+
+    /// Set registry authentication for private OCI registries.
+    pub fn registry_auth(mut self, auth: RegistryAuth) -> Self {
+        self.config.registry_auth = Some(auth);
+        self
+    }
+
+    /// Replace an existing stopped sandbox with the same name during create.
+    pub fn force(mut self) -> Self {
+        self.config.replace_existing = true;
         self
     }
 
@@ -281,5 +295,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.log_level, None);
+    }
+
+    #[test]
+    fn test_builder_force_sets_replace_existing() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine:3.23")
+            .force()
+            .build()
+            .unwrap();
+
+        assert!(config.replace_existing);
     }
 }
