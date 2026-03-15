@@ -126,7 +126,11 @@ pub(crate) fn translate_open_flags(linux_flags_val: i32) -> i32 {
 /// all directories and metadata-bearing entries (those with overlay_origin
 /// or overlay_redirect xattrs).
 pub(crate) fn register_root_inode(fs: &OverlayFs) -> io::Result<()> {
-    let upper_fd = fs.upper.root_fd.as_raw_fd();
+    let upper_fd = if let Some(ref upper) = fs.upper {
+        upper.root_fd.as_raw_fd()
+    } else {
+        fs.lowers.last().unwrap().root_fd.as_raw_fd()
+    };
     let st = platform::fstat(upper_fd)?;
 
     // Create root node with Root state.
@@ -146,9 +150,7 @@ pub(crate) fn register_root_inode(fs: &OverlayFs) -> io::Result<()> {
         inode: ROOT_INODE,
         kind: libc::S_IFDIR as u32,
         lookup_refs: std::sync::atomic::AtomicU64::new(2), // libfuse convention
-        state: RwLock::new(NodeState::Root {
-            upper_fd: root_file,
-        }),
+        state: RwLock::new(NodeState::Root { root_fd: root_file }),
         opaque: std::sync::atomic::AtomicBool::new(false),
         copy_up_lock: Mutex::new(()),
         origin: None,
@@ -165,34 +167,36 @@ pub(crate) fn register_root_inode(fs: &OverlayFs) -> io::Result<()> {
     }
 
     // Register upper alt key for root.
-    #[cfg(target_os = "linux")]
-    {
-        let mut stx: libc::statx = unsafe { std::mem::zeroed() };
-        let ret = unsafe {
-            libc::statx(
-                upper_fd,
-                c"".as_ptr(),
-                libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_SYNC_AS_STAT,
-                libc::STATX_BASIC_STATS | libc::STATX_MNT_ID,
-                &mut stx,
-            )
-        };
-        if ret >= 0 {
-            let alt_key = InodeAltKey::new(
-                stx.stx_ino,
-                stx.stx_dev_major as u64 * 256 + stx.stx_dev_minor as u64,
-                stx.stx_mnt_id,
-            );
+    if fs.upper.is_some() {
+        #[cfg(target_os = "linux")]
+        {
+            let mut stx: libc::statx = unsafe { std::mem::zeroed() };
+            let ret = unsafe {
+                libc::statx(
+                    upper_fd,
+                    c"".as_ptr(),
+                    libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_SYNC_AS_STAT,
+                    libc::STATX_BASIC_STATS | libc::STATX_MNT_ID,
+                    &mut stx,
+                )
+            };
+            if ret >= 0 {
+                let alt_key = InodeAltKey::new(
+                    stx.stx_ino,
+                    stx.stx_dev_major as u64 * 256 + stx.stx_dev_minor as u64,
+                    stx.stx_mnt_id,
+                );
+                let mut upper_alt = fs.upper_alt_keys.write().unwrap();
+                upper_alt.insert(alt_key, ROOT_INODE);
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let alt_key = InodeAltKey::new(st.st_ino as u64, st.st_dev as u64);
             let mut upper_alt = fs.upper_alt_keys.write().unwrap();
             upper_alt.insert(alt_key, ROOT_INODE);
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let alt_key = InodeAltKey::new(st.st_ino as u64, st.st_dev as u64);
-        let mut upper_alt = fs.upper_alt_keys.write().unwrap();
-        upper_alt.insert(alt_key, ROOT_INODE);
     }
 
     // Check if root is opaque.
@@ -201,7 +205,9 @@ pub(crate) fn register_root_inode(fs: &OverlayFs) -> io::Result<()> {
     }
 
     // BFS hydrate the upper layer to rebuild origin_index and redirect state.
-    bfs_hydrate_upper(fs)?;
+    if fs.upper.is_some() {
+        bfs_hydrate_upper(fs)?;
+    }
 
     Ok(())
 }
@@ -220,7 +226,7 @@ fn bfs_hydrate_upper(fs: &OverlayFs) -> io::Result<()> {
     use super::{origin, types::RedirectState};
     use std::collections::VecDeque;
 
-    let upper_fd = fs.upper.root_fd.as_raw_fd();
+    let upper_fd = fs.upper.as_ref().unwrap().root_fd.as_raw_fd();
     let root_dir_fd = dup_fd_raw(upper_fd)?;
 
     let mut queue: VecDeque<(RawFd, u64)> = VecDeque::new();
@@ -546,41 +552,46 @@ pub(crate) fn do_lookup(fs: &OverlayFs, parent: u64, name: &CStr) -> io::Result<
     };
 
     // Try upper layer first.
-    let upper_parent_fd = get_upper_dir_fd(fs, &parent_node);
+    if fs.upper.is_some() {
+        let upper_parent_fd = get_upper_dir_fd(fs, &parent_node);
 
-    if let Some(ref upper_fd_node) = upper_parent_fd {
-        let upper_fd = upper_fd_node.raw();
+        if let Some(ref upper_fd_node) = upper_parent_fd {
+            let upper_fd = upper_fd_node.raw();
 
-        // Check whiteout in upper.
-        if layer::check_whiteout(upper_fd, name.to_bytes())? {
-            return Err(platform::enoent());
-        }
-
-        // Check if entry exists in upper.
-        #[cfg(target_os = "linux")]
-        let upper_flags = libc::O_PATH | libc::O_NOFOLLOW;
-        #[cfg(target_os = "macos")]
-        let upper_flags = libc::O_RDONLY | libc::O_NOFOLLOW;
-
-        match layer::open_child_beneath(
-            upper_fd,
-            name,
-            upper_flags,
-            #[cfg(target_os = "linux")]
-            fs.upper.has_openat2,
-            #[cfg(target_os = "macos")]
-            false,
-        ) {
-            Ok(fd) => {
-                return resolve_upper(fs, parent, name, fd);
+            // Check whiteout in upper.
+            if layer::check_whiteout(upper_fd, name.to_bytes())? {
+                return Err(platform::enoent());
             }
-            Err(e) if platform::is_enoent(&e) => {}
-            Err(e) => return Err(e),
+
+            // Check if entry exists in upper.
+            #[cfg(target_os = "linux")]
+            let upper_flags = libc::O_PATH | libc::O_NOFOLLOW;
+            #[cfg(target_os = "macos")]
+            let upper_flags = libc::O_RDONLY | libc::O_NOFOLLOW;
+
+            match layer::open_child_beneath(
+                upper_fd,
+                name,
+                upper_flags,
+                #[cfg(target_os = "linux")]
+                fs.upper.as_ref().unwrap().has_openat2,
+                #[cfg(target_os = "macos")]
+                false,
+            ) {
+                Ok(fd) => {
+                    return resolve_upper(fs, parent, name, fd);
+                }
+                Err(e) if platform::is_enoent(&e) => {}
+                Err(e) => return Err(e),
+            }
         }
     }
 
-    // If parent is opaque, don't search lowers.
-    if parent_node.opaque.load(Ordering::Acquire) {
+    // If parent is opaque AND we already checked the upper, don't search lowers.
+    // In read-only mode (no upper), the opaque dir's entries live on a lower layer,
+    // so we must still search lowers — the per-layer opaque check inside the loop
+    // handles stopping at the correct layer.
+    if fs.upper.is_some() && parent_node.opaque.load(Ordering::Acquire) {
         return Err(platform::enoent());
     }
 
@@ -825,11 +836,26 @@ fn resolve_lower(
 ) -> io::Result<Entry> {
     // Open fd to get xattr override. On Linux, keep the fd for reuse as the
     // O_PATH pinning fd (avoids a redundant second open_lower_child_fd call).
-    let lower_fd = open_lower_child_fd(lower_layer, parent, name, fs)?;
+    //
+    // On macOS, symlinks cannot be opened with O_NOFOLLOW (returns ELOOP) and
+    // cannot carry user xattrs, so skip the fd-based override for symlinks.
+    #[cfg(target_os = "macos")]
+    let is_symlink = (st.st_mode as u32) & (libc::S_IFMT as u32) == (libc::S_IFLNK as u32);
+    #[cfg(target_os = "linux")]
+    let is_symlink = false; // Linux uses O_PATH which works on symlinks.
+
+    let (lower_fd, patched) = if is_symlink {
+        (-1, st)
+    } else {
+        let fd = open_lower_child_fd(lower_layer, parent, name, fs)?;
+        let p = stat_override::patched_stat(fd, st)?;
+        (fd, p)
+    };
     let _close = scopeguard::guard(lower_fd, |fd| unsafe {
-        libc::close(fd);
+        if fd >= 0 {
+            libc::close(fd);
+        }
     });
-    let patched = stat_override::patched_stat(lower_fd, st)?;
 
     // Construct origin ID for hardlink unification.
     let origin_id = LowerOriginId::new(lower_layer.index, st.st_ino);
@@ -837,7 +863,7 @@ fn resolve_lower(
 
     // Check if this origin was already copied up (cross-copy-up dedup).
     // If so, resolve to the existing upper node instead of creating a new Lower node.
-    {
+    if !fs.cfg.read_only {
         let origin_idx = fs.origin_index.read().unwrap();
         if let Some(&existing_ino) = origin_idx.get(&origin_id) {
             let nodes = fs.nodes.read().unwrap();
@@ -1044,16 +1070,20 @@ pub(crate) fn forget_one_locked(
 /// Must be called AFTER releasing nodes/dentries write locks to avoid
 /// lock ordering deadlocks.
 fn cleanup_dedup_maps(fs: &OverlayFs, inode: u64, origin: Option<LowerOriginId>) {
-    // Remove from upper_alt_keys (scan — alt_key not stored on node).
-    fs.upper_alt_keys
-        .write()
-        .unwrap()
-        .retain(|_, &mut v| v != inode);
+    // Always clean lower_origin_keys (populated for lower-layer hardlinks even in read-only mode).
+    // Only clean upper_alt_keys and origin_index in writable mode.
+    if !fs.cfg.read_only {
+        fs.upper_alt_keys
+            .write()
+            .unwrap()
+            .retain(|_, &mut v| v != inode);
+    }
 
-    // Remove from origin-based maps if the node had an origin.
     if let Some(origin_id) = origin {
         fs.lower_origin_keys.write().unwrap().remove(&origin_id);
-        fs.origin_index.write().unwrap().remove(&origin_id);
+        if !fs.cfg.read_only {
+            fs.origin_index.write().unwrap().remove(&origin_id);
+        }
     }
 }
 
@@ -1061,20 +1091,28 @@ fn cleanup_dedup_maps(fs: &OverlayFs, inode: u64, origin: Option<LowerOriginId>)
 ///
 /// Called from batch_forget after releasing nodes/dentries locks.
 pub(crate) fn cleanup_dedup_maps_batch(fs: &OverlayFs, removed: &[(u64, Option<LowerOriginId>)]) {
-    // Collect removed inodes for efficient set lookup.
-    let removed_set: HashSet<u64> = removed.iter().map(|(ino, _)| *ino).collect();
+    // Always clean lower_origin_keys (populated for lower-layer hardlinks even in read-only mode).
+    // Only clean upper_alt_keys and origin_index in writable mode.
+    if !fs.cfg.read_only {
+        let removed_set: HashSet<u64> = removed.iter().map(|(ino, _)| *ino).collect();
 
-    fs.upper_alt_keys
-        .write()
-        .unwrap()
-        .retain(|_, v| !removed_set.contains(v));
+        fs.upper_alt_keys
+            .write()
+            .unwrap()
+            .retain(|_, v| !removed_set.contains(v));
+
+        let mut origin_idx = fs.origin_index.write().unwrap();
+        for (_, origin) in removed {
+            if let Some(origin_id) = origin {
+                origin_idx.remove(origin_id);
+            }
+        }
+    }
 
     let mut origin_keys = fs.lower_origin_keys.write().unwrap();
-    let mut origin_idx = fs.origin_index.write().unwrap();
     for (_, origin) in removed {
         if let Some(origin_id) = origin {
             origin_keys.remove(origin_id);
-            origin_idx.remove(origin_id);
         }
     }
 }
@@ -1092,9 +1130,9 @@ pub(crate) fn stat_node(fs: &OverlayFs, inode: u64) -> io::Result<stat64> {
 
     let state = node.state.read().unwrap();
     match &*state {
-        NodeState::Root { upper_fd } => {
-            let st = platform::fstat(upper_fd.as_raw_fd())?;
-            stat_override::patched_stat(upper_fd.as_raw_fd(), st)
+        NodeState::Root { root_fd } => {
+            let st = platform::fstat(root_fd.as_raw_fd())?;
+            stat_override::patched_stat(root_fd.as_raw_fd(), st)
         }
         #[cfg(target_os = "linux")]
         NodeState::Lower { file, .. } | NodeState::Upper { file, .. } => {
@@ -1126,8 +1164,8 @@ pub(crate) fn open_node_fd(fs: &OverlayFs, inode: u64, flags: i32) -> io::Result
 
     let state = node.state.read().unwrap();
     match &*state {
-        NodeState::Root { upper_fd } => {
-            let fd = unsafe { libc::fcntl(upper_fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        NodeState::Root { root_fd } => {
+            let fd = unsafe { libc::fcntl(root_fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
             if fd < 0 {
                 return Err(platform::linux_error(io::Error::last_os_error()));
             }
@@ -1135,13 +1173,25 @@ pub(crate) fn open_node_fd(fs: &OverlayFs, inode: u64, flags: i32) -> io::Result
         }
         #[cfg(target_os = "linux")]
         NodeState::Lower { file, .. } | NodeState::Upper { file, .. } => {
-            reopen_fd_linux(&fs.upper.proc_self_fd, file.as_raw_fd(), flags)
+            reopen_fd_linux(&fs.proc_self_fd, file.as_raw_fd(), flags)
         }
         #[cfg(target_os = "macos")]
         NodeState::Lower { ino, dev, .. } | NodeState::Upper { ino, dev, .. } => {
             let path = vol_path(*dev, *ino);
             let fd =
                 unsafe { libc::open(path.as_ptr(), flags | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
+            if fd >= 0 {
+                return Ok(fd);
+            }
+            // Only fall back to O_SYMLINK for ELOOP (symlink with O_NOFOLLOW).
+            // Other errors (EACCES, ENOENT, etc.) should propagate immediately.
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::ELOOP) {
+                return Err(platform::linux_error(err));
+            }
+            // O_SYMLINK opens the symlink itself (not its target) on macOS.
+            let fd =
+                unsafe { libc::open(path.as_ptr(), flags | libc::O_CLOEXEC | libc::O_SYMLINK) };
             if fd < 0 {
                 return Err(platform::linux_error(io::Error::last_os_error()));
             }
@@ -1180,15 +1230,15 @@ fn make_entry(
 pub(crate) fn get_upper_dir_fd(fs: &OverlayFs, parent_node: &OverlayNode) -> Option<NodeFd> {
     let state = parent_node.state.read().unwrap();
     match &*state {
-        NodeState::Root { upper_fd } => Some(NodeFd {
-            fd: upper_fd.as_raw_fd(),
+        NodeState::Root { root_fd } => Some(NodeFd {
+            fd: root_fd.as_raw_fd(),
             owned: false,
         }),
         NodeState::Upper { .. } => {
             #[cfg(target_os = "linux")]
             if let NodeState::Upper { file, .. } = &*state {
                 if let Ok(fd) = reopen_fd_linux(
-                    &fs.upper.proc_self_fd,
+                    &fs.proc_self_fd,
                     file.as_raw_fd(),
                     libc::O_RDONLY | libc::O_DIRECTORY,
                 ) {
@@ -1448,19 +1498,35 @@ fn open_lower_child_fd(
                 libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             )
         };
-        if fd < 0 {
-            // Try as directory.
-            let fd = unsafe {
-                libc::openat(
-                    parent_fd_node.raw(),
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-                )
-            };
-            if fd < 0 {
-                return Err(platform::linux_error(io::Error::last_os_error()));
-            }
+        if fd >= 0 {
             return Ok(fd);
+        }
+        // Try as directory.
+        let fd = unsafe {
+            libc::openat(
+                parent_fd_node.raw(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            )
+        };
+        if fd >= 0 {
+            return Ok(fd);
+        }
+        // Only fall back to O_SYMLINK for ELOOP (symlink with O_NOFOLLOW).
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ELOOP) {
+            return Err(platform::linux_error(err));
+        }
+        // O_SYMLINK opens the symlink itself (not its target) on macOS.
+        let fd = unsafe {
+            libc::openat(
+                parent_fd_node.raw(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK,
+            )
+        };
+        if fd < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
         }
         Ok(fd)
     }
@@ -1536,9 +1602,12 @@ pub(crate) fn vol_path(dev: u64, ino: u64) -> CString {
 }
 
 /// Open a /.vol path on macOS.
+///
+/// Tries O_RDONLY first, then O_DIRECTORY for directories. If ELOOP is returned
+/// (symlink with O_NOFOLLOW), falls back to O_SYMLINK which opens the symlink
+/// itself without following it.
 #[cfg(target_os = "macos")]
 fn open_macos_vol(path: &CStr) -> io::Result<RawFd> {
-    // Try O_RDONLY first, then O_RDONLY | O_DIRECTORY.
     let fd = unsafe {
         libc::open(
             path.as_ptr(),
@@ -1552,6 +1621,21 @@ fn open_macos_vol(path: &CStr) -> io::Result<RawFd> {
         libc::open(
             path.as_ptr(),
             libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        )
+    };
+    if fd >= 0 {
+        return Ok(fd);
+    }
+    // Only fall back to O_SYMLINK for ELOOP (symlink with O_NOFOLLOW).
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() != Some(libc::ELOOP) {
+        return Err(platform::linux_error(err));
+    }
+    // O_SYMLINK opens the symlink itself (not its target) on macOS.
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK,
         )
     };
     if fd >= 0 {

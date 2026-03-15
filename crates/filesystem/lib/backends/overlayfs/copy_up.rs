@@ -126,10 +126,10 @@ pub(crate) fn open_upper_parent_fd(fs: &OverlayFs, parent_ino: u64) -> io::Resul
 
     let state = parent_node.state.read().unwrap();
     match &*state {
-        NodeState::Root { upper_fd } => inode::dup_fd_raw(upper_fd.as_raw_fd()),
+        NodeState::Root { root_fd } => inode::dup_fd_raw(root_fd.as_raw_fd()),
         #[cfg(target_os = "linux")]
         NodeState::Upper { file, .. } => inode::reopen_fd_linux(
-            &fs.upper.proc_self_fd,
+            &fs.proc_self_fd,
             file.as_raw_fd(),
             libc::O_RDONLY | libc::O_DIRECTORY,
         ),
@@ -195,6 +195,14 @@ fn copy_up_regular(
         libc::close(fd);
     });
 
+    // Scopeguard to unlink temp file on error. Defused after successful renameat.
+    let staging_fd = fs.staging_fd.as_ref().unwrap().as_raw_fd();
+    let mut unlink_guard = scopeguard::guard(Some(temp_name.clone()), |name| {
+        if let Some(name) = name {
+            unsafe { libc::unlinkat(staging_fd, name.as_ptr(), 0) };
+        }
+    });
+
     // Copy file data.
     let st = platform::fstat(lower_fd)?;
     let file_size = st.st_size as u64;
@@ -212,7 +220,7 @@ fn copy_up_regular(
     // Atomic rename from staging_dir to upper parent.
     let ret = unsafe {
         libc::renameat(
-            fs.staging_fd.as_raw_fd(),
+            staging_fd,
             temp_name.as_ptr(),
             upper_parent_fd,
             name.as_ptr(),
@@ -220,10 +228,11 @@ fn copy_up_regular(
     };
     if ret < 0 {
         let err = io::Error::last_os_error();
-        // Clean up temp file on failure.
-        unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
         return Err(platform::linux_error(err));
     }
+
+    // Defuse the unlink guard — renameat succeeded.
+    *unlink_guard = None;
 
     // fsync the destination parent for durability.
     fsync_fd(upper_parent_fd)?;
@@ -340,22 +349,25 @@ fn copy_up_symlink(
             let _close_temp = scopeguard::guard(temp_fd, |fd| unsafe {
                 libc::close(fd);
             });
+            let staging_fd_raw = fs.staging_fd.as_ref().unwrap().as_raw_fd();
+            let mut unlink_guard = scopeguard::guard(Some(temp_name.clone()), |name| {
+                if let Some(name) = name {
+                    unsafe { libc::unlinkat(staging_fd_raw, name.as_ptr(), 0) };
+                }
+            });
 
             let written =
                 unsafe { libc::write(temp_fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
             if written < 0 || (written as usize) != buf.len() {
-                unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
                 return Err(platform::eio());
             }
 
             // Create stat override (real symlinks don't have overlay xattrs).
             let mode = libc::S_IFLNK as u32 | (st.st_mode as u32 & 0o7777);
-            if let Err(e) = stat_override::set_override(temp_fd, st.st_uid, st.st_gid, mode, 0) {
-                unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
-                return Err(e);
-            }
+            stat_override::set_override(temp_fd, st.st_uid, st.st_gid, mode, 0)?;
 
             stage_and_install(fs, temp_fd, &temp_name, &st, upper_parent_fd, name)?;
+            *unlink_guard = None;
         } else {
             // File-backed symlink on lower: reopen for data copy.
             let lower_fd = inode::open_node_fd(fs, node.inode, libc::O_RDONLY)?;
@@ -367,23 +379,25 @@ fn copy_up_symlink(
             let _close_temp = scopeguard::guard(temp_fd, |fd| unsafe {
                 libc::close(fd);
             });
+            let staging_fd_raw = fs.staging_fd.as_ref().unwrap().as_raw_fd();
+            let mut unlink_guard = scopeguard::guard(Some(temp_name.clone()), |name| {
+                if let Some(name) = name {
+                    unsafe { libc::unlinkat(staging_fd_raw, name.as_ptr(), 0) };
+                }
+            });
 
             copy_file_data(lower_fd, temp_fd, st.st_size as u64)?;
             copy_xattrs(lower_fd, temp_fd)?;
 
             stage_and_install(fs, temp_fd, &temp_name, &st, upper_parent_fd, name)?;
+            *unlink_guard = None;
         }
     }
 
     #[cfg(target_os = "macos")]
     {
-        // Open lower fd for xattr copy.
-        let lower_fd = inode::open_node_fd(fs, node.inode, libc::O_RDONLY)?;
-        let _close_lower = scopeguard::guard(lower_fd, |fd| unsafe {
-            libc::close(fd);
-        });
-
-        // Read link target on macOS.
+        // Read link target on macOS using /.vol path.
+        // Cannot use open_node_fd(O_RDONLY) because O_NOFOLLOW on a symlink returns ELOOP on macOS.
         let state = node.state.read().unwrap();
         let (node_dev, node_ino) = match &*state {
             NodeState::Lower { dev, ino, .. } | NodeState::Upper { dev, ino, .. } => (*dev, *ino),
@@ -392,6 +406,20 @@ fn copy_up_symlink(
         drop(state);
 
         let vol = inode::vol_path(node_dev, node_ino);
+
+        // Open the lower symlink with O_SYMLINK for xattr copy and fstat.
+        let lower_fd = unsafe {
+            libc::open(
+                vol.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK,
+            )
+        };
+        if lower_fd < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
+        }
+        let _close_lower = scopeguard::guard(lower_fd, |fd| unsafe {
+            libc::close(fd);
+        });
         let mut buf = vec![0u8; libc::PATH_MAX as usize];
         let len = unsafe {
             libc::readlink(
@@ -408,67 +436,55 @@ fn copy_up_symlink(
         let target = unsafe { CStr::from_bytes_with_nul_unchecked(&buf) };
 
         // Stage: create symlink in staging_dir, not directly in upper.
+        let staging_fd_raw = fs.staging_fd.as_ref().unwrap().as_raw_fd();
         let temp_name = create_temp_symlink_name(fs);
-        let ret = unsafe {
-            libc::symlinkat(
-                target.as_ptr(),
-                fs.staging_fd.as_raw_fd(),
-                temp_name.as_ptr(),
-            )
-        };
+        let ret = unsafe { libc::symlinkat(target.as_ptr(), staging_fd_raw, temp_name.as_ptr()) };
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
 
-        // Fstat lower before opening the staged symlink so a failure here
-        // does not leak sym_fd or the temp file.
+        // Scopeguard to unlink staged symlink on error. Defused after renameat.
+        let mut unlink_guard = scopeguard::guard(Some(temp_name.clone()), |name| {
+            if let Some(name) = name {
+                unsafe { libc::unlinkat(staging_fd_raw, name.as_ptr(), 0) };
+            }
+        });
+
         let lower_st = platform::fstat(lower_fd)?;
 
         // Copy xattrs via O_SYMLINK fd on the staged symlink.
         let sym_fd = unsafe {
             libc::openat(
-                fs.staging_fd.as_raw_fd(),
+                staging_fd_raw,
                 temp_name.as_ptr(),
                 libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK,
             )
         };
         if sym_fd < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
-            return Err(platform::linux_error(err));
+            return Err(platform::linux_error(io::Error::last_os_error()));
         }
+        let _close_sym = scopeguard::guard(sym_fd, |fd| unsafe {
+            libc::close(fd);
+        });
 
-        let xattr_result = copy_xattrs(lower_fd, sym_fd);
-        let ts_result = if xattr_result.is_ok() {
-            apply_timestamps(sym_fd, &lower_st)
-        } else {
-            Ok(())
-        };
-        unsafe { libc::close(sym_fd) };
-
-        if let Err(e) = xattr_result {
-            unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
-            return Err(e);
-        }
-        if let Err(e) = ts_result {
-            unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
-            return Err(e);
-        }
+        copy_xattrs(lower_fd, sym_fd)?;
+        apply_timestamps(sym_fd, &lower_st)?;
 
         // Atomically install into upper.
         let ret = unsafe {
             libc::renameat(
-                fs.staging_fd.as_raw_fd(),
+                staging_fd_raw,
                 temp_name.as_ptr(),
                 upper_parent_fd,
                 name.as_ptr(),
             )
         };
         if ret < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
-            return Err(platform::linux_error(err));
+            return Err(platform::linux_error(io::Error::last_os_error()));
         }
+
+        // Defuse — renameat succeeded.
+        *unlink_guard = None;
     }
 
     // fsync the destination parent for durability.
@@ -502,41 +518,41 @@ fn copy_up_special(
         libc::close(fd);
     });
 
+    // Scopeguard to unlink temp file on error. Defused after renameat succeeds.
+    let staging_fd_raw = fs.staging_fd.as_ref().unwrap().as_raw_fd();
+    let mut unlink_guard = scopeguard::guard(Some(temp_name.clone()), |name| {
+        if let Some(name) = name {
+            unsafe { libc::unlinkat(staging_fd_raw, name.as_ptr(), 0) };
+        }
+    });
+
     // Fstat lower before creating temp file so failure doesn't leak it.
     let st = platform::fstat(lower_fd)?;
 
     // Copy xattrs from lower (which includes override with type/rdev info).
-    if let Err(e) = copy_xattrs(lower_fd, temp_fd) {
-        unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
-        return Err(e);
-    }
+    copy_xattrs(lower_fd, temp_fd)?;
 
     // Preserve source timestamps.
-    if let Err(e) = apply_timestamps(temp_fd, &st) {
-        unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
-        return Err(e);
-    }
+    apply_timestamps(temp_fd, &st)?;
 
     // fsync temp file.
-    if let Err(e) = fsync_fd(temp_fd) {
-        unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
-        return Err(e);
-    }
+    fsync_fd(temp_fd)?;
 
     // Atomic rename from staging_dir to upper parent.
     let ret = unsafe {
         libc::renameat(
-            fs.staging_fd.as_raw_fd(),
+            staging_fd_raw,
             temp_name.as_ptr(),
             upper_parent_fd,
             name.as_ptr(),
         )
     };
     if ret < 0 {
-        let err = io::Error::last_os_error();
-        unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
-        return Err(platform::linux_error(err));
+        return Err(platform::linux_error(io::Error::last_os_error()));
     }
+
+    // Defuse — renameat succeeded.
+    *unlink_guard = None;
 
     // fsync the destination parent for durability.
     fsync_fd(upper_parent_fd)?;
@@ -553,8 +569,7 @@ fn copy_up_special(
 
 /// Apply timestamps, fsync, and atomically install a staged temp file into the upper layer.
 ///
-/// On failure, cleans up the temp file. Used by `copy_up_symlink` to deduplicate
-/// the identical staging tail shared between the real-symlink and file-backed branches.
+/// Callers must provide a scopeguard for temp file cleanup on error.
 #[cfg(target_os = "linux")]
 fn stage_and_install(
     fs: &OverlayFs,
@@ -564,27 +579,19 @@ fn stage_and_install(
     upper_parent_fd: RawFd,
     name: &CStr,
 ) -> io::Result<()> {
-    if let Err(e) = apply_timestamps(temp_fd, st) {
-        unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
-        return Err(e);
-    }
-    if let Err(e) = fsync_fd(temp_fd) {
-        unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
-        return Err(e);
-    }
+    apply_timestamps(temp_fd, st)?;
+    fsync_fd(temp_fd)?;
 
     let ret = unsafe {
         libc::renameat(
-            fs.staging_fd.as_raw_fd(),
+            fs.staging_fd.as_ref().unwrap().as_raw_fd(),
             temp_name.as_ptr(),
             upper_parent_fd,
             name.as_ptr(),
         )
     };
     if ret < 0 {
-        let err = io::Error::last_os_error();
-        unsafe { libc::unlinkat(fs.staging_fd.as_raw_fd(), temp_name.as_ptr(), 0) };
-        return Err(platform::linux_error(err));
+        return Err(platform::linux_error(io::Error::last_os_error()));
     }
 
     Ok(())
@@ -1213,7 +1220,7 @@ fn create_temp_file(fs: &OverlayFs) -> io::Result<(RawFd, std::ffi::CString)> {
 
     let fd = unsafe {
         libc::openat(
-            fs.staging_fd.as_raw_fd(),
+            fs.staging_fd.as_ref().unwrap().as_raw_fd(),
             name_cstr.as_ptr(),
             libc::O_CREAT | libc::O_EXCL | libc::O_RDWR | libc::O_CLOEXEC,
             (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,

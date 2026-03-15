@@ -39,6 +39,12 @@ pub struct OverlayConfig {
 
     /// Enable writeback caching (default: false).
     pub writeback: bool,
+
+    /// Read-only mode (default: false).
+    ///
+    /// When true, no writable upper layer exists. All mutation operations
+    /// return EROFS. Copy-up is disabled. The merged view is immutable.
+    pub read_only: bool,
 }
 
 /// Cache policy for FUSE open options.
@@ -94,8 +100,8 @@ pub(crate) struct OverlayNode {
 pub(crate) enum NodeState {
     /// The overlay root directory.
     Root {
-        /// Fd to the upper layer's root directory.
-        upper_fd: File,
+        /// Fd to the root directory (upper layer in rw mode, top lower in ro mode).
+        root_fd: File,
     },
 
     /// Entry lives on a read-only lower layer.

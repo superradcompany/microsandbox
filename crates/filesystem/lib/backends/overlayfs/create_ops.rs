@@ -45,6 +45,9 @@ pub(crate) fn do_create(
     umask: u32,
     _extensions: Extensions,
 ) -> io::Result<(Entry, Option<u64>, OpenOptions)> {
+    if fs.cfg.read_only {
+        return Err(platform::erofs());
+    }
     name_validation::validate_overlay_name(name)?;
 
     if init_binary::is_init_name(name.to_bytes()) {
@@ -131,6 +134,9 @@ pub(crate) fn do_mkdir(
     umask: u32,
     _extensions: Extensions,
 ) -> io::Result<Entry> {
+    if fs.cfg.read_only {
+        return Err(platform::erofs());
+    }
     name_validation::validate_overlay_name(name)?;
 
     if init_binary::is_init_name(name.to_bytes()) {
@@ -186,6 +192,9 @@ pub(crate) fn do_mknod(
     umask: u32,
     _extensions: Extensions,
 ) -> io::Result<Entry> {
+    if fs.cfg.read_only {
+        return Err(platform::erofs());
+    }
     name_validation::validate_overlay_name(name)?;
 
     if init_binary::is_init_name(name.to_bytes()) {
@@ -240,6 +249,9 @@ pub(crate) fn do_symlink(
     name: &CStr,
     _extensions: Extensions,
 ) -> io::Result<Entry> {
+    if fs.cfg.read_only {
+        return Err(platform::erofs());
+    }
     name_validation::validate_overlay_name(name)?;
 
     if init_binary::is_init_name(name.to_bytes()) {
@@ -336,6 +348,9 @@ pub(crate) fn do_link(
     newparent: u64,
     newname: &CStr,
 ) -> io::Result<Entry> {
+    if fs.cfg.read_only {
+        return Err(platform::erofs());
+    }
     name_validation::validate_overlay_name(newname)?;
 
     if init_binary::is_init_name(newname.to_bytes()) {

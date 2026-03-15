@@ -44,6 +44,10 @@ pub(crate) fn do_open(
         || access_mode == libc::O_RDWR
         || open_flags & libc::O_TRUNC != 0;
 
+    if fs.cfg.read_only && is_write {
+        return Err(platform::erofs());
+    }
+
     // Copy-up before write opens.
     if is_write {
         copy_up::ensure_upper(fs, ino)?;
@@ -120,6 +124,9 @@ pub(crate) fn do_write(
     offset: u64,
     kill_priv: bool,
 ) -> io::Result<usize> {
+    if fs.cfg.read_only {
+        return Err(platform::erofs());
+    }
     if ino == init_binary::INIT_INODE {
         return Err(platform::eacces());
     }

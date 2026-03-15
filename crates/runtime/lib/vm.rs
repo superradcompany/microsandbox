@@ -243,19 +243,6 @@ fn build_overlay_rootfs(
         "overlay rootfs requires at least one lower layer"
     );
 
-    let upper_dir = upper_dir.ok_or_else(|| {
-        msb_krun::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "overlay rootfs requires a writable upper directory",
-        ))
-    })?;
-    let staging_dir = staging_dir.ok_or_else(|| {
-        msb_krun::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "overlay rootfs requires a staging directory",
-        ))
-    })?;
-
     let mut overlay_builder = OverlayFs::builder();
 
     for layer in layers {
@@ -268,7 +255,20 @@ fn build_overlay_rootfs(
         }
     }
 
-    overlay_builder = overlay_builder.writable(upper_dir).staging(staging_dir);
+    match (upper_dir, staging_dir) {
+        (Some(upper), Some(staging)) => {
+            overlay_builder = overlay_builder.writable(upper).staging(staging);
+        }
+        (None, None) => {
+            overlay_builder = overlay_builder.read_only();
+        }
+        _ => {
+            return Err(msb_krun::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "overlay rootfs: upper_dir and staging_dir must both be set or both be omitted",
+            )));
+        }
+    }
 
     overlay_builder.build().map_err(msb_krun::Error::Io)
 }
@@ -343,37 +343,32 @@ mod tests {
     }
 
     #[test]
-    fn test_build_overlay_rootfs_requires_upper() {
+    fn test_build_overlay_rootfs_rejects_mismatched_upper_staging() {
         let temp = tempdir().unwrap();
         let lower = create_dir(temp.path(), "lower.extracted");
         let staging = create_dir(temp.path(), "staging");
 
-        let err = match build_overlay_rootfs(&[lower], None, Some(&staging)) {
-            Ok(_) => panic!("expected missing upper dir to be rejected"),
-            Err(err) => err,
-        };
+        // upper missing but staging present → error
+        match build_overlay_rootfs(&[lower.clone()], None, Some(&staging)) {
+            Ok(_) => panic!("expected mismatched upper/staging to be rejected"),
+            Err(err) => assert!(err.to_string().contains("both be set or both be omitted")),
+        }
 
-        assert!(
-            err.to_string()
-                .contains("overlay rootfs requires a writable upper directory")
-        );
+        // upper present but staging missing → error
+        let upper = create_dir(temp.path(), "rw");
+        match build_overlay_rootfs(&[lower], Some(&upper), None) {
+            Ok(_) => panic!("expected mismatched upper/staging to be rejected"),
+            Err(err) => assert!(err.to_string().contains("both be set or both be omitted")),
+        }
     }
 
     #[test]
-    fn test_build_overlay_rootfs_requires_staging() {
+    fn test_build_overlay_rootfs_read_only() {
         let temp = tempdir().unwrap();
         let lower = create_dir(temp.path(), "lower.extracted");
-        let upper = create_dir(temp.path(), "rw");
 
-        let err = match build_overlay_rootfs(&[lower], Some(&upper), None) {
-            Ok(_) => panic!("expected missing staging dir to be rejected"),
-            Err(err) => err,
-        };
-
-        assert!(
-            err.to_string()
-                .contains("overlay rootfs requires a staging directory")
-        );
+        // Both None → read-only mode (should succeed).
+        build_overlay_rootfs(&[lower], None, None).unwrap();
     }
 
     #[test]

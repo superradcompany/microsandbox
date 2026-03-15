@@ -11,6 +11,7 @@ mod test_index;
 mod test_lookup;
 mod test_metadata;
 mod test_multi_layer;
+mod test_read_only;
 mod test_readdir;
 mod test_remove_ops;
 mod test_rename;
@@ -47,6 +48,7 @@ const LINUX_EACCES: i32 = 13;
 const LINUX_EEXIST: i32 = 17;
 const LINUX_EINVAL: i32 = 22;
 const LINUX_ENOTEMPTY: i32 = 39;
+const LINUX_EROFS: i32 = 30;
 const LINUX_ENODATA: i32 = 61;
 
 /// Root inode number (FUSE convention).
@@ -79,6 +81,83 @@ struct MockZeroCopyWriter {
 struct MockZeroCopyReader {
     data: Vec<u8>,
     pos: usize,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn root_ctx() -> Context {
+    Context {
+        uid: 0,
+        gid: 0,
+        pid: 1,
+    }
+}
+
+fn make_cstr(s: &str) -> CString {
+    CString::new(s).unwrap()
+}
+
+fn fs_lookup(fs: &OverlayFs, parent: u64, name: &str) -> io::Result<Entry> {
+    fs.lookup(root_ctx(), parent, &make_cstr(name))
+}
+
+fn fs_lookup_root(fs: &OverlayFs, name: &str) -> io::Result<Entry> {
+    fs_lookup(fs, ROOT_INODE, name)
+}
+
+fn fs_fuse_open(fs: &OverlayFs, inode: u64, flags: u32) -> io::Result<u64> {
+    let (handle, _opts) = fs.open(root_ctx(), inode, false, flags)?;
+    Ok(handle.unwrap())
+}
+
+fn fs_fuse_opendir(fs: &OverlayFs, inode: u64) -> io::Result<u64> {
+    let (handle, _opts) = fs.opendir(root_ctx(), inode, 0)?;
+    Ok(handle.unwrap())
+}
+
+fn fs_fuse_read(
+    fs: &OverlayFs,
+    inode: u64,
+    handle: u64,
+    size: u32,
+    offset: u64,
+) -> io::Result<Vec<u8>> {
+    let mut writer = MockZeroCopyWriter::new();
+    let n = fs.read(
+        root_ctx(),
+        inode,
+        handle,
+        &mut writer,
+        size,
+        offset,
+        None,
+        0,
+    )?;
+    let mut data = writer.into_data();
+    data.truncate(n);
+    Ok(data)
+}
+
+fn fs_readdir_names(fs: &OverlayFs, inode: u64) -> io::Result<Vec<Vec<u8>>> {
+    let handle = fs_fuse_opendir(fs, inode)?;
+    let entries = fs.readdir(root_ctx(), inode, handle, 65536, 0)?;
+    let names = entries.iter().map(|e| e.name.to_vec()).collect();
+    fs.releasedir(root_ctx(), inode, 0, handle)?;
+    Ok(names)
+}
+
+fn assert_errno<T>(result: io::Result<T>, expected_errno: i32) {
+    match result {
+        Ok(_) => panic!("expected errno {expected_errno}, got Ok"),
+        Err(err) => assert_eq!(
+            err.raw_os_error(),
+            Some(expected_errno),
+            "expected errno {expected_errno}, got {:?}",
+            err
+        ),
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -136,11 +215,7 @@ impl OverlayTestSandbox {
 
     /// Get a default Context (uid=0, gid=0 — root user).
     fn ctx(&self) -> Context {
-        Context {
-            uid: 0,
-            gid: 0,
-            pid: 1,
-        }
+        root_ctx()
     }
 
     /// Get a Context with specific uid/gid.
@@ -150,17 +225,17 @@ impl OverlayTestSandbox {
 
     /// Make a CString from a &str (panics on embedded nul).
     fn cstr(s: &str) -> CString {
-        CString::new(s).unwrap()
+        make_cstr(s)
     }
 
     /// Lookup a name in a parent directory.
     fn lookup(&self, parent: u64, name: &str) -> io::Result<Entry> {
-        self.fs.lookup(self.ctx(), parent, &Self::cstr(name))
+        fs_lookup(&self.fs, parent, name)
     }
 
     /// Lookup a name in the root directory.
     fn lookup_root(&self, name: &str) -> io::Result<Entry> {
-        self.lookup(ROOT_INODE, name)
+        fs_lookup_root(&self.fs, name)
     }
 
     /// Create a file via the FUSE create() operation. Returns (Entry, handle).
@@ -202,14 +277,12 @@ impl OverlayTestSandbox {
 
     /// Open a file by inode. Returns handle.
     fn fuse_open(&self, inode: u64, flags: u32) -> io::Result<u64> {
-        let (handle, _opts) = self.fs.open(self.ctx(), inode, false, flags)?;
-        Ok(handle.unwrap())
+        fs_fuse_open(&self.fs, inode, flags)
     }
 
     /// Open a directory by inode. Returns handle.
     fn fuse_opendir(&self, inode: u64) -> io::Result<u64> {
-        let (handle, _opts) = self.fs.opendir(self.ctx(), inode, 0)?;
-        Ok(handle.unwrap())
+        fs_fuse_opendir(&self.fs, inode)
     }
 
     /// Write data to a file handle via MockZeroCopyReader.
@@ -231,29 +304,12 @@ impl OverlayTestSandbox {
 
     /// Read data from a file handle via MockZeroCopyWriter.
     fn fuse_read(&self, inode: u64, handle: u64, size: u32, offset: u64) -> io::Result<Vec<u8>> {
-        let mut writer = MockZeroCopyWriter::new();
-        let n = self.fs.read(
-            self.ctx(),
-            inode,
-            handle,
-            &mut writer,
-            size,
-            offset,
-            None,
-            0,
-        )?;
-        let mut data = writer.into_data();
-        data.truncate(n);
-        Ok(data)
+        fs_fuse_read(&self.fs, inode, handle, size, offset)
     }
 
     /// Collect all entry names from readdir on the given inode.
     fn readdir_names(&self, inode: u64) -> io::Result<Vec<Vec<u8>>> {
-        let handle = self.fuse_opendir(inode)?;
-        let entries = self.fs.readdir(self.ctx(), inode, handle, 65536, 0)?;
-        let names = entries.iter().map(|e| e.name.to_vec()).collect();
-        self.fs.releasedir(self.ctx(), inode, 0, handle)?;
-        Ok(names)
+        fs_readdir_names(&self.fs, inode)
     }
 
     /// Check if a whiteout marker exists on the upper layer.
@@ -269,15 +325,82 @@ impl OverlayTestSandbox {
 
     /// Assert that an io::Result is an error with the expected Linux errno.
     fn assert_errno<T>(result: io::Result<T>, expected_errno: i32) {
-        match result {
-            Ok(_) => panic!("expected errno {expected_errno}, got Ok"),
-            Err(err) => assert_eq!(
-                err.raw_os_error(),
-                Some(expected_errno),
-                "expected errno {expected_errno}, got {:?}",
-                err
-            ),
+        assert_errno(result, expected_errno)
+    }
+}
+
+/// Test harness providing a read-only OverlayFs (no upper layer).
+struct ReadOnlyOverlayTestSandbox {
+    fs: OverlayFs,
+    _tmp: TempDir,
+}
+
+impl ReadOnlyOverlayTestSandbox {
+    /// Create a read-only sandbox with 1 lower layer. `f` populates before mount.
+    fn with_lower(f: impl FnOnce(&Path)) -> Self {
+        Self::with_layers(1, |lowers| {
+            f(&lowers[0]);
+        })
+    }
+
+    /// Create a read-only sandbox with N lower layers.
+    fn with_layers(n: usize, f: impl FnOnce(&[PathBuf])) -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let mut lower_roots = Vec::with_capacity(n);
+        for i in 0..n {
+            let lower = tmp.path().join(format!("lower_{i}"));
+            std::fs::create_dir(&lower).unwrap();
+            lower_roots.push(lower);
         }
+
+        f(&lower_roots);
+
+        let mut builder = OverlayFs::builder();
+        for lower in &lower_roots {
+            builder = builder.layer(lower);
+        }
+        let fs = builder.read_only().build().unwrap();
+
+        fs.init(FsOptions::empty()).unwrap();
+
+        Self { fs, _tmp: tmp }
+    }
+
+    fn ctx(&self) -> Context {
+        root_ctx()
+    }
+
+    fn cstr(s: &str) -> CString {
+        make_cstr(s)
+    }
+
+    fn lookup(&self, parent: u64, name: &str) -> io::Result<Entry> {
+        fs_lookup(&self.fs, parent, name)
+    }
+
+    fn lookup_root(&self, name: &str) -> io::Result<Entry> {
+        fs_lookup_root(&self.fs, name)
+    }
+
+    fn fuse_open(&self, inode: u64, flags: u32) -> io::Result<u64> {
+        fs_fuse_open(&self.fs, inode, flags)
+    }
+
+    fn fuse_opendir(&self, inode: u64) -> io::Result<u64> {
+        fs_fuse_opendir(&self.fs, inode)
+    }
+
+    fn fuse_read(&self, inode: u64, handle: u64, size: u32, offset: u64) -> io::Result<Vec<u8>> {
+        fs_fuse_read(&self.fs, inode, handle, size, offset)
+    }
+
+    fn readdir_names(&self, inode: u64) -> io::Result<Vec<Vec<u8>>> {
+        fs_readdir_names(&self.fs, inode)
+    }
+
+    fn assert_errno<T>(result: io::Result<T>, expected_errno: i32) {
+        assert_errno(result, expected_errno)
     }
 }
 

@@ -58,11 +58,11 @@ pub struct OverlayFs {
     /// Read-only lower layers (bottom-to-top order, index 0 = bottommost).
     pub(crate) lowers: Vec<Layer>,
 
-    /// Writable upper layer.
-    pub(crate) upper: Layer,
+    /// Writable upper layer (`None` in read-only mode).
+    pub(crate) upper: Option<Layer>,
 
-    /// Staging directory fd (same filesystem as upper, for atomic copy-up).
-    pub(crate) staging_fd: File,
+    /// Staging directory fd (`None` in read-only mode).
+    pub(crate) staging_fd: Option<File>,
 
     /// Inode table: FUSE inode → OverlayNode.
     pub(crate) nodes: RwLock<BTreeMap<u64, Arc<OverlayNode>>>,
@@ -99,6 +99,10 @@ pub struct OverlayFs {
 
     /// Name interning table for path components.
     pub(crate) names: NameTable,
+
+    /// Linux: /proc/self/fd handle for secure inode reopening.
+    #[cfg(target_os = "linux")]
+    pub(crate) proc_self_fd: File,
 
     /// Configuration.
     pub(crate) cfg: OverlayConfig,
@@ -144,25 +148,28 @@ impl DynFileSystem for OverlayFs {
 
         let mut opts = FsOptions::empty();
 
-        let wanted = FsOptions::DONT_MASK
-            | FsOptions::BIG_WRITES
-            | FsOptions::ASYNC_READ
-            | FsOptions::PARALLEL_DIROPS
-            | FsOptions::MAX_PAGES
-            | FsOptions::HANDLE_KILLPRIV_V2;
-        opts |= capable & wanted;
+        // Read-relevant capabilities (always requested).
+        let read_wanted = FsOptions::ASYNC_READ | FsOptions::PARALLEL_DIROPS | FsOptions::MAX_PAGES;
+        opts |= capable & read_wanted;
 
         if capable.contains(FsOptions::DO_READDIRPLUS) {
             opts |= FsOptions::DO_READDIRPLUS | FsOptions::READDIRPLUS_AUTO;
         }
 
-        if self.cfg.writeback && capable.contains(FsOptions::WRITEBACK_CACHE) {
-            opts |= FsOptions::WRITEBACK_CACHE;
-            self.writeback.store(true, Ordering::Relaxed);
-        }
+        // Write-relevant capabilities (skipped in read-only mode).
+        if !self.cfg.read_only {
+            let write_wanted =
+                FsOptions::DONT_MASK | FsOptions::BIG_WRITES | FsOptions::HANDLE_KILLPRIV_V2;
+            opts |= capable & write_wanted;
 
-        // Clear umask so the client can set all mode bits.
-        unsafe { libc::umask(0o000) };
+            if self.cfg.writeback && capable.contains(FsOptions::WRITEBACK_CACHE) {
+                opts |= FsOptions::WRITEBACK_CACHE;
+                self.writeback.store(true, Ordering::Relaxed);
+            }
+
+            // Clear umask so the client can set all mode bits.
+            unsafe { libc::umask(0o000) };
+        }
 
         Ok(opts)
     }

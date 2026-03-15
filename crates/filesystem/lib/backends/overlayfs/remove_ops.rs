@@ -46,6 +46,9 @@ const KNOWN_RENAME_FLAGS: u32 = RENAME_NOREPLACE | RENAME_EXCHANGE;
 /// and is not a directory. Ensures the parent is on upper, unlinks the upper
 /// entry if present, and creates a whiteout if the name exists on lower layers.
 pub(crate) fn do_unlink(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr) -> io::Result<()> {
+    if fs.cfg.read_only {
+        return Err(platform::erofs());
+    }
     name_validation::validate_overlay_name(name)?;
 
     if init_binary::is_init_name(name.to_bytes()) {
@@ -100,6 +103,9 @@ pub(crate) fn do_unlink(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr)
 /// is a directory, and is empty across all layers. Ensures the parent is on
 /// upper, removes the upper entry and creates a whiteout if needed.
 pub(crate) fn do_rmdir(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr) -> io::Result<()> {
+    if fs.cfg.read_only {
+        return Err(platform::erofs());
+    }
     name_validation::validate_overlay_name(name)?;
 
     if init_binary::is_init_name(name.to_bytes()) {
@@ -168,6 +174,9 @@ pub(crate) fn do_rename(
     newname: &CStr,
     flags: u32,
 ) -> io::Result<()> {
+    if fs.cfg.read_only {
+        return Err(platform::erofs());
+    }
     name_validation::validate_overlay_name(oldname)?;
     name_validation::validate_overlay_name(newname)?;
 
