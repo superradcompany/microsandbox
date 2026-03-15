@@ -346,6 +346,27 @@ fn supervisor_cli_args(
                 args.push(layer_dir.as_os_str().to_os_string());
             }
         }
+        RootfsSource::DiskImage {
+            path,
+            format,
+            fstype,
+        } => {
+            args.push(OsString::from("--rootfs-disk"));
+            args.push(path.as_os_str().to_os_string());
+            args.push(OsString::from("--rootfs-disk-format"));
+            args.push(OsString::from(format.as_str()));
+
+            // Build MSB_BLOCK_ROOT env var value.
+            let mut block_root_val = String::from("/dev/vda");
+            if let Some(ft) = fstype {
+                block_root_val.push_str(&format!(",fstype={ft}"));
+            }
+            args.push(OsString::from("--env"));
+            args.push(OsString::from(format!(
+                "{}={block_root_val}",
+                microsandbox_protocol::ENV_BLOCK_ROOT
+            )));
+        }
     }
 
     // Process mounts: emit --mount args for virtiofs mounts, collect tmpfs specs.
@@ -655,5 +676,83 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(!rendered.iter().any(|a| a.starts_with("MSB_TMPFS=")));
+    }
+
+    #[test]
+    fn test_supervisor_cli_args_disk_image_with_fstype() {
+        let config = SandboxBuilder::new("test")
+            .image(|i: crate::sandbox::ImageBuilder| i.disk("/tmp/ubuntu.qcow2").fstype("ext4"))
+            .build()
+            .unwrap();
+
+        assert!(matches!(config.image, RootfsSource::DiskImage { .. }));
+
+        let args = supervisor_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/rootfs-base"),
+            Path::new("/tmp/rw"),
+            Path::new("/tmp/staging"),
+            9,
+            Path::new("/tmp/libkrunfw.dylib"),
+        );
+
+        let rendered = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(rendered.contains(&"--rootfs-disk".to_string()));
+        assert!(rendered.contains(&"/tmp/ubuntu.qcow2".to_string()));
+        assert!(rendered.contains(&"--rootfs-disk-format".to_string()));
+        assert!(rendered.contains(&"qcow2".to_string()));
+        assert!(rendered.contains(&"MSB_BLOCK_ROOT=/dev/vda,fstype=ext4".to_string()));
+
+        // Should not contain bind or overlay args.
+        assert!(!rendered.contains(&"--rootfs-path".to_string()));
+        assert!(!rendered.contains(&"--rootfs-lower".to_string()));
+        assert!(!rendered.contains(&"--rootfs-upper".to_string()));
+        assert!(!rendered.contains(&"--rootfs-staging".to_string()));
+    }
+
+    #[test]
+    fn test_supervisor_cli_args_disk_image_without_fstype() {
+        let config = SandboxBuilder::new("test")
+            .image(|i: crate::sandbox::ImageBuilder| i.disk("/tmp/alpine.raw"))
+            .build()
+            .unwrap();
+
+        assert!(matches!(config.image, RootfsSource::DiskImage { .. }));
+
+        let args = supervisor_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/rootfs-base"),
+            Path::new("/tmp/rw"),
+            Path::new("/tmp/staging"),
+            9,
+            Path::new("/tmp/libkrunfw.dylib"),
+        );
+
+        let rendered = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(rendered.contains(&"--rootfs-disk".to_string()));
+        assert!(rendered.contains(&"/tmp/alpine.raw".to_string()));
+        assert!(rendered.contains(&"--rootfs-disk-format".to_string()));
+        assert!(rendered.contains(&"raw".to_string()));
+        assert!(rendered.contains(&"MSB_BLOCK_ROOT=/dev/vda".to_string()));
+
+        // Should not contain bind or overlay args.
+        assert!(!rendered.contains(&"--rootfs-path".to_string()));
+        assert!(!rendered.contains(&"--rootfs-lower".to_string()));
     }
 }

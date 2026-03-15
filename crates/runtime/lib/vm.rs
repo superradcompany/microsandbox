@@ -39,7 +39,16 @@ pub struct VmConfig {
     /// Private staging directory for OverlayFs atomic operations.
     pub rootfs_staging: Option<PathBuf>,
 
-    /// Additional mounts as `tag:host_path` pairs.
+    /// Disk image path for virtio-blk rootfs.
+    pub rootfs_disk: Option<PathBuf>,
+
+    /// Disk image format string ("qcow2", "raw", "vmdk").
+    pub rootfs_disk_format: Option<String>,
+
+    /// Whether the disk image is read-only.
+    pub rootfs_disk_readonly: bool,
+
+    /// Additional mounts as `tag:host_path[:ro]` strings.
     pub mounts: Vec<String>,
 
     /// Pre-built filesystem backends as `(tag, backend)` pairs.
@@ -84,6 +93,9 @@ impl std::fmt::Debug for VmConfig {
             .field("rootfs_lowers", &self.rootfs_lowers)
             .field("rootfs_upper", &self.rootfs_upper)
             .field("rootfs_staging", &self.rootfs_staging)
+            .field("rootfs_disk", &self.rootfs_disk)
+            .field("rootfs_disk_format", &self.rootfs_disk_format)
+            .field("rootfs_disk_readonly", &self.rootfs_disk_readonly)
             .field("mounts", &self.mounts)
             .field("backends", &format!("[{} backend(s)]", self.backends.len()))
             .field("init_path", &self.init_path)
@@ -162,11 +174,46 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
             std::io::ErrorKind::InvalidInput,
             "overlay rootfs requires at least one lower layer",
         )));
+    } else if let Some(ref disk_path) = config.rootfs_disk {
+        // Empty trampoline: PassthroughFs injects /init.krun (agentd) automatically.
+        let empty_trampoline = tempfile::tempdir().map_err(msb_krun::Error::Io)?;
+        let cfg = PassthroughConfig {
+            root_dir: empty_trampoline.path().to_path_buf(),
+            ..Default::default()
+        };
+        let backend = PassthroughFs::new(cfg)?;
+        builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+
+        // Attach disk image as virtio-blk device.
+        let format_str = config.rootfs_disk_format.as_deref().unwrap_or("raw");
+        let format: msb_krun::DiskImageFormat = match format_str {
+            "qcow2" => msb_krun::DiskImageFormat::Qcow2,
+            "raw" => msb_krun::DiskImageFormat::Raw,
+            "vmdk" => msb_krun::DiskImageFormat::Vmdk,
+            other => {
+                return Err(msb_krun::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unknown disk image format: {other}"),
+                )));
+            }
+        };
+        let disk_path = disk_path.clone();
+        let readonly = config.rootfs_disk_readonly;
+        builder = builder.disk(move |d| d.path(&disk_path).format(format).read_only(readonly));
+
+        // Keep the trampoline directory alive until VM exits.
+        // enter() never returns, so we prevent cleanup on drop.
+        let _ = empty_trampoline.keep();
     }
 
-    // Additional mounts (tag:host_path format).
+    // Additional mounts (tag:host_path[:ro] format).
     for mount_spec in &config.mounts {
-        if let Some((tag, path)) = mount_spec.split_once(':') {
+        let (spec, _readonly) = match mount_spec.strip_suffix(":ro") {
+            Some(s) => (s, true),
+            None => (mount_spec.as_str(), false),
+        };
+
+        if let Some((tag, path)) = spec.split_once(':') {
             let tag = tag.to_string();
             let cfg = PassthroughConfig {
                 root_dir: PathBuf::from(path),
@@ -296,6 +343,9 @@ mod tests {
             rootfs_lowers: vec![PathBuf::from("/tmp/layer0")],
             rootfs_upper: Some(PathBuf::from("/tmp/rw")),
             rootfs_staging: Some(PathBuf::from("/tmp/staging")),
+            rootfs_disk: None,
+            rootfs_disk_format: None,
+            rootfs_disk_readonly: false,
             mounts: Vec::new(),
             backends: Vec::new(),
             init_path: None,
@@ -324,6 +374,9 @@ mod tests {
             rootfs_lowers: Vec::new(),
             rootfs_upper: Some(PathBuf::from("/tmp/rw")),
             rootfs_staging: Some(PathBuf::from("/tmp/staging")),
+            rootfs_disk: None,
+            rootfs_disk_format: None,
+            rootfs_disk_readonly: false,
             mounts: Vec::new(),
             backends: Vec::new(),
             init_path: None,

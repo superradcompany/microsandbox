@@ -19,14 +19,12 @@ microsandbox-db = { path = "../db" }
 microsandbox-filesystem = { path = "../filesystem" }
 microsandbox-protocol = { path = "../protocol" }
 microsandbox-utils = { path = "../utils" }
-msb_krun = { version = "0.1.2", features = ["net"] }
+msb_krun = { version = "0.1.3", features = ["blk", "net"] }
 nix = { workspace = true, features = ["process", "signal"] }
 sea-orm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
