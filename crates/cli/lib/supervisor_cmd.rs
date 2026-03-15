@@ -116,6 +116,18 @@ pub struct SupervisorArgs {
     #[arg(long)]
     pub rootfs_staging: Option<PathBuf>,
 
+    /// Disk image file path for virtio-blk rootfs.
+    #[arg(long)]
+    pub rootfs_disk: Option<PathBuf>,
+
+    /// Disk image format (qcow2, raw, vmdk).
+    #[arg(long)]
+    pub rootfs_disk_format: Option<String>,
+
+    /// Mount disk image as read-only.
+    #[arg(long)]
+    pub rootfs_disk_readonly: bool,
+
     /// Additional mounts as `tag:host_path` (repeatable).
     #[arg(long)]
     pub mount: Vec<String>,
@@ -173,6 +185,9 @@ pub async fn run(args: SupervisorArgs, log_level: Option<LogLevel>) -> RuntimeRe
         rootfs_lowers: args.rootfs_lower,
         rootfs_upper: args.rootfs_upper,
         rootfs_staging: args.rootfs_staging,
+        rootfs_disk: args.rootfs_disk,
+        rootfs_disk_format: args.rootfs_disk_format,
+        rootfs_disk_readonly: args.rootfs_disk_readonly,
         mounts: args.mount,
         backends: vec![],
         init_path: args.init_path,

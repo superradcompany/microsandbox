@@ -6,7 +6,7 @@ use microsandbox_image::RegistryAuth;
 
 use super::{
     config::SandboxConfig,
-    types::{ImageSource, MountBuilder, RootfsSource},
+    types::{IntoImage, MountBuilder, RootfsSource},
 };
 use crate::{LogLevel, MicrosandboxResult, size::Mebibytes};
 
@@ -38,23 +38,22 @@ impl SandboxBuilder {
 
     /// Set the root filesystem image source.
     ///
-    /// Accepts a string or path:
+    /// Accepts a string, path, or closure:
     /// - **`&str` / `String`**: Paths starting with `/`, `./`, or `../` are treated as local
-    ///   bind mounts. Everything else is treated as an OCI image reference.
-    /// - **`PathBuf`**: Always treated as a local bind mount.
+    ///   paths. Everything else is treated as an OCI image reference. Disk image extensions
+    ///   (`.qcow2`, `.raw`, `.vmdk`) resolve to virtio-blk block device rootfs.
+    /// - **`PathBuf`**: Always treated as a local path.
+    /// - **Closure**: `|i| i.disk("./image.qcow2").fstype("ext4")` for explicit disk image
+    ///   configuration.
     ///
     /// ```ignore
-    /// .image("python:3.12")           // OCI image
-    /// .image("./rootfs")              // local directory (bind mount)
-    /// .image("/abs/path/to/rootfs")   // local directory (bind mount)
-    /// .image(PathBuf::from("./rootfs")) // local directory (bind mount)
+    /// .image("python:3.12")                                // OCI image
+    /// .image("./rootfs")                                   // local directory (bind mount)
+    /// .image("./ubuntu.qcow2")                             // disk image (auto-detect fs)
+    /// .image(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))  // disk image (explicit fs)
     /// ```
-    ///
-    /// Disk image formats (`.qcow2`, `.raw`, `.vmdk`) are not yet supported and
-    /// will produce a build error.
-    pub fn image(mut self, image: impl Into<ImageSource>) -> Self {
-        let source: ImageSource = image.into();
-        match source.into_rootfs_source() {
+    pub fn image(mut self, image: impl IntoImage) -> Self {
+        match image.into_rootfs_source() {
             Ok(rootfs) => self.config.image = rootfs,
             Err(e) => {
                 if self.build_error.is_none() {
@@ -243,6 +242,11 @@ impl SandboxBuilder {
             RootfsSource::Oci(s) if s.is_empty() => {
                 return Err(crate::MicrosandboxError::InvalidConfig(
                     "image source is required".into(),
+                ));
+            }
+            RootfsSource::DiskImage { .. } if !self.config.patches.is_empty() => {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "patches are not compatible with disk image rootfs".into(),
                 ));
             }
             _ => {}

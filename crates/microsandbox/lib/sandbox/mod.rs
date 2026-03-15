@@ -52,8 +52,8 @@ pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, Sandbo
 pub use microsandbox_filesystem::AccessMode;
 pub use microsandbox_runtime::logging::LogLevel;
 pub use types::{
-    ImageSource, MountBuilder, NetworkConfig, Patch, RootfsSource, SecretsConfig, SshConfig,
-    VolumeMount,
+    DiskImageFormat, ImageBuilder, ImageSource, IntoImage, MountBuilder, NetworkConfig, Patch,
+    RootfsSource, SecretsConfig, SshConfig, VolumeMount,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -770,6 +770,21 @@ fn validate_rootfs_source(rootfs: &RootfsSource) -> MicrosandboxResult<()> {
             }
         }
         RootfsSource::Oci(_) => {}
+        RootfsSource::DiskImage { path, .. } => {
+            if !path.exists() {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "disk image does not exist: {}",
+                    path.display()
+                )));
+            }
+
+            if !path.is_file() {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "disk image is not a regular file: {}",
+                    path.display()
+                )));
+            }
+        }
     }
 
     Ok(())

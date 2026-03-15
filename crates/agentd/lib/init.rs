@@ -19,6 +19,14 @@ struct TmpfsSpec<'a> {
     noexec: bool,
 }
 
+/// Parsed block-device root specification.
+#[derive(Debug)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct BlockRootSpec<'a> {
+    device: &'a str,
+    fstype: Option<&'a str>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -31,6 +39,7 @@ struct TmpfsSpec<'a> {
 pub fn init() -> AgentdResult<()> {
     linux::mount_filesystems()?;
     linux::mount_runtime()?;
+    linux::mount_block_root()?;
     linux::apply_tmpfs_mounts()?;
     linux::create_run_dir()?;
     Ok(())
@@ -83,6 +92,32 @@ fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec<'_>> {
     })
 }
 
+/// Parses a block-device root specification: `device[,fstype=TYPE]`
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec<'_>> {
+    let mut parts = val.split(',');
+    let device = parts.next().unwrap();
+    if device.is_empty() {
+        return Err(AgentdError::Init("MSB_BLOCK_ROOT has empty device path".into()));
+    }
+
+    let mut fstype = None;
+    for opt in parts {
+        if let Some(val) = opt.strip_prefix("fstype=") {
+            if val.is_empty() {
+                return Err(AgentdError::Init("MSB_BLOCK_ROOT has empty fstype value".into()));
+            }
+            fstype = Some(val);
+        } else {
+            return Err(AgentdError::Init(format!(
+                "unknown MSB_BLOCK_ROOT option: {opt}"
+            )));
+        }
+    }
+
+    Ok(BlockRootSpec { device, fstype })
+}
+
 //--------------------------------------------------------------------------------------------------
 // Modules
 //--------------------------------------------------------------------------------------------------
@@ -94,11 +129,11 @@ mod linux {
 
     use nix::mount::{MsFlags, mount};
     use nix::sys::stat::Mode;
-    use nix::unistd::mkdir;
+    use nix::unistd::{chdir, chroot, mkdir};
 
     use crate::error::{AgentdError, AgentdResult};
 
-    use super::TmpfsSpec;
+    use super::{BlockRootSpec, TmpfsSpec};
 
     /// Mounts essential Linux filesystems.
     pub fn mount_filesystems() -> AgentdResult<()> {
@@ -188,6 +223,112 @@ mod linux {
             None::<&str>,
         )?;
         Ok(())
+    }
+
+    /// Mounts a block device as the new root filesystem, if `MSB_BLOCK_ROOT` is set.
+    ///
+    /// Steps: mount block device at `/newroot`, bind-mount `/.msb` into it,
+    /// pivot via `MS_MOVE` + `chroot`, then re-mount essential filesystems.
+    pub fn mount_block_root() -> AgentdResult<()> {
+        let val = match std::env::var(microsandbox_protocol::ENV_BLOCK_ROOT) {
+            Ok(v) if !v.is_empty() => v,
+            _ => return Ok(()),
+        };
+
+        let spec = super::parse_block_root(&val)?;
+
+        // Create the temporary mount point.
+        mkdir_ignore_exists("/newroot")?;
+
+        // Mount the block device.
+        if let Some(fstype) = spec.fstype {
+            mount(
+                Some(spec.device),
+                "/newroot",
+                Some(fstype),
+                MsFlags::empty(),
+                None::<&str>,
+            )
+            .map_err(|e| {
+                AgentdError::Init(format!(
+                    "failed to mount {} at /newroot as {fstype}: {e}",
+                    spec.device
+                ))
+            })?;
+        } else {
+            try_mount(spec.device, "/newroot")?;
+        }
+
+        // Bind-mount the runtime filesystem into the new root.
+        let msb_target = "/newroot/.msb";
+        mkdir_ignore_exists(msb_target)?;
+        mount(
+            Some(microsandbox_protocol::RUNTIME_MOUNT_POINT),
+            msb_target,
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>,
+        )
+        .map_err(|e| AgentdError::Init(format!("failed to bind-mount /.msb into /newroot: {e}")))?;
+
+        // Pivot: move the new root on top of /.
+        chdir("/newroot")
+            .map_err(|e| AgentdError::Init(format!("failed to chdir /newroot: {e}")))?;
+
+        mount(
+            Some("."),
+            "/",
+            None::<&str>,
+            MsFlags::MS_MOVE,
+            None::<&str>,
+        )
+        .map_err(|e| AgentdError::Init(format!("failed to MS_MOVE /newroot to /: {e}")))?;
+
+        chroot(".")
+            .map_err(|e| AgentdError::Init(format!("failed to chroot: {e}")))?;
+
+        chdir("/")
+            .map_err(|e| AgentdError::Init(format!("failed to chdir / after chroot: {e}")))?;
+
+        // Re-mount essential filesystems in the new root.
+        mount_filesystems()?;
+
+        Ok(())
+    }
+
+    /// Tries every filesystem type listed in `/proc/filesystems` until one succeeds.
+    fn try_mount(device: &str, target: &str) -> AgentdResult<()> {
+        let content = std::fs::read_to_string("/proc/filesystems").map_err(|e| {
+            AgentdError::Init(format!("failed to read /proc/filesystems: {e}"))
+        })?;
+
+        for line in content.lines() {
+            // Skip virtual filesystems marked with "nodev".
+            if line.starts_with("nodev") {
+                continue;
+            }
+
+            let fstype = line.trim();
+            if fstype.is_empty() {
+                continue;
+            }
+
+            if mount(
+                Some(device),
+                target,
+                Some(fstype),
+                MsFlags::empty(),
+                None::<&str>,
+            )
+            .is_ok()
+            {
+                return Ok(());
+            }
+        }
+
+        Err(AgentdError::Init(format!(
+            "failed to mount {device} at {target}: no supported filesystem found"
+        )))
     }
 
     /// Reads `MSB_TMPFS` env var and mounts each tmpfs entry.
@@ -359,5 +500,37 @@ mod tests {
     fn test_parse_empty_path_errors() {
         let err = parse_tmpfs_entry(",size=256").unwrap_err();
         assert!(err.to_string().contains("empty path"));
+    }
+
+    #[test]
+    fn test_parse_block_root_device_only() {
+        let spec = parse_block_root("/dev/vda").unwrap();
+        assert_eq!(spec.device, "/dev/vda");
+        assert_eq!(spec.fstype, None);
+    }
+
+    #[test]
+    fn test_parse_block_root_with_fstype() {
+        let spec = parse_block_root("/dev/vda,fstype=ext4").unwrap();
+        assert_eq!(spec.device, "/dev/vda");
+        assert_eq!(spec.fstype, Some("ext4"));
+    }
+
+    #[test]
+    fn test_parse_block_root_empty_device_errors() {
+        let err = parse_block_root(",fstype=ext4").unwrap_err();
+        assert!(err.to_string().contains("empty device path"));
+    }
+
+    #[test]
+    fn test_parse_block_root_unknown_option_errors() {
+        let err = parse_block_root("/dev/vda,bogus=42").unwrap_err();
+        assert!(err.to_string().contains("unknown MSB_BLOCK_ROOT option"));
+    }
+
+    #[test]
+    fn test_parse_block_root_empty_fstype_errors() {
+        let err = parse_block_root("/dev/vda,fstype=").unwrap_err();
+        assert!(err.to_string().contains("empty fstype"));
     }
 }

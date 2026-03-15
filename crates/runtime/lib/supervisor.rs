@@ -446,6 +446,18 @@ fn microvm_cli_args(config: &SupervisorConfig) -> Vec<OsString> {
         args.push(staging_dir.clone().into_os_string());
     }
 
+    if let Some(ref disk_path) = config.vm_config.rootfs_disk {
+        args.push(OsString::from("--rootfs-disk"));
+        args.push(disk_path.clone().into_os_string());
+    }
+    if let Some(ref disk_format) = config.vm_config.rootfs_disk_format {
+        args.push(OsString::from("--rootfs-disk-format"));
+        args.push(OsString::from(disk_format));
+    }
+    if config.vm_config.rootfs_disk_readonly {
+        args.push(OsString::from("--rootfs-disk-readonly"));
+    }
+
     for mount in &config.vm_config.mounts {
         args.push(OsString::from("--mount"));
         args.push(OsString::from(mount));
@@ -779,6 +791,9 @@ mod tests {
                 rootfs_lowers: Vec::new(),
                 rootfs_upper: None,
                 rootfs_staging: None,
+                rootfs_disk: None,
+                rootfs_disk_format: None,
+                rootfs_disk_readonly: false,
                 mounts: vec!["data:/tmp/data".into()],
                 backends: Vec::new(),
                 init_path: None,

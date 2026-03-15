@@ -41,6 +41,13 @@ pub const RUNTIME_MOUNT_POINT: &str = "/.msb";
 /// - `MSB_TMPFS=/tmp,size=256,noexec` — with noexec flag
 pub const ENV_TMPFS: &str = "MSB_TMPFS";
 
+/// Environment variable specifying the block device for rootfs switch.
+///
+/// Format: `device[,key=value,...]`
+/// - `device` — block device path (required, always first element)
+/// - `fstype=TYPE` — filesystem type (optional; auto-detected if absent)
+pub const ENV_BLOCK_ROOT: &str = "MSB_BLOCK_ROOT";
+
 //--------------------------------------------------------------------------------------------------
 // Exports
 //--------------------------------------------------------------------------------------------------
