@@ -65,8 +65,7 @@ pub(crate) fn do_readdir(
     _size: u32,
     offset: u64,
 ) -> io::Result<Vec<DirEntry<'static>>> {
-    let dir_entries = serve_snapshot_entries(fs, ino, handle, offset, true)?;
-    Ok(dir_entries)
+    serve_snapshot_entries(fs, ino, handle, offset, true)
 }
 
 /// Read directory entries with attributes (readdirplus).
@@ -227,8 +226,12 @@ fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
     let mut entries: Vec<MergedDirEntry> = Vec::new();
     let mut is_opaque = node.opaque.load(Ordering::Acquire);
 
-    // Phase 1: Scan upper layer.
-    let upper_dir_fd = inode::get_upper_dir_fd(fs, &node);
+    // Phase 1: Scan upper layer (skipped in read-only mode).
+    let upper_dir_fd = if fs.upper.is_some() {
+        inode::get_upper_dir_fd(fs, &node)
+    } else {
+        None
+    };
     if let Some(upper_fd_node) = upper_dir_fd {
         let upper_fd = upper_fd_node.raw();
         let raw_entries = layer::read_dir_entries_raw(upper_fd)?;
@@ -386,8 +389,12 @@ pub(crate) fn is_merged_dir_empty(fs: &OverlayFs, ino: u64) -> io::Result<bool> 
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
     let mut is_opaque = node.opaque.load(Ordering::Acquire);
 
-    // Phase 1: Scan upper layer.
-    let upper_dir_fd = inode::get_upper_dir_fd(fs, &node);
+    // Phase 1: Scan upper layer (skipped in read-only mode).
+    let upper_dir_fd = if fs.upper.is_some() {
+        inode::get_upper_dir_fd(fs, &node)
+    } else {
+        None
+    };
     if let Some(upper_fd_node) = upper_dir_fd {
         let upper_fd = upper_fd_node.raw();
         let raw_entries = layer::read_dir_entries_raw(upper_fd)?;

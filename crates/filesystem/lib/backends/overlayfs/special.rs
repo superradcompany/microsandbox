@@ -15,7 +15,10 @@ use crate::{
 
 /// Get filesystem statistics from the upper layer.
 pub(crate) fn do_statfs(fs: &OverlayFs, _ctx: Context, _ino: u64) -> io::Result<statvfs64> {
-    let fd = fs.upper.root_fd.as_raw_fd();
+    let fd = match &fs.upper {
+        Some(upper) => upper.root_fd.as_raw_fd(),
+        None => fs.lowers.last().unwrap().root_fd.as_raw_fd(),
+    };
 
     #[cfg(target_os = "linux")]
     {
@@ -52,6 +55,10 @@ pub(crate) fn do_fsync(
 
     let handles = fs.file_handles.read().unwrap();
     let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
+
+    if fs.cfg.read_only {
+        return Ok(());
+    }
     #[allow(clippy::readonly_write_lock)]
     let f = data.file.write().unwrap();
     let fd = f.as_raw_fd();
@@ -86,6 +93,10 @@ pub(crate) fn do_fsyncdir(
     _handle: u64,
 ) -> io::Result<()> {
     if ino == init_binary::INIT_INODE {
+        return Ok(());
+    }
+
+    if fs.cfg.read_only {
         return Ok(());
     }
 
@@ -153,6 +164,9 @@ pub(crate) fn do_fallocate(
     offset: u64,
     length: u64,
 ) -> io::Result<()> {
+    if fs.cfg.read_only {
+        return Err(platform::erofs());
+    }
     if ino == init_binary::INIT_INODE {
         return Err(platform::eacces());
     }
@@ -232,6 +246,9 @@ pub(crate) fn do_copyfilerange(
     len: u64,
     flags: u64,
 ) -> io::Result<usize> {
+    if fs.cfg.read_only {
+        return Err(platform::erofs());
+    }
     if inode_in == init_binary::INIT_INODE || inode_out == init_binary::INIT_INODE {
         return Err(platform::enosys());
     }

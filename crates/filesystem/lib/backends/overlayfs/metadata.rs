@@ -47,6 +47,9 @@ pub(crate) fn do_setattr(
     _handle: Option<u64>,
     valid: SetattrValid,
 ) -> io::Result<(stat64, Duration)> {
+    if fs.cfg.read_only {
+        return Err(platform::erofs());
+    }
     if ino == init_binary::INIT_INODE {
         return Err(platform::eacces());
     }
@@ -168,6 +171,10 @@ pub(crate) fn do_access(fs: &OverlayFs, ctx: Context, ino: u64, mask: u32) -> io
     // F_OK: just check existence.
     if mask == libc::F_OK as u32 {
         return Ok(());
+    }
+
+    if fs.cfg.read_only && mask & libc::W_OK as u32 != 0 {
+        return Err(platform::erofs());
     }
 
     #[cfg(target_os = "linux")]

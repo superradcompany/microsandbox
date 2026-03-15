@@ -1,11 +1,19 @@
 //! Builder API for constructing an OverlayFs instance.
 //!
 //! ```ignore
+//! // Read-write mode:
 //! OverlayFs::builder()
 //!     .layer(lower0)
 //!     .layer(lower1)
 //!     .writable(upper)
 //!     .staging(staging)
+//!     .build()?
+//!
+//! // Read-only mode:
+//! OverlayFs::builder()
+//!     .layer(lower0)
+//!     .layer(lower1)
+//!     .read_only()
 //!     .build()?
 //! ```
 
@@ -39,6 +47,7 @@ pub struct OverlayFsBuilder {
     lower_indexes: Vec<Option<PathBuf>>,
     upper_dir: Option<PathBuf>,
     staging_dir: Option<PathBuf>,
+    read_only: bool,
     strict: bool,
     entry_timeout: Duration,
     attr_timeout: Duration,
@@ -58,6 +67,7 @@ impl OverlayFsBuilder {
             lower_indexes: Vec::new(),
             upper_dir: None,
             staging_dir: None,
+            read_only: false,
             strict: true,
             entry_timeout: Duration::from_secs(5),
             attr_timeout: Duration::from_secs(5),
@@ -109,6 +119,15 @@ impl OverlayFsBuilder {
         self
     }
 
+    /// Enable read-only mode (no writable upper layer).
+    ///
+    /// Mutually exclusive with `.writable()` and `.staging()`.
+    /// All mutation operations will return EROFS.
+    pub fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
+    }
+
     /// Enable or disable strict mode.
     pub fn strict(mut self, enabled: bool) -> Self {
         self.strict = enabled;
@@ -141,13 +160,6 @@ impl OverlayFsBuilder {
 
     /// Build the OverlayFs instance.
     pub fn build(self) -> io::Result<OverlayFs> {
-        let upper_dir = self.upper_dir.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "upper directory not set")
-        })?;
-        let staging_dir = self.staging_dir.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "staging directory not set")
-        })?;
-
         if self.lowers.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -195,8 +207,97 @@ impl OverlayFsBuilder {
             });
         }
 
+        if self.read_only {
+            return self.build_read_only(
+                lowers,
+                #[cfg(target_os = "linux")]
+                proc_self_fd_main,
+            );
+        }
+
+        self.build_read_write(
+            lowers,
+            #[cfg(target_os = "linux")]
+            proc_self_fd_main,
+            #[cfg(target_os = "linux")]
+            has_openat2,
+        )
+    }
+
+    /// Build a read-only OverlayFs (no upper layer, no staging directory).
+    fn build_read_only(
+        self,
+        lowers: Vec<Layer>,
+        #[cfg(target_os = "linux")] proc_self_fd_main: File,
+    ) -> io::Result<OverlayFs> {
+        // Validate: writable/staging/writeback must not be set in read-only mode.
+        if self.writeback {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "writeback must not be set in read-only mode",
+            ));
+        }
+        if self.upper_dir.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "upper directory must not be set in read-only mode",
+            ));
+        }
+        if self.staging_dir.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "staging directory must not be set in read-only mode",
+            ));
+        }
+
+        let init_file = init_binary::create_init_file()?;
+
+        let cfg = OverlayConfig {
+            entry_timeout: self.entry_timeout,
+            attr_timeout: self.attr_timeout,
+            cache_policy: self.cache_policy,
+            writeback: false, // Force-disable in read-only mode.
+            read_only: true,
+        };
+
+        Ok(OverlayFs {
+            lowers,
+            upper: None,
+            staging_fd: None,
+            nodes: RwLock::new(BTreeMap::new()),
+            dentries: RwLock::new(BTreeMap::new()),
+            upper_alt_keys: RwLock::new(BTreeMap::new()),
+            lower_origin_keys: RwLock::new(BTreeMap::new()),
+            origin_index: RwLock::new(BTreeMap::new()),
+            next_inode: AtomicU64::new(3), // 1=root, 2=init
+            file_handles: RwLock::new(BTreeMap::new()),
+            dir_handles: RwLock::new(BTreeMap::new()),
+            next_handle: AtomicU64::new(1), // 0=init handle
+            writeback: AtomicBool::new(false),
+            init_file,
+            names: NameTable::new(),
+            #[cfg(target_os = "linux")]
+            proc_self_fd: proc_self_fd_main,
+            cfg,
+        })
+    }
+
+    /// Build a read-write OverlayFs with upper layer and staging directory.
+    fn build_read_write(
+        self,
+        lowers: Vec<Layer>,
+        #[cfg(target_os = "linux")] proc_self_fd_main: File,
+        #[cfg(target_os = "linux")] has_openat2: bool,
+    ) -> io::Result<OverlayFs> {
+        let upper_dir = self.upper_dir.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "upper directory not set")
+        })?;
+        let staging_dir = self.staging_dir.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "staging directory not set")
+        })?;
+
         // Open upper layer.
-        let upper_index = self.lowers.len();
+        let upper_index = lowers.len();
         let upper_root_fd = open_dir(&upper_dir)?;
 
         // Probe xattr support on upper if strict mode.
@@ -243,7 +344,6 @@ impl OverlayFsBuilder {
         // Clean leftover temp files in staging_dir.
         clean_staging_dir(&staging_fd)?;
 
-        // Create init binary file.
         let init_file = init_binary::create_init_file()?;
 
         let cfg = OverlayConfig {
@@ -251,12 +351,13 @@ impl OverlayFsBuilder {
             attr_timeout: self.attr_timeout,
             cache_policy: self.cache_policy,
             writeback: self.writeback,
+            read_only: false,
         };
 
         Ok(OverlayFs {
             lowers,
-            upper,
-            staging_fd,
+            upper: Some(upper),
+            staging_fd: Some(staging_fd),
             nodes: RwLock::new(BTreeMap::new()),
             dentries: RwLock::new(BTreeMap::new()),
             upper_alt_keys: RwLock::new(BTreeMap::new()),
@@ -269,6 +370,8 @@ impl OverlayFsBuilder {
             writeback: AtomicBool::new(false),
             init_file,
             names: NameTable::new(),
+            #[cfg(target_os = "linux")]
+            proc_self_fd: proc_self_fd_main,
             cfg,
         })
     }

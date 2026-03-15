@@ -35,16 +35,8 @@ use super::{
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Check if an xattr name is an internal overlay key that should be hidden.
-fn is_internal_xattr(name: &CStr) -> bool {
-    name == stat_override::OVERRIDE_XATTR_KEY
-        || name == ORIGIN_XATTR_KEY
-        || name == REDIRECT_XATTR_KEY
-        || name == TOMBSTONES_XATTR_KEY
-}
-
-/// Check if a raw xattr name matches any internal key.
-fn is_internal_xattr_bytes(name: &[u8]) -> bool {
+/// Check if an xattr name matches any internal overlay key that should be hidden.
+fn is_internal_xattr(name: &[u8]) -> bool {
     name == stat_override::OVERRIDE_XATTR_KEY.to_bytes()
         || name == ORIGIN_XATTR_KEY.to_bytes()
         || name == REDIRECT_XATTR_KEY.to_bytes()
@@ -64,7 +56,7 @@ pub(crate) fn do_getxattr(
     }
 
     // Block reads of internal xattrs.
-    if is_internal_xattr(name) {
+    if is_internal_xattr(name.to_bytes()) {
         return Err(platform::eacces());
     }
 
@@ -209,28 +201,64 @@ pub(crate) fn do_listxattr(
         // Exhausted retries — the xattr list keeps changing.
         Err(platform::eio())
     } else {
-        let mut buf = vec![0u8; size as usize];
+        // Cannot pass the guest's `size` directly to the kernel because it was
+        // computed from the *filtered* byte count (internal xattrs removed).
+        // The raw kernel list is larger, so we must read the full list, filter,
+        // and then check whether the filtered result fits.
+        for _ in 0..3 {
+            #[cfg(target_os = "linux")]
+            let raw_size = unsafe {
+                libc::listxattr(
+                    path.as_ptr() as *const libc::c_char,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
 
-        #[cfg(target_os = "linux")]
-        let ret = unsafe {
-            libc::listxattr(
-                path.as_ptr() as *const libc::c_char,
-                buf.as_mut_ptr() as *mut libc::c_char,
-                buf.len(),
-            )
-        };
+            #[cfg(target_os = "macos")]
+            let raw_size = unsafe { libc::flistxattr(fd, std::ptr::null_mut(), 0, 0) };
 
-        #[cfg(target_os = "macos")]
-        let ret =
-            unsafe { libc::flistxattr(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0) };
+            if raw_size < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
 
-        if ret < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
+            if raw_size == 0 {
+                return Ok(ListxattrReply::Names(Vec::new()));
+            }
+
+            let mut buf = vec![0u8; raw_size as usize];
+
+            #[cfg(target_os = "linux")]
+            let ret = unsafe {
+                libc::listxattr(
+                    path.as_ptr() as *const libc::c_char,
+                    buf.as_mut_ptr() as *mut libc::c_char,
+                    buf.len(),
+                )
+            };
+
+            #[cfg(target_os = "macos")]
+            let ret = unsafe {
+                libc::flistxattr(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0)
+            };
+
+            if ret < 0 {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::ERANGE) {
+                    continue;
+                }
+                return Err(platform::linux_error(err));
+            }
+            buf.truncate(ret as usize);
+
+            let filtered = filter_internal_xattrs(&buf);
+            if filtered.len() > size as usize {
+                return Err(platform::erange());
+            }
+            return Ok(ListxattrReply::Names(filtered));
         }
-        buf.truncate(ret as usize);
 
-        let filtered = filter_internal_xattrs(&buf);
-        Ok(ListxattrReply::Names(filtered))
+        Err(platform::eio())
     }
 }
 
@@ -245,10 +273,13 @@ pub(crate) fn do_setxattr(
     value: &[u8],
     flags: u32,
 ) -> io::Result<()> {
+    if fs.cfg.read_only {
+        return Err(platform::erofs());
+    }
     if ino == init_binary::INIT_INODE {
         return Err(platform::eacces());
     }
-    if is_internal_xattr(name) {
+    if is_internal_xattr(name.to_bytes()) {
         return Err(platform::eacces());
     }
 
@@ -307,10 +338,13 @@ pub(crate) fn do_removexattr(
     ino: u64,
     name: &CStr,
 ) -> io::Result<()> {
+    if fs.cfg.read_only {
+        return Err(platform::erofs());
+    }
     if ino == init_binary::INIT_INODE {
         return Err(platform::eacces());
     }
-    if is_internal_xattr(name) {
+    if is_internal_xattr(name.to_bytes()) {
         return Err(platform::eacces());
     }
 
@@ -375,7 +409,7 @@ fn filter_internal_xattrs(names: &[u8]) -> Vec<u8> {
         if entry.is_empty() {
             continue;
         }
-        if !is_internal_xattr_bytes(entry) {
+        if !is_internal_xattr(entry) {
             result.extend_from_slice(entry);
             result.push(0);
         }

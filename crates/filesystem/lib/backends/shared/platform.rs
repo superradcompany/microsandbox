@@ -56,6 +56,7 @@ const LINUX_EROFS: i32 = 30;
 const LINUX_EMLINK: i32 = 31;
 const LINUX_EPIPE: i32 = 32;
 const LINUX_EDOM: i32 = 33;
+const LINUX_ERANGE: i32 = 34;
 const LINUX_EDEADLK: i32 = 35;
 const LINUX_ENAMETOOLONG: i32 = 36;
 const LINUX_ENOLCK: i32 = 37;
@@ -321,7 +322,12 @@ pub(crate) fn enxio() -> io::Error {
 
 /// Create an `io::Error` with Linux `ERANGE`.
 pub(crate) fn erange() -> io::Error {
-    io::Error::from_raw_os_error(34) // LINUX_ERANGE
+    io::Error::from_raw_os_error(LINUX_ERANGE)
+}
+
+/// Create an `io::Error` with Linux `EROFS`.
+pub(crate) fn erofs() -> io::Error {
+    io::Error::from_raw_os_error(LINUX_EROFS)
 }
 
 /// Check if an error is ENOENT.
