@@ -218,6 +218,22 @@ fn shutdown_mode_str(mode: &microsandbox_runtime::policy::ShutdownMode) -> &'sta
     }
 }
 
+/// Push a `--mount tag:host_path[:ro]` arg pair.
+fn push_mount_arg(
+    args: &mut Vec<OsString>,
+    guest: &str,
+    host_display: &impl std::fmt::Display,
+    readonly: bool,
+) {
+    let tag = guest_mount_tag(guest);
+    let mut arg = format!("{tag}:{host_display}");
+    if readonly {
+        arg.push_str(":ro");
+    }
+    args.push(OsString::from("--mount"));
+    args.push(OsString::from(arg));
+}
+
 /// Generate a virtiofs tag from a guest mount path.
 ///
 /// Replaces `/` with `_` and strips leading underscores to produce a
@@ -332,11 +348,8 @@ fn supervisor_cli_args(
         }
     }
 
-    for (key, value) in &config.env {
-        args.push(OsString::from("--env"));
-        args.push(OsString::from(format!("{key}={value}")));
-    }
-
+    // Process mounts: emit --mount args for virtiofs mounts, collect tmpfs specs.
+    let mut tmpfs_val = String::new();
     for mount in &config.mounts {
         match mount {
             VolumeMount::Bind {
@@ -344,13 +357,7 @@ fn supervisor_cli_args(
                 guest,
                 readonly,
             } => {
-                let tag = guest_mount_tag(guest);
-                let mut arg = format!("{tag}:{}", host.display());
-                if *readonly {
-                    arg.push_str(":ro");
-                }
-                args.push(OsString::from("--mount"));
-                args.push(OsString::from(arg));
+                push_mount_arg(&mut args, guest, &host.display(), *readonly);
             }
             VolumeMount::Named {
                 name,
@@ -358,22 +365,35 @@ fn supervisor_cli_args(
                 readonly,
             } => {
                 let vol_path = config::config().volumes_dir().join(name);
-                let tag = guest_mount_tag(guest);
-                let mut arg = format!("{tag}:{}", vol_path.display());
-                if *readonly {
-                    arg.push_str(":ro");
-                }
-                args.push(OsString::from("--mount"));
-                args.push(OsString::from(arg));
+                push_mount_arg(&mut args, guest, &vol_path.display(), *readonly);
             }
-            VolumeMount::Tmpfs { .. } => {
-                // Tmpfs mounts are handled by the guest kernel, not virtiofs.
+            VolumeMount::Tmpfs { guest, size_mib } => {
+                if !tmpfs_val.is_empty() {
+                    tmpfs_val.push(';');
+                }
+                tmpfs_val.push_str(guest);
+                if let Some(s) = size_mib {
+                    tmpfs_val.push_str(&format!(",size={s}"));
+                }
             }
             VolumeMount::Backend { .. } => {
                 // Backend mounts are guarded at Sandbox::create() — they cannot
                 // reach this point in the subprocess path. If they do, skip them.
             }
         }
+    }
+
+    if !tmpfs_val.is_empty() {
+        args.push(OsString::from("--env"));
+        args.push(OsString::from(format!(
+            "{}={tmpfs_val}",
+            microsandbox_protocol::ENV_TMPFS
+        )));
+    }
+
+    for (key, value) in &config.env {
+        args.push(OsString::from("--env"));
+        args.push(OsString::from(format!("{key}={value}")));
     }
 
     if let Some(ref workdir) = config.workdir {
@@ -577,5 +597,63 @@ mod tests {
         assert!(!rendered.contains(&"--rootfs-path".to_string()));
         assert!(rendered.contains(&"--rootfs-lower".to_string()));
         assert!(rendered.contains(&"/tmp/rootfs-base".to_string()));
+    }
+
+    #[test]
+    fn test_supervisor_cli_args_inject_tmpfs_env_var() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/tmp", |m| m.tmpfs().size(256u32))
+            .volume("/var/tmp", |m| m.tmpfs())
+            .build()
+            .unwrap();
+
+        let args = supervisor_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/rootfs-base"),
+            Path::new("/tmp/rw"),
+            Path::new("/tmp/staging"),
+            9,
+            Path::new("/tmp/libkrunfw.dylib"),
+        );
+
+        let rendered = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(rendered.contains(&"MSB_TMPFS=/tmp,size=256;/var/tmp".to_string()));
+    }
+
+    #[test]
+    fn test_supervisor_cli_args_omit_tmpfs_env_var_when_no_tmpfs() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .unwrap();
+
+        let args = supervisor_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/rootfs-base"),
+            Path::new("/tmp/rw"),
+            Path::new("/tmp/staging"),
+            9,
+            Path::new("/tmp/libkrunfw.dylib"),
+        );
+
+        let rendered = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(!rendered.iter().any(|a| a.starts_with("MSB_TMPFS=")));
     }
 }
