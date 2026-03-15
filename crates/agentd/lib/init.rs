@@ -1,9 +1,23 @@
-//! PID 1 init: mount filesystems, prepare runtime directories.
+//! PID 1 init: mount filesystems, apply tmpfs mounts, prepare runtime directories.
 //!
 //! This module only performs real work on Linux. On other platforms, `init()` is a no-op
 //! to allow the crate to compile for development purposes.
 
-use crate::error::AgentdResult;
+use crate::error::{AgentdError, AgentdResult};
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Parsed tmpfs mount specification.
+#[derive(Debug)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct TmpfsSpec<'a> {
+    path: &'a str,
+    size_mib: Option<u32>,
+    mode: Option<u32>,
+    noexec: bool,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -11,11 +25,13 @@ use crate::error::AgentdResult;
 
 /// Performs synchronous PID 1 initialization.
 ///
-/// Mounts essential filesystems and prepares runtime directories.
+/// Mounts essential filesystems, applies tmpfs mounts from `MSB_TMPFS` env var,
+/// and prepares runtime directories.
 #[cfg(target_os = "linux")]
 pub fn init() -> AgentdResult<()> {
     linux::mount_filesystems()?;
     linux::mount_runtime()?;
+    linux::apply_tmpfs_mounts()?;
     linux::create_run_dir()?;
     Ok(())
 }
@@ -24,6 +40,47 @@ pub fn init() -> AgentdResult<()> {
 #[cfg(not(target_os = "linux"))]
 pub fn init() -> AgentdResult<()> {
     Ok(())
+}
+
+/// Parses a single tmpfs entry: `path[,size=N][,mode=N][,noexec]`
+///
+/// Mode is parsed as octal (e.g. `mode=1777`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec<'_>> {
+    let mut parts = entry.split(',');
+    let path = parts.next().unwrap(); // always at least one element
+    if path.is_empty() {
+        return Err(AgentdError::Init("tmpfs entry has empty path".into()));
+    }
+
+    let mut size_mib = None;
+    let mut mode = None;
+    let mut noexec = false;
+
+    for opt in parts {
+        if opt == "noexec" {
+            noexec = true;
+        } else if let Some(val) = opt.strip_prefix("size=") {
+            size_mib = Some(val.parse::<u32>().map_err(|_| {
+                AgentdError::Init(format!("invalid tmpfs size: {val}"))
+            })?);
+        } else if let Some(val) = opt.strip_prefix("mode=") {
+            mode = Some(u32::from_str_radix(val, 8).map_err(|_| {
+                AgentdError::Init(format!("invalid octal tmpfs mode: {val}"))
+            })?);
+        } else {
+            return Err(AgentdError::Init(format!(
+                "unknown tmpfs option: {opt}"
+            )));
+        }
+    }
+
+    Ok(TmpfsSpec {
+        path,
+        size_mib,
+        mode,
+        noexec,
+    })
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -40,6 +97,8 @@ mod linux {
     use nix::unistd::mkdir;
 
     use crate::error::{AgentdError, AgentdResult};
+
+    use super::TmpfsSpec;
 
     /// Mounts essential Linux filesystems.
     pub fn mount_filesystems() -> AgentdResult<()> {
@@ -131,6 +190,73 @@ mod linux {
         Ok(())
     }
 
+    /// Reads `MSB_TMPFS` env var and mounts each tmpfs entry.
+    ///
+    /// Missing env var is not an error (no tmpfs mounts requested).
+    /// Parse failures and mount failures are hard errors.
+    pub fn apply_tmpfs_mounts() -> AgentdResult<()> {
+        let val = match std::env::var(microsandbox_protocol::ENV_TMPFS) {
+            Ok(v) if !v.is_empty() => v,
+            _ => return Ok(()),
+        };
+
+        for entry in val.split(';') {
+            if entry.is_empty() {
+                continue;
+            }
+
+            let spec = super::parse_tmpfs_entry(entry)?;
+            mount_tmpfs(&spec)?;
+        }
+
+        Ok(())
+    }
+
+    /// Mounts a single tmpfs from a parsed spec.
+    fn mount_tmpfs(spec: &TmpfsSpec<'_>) -> AgentdResult<()> {
+        let path = spec.path;
+
+        // Determine the permission mode.
+        let mode = spec.mode.unwrap_or(if path == "/tmp" || path == "/var/tmp" {
+            0o1777
+        } else {
+            0o755
+        });
+
+        // Create the target directory.
+        std::fs::create_dir_all(path).map_err(|e| {
+            AgentdError::Init(format!("failed to create directory {path}: {e}"))
+        })?;
+
+        // Flags: nosuid + nodev (sensible safety defaults).
+        let mut flags =
+            MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
+        if spec.noexec {
+            flags |= MsFlags::MS_NOEXEC;
+        }
+
+        // Mount data: size and mode options.
+        let mut data = String::new();
+        if let Some(mib) = spec.size_mib {
+            data.push_str(&format!("size={}", u64::from(mib) * 1024 * 1024));
+        }
+        if !data.is_empty() {
+            data.push(',');
+        }
+        data.push_str(&format!("mode={mode:o}"));
+
+        mount(
+            Some("tmpfs"),
+            path,
+            Some("tmpfs"),
+            flags,
+            Some(data.as_str()),
+        )
+        .map_err(|e| AgentdError::Init(format!("failed to mount tmpfs at {path}: {e}")))?;
+
+        Ok(())
+    }
+
     /// Creates the `/run` directory.
     pub fn create_run_dir() -> AgentdResult<()> {
         mkdir_ignore_exists("/run")?;
@@ -159,5 +285,79 @@ mod linux {
             Err(nix::Error::EBUSY) => Ok(()),
             Err(e) => Err(AgentdError::Init(format!("failed to mount {target}: {e}"))),
         }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_path_only() {
+        let spec = parse_tmpfs_entry("/tmp").unwrap();
+        assert_eq!(spec.path, "/tmp");
+        assert_eq!(spec.size_mib, None);
+        assert_eq!(spec.mode, None);
+        assert!(!spec.noexec);
+    }
+
+    #[test]
+    fn test_parse_with_size() {
+        let spec = parse_tmpfs_entry("/tmp,size=256").unwrap();
+        assert_eq!(spec.path, "/tmp");
+        assert_eq!(spec.size_mib, Some(256));
+    }
+
+    #[test]
+    fn test_parse_with_noexec() {
+        let spec = parse_tmpfs_entry("/tmp,noexec").unwrap();
+        assert_eq!(spec.path, "/tmp");
+        assert!(spec.noexec);
+    }
+
+    #[test]
+    fn test_parse_with_octal_mode() {
+        let spec = parse_tmpfs_entry("/tmp,mode=1777").unwrap();
+        assert_eq!(spec.mode, Some(0o1777));
+
+        let spec = parse_tmpfs_entry("/data,mode=755").unwrap();
+        assert_eq!(spec.mode, Some(0o755));
+    }
+
+    #[test]
+    fn test_parse_multi_options() {
+        let spec = parse_tmpfs_entry("/tmp,size=256,mode=1777,noexec").unwrap();
+        assert_eq!(spec.path, "/tmp");
+        assert_eq!(spec.size_mib, Some(256));
+        assert_eq!(spec.mode, Some(0o1777));
+        assert!(spec.noexec);
+    }
+
+    #[test]
+    fn test_parse_unknown_option_errors() {
+        let err = parse_tmpfs_entry("/tmp,bogus=42").unwrap_err();
+        assert!(err.to_string().contains("unknown tmpfs option"));
+    }
+
+    #[test]
+    fn test_parse_invalid_size_errors() {
+        let err = parse_tmpfs_entry("/tmp,size=abc").unwrap_err();
+        assert!(err.to_string().contains("invalid tmpfs size"));
+    }
+
+    #[test]
+    fn test_parse_invalid_mode_errors() {
+        let err = parse_tmpfs_entry("/tmp,mode=zzz").unwrap_err();
+        assert!(err.to_string().contains("invalid octal tmpfs mode"));
+    }
+
+    #[test]
+    fn test_parse_empty_path_errors() {
+        let err = parse_tmpfs_entry(",size=256").unwrap_err();
+        assert!(err.to_string().contains("empty path"));
     }
 }

@@ -19,6 +19,29 @@ pub const RUNTIME_FS_TAG: &str = "msb_runtime";
 pub const RUNTIME_MOUNT_POINT: &str = "/.msb";
 
 //--------------------------------------------------------------------------------------------------
+// Constants: Guest Init Environment Variables
+//--------------------------------------------------------------------------------------------------
+
+/// Environment variable carrying tmpfs mount specs for guest init.
+///
+/// Format: `path[,key=value,...][;path[,key=value,...];...]`
+///
+/// - `path` — guest mount path (required, always the first element)
+/// - `size=N` — size limit in MiB (optional)
+/// - `noexec` — mount with noexec flag (optional)
+/// - `mode=N` — permission mode as octal integer (optional, e.g. `mode=1777`)
+///
+/// Entries are separated by `;`. Within an entry, the path comes first
+/// followed by comma-separated options.
+///
+/// Examples:
+/// - `MSB_TMPFS=/tmp,size=256` — 256 MiB tmpfs at `/tmp`
+/// - `MSB_TMPFS=/tmp,size=256;/var/tmp,size=128` — two tmpfs mounts
+/// - `MSB_TMPFS=/tmp` — tmpfs at `/tmp` with defaults
+/// - `MSB_TMPFS=/tmp,size=256,noexec` — with noexec flag
+pub const ENV_TMPFS: &str = "MSB_TMPFS";
+
+//--------------------------------------------------------------------------------------------------
 // Exports
 //--------------------------------------------------------------------------------------------------
 
