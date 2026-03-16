@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use microsandbox_image::RegistryAuth;
 
-use super::types::{NetworkConfig, Patch, RootfsSource, SecretsConfig, SshConfig, VolumeMount};
+use microsandbox_network::config::NetworkConfig;
+
+use super::types::{Patch, RootfsSource, SecretsConfig, SshConfig, VolumeMount};
 
 //--------------------------------------------------------------------------------------------------
 // Constants

@@ -34,13 +34,14 @@ struct BlockRootSpec<'a> {
 /// Performs synchronous PID 1 initialization.
 ///
 /// Mounts essential filesystems, applies tmpfs mounts from `MSB_TMPFS` env var,
-/// and prepares runtime directories.
+/// configures networking from `MSB_NET*` env vars, and prepares runtime directories.
 #[cfg(target_os = "linux")]
 pub fn init() -> AgentdResult<()> {
     linux::mount_filesystems()?;
     linux::mount_runtime()?;
     linux::mount_block_root()?;
     linux::apply_tmpfs_mounts()?;
+    crate::network::apply_network_config()?;
     linux::create_run_dir()?;
     Ok(())
 }
@@ -133,7 +134,7 @@ mod linux {
 
     use crate::error::{AgentdError, AgentdResult};
 
-    use super::{BlockRootSpec, TmpfsSpec};
+    use super::TmpfsSpec;
 
     /// Mounts essential Linux filesystems.
     pub fn mount_filesystems() -> AgentdResult<()> {

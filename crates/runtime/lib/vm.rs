@@ -132,7 +132,30 @@ pub fn enter(config: VmConfig) -> ! {
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
+fn validate_disk_format(format: Option<&str>) -> msb_krun::Result<msb_krun::DiskImageFormat> {
+    match format.unwrap_or("raw") {
+        "qcow2" => Ok(msb_krun::DiskImageFormat::Qcow2),
+        "raw" => Ok(msb_krun::DiskImageFormat::Raw),
+        "vmdk" => Ok(msb_krun::DiskImageFormat::Vmdk),
+        other => Err(msb_krun::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unknown disk image format: {other}"),
+        ))),
+    }
+}
+
+fn append_block_root_env(env: &mut Vec<String>) {
+    let prefix = format!("{}=", microsandbox_protocol::ENV_BLOCK_ROOT);
+    if env.iter().any(|entry| entry.starts_with(&prefix)) {
+        return;
+    }
+
+    env.push(format!("{prefix}/dev/vda"));
+}
+
 fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallible> {
+    let mut exec_env = config.env.clone();
+
     let mut builder = VmBuilder::new()
         .machine(|m| m.vcpus(config.vcpus).memory_mib(config.memory_mib as usize))
         .kernel(|k| {
@@ -184,22 +207,11 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
         let backend = PassthroughFs::new(cfg)?;
         builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
 
-        // Attach disk image as virtio-blk device.
-        let format_str = config.rootfs_disk_format.as_deref().unwrap_or("raw");
-        let format: msb_krun::DiskImageFormat = match format_str {
-            "qcow2" => msb_krun::DiskImageFormat::Qcow2,
-            "raw" => msb_krun::DiskImageFormat::Raw,
-            "vmdk" => msb_krun::DiskImageFormat::Vmdk,
-            other => {
-                return Err(msb_krun::Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("unknown disk image format: {other}"),
-                )));
-            }
-        };
+        let format = validate_disk_format(config.rootfs_disk_format.as_deref())?;
         let disk_path = disk_path.clone();
         let readonly = config.rootfs_disk_readonly;
         builder = builder.disk(move |d| d.path(&disk_path).format(format).read_only(readonly));
+        append_block_root_env(&mut exec_env);
 
         // Keep the trampoline directory alive until VM exits.
         // enter() never returns, so we prevent cleanup on drop.
@@ -239,7 +251,7 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
         if !config.exec_args.is_empty() {
             e = e.args(&config.exec_args);
         }
-        for env_str in &config.env {
+        for env_str in &exec_env {
             if let Some((key, value)) = env_str.split_once('=') {
                 e = e.env(key, value);
             } else {
@@ -331,7 +343,10 @@ mod tests {
     use microsandbox_utils::index::IndexBuilder;
     use tempfile::tempdir;
 
-    use super::{VmConfig, build_and_enter, build_overlay_rootfs};
+    use super::{
+        VmConfig, append_block_root_env, build_and_enter, build_overlay_rootfs,
+        validate_disk_format,
+    };
 
     #[test]
     fn test_build_and_enter_rejects_rootfs_path_combined_with_overlay_fields() {
@@ -448,6 +463,36 @@ mod tests {
         std::fs::write(&index_path, index).unwrap();
 
         assert!(build_overlay_rootfs(&[lower], Some(&upper), Some(&staging)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_disk_format_rejects_unknown_values() {
+        let err = validate_disk_format(Some("iso")).unwrap_err();
+        assert!(err.to_string().contains("unknown disk image format"));
+    }
+
+    #[test]
+    fn test_append_block_root_env_adds_default_device() {
+        let mut env = vec!["FOO=bar".to_string()];
+        append_block_root_env(&mut env);
+
+        assert!(env.contains(&"FOO=bar".to_string()));
+        assert!(env.contains(&format!(
+            "{}=/dev/vda",
+            microsandbox_protocol::ENV_BLOCK_ROOT
+        )));
+    }
+
+    #[test]
+    fn test_append_block_root_env_preserves_existing_value() {
+        let existing = format!(
+            "{}=/dev/vdb,fstype=xfs",
+            microsandbox_protocol::ENV_BLOCK_ROOT
+        );
+        let mut env = vec![existing.clone()];
+        append_block_root_env(&mut env);
+
+        assert_eq!(env, vec![existing]);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! See [examples/README.md](../../README.md) for prerequisites and usage.
 
-use microsandbox::sandbox::Sandbox;
+use microsandbox::{LogLevel, sandbox::Sandbox};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,6 +14,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .image(rootfs_path)
         .cpus(1)
         .memory(512)
+        .force()
+        .log_level(LogLevel::Info)
         .create()
         .await?;
 

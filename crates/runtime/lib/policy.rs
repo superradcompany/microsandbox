@@ -86,25 +86,32 @@ impl ChildPolicy {
     /// Default policy for the VM process.
     ///
     /// VM exit triggers `ShutdownAll` — there's nothing to supervise without the VM.
+    /// No grace period before SIGKILL: libkrun VMs have no persistent state to flush.
     pub fn vm_default() -> Self {
         Self {
             on_exit: ExitAction::ShutdownAll,
             max_restarts: 0,
             restart_delay_ms: 0,
             restart_window_secs: 0,
-            shutdown_timeout_ms: 5000,
+            shutdown_timeout_ms: 0,
         }
     }
 
     /// Default policy for the msbnet process.
     ///
-    /// msbnet is restarted up to 3 times within a 60-second window.
+    /// msbnet failure is fatal to the sandbox. With the current direct socketpair
+    /// design, the VM owns a specific Unixgram peer fd. If msbnet dies, there is
+    /// no safe reconnect path for the already-running VM. Restarting msbnet alone
+    /// would create split-brain behavior or dead networking.
+    ///
+    /// A 2-second grace period allows `TapLink::Drop` to clean up nftables set
+    /// entries and delete the TAP device before the supervisor escalates to SIGKILL.
     pub fn msbnet_default() -> Self {
         Self {
-            on_exit: ExitAction::Restart,
-            max_restarts: 3,
-            restart_delay_ms: 1000,
-            restart_window_secs: 60,
+            on_exit: ExitAction::ShutdownAll,
+            max_restarts: 0,
+            restart_delay_ms: 0,
+            restart_window_secs: 0,
             shutdown_timeout_ms: 2000,
         }
     }
@@ -168,9 +175,9 @@ mod tests {
         let decoded: ChildPolicies = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded.vm.on_exit, ExitAction::ShutdownAll);
-        assert_eq!(decoded.vm.shutdown_timeout_ms, 5000);
-        assert_eq!(decoded.msbnet.on_exit, ExitAction::Restart);
-        assert_eq!(decoded.msbnet.max_restarts, 3);
+        assert_eq!(decoded.vm.shutdown_timeout_ms, 0);
+        assert_eq!(decoded.msbnet.on_exit, ExitAction::ShutdownAll);
+        assert_eq!(decoded.msbnet.max_restarts, 0);
     }
 
     #[test]
@@ -190,10 +197,11 @@ mod tests {
         assert_eq!(policies.vm.on_exit, ExitAction::ShutdownAll);
         assert_eq!(policies.vm.max_restarts, 0);
 
-        // msbnet default: Restart, up to 3 times.
-        assert_eq!(policies.msbnet.on_exit, ExitAction::Restart);
-        assert_eq!(policies.msbnet.max_restarts, 3);
-        assert_eq!(policies.msbnet.restart_delay_ms, 1000);
-        assert_eq!(policies.msbnet.restart_window_secs, 60);
+        // msbnet default: ShutdownAll, no restarts, 2s grace period for cleanup.
+        assert_eq!(policies.msbnet.on_exit, ExitAction::ShutdownAll);
+        assert_eq!(policies.msbnet.max_restarts, 0);
+        assert_eq!(policies.msbnet.restart_delay_ms, 0);
+        assert_eq!(policies.msbnet.restart_window_secs, 0);
+        assert_eq!(policies.msbnet.shutdown_timeout_ms, 2000);
     }
 }

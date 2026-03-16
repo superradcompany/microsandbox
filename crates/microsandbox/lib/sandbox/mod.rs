@@ -50,10 +50,11 @@ pub use config::SandboxConfig;
 pub use exec::{ExecOptionsBuilder, ExitStatus as ExecExitStatus, Rlimit, RlimitResource};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
 pub use microsandbox_filesystem::AccessMode;
+pub use microsandbox_network::config::NetworkConfig;
 pub use microsandbox_runtime::logging::LogLevel;
 pub use types::{
-    DiskImageFormat, ImageBuilder, ImageSource, IntoImage, MountBuilder, NetworkConfig, Patch,
-    RootfsSource, SecretsConfig, SshConfig, VolumeMount,
+    DiskImageFormat, ImageBuilder, ImageSource, IntoImage, MountBuilder, Patch, RootfsSource,
+    SecretsConfig, SshConfig, VolumeMount,
 };
 
 //--------------------------------------------------------------------------------------------------

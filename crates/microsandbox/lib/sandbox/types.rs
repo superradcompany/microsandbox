@@ -83,6 +83,7 @@ pub struct ImageBuilder {
 /// - `&str`, `String`, `PathBuf` — resolved via [`ImageSource`].
 /// - `FnOnce(ImageBuilder) -> ImageBuilder` — closure-based disk image configuration.
 pub trait IntoImage {
+    /// Resolve this value into a concrete root filesystem source.
     fn into_rootfs_source(self) -> crate::MicrosandboxResult<RootfsSource>;
 }
 
@@ -163,12 +164,6 @@ enum MountKind {
 /// Fully implemented in Phase 13 (Patches).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Patch {}
-
-/// Network configuration for a sandbox.
-///
-/// Fully implemented in Phase 9 (Network).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct NetworkConfig {}
 
 /// Secrets configuration for a sandbox.
 ///

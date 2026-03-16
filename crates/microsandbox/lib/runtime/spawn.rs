@@ -51,9 +51,20 @@ pub async fn spawn_supervisor(
     config: &SandboxConfig,
     sandbox_id: i32,
 ) -> MicrosandboxResult<(SupervisorHandle, RawFd)> {
-    // Create the agent socket pair.
-    let (host_fd, guest_fd) = create_socketpair()?;
+    // Create the agent socket pair (SOCK_STREAM for virtio-console).
+    let (host_fd, guest_fd) = create_socketpair(libc::SOCK_STREAM)?;
     let guest_raw_fd = guest_fd.as_raw_fd();
+
+    // Create the network socket pair (SOCK_DGRAM for Unixgram frame relay)
+    // if networking is enabled.
+    let net_fds = if config.network.enabled {
+        let (msbnet_fd, vm_fd) = create_socketpair(libc::SOCK_DGRAM)?;
+        Some((msbnet_fd, vm_fd))
+    } else {
+        None
+    };
+    let net_msbnet_raw_fd = net_fds.as_ref().map(|(msbnet_fd, _)| msbnet_fd.as_raw_fd());
+    let net_vm_raw_fd = net_fds.as_ref().map(|(_, vm_fd)| vm_fd.as_raw_fd());
 
     // Resolve paths.
     let msb_path = config::resolve_msb_path()?;
@@ -62,6 +73,11 @@ pub async fn spawn_supervisor(
     let sandbox_dir = global.sandboxes_dir().join(&config.name);
     let log_dir = sandbox_dir.join("logs");
     let runtime_dir = sandbox_dir.join("runtime");
+    let network_config_json = if config.network.enabled {
+        Some(serde_json::to_string(&config.network)?)
+    } else {
+        None
+    };
     let scripts_dir = runtime_dir.join("scripts");
     let empty_rootfs_dir = sandbox_dir.join("rootfs-base");
     let rw_dir = sandbox_dir.join("rw");
@@ -96,10 +112,13 @@ pub async fn spawn_supervisor(
         &db_path,
         &log_dir,
         &runtime_dir,
+        network_config_json.as_deref(),
         &empty_rootfs_dir,
         &rw_dir,
         &staging_dir,
         guest_raw_fd,
+        net_msbnet_raw_fd,
+        net_vm_raw_fd,
         &libkrunfw_path,
     ));
 
@@ -107,10 +126,16 @@ pub async fn spawn_supervisor(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::inherit());
 
-    // Clear CLOEXEC on the guest FD so it's inherited by the child.
+    // Clear CLOEXEC on inherited FDs so they survive exec.
     unsafe {
         cmd.pre_exec(move || {
             clear_cloexec(guest_raw_fd)?;
+            if let Some(nfd) = net_msbnet_raw_fd {
+                clear_cloexec(nfd)?;
+            }
+            if let Some(nfd) = net_vm_raw_fd {
+                clear_cloexec(nfd)?;
+            }
             Ok(())
         });
     }
@@ -121,8 +146,9 @@ pub async fn spawn_supervisor(
         crate::MicrosandboxError::Runtime("supervisor process exited immediately".into())
     })?;
 
-    // Close the guest FD in the parent by dropping it.
+    // Close inherited FDs in the parent by dropping them.
     drop(guest_fd);
+    drop(net_fds);
 
     // Read the startup JSON from the supervisor's stdout.
     let stdout = child.stdout.take().ok_or_else(|| {
@@ -131,16 +157,32 @@ pub async fn spawn_supervisor(
 
     let mut reader = tokio::io::BufReader::new(stdout);
     let mut line = String::new();
-    reader.read_line(&mut line).await?;
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        reader.read_line(&mut line),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => {
+            terminate_startup_supervisor(&mut child).await;
+            return Err(err.into());
+        }
+        Err(_) => {
+            terminate_startup_supervisor(&mut child).await;
+            return Err(crate::MicrosandboxError::Runtime(
+                "supervisor startup timeout: no JSON received within 30 seconds".into(),
+            ));
+        }
+    }
 
     let startup: StartupInfo = match serde_json::from_str(line.trim()) {
         Ok(info) => info,
         Err(_) => {
-            // Supervisor exited before writing JSON. Wait for it to get exit code.
-            let status = child.wait().await?;
+            let status = terminate_startup_supervisor(&mut child).await;
             return Err(crate::MicrosandboxError::Runtime(format!(
-                "supervisor exited ({status}) before sending startup info \
-                 (check stderr above for details)"
+                "supervisor exited ({status:?}) before sending startup info \
+                 (line: {line:?}, check stderr above for details)"
             )));
         }
     };
@@ -163,34 +205,57 @@ pub async fn spawn_supervisor(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Create a Unix socket pair, returning (host_fd, guest_fd) as OwnedFds.
-fn create_socketpair() -> MicrosandboxResult<(OwnedFd, OwnedFd)> {
+/// Create a Unix socket pair with `FD_CLOEXEC` set on both ends.
+///
+/// We set `FD_CLOEXEC` with `fcntl()` instead of relying on `SOCK_CLOEXEC`
+/// because Darwin's libc bindings do not expose that socket type flag.
+///
+/// `sock_type` is typically `libc::SOCK_STREAM` (for agent channel)
+/// or `libc::SOCK_DGRAM` (for Unixgram network frame relay).
+fn create_socketpair(sock_type: libc::c_int) -> MicrosandboxResult<(OwnedFd, OwnedFd)> {
     let mut fds = [0i32; 2];
-    let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+    let ret = unsafe { libc::socketpair(libc::AF_UNIX, sock_type, 0, fds.as_mut_ptr()) };
     if ret != 0 {
         return Err(crate::MicrosandboxError::Io(std::io::Error::last_os_error()));
     }
 
-    // Wrap immediately so FDs are closed on error.
     let fd1 = unsafe { OwnedFd::from_raw_fd(fds[0]) };
     let fd2 = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
-    // Set CLOEXEC on both.
     set_cloexec(fd1.as_raw_fd())?;
     set_cloexec(fd2.as_raw_fd())?;
+
+    // Set non-blocking mode on both ends. Tokio's AsyncFd requires
+    // non-blocking fds — a blocking fd can stall the single-threaded
+    // runtime on spurious epoll/kqueue wakeups. SOCK_NONBLOCK is not
+    // available on macOS, so we use fcntl instead.
+    set_nonblock(fd1.as_raw_fd())?;
+    set_nonblock(fd2.as_raw_fd())?;
 
     Ok((fd1, fd2))
 }
 
-/// Set the close-on-exec flag on a file descriptor (preserving existing flags).
-fn set_cloexec(fd: RawFd) -> MicrosandboxResult<()> {
+/// Set non-blocking mode on a file descriptor (preserving other flags).
+fn set_nonblock(fd: RawFd) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Set the close-on-exec flag on a file descriptor (preserving other flags).
+fn set_cloexec(fd: RawFd) -> std::io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags == -1 {
-        return Err(crate::MicrosandboxError::Io(std::io::Error::last_os_error()));
+        return Err(std::io::Error::last_os_error());
     }
     let ret = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
     if ret == -1 {
-        return Err(crate::MicrosandboxError::Io(std::io::Error::last_os_error()));
+        return Err(std::io::Error::last_os_error());
     }
     Ok(())
 }
@@ -206,6 +271,13 @@ fn clear_cloexec(fd: RawFd) -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+async fn terminate_startup_supervisor(
+    child: &mut tokio::process::Child,
+) -> Option<std::process::ExitStatus> {
+    let _ = child.start_kill();
+    child.wait().await.ok()
 }
 
 /// Convert ShutdownMode to CLI arg string.
@@ -263,10 +335,13 @@ fn supervisor_cli_args(
     db_path: &Path,
     log_dir: &Path,
     runtime_dir: &Path,
+    network_config_json: Option<&str>,
     empty_rootfs_dir: &Path,
     rw_dir: &Path,
     staging_dir: &Path,
     agent_fd: RawFd,
+    net_msbnet_fd: Option<RawFd>,
+    net_vm_fd: Option<RawFd>,
     libkrunfw_path: &Path,
 ) -> Vec<OsString> {
     let mut args = vec![OsString::from("supervisor")];
@@ -285,8 +360,22 @@ fn supervisor_cli_args(
     args.push(log_dir.as_os_str().to_os_string());
     args.push(OsString::from("--runtime-dir"));
     args.push(runtime_dir.as_os_str().to_os_string());
+    if let Some(network_config_json) = network_config_json {
+        args.push(OsString::from("--network-config-json"));
+        args.push(OsString::from(network_config_json));
+    }
     args.push(OsString::from("--agent-fd"));
     args.push(OsString::from(agent_fd.to_string()));
+
+    if let Some(nfd) = net_msbnet_fd {
+        args.push(OsString::from("--net-msbnet-fd"));
+        args.push(OsString::from(nfd.to_string()));
+    }
+
+    if let Some(nfd) = net_vm_fd {
+        args.push(OsString::from("--net-vm-fd"));
+        args.push(OsString::from(nfd.to_string()));
+    }
 
     let sp = &config.supervisor_policy;
     args.push(OsString::from("--shutdown-mode"));
@@ -453,10 +542,13 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
+            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
+            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -476,10 +568,13 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
+            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
+            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -504,10 +599,13 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
+            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
+            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -537,10 +635,13 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
+            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
+            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -572,10 +673,13 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
+            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
+            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -604,10 +708,13 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
+            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
+            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -635,10 +742,13 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
+            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
+            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -663,10 +773,13 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
+            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
+            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -693,10 +806,13 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
+            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
+            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -733,10 +849,13 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
+            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
+            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 

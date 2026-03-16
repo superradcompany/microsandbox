@@ -17,9 +17,10 @@ clap = { workspace = true, features = ["derive"] }
 libc.workspace = true
 microsandbox-db = { path = "../db" }
 microsandbox-filesystem = { path = "../filesystem" }
+microsandbox-network = { path = "../network" }
 microsandbox-protocol = { path = "../protocol" }
 microsandbox-utils = { path = "../utils" }
-msb_krun = { version = "0.1.3", features = ["blk", "net"] }
+msb_krun = { version = "0.1.4", features = ["blk", "net"] }
 nix = { workspace = true, features = ["process", "signal"] }
 sea-orm.workspace = true
 serde.workspace = true

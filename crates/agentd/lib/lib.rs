@@ -14,6 +14,7 @@ pub mod clock;
 pub mod fs;
 pub mod heartbeat;
 pub mod init;
+pub mod network;
 pub mod serial;
 pub mod session;
 

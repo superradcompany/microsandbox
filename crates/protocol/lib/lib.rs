@@ -48,6 +48,42 @@ pub const ENV_TMPFS: &str = "MSB_TMPFS";
 /// - `fstype=TYPE` — filesystem type (optional; auto-detected if absent)
 pub const ENV_BLOCK_ROOT: &str = "MSB_BLOCK_ROOT";
 
+/// Environment variable carrying the guest network interface configuration.
+///
+/// Format: `key=value,...`
+///
+/// - `iface=NAME` — interface name (required)
+/// - `mac=AA:BB:CC:DD:EE:FF` — MAC address (required)
+/// - `mtu=N` — MTU (optional)
+///
+/// Example:
+/// - `MSB_NET=iface=eth0,mac=02:5a:7b:13:01:02,mtu=1500`
+pub const ENV_NET: &str = "MSB_NET";
+
+/// Environment variable carrying the guest IPv4 network configuration.
+///
+/// Format: `key=value,...`
+///
+/// - `addr=A.B.C.D/N` — address with prefix length (required)
+/// - `gw=A.B.C.D` — default gateway (required)
+/// - `dns=A.B.C.D` — DNS server (optional)
+///
+/// Example:
+/// - `MSB_NET_IPV4=addr=100.96.1.2/30,gw=100.96.1.1,dns=100.96.1.1`
+pub const ENV_NET_IPV4: &str = "MSB_NET_IPV4";
+
+/// Environment variable carrying the guest IPv6 network configuration.
+///
+/// Format: `key=value,...`
+///
+/// - `addr=ADDR/N` — address with prefix length (required)
+/// - `gw=ADDR` — default gateway (required)
+/// - `dns=ADDR` — DNS server (optional)
+///
+/// Example:
+/// - `MSB_NET_IPV6=addr=fd42:6d73:62:2a::2/64,gw=fd42:6d73:62:2a::1,dns=fd42:6d73:62:2a::1`
+pub const ENV_NET_IPV6: &str = "MSB_NET_IPV6";
+
 //--------------------------------------------------------------------------------------------------
 // Exports
 //--------------------------------------------------------------------------------------------------

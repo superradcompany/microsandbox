@@ -41,9 +41,21 @@ pub struct SupervisorArgs {
     #[arg(long)]
     pub runtime_dir: PathBuf,
 
+    /// Serialized network config JSON for `msbnet`.
+    #[arg(long)]
+    pub network_config_json: Option<String>,
+
     /// Agent FD (inherited from parent, for VM's virtio-console).
     #[arg(long)]
     pub agent_fd: RawFd,
+
+    /// Network FD inherited by the `msbnet` child.
+    #[arg(long)]
+    pub net_msbnet_fd: Option<RawFd>,
+
+    /// Network FD inherited by the VM child.
+    #[arg(long)]
+    pub net_vm_fd: Option<RawFd>,
 
     /// Forward VM console output to supervisor stdout.
     #[arg(long = "forward")]
@@ -84,7 +96,7 @@ pub struct SupervisorArgs {
     pub vm_restart_window: u64,
 
     /// Grace period in milliseconds before SIGKILL on VM shutdown.
-    #[arg(long, default_value_t = 5000)]
+    #[arg(long, default_value_t = 0)]
     pub vm_shutdown_timeout_ms: u64,
 
     // ── VM passthrough args ──────────────────────────────────────────────
@@ -206,7 +218,16 @@ pub async fn run(args: SupervisorArgs, log_level: Option<LogLevel>) -> RuntimeRe
         sandbox_db_path: args.sandbox_db_path,
         log_dir: args.log_dir,
         runtime_dir: args.runtime_dir,
+        network_config_json: args.network_config_json,
         agent_fd: args.agent_fd,
+        net_msbnet_fd: args.net_msbnet_fd,
+        net_vm_fd: args.net_vm_fd,
+        sandbox_slot: u32::try_from(args.sandbox_id).map_err(|_| {
+            microsandbox_runtime::RuntimeError::Custom(format!(
+                "sandbox_id {} is negative and cannot be used as a network slot",
+                args.sandbox_id
+            ))
+        })?,
         forward_output: args.forward_output,
         child_policies,
         supervisor_policy,

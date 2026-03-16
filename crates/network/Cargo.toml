@@ -6,5 +6,27 @@ repository.workspace = true
 license.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "msbnet"
+path = "bin/main.rs"
+
 [lib]
 path = "lib/lib.rs"
+
+[dependencies]
+clap = { workspace = true }
+etherparse = { workspace = true }
+hickory-proto = { workspace = true }
+hickory-resolver = { workspace = true }
+ipnetwork = { workspace = true }
+libc = { workspace = true }
+microsandbox-protocol = { path = "../protocol" }
+nix = { workspace = true, features = ["user"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]
+cc = { workspace = true }
