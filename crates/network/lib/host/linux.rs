@@ -191,6 +191,7 @@ impl TapLink {
                 gateway: self.gateway_v6.to_string(),
                 dns: vec![self.gateway_v6.to_string()],
             }),
+            tls: None,
         }
     }
 
@@ -474,7 +475,7 @@ fn remove_nftables_elements(ifname: &str, subnet_v4: &str, subnet_v6: &str) -> s
 }
 
 /// Runs an `nft -f` script atomically.
-fn nft_script(script: &str) -> std::io::Result<()> {
+pub(crate) fn nft_script(script: &str) -> std::io::Result<()> {
     let output = std::process::Command::new("nft")
         .arg("-f")
         .arg("-")

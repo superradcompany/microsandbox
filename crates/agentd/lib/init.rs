@@ -42,6 +42,7 @@ pub fn init() -> AgentdResult<()> {
     linux::mount_block_root()?;
     linux::apply_tmpfs_mounts()?;
     crate::network::apply_network_config()?;
+    crate::tls::install_ca_cert()?;
     linux::create_run_dir()?;
     Ok(())
 }

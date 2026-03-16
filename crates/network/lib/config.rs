@@ -38,6 +38,10 @@ pub struct NetworkConfig {
     /// DNS interception and filtering settings.
     #[serde(default)]
     pub dns: DnsConfig,
+
+    /// TLS interception configuration.
+    #[serde(default)]
+    pub tls: crate::tls::TlsConfig,
 }
 
 /// Network interface configuration (dual-stack).

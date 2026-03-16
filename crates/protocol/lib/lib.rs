@@ -84,6 +84,13 @@ pub const ENV_NET_IPV4: &str = "MSB_NET_IPV4";
 /// - `MSB_NET_IPV6=addr=fd42:6d73:62:2a::2/64,gw=fd42:6d73:62:2a::1,dns=fd42:6d73:62:2a::1`
 pub const ENV_NET_IPV6: &str = "MSB_NET_IPV6";
 
+/// Guest-side path to the CA certificate for TLS interception.
+///
+/// Placed by the supervisor via the runtime virtiofs mount.
+/// agentd checks for this file during init and installs it into the guest
+/// trust store.
+pub const GUEST_TLS_CA_PATH: &str = "/.msb/tls/ca.pem";
+
 //--------------------------------------------------------------------------------------------------
 // Exports
 //--------------------------------------------------------------------------------------------------

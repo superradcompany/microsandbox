@@ -115,3 +115,9 @@ sea-orm-migration = { version = "1.1", features = [
     "sqlx-sqlite",
 ] }
 ureq = "3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+rustls-native-certs = "0.8"
+rcgen = { version = "0.13", features = ["x509-parser"] }
+lru = "0.12"
