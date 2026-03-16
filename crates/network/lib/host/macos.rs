@@ -1,42 +1,43 @@
 //! macOS host backend: vmnet.framework.
 //!
 //! Creates a vmnet interface in shared mode using the vmnet.framework API.
-//! Uses a C shim (`csrc/vmnet_shim.c`) to bridge Objective-C block callbacks
-//! to Rust-compatible synchronous calls.
+//! Uses the `block2` crate to create Objective-C blocks for vmnet callbacks
+//! directly from Rust, eliminating the need for a C shim.
 //!
 //! The vmnet shared mode provides NATed internet access — equivalent to the
 //! Linux TAP + nftables NAT approach, but handled entirely inside Apple's
 //! framework. No host-side firewall rules are needed.
 
+use std::ffi::{c_char, c_void, CStr};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::mpsc;
+
+use block2::{Block, RcBlock};
 
 use super::FrameTransport;
 use crate::config::InterfaceConfig;
 use crate::ready::{MsbnetReady, MsbnetReadyIpv4, MsbnetReadyIpv6};
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// vmnet shared mode identifier.
+const VMNET_SHARED_MODE: u64 = 1001;
+
+/// Success status code from vmnet operations.
+const VMNET_SUCCESS: u32 = 1000;
+
+/// Event mask for packet-available notifications.
+const VMNET_INTERFACE_PACKETS_AVAILABLE: u32 = 1 << 0;
+
+//--------------------------------------------------------------------------------------------------
 // FFI Types
 //--------------------------------------------------------------------------------------------------
 
 /// Opaque vmnet interface handle.
-type InterfaceRef = *mut libc::c_void;
-
-/// Return codes from vmnet operations.
-const VMNET_SUCCESS: u32 = 1000;
-
-/// Result struct populated by the C shim.
-#[repr(C)]
-struct VmnetStartResult {
-    status: u32,
-    mac_address: [u8; 18],
-    mtu: u64,
-    max_packet_size: u64,
-    start_address: [u8; 64],
-    end_address: [u8; 64],
-    subnet_mask: [u8; 64],
-    nat66_prefix: [u8; 64],
-}
+type InterfaceRef = *mut c_void;
 
 /// Packet descriptor for vmnet_read/vmnet_write.
 #[repr(C)]
@@ -51,18 +52,72 @@ struct VmPktDesc {
 // FFI Functions
 //--------------------------------------------------------------------------------------------------
 
+#[link(name = "vmnet", kind = "framework")]
 unsafe extern "C" {
-    fn vmnet_shim_start_shared(out_iface: *mut InterfaceRef, out_result: *mut VmnetStartResult);
-    fn vmnet_shim_stop(iface: InterfaceRef) -> u32;
-    fn vmnet_shim_set_event_fd(iface: InterfaceRef, notify_fd: libc::c_int) -> u32;
+    fn vmnet_start_interface(
+        interface_desc: *mut c_void,
+        queue: *mut c_void,
+        handler: &Block<dyn Fn(u32, *mut c_void)>,
+    ) -> InterfaceRef;
+
+    fn vmnet_stop_interface(
+        iface: InterfaceRef,
+        queue: *mut c_void,
+        handler: &Block<dyn Fn(u32)>,
+    ) -> u32;
+
+    fn vmnet_interface_set_event_callback(
+        iface: InterfaceRef,
+        event_mask: u32,
+        queue: *mut c_void,
+        handler: &Block<dyn Fn(u32, *mut c_void)>,
+    ) -> u32;
 
     fn vmnet_read(iface: InterfaceRef, packets: *mut VmPktDesc, pktcnt: *mut libc::c_int) -> u32;
     fn vmnet_write(iface: InterfaceRef, packets: *mut VmPktDesc, pktcnt: *mut libc::c_int) -> u32;
+
+    static vmnet_operation_mode_key: *const c_char;
+    static vmnet_mac_address_key: *const c_char;
+    static vmnet_mtu_key: *const c_char;
+    static vmnet_max_packet_size_key: *const c_char;
+    static vmnet_start_address_key: *const c_char;
+    static vmnet_subnet_mask_key: *const c_char;
+    static vmnet_nat66_prefix_key: *const c_char;
+}
+
+// XPC dictionary functions (part of libxpc, linked automatically on macOS).
+unsafe extern "C" {
+    fn xpc_dictionary_create(
+        keys: *const *const c_char,
+        values: *const *mut c_void,
+        count: usize,
+    ) -> *mut c_void;
+
+    fn xpc_dictionary_set_uint64(dict: *mut c_void, key: *const c_char, value: u64);
+    fn xpc_dictionary_get_string(dict: *mut c_void, key: *const c_char) -> *const c_char;
+    fn xpc_dictionary_get_uint64(dict: *mut c_void, key: *const c_char) -> u64;
+
+    fn xpc_release(object: *mut c_void);
+}
+
+// libdispatch (linked automatically on macOS).
+unsafe extern "C" {
+    fn dispatch_get_global_queue(identifier: isize, flags: usize) -> *mut c_void;
 }
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// Resolved parameters from vmnet_start_interface.
+struct StartResult {
+    mac: String,
+    mtu: u64,
+    max_packet_size: u64,
+    start_address: String,
+    subnet_mask: String,
+    nat66_prefix: String,
+}
 
 /// vmnet.framework-based network backend for macOS.
 ///
@@ -126,37 +181,75 @@ impl VmnetLink {
             ));
         }
 
-        let mut iface: InterfaceRef = std::ptr::null_mut();
-        let mut result: VmnetStartResult = unsafe { std::mem::zeroed() };
+        let queue = unsafe { dispatch_get_global_queue(0, 0) };
 
+        // Create interface description with shared mode.
+        let desc =
+            unsafe { xpc_dictionary_create(std::ptr::null(), std::ptr::null(), 0) };
         unsafe {
-            vmnet_shim_start_shared(&mut iface, &mut result);
-        }
+            xpc_dictionary_set_uint64(desc, vmnet_operation_mode_key, VMNET_SHARED_MODE)
+        };
 
-        if iface.is_null() || result.status != VMNET_SUCCESS {
+        // Start the interface with a block callback.
+        let (tx, rx) = mpsc::sync_channel::<(u32, Option<StartResult>)>(1);
+        let start_block =
+            RcBlock::new(move |status: u32, interface_param: *mut c_void| {
+                let result =
+                    if status == VMNET_SUCCESS && !interface_param.is_null() {
+                        Some(unsafe { extract_params(interface_param) })
+                    } else {
+                        None
+                    };
+                let _ = tx.send((status, result));
+            });
+
+        let iface =
+            unsafe { vmnet_start_interface(desc, queue, &start_block) };
+        unsafe { xpc_release(desc) };
+
+        let (status, params) = rx
+            .recv()
+            .map_err(|_| std::io::Error::other("vmnet start callback was not invoked"))?;
+
+        if iface.is_null() || status != VMNET_SUCCESS {
             return Err(std::io::Error::other(format!(
-                "vmnet_start_interface failed with status {}",
-                result.status
+                "vmnet_start_interface failed with status {status}"
             )));
         }
 
-        // Extract strings from the result.
-        let mac = c_str_from_bytes(&result.mac_address);
-        let mtu = u16::try_from(result.mtu).map_err(|_| {
-            std::io::Error::other(format!("vmnet reported MTU {} exceeds u16 range", result.mtu))
+        let params = params.ok_or_else(|| {
+            stop_interface(iface);
+            std::io::Error::other("vmnet_start_interface returned no parameters")
         })?;
-        let max_packet_size = result.max_packet_size as usize;
-        let gateway_v4 = c_str_from_bytes(&result.start_address);
-        let subnet_mask = c_str_from_bytes(&result.subnet_mask);
 
-        // Derive guest IP: gateway + 1.
+        // Extract resolved parameters.
+        let mac = params.mac;
+        if params.mtu == 0 {
+            stop_interface(iface);
+            return Err(std::io::Error::other("vmnet reported MTU 0"));
+        }
+        let mtu = u16::try_from(params.mtu).map_err(|_| {
+            stop_interface(iface);
+            std::io::Error::other(format!(
+                "vmnet reported MTU {} exceeds u16 range",
+                params.mtu
+            ))
+        })?;
+        let max_packet_size = params.max_packet_size as usize;
+        if max_packet_size > crate::engine::MAX_FRAME_SIZE {
+            stop_interface(iface);
+            return Err(std::io::Error::other(format!(
+                "vmnet reported max_packet_size {max_packet_size} exceeds engine buffer size {}",
+                crate::engine::MAX_FRAME_SIZE,
+            )));
+        }
+        let gateway_v4 = params.start_address;
+        let subnet_mask = params.subnet_mask;
         let guest_v4 = derive_guest_ip(&gateway_v4);
-
-        // Extract NAT66 prefix and derive IPv6 addresses.
-        let nat66_prefix = c_str_from_bytes(&result.nat66_prefix);
-        let (gateway_v6, guest_v6) = derive_ipv6_addresses(&nat66_prefix);
+        let (gateway_v6, guest_v6) = derive_ipv6_addresses(&params.nat66_prefix);
 
         if gateway_v6.is_none() {
+            stop_interface(iface);
             return Err(std::io::Error::other(
                 "vmnet did not provide a NAT66 IPv6 prefix; dual-stack networking requires IPv6",
             ));
@@ -165,40 +258,49 @@ impl VmnetLink {
         // Create a pipe for packet-available notifications.
         let mut pipe_fds = [0i32; 2];
         if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
-            unsafe { vmnet_shim_stop(iface) };
+            stop_interface(iface);
             return Err(std::io::Error::last_os_error());
         }
 
         let notify_read = unsafe { OwnedFd::from_raw_fd(pipe_fds[0]) };
         let notify_write = unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) };
 
-        // Make the read end non-blocking for AsyncFd.
-        unsafe {
-            let flags = libc::fcntl(pipe_fds[0], libc::F_GETFL);
-            if flags == -1 {
-                vmnet_shim_stop(iface);
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::fcntl(pipe_fds[0], libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
-                vmnet_shim_stop(iface);
-                return Err(std::io::Error::last_os_error());
-            }
-
-            let flags = libc::fcntl(pipe_fds[1], libc::F_GETFL);
-            if flags == -1 {
-                vmnet_shim_stop(iface);
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::fcntl(pipe_fds[1], libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
-                vmnet_shim_stop(iface);
-                return Err(std::io::Error::last_os_error());
+        // Make both ends non-blocking for AsyncFd.
+        for fd in pipe_fds {
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                if flags == -1 {
+                    stop_interface(iface);
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
+                    stop_interface(iface);
+                    return Err(std::io::Error::last_os_error());
+                }
             }
         }
 
         // Register the packet-available event callback.
-        let ret = unsafe { vmnet_shim_set_event_fd(iface, notify_write.as_raw_fd()) };
+        let write_fd = notify_write.as_raw_fd();
+        let event_block =
+            RcBlock::new(move |_event_mask: u32, _event: *mut c_void| {
+                unsafe {
+                    let byte: u8 = 1;
+                    libc::write(write_fd, (&raw const byte).cast(), 1);
+                }
+            });
+
+        let ret = unsafe {
+            vmnet_interface_set_event_callback(
+                iface,
+                VMNET_INTERFACE_PACKETS_AVAILABLE,
+                queue,
+                &event_block,
+            )
+        };
+
         if ret != VMNET_SUCCESS {
-            unsafe { vmnet_shim_stop(iface) };
+            stop_interface(iface);
             return Err(std::io::Error::other(format!(
                 "vmnet_interface_set_event_callback failed with status {ret}"
             )));
@@ -320,16 +422,13 @@ impl VmnetLink {
     ///
     /// The engine uses this with AsyncFd to detect when frames are available.
     pub fn as_raw_fd(&self) -> RawFd {
-        use std::os::fd::AsRawFd;
         self.notify_fd.as_raw_fd()
     }
 }
 
 impl Drop for VmnetLink {
     fn drop(&mut self) {
-        unsafe {
-            vmnet_shim_stop(self.iface);
-        }
+        stop_interface(self.iface);
     }
 }
 
@@ -355,10 +454,50 @@ impl FrameTransport for VmnetLink {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Extracts a Rust String from a null-terminated C byte array.
-fn c_str_from_bytes(bytes: &[u8]) -> String {
-    let nul_pos = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..nul_pos]).to_string()
+/// Extracts resolved parameters from the vmnet interface's XPC dictionary.
+///
+/// # Safety
+///
+/// `dict` must be a valid, non-null XPC dictionary pointer returned by
+/// vmnet_start_interface's completion handler.
+unsafe fn extract_params(dict: *mut c_void) -> StartResult {
+    let get_str = |key: *const c_char| -> String {
+        let ptr = unsafe { xpc_dictionary_get_string(dict, key) };
+        if ptr.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+        }
+    };
+
+    unsafe {
+        StartResult {
+            mac: get_str(vmnet_mac_address_key),
+            mtu: xpc_dictionary_get_uint64(dict, vmnet_mtu_key),
+            max_packet_size: xpc_dictionary_get_uint64(dict, vmnet_max_packet_size_key),
+            start_address: get_str(vmnet_start_address_key),
+            subnet_mask: get_str(vmnet_subnet_mask_key),
+            nat66_prefix: get_str(vmnet_nat66_prefix_key),
+        }
+    }
+}
+
+/// Synchronously stops a vmnet interface.
+fn stop_interface(iface: InterfaceRef) {
+    let queue = unsafe { dispatch_get_global_queue(0, 0) };
+
+    let (tx, rx) = mpsc::sync_channel::<u32>(1);
+    let block = RcBlock::new(move |status: u32| {
+        let _ = tx.send(status);
+    });
+
+    let ret = unsafe { vmnet_stop_interface(iface, queue, &block) };
+
+    if ret == VMNET_SUCCESS {
+        let _ = rx.recv();
+    } else {
+        tracing::warn!("vmnet_stop_interface failed with status {ret}");
+    }
 }
 
 /// Derives IPv6 gateway and guest addresses from a NAT66 prefix string.

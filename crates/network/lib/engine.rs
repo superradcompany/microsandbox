@@ -22,7 +22,7 @@ use crate::policy::{Action, Direction, PolicyEngine};
 
 /// Maximum ethernet frame size (14-byte header + 1500 MTU).
 /// Jumbo frames are not supported — MTU > 1500 is rejected at config time.
-const MAX_FRAME_SIZE: usize = 1514;
+pub const MAX_FRAME_SIZE: usize = 1514;
 
 //--------------------------------------------------------------------------------------------------
 // Types
