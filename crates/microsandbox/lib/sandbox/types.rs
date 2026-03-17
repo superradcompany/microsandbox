@@ -2,11 +2,8 @@
 //!
 //! These types are referenced by [`SandboxConfig`](super::SandboxConfig).
 
-use std::{io, path::PathBuf};
+use std::path::PathBuf;
 
-use microsandbox_filesystem::{
-    AccessMode, DynFileSystem, PassthroughConfig, PassthroughFs, ProxyFs,
-};
 use serde::{Deserialize, Serialize};
 
 use crate::size::Mebibytes;
@@ -117,38 +114,14 @@ pub enum VolumeMount {
         size_mib: Option<u32>,
     },
 
-    /// Custom filesystem backend (e.g. a [`ProxyFs`]-wrapped backend with hooks).
-    ///
-    /// Created when a [`MountBuilder`] has hooks set (`.on_read()`, `.on_write()`,
-    /// `.on_access()`), or when using `.backend()` directly.
-    ///
-    /// Backend mounts cannot be serialized or passed through process boundaries.
-    /// They require in-process VM creation to function.
-    Backend {
-        /// Guest mount path.
-        guest: String,
-        /// Pre-built filesystem backend.
-        backend: Box<dyn DynFileSystem + Send + Sync>,
-        /// Whether the mount is read-only.
-        readonly: bool,
-    },
 }
 
 /// Builder for constructing a [`VolumeMount`].
-///
-/// When hooks are set via `.on_read()`, `.on_write()`, or `.on_access()`,
-/// the builder produces a [`VolumeMount::Backend`] with a [`ProxyFs`]-wrapped
-/// backend. Otherwise it produces a [`VolumeMount::Bind`], [`VolumeMount::Named`],
-/// or [`VolumeMount::Tmpfs`].
-#[allow(clippy::type_complexity)]
 pub struct MountBuilder {
     guest: String,
     mount: MountKind,
     readonly: bool,
     size_mib: Option<u32>,
-    on_access: Option<Box<dyn Fn(&str, AccessMode) -> Result<(), io::Error> + Send + Sync>>,
-    on_read: Option<Box<dyn Fn(&str, &[u8]) -> Vec<u8> + Send + Sync>>,
-    on_write: Option<Box<dyn Fn(&str, &[u8]) -> Vec<u8> + Send + Sync>>,
 }
 
 /// Internal kind for the mount builder.
@@ -189,9 +162,6 @@ impl MountBuilder {
             mount: MountKind::Unset,
             readonly: false,
             size_mib: None,
-            on_access: None,
-            on_read: None,
-            on_write: None,
         }
     }
 
@@ -232,68 +202,8 @@ impl MountBuilder {
         self
     }
 
-    /// Set an access control hook.
-    ///
-    /// Called before `open`, `create`, and `opendir`. Receives the file path
-    /// (relative to mount root) and the [`AccessMode`]. Return `Ok(())` to
-    /// allow the operation, or `Err(e)` to deny it.
-    ///
-    /// When any hook is set, the mount produces a [`VolumeMount::Backend`]
-    /// with a [`ProxyFs`]-wrapped backend.
-    pub fn on_access(
-        mut self,
-        hook: impl Fn(&str, AccessMode) -> Result<(), io::Error> + Send + Sync + 'static,
-    ) -> Self {
-        self.on_access = Some(Box::new(hook));
-        self
-    }
-
-    /// Set a read interception hook.
-    ///
-    /// Called after data is read from the underlying backend, before returning
-    /// to the guest. Receives the file path and raw data, returns (possibly
-    /// transformed) data.
-    ///
-    /// When set, the zero-copy read path is broken — data flows through memory.
-    pub fn on_read(
-        mut self,
-        hook: impl Fn(&str, &[u8]) -> Vec<u8> + Send + Sync + 'static,
-    ) -> Self {
-        self.on_read = Some(Box::new(hook));
-        self
-    }
-
-    /// Set a write interception hook.
-    ///
-    /// Called after receiving data from the guest, before passing to the
-    /// underlying backend. Receives the file path and raw data, returns
-    /// (possibly transformed) data.
-    ///
-    /// When set, the zero-copy write path is broken — data flows through memory.
-    pub fn on_write(
-        mut self,
-        hook: impl Fn(&str, &[u8]) -> Vec<u8> + Send + Sync + 'static,
-    ) -> Self {
-        self.on_write = Some(Box::new(hook));
-        self
-    }
-
     /// Build the volume mount.
     pub(crate) fn build(self) -> crate::MicrosandboxResult<VolumeMount> {
-        let has_hooks =
-            self.on_access.is_some() || self.on_read.is_some() || self.on_write.is_some();
-
-        if has_hooks {
-            self.build_backend()
-        } else {
-            self.build_plain()
-        }
-    }
-}
-
-impl MountBuilder {
-    /// Build a plain mount (no hooks).
-    fn build_plain(self) -> crate::MicrosandboxResult<VolumeMount> {
         match self.mount {
             MountKind::Bind(host) => Ok(VolumeMount::Bind {
                 host,
@@ -314,57 +224,6 @@ impl MountBuilder {
             )),
         }
     }
-
-    /// Build a [`VolumeMount::Backend`] with a [`ProxyFs`]-wrapped backend.
-    fn build_backend(self) -> crate::MicrosandboxResult<VolumeMount> {
-        let root_dir = match self.mount {
-            MountKind::Bind(host) => host,
-            MountKind::Named(name) => crate::config::config().volumes_dir().join(name),
-            MountKind::Tmpfs => {
-                return Err(crate::MicrosandboxError::InvalidConfig(
-                    "hooks are not supported on tmpfs mounts (tmpfs is handled by the guest kernel)"
-                        .into(),
-                ));
-            }
-            MountKind::Unset => {
-                return Err(crate::MicrosandboxError::InvalidConfig(
-                    "MountBuilder: no mount type set (call .bind() or .named())".into(),
-                ));
-            }
-        };
-
-        // Create the inner PassthroughFs backend.
-        let cfg = PassthroughConfig {
-            root_dir,
-            ..Default::default()
-        };
-        let inner = PassthroughFs::new(cfg).map_err(|e| {
-            crate::MicrosandboxError::Io(io::Error::other(format!(
-                "failed to create passthrough backend: {e}"
-            )))
-        })?;
-
-        // Wrap in ProxyFs with hooks.
-        let mut proxy_builder = ProxyFs::builder(Box::new(inner));
-        if let Some(hook) = self.on_access {
-            proxy_builder = proxy_builder.on_access(hook);
-        }
-        if let Some(hook) = self.on_read {
-            proxy_builder = proxy_builder.on_read(hook);
-        }
-        if let Some(hook) = self.on_write {
-            proxy_builder = proxy_builder.on_write(hook);
-        }
-        let proxy = proxy_builder
-            .build()
-            .map_err(crate::MicrosandboxError::Io)?;
-
-        Ok(VolumeMount::Backend {
-            guest: self.guest,
-            backend: Box::new(proxy),
-            readonly: self.readonly,
-        })
-    }
 }
 
 impl VolumeMount {
@@ -373,14 +232,8 @@ impl VolumeMount {
         match self {
             Self::Bind { guest, .. }
             | Self::Named { guest, .. }
-            | Self::Tmpfs { guest, .. }
-            | Self::Backend { guest, .. } => guest,
+            | Self::Tmpfs { guest, .. } => guest,
         }
-    }
-
-    /// Returns `true` if this is a [`VolumeMount::Backend`] variant.
-    pub fn is_backend(&self) -> bool {
-        matches!(self, Self::Backend { .. })
     }
 }
 
@@ -610,7 +463,7 @@ impl From<PathBuf> for ImageSource {
 }
 
 /// Custom serialization — only serializable variants are written.
-/// [`VolumeMount::Backend`] cannot be serialized and will return an error.
+/// Custom serialization for `VolumeMount`.
 impl Serialize for VolumeMount {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
@@ -647,9 +500,6 @@ impl Serialize for VolumeMount {
                 map.serialize_entry("size_mib", size_mib)?;
                 map.end()
             }
-            Self::Backend { .. } => Err(serde::ser::Error::custom(
-                "VolumeMount::Backend cannot be serialized",
-            )),
         }
     }
 }
@@ -732,14 +582,6 @@ impl std::fmt::Debug for VolumeMount {
                 .debug_struct("Tmpfs")
                 .field("guest", guest)
                 .field("size_mib", size_mib)
-                .finish(),
-            Self::Backend {
-                guest, readonly, ..
-            } => f
-                .debug_struct("Backend")
-                .field("guest", guest)
-                .field("readonly", readonly)
-                .field("backend", &"<dyn DynFileSystem>")
                 .finish(),
         }
     }

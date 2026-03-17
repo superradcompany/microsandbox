@@ -1,12 +1,12 @@
 # microsandbox-filesystem
 
-Filesystem backends for [microsandbox](https://github.com/zerocore-ai/microsandbox) virtual machines. This crate provides five pluggable backends that give each sandbox a complete, Linux-compatible filesystem — from bind-mounting a host directory to stacking OCI image layers with copy-on-write.
+Filesystem backends for [microsandbox](https://github.com/zerocore-ai/microsandbox) virtual machines. This crate provides four pluggable backends that give each sandbox a complete, Linux-compatible filesystem — from bind-mounting a host directory to stacking OCI image layers with copy-on-write.
 
 - **No root required** — runs unprivileged; guest-visible ownership and permissions are virtualized without touching the host filesystem
 - **Runs on macOS too** — the guest sees a full Linux filesystem even when the host is macOS
 - **Zero-copy I/O** — file reads and writes flow directly between host and guest with no intermediate allocation
 - **Real OCI layer semantics** — OverlayFs handles whiteouts, opaque directories, and atomic copy-up correctly
-- **Composable** — all five backends implement `DynFileSystem` and can be nested freely
+- **Composable** — all four backends implement `DynFileSystem` and can be nested freely
 
 ## Backends
 
@@ -73,23 +73,9 @@ Built-in policies:
 
 When a write targets a file that lives on the other backend, DualFs copies it over automatically.
 
-### ProxyFs
-
-Wraps any backend with hooks for access control, read interception, and write validation.
-
-```rust
-let fs = ProxyFs::builder(Box::new(passthrough_fs))
-    .on_access(my_access_hook)   // called before open/create — return error to deny
-    .on_read(my_read_hook)       // called after reads — transform/inspect data
-    .on_write(my_write_hook)     // called before writes — transform/validate data
-    .build()?;
-```
-
-Hooks receive human-readable paths (not raw inode numbers). Zero overhead when no hooks are set.
-
 ## Composability
 
-Backends can be nested freely since they all implement `DynFileSystem`. For example, a `ProxyFs` can wrap a `DualFs` that combines an `OverlayFs` with a `MemFs`:
+Backends can be nested freely since they all implement `DynFileSystem`. For example, a `DualFs` can combine an `OverlayFs` with a `MemFs`:
 
 ```rust
 let overlay = OverlayFs::builder()
@@ -107,10 +93,6 @@ let dual = DualFs::builder()
     .backend_a(overlay)
     .backend_b(mem)
     .policy(ReadBackendBWriteBackendA)
-    .build()?;
-
-let fs = ProxyFs::builder(Box::new(dual))
-    .on_access(my_access_hook)
     .build()?;
 ```
 

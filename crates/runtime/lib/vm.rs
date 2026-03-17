@@ -54,7 +54,7 @@ pub struct VmConfig {
     /// Pre-built filesystem backends as `(tag, backend)` pairs.
     ///
     /// These bypass the string-based mount path and are registered directly
-    /// with the VM builder. Used for mounts with hooks (e.g. ProxyFs wrappers).
+    /// with the VM builder.
     pub backends: Vec<(String, Box<dyn DynFileSystem + Send + Sync>)>,
 
     /// Path to the init binary in the guest.
@@ -238,7 +238,7 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
         }
     }
 
-    // Pre-built backend mounts (hooks, ProxyFs wrappers, etc.).
+    // Pre-built backend mounts.
     for (tag, backend) in config.backends {
         builder = builder.fs(move |fs| fs.tag(&tag).custom(backend));
     }

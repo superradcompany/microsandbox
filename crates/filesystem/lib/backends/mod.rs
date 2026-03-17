@@ -7,5 +7,4 @@ pub mod dualfs;
 pub mod memfs;
 pub mod overlayfs;
 pub mod passthroughfs;
-pub mod proxy;
 pub(crate) mod shared;

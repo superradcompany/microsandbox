@@ -49,7 +49,6 @@ pub use builder::SandboxBuilder;
 pub use config::SandboxConfig;
 pub use exec::{ExecOptionsBuilder, ExitStatus as ExecExitStatus, Rlimit, RlimitResource};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
-pub use microsandbox_filesystem::AccessMode;
 pub use microsandbox_network::config::NetworkConfig;
 pub use microsandbox_runtime::logging::LogLevel;
 pub use types::{
@@ -91,17 +90,6 @@ impl Sandbox {
     pub async fn create(mut config: SandboxConfig) -> MicrosandboxResult<Self> {
         let mut pinned_manifest_digest: Option<String> = None;
         let mut pinned_reference: Option<String> = None;
-
-        // Backend mounts hold closures and cannot cross process boundaries.
-        // They will be supported when in-process VM mode is available.
-        let backend_count = config.mounts.iter().filter(|m| m.is_backend()).count();
-        if backend_count > 0 {
-            return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                "hooked mounts (with on_read/on_write/on_access) are not yet supported \
-                     in subprocess mode ({backend_count} backend mount(s) provided). \
-                     Backend mounts require in-process VM mode, which is planned for a future release.",
-            )));
-        }
 
         validate_rootfs_source(&config.image)?;
 

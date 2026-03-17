@@ -486,10 +486,6 @@ fn supervisor_cli_args(
                     tmpfs_val.push_str(&format!(",size={s}"));
                 }
             }
-            VolumeMount::Backend { .. } => {
-                // Backend mounts are guarded at Sandbox::create() — they cannot
-                // reach this point in the subprocess path. If they do, skip them.
-            }
         }
     }
 

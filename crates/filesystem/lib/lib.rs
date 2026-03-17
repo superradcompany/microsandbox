@@ -22,7 +22,6 @@ pub use backends::{
     memfs::{CachePolicy as MemCachePolicy, MemFs, MemFsConfig},
     overlayfs::{CachePolicy as OverlayCachePolicy, OverlayConfig, OverlayFs},
     passthroughfs::{CachePolicy, PassthroughConfig, PassthroughFs, PassthroughFsBuilder},
-    proxy::{AccessMode, ProxyFs, ProxyFsBuilder},
 };
 pub use microsandbox_utils::size::{ByteSize, Bytes, Mebibytes, SizeExt};
 pub use msb_krun::backends::fs::{
