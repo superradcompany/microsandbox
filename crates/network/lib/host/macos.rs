@@ -415,6 +415,7 @@ impl VmnetLink {
                 gateway: gw.to_string(),
                 dns: vec![gw.to_string()],
             }),
+            tls: None,
         }
     }
 

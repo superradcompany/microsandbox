@@ -17,5 +17,6 @@ pub mod init;
 pub mod network;
 pub mod serial;
 pub mod session;
+pub mod tls;
 
 pub use error::*;

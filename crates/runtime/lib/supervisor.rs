@@ -174,6 +174,17 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
             config.vm_config.env.push(format!("{key}={value}"));
         }
 
+        // If TLS interception is enabled, write the CA cert to the runtime
+        // mount so agentd can install it into the guest trust store.
+        if let Some(ref tls_ready) = ready.tls {
+            if tls_ready.enabled {
+                let tls_dir = config.runtime_dir.join("tls");
+                std::fs::create_dir_all(&tls_dir)?;
+                std::fs::write(tls_dir.join("ca.pem"), &tls_ready.ca_pem)?;
+                tracing::info!("wrote CA cert to runtime/tls/ca.pem for guest trust store injection");
+            }
+        }
+
         tracing::info!(%pid, "msbnet ready");
     }
 

@@ -4,10 +4,12 @@
 //! 1. Parse CLI args (net_fd, sandbox slot, network config).
 //! 2. Privileged bootstrap: create platform backend (TapLink or VmnetLink).
 //! 3. Privileged: bind published port listeners.
-//! 4. Drop privileges.
-//! 5. Start relay tasks on pre-bound listeners.
-//! 6. Write `MsbnetReady` JSON to stdout.
-//! 7. Enter async packet relay loop.
+//! 4. Privileged: if TLS enabled, load/generate CA, bind TLS proxy, install redirect rules.
+//! 5. Drop privileges.
+//! 6. Start relay tasks on pre-bound listeners.
+//! 7. If TLS enabled, start TLS proxy from pre-bound listener.
+//! 8. Write `MsbnetReady` JSON to stdout (includes TLS readiness if enabled).
+//! 9. Enter async packet relay loop.
 
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -118,6 +120,23 @@ struct Args {
     /// DIRECTION,DESTINATION,PROTOCOL,PORTS,ACTION
     #[arg(long)]
     rule: Vec<String>,
+
+    // ── TLS interception flags ────────────────────────────────────────────
+    /// Disable TLS interception (enabled by default when --config-json includes tls.enabled).
+    #[arg(long, conflicts_with_all = ["config_json", "config_file"])]
+    no_tls: bool,
+
+    /// TCP port to intercept for TLS (repeatable, default: 443).
+    #[arg(long, conflicts_with_all = ["config_json", "config_file"])]
+    tls_intercepted_port: Vec<u16>,
+
+    /// Domain to bypass TLS interception (repeatable, supports *.suffix wildcards).
+    #[arg(long, conflicts_with_all = ["config_json", "config_file"])]
+    tls_bypass: Vec<String>,
+
+    /// Disable upstream TLS certificate verification.
+    #[arg(long, conflicts_with_all = ["config_json", "config_file"])]
+    no_tls_verify_upstream: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -129,6 +148,9 @@ fn main() {
     let network_config = resolve_config(&args);
 
     // Privileged bootstrap: create platform backend.
+    #[cfg(feature = "tls")]
+    let (backend, mut ready_info) = bootstrap(args.slot, &network_config.interface);
+    #[cfg(not(feature = "tls"))]
     let (backend, ready_info) = bootstrap(args.slot, &network_config.interface);
 
     let guest_ipv4 = ready_info
@@ -153,6 +175,24 @@ fn main() {
             guest_ipv6,
         ))
         .expect("failed to bind published port listeners");
+
+    // Privileged: TLS interception setup (if enabled).
+    #[cfg(feature = "tls")]
+    let tls_state = if network_config.tls.enabled {
+        Some(setup_tls(&rt, &network_config, guest_ipv4, guest_ipv6, args.slot, &ready_info))
+    } else {
+        None
+    };
+
+    #[cfg(feature = "tls")]
+    if let Some(ref state) = tls_state {
+        ready_info.tls = Some(microsandbox_network::ready::MsbnetReadyTls {
+            enabled: true,
+            proxy_port: state.pending.port,
+            ca_pem: state.ca_pem.clone(),
+            intercepted_ports: network_config.tls.intercepted_ports.clone(),
+        });
+    }
 
     // Drop privileges to the real uid/gid.
     drop_privileges().expect("failed to drop privileges");
@@ -185,6 +225,18 @@ fn main() {
     // Enter the tokio runtime context so start_from() can call tokio::spawn().
     let _runtime_guard = rt.enter();
     let _publisher = PortPublisher::start_from(pending_listeners);
+
+    // Start TLS proxy (unprivileged — uses pre-bound listener).
+    #[cfg(feature = "tls")]
+    let _tls_proxy = tls_state.map(|state| {
+        microsandbox_network::tls::TlsProxy::start_noop(
+            state.pending,
+            state.cert_cache,
+            state.bypass,
+            state.client_config,
+            state.redirect_guard,
+        )
+    });
 
     // Signal readiness only after all fallible startup work has succeeded.
     let json = serde_json::to_string(&ready_info).expect("failed to serialize MsbnetReady");
@@ -281,12 +333,44 @@ fn build_config_from_flags(args: &Args) -> NetworkConfig {
         rebind_protection: !args.no_dns_rebind_protection,
     };
 
+    // TLS config from individual flags.
+    #[cfg(feature = "tls")]
+    let tls = {
+        if args.no_tls {
+            Default::default()
+        } else {
+            let has_tls_flags = !args.tls_intercepted_port.is_empty()
+                || !args.tls_bypass.is_empty()
+                || args.no_tls_verify_upstream;
+
+            if has_tls_flags {
+                microsandbox_network::tls::TlsConfig {
+                    enabled: true,
+                    intercepted_ports: if args.tls_intercepted_port.is_empty() {
+                        vec![443]
+                    } else {
+                        args.tls_intercepted_port.clone()
+                    },
+                    bypass: args.tls_bypass.clone(),
+                    verify_upstream: !args.no_tls_verify_upstream,
+                    ..Default::default()
+                }
+            } else {
+                Default::default()
+            }
+        }
+    };
+
+    #[cfg(not(feature = "tls"))]
+    let tls = Default::default();
+
     NetworkConfig {
         enabled: true,
         interface,
         ports,
         policy,
         dns,
+        tls,
     }
 }
 
@@ -481,6 +565,88 @@ fn bootstrap(
 
     let ready = vmnet.ready_info();
     (vmnet, ready)
+}
+
+/// Intermediate state from privileged TLS setup, consumed after privilege drop.
+#[cfg(feature = "tls")]
+struct TlsSetupState {
+    pending: microsandbox_network::tls::PendingTlsProxy,
+    cert_cache: Arc<microsandbox_network::tls::CertCache>,
+    bypass: microsandbox_network::tls::BypassMatcher,
+    client_config: Arc<rustls::ClientConfig>,
+    ca_pem: String,
+    /// Owns redirect rule cleanup. Created immediately after install() succeeds
+    /// so that if any subsequent step panics, the Drop impl cleans up the rules.
+    redirect_guard: microsandbox_network::tls::RedirectGuard,
+}
+
+/// Performs privileged TLS setup: load/generate CA, bind proxy, install redirect rules.
+#[cfg(feature = "tls")]
+fn setup_tls(
+    rt: &tokio::runtime::Runtime,
+    network_config: &NetworkConfig,
+    guest_ipv4: Option<Ipv4Addr>,
+    guest_ipv6: Option<Ipv6Addr>,
+    slot: u32,
+    ready_info: &microsandbox_network::ready::MsbnetReady,
+) -> TlsSetupState {
+    use microsandbox_network::tls;
+
+    // Load or generate the CA keypair.
+    let ca = tls::load_or_generate(&network_config.tls.ca)
+        .expect("failed to load or generate TLS CA");
+    let ca_pem = ca.cert_pem.clone();
+
+    // Build cert cache.
+    let cert_cache = Arc::new(tls::CertCache::new(ca, &network_config.tls.cache));
+
+    // Bind proxy listener (privileged — may need a low port).
+    let pending = rt
+        .block_on(tls::bind_proxy())
+        .expect("failed to bind TLS proxy listener");
+
+    // Install kernel redirect rules.
+    let ipv6_prefix = guest_ipv6.map(|addr| {
+        ipnetwork::Ipv6Network::new(addr, 64)
+            .expect("failed to create IPv6 /64 prefix for TLS redirect")
+    });
+
+    tls::install(&tls::RedirectConfig {
+        guest_ipv4,
+        guest_ipv6_prefix: ipv6_prefix,
+        intercepted_ports: network_config.tls.intercepted_ports.clone(),
+        proxy_port: pending.port,
+        sandbox_id: slot,
+        ifname: ready_info.ifname.clone(),
+    })
+    .expect("failed to install TLS redirect rules");
+
+    // Create the redirect guard immediately after install succeeds.
+    // If any subsequent step panics, the Drop impl cleans up the rules.
+    let redirect_guard = tls::RedirectGuard::new(slot);
+
+    // Build upstream TLS client config.
+    let client_config = tls::build_client_config(network_config.tls.verify_upstream)
+        .expect("failed to build upstream TLS client config");
+
+    // Build bypass matcher.
+    let bypass = tls::BypassMatcher::new(&network_config.tls.bypass);
+
+    tracing::info!(
+        proxy_port = pending.port,
+        intercepted_ports = ?network_config.tls.intercepted_ports,
+        bypass_count = network_config.tls.bypass.len(),
+        "TLS interception setup complete"
+    );
+
+    TlsSetupState {
+        pending,
+        cert_cache,
+        bypass,
+        client_config,
+        ca_pem,
+        redirect_guard,
+    }
 }
 
 /// Drops privileges to the real uid/gid.
@@ -689,6 +855,7 @@ mod tests {
                 blocked_suffixes: vec![],
                 rebind_protection: true,
             },
+            tls: Default::default(),
         };
 
         let json = serde_json::to_string(&config).unwrap();

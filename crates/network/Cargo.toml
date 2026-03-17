@@ -13,20 +13,43 @@ path = "bin/main.rs"
 [lib]
 path = "lib/lib.rs"
 
+[features]
+default = ["tls"]
+tls = [
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:rustls-pemfile",
+    "dep:rustls-native-certs",
+    "dep:rcgen",
+    "dep:lru",
+]
+
 [dependencies]
 clap = { workspace = true }
+dirs = { workspace = true }
 etherparse = { workspace = true }
 hickory-proto = { workspace = true }
 hickory-resolver = { workspace = true }
 ipnetwork = { workspace = true }
 libc = { workspace = true }
+lru = { workspace = true, optional = true }
 microsandbox-protocol = { path = "../protocol" }
+microsandbox-utils = { path = "../utils" }
 nix = { workspace = true, features = ["user"] }
+rcgen = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rustls-native-certs = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+time = "0.3"
+tokio-rustls = { workspace = true, optional = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"

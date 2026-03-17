@@ -39,6 +39,26 @@ pub struct MsbnetReady {
 
     /// Resolved IPv6 network parameters.
     pub ipv6: Option<MsbnetReadyIpv6>,
+
+    /// TLS interception readiness info. `None` when TLS is disabled.
+    #[serde(default)]
+    pub tls: Option<MsbnetReadyTls>,
+}
+
+/// TLS interception readiness info reported by `msbnet`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MsbnetReadyTls {
+    /// Whether TLS interception is active.
+    pub enabled: bool,
+
+    /// Local port the TLS proxy is listening on.
+    pub proxy_port: u16,
+
+    /// PEM-encoded CA certificate for guest trust store injection.
+    pub ca_pem: String,
+
+    /// Ports being intercepted.
+    pub intercepted_ports: Vec<u16>,
 }
 
 /// Resolved IPv4 parameters reported by `msbnet`.
@@ -153,6 +173,7 @@ mod tests {
                 gateway: "fd42:6d73:62:2a::1".to_string(),
                 dns: vec!["fd42:6d73:62:2a::1".to_string()],
             }),
+            tls: None,
         };
 
         let json = serde_json::to_string(&ready).unwrap();
@@ -188,6 +209,7 @@ mod tests {
                 gateway: "fd42:6d73:62:2a::1".to_string(),
                 dns: vec!["fd42:6d73:62:2a::1".to_string()],
             }),
+            tls: None,
         };
 
         let vars = ready.to_env_vars();
@@ -219,6 +241,7 @@ mod tests {
                 dns: vec![],
             }),
             ipv6: None,
+            tls: None,
         };
 
         let vars = ready.to_env_vars();
