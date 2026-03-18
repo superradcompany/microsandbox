@@ -12,8 +12,47 @@ env:
   LIBKRUNFW_ABI: "5"
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Build kernel.c on Linux for macOS libkrunfw linking
+  # ---------------------------------------------------------------------------
+  build-kernel:
+    name: Build kernel.c (aarch64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Cache kernel.c
+        id: cache-kernel
+        uses: actions/cache@v4
+        with:
+          path: vendor/libkrunfw/kernel.c
+          key: kernel-c-aarch64-${{ hashFiles('vendor/libkrunfw/**') }}
+
+      - name: Install kernel build deps
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y gcc make flex bison libelf-dev bc python3-pyelftools
+
+      - name: Build kernel.c
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          cd vendor/libkrunfw
+          make -j$(nproc)
+
+      - name: Upload kernel.c
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-c-aarch64
+          path: vendor/libkrunfw/kernel.c
+
+  # ---------------------------------------------------------------------------
+  # Check
+  # ---------------------------------------------------------------------------
   check:
     name: Check (${{ matrix.target }})
+    needs: build-kernel
+    if: always()
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -63,21 +102,16 @@ jobs:
           mkdir -p build
           cp crates/agentd/target/${{ matrix.agentd_target }}/release/agentd build/agentd
 
-      # -- agentd (macOS: Docker cross-compilation via Colima) --
-      - name: Install and start Colima (macOS)
+      # -- agentd (macOS: cross-compile with musl-cross) --
+      - name: Build agentd (musl-cross)
         if: matrix.os == 'darwin'
         run: |
-          brew install colima docker
-          colima start
-
-      - name: Build agentd (Docker)
-        if: matrix.os == 'darwin'
-        run: |
-          docker build -f Dockerfile.agentd -t microsandbox-agentd-build .
+          brew install filosottile/musl-cross/musl-cross
+          rustup target add aarch64-unknown-linux-musl
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc \
+            cargo build --release --manifest-path crates/agentd/Cargo.toml --target aarch64-unknown-linux-musl
           mkdir -p build
-          id=$(docker create microsandbox-agentd-build /dev/null)
-          docker cp "$id:/agentd" build/agentd
-          docker rm "$id"
+          cp crates/agentd/target/aarch64-unknown-linux-musl/release/agentd build/agentd
 
       # -- libkrunfw (cached) --
       - name: Cache libkrunfw
@@ -99,11 +133,17 @@ jobs:
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
 
+      - name: Download kernel.c (macOS)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'darwin'
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-c-aarch64
+          path: vendor/libkrunfw/
+
       - name: Build libkrunfw (macOS)
         if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'darwin'
         run: |
           cd vendor/libkrunfw
-          ./build_in_docker.sh
           cc -fPIC -DABI_VERSION=${{ env.LIBKRUNFW_ABI }} -shared -o libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib kernel.c
           cd ../..
           mkdir -p build
