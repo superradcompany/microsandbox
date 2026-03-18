@@ -533,7 +533,7 @@ pub(crate) fn open_inode_fd(fs: &PassthroughFs, inode: u64, flags: i32) -> io::R
         let fd = unsafe {
             libc::openat(
                 fs.proc_self_fd.as_raw_fd(),
-                fd_str.as_ptr(),
+                fd_str,
                 flags | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             )
         };

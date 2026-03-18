@@ -201,7 +201,7 @@ pub(crate) fn do_readlink(fs: &OverlayFs, _ctx: Context, ino: u64) -> io::Result
 
         // File-backed symlink: reopen for reading (safe — it's a regular file).
         let fd = inode::open_node_fd(fs, ino, libc::O_RDONLY)?;
-        let _close = scopeguard::guard(fd, |fd| unsafe { libc::close(fd) });
+        let _close = scopeguard::guard(fd, |fd| unsafe { libc::close(fd); });
 
         // Verify xattr says S_IFLNK — missing or wrong type is an integrity error.
         if let Some(ovr) = stat_override::get_override(fd)? {

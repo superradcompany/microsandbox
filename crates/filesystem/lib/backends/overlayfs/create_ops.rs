@@ -18,7 +18,7 @@
 use std::{
     ffi::CStr,
     io,
-    os::fd::FromRawFd,
+    os::fd::{AsRawFd, FromRawFd},
     sync::{Arc, RwLock, atomic::Ordering},
 };
 

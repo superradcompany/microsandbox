@@ -65,9 +65,9 @@ pub(crate) fn build_stat_from_meta(ino: u64, meta: &InodeMeta) -> stat64 {
 
     #[cfg(target_os = "linux")]
     {
-        st.st_mode = meta.mode;
-        st.st_nlink = meta.nlink;
-        st.st_rdev = meta.rdev as u64;
+        st.st_mode = meta.mode as _;
+        st.st_nlink = meta.nlink as _;
+        st.st_rdev = meta.rdev as _;
     }
 
     #[cfg(target_os = "macos")]
