@@ -87,7 +87,6 @@ pub const GITHUB_ORG: &str = "zerocore-ai";
 pub const MICROSANDBOX_REPO: &str = "microsandbox";
 
 /// libkrunfw repository name.
-pub const LIBKRUNFW_REPO: &str = "libkrunfw";
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -103,7 +102,7 @@ pub fn libkrunfw_filename(os: &str) -> String {
 }
 
 /// Returns the GitHub release download URL for libkrunfw.
-pub fn libkrunfw_download_url(arch: &str, os: &str) -> String {
+pub fn libkrunfw_download_url(version: &str, arch: &str, os: &str) -> String {
     let (target_os, ext) = if os == "macos" {
         ("darwin", "dylib")
     } else {
@@ -111,13 +110,13 @@ pub fn libkrunfw_download_url(arch: &str, os: &str) -> String {
     };
 
     format!(
-        "https://github.com/{GITHUB_ORG}/{LIBKRUNFW_REPO}/releases/download/v{LIBKRUNFW_VERSION}/libkrunfw-{target_os}-{arch}.{ext}"
+        "https://github.com/{GITHUB_ORG}/{MICROSANDBOX_REPO}/releases/download/v{version}/libkrunfw-{target_os}-{arch}.{ext}"
     )
 }
 
 /// Returns the GitHub release download URL for the agentd binary.
 pub fn agentd_download_url(version: &str, arch: &str) -> String {
     format!(
-        "https://github.com/{GITHUB_ORG}/{MICROSANDBOX_REPO}/releases/download/agentd-v{version}/{AGENTD_BINARY}-{arch}"
+        "https://github.com/{GITHUB_ORG}/{MICROSANDBOX_REPO}/releases/download/v{version}/{AGENTD_BINARY}-{arch}"
     )
 }

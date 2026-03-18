@@ -1,0 +1,127 @@
+name: Check
+
+on:
+  push:
+    branches: [microsandbox]
+  pull_request:
+    branches: [microsandbox]
+
+env:
+  CARGO_TERM_COLOR: always
+  LIBKRUNFW_VERSION: "5.2.1"
+  LIBKRUNFW_ABI: "5"
+
+jobs:
+  check:
+    name: Check (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-latest
+            arch: x86_64
+            os: linux
+            agentd_target: x86_64-unknown-linux-musl
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+            os: linux
+            agentd_target: aarch64-unknown-linux-musl
+          - target: darwin-aarch64
+            runner: macos-14
+            arch: aarch64
+            os: darwin
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # -- Linux build deps --
+      - name: Install build deps (Linux)
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools gcc make flex bison libelf-dev bc python3-pyelftools
+
+      # -- agentd (Linux: native musl) --
+      - name: Build agentd (musl)
+        if: matrix.os == 'linux'
+        run: |
+          rustup target add ${{ matrix.agentd_target }}
+          cargo build --release -p microsandbox-agentd --target ${{ matrix.agentd_target }}
+          mkdir -p build
+          cp target/${{ matrix.agentd_target }}/release/agentd build/agentd
+
+      # -- agentd (macOS: Docker cross-compilation) --
+      - name: Setup Docker (macOS)
+        if: matrix.os == 'darwin'
+        uses: crazy-max/ghaction-setup-docker@v3
+
+      - name: Build agentd (Docker)
+        if: matrix.os == 'darwin'
+        run: |
+          docker build -f Dockerfile.agentd -t microsandbox-agentd-build .
+          mkdir -p build
+          id=$(docker create microsandbox-agentd-build /dev/null)
+          docker cp "$id:/agentd" build/agentd
+          docker rm "$id"
+
+      # -- libkrunfw (cached) --
+      - name: Cache libkrunfw
+        id: cache-libkrunfw
+        uses: actions/cache@v4
+        with:
+          path: build/libkrunfw*
+          key: libkrunfw-${{ matrix.target }}-${{ hashFiles('vendor/libkrunfw/**') }}
+
+      - name: Build libkrunfw (Linux)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'linux'
+        run: |
+          cd vendor/libkrunfw
+          make -j$(nproc)
+          cd ../..
+          mkdir -p build
+          cp vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} build/
+          cd build
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
+
+      - name: Build libkrunfw (macOS)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'darwin'
+        run: |
+          cd vendor/libkrunfw
+          ./build_in_docker.sh
+          cc -fPIC -DABI_VERSION=${{ env.LIBKRUNFW_ABI }} -shared -o libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib kernel.c
+          cd ../..
+          mkdir -p build
+          cp vendor/libkrunfw/libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib build/
+          cd build
+          ln -sf libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib libkrunfw.dylib
+
+      # -- Checks (workspace) --
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --no-deps
+
+      # -- Checks (agentd — excluded from workspace, Linux-only) --
+      - name: Format agentd
+        if: matrix.os == 'linux'
+        run: cargo fmt --manifest-path crates/agentd/Cargo.toml -- --check
+
+      - name: Clippy agentd
+        if: matrix.os == 'linux'
+        run: cargo clippy --manifest-path crates/agentd/Cargo.toml --target ${{ matrix.agentd_target }} -- -D warnings
