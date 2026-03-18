@@ -34,14 +34,13 @@ jobs:
             agentd_target: aarch64-unknown-linux-musl
             libkrunfw_file: libkrunfw.so.5.2.1
             libkrunfw_asset: libkrunfw-linux-aarch64.so
-          # TODO: uncomment when Docker on macOS runners is reliable
-          # - target: darwin-aarch64
-          #   runner: macos-14
-          #   arch: aarch64
-          #   os: darwin
-          #   agentd_target: ""
-          #   libkrunfw_file: libkrunfw.5.dylib
-          #   libkrunfw_asset: libkrunfw-darwin-aarch64.dylib
+          - target: darwin-aarch64
+            runner: macos-14
+            arch: aarch64
+            os: darwin
+            agentd_target: ""
+            libkrunfw_file: libkrunfw.5.dylib
+            libkrunfw_asset: libkrunfw-darwin-aarch64.dylib
 
     steps:
       - uses: actions/checkout@v4
@@ -66,19 +65,21 @@ jobs:
           mkdir -p build
           cp crates/agentd/target/${{ matrix.agentd_target }}/release/agentd build/agentd
 
-      # -- agentd (macOS: Docker cross-compilation) --
-      # - name: Setup Docker (macOS)
-      #   if: matrix.os == 'darwin'
-      #   uses: docker/setup-docker-action@v4
+      # -- agentd (macOS: Docker cross-compilation via Colima) --
+      - name: Install and start Colima (macOS)
+        if: matrix.os == 'darwin'
+        run: |
+          brew install colima docker
+          colima start
 
-      # - name: Build agentd (Docker)
-      #   if: matrix.os == 'darwin'
-      #   run: |
-      #     docker build -f Dockerfile.agentd -t microsandbox-agentd-build .
-      #     mkdir -p build
-      #     id=$(docker create microsandbox-agentd-build /dev/null)
-      #     docker cp "$id:/agentd" build/agentd
-      #     docker rm "$id"
+      - name: Build agentd (Docker)
+        if: matrix.os == 'darwin'
+        run: |
+          docker build -f Dockerfile.agentd -t microsandbox-agentd-build .
+          mkdir -p build
+          id=$(docker create microsandbox-agentd-build /dev/null)
+          docker cp "$id:/agentd" build/agentd
+          docker rm "$id"
 
       # -- libkrunfw (cached) --
       - name: Cache libkrunfw
@@ -100,17 +101,17 @@ jobs:
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
 
-      # - name: Build libkrunfw (macOS)
-      #   if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'darwin'
-      #   run: |
-      #     cd vendor/libkrunfw
-      #     ./build_in_docker.sh
-      #     cc -fPIC -DABI_VERSION=${{ env.LIBKRUNFW_ABI }} -shared -o libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib kernel.c
-      #     cd ../..
-      #     mkdir -p build
-      #     cp vendor/libkrunfw/libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib build/
-      #     cd build
-      #     ln -sf libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib libkrunfw.dylib
+      - name: Build libkrunfw (macOS)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'darwin'
+        run: |
+          cd vendor/libkrunfw
+          ./build_in_docker.sh
+          cc -fPIC -DABI_VERSION=${{ env.LIBKRUNFW_ABI }} -shared -o libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib kernel.c
+          cd ../..
+          mkdir -p build
+          cp vendor/libkrunfw/libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib build/
+          cd build
+          ln -sf libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib libkrunfw.dylib
 
       # -- msb --
       - name: Build msb
@@ -126,9 +127,9 @@ jobs:
           cp target/release/msbnet build/msbnet
 
       # -- macOS codesign --
-      # - name: Codesign msb
-      #   if: matrix.os == 'darwin'
-      #   run: codesign --entitlements entitlements.plist --force -s - build/msb
+      - name: Codesign msb
+        if: matrix.os == 'darwin'
+        run: codesign --entitlements entitlements.plist --force -s - build/msb
 
       # -- Stage release artifacts --
       - name: Stage artifacts
