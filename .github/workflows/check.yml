@@ -55,14 +55,14 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           rustup target add ${{ matrix.agentd_target }}
-          cargo build --release -p microsandbox-agentd --target ${{ matrix.agentd_target }}
+          cargo build --release --manifest-path crates/agentd/Cargo.toml --target ${{ matrix.agentd_target }}
           mkdir -p build
-          cp target/${{ matrix.agentd_target }}/release/agentd build/agentd
+          cp crates/agentd/target/${{ matrix.agentd_target }}/release/agentd build/agentd
 
       # -- agentd (macOS: Docker cross-compilation) --
       - name: Setup Docker (macOS)
         if: matrix.os == 'darwin'
-        uses: crazy-max/ghaction-setup-docker@v3
+        uses: docker/setup-docker-action@v4
 
       - name: Build agentd (Docker)
         if: matrix.os == 'darwin'
