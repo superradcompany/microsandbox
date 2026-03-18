@@ -30,7 +30,7 @@ use crate::{
     MicrosandboxResult,
     agent::AgentBridge,
     db::entity::{
-        image as image_entity, sandbox as sandbox_entity, sandbox::SandboxStatus,
+        image as image_entity, sandbox as sandbox_entity,
         sandbox_image as sandbox_image_entity,
     },
     runtime::{SupervisorHandle, spawn_supervisor},
@@ -55,6 +55,7 @@ pub use types::{
     DiskImageFormat, ImageBuilder, ImageSource, IntoImage, MountBuilder, Patch, RootfsSource,
     SecretsConfig, SshConfig, VolumeMount,
 };
+pub use crate::db::entity::sandbox::SandboxStatus;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -235,6 +236,78 @@ impl Sandbox {
         model.into_active_model().delete(db).await?;
 
         Ok(())
+    }
+
+    /// Stop a running sandbox by name.
+    ///
+    /// Finds the supervisor PID from the database and sends SIGTERM.
+    pub async fn stop_by_name(name: &str) -> MicrosandboxResult<()> {
+        use crate::db::entity::supervisor as supervisor_entity;
+
+        let db =
+            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let sandbox = load_sandbox_record(db, name).await?;
+
+        if sandbox.status != SandboxStatus::Running && sandbox.status != SandboxStatus::Draining {
+            return Err(crate::MicrosandboxError::Custom(format!(
+                "sandbox '{name}' is not running"
+            )));
+        }
+
+        let supervisor = supervisor_entity::Entity::find()
+            .filter(supervisor_entity::Column::SandboxId.eq(sandbox.id))
+            .filter(
+                supervisor_entity::Column::Status
+                    .eq(supervisor_entity::SupervisorStatus::Running),
+            )
+            .order_by_desc(supervisor_entity::Column::StartedAt)
+            .one(db)
+            .await?;
+
+        match supervisor.and_then(|s| s.pid) {
+            Some(pid) => {
+                nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGTERM,
+                )?;
+                Ok(())
+            }
+            None => Err(crate::MicrosandboxError::Custom(format!(
+                "no running supervisor found for sandbox '{name}'"
+            ))),
+        }
+    }
+
+    /// Kill a running sandbox by name (SIGKILL).
+    pub async fn kill_by_name(name: &str) -> MicrosandboxResult<()> {
+        use crate::db::entity::supervisor as supervisor_entity;
+
+        let db =
+            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let sandbox = load_sandbox_record(db, name).await?;
+
+        let supervisor = supervisor_entity::Entity::find()
+            .filter(supervisor_entity::Column::SandboxId.eq(sandbox.id))
+            .filter(
+                supervisor_entity::Column::Status
+                    .eq(supervisor_entity::SupervisorStatus::Running),
+            )
+            .order_by_desc(supervisor_entity::Column::StartedAt)
+            .one(db)
+            .await?;
+
+        match supervisor.and_then(|s| s.pid) {
+            Some(pid) => {
+                nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                )?;
+                Ok(())
+            }
+            None => Err(crate::MicrosandboxError::Custom(format!(
+                "no running supervisor found for sandbox '{name}'"
+            ))),
+        }
     }
 }
 

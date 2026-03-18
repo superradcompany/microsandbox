@@ -2,6 +2,9 @@
 
 use clap::{Parser, Subcommand};
 use microsandbox_cli::{
+    commands::{
+        attach, create, exec, inspect, list, ps, pull, remove, run, shell, start, stop,
+    },
     log_args::{self, LogArgs},
     microvm_cmd::{self, MicrovmArgs},
     supervisor_cmd::{self, SupervisorArgs},
@@ -26,10 +29,50 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Run the supervisor process.
+    #[command(hide = true)]
     Supervisor(SupervisorArgs),
 
     /// Run the microVM process.
+    #[command(hide = true)]
     Microvm(MicrovmArgs),
+
+    /// Create and start a new sandbox.
+    Run(run::RunArgs),
+
+    /// Create and boot a fresh sandbox (no workload).
+    Create(create::CreateArgs),
+
+    /// Start/resume an existing stopped sandbox.
+    Start(start::StartArgs),
+
+    /// Stop a running sandbox.
+    Stop(stop::StopArgs),
+
+    /// List all sandboxes.
+    #[command(visible_alias = "ls")]
+    List(list::ListArgs),
+
+    /// Show running sandboxes.
+    Ps(ps::PsArgs),
+
+    /// Remove a stopped sandbox.
+    #[command(visible_alias = "rm")]
+    Remove(remove::RemoveArgs),
+
+    /// Execute a command in a sandbox.
+    Exec(exec::ExecArgs),
+
+    /// Attach to a sandbox with interactive terminal.
+    Attach(attach::AttachArgs),
+
+    /// Interactive shell in a sandbox.
+    Shell(shell::ShellArgs),
+
+    /// Pull an image from a registry.
+    Pull(pull::PullArgs),
+
+    /// Show detailed sandbox information.
+    Inspect(inspect::InspectArgs),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -51,13 +94,30 @@ async fn main() {
     let log_level = cli.logs.selected_level();
     log_args::init_tracing(log_level);
 
-    let result = match cli.command {
-        Commands::Supervisor(args) => supervisor_cmd::run(args, log_level).await,
-        Commands::Microvm(args) => microvm_cmd::run(args),
+    let result: Result<(), Box<dyn std::error::Error>> = match cli.command {
+        // Hidden internal commands.
+        Commands::Supervisor(args) => supervisor_cmd::run(args, log_level)
+            .await
+            .map_err(Into::into),
+        Commands::Microvm(args) => microvm_cmd::run(args).map_err(Into::into),
+
+        // User-facing commands.
+        Commands::Run(args) => run::run(args).await.map_err(Into::into),
+        Commands::Create(args) => create::run(args).await.map_err(Into::into),
+        Commands::Start(args) => start::run(args).await.map_err(Into::into),
+        Commands::Stop(args) => stop::run(args).await.map_err(Into::into),
+        Commands::List(args) => list::run(args).await.map_err(Into::into),
+        Commands::Ps(args) => ps::run(args).await.map_err(Into::into),
+        Commands::Remove(args) => remove::run(args).await.map_err(Into::into),
+        Commands::Exec(args) => exec::run(args).await.map_err(Into::into),
+        Commands::Attach(args) => attach::run(args).await.map_err(Into::into),
+        Commands::Shell(args) => shell::run(args).await.map_err(Into::into),
+        Commands::Pull(args) => pull::run(args).await.map_err(Into::into),
+        Commands::Inspect(args) => inspect::run(args).await.map_err(Into::into),
     };
 
     if let Err(e) = result {
-        eprintln!("error: {e}");
+        microsandbox_cli::ui::error(&e.to_string());
         std::process::exit(1);
     }
 }
