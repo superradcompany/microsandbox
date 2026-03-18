@@ -8,7 +8,9 @@
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+pub mod commands;
 pub mod log_args;
 pub mod microvm_cmd;
 pub mod styles;
 pub mod supervisor_cmd;
+pub mod ui;

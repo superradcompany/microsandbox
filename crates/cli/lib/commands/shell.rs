@@ -1,0 +1,75 @@
+//! `msb shell` command — interactive shell in a sandbox (alias for attach).
+
+use clap::Args;
+use microsandbox::sandbox::{Sandbox, SandboxStatus};
+
+use crate::ui;
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// Interactive shell in a running sandbox.
+#[derive(Debug, Args)]
+pub struct ShellArgs {
+    /// Name of the sandbox.
+    pub name: String,
+
+    /// Shell to use (overrides sandbox default).
+    #[arg(long)]
+    pub shell: Option<String>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Execute the `msb shell` command.
+pub async fn run(args: ShellArgs) -> anyhow::Result<()> {
+    let info = Sandbox::get(&args.name).await?;
+
+    let sandbox = match info.status {
+        SandboxStatus::Running | SandboxStatus::Draining => {
+            anyhow::bail!(
+                "sandbox '{}' is already running in another process; \
+                 cross-process attach is not yet supported",
+                args.name
+            );
+        }
+        SandboxStatus::Stopped | SandboxStatus::Crashed => {
+            let spinner = ui::Spinner::start("Starting", &args.name);
+            match Sandbox::start(&args.name).await {
+                Ok(s) => {
+                    spinner.finish_success("Started");
+                    s
+                }
+                Err(e) => {
+                    spinner.finish_error();
+                    return Err(e.into());
+                }
+            }
+        }
+        _ => {
+            anyhow::bail!(
+                "sandbox '{}' is in state {:?} and cannot be attached to",
+                args.name,
+                info.status
+            );
+        }
+    };
+
+    // Use the specified shell or default.
+    let exit_code = match args.shell {
+        Some(ref shell) => sandbox.attach(shell.as_str(), ()).await?,
+        None => sandbox.attach((), ()).await?,
+    };
+
+    let _ = sandbox.stop().await;
+    let _ = sandbox.wait().await;
+
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+
+    Ok(())
+}
