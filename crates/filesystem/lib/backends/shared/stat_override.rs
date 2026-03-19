@@ -81,12 +81,12 @@ pub(crate) fn patched_stat(fd: RawFd, mut st: stat64) -> io::Result<stat64> {
                 st.st_mode = ovr.mode as u16;
             }
 
-            if ovr.mode & libc::S_IFMT as u32 == libc::S_IFBLK as u32
-                || ovr.mode & libc::S_IFMT as u32 == libc::S_IFCHR as u32
+            if ovr.mode & platform::MODE_TYPE_MASK == platform::MODE_BLK
+                || ovr.mode & platform::MODE_TYPE_MASK == platform::MODE_CHR
             {
                 #[cfg(target_os = "linux")]
                 {
-                    st.st_rdev = ovr.rdev as u64;
+                    st.st_rdev = ovr.rdev;
                 }
                 #[cfg(target_os = "macos")]
                 {

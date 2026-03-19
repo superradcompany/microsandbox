@@ -128,7 +128,7 @@ pub(crate) fn do_readdirplus(
             Ok(entry) => {
                 // Correct d_type from the lookup's stat (free: no extra syscalls).
                 let mut de = de;
-                let file_type = entry.attr.st_mode as u32 & libc::S_IFMT as u32;
+                let file_type = platform::mode_file_type(entry.attr.st_mode);
                 de.type_ = mode_to_dtype(file_type);
                 result.push((de, entry));
             }
@@ -165,7 +165,7 @@ fn inject_init_entry(entries: &mut Vec<DirEntry<'static>>) {
         entries.push(DirEntry {
             ino: init_binary::INIT_INODE,
             offset: next_offset,
-            type_: libc::DT_REG as u32,
+            type_: platform::DIRENT_REG,
             name,
         });
     }
@@ -173,15 +173,7 @@ fn inject_init_entry(entries: &mut Vec<DirEntry<'static>>) {
 
 /// Convert a file mode type to a directory entry type.
 fn mode_to_dtype(mode_type: u32) -> u32 {
-    match mode_type {
-        m if m == libc::S_IFLNK as u32 => libc::DT_LNK as u32,
-        m if m == libc::S_IFDIR as u32 => libc::DT_DIR as u32,
-        m if m == libc::S_IFCHR as u32 => libc::DT_CHR as u32,
-        m if m == libc::S_IFBLK as u32 => libc::DT_BLK as u32,
-        m if m == libc::S_IFIFO as u32 => libc::DT_FIFO as u32,
-        m if m == libc::S_IFSOCK as u32 => libc::DT_SOCK as u32,
-        _ => libc::DT_REG as u32,
-    }
+    platform::dirent_type_from_mode(mode_type)
 }
 
 /// Read directory entries using `getdents64` with FUSE size as buffer hint.

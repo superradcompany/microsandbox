@@ -111,6 +111,111 @@ const LINUX_ECANCELED: i32 = 125;
 const LINUX_EOWNERDEAD: i32 = 130;
 const LINUX_ENOTRECOVERABLE: i32 = 131;
 
+#[cfg(target_os = "linux")]
+pub(crate) const MODE_TYPE_MASK: u32 = libc::S_IFMT;
+#[cfg(target_os = "macos")]
+pub(crate) const MODE_TYPE_MASK: u32 = libc::S_IFMT as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const MODE_REG: u32 = libc::S_IFREG;
+#[cfg(target_os = "macos")]
+pub(crate) const MODE_REG: u32 = libc::S_IFREG as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const MODE_DIR: u32 = libc::S_IFDIR;
+#[cfg(target_os = "macos")]
+pub(crate) const MODE_DIR: u32 = libc::S_IFDIR as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const MODE_LNK: u32 = libc::S_IFLNK;
+#[cfg(target_os = "macos")]
+pub(crate) const MODE_LNK: u32 = libc::S_IFLNK as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const MODE_CHR: u32 = libc::S_IFCHR;
+#[cfg(target_os = "macos")]
+pub(crate) const MODE_CHR: u32 = libc::S_IFCHR as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const MODE_BLK: u32 = libc::S_IFBLK;
+#[cfg(target_os = "macos")]
+pub(crate) const MODE_BLK: u32 = libc::S_IFBLK as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const MODE_FIFO: u32 = libc::S_IFIFO;
+#[cfg(target_os = "macos")]
+pub(crate) const MODE_FIFO: u32 = libc::S_IFIFO as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const MODE_SOCK: u32 = libc::S_IFSOCK;
+#[cfg(target_os = "macos")]
+pub(crate) const MODE_SOCK: u32 = libc::S_IFSOCK as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const MODE_SETUID: u32 = libc::S_ISUID;
+#[cfg(target_os = "macos")]
+pub(crate) const MODE_SETUID: u32 = libc::S_ISUID as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const MODE_SETGID: u32 = libc::S_ISGID;
+#[cfg(target_os = "macos")]
+pub(crate) const MODE_SETGID: u32 = libc::S_ISGID as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const DIRENT_REG: u32 = libc::DT_REG;
+#[cfg(target_os = "macos")]
+pub(crate) const DIRENT_REG: u32 = libc::DT_REG as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const DIRENT_DIR: u32 = libc::DT_DIR;
+#[cfg(target_os = "macos")]
+pub(crate) const DIRENT_DIR: u32 = libc::DT_DIR as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const DIRENT_LNK: u32 = libc::DT_LNK;
+#[cfg(target_os = "macos")]
+pub(crate) const DIRENT_LNK: u32 = libc::DT_LNK as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const DIRENT_CHR: u32 = libc::DT_CHR;
+#[cfg(target_os = "macos")]
+pub(crate) const DIRENT_CHR: u32 = libc::DT_CHR as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const DIRENT_BLK: u32 = libc::DT_BLK;
+#[cfg(target_os = "macos")]
+pub(crate) const DIRENT_BLK: u32 = libc::DT_BLK as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const DIRENT_FIFO: u32 = libc::DT_FIFO;
+#[cfg(target_os = "macos")]
+pub(crate) const DIRENT_FIFO: u32 = libc::DT_FIFO as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const DIRENT_SOCK: u32 = libc::DT_SOCK;
+#[cfg(target_os = "macos")]
+pub(crate) const DIRENT_SOCK: u32 = libc::DT_SOCK as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const ACCESS_F_OK: u32 = libc::F_OK;
+#[cfg(target_os = "macos")]
+pub(crate) const ACCESS_F_OK: u32 = libc::F_OK as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const ACCESS_R_OK: u32 = libc::R_OK;
+#[cfg(target_os = "macos")]
+pub(crate) const ACCESS_R_OK: u32 = libc::R_OK as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const ACCESS_W_OK: u32 = libc::W_OK;
+#[cfg(target_os = "macos")]
+pub(crate) const ACCESS_W_OK: u32 = libc::W_OK as u32;
+
+#[cfg(target_os = "linux")]
+pub(crate) const ACCESS_X_OK: u32 = libc::X_OK;
+#[cfg(target_os = "macos")]
+pub(crate) const ACCESS_X_OK: u32 = libc::X_OK as u32;
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -352,6 +457,77 @@ pub(crate) fn fstat(fd: RawFd) -> io::Result<stat64> {
         Err(linux_error(io::Error::last_os_error()))
     } else {
         Ok(st)
+    }
+}
+
+/// Normalize a mode value to `u32` across platforms.
+#[cfg(target_os = "linux")]
+pub(crate) fn mode_u32(mode: libc::mode_t) -> u32 {
+    mode
+}
+
+/// Normalize a mode value to `u32` across platforms.
+#[cfg(target_os = "macos")]
+pub(crate) fn mode_u32(mode: libc::mode_t) -> u32 {
+    mode as u32
+}
+
+/// Extract the file type bits from a mode value.
+pub(crate) fn mode_file_type(mode: libc::mode_t) -> u32 {
+    mode_u32(mode) & MODE_TYPE_MASK
+}
+
+/// Convert a file type bitmask to a dirent type value.
+pub(crate) fn dirent_type_from_mode(file_type: u32) -> u32 {
+    match file_type {
+        MODE_LNK => DIRENT_LNK,
+        MODE_DIR => DIRENT_DIR,
+        MODE_CHR => DIRENT_CHR,
+        MODE_BLK => DIRENT_BLK,
+        MODE_FIFO => DIRENT_FIFO,
+        MODE_SOCK => DIRENT_SOCK,
+        _ => DIRENT_REG,
+    }
+}
+
+/// Normalize `st_ino` to `u64` across platforms.
+pub(crate) fn stat_ino(st: &stat64) -> u64 {
+    st.st_ino
+}
+
+/// Normalize `st_dev` to `u64` across platforms.
+#[cfg(target_os = "linux")]
+pub(crate) fn stat_dev(st: &stat64) -> u64 {
+    st.st_dev
+}
+
+/// Normalize `st_dev` to `u64` across platforms.
+#[cfg(target_os = "macos")]
+pub(crate) fn stat_dev(st: &stat64) -> u64 {
+    st.st_dev as u64
+}
+
+/// Read the target of a symlink opened by file descriptor (Linux only).
+///
+/// This uses `readlinkat(fd, "", ...)` so the kernel reads the symlink target
+/// referenced by the already-pinned fd itself. Using `/proc/self/fd/N` here
+/// would instead expose the procfs magic-link target and leak a host path.
+#[cfg(target_os = "linux")]
+pub(crate) fn readlink_fd(fd: RawFd) -> io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    let len = unsafe {
+        libc::readlinkat(
+            fd,
+            c"".as_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+        )
+    };
+    if len < 0 {
+        Err(linux_error(io::Error::last_os_error()))
+    } else {
+        buf.truncate(len as usize);
+        Ok(buf)
     }
 }
 

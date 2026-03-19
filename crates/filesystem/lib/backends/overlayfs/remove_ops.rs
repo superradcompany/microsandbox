@@ -59,8 +59,8 @@ pub(crate) fn do_unlink(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr)
     let target = inode::do_lookup(fs, parent, name)?;
     // Balance the internal lookup refcount — the FUSE kernel doesn't know about it.
     inode::forget_one(fs, target.inode, 1);
-    let target_type = target.attr.st_mode as u32 & libc::S_IFMT as u32;
-    if target_type == libc::S_IFDIR as u32 {
+    let target_type = platform::mode_file_type(target.attr.st_mode);
+    if target_type == platform::MODE_DIR {
         return Err(platform::eisdir());
     }
 
@@ -116,8 +116,8 @@ pub(crate) fn do_rmdir(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr) 
     let target = inode::do_lookup(fs, parent, name)?;
     // Balance the internal lookup refcount — the FUSE kernel doesn't know about it.
     inode::forget_one(fs, target.inode, 1);
-    let target_type = target.attr.st_mode as u32 & libc::S_IFMT as u32;
-    if target_type != libc::S_IFDIR as u32 {
+    let target_type = platform::mode_file_type(target.attr.st_mode);
+    if target_type != platform::MODE_DIR {
         return Err(platform::enotdir());
     }
 
@@ -206,8 +206,8 @@ pub(crate) fn do_rename(
     let source_entry = inode::do_lookup(fs, olddir, oldname)?;
     // Balance internal lookup refcount.
     inode::forget_one(fs, source_entry.inode, 1);
-    let source_type = source_entry.attr.st_mode as u32 & libc::S_IFMT as u32;
-    let source_is_dir = source_type == libc::S_IFDIR as u32;
+    let source_type = platform::mode_file_type(source_entry.attr.st_mode);
+    let source_is_dir = source_type == platform::MODE_DIR;
     let oldname_id = fs.names.intern(oldname.to_bytes());
     let source_node = {
         let nodes = fs.nodes.read().unwrap();
@@ -229,8 +229,8 @@ pub(crate) fn do_rename(
     }
 
     if let Ok(ref de) = dest_entry {
-        let dest_type = de.attr.st_mode as u32 & libc::S_IFMT as u32;
-        let dest_is_dir = dest_type == libc::S_IFDIR as u32;
+        let dest_type = platform::mode_file_type(de.attr.st_mode);
+        let dest_is_dir = dest_type == platform::MODE_DIR;
 
         if !source_is_dir && dest_is_dir {
             return Err(platform::eisdir());
@@ -391,8 +391,8 @@ fn do_rename_exchange(
     inode::forget_one(fs, source_entry.inode, 1);
     inode::forget_one(fs, dest_entry.inode, 1);
 
-    let src_is_dir = source_entry.attr.st_mode as u32 & libc::S_IFMT as u32 == libc::S_IFDIR as u32;
-    let dst_is_dir = dest_entry.attr.st_mode as u32 & libc::S_IFMT as u32 == libc::S_IFDIR as u32;
+    let src_is_dir = platform::mode_file_type(source_entry.attr.st_mode) == platform::MODE_DIR;
+    let dst_is_dir = platform::mode_file_type(dest_entry.attr.st_mode) == platform::MODE_DIR;
 
     // For directory entries, determine if they need redirect metadata after
     // exchange. A directory needs a redirect if it has any lower-layer presence
@@ -902,8 +902,8 @@ fn clear_dest_dir_if_needed(
     dest_entry: &Result<crate::Entry, io::Error>,
 ) -> io::Result<()> {
     if let Ok(de) = dest_entry {
-        let dest_type = de.attr.st_mode as u32 & libc::S_IFMT as u32;
-        if dest_type == libc::S_IFDIR as u32 {
+        let dest_type = platform::mode_file_type(de.attr.st_mode);
+        if dest_type == platform::MODE_DIR {
             remove_upper_dir_artifacts(parent_fd, name)?;
             let ret = unsafe { libc::unlinkat(parent_fd, name.as_ptr(), libc::AT_REMOVEDIR) };
             if ret < 0 {

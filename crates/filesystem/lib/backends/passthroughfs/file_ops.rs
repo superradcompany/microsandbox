@@ -64,7 +64,7 @@ pub(crate) fn do_open(
         && (open_flags & libc::O_TRUNC != 0)
         && let Ok(Some(ovr)) = stat_override::get_override(fd)
     {
-        let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+        let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
         if new_mode != ovr.mode {
             let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
         }
@@ -130,7 +130,7 @@ pub(crate) fn do_write(
     if kill_priv {
         let fd = f.as_raw_fd();
         if let Ok(Some(ovr)) = stat_override::get_override(fd) {
-            let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+            let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
             if new_mode != ovr.mode {
                 let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
             }

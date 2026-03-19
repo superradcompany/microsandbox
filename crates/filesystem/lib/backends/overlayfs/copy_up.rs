@@ -98,11 +98,11 @@ pub(crate) fn ensure_upper(fs: &OverlayFs, ino: u64) -> io::Result<()> {
 
     // Dispatch by file type.
     let kind = node.kind;
-    if kind == libc::S_IFDIR as u32 {
+    if kind == platform::MODE_DIR {
         copy_up_directory(fs, &node, upper_parent_fd, &name_cstr)?;
-    } else if kind == libc::S_IFLNK as u32 {
+    } else if kind == platform::MODE_LNK {
         copy_up_symlink(fs, &node, upper_parent_fd, &name_cstr)?;
-    } else if kind == libc::S_IFREG as u32 {
+    } else if kind == platform::MODE_REG {
         copy_up_regular(fs, &node, upper_parent_fd, &name_cstr)?;
     } else {
         // Special file (device, fifo, socket).
@@ -363,7 +363,7 @@ fn copy_up_symlink(
             }
 
             // Create stat override (real symlinks don't have overlay xattrs).
-            let mode = libc::S_IFLNK as u32 | (st.st_mode as u32 & 0o7777);
+            let mode = platform::MODE_LNK | (platform::mode_u32(st.st_mode) & 0o7777);
             stat_override::set_override(temp_fd, st.st_uid, st.st_gid, mode, 0)?;
 
             stage_and_install(fs, temp_fd, &temp_name, &st, upper_parent_fd, name)?;
@@ -791,12 +791,12 @@ pub(crate) fn transition_to_upper(
     {
         // Get stat of the new upper entry.
         let st = platform::fstatat_nofollow(upper_parent_fd, name)?;
-        let alt_key = InodeAltKey::new(st.st_ino as u64, st.st_dev as u64);
+        let alt_key = InodeAltKey::new(platform::stat_ino(&st), platform::stat_dev(&st));
 
         // Write origin xattr if this was a lower-layer node.
         if let Some(ref origin_id) = node.origin {
             // On macOS, open a writable fd to set xattr.
-            let upper_path = inode::vol_path(st.st_dev as u64, st.st_ino as u64);
+            let upper_path = inode::vol_path(platform::stat_dev(&st), platform::stat_ino(&st));
             let xattr_fd = unsafe {
                 libc::open(
                     upper_path.as_ptr(),
@@ -815,8 +815,8 @@ pub(crate) fn transition_to_upper(
         {
             let mut state = node.state.write().unwrap();
             *state = NodeState::Upper {
-                ino: st.st_ino as u64,
-                dev: st.st_dev as u64,
+                ino: platform::stat_ino(&st),
+                dev: platform::stat_dev(&st),
             };
         }
 

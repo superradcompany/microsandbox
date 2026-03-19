@@ -235,12 +235,12 @@ impl PassthroughFs {
         let alt_key = InodeAltKey::new(st.st_ino, st.st_dev, mnt_id);
 
         #[cfg(target_os = "macos")]
-        let alt_key = InodeAltKey::new(st.st_ino as u64, st.st_dev as u64);
+        let alt_key = InodeAltKey::new(platform::stat_ino(&st), platform::stat_dev(&st));
 
         let data = Arc::new(InodeData {
             inode: 1, // ROOT_ID
-            ino: st.st_ino as u64,
-            dev: st.st_dev as u64,
+            ino: platform::stat_ino(&st),
+            dev: platform::stat_dev(&st),
             refcount: AtomicU64::new(2), // libfuse convention: root gets refcount 2
             #[cfg(target_os = "linux")]
             file: {

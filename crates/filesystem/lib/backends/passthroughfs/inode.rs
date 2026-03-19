@@ -318,10 +318,10 @@ fn do_lookup_linux(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
 #[cfg(target_os = "macos")]
 fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Result<Entry> {
     let st = platform::fstatat_nofollow(parent_fd, name)?;
-    let alt_key = InodeAltKey::new(st.st_ino as u64, st.st_dev as u64);
+    let alt_key = InodeAltKey::new(platform::stat_ino(&st), platform::stat_dev(&st));
 
     // Open a real fd for xattr access via /.vol/dev/ino.
-    let patched = open_and_patch_stat_macos(st.st_dev as u64, st.st_ino as u64, st)?;
+    let patched = open_and_patch_stat_macos(platform::stat_dev(&st), platform::stat_ino(&st), st)?;
 
     // Fast path: most lookups hit an already-tracked inode and only need a
     // refcount bump. We still recheck under the write lock below before
@@ -359,8 +359,8 @@ fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
     let inode_num = fs.next_inode.fetch_add(1, Ordering::Relaxed);
     let data = Arc::new(InodeData {
         inode: inode_num,
-        ino: st.st_ino as u64,
-        dev: st.st_dev as u64,
+        ino: platform::stat_ino(&st),
+        dev: platform::stat_dev(&st),
         refcount: std::sync::atomic::AtomicU64::new(1),
         #[cfg(target_os = "macos")]
         unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
@@ -535,8 +535,8 @@ pub(crate) fn open_inode_fd(fs: &PassthroughFs, inode: u64, flags: i32) -> io::R
         }
         let mut buf = [0u8; 20];
         let fd_str = format_fd_cstr(inode_fd.raw(), &mut buf);
-        let fd =
-            unsafe { libc::openat(fs.proc_self_fd.as_raw_fd(), fd_str, flags | libc::O_CLOEXEC) };
+        let reopen_flags = (flags & !libc::O_NOFOLLOW) | libc::O_CLOEXEC;
+        let fd = unsafe { libc::openat(fs.proc_self_fd.as_raw_fd(), fd_str, reopen_flags) };
         if fd < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
