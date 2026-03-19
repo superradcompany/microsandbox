@@ -131,6 +131,7 @@ pub(crate) fn register_root_inode(fs: &OverlayFs) -> io::Result<()> {
     } else {
         fs.lowers.last().unwrap().root_fd.as_raw_fd()
     };
+    #[cfg(target_os = "macos")]
     let st = platform::fstat(upper_fd)?;
 
     // Create root node with Root state.

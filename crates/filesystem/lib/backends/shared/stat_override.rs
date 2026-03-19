@@ -86,7 +86,7 @@ pub(crate) fn patched_stat(fd: RawFd, mut st: stat64) -> io::Result<stat64> {
             {
                 #[cfg(target_os = "linux")]
                 {
-                    st.st_rdev = ovr.rdev;
+                    st.st_rdev = u64::from(ovr.rdev);
                 }
                 #[cfg(target_os = "macos")]
                 {

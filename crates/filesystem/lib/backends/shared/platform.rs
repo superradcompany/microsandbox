@@ -161,59 +161,26 @@ pub(crate) const MODE_SETGID: u32 = libc::S_ISGID;
 #[cfg(target_os = "macos")]
 pub(crate) const MODE_SETGID: u32 = libc::S_ISGID as u32;
 
-#[cfg(target_os = "linux")]
-pub(crate) const DIRENT_REG: u32 = libc::DT_REG;
-#[cfg(target_os = "macos")]
 pub(crate) const DIRENT_REG: u32 = libc::DT_REG as u32;
 
-#[cfg(target_os = "linux")]
-pub(crate) const DIRENT_DIR: u32 = libc::DT_DIR;
-#[cfg(target_os = "macos")]
 pub(crate) const DIRENT_DIR: u32 = libc::DT_DIR as u32;
 
-#[cfg(target_os = "linux")]
-pub(crate) const DIRENT_LNK: u32 = libc::DT_LNK;
-#[cfg(target_os = "macos")]
 pub(crate) const DIRENT_LNK: u32 = libc::DT_LNK as u32;
 
-#[cfg(target_os = "linux")]
-pub(crate) const DIRENT_CHR: u32 = libc::DT_CHR;
-#[cfg(target_os = "macos")]
 pub(crate) const DIRENT_CHR: u32 = libc::DT_CHR as u32;
 
-#[cfg(target_os = "linux")]
-pub(crate) const DIRENT_BLK: u32 = libc::DT_BLK;
-#[cfg(target_os = "macos")]
 pub(crate) const DIRENT_BLK: u32 = libc::DT_BLK as u32;
 
-#[cfg(target_os = "linux")]
-pub(crate) const DIRENT_FIFO: u32 = libc::DT_FIFO;
-#[cfg(target_os = "macos")]
 pub(crate) const DIRENT_FIFO: u32 = libc::DT_FIFO as u32;
 
-#[cfg(target_os = "linux")]
-pub(crate) const DIRENT_SOCK: u32 = libc::DT_SOCK;
-#[cfg(target_os = "macos")]
 pub(crate) const DIRENT_SOCK: u32 = libc::DT_SOCK as u32;
 
-#[cfg(target_os = "linux")]
-pub(crate) const ACCESS_F_OK: u32 = libc::F_OK;
-#[cfg(target_os = "macos")]
 pub(crate) const ACCESS_F_OK: u32 = libc::F_OK as u32;
 
-#[cfg(target_os = "linux")]
-pub(crate) const ACCESS_R_OK: u32 = libc::R_OK;
-#[cfg(target_os = "macos")]
 pub(crate) const ACCESS_R_OK: u32 = libc::R_OK as u32;
 
-#[cfg(target_os = "linux")]
-pub(crate) const ACCESS_W_OK: u32 = libc::W_OK;
-#[cfg(target_os = "macos")]
 pub(crate) const ACCESS_W_OK: u32 = libc::W_OK as u32;
 
-#[cfg(target_os = "linux")]
-pub(crate) const ACCESS_X_OK: u32 = libc::X_OK;
-#[cfg(target_os = "macos")]
 pub(crate) const ACCESS_X_OK: u32 = libc::X_OK as u32;
 
 //--------------------------------------------------------------------------------------------------

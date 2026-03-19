@@ -17,7 +17,7 @@
 //! inode is `fstat`'d first and real host symlinks are rejected before reopen.
 
 use std::{
-    ffi::{CStr, CString},
+    ffi::CStr,
     io,
     os::fd::AsRawFd,
     sync::{Arc, atomic::Ordering},
@@ -177,7 +177,9 @@ fn open_macos_path_hardened(path: *const libc::c_char, flags: i32) -> io::Result
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn vol_path(dev: u64, ino: u64) -> CString {
+pub(crate) fn vol_path(dev: u64, ino: u64) -> std::ffi::CString {
+    use std::ffi::CString;
+
     CString::new(format!("/.vol/{dev}/{ino}"))
         .expect("formatted /.vol path never contains interior nul")
 }
