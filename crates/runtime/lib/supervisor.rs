@@ -181,7 +181,9 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
                 let tls_dir = config.runtime_dir.join("tls");
                 std::fs::create_dir_all(&tls_dir)?;
                 std::fs::write(tls_dir.join("ca.pem"), &tls_ready.ca_pem)?;
-                tracing::info!("wrote CA cert to runtime/tls/ca.pem for guest trust store injection");
+                tracing::info!(
+                    "wrote CA cert to runtime/tls/ca.pem for guest trust store injection"
+                );
             }
         }
 
@@ -494,11 +496,8 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
                 let _ = nix::sys::signal::killpg(pid, Signal::SIGTERM);
 
                 if grace_ms > 0 {
-                    let exited = tokio::time::timeout(
-                        Duration::from_millis(grace_ms),
-                        child.wait(),
-                    )
-                    .await;
+                    let exited =
+                        tokio::time::timeout(Duration::from_millis(grace_ms), child.wait()).await;
 
                     if exited.is_err() {
                         let _ = nix::sys::signal::killpg(pid, Signal::SIGKILL);

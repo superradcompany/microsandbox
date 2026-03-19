@@ -113,7 +113,6 @@ pub enum VolumeMount {
         /// Size limit in MiB.
         size_mib: Option<u32>,
     },
-
 }
 
 /// Builder for constructing a [`VolumeMount`].
@@ -230,9 +229,9 @@ impl VolumeMount {
     /// Get the guest mount path.
     pub fn guest(&self) -> &str {
         match self {
-            Self::Bind { guest, .. }
-            | Self::Named { guest, .. }
-            | Self::Tmpfs { guest, .. } => guest,
+            Self::Bind { guest, .. } | Self::Named { guest, .. } | Self::Tmpfs { guest, .. } => {
+                guest
+            }
         }
     }
 }

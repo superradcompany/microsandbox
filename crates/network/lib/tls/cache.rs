@@ -1,9 +1,11 @@
 //! In-memory LRU certificate cache with TTL eviction.
 
-use std::io;
-use std::num::NonZeroUsize;
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::{
+    io,
+    num::NonZeroUsize,
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
 
 use lru::LruCache;
 use rustls::sign::CertifiedKey;

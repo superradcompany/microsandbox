@@ -3,15 +3,11 @@
 //! Connects to the real server using TLS, optionally verifying the server's
 //! certificate against the host's system trust store.
 
-use std::io;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{io, net::SocketAddr, sync::Arc};
 
-use rustls::pki_types::ServerName;
-use rustls::ClientConfig;
+use rustls::{ClientConfig, pki_types::ServerName};
 use tokio::net::TcpStream;
-use tokio_rustls::client::TlsStream;
-use tokio_rustls::TlsConnector;
+use tokio_rustls::{TlsConnector, client::TlsStream};
 
 //--------------------------------------------------------------------------------------------------
 // Functions

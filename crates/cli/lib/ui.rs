@@ -4,8 +4,10 @@
 //! detail views, and styled messages. All ephemeral output goes to stderr;
 //! final data output goes to stdout.
 
-use std::io::IsTerminal;
-use std::time::{Duration, Instant};
+use std::{
+    io::IsTerminal,
+    time::{Duration, Instant},
+};
 
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -87,12 +89,7 @@ impl Spinner {
         if let Some(pb) = self.pb {
             pb.finish_and_clear();
         }
-        eprintln!(
-            "   {} {:<12} {}",
-            style("✗").red(),
-            self.label,
-            self.target
-        );
+        eprintln!("   {} {:<12} {}", style("✗").red(), self.label, self.target);
     }
 }
 

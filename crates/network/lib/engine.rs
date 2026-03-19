@@ -4,17 +4,20 @@
 //! bidirectional frame relay between the VM (via Unixgram socketpair)
 //! and the host network backend (TAP or vmnet).
 
-use std::net::IpAddr;
-use std::os::fd::{AsRawFd, RawFd};
+use std::{
+    net::IpAddr,
+    os::fd::{AsRawFd, RawFd},
+};
 
 use etherparse::{PacketBuilder, TransportSlice};
-use tokio::io::Interest;
-use tokio::io::unix::AsyncFd;
+use tokio::io::{Interest, unix::AsyncFd};
 
-use crate::dns::{DnsInterceptResponse, DnsInterceptResult, DnsInterceptor, TcpResponseFlags};
-use crate::host::FrameTransport;
-use crate::packet::ParsedFrame;
-use crate::policy::{Action, Direction, PolicyEngine};
+use crate::{
+    dns::{DnsInterceptResponse, DnsInterceptResult, DnsInterceptor, TcpResponseFlags},
+    host::FrameTransport,
+    packet::ParsedFrame,
+    policy::{Action, Direction, PolicyEngine},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants

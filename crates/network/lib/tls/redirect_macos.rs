@@ -3,8 +3,7 @@
 //! Installs per-sandbox pf anchors that redirect matching TCP traffic from
 //! the guest subnet to the local TLS proxy port.
 
-use std::io;
-use std::io::Write;
+use std::{io, io::Write};
 
 use super::RedirectConfig;
 

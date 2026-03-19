@@ -4,13 +4,17 @@
 //! through regular kernel sockets. The existing frame relay handles L2
 //! transport automatically — the publisher operates at the application layer.
 
-use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::Mutex;
+use tokio::{
+    net::{TcpListener, TcpStream, UdpSocket},
+    sync::Mutex,
+};
 
 use crate::config::{PortProtocol, PublishedPort};
 

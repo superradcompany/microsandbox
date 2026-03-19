@@ -3,14 +3,18 @@
 //! Evaluates rules against parsed packet headers using first-match-wins semantics.
 //! Domain-based rules are resolved via the DNS pin set.
 
-use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::{HashMap, HashSet},
+    net::IpAddr,
+    sync::{Arc, RwLock},
+};
 
 use crate::packet::{IpProtocol, ParsedFrame};
 
-use super::destination::{matches_cidr, matches_group};
-use super::types::{Action, Destination, Direction, NetworkPolicy, Protocol};
+use super::{
+    destination::{matches_cidr, matches_group},
+    types::{Action, Destination, Direction, NetworkPolicy, Protocol},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
