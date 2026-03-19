@@ -10,7 +10,7 @@ use crate::error::ImageError;
 
 /// Runtime configuration parsed from an OCI image config blob.
 ///
-/// These are defaults — [`SandboxBuilder`] fields override them.
+/// These are defaults — `SandboxBuilder` fields override them.
 /// Fields are `Option` where the OCI spec allows omission.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ImageConfig {

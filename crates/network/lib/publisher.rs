@@ -79,7 +79,8 @@ impl PortPublisher {
     /// Binds host-side listeners for all published ports.
     ///
     /// This performs the privileged `bind()` syscalls but does not spawn relay
-    /// tasks. Call [`start_from`] after dropping privileges to begin relaying.
+    /// tasks. Call [`PortPublisher::start_from`] after dropping privileges to begin
+    /// relaying.
     pub async fn bind(
         ports: &[PublishedPort],
         guest_ipv4: Option<Ipv4Addr>,

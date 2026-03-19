@@ -101,7 +101,7 @@ struct Args {
     #[arg(long)]
     ipv6_gateway: Option<Ipv6Addr>,
 
-    /// Published port: HOST_PORT:GUEST_PORT[/PROTO][@BIND_ADDR] (repeatable).
+    /// Published port: HOST_PORT:GUEST_PORT\[/PROTO\]\[@BIND_ADDR\] (repeatable).
     #[arg(long)]
     port: Vec<String>,
 

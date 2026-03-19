@@ -22,6 +22,9 @@ use std::{
     sync::{Arc, RwLock, atomic::Ordering},
 };
 
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+
 use super::{OverlayFs, copy_up, inode, types::FileHandle, whiteout};
 use crate::{
     Context, Entry, Extensions, OpenOptions,

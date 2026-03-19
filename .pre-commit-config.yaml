@@ -38,3 +38,15 @@ repos:
         language: system
         pass_filenames: false
         files: \.(rs|toml)$
+      - id: cargo-doc-workspace
+        name: cargo doc (workspace)
+        entry: bash -lc 'RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps'
+        language: system
+        pass_filenames: false
+        files: \.(rs|toml)$
+      - id: cargo-build-msb-release
+        name: cargo build (msb release)
+        entry: cargo build --release -p microsandbox-cli
+        language: system
+        pass_filenames: false
+        files: \.(rs|toml)$
