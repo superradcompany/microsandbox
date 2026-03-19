@@ -176,15 +176,13 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
 
         // If TLS interception is enabled, write the CA cert to the runtime
         // mount so agentd can install it into the guest trust store.
-        if let Some(ref tls_ready) = ready.tls {
-            if tls_ready.enabled {
-                let tls_dir = config.runtime_dir.join("tls");
-                std::fs::create_dir_all(&tls_dir)?;
-                std::fs::write(tls_dir.join("ca.pem"), &tls_ready.ca_pem)?;
-                tracing::info!(
-                    "wrote CA cert to runtime/tls/ca.pem for guest trust store injection"
-                );
-            }
+        if let Some(ref tls_ready) = ready.tls
+            && tls_ready.enabled
+        {
+            let tls_dir = config.runtime_dir.join("tls");
+            std::fs::create_dir_all(&tls_dir)?;
+            std::fs::write(tls_dir.join("ca.pem"), &tls_ready.ca_pem)?;
+            tracing::info!("wrote CA cert to runtime/tls/ca.pem for guest trust store injection");
         }
 
         tracing::info!(%pid, "msbnet ready");
@@ -483,33 +481,32 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
 
     // ── Shutdown: record results ─────────────────────────────────────────────
 
-    if let Some(ref mut child) = msbnet_child {
-        if msbnet_monitor
+    if let Some(ref mut child) = msbnet_child
+        && msbnet_monitor
             .as_ref()
             .is_some_and(|monitor| !monitor.has_exited())
-        {
-            if let Some(pid) = child.id() {
-                let pid = nix::unistd::Pid::from_raw(pid as i32);
-                let grace_ms = config.child_policies.msbnet.shutdown_timeout_ms;
+    {
+        if let Some(pid) = child.id() {
+            let pid = nix::unistd::Pid::from_raw(pid as i32);
+            let grace_ms = config.child_policies.msbnet.shutdown_timeout_ms;
 
-                // Send SIGTERM first to allow Drop cleanup (nftables, TAP removal).
-                let _ = nix::sys::signal::killpg(pid, Signal::SIGTERM);
+            // Send SIGTERM first to allow Drop cleanup (nftables, TAP removal).
+            let _ = nix::sys::signal::killpg(pid, Signal::SIGTERM);
 
-                if grace_ms > 0 {
-                    let exited =
-                        tokio::time::timeout(Duration::from_millis(grace_ms), child.wait()).await;
+            if grace_ms > 0 {
+                let exited =
+                    tokio::time::timeout(Duration::from_millis(grace_ms), child.wait()).await;
 
-                    if exited.is_err() {
-                        let _ = nix::sys::signal::killpg(pid, Signal::SIGKILL);
-                        let _ = child.wait().await;
-                    }
-                } else {
+                if exited.is_err() {
                     let _ = nix::sys::signal::killpg(pid, Signal::SIGKILL);
                     let _ = child.wait().await;
                 }
             } else {
+                let _ = nix::sys::signal::killpg(pid, Signal::SIGKILL);
                 let _ = child.wait().await;
             }
+        } else {
+            let _ = child.wait().await;
         }
     }
 
@@ -844,10 +841,10 @@ fn clear_fd_cloexec(fd: i32) -> std::io::Result<()> {
 }
 
 async fn terminate_child(child: &mut tokio::process::Child, name: &str) {
-    if let Some(pid) = child.id() {
-        if let Ok(pid_i32) = i32::try_from(pid) {
-            let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid_i32), Signal::SIGKILL);
-        }
+    if let Some(pid) = child.id()
+        && let Ok(pid_i32) = i32::try_from(pid)
+    {
+        let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid_i32), Signal::SIGKILL);
     }
 
     if let Err(err) = child.wait().await {

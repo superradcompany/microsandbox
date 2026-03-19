@@ -33,11 +33,11 @@ pub fn find_serial_port(name: &str) -> AgentdResult<PathBuf> {
         let entry = entry?;
         let name_file = entry.path().join("name");
 
-        if let Ok(port_name) = fs::read_to_string(&name_file) {
-            if port_name.trim() == name {
-                let port_id = entry.file_name();
-                return Ok(PathBuf::from("/dev").join(port_id));
-            }
+        if let Ok(port_name) = fs::read_to_string(&name_file)
+            && port_name.trim() == name
+        {
+            let port_id = entry.file_name();
+            return Ok(PathBuf::from("/dev").join(port_id));
         }
     }
 

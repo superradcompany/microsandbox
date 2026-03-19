@@ -295,7 +295,7 @@ fn load_config_file(path: &PathBuf) -> NetworkConfig {
 
 /// Builds a NetworkConfig from individual CLI flags.
 fn build_config_from_flags(args: &Args) -> NetworkConfig {
-    let mac = args.mac.as_deref().map(|s| parse_mac(s));
+    let mac = args.mac.as_deref().map(parse_mac);
 
     let ipv4 = match (args.ipv4_address, args.ipv4_prefix_len, args.ipv4_gateway) {
         (Some(address), Some(prefix_len), Some(gateway)) => Some(Ipv4Config {
@@ -891,16 +891,16 @@ mod tests {
 fn collect_gateway_ips(ready_info: &microsandbox_network::ready::MsbnetReady) -> Vec<IpAddr> {
     let mut ips = Vec::new();
 
-    if let Some(ref ipv4) = ready_info.ipv4 {
-        if let Ok(ip) = ipv4.gateway.parse() {
-            ips.push(IpAddr::V4(ip));
-        }
+    if let Some(ref ipv4) = ready_info.ipv4
+        && let Ok(ip) = ipv4.gateway.parse()
+    {
+        ips.push(IpAddr::V4(ip));
     }
 
-    if let Some(ref ipv6) = ready_info.ipv6 {
-        if let Ok(ip) = ipv6.gateway.parse() {
-            ips.push(IpAddr::V6(ip));
-        }
+    if let Some(ref ipv6) = ready_info.ipv6
+        && let Ok(ip) = ipv6.gateway.parse()
+    {
+        ips.push(IpAddr::V6(ip));
     }
 
     ips

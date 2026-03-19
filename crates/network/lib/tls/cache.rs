@@ -56,10 +56,10 @@ impl CertCache {
         // locks (a previous holder panicked) rather than cascading the panic.
         {
             let cache = self.inner.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = cache.peek(&lower) {
-                if entry.created.elapsed() < self.ttl {
-                    return Ok(Arc::clone(&entry.key));
-                }
+            if let Some(entry) = cache.peek(&lower)
+                && entry.created.elapsed() < self.ttl
+            {
+                return Ok(Arc::clone(&entry.key));
             }
         }
 
@@ -67,10 +67,10 @@ impl CertCache {
         let mut cache = self.inner.write().unwrap_or_else(|e| e.into_inner());
 
         // Double-check after acquiring write lock.
-        if let Some(entry) = cache.get(&lower) {
-            if entry.created.elapsed() < self.ttl {
-                return Ok(Arc::clone(&entry.key));
-            }
+        if let Some(entry) = cache.get(&lower)
+            && entry.created.elapsed() < self.ttl
+        {
+            return Ok(Arc::clone(&entry.key));
         }
 
         // Generate.

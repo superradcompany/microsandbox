@@ -70,33 +70,39 @@ You don't need to be an expert programmer to contribute code! Here's a friendly 
    - Follow the instructions in our [DEVELOPMENT.md](./DEVELOPMENT.md) file
    - If you run into any issues, remember we're just an email away!
 
-7. **Make your changes**
+7. **Install pre-commit hooks**
+
+   - Install `pre-commit` with your package manager, for example `brew install pre-commit` or `pipx install pre-commit`
+   - Run `pre-commit install` from the repository root
+   - Optional but recommended: run `pre-commit run --all-files` once before your first commit
+
+8. **Make your changes**
 
    - Open your favorite editor and start coding
    - Test your changes using the commands in our README
    - Take breaks and have fun with it!
 
-8. **Write tests**
+9. **Write tests**
 
    - For new features: Write tests that protect your feature from breaking
    - For bug fixes: Write tests that ensure the bug won't return
    - Consider adding documentation tests to show how to use your new feature
    - Don't stress about getting testing perfect - we can help guide you
 
-9. **Follow coding guidelines**
+10. **Follow coding guidelines**
 
     - Check out our [Rust style guide][rust-style-guide] for reference
     - Clean, readable code helps everyone who comes after you
     - If you're unsure about anything, just do your best and mention it in your PR
 
-10. **Commit and push your changes**
+11. **Commit and push your changes**
 
     - Send your work to your GitHub repository
     - We use [conventional commits][conventional-commits] for naming
     - New to Git? Learn about [committing code][committing-code] and [pushing][push-remote]
     - Pre-commit hooks will run automatically if you installed them
 
-11. **Open a pull request** 🎉
+12. **Open a pull request** 🎉
     - This is how your code gets merged into the main project
     - We'll review your code and may suggest some changes
     - Every pull request helps us grow, so thank you in advance!

@@ -564,13 +564,9 @@ fn append_tcp_segment(state: &mut TcpStreamState, payload: &[u8], fin: bool) -> 
 fn drain_pending_segments(state: &mut TcpStreamState) -> Option<bool> {
     let mut close_after_queries = false;
 
-    loop {
-        // Use direct key lookup instead of iter().next() to avoid BTreeMap
-        // natural ordering issues at TCP sequence number wraparound.
-        let segment = match state.pending_segments.remove(&state.next_client_sequence) {
-            Some(seg) => seg,
-            None => break,
-        };
+    // Use direct key lookup instead of iter().next() to avoid BTreeMap
+    // natural ordering issues at TCP sequence number wraparound.
+    while let Some(segment) = state.pending_segments.remove(&state.next_client_sequence) {
         close_after_queries |= append_tcp_segment(state, &segment.payload, segment.fin)?;
     }
 

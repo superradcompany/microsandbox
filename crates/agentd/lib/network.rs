@@ -5,9 +5,12 @@
 //!
 //! This module only performs real work on Linux. On other platforms, it is a no-op.
 
+#[cfg(target_os = "linux")]
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use crate::error::{AgentdError, AgentdResult};
+#[cfg(target_os = "linux")]
+use crate::error::AgentdError;
+use crate::error::AgentdResult;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -15,7 +18,7 @@ use crate::error::{AgentdError, AgentdResult};
 
 /// Parsed `MSB_NET` specification.
 #[derive(Debug)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(target_os = "linux")]
 struct NetSpec<'a> {
     iface: &'a str,
     mac: [u8; 6],
@@ -24,7 +27,7 @@ struct NetSpec<'a> {
 
 /// Parsed `MSB_NET_IPV4` specification.
 #[derive(Debug)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(target_os = "linux")]
 struct NetIpv4Spec {
     address: Ipv4Addr,
     prefix_len: u8,
@@ -34,7 +37,7 @@ struct NetIpv4Spec {
 
 /// Parsed `MSB_NET_IPV6` specification.
 #[derive(Debug)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(target_os = "linux")]
 struct NetIpv6Spec {
     address: Ipv6Addr,
     prefix_len: u8,
@@ -80,6 +83,7 @@ pub fn apply_network_config() -> AgentdResult<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 /// Parses `MSB_NET` value: `iface=NAME,mac=AA:BB:CC:DD:EE:FF,mtu=N`
 fn parse_net(val: &str) -> AgentdResult<NetSpec<'_>> {
     let mut iface = None;
@@ -106,6 +110,7 @@ fn parse_net(val: &str) -> AgentdResult<NetSpec<'_>> {
     Ok(NetSpec { iface, mac, mtu })
 }
 
+#[cfg(target_os = "linux")]
 /// Parses `MSB_NET_IPV4` value: `addr=A.B.C.D/N,gw=A.B.C.D[,dns=A.B.C.D]`
 fn parse_net_ipv4(val: &str) -> AgentdResult<NetIpv4Spec> {
     let mut address = None;
@@ -148,6 +153,7 @@ fn parse_net_ipv4(val: &str) -> AgentdResult<NetIpv4Spec> {
     })
 }
 
+#[cfg(target_os = "linux")]
 /// Parses `MSB_NET_IPV6` value: `addr=ADDR/N,gw=ADDR[,dns=ADDR]`
 fn parse_net_ipv6(val: &str) -> AgentdResult<NetIpv6Spec> {
     let mut address = None;
@@ -190,6 +196,7 @@ fn parse_net_ipv6(val: &str) -> AgentdResult<NetIpv6Spec> {
     })
 }
 
+#[cfg(target_os = "linux")]
 /// Parses a MAC address string like `02:5a:7b:13:01:02`.
 fn parse_mac(s: &str) -> AgentdResult<[u8; 6]> {
     let mut mac = [0u8; 6];
@@ -208,6 +215,7 @@ fn parse_mac(s: &str) -> AgentdResult<[u8; 6]> {
     Ok(mac)
 }
 
+#[cfg(target_os = "linux")]
 /// Parses an IPv4 CIDR like `100.96.1.2/30`.
 fn parse_cidr_v4(s: &str) -> AgentdResult<(Ipv4Addr, u8)> {
     let (addr_str, prefix_str) = s
@@ -227,6 +235,7 @@ fn parse_cidr_v4(s: &str) -> AgentdResult<(Ipv4Addr, u8)> {
     Ok((addr, prefix))
 }
 
+#[cfg(target_os = "linux")]
 /// Parses an IPv6 CIDR like `fd42:6d73:62:2a::2/64`.
 fn parse_cidr_v6(s: &str) -> AgentdResult<(Ipv6Addr, u8)> {
     let (addr_str, prefix_str) = s

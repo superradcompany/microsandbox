@@ -226,11 +226,11 @@ async fn handle_connection(
     tracing::debug!(%peer_addr, %original_dst, sni = sni_str, "TLS proxy: extracted SNI");
 
     // Bypass decision.
-    if let Some(ref sni) = sni {
-        if bypass.is_bypassed(sni) {
-            tracing::debug!(sni, "TLS proxy: bypassing");
-            return bypass_connection(stream, original_dst, client_hello).await;
-        }
+    if let Some(ref sni) = sni
+        && bypass.is_bypassed(sni)
+    {
+        tracing::debug!(sni, "TLS proxy: bypassing");
+        return bypass_connection(stream, original_dst, client_hello).await;
     }
 
     // Intercept path.
@@ -354,8 +354,8 @@ async fn intercept_connection(
 
     // Wait for both directions to complete.
     let (out_result, in_result) = tokio::join!(outbound, inbound);
-    out_result.map_err(|e| io::Error::other(e))??;
-    in_result.map_err(|e| io::Error::other(e))??;
+    out_result.map_err(io::Error::other)??;
+    in_result.map_err(io::Error::other)??;
     Ok(())
 }
 

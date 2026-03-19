@@ -310,12 +310,12 @@ fn send_raw_response(
 /// Open a file for writing and return a write session.
 async fn handle_write_open(path: &str, mode: Option<u32>) -> Result<FsWriteSession, String> {
     // Ensure parent directory exists.
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("mkdir parent: {e}"))?;
-        }
+    if let Some(parent) = std::path::Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("mkdir parent: {e}"))?;
     }
 
     let file = tokio::fs::OpenOptions::new()
@@ -388,16 +388,15 @@ async fn handle_remove_dir(path: &str) -> FsResponse {
 /// Copy a file within the guest.
 async fn handle_copy(src: &str, dst: &str) -> FsResponse {
     // Ensure parent directory of destination exists.
-    if let Some(parent) = std::path::Path::new(dst).parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                return FsResponse {
-                    ok: false,
-                    error: Some(format!("mkdir parent: {e}")),
-                    data: None,
-                };
-            }
-        }
+    if let Some(parent) = std::path::Path::new(dst).parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(e) = tokio::fs::create_dir_all(parent).await
+    {
+        return FsResponse {
+            ok: false,
+            error: Some(format!("mkdir parent: {e}")),
+            data: None,
+        };
     }
 
     match tokio::fs::copy(src, dst).await {
@@ -417,16 +416,15 @@ async fn handle_copy(src: &str, dst: &str) -> FsResponse {
 /// Rename/move a file or directory.
 async fn handle_rename(src: &str, dst: &str) -> FsResponse {
     // Ensure parent directory of destination exists.
-    if let Some(parent) = std::path::Path::new(dst).parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                return FsResponse {
-                    ok: false,
-                    error: Some(format!("mkdir parent: {e}")),
-                    data: None,
-                };
-            }
-        }
+    if let Some(parent) = std::path::Path::new(dst).parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(e) = tokio::fs::create_dir_all(parent).await
+    {
+        return FsResponse {
+            ok: false,
+            error: Some(format!("mkdir parent: {e}")),
+            data: None,
+        };
     }
 
     match tokio::fs::rename(src, dst).await {

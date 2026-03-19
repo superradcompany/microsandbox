@@ -86,8 +86,6 @@ pub const GITHUB_ORG: &str = "zerocore-ai";
 /// Main repository name.
 pub const MICROSANDBOX_REPO: &str = "microsandbox";
 
-/// libkrunfw repository name.
-
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------

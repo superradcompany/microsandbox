@@ -69,6 +69,7 @@ pub enum ImageSource {
 /// ```ignore
 /// .image(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
 /// ```
+#[derive(Default)]
 pub struct ImageBuilder {
     source: Option<RootfsSource>,
     error: Option<crate::MicrosandboxError>,
@@ -304,10 +305,7 @@ impl DiskImageFormat {
 impl ImageBuilder {
     /// Create a new image builder.
     pub fn new() -> Self {
-        Self {
-            source: None,
-            error: None,
-        }
+        Self::default()
     }
 
     /// Use a disk image file as the root filesystem.

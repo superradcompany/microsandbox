@@ -80,11 +80,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
-
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
@@ -153,7 +149,7 @@ jobs:
 
       # -- Checks (workspace) --
       - name: Format
-        run: cargo +nightly fmt --all -- --check
+        run: cargo +stable fmt --all -- --check
 
       - name: Clippy
         run: cargo +stable clippy --workspace -- -D warnings
@@ -166,7 +162,7 @@ jobs:
       # -- Checks (agentd — excluded from workspace, Linux-only) --
       - name: Format agentd
         if: matrix.os == 'linux'
-        run: cargo +nightly fmt --manifest-path crates/agentd/Cargo.toml -- --check
+        run: cargo +stable fmt --manifest-path crates/agentd/Cargo.toml -- --check
 
       - name: Clippy agentd
         if: matrix.os == 'linux'
