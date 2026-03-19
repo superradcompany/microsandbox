@@ -162,8 +162,8 @@ pub(crate) fn do_readlink(fs: &OverlayFs, _ctx: Context, ino: u64) -> io::Result
     {
         // Dup the O_PATH fd while the state lock is held to prevent a
         // concurrent copy-up from closing it underneath us. open_node_fd
-        // reopens with O_NOFOLLOW which fails with ELOOP for real symlinks,
-        // so we use the O_PATH fd directly.
+        // rejects real host symlinks before procfd reopen, so readlink uses
+        // the duplicated O_PATH fd directly instead.
         let (dup_fd, st) = {
             let state = node.state.read().unwrap();
             let fd = match &*state {

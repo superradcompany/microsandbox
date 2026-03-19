@@ -1562,19 +1562,28 @@ pub(crate) fn dup_fd_raw(fd: RawFd) -> io::Result<RawFd> {
 }
 
 /// Reopen an O_PATH fd for I/O via /proc/self/fd (Linux only).
+///
+/// Procfd entries are symlinks on Linux, so reopening them must not add
+/// `O_NOFOLLOW` or the kernel returns `ELOOP`. Real host symlinks are rejected
+/// before reopen so procfd never follows them to an escaped target.
 #[cfg(target_os = "linux")]
 pub(crate) fn reopen_fd_linux(
     proc_self_fd: &File,
     o_path_fd: RawFd,
     flags: i32,
 ) -> io::Result<RawFd> {
+    let st = platform::fstat(o_path_fd)?;
+    if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
+        return Err(platform::eloop());
+    }
+
     let mut buf = [0u8; 20];
     let fd_str = format_fd_cstr(o_path_fd, &mut buf);
     let fd = unsafe {
         libc::openat(
             proc_self_fd.as_raw_fd(),
             fd_str.as_ptr(),
-            flags | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            flags | libc::O_CLOEXEC,
         )
     };
     if fd < 0 {

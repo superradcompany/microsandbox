@@ -94,7 +94,7 @@ pub(crate) fn do_create(
     let entry = inode::do_lookup(fs, parent, name)?;
 
     // Reopen for the handle — strip O_CREAT since the file already exists.
-    // open_inode_fd adds O_NOFOLLOW and O_CLOEXEC itself.
+    // open_inode_fd adds O_CLOEXEC itself and rejects real host symlinks.
     let open_fd = inode::open_inode_fd(fs, entry.inode, open_flags & !libc::O_CREAT)?;
 
     // Clear SUID/SGID on create+truncate of existing file (HANDLE_KILLPRIV_V2).

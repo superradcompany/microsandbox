@@ -12,6 +12,30 @@ use super::{
 };
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+const S_IFREG_MODE: u32 = libc::S_IFREG;
+#[cfg(target_os = "macos")]
+const S_IFREG_MODE: u32 = libc::S_IFREG as u32;
+
+#[cfg(target_os = "linux")]
+const S_IFDIR_MODE: u32 = libc::S_IFDIR;
+#[cfg(target_os = "macos")]
+const S_IFDIR_MODE: u32 = libc::S_IFDIR as u32;
+
+#[cfg(target_os = "linux")]
+const S_IFLNK_MODE: u32 = libc::S_IFLNK;
+#[cfg(target_os = "macos")]
+const S_IFLNK_MODE: u32 = libc::S_IFLNK as u32;
+
+#[cfg(target_os = "linux")]
+const S_IFMT_MODE: u32 = libc::S_IFMT;
+#[cfg(target_os = "macos")]
+const S_IFMT_MODE: u32 = libc::S_IFMT as u32;
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -111,7 +135,7 @@ impl IndexBuilder {
             name: name.to_string(),
             host_ino: ino,
             size: 0,
-            mode: u32::from(libc::S_IFREG) | (mode & 0o7777),
+            mode: S_IFREG_MODE | (mode & 0o7777),
             uid: 0,
             gid: 0,
             flags: 0,
@@ -132,7 +156,7 @@ impl IndexBuilder {
             name: name.to_string(),
             host_ino: ino,
             size: 0,
-            mode: u32::from(libc::S_IFDIR) | (mode & 0o7777),
+            mode: S_IFDIR_MODE | (mode & 0o7777),
             uid: 0,
             gid: 0,
             flags: 0,
@@ -149,7 +173,7 @@ impl IndexBuilder {
             name: name.to_string(),
             host_ino: ino,
             size: 0,
-            mode: u32::from(libc::S_IFLNK) | 0o777,
+            mode: S_IFLNK_MODE | 0o777,
             uid: 0,
             gid: 0,
             flags: 0,
@@ -164,7 +188,7 @@ impl IndexBuilder {
             name: name.to_string(),
             host_ino: 0,
             size: 0,
-            mode: u32::from(libc::S_IFREG),
+            mode: S_IFREG_MODE,
             uid: 0,
             gid: 0,
             flags: ENTRY_FLAG_WHITEOUT,
@@ -320,20 +344,19 @@ impl IndexBuilder {
                 let (name_off, name_len) = entry_name_offsets[dir_idx][entry_idx];
 
                 // Auto-compute dir_record_idx for directory entries.
-                let dir_record_idx =
-                    if entry.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFDIR) {
-                        let child_path = if dir.path.is_empty() {
-                            entry.name.clone()
-                        } else {
-                            format!("{}/{}", dir.path, entry.name)
-                        };
-                        sorted_paths
-                            .binary_search(&child_path.as_str())
-                            .map(|i| i as u32)
-                            .unwrap_or(DIR_RECORD_IDX_NONE)
+                let dir_record_idx = if entry.mode & S_IFMT_MODE == S_IFDIR_MODE {
+                    let child_path = if dir.path.is_empty() {
+                        entry.name.clone()
                     } else {
-                        DIR_RECORD_IDX_NONE
+                        format!("{}/{}", dir.path, entry.name)
                     };
+                    sorted_paths
+                        .binary_search(&child_path.as_str())
+                        .map(|i| i as u32)
+                        .unwrap_or(DIR_RECORD_IDX_NONE)
+                } else {
+                    DIR_RECORD_IDX_NONE
+                };
 
                 buf.extend_from_slice(&entry.host_ino.to_le_bytes());
                 buf.extend_from_slice(&entry.size.to_le_bytes());

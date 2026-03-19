@@ -115,8 +115,8 @@ pub struct PassthroughFs {
 
     /// Open fd to /proc/self/fd (Linux only).
     ///
-    /// Used by `open_inode_fd` for secure inode reopening: `openat(proc_self_fd, "N", O_NOFOLLOW)`
-    /// prevents procfd magic-link symlink following that could escape the exported root.
+    /// Used by `open_inode_fd` to reopen tracked inodes via procfd handles
+    /// after first rejecting real host symlinks on the pinned inode.
     #[cfg(target_os = "linux")]
     pub(crate) proc_self_fd: File,
 }

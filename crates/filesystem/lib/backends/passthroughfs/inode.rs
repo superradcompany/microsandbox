@@ -9,13 +9,12 @@
 //! macOS lookup uses fstatat → inode table check → register, with a separate fd open
 //! via `/.vol/dev/ino` for xattr access (since macOS doesn't store per-inode O_PATH fds).
 //!
-//! ## Security: Procfd Reopen
+//! ## Procfd Reopen
 //!
-//! `open_inode_fd` reopens inodes for I/O via `openat(proc_self_fd, "N", O_NOFOLLOW)`.
-//! This prevents procfd magic-link symlink following: without O_NOFOLLOW, `open("/proc/self/fd/N")`
-//! on an O_PATH fd pointing to a real host symlink would follow the target, potentially
-//! escaping the exported root. Using `openat` relative to `/proc/self/fd` with `O_NOFOLLOW`
-//! ensures the kernel resolves the fd reference without following any symlinks.
+//! `open_inode_fd` reopens tracked inodes for I/O via `/proc/self/fd/N`.
+//! Procfd entries are themselves symlinks on Linux, so reopening them must not
+//! add `O_NOFOLLOW` or the kernel will fail with `ELOOP`. Instead, the pinned
+//! inode is `fstat`'d first and real host symlinks are rejected before reopen.
 
 use std::{
     ffi::{CStr, CString},
@@ -522,21 +521,22 @@ fn open_vol_fd(dev: u64, ino: u64) -> io::Result<i32> {
 
 /// Open a file for I/O by inode. Returns a real file descriptor (not O_PATH).
 ///
-/// On Linux, uses `openat(proc_self_fd, "N", flags | O_NOFOLLOW)` to prevent
-/// procfd magic-link symlink following, which could escape the exported root.
+/// On Linux, uses `openat(proc_self_fd, "N", flags)` to reopen the tracked
+/// procfd entry. Adding `O_NOFOLLOW` here would make every procfd reopen fail
+/// with `ELOOP`, because `/proc/self/fd/N` is itself a symlink. Real host
+/// symlinks are rejected before reopen so we never follow them through procfd.
 pub(crate) fn open_inode_fd(fs: &PassthroughFs, inode: u64, flags: i32) -> io::Result<i32> {
     #[cfg(target_os = "linux")]
     {
         let inode_fd = get_inode_fd(fs, inode)?;
+        let st = platform::fstat(inode_fd.raw())?;
+        if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
+            return Err(platform::eloop());
+        }
         let mut buf = [0u8; 20];
         let fd_str = format_fd_cstr(inode_fd.raw(), &mut buf);
-        let fd = unsafe {
-            libc::openat(
-                fs.proc_self_fd.as_raw_fd(),
-                fd_str,
-                flags | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            )
-        };
+        let fd =
+            unsafe { libc::openat(fs.proc_self_fd.as_raw_fd(), fd_str, flags | libc::O_CLOEXEC) };
         if fd < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }

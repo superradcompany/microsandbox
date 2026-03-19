@@ -56,8 +56,7 @@ pub(crate) fn do_open(
         open_flags &= !libc::O_APPEND;
     }
 
-    // open_inode_fd adds O_NOFOLLOW and O_CLOEXEC itself for security
-    // (prevents procfd magic-link following), so no need to set them here.
+    // open_inode_fd adds O_CLOEXEC itself and rejects real host symlinks.
     let fd = inode::open_inode_fd(fs, inode, open_flags)?;
 
     // Clear SUID/SGID on open+truncate (HANDLE_KILLPRIV_V2).

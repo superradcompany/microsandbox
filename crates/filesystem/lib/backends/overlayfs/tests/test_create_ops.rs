@@ -94,6 +94,23 @@ fn test_symlink() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn test_lower_host_symlink_open_rejected_but_readlink_allowed() {
+    let sb = OverlayTestSandbox::with_lower(|lower| {
+        std::os::unix::fs::symlink("/host/target", lower.join("host-link")).unwrap();
+    });
+
+    let entry = sb.lookup_root("host-link").unwrap();
+    OverlayTestSandbox::assert_errno(
+        sb.fuse_open(entry.inode, libc::O_RDONLY as u32),
+        LINUX_ELOOP,
+    );
+
+    let target = sb.fs.readlink(sb.ctx(), entry.inode).unwrap();
+    assert_eq!(&target[..], b"/host/target");
+}
+
+#[test]
 fn test_link_upper_file() {
     let sb = OverlayTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("original.txt").unwrap();
