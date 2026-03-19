@@ -518,11 +518,11 @@ mod linux {
 
         // RTA attributes
         let mut rta_offset = NLMSG_HDRLEN + IFADDRMSG_LEN;
-        write_rta(&mut buf[rta_offset..], libc::IFA_ADDRESS as u16, addr);
+        write_rta(&mut buf[rta_offset..], libc::IFA_ADDRESS, addr);
         rta_offset += rta_space(addr_len);
 
         if is_ipv4 {
-            write_rta(&mut buf[rta_offset..], libc::IFA_LOCAL as u16, addr);
+            write_rta(&mut buf[rta_offset..], libc::IFA_LOCAL, addr);
         }
 
         netlink_send(&buf)
@@ -564,7 +564,7 @@ mod linux {
 
         // RTA_GATEWAY attribute
         let rta_offset = NLMSG_HDRLEN + RTMSG_LEN;
-        write_rta(&mut buf[rta_offset..], libc::RTA_GATEWAY as u16, gateway);
+        write_rta(&mut buf[rta_offset..], libc::RTA_GATEWAY, gateway);
 
         netlink_send(&buf)
     }

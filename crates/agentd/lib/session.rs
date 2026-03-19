@@ -210,7 +210,12 @@ impl ExecSession {
             }
 
             // Set controlling terminal.
-            if unsafe { libc::ioctl(slave_fd, libc::TIOCSCTTY.into(), 0) } < 0 {
+            #[cfg(target_os = "linux")]
+            let tiocsctty = libc::TIOCSCTTY;
+            #[cfg(target_os = "macos")]
+            let tiocsctty: libc::c_ulong = libc::TIOCSCTTY.into();
+
+            if unsafe { libc::ioctl(slave_fd, tiocsctty, 0) } < 0 {
                 unsafe { libc::_exit(1) };
             }
 
