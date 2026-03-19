@@ -68,7 +68,7 @@ impl Drop for InodeFd {
 /// match `libc` constants, but on macOS the numeric values differ (e.g. Linux
 /// `O_TRUNC` 0x200 = macOS `O_CREAT` 0x200). This module defines the Linux
 /// values so we can translate them to host values on macOS.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 mod linux_flags {
     pub const O_APPEND: i32 = 0x400;
     pub const O_CREAT: i32 = 0x40;
@@ -79,6 +79,24 @@ mod linux_flags {
     pub const O_CLOEXEC: i32 = 0x80000;
     pub const O_DIRECTORY: i32 = 0x10000;
 }
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod linux_flags {
+    pub const O_APPEND: i32 = 0x400;
+    pub const O_CREAT: i32 = 0x40;
+    pub const O_TRUNC: i32 = 0x200;
+    pub const O_EXCL: i32 = 0x80;
+    pub const O_NOFOLLOW: i32 = 0x8000;
+    pub const O_NONBLOCK: i32 = 0x800;
+    pub const O_CLOEXEC: i32 = 0x80000;
+    pub const O_DIRECTORY: i32 = 0x4000;
+}
+
+#[cfg(all(
+    target_os = "macos",
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
+compile_error!("unsupported macOS architecture for Linux open-flag translation");
 
 #[cfg(target_os = "macos")]
 const O_RESOLVE_BENEATH: i32 = 0x0000_1000;
