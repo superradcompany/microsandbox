@@ -631,7 +631,7 @@ pub(crate) fn register(
 
     // New entry — assign a guest inode.
     let guest_inode = fs.state.next_inode.fetch_add(1, Ordering::Relaxed);
-    let kind = FileKind::from_mode(child_entry.attr.st_mode as u32);
+    let kind = FileKind::from_mode(platform::mode_u32(child_entry.attr.st_mode));
 
     let node_state = match source {
         BackendId::BackendA => NodeState::BackendA {

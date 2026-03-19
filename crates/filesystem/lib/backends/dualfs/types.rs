@@ -13,6 +13,7 @@ use std::{
 };
 
 use super::policy::DualDispatchPlan;
+use crate::backends::shared::platform;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -370,12 +371,12 @@ impl DualState {
 impl FileKind {
     /// Convert from stat st_mode to FileKind.
     pub(crate) fn from_mode(mode: u32) -> Self {
-        let fmt = mode & libc::S_IFMT as u32;
-        if fmt == libc::S_IFREG as u32 {
+        let fmt = mode & platform::MODE_TYPE_MASK;
+        if fmt == platform::MODE_REG {
             FileKind::RegularFile
-        } else if fmt == libc::S_IFDIR as u32 {
+        } else if fmt == platform::MODE_DIR {
             FileKind::Directory
-        } else if fmt == libc::S_IFLNK as u32 {
+        } else if fmt == platform::MODE_LNK {
             FileKind::Symlink
         } else {
             FileKind::Special
@@ -385,20 +386,20 @@ impl FileKind {
     /// Convert to d_type value.
     pub(crate) fn to_dtype(self) -> u32 {
         match self {
-            FileKind::RegularFile => libc::DT_REG as u32,
-            FileKind::Directory => libc::DT_DIR as u32,
-            FileKind::Symlink => libc::DT_LNK as u32,
-            FileKind::Special => libc::DT_UNKNOWN as u32,
+            FileKind::RegularFile => platform::DIRENT_REG,
+            FileKind::Directory => platform::DIRENT_DIR,
+            FileKind::Symlink => platform::DIRENT_LNK,
+            FileKind::Special => libc::DT_UNKNOWN.into(),
         }
     }
 
     /// Convert from d_type to FileKind.
     pub(crate) fn from_dtype(dtype: u32) -> Self {
-        if dtype == libc::DT_REG as u32 {
+        if dtype == platform::DIRENT_REG {
             FileKind::RegularFile
-        } else if dtype == libc::DT_DIR as u32 {
+        } else if dtype == platform::DIRENT_DIR {
             FileKind::Directory
-        } else if dtype == libc::DT_LNK as u32 {
+        } else if dtype == platform::DIRENT_LNK {
             FileKind::Symlink
         } else {
             FileKind::Special

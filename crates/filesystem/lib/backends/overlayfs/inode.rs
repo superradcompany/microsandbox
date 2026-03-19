@@ -450,16 +450,13 @@ fn hydrate_upper_entry(fs: &OverlayFs, parent_ino: u64, name: &CStr, fd: RawFd) 
             unsafe { File::from_raw_fd(dup_fd) }
         };
 
-        let kind = stx.stx_mode as u32 & libc::S_IFMT as u32;
+        let kind = (stx.stx_mode as u32) & platform::MODE_TYPE_MASK;
 
         let node = Arc::new(OverlayNode {
             inode,
             kind,
             lookup_refs: std::sync::atomic::AtomicU64::new(1),
-            state: RwLock::new(NodeState::Upper {
-                file,
-                mnt_id: stx.stx_mnt_id,
-            }),
+            state: RwLock::new(NodeState::Upper { file }),
             opaque: std::sync::atomic::AtomicBool::new(false),
             copy_up_lock: Mutex::new(()),
             origin: None,
@@ -477,7 +474,7 @@ fn hydrate_upper_entry(fs: &OverlayFs, parent_ino: u64, name: &CStr, fd: RawFd) 
             .unwrap()
             .insert((parent_ino, name_id), Dentry { node: inode });
 
-        return Ok(inode);
+        Ok(inode)
     }
 
     #[cfg(target_os = "macos")]
@@ -569,13 +566,19 @@ pub(crate) fn do_lookup(fs: &OverlayFs, parent: u64, name: &CStr) -> io::Result<
             let upper_flags = libc::O_PATH | libc::O_NOFOLLOW;
             #[cfg(target_os = "macos")]
             let upper_flags = libc::O_RDONLY | libc::O_NOFOLLOW;
+            #[cfg(target_os = "linux")]
+            let has_openat2 = fs
+                .upper
+                .as_ref()
+                .map(|upper| upper.has_openat2)
+                .unwrap_or(false);
 
             match layer::open_child_beneath(
                 upper_fd,
                 name,
                 upper_flags,
                 #[cfg(target_os = "linux")]
-                fs.upper.as_ref().unwrap().has_openat2,
+                has_openat2,
                 #[cfg(target_os = "macos")]
                 false,
             ) {
@@ -756,11 +759,7 @@ fn resolve_upper(fs: &OverlayFs, parent: u64, name: &CStr, fd: RawFd) -> io::Res
         // Take ownership of the fd (defuse the close guard).
         let owned_fd = scopeguard::ScopeGuard::into_inner(_close_guard);
         let file = unsafe { File::from_raw_fd(owned_fd) };
-        // Reuse the stx from the alt_key call above — same fd, same data.
-        NodeState::Upper {
-            file,
-            mnt_id: stx.stx_mnt_id,
-        }
+        NodeState::Upper { file }
     };
 
     #[cfg(target_os = "macos")]
@@ -773,9 +772,6 @@ fn resolve_upper(fs: &OverlayFs, parent: u64, name: &CStr, fd: RawFd) -> io::Res
         }
     };
 
-    #[cfg(target_os = "linux")]
-    let kind = patched.st_mode & libc::S_IFMT;
-    #[cfg(target_os = "macos")]
     let kind = platform::mode_file_type(patched.st_mode);
 
     let node = Arc::new(OverlayNode {
@@ -933,7 +929,6 @@ fn resolve_lower(
         NodeState::Lower {
             layer_idx: lower_layer.index,
             file,
-            mnt_id: stx.stx_mnt_id,
         }
     };
 
@@ -944,9 +939,6 @@ fn resolve_lower(
         dev: platform::stat_dev(&st),
     };
 
-    #[cfg(target_os = "linux")]
-    let kind = patched.st_mode & libc::S_IFMT;
-    #[cfg(target_os = "macos")]
     let kind = platform::mode_file_type(patched.st_mode);
 
     let node = Arc::new(OverlayNode {
@@ -1237,14 +1229,14 @@ pub(crate) fn get_upper_dir_fd(fs: &OverlayFs, parent_node: &OverlayNode) -> Opt
         }),
         NodeState::Upper { .. } => {
             #[cfg(target_os = "linux")]
-            if let NodeState::Upper { file, .. } = &*state {
-                if let Ok(fd) = reopen_fd_linux(
+            if let NodeState::Upper { file, .. } = &*state
+                && let Ok(fd) = reopen_fd_linux(
                     &fs.proc_self_fd,
                     file.as_raw_fd(),
                     libc::O_RDONLY | libc::O_DIRECTORY,
-                ) {
-                    return Some(NodeFd { fd, owned: true });
-                }
+                )
+            {
+                return Some(NodeFd { fd, owned: true });
             }
             #[cfg(target_os = "macos")]
             if let NodeState::Upper { ino, dev, .. } = &*state {
@@ -1386,14 +1378,14 @@ pub(crate) fn open_lower_parent(
         NodeState::Lower { layer_idx, .. } if *layer_idx == layer.index => {
             // Parent is on this same lower layer.
             #[cfg(target_os = "linux")]
-            if let NodeState::Lower { file, .. } = &*state {
-                if let Ok(fd) = reopen_fd_linux(
+            if let NodeState::Lower { file, .. } = &*state
+                && let Ok(fd) = reopen_fd_linux(
                     &layer.proc_self_fd,
                     file.as_raw_fd(),
                     libc::O_RDONLY | libc::O_DIRECTORY,
-                ) {
-                    return Some(NodeFd { fd, owned: true });
-                }
+                )
+            {
+                return Some(NodeFd { fd, owned: true });
             }
             #[cfg(target_os = "macos")]
             if let NodeState::Lower { ino, dev, .. } = &*state {
@@ -1574,7 +1566,7 @@ pub(crate) fn reopen_fd_linux(
     flags: i32,
 ) -> io::Result<RawFd> {
     let st = platform::fstat(o_path_fd)?;
-    if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
+    if platform::mode_file_type(st.st_mode) == platform::MODE_LNK {
         return Err(platform::eloop());
     }
 

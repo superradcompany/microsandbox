@@ -37,7 +37,7 @@ pub(crate) fn do_open(
 
     let node = inode::get_node(fs, ino)?;
 
-    if node.kind == libc::S_IFDIR as u32 {
+    if node.kind == platform::MODE_DIR {
         return Err(platform::eisdir());
     }
 
@@ -63,8 +63,8 @@ pub(crate) fn do_open(
     // Handle kill_priv: clear SUID/SGID on truncate.
     if kill_priv && (open_flags & super::GUEST_O_TRUNC != 0) {
         let mut meta = node.meta.write().unwrap();
-        if meta.mode & (libc::S_ISUID as u32 | libc::S_ISGID as u32) != 0 {
-            meta.mode &= !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+        if meta.mode & (platform::MODE_SETUID | platform::MODE_SETGID) != 0 {
+            meta.mode &= !(platform::MODE_SETUID | platform::MODE_SETGID);
             meta.ctime = inode::current_time();
         }
     }
@@ -226,7 +226,7 @@ pub(crate) fn do_write(
 
         // kill_priv: clear SUID/SGID on data write.
         if kill_priv {
-            meta.mode &= !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+            meta.mode &= !(platform::MODE_SETUID | platform::MODE_SETGID);
         }
     }
 
@@ -264,7 +264,7 @@ pub(crate) fn do_release(fs: &MemFs, _ctx: Context, ino: u64, handle: u64) -> io
     if let Some(fh) = fs.file_handles.write().unwrap().remove(&handle) {
         // If this was the last reference to a regular file already evicted
         // from the nodes table, release the capacity.
-        if fh.node.kind == libc::S_IFREG as u32
+        if fh.node.kind == platform::MODE_REG
             && Arc::strong_count(&fh.node) == 1
             && let InodeContent::RegularFile { ref data } = fh.node.content
         {

@@ -142,7 +142,7 @@ pub(crate) fn do_fallocate(
     let handles = fs.file_handles.read().unwrap();
     let fh = handles.get(&handle).ok_or_else(platform::ebadf)?;
 
-    if fh.node.kind != libc::S_IFREG as u32 {
+    if fh.node.kind != platform::MODE_REG {
         return Err(platform::enodev());
     }
 

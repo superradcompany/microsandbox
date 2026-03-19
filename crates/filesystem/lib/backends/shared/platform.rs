@@ -16,6 +16,8 @@
 //! atomically. Availability is probed at init time and cached in `PassthroughFs::has_openat2`.
 //! Falls back to `openat(O_NOFOLLOW)` on older kernels.
 
+#![cfg_attr(target_os = "linux", allow(dead_code))]
+
 use std::{io, os::fd::RawFd};
 
 use crate::stat64;

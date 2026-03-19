@@ -181,22 +181,8 @@ pub(crate) fn do_readlink(fs: &OverlayFs, _ctx: Context, ino: u64) -> io::Result
         });
 
         if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
-            // Real symlink — read target via /proc/self/fd/<dup'd O_PATH>.
-            let proc_path = format!("/proc/self/fd/{}\0", dup_fd);
-            let mut buf = vec![0u8; libc::PATH_MAX as usize];
-            let len = unsafe {
-                libc::readlinkat(
-                    libc::AT_FDCWD,
-                    proc_path.as_ptr() as *const libc::c_char,
-                    buf.as_mut_ptr() as *mut libc::c_char,
-                    buf.len(),
-                )
-            };
-            if len < 0 {
-                return Err(platform::linux_error(io::Error::last_os_error()));
-            }
-            buf.truncate(len as usize);
-            return Ok(buf);
+            // Real symlink — read the target from the pinned fd itself.
+            return platform::readlink_fd(dup_fd);
         }
 
         // File-backed symlink: reopen for reading (safe — it's a regular file).

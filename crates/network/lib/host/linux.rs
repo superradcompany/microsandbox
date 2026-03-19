@@ -123,7 +123,7 @@ impl TapLink {
             .unwrap_or_else(|| compute_ipv6_addresses(slot));
         let mac = interface.mac.unwrap_or_else(|| compute_mac(slot));
         let mtu = interface.mtu.unwrap_or(1500u16);
-        if mtu < 68 || mtu > 1500 {
+        if !(68..=1500).contains(&mtu) {
             return Err(std::io::Error::other(format!(
                 "MTU {mtu} is outside supported range (68–1500)"
             )));

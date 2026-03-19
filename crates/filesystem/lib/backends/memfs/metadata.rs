@@ -82,11 +82,9 @@ pub(crate) fn do_setattr(
 
     // Handle mode changes (preserve file type bits).
     if valid.contains(SetattrValid::MODE) {
-        #[cfg(target_os = "linux")]
-        let attr_mode = attr.st_mode;
-        #[cfg(target_os = "macos")]
-        let attr_mode = attr.st_mode as u32;
-        meta.mode = (meta.mode & libc::S_IFMT as u32) | (attr_mode & !libc::S_IFMT as u32);
+        let attr_mode = platform::mode_u32(attr.st_mode);
+        meta.mode =
+            (meta.mode & platform::MODE_TYPE_MASK) | (attr_mode & !platform::MODE_TYPE_MASK);
     }
 
     if valid.contains(SetattrValid::UID) {
@@ -122,7 +120,7 @@ pub(crate) fn do_setattr(
 
     // Handle kill SUID/SGID.
     if valid.contains(SetattrValid::KILL_SUIDGID) {
-        meta.mode &= !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+        meta.mode &= !(platform::MODE_SETUID | platform::MODE_SETGID);
     }
 
     meta.ctime = inode::current_time();
@@ -134,7 +132,7 @@ pub(crate) fn do_setattr(
 /// Check file access permissions using in-memory metadata.
 pub(crate) fn do_access(fs: &MemFs, ctx: Context, ino: u64, mask: u32) -> io::Result<()> {
     if ino == init_binary::INIT_INODE {
-        if mask & libc::W_OK as u32 != 0 {
+        if mask & platform::ACCESS_W_OK != 0 {
             return Err(platform::eacces());
         }
         return Ok(());
@@ -144,7 +142,7 @@ pub(crate) fn do_access(fs: &MemFs, ctx: Context, ino: u64, mask: u32) -> io::Re
     let meta = node.meta.read().unwrap();
 
     // F_OK: just check existence.
-    if mask == libc::F_OK as u32 {
+    if mask == platform::ACCESS_F_OK {
         return Ok(());
     }
 
@@ -152,7 +150,7 @@ pub(crate) fn do_access(fs: &MemFs, ctx: Context, ino: u64, mask: u32) -> io::Re
 
     // Root bypasses read/write checks.
     if ctx.uid == 0 {
-        if mask & libc::X_OK as u32 != 0 && st_mode & 0o111 == 0 {
+        if mask & platform::ACCESS_X_OK != 0 && st_mode & 0o111 == 0 {
             return Err(platform::eacces());
         }
         return Ok(());
@@ -166,13 +164,13 @@ pub(crate) fn do_access(fs: &MemFs, ctx: Context, ino: u64, mask: u32) -> io::Re
         st_mode & 0o7
     };
 
-    if mask & libc::R_OK as u32 != 0 && bits & 0o4 == 0 {
+    if mask & platform::ACCESS_R_OK != 0 && bits & 0o4 == 0 {
         return Err(platform::eacces());
     }
-    if mask & libc::W_OK as u32 != 0 && bits & 0o2 == 0 {
+    if mask & platform::ACCESS_W_OK != 0 && bits & 0o2 == 0 {
         return Err(platform::eacces());
     }
-    if mask & libc::X_OK as u32 != 0 && bits & 0o1 == 0 {
+    if mask & platform::ACCESS_X_OK != 0 && bits & 0o1 == 0 {
         return Err(platform::eacces());
     }
 

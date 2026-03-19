@@ -33,6 +33,7 @@ where
 /// On Linux, includes `mnt_id` from `statx` to prevent cross-mount collisions.
 /// On macOS, uses `(ino, dev)` which is sufficient since there are no bind mounts.
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Debug)]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) struct InodeAltKey {
     pub ino: u64,
     pub dev: u64,
@@ -41,6 +42,7 @@ pub(crate) struct InodeAltKey {
 }
 
 /// Per-inode data tracked by the filesystem backend.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) struct InodeData {
     /// Synthetic FUSE inode number (monotonically increasing, never reused).
     pub inode: u64,

@@ -45,11 +45,11 @@ pub(crate) fn do_create(
     let parent_node = inode::get_node(fs, parent)?;
     let ino = inode::alloc_inode(fs)?;
     let now = inode::current_time();
-    let effective_mode = libc::S_IFREG as u32 | (mode & !umask & 0o7777);
+    let effective_mode = platform::MODE_REG | (mode & !umask & 0o7777);
 
     let node = Arc::new(MemNode {
         inode: ino,
-        kind: libc::S_IFREG as u32,
+        kind: platform::MODE_REG,
         lookup_refs: AtomicU64::new(1),
         meta: RwLock::new(InodeMeta {
             uid: ctx.uid,
@@ -128,11 +128,11 @@ pub(crate) fn do_mkdir(
     let parent_node = inode::get_node(fs, parent)?;
     let ino = inode::alloc_inode(fs)?;
     let now = inode::current_time();
-    let effective_mode = libc::S_IFDIR as u32 | (mode & !umask & 0o7777);
+    let effective_mode = platform::MODE_DIR | (mode & !umask & 0o7777);
 
     let node = Arc::new(MemNode {
         inode: ino,
-        kind: libc::S_IFDIR as u32,
+        kind: platform::MODE_DIR,
         lookup_refs: AtomicU64::new(1),
         meta: RwLock::new(InodeMeta {
             uid: ctx.uid,
@@ -206,20 +206,20 @@ pub(crate) fn do_mknod(
     let ino = inode::alloc_inode(fs)?;
     let now = inode::current_time();
 
-    let file_type = mode & libc::S_IFMT as u32;
+    let file_type = mode & platform::MODE_TYPE_MASK;
     let effective_mode = file_type | (mode & !umask & 0o7777);
 
     let (kind, content) = match file_type {
-        m if m == libc::S_IFREG as u32 => (
-            libc::S_IFREG as u32,
+        m if m == platform::MODE_REG => (
+            platform::MODE_REG,
             InodeContent::RegularFile {
                 data: RwLock::new(Vec::new()),
             },
         ),
-        m if m == libc::S_IFBLK as u32
-            || m == libc::S_IFCHR as u32
-            || m == libc::S_IFIFO as u32
-            || m == libc::S_IFSOCK as u32 =>
+        m if m == platform::MODE_BLK
+            || m == platform::MODE_CHR
+            || m == platform::MODE_FIFO
+            || m == platform::MODE_SOCK =>
         {
             (file_type, InodeContent::Special)
         }
@@ -300,12 +300,12 @@ pub(crate) fn do_symlink(
 
     let node = Arc::new(MemNode {
         inode: ino,
-        kind: libc::S_IFLNK as u32,
+        kind: platform::MODE_LNK,
         lookup_refs: AtomicU64::new(1),
         meta: RwLock::new(InodeMeta {
             uid: ctx.uid,
             gid: ctx.gid,
-            mode: libc::S_IFLNK as u32 | 0o777,
+            mode: platform::MODE_LNK | 0o777,
             rdev: 0,
             nlink: 1,
             size: target.len() as u64,
@@ -364,7 +364,7 @@ pub(crate) fn do_link(
     let node = inode::get_node(fs, ino)?;
 
     // Cannot hardlink directories.
-    if node.kind == libc::S_IFDIR as u32 {
+    if node.kind == platform::MODE_DIR {
         return Err(platform::eperm());
     }
 

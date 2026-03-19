@@ -14,7 +14,10 @@ use super::{
         BackendId, DirSnapshot, DualDirHandle, FileKind, MergedDirEntry, NodeState, ROOT_INODE,
     },
 };
-use crate::{Context, DirEntry, Entry, OpenOptions, backends::shared::init_binary};
+use crate::{
+    Context, DirEntry, Entry, OpenOptions,
+    backends::shared::{init_binary, platform},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -222,7 +225,7 @@ fn build_readdir_snapshot(
         name: b".".to_vec(),
         inode: guest_inode,
         offset: off,
-        file_type: libc::DT_DIR as u32,
+        file_type: platform::DIRENT_DIR,
     });
     off += 1;
     seen.insert(b".".to_vec());
@@ -240,7 +243,7 @@ fn build_readdir_snapshot(
         name: b"..".to_vec(),
         inode: parent_inode,
         offset: off,
-        file_type: libc::DT_DIR as u32,
+        file_type: platform::DIRENT_DIR,
     });
     off += 1;
     seen.insert(b"..".to_vec());
@@ -251,7 +254,7 @@ fn build_readdir_snapshot(
             name: init_binary::INIT_FILENAME.to_vec(),
             inode: init_binary::INIT_INODE,
             offset: off,
-            file_type: libc::DT_REG as u32,
+            file_type: platform::DIRENT_REG,
         });
         off += 1;
         seen.insert(init_binary::INIT_FILENAME.to_vec());

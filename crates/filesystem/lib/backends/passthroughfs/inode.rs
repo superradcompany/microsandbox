@@ -461,6 +461,12 @@ pub(crate) fn forget_one_locked(
 pub(crate) fn get_inode_fd(fs: &PassthroughFs, inode: u64) -> io::Result<InodeFd> {
     // Root inode uses the stored root fd.
     if inode == 1 {
+        let inodes = fs.inodes.read().unwrap();
+        if inodes.get(&inode).is_none() {
+            return Err(platform::ebadf());
+        }
+        drop(inodes);
+
         return Ok(InodeFd {
             fd: fs.root_fd.as_raw_fd(),
             #[cfg(target_os = "macos")]

@@ -774,10 +774,7 @@ pub(crate) fn transition_to_upper(
         // Update node state.
         {
             let mut state = node.state.write().unwrap();
-            *state = NodeState::Upper {
-                file,
-                mnt_id: stx.stx_mnt_id,
-            };
+            *state = NodeState::Upper { file };
         }
 
         // Register alt key.
@@ -885,7 +882,7 @@ fn copy_file_data(src_fd: RawFd, dst_fd: RawFd, size: u64) -> io::Result<()> {
         if remaining > 0 {
             return Err(platform::eio());
         }
-        return Ok(());
+        Ok(())
     }
 
     // macOS: buffered copy.
@@ -942,7 +939,7 @@ fn try_clone_file(src_fd: RawFd, dst_fd: RawFd) -> bool {
         // FICLONE = _IOW(0x94, 9, int) = 0x40049409
         const FICLONE: libc::c_ulong = 0x40049409;
         let ret = unsafe { libc::ioctl(dst_fd, FICLONE, src_fd) };
-        return ret == 0;
+        ret == 0
     }
 
     #[cfg(target_os = "macos")]

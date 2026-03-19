@@ -204,7 +204,7 @@ pub(crate) fn do_setattr(
 /// Handle access. Direct dispatch from node state.
 pub(crate) fn do_access(fs: &DualFs, ctx: Context, ino: u64, mask: u32) -> io::Result<()> {
     if ino == init_binary::INIT_INODE {
-        if mask & libc::W_OK as u32 != 0 {
+        if mask & platform::ACCESS_W_OK != 0 {
             return Err(io::Error::from_raw_os_error(libc::EACCES));
         }
         return Ok(());
