@@ -3,6 +3,7 @@ name: 🚀 Release Packages & Binaries
 on:
   push:
     branches: [ main ]
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       trigger_release:
@@ -19,7 +20,7 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.trigger_release == 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.trigger_release == 'true' }}
     outputs:
       releases_created: ${{ steps.release.outputs.releases_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
@@ -70,7 +71,7 @@ jobs:
 
   build-and-package:
     needs: release-please
-    if: ${{ needs.release-please.outputs['--release_created'] == 'true' }}
+    if: ${{ always() && (startsWith(github.ref, 'refs/tags/v') || needs.release-please.outputs['--release_created'] == 'true') }}
     strategy:
       matrix:
         include:
@@ -99,15 +100,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Extract version from tag
+      - name: Determine release version
         id: version
         run: |
-          if [ -n "${{ needs.release-please.outputs.tag_name }}" ]; then
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          elif [ -n "${{ needs.release-please.outputs.tag_name }}" ]; then
             VERSION=${{ needs.release-please.outputs.tag_name }}
           else
             VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           fi
           echo "version=${VERSION#v}" >> $GITHUB_OUTPUT
+          echo "tag_name=${VERSION}" >> $GITHUB_OUTPUT
           echo "Version: ${VERSION#v}"
 
       - name: Build and package
@@ -118,9 +122,9 @@ jobs:
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v1
-        if: needs.release-please.outputs.tag_name != ''
+        if: steps.version.outputs.tag_name != ''
         with:
-          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          tag_name: ${{ steps.version.outputs.tag_name }}
           files: |
             build/microsandbox-*.tar.gz
             build/microsandbox-*.tar.gz.sha256
