@@ -1,35 +1,11 @@
 # Examples
 
-A collection of examples showing how to use the microsandbox SDK.
+Examples showing how to use the microsandbox SDK.
 
-## Prerequisites
+## simple-root
 
-Before running any example, make sure you've done the following from the repo root:
-
-1. **Build msb** (the sandbox runtime):
-
-   ```sh
-   just build
-   ```
-
-2. **Initialize the rootfs submodule** (provides the Alpine Linux root filesystem):
-
-   ```sh
-   git submodule update --init
-   ```
-
-That's it. You don't need `just build-deps` unless you've never built agentd and libkrunfw before — `just build` handles the rest.
-
-## Running examples
-
-All examples are run from the **repo root**. Point `MSB_PATH` to the binary produced by `just build`:
+Boots a sandbox, runs a few shell commands, and stops it. A good starting point.
 
 ```sh
-MSB_PATH="$PWD/build/msb" cargo run -p <example-name>
+cargo run -p simple-root
 ```
-
-## Examples
-
-| Example | Description |
-|---------|-------------|
-| [basic](basic/) | Boots a sandbox, runs a few shell commands, and stops it. A good starting point. |

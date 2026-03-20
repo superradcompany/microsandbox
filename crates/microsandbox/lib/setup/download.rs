@@ -2,11 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
+use flate2::read::GzDecoder;
 use futures::StreamExt;
-use tokio::io::AsyncWriteExt;
+use tar::Archive;
 
 use crate::{MicrosandboxError, MicrosandboxResult};
-use microsandbox_utils::{BASE_DIR_NAME, LIB_SUBDIR, LIBKRUNFW_ABI};
+use microsandbox_utils::{
+    BASE_DIR_NAME, BIN_SUBDIR, LIB_SUBDIR, LIBKRUNFW_ABI, MSB_BINARY, MSBNET_BINARY,
+};
 
 use super::verify::verify_installation;
 
@@ -24,6 +27,10 @@ pub struct Setup {
     /// Skip verification after installation.
     #[builder(default = false)]
     skip_verify: bool,
+
+    /// Force re-download even if binaries already exist.
+    #[builder(default = false)]
+    force: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -34,48 +41,57 @@ impl Setup {
     /// Run the installation process.
     pub async fn install(&self) -> MicrosandboxResult<()> {
         let base_dir = self.resolve_base_dir()?;
+        let bin_dir = base_dir.join(BIN_SUBDIR);
         let lib_dir = base_dir.join(LIB_SUBDIR);
+        tokio::fs::create_dir_all(&bin_dir).await?;
         tokio::fs::create_dir_all(&lib_dir).await?;
 
-        self.install_libkrunfw(&lib_dir).await?;
+        self.install_bundle(&bin_dir, &lib_dir).await?;
 
         if !self.skip_verify {
-            verify_installation(&lib_dir)?;
+            verify_installation(&bin_dir, &lib_dir)?;
         }
 
         Ok(())
     }
 
-    /// Install libkrunfw to the target directory.
-    async fn install_libkrunfw(&self, lib_dir: &Path) -> MicrosandboxResult<()> {
-        let filename = microsandbox_utils::libkrunfw_filename(std::env::consts::OS);
-        let symlinks = libkrunfw_symlinks(&filename);
+    /// Download and extract the microsandbox bundle tarball.
+    async fn install_bundle(&self, bin_dir: &Path, lib_dir: &Path) -> MicrosandboxResult<()> {
+        let libkrunfw_name = microsandbox_utils::libkrunfw_filename(std::env::consts::OS);
 
-        let dest = lib_dir.join(&filename);
-        if dest.exists() {
+        // Skip if all binaries are already present.
+        if !self.force
+            && bin_dir.join(MSB_BINARY).exists()
+            && bin_dir.join(MSBNET_BINARY).exists()
+            && lib_dir.join(&libkrunfw_name).exists()
+        {
             return Ok(());
         }
 
-        let url = microsandbox_utils::libkrunfw_download_url(
-            env!("CARGO_PKG_VERSION"),
+        let version = env!("CARGO_PKG_VERSION");
+        let url = microsandbox_utils::bundle_download_url(
+            version,
             std::env::consts::ARCH,
             std::env::consts::OS,
         );
-        download_file(&url, &dest).await?;
 
-        // Create symlinks.
+        tracing::info!(version, "downloading microsandbox runtime dependencies");
+        let data = download_bytes(&url).await?;
+        extract_bundle(&data, bin_dir, lib_dir)?;
+        tracing::info!("microsandbox runtime dependencies installed");
+
+        // Create libkrunfw symlinks.
         #[cfg(unix)]
-        for (link_name, target) in &symlinks {
-            let link_path = lib_dir.join(link_name);
-            if link_path.exists() {
-                tokio::fs::remove_file(&link_path).await?;
+        {
+            let symlinks = libkrunfw_symlinks(&libkrunfw_name);
+            for (link_name, target) in &symlinks {
+                let link_path = lib_dir.join(link_name);
+                if link_path.exists() || link_path.is_symlink() {
+                    std::fs::remove_file(&link_path)?;
+                }
+                std::os::unix::fs::symlink(target, &link_path)?;
             }
-            tokio::fs::symlink(target, &link_path).await?;
         }
-
-        // Suppress unused variable warning on non-unix platforms.
-        #[cfg(not(unix))]
-        let _ = symlinks;
 
         Ok(())
     }
@@ -96,7 +112,8 @@ impl Setup {
 
 /// Install microsandbox runtime dependencies with default settings.
 ///
-/// This creates `~/.microsandbox/lib/` and downloads libkrunfw if not already present.
+/// This downloads the microsandbox bundle tarball and extracts `msb`, `msbnet`,
+/// and `libkrunfw` to `~/.microsandbox/{bin,lib}/`.
 pub async fn install() -> MicrosandboxResult<()> {
     Setup::builder().build().install().await
 }
@@ -106,8 +123,9 @@ pub fn is_installed() -> bool {
     let Some(base_dir) = default_base_dir() else {
         return false;
     };
+    let bin_dir = base_dir.join(BIN_SUBDIR);
     let lib_dir = base_dir.join(LIB_SUBDIR);
-    verify_installation(&lib_dir).is_ok()
+    verify_installation(&bin_dir, &lib_dir).is_ok()
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -130,45 +148,45 @@ fn libkrunfw_symlinks(filename: &str) -> Vec<(String, String)> {
     }
 }
 
-async fn download_file(url: &str, dest: &Path) -> MicrosandboxResult<()> {
-    let response = reqwest::get(url).await?.error_for_status()?;
+/// Extract the bundle tarball, routing files to bin/ or lib/ based on name.
+fn extract_bundle(data: &[u8], bin_dir: &Path, lib_dir: &Path) -> MicrosandboxResult<()> {
+    let decoder = GzDecoder::new(std::io::Cursor::new(data));
+    let mut archive = Archive::new(decoder);
 
-    // Download to a temporary file first for atomic write.
-    let part_path = {
-        let mut s = dest.as_os_str().to_os_string();
-        s.push(".part");
-        PathBuf::from(s)
-    };
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+        let Some(filename) = path.file_name().and_then(|f| f.to_str()) else {
+            continue;
+        };
 
-    let result = write_part_file(&part_path, response).await;
-    if result.is_err() {
-        // Clean up partial .part file on error.
-        let _ = tokio::fs::remove_file(&part_path).await;
+        let dest = if filename.starts_with("libkrunfw") {
+            lib_dir.join(filename)
+        } else {
+            bin_dir.join(filename)
+        };
+
+        entry.unpack(&dest)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+        }
     }
-    result?;
-
-    // Atomically move to final destination.
-    tokio::fs::rename(&part_path, dest).await?;
 
     Ok(())
 }
 
-async fn write_part_file(part_path: &Path, response: reqwest::Response) -> MicrosandboxResult<()> {
+async fn download_bytes(url: &str) -> MicrosandboxResult<Vec<u8>> {
+    let response = reqwest::get(url).await?.error_for_status()?;
     let mut stream = response.bytes_stream();
-    let file = tokio::fs::File::create(part_path).await?;
-    let mut writer = tokio::io::BufWriter::new(file);
+    let mut data = Vec::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        writer.write_all(&chunk).await?;
-    }
-    writer.flush().await?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(part_path, std::fs::Permissions::from_mode(0o755)).await?;
+        data.extend_from_slice(&chunk);
     }
 
-    Ok(())
+    Ok(data)
 }

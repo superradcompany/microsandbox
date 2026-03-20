@@ -11,12 +11,16 @@ edition.workspace = true
 name = "microsandbox_runtime"
 path = "lib/lib.rs"
 
+[features]
+default = ["prebuilt"]
+prebuilt = ["microsandbox-filesystem/prebuilt"]
+
 [dependencies]
 chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
 libc.workspace = true
 microsandbox-db = { version = "0.3.0", path = "../db" }
-microsandbox-filesystem = { version = "0.3.0", path = "../filesystem" }
+microsandbox-filesystem = { version = "0.3.0", path = "../filesystem", default-features = false }
 microsandbox-network = { version = "0.3.0", path = "../network" }
 microsandbox-protocol = { version = "0.3.0", path = "../protocol" }
 microsandbox-utils = { version = "0.3.0", path = "../utils" }

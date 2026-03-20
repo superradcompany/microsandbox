@@ -1,7 +1,6 @@
-use std::{
-    path::{Path, PathBuf},
-    time::SystemTime,
-};
+use std::path::{Path, PathBuf};
+#[cfg(not(feature = "prebuilt"))]
+use std::time::SystemTime;
 
 use microsandbox_utils::AGENTD_BINARY;
 #[cfg(feature = "prebuilt")]
@@ -35,7 +34,6 @@ fn build_agentd(workspace_root: &Path, out_dir: &Path) {
         let url = agentd_download_url(env!("CARGO_PKG_VERSION"), &arch);
 
         download_to(&url, &dest);
-        return;
     }
 
     #[cfg(not(feature = "prebuilt"))]
@@ -73,6 +71,7 @@ fn build_agentd(workspace_root: &Path, out_dir: &Path) {
     }
 }
 
+#[cfg(not(feature = "prebuilt"))]
 fn newest_tree_mtime(root: &Path) -> Option<SystemTime> {
     fn walk(path: &Path, newest: &mut Option<SystemTime>) {
         let entries = match std::fs::read_dir(path) {

@@ -118,3 +118,11 @@ pub fn agentd_download_url(version: &str, arch: &str) -> String {
         "https://github.com/{GITHUB_ORG}/{MICROSANDBOX_REPO}/releases/download/v{version}/{AGENTD_BINARY}-{arch}"
     )
 }
+
+/// Returns the GitHub release download URL for the microsandbox bundle tarball.
+pub fn bundle_download_url(version: &str, arch: &str, os: &str) -> String {
+    let target_os = if os == "macos" { "darwin" } else { "linux" };
+    format!(
+        "https://github.com/{GITHUB_ORG}/{MICROSANDBOX_REPO}/releases/download/v{version}/{MICROSANDBOX_REPO}-{target_os}-{arch}.tar.gz"
+    )
+}

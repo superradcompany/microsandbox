@@ -1,11 +1,11 @@
 [package]
-name = "basic-example"
+name = "simple-root"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [[bin]]
-name = "basic-example"
+name = "simple-root"
 path = "bin/main.rs"
 
 [dependencies]

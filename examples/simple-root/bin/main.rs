@@ -1,8 +1,8 @@
-//! Basic example demonstrating the microsandbox SDK.
+//! Simple root example demonstrating the microsandbox SDK.
 //!
 //! See [examples/README.md](../../README.md) for prerequisites and usage.
 
-use microsandbox::{LogLevel, sandbox::Sandbox};
+use microsandbox::sandbox::Sandbox;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -10,12 +10,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Creating sandbox (rootfs={rootfs_path:?})");
 
     // Create a sandbox with a bind-mounted rootfs.
-    let sandbox = Sandbox::builder("basic-example")
+    let sandbox = Sandbox::builder("simple-root")
         .image(rootfs_path)
         .cpus(1)
         .memory(512)
-        .force()
-        .log_level(LogLevel::Info)
+        .overwrite()
         .create()
         .await?;
 

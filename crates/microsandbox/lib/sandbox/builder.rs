@@ -117,7 +117,7 @@ impl SandboxBuilder {
     }
 
     /// Replace an existing stopped sandbox with the same name during create.
-    pub fn force(mut self) -> Self {
+    pub fn overwrite(mut self) -> Self {
         self.config.replace_existing = true;
         self
     }
@@ -301,10 +301,10 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_force_sets_replace_existing() {
+    fn test_builder_overwrite_sets_replace_existing() {
         let config = SandboxBuilder::new("test")
             .image("alpine:3.23")
-            .force()
+            .overwrite()
             .build()
             .unwrap();
 
