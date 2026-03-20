@@ -25,9 +25,9 @@ chrono.workspace = true
 clap.workspace = true
 console.workspace = true
 indicatif.workspace = true
-microsandbox = { version = "0.3.0", path = "../microsandbox", default-features = false }
-microsandbox-image = { version = "0.3.0", path = "../image" }
-microsandbox-runtime = { version = "0.3.0", path = "../runtime", default-features = false }
+microsandbox = { version = "0.3.1", path = "../microsandbox", default-features = false }
+microsandbox-image = { version = "0.3.1", path = "../image" }
+microsandbox-runtime = { version = "0.3.1", path = "../runtime", default-features = false }
 rand.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -9,6 +9,7 @@ use tar::Archive;
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_utils::{
     BASE_DIR_NAME, BIN_SUBDIR, LIB_SUBDIR, LIBKRUNFW_ABI, MSB_BINARY, MSBNET_BINARY,
+    PREBUILT_VERSION,
 };
 
 use super::verify::verify_installation;
@@ -68,14 +69,16 @@ impl Setup {
             return Ok(());
         }
 
-        let version = env!("CARGO_PKG_VERSION");
         let url = microsandbox_utils::bundle_download_url(
-            version,
+            PREBUILT_VERSION,
             std::env::consts::ARCH,
             std::env::consts::OS,
         );
 
-        tracing::info!(version, "downloading microsandbox runtime dependencies");
+        tracing::info!(
+            version = PREBUILT_VERSION,
+            "downloading microsandbox runtime dependencies"
+        );
         let data = download_bytes(&url).await?;
         extract_bundle(&data, bin_dir, lib_dir)?;
         tracing::info!("microsandbox runtime dependencies installed");

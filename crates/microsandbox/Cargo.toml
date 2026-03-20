@@ -23,14 +23,14 @@ dirs.workspace = true
 flate2.workspace = true
 futures.workspace = true
 libc.workspace = true
-microsandbox-db = { version = "0.3.0", path = "../db" }
-microsandbox-filesystem = { version = "0.3.0", path = "../filesystem", default-features = false }
-microsandbox-image = { version = "0.3.0", path = "../image" }
-microsandbox-migration = { version = "0.3.0", path = "../migration" }
-microsandbox-network = { version = "0.3.0", path = "../network" }
-microsandbox-protocol = { version = "0.3.0", path = "../protocol" }
-microsandbox-runtime = { version = "0.3.0", path = "../runtime", default-features = false }
-microsandbox-utils = { version = "0.3.0", path = "../utils" }
+microsandbox-db = { version = "0.3.1", path = "../db" }
+microsandbox-filesystem = { version = "0.3.1", path = "../filesystem", default-features = false }
+microsandbox-image = { version = "0.3.1", path = "../image" }
+microsandbox-migration = { version = "0.3.1", path = "../migration" }
+microsandbox-network = { version = "0.3.1", path = "../network" }
+microsandbox-protocol = { version = "0.3.1", path = "../protocol" }
+microsandbox-runtime = { version = "0.3.1", path = "../runtime", default-features = false }
+microsandbox-utils = { version = "0.3.1", path = "../utils" }
 nix = { workspace = true, features = ["process", "signal"] }
 reqwest.workspace = true
 scopeguard.workspace = true

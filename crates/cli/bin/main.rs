@@ -77,8 +77,7 @@ enum Commands {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-#[tokio::main]
-async fn main() {
+fn main() {
     // Auto-set MSB_PATH so the library can find the msb binary
     // when spawning supervisor processes.
     // Safety: called before any threads are spawned (single-threaded at this point).
@@ -93,29 +92,45 @@ async fn main() {
     log_args::init_tracing(log_level);
 
     let result: Result<(), Box<dyn std::error::Error>> = match cli.command {
-        // Hidden internal commands.
-        Commands::Supervisor(args) => supervisor_cmd::run(args, log_level)
-            .await
-            .map_err(Into::into),
         Commands::Microvm(args) => microvm_cmd::run(args).map_err(Into::into),
-
-        // User-facing commands.
-        Commands::Run(args) => run::run(args).await.map_err(Into::into),
-        Commands::Create(args) => create::run(args).await.map_err(Into::into),
-        Commands::Start(args) => start::run(args).await.map_err(Into::into),
-        Commands::Stop(args) => stop::run(args).await.map_err(Into::into),
-        Commands::List(args) => list::run(args).await.map_err(Into::into),
-        Commands::Ps(args) => ps::run(args).await.map_err(Into::into),
-        Commands::Remove(args) => remove::run(args).await.map_err(Into::into),
-        Commands::Exec(args) => exec::run(args).await.map_err(Into::into),
-        Commands::Attach(args) => attach::run(args).await.map_err(Into::into),
-        Commands::Shell(args) => shell::run(args).await.map_err(Into::into),
-        Commands::Pull(args) => pull::run(args).await.map_err(Into::into),
-        Commands::Inspect(args) => inspect::run(args).await.map_err(Into::into),
+        command => run_async_command(command, log_level),
     };
 
     if let Err(e) = result {
         microsandbox_cli::ui::error(&e.to_string());
         std::process::exit(1);
     }
+}
+
+fn run_async_command(
+    command: Commands,
+    log_level: Option<microsandbox::LogLevel>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    runtime.block_on(async move {
+        match command {
+            // Hidden internal commands.
+            Commands::Supervisor(args) => supervisor_cmd::run(args, log_level)
+                .await
+                .map_err(Into::into),
+            Commands::Microvm(_) => unreachable!("microvm is handled before Tokio starts"),
+
+            // User-facing commands.
+            Commands::Run(args) => run::run(args).await.map_err(Into::into),
+            Commands::Create(args) => create::run(args).await.map_err(Into::into),
+            Commands::Start(args) => start::run(args).await.map_err(Into::into),
+            Commands::Stop(args) => stop::run(args).await.map_err(Into::into),
+            Commands::List(args) => list::run(args).await.map_err(Into::into),
+            Commands::Ps(args) => ps::run(args).await.map_err(Into::into),
+            Commands::Remove(args) => remove::run(args).await.map_err(Into::into),
+            Commands::Exec(args) => exec::run(args).await.map_err(Into::into),
+            Commands::Attach(args) => attach::run(args).await.map_err(Into::into),
+            Commands::Shell(args) => shell::run(args).await.map_err(Into::into),
+            Commands::Pull(args) => pull::run(args).await.map_err(Into::into),
+            Commands::Inspect(args) => inspect::run(args).await.map_err(Into::into),
+        }
+    })
 }

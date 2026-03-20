@@ -34,8 +34,8 @@ hickory-resolver = { workspace = true }
 ipnetwork = { workspace = true }
 libc = { workspace = true }
 lru = { workspace = true, optional = true }
-microsandbox-protocol = { version = "0.3.0", path = "../protocol" }
-microsandbox-utils = { version = "0.3.0", path = "../utils" }
+microsandbox-protocol = { version = "0.3.1", path = "../protocol" }
+microsandbox-utils = { version = "0.3.1", path = "../utils" }
 nix = { workspace = true, features = ["user"] }
 rcgen = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }

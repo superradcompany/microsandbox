@@ -19,11 +19,11 @@ prebuilt = ["microsandbox-filesystem/prebuilt"]
 chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
 libc.workspace = true
-microsandbox-db = { version = "0.3.0", path = "../db" }
-microsandbox-filesystem = { version = "0.3.0", path = "../filesystem", default-features = false }
-microsandbox-network = { version = "0.3.0", path = "../network" }
-microsandbox-protocol = { version = "0.3.0", path = "../protocol" }
-microsandbox-utils = { version = "0.3.0", path = "../utils" }
+microsandbox-db = { version = "0.3.1", path = "../db" }
+microsandbox-filesystem = { version = "0.3.1", path = "../filesystem", default-features = false }
+microsandbox-network = { version = "0.3.1", path = "../network" }
+microsandbox-protocol = { version = "0.3.1", path = "../protocol" }
+microsandbox-utils = { version = "0.3.1", path = "../utils" }
 msb_krun = { version = "0.1.6", features = ["blk", "net"] }
 nix = { workspace = true, features = ["process", "signal"] }
 sea-orm.workspace = true
