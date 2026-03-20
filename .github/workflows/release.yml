@@ -70,18 +70,20 @@ jobs:
           fi
 
   build-and-package:
+    name: Build and package (${{ matrix.release_target }})
     needs: release-please
     if: ${{ always() && (startsWith(github.ref, 'refs/tags/v') || needs.release-please.outputs['--release_created'] == 'true') }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-          - os: macos-26
-            target: aarch64-apple-darwin
-    runs-on: ${{ matrix.os }}
+          - runner: ubuntu-latest
+            release_target: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            release_target: linux-aarch64
+          - runner: macos-14
+            release_target: darwin-arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -91,14 +93,7 @@ jobs:
         with:
           profile: minimal
           toolchain: stable
-          target: ${{ matrix.target }}
           override: true
-
-      - name: Install cross-compilation tools (Linux)
-        if: matrix.os == 'ubuntu-latest' && matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Determine release version
         id: version
@@ -115,10 +110,7 @@ jobs:
           echo "Version: ${VERSION#v}"
 
       - name: Build and package
-        run: |
-          ./scripts/package_microsandbox.sh ${{ steps.version.outputs.version }}
-        env:
-          CARGO_BUILD_TARGET: ${{ matrix.target }}
+        run: ./scripts/package_microsandbox.sh ${{ steps.version.outputs.version }}
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v1
