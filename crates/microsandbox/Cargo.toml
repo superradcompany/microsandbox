@@ -21,14 +21,14 @@ crossterm.workspace = true
 dirs.workspace = true
 futures.workspace = true
 libc.workspace = true
-microsandbox-db = { path = "../db" }
-microsandbox-filesystem = { path = "../filesystem" }
-microsandbox-image = { path = "../image" }
-microsandbox-migration = { path = "../migration" }
-microsandbox-network = { path = "../network" }
-microsandbox-protocol = { path = "../protocol" }
-microsandbox-runtime = { path = "../runtime" }
-microsandbox-utils = { path = "../utils" }
+microsandbox-db = { version = "0.2.7", path = "../db" }
+microsandbox-filesystem = { version = "0.2.7", path = "../filesystem" }
+microsandbox-image = { version = "0.2.7", path = "../image" }
+microsandbox-migration = { version = "0.2.7", path = "../migration" }
+microsandbox-network = { version = "0.2.7", path = "../network" }
+microsandbox-protocol = { version = "0.2.7", path = "../protocol" }
+microsandbox-runtime = { version = "0.2.7", path = "../runtime" }
+microsandbox-utils = { version = "0.2.7", path = "../utils" }
 nix = { workspace = true, features = ["process", "signal"] }
 reqwest.workspace = true
 scopeguard.workspace = true
@@ -42,7 +42,7 @@ typed-builder.workspace = true
 which.workspace = true
 
 [build-dependencies]
-microsandbox-utils = { path = "../utils" }
+microsandbox-utils = { version = "0.2.7", path = "../utils" }
 ureq = { workspace = true, optional = true }
 
 [dev-dependencies]
