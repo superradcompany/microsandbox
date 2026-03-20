@@ -27,9 +27,15 @@ use crate::{
 pub(crate) const OVERRIDE_XATTR_KEY: &str = "user.containers.override_stat";
 
 /// File type mask.
+#[cfg(target_os = "linux")]
+pub(crate) const S_IFMT: u32 = libc::S_IFMT;
+#[cfg(target_os = "macos")]
 pub(crate) const S_IFMT: u32 = libc::S_IFMT as u32;
 
 /// Symlink file type bits.
+#[cfg(target_os = "linux")]
+pub(crate) const S_IFLNK: u32 = libc::S_IFLNK;
+#[cfg(target_os = "macos")]
 pub(crate) const S_IFLNK: u32 = libc::S_IFLNK as u32;
 
 //--------------------------------------------------------------------------------------------------

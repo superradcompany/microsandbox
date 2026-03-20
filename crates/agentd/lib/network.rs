@@ -5,9 +5,12 @@
 //!
 //! This module only performs real work on Linux. On other platforms, it is a no-op.
 
+#[cfg(target_os = "linux")]
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use crate::error::{AgentdError, AgentdResult};
+#[cfg(target_os = "linux")]
+use crate::error::AgentdError;
+use crate::error::AgentdResult;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -15,7 +18,7 @@ use crate::error::{AgentdError, AgentdResult};
 
 /// Parsed `MSB_NET` specification.
 #[derive(Debug)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(target_os = "linux")]
 struct NetSpec<'a> {
     iface: &'a str,
     mac: [u8; 6],
@@ -24,7 +27,7 @@ struct NetSpec<'a> {
 
 /// Parsed `MSB_NET_IPV4` specification.
 #[derive(Debug)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(target_os = "linux")]
 struct NetIpv4Spec {
     address: Ipv4Addr,
     prefix_len: u8,
@@ -34,7 +37,7 @@ struct NetIpv4Spec {
 
 /// Parsed `MSB_NET_IPV6` specification.
 #[derive(Debug)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(target_os = "linux")]
 struct NetIpv6Spec {
     address: Ipv6Addr,
     prefix_len: u8,
@@ -80,6 +83,7 @@ pub fn apply_network_config() -> AgentdResult<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 /// Parses `MSB_NET` value: `iface=NAME,mac=AA:BB:CC:DD:EE:FF,mtu=N`
 fn parse_net(val: &str) -> AgentdResult<NetSpec<'_>> {
     let mut iface = None;
@@ -106,6 +110,7 @@ fn parse_net(val: &str) -> AgentdResult<NetSpec<'_>> {
     Ok(NetSpec { iface, mac, mtu })
 }
 
+#[cfg(target_os = "linux")]
 /// Parses `MSB_NET_IPV4` value: `addr=A.B.C.D/N,gw=A.B.C.D[,dns=A.B.C.D]`
 fn parse_net_ipv4(val: &str) -> AgentdResult<NetIpv4Spec> {
     let mut address = None;
@@ -119,13 +124,15 @@ fn parse_net_ipv4(val: &str) -> AgentdResult<NetIpv4Spec> {
             address = Some(addr);
             prefix_len = Some(prefix);
         } else if let Some(v) = part.strip_prefix("gw=") {
-            gateway = Some(v.parse::<Ipv4Addr>().map_err(|_| {
-                AgentdError::Init(format!("invalid IPv4 gateway: {v}"))
-            })?);
+            gateway = Some(
+                v.parse::<Ipv4Addr>()
+                    .map_err(|_| AgentdError::Init(format!("invalid IPv4 gateway: {v}")))?,
+            );
         } else if let Some(v) = part.strip_prefix("dns=") {
-            dns = Some(v.parse::<Ipv4Addr>().map_err(|_| {
-                AgentdError::Init(format!("invalid IPv4 DNS: {v}"))
-            })?);
+            dns = Some(
+                v.parse::<Ipv4Addr>()
+                    .map_err(|_| AgentdError::Init(format!("invalid IPv4 DNS: {v}")))?,
+            );
         } else {
             return Err(AgentdError::Init(format!(
                 "unknown MSB_NET_IPV4 option: {part}"
@@ -146,6 +153,7 @@ fn parse_net_ipv4(val: &str) -> AgentdResult<NetIpv4Spec> {
     })
 }
 
+#[cfg(target_os = "linux")]
 /// Parses `MSB_NET_IPV6` value: `addr=ADDR/N,gw=ADDR[,dns=ADDR]`
 fn parse_net_ipv6(val: &str) -> AgentdResult<NetIpv6Spec> {
     let mut address = None;
@@ -159,13 +167,15 @@ fn parse_net_ipv6(val: &str) -> AgentdResult<NetIpv6Spec> {
             address = Some(addr);
             prefix_len = Some(prefix);
         } else if let Some(v) = part.strip_prefix("gw=") {
-            gateway = Some(v.parse::<Ipv6Addr>().map_err(|_| {
-                AgentdError::Init(format!("invalid IPv6 gateway: {v}"))
-            })?);
+            gateway = Some(
+                v.parse::<Ipv6Addr>()
+                    .map_err(|_| AgentdError::Init(format!("invalid IPv6 gateway: {v}")))?,
+            );
         } else if let Some(v) = part.strip_prefix("dns=") {
-            dns = Some(v.parse::<Ipv6Addr>().map_err(|_| {
-                AgentdError::Init(format!("invalid IPv6 DNS: {v}"))
-            })?);
+            dns = Some(
+                v.parse::<Ipv6Addr>()
+                    .map_err(|_| AgentdError::Init(format!("invalid IPv6 DNS: {v}")))?,
+            );
         } else {
             return Err(AgentdError::Init(format!(
                 "unknown MSB_NET_IPV6 option: {part}"
@@ -186,6 +196,7 @@ fn parse_net_ipv6(val: &str) -> AgentdResult<NetIpv6Spec> {
     })
 }
 
+#[cfg(target_os = "linux")]
 /// Parses a MAC address string like `02:5a:7b:13:01:02`.
 fn parse_mac(s: &str) -> AgentdResult<[u8; 6]> {
     let mut mac = [0u8; 6];
@@ -204,6 +215,7 @@ fn parse_mac(s: &str) -> AgentdResult<[u8; 6]> {
     Ok(mac)
 }
 
+#[cfg(target_os = "linux")]
 /// Parses an IPv4 CIDR like `100.96.1.2/30`.
 fn parse_cidr_v4(s: &str) -> AgentdResult<(Ipv4Addr, u8)> {
     let (addr_str, prefix_str) = s
@@ -223,6 +235,7 @@ fn parse_cidr_v4(s: &str) -> AgentdResult<(Ipv4Addr, u8)> {
     Ok((addr, prefix))
 }
 
+#[cfg(target_os = "linux")]
 /// Parses an IPv6 CIDR like `fd42:6d73:62:2a::2/64`.
 fn parse_cidr_v6(s: &str) -> AgentdResult<(Ipv6Addr, u8)> {
     let (addr_str, prefix_str) = s
@@ -354,8 +367,7 @@ mod linux {
             copy_ifname(&mut ifr, ifname)?;
 
             ifr.ifr_ifru.ifru_hwaddr.sa_family = libc::ARPHRD_ETHER;
-            ifr.ifr_ifru.ifru_hwaddr.sa_data[..6]
-                .copy_from_slice(&mac.map(|b| b as libc::c_char));
+            ifr.ifr_ifru.ifru_hwaddr.sa_data[..6].copy_from_slice(&mac.map(|b| b as libc::c_char));
 
             let sock = socket_fd()?;
             if libc::ioctl(sock, libc::SIOCSIFHWADDR as _, &ifr) < 0 {
@@ -427,29 +439,41 @@ mod linux {
     /// Adds an IPv4 address to an interface via netlink RTM_NEWADDR.
     fn add_address_v4(ifindex: u32, addr: Ipv4Addr, prefix_len: u8) -> AgentdResult<()> {
         let addr_bytes = addr.octets();
-        netlink_newaddr(ifindex, libc::AF_INET as u8, prefix_len, &addr_bytes)
-            .map_err(|e| AgentdError::Init(format!("failed to add IPv4 address {addr}/{prefix_len}: {e}")))
+        netlink_newaddr(ifindex, libc::AF_INET as u8, prefix_len, &addr_bytes).map_err(|e| {
+            AgentdError::Init(format!(
+                "failed to add IPv4 address {addr}/{prefix_len}: {e}"
+            ))
+        })
     }
 
     /// Adds an IPv6 address to an interface via netlink RTM_NEWADDR.
     fn add_address_v6(ifindex: u32, addr: Ipv6Addr, prefix_len: u8) -> AgentdResult<()> {
         let addr_bytes = addr.octets();
-        netlink_newaddr(ifindex, libc::AF_INET6 as u8, prefix_len, &addr_bytes)
-            .map_err(|e| AgentdError::Init(format!("failed to add IPv6 address {addr}/{prefix_len}: {e}")))
+        netlink_newaddr(ifindex, libc::AF_INET6 as u8, prefix_len, &addr_bytes).map_err(|e| {
+            AgentdError::Init(format!(
+                "failed to add IPv6 address {addr}/{prefix_len}: {e}"
+            ))
+        })
     }
 
     /// Adds an IPv4 default route via netlink RTM_NEWROUTE.
     fn add_default_route_v4(gateway: Ipv4Addr) -> AgentdResult<()> {
         let gw_bytes = gateway.octets();
-        netlink_newroute(libc::AF_INET as u8, &gw_bytes)
-            .map_err(|e| AgentdError::Init(format!("failed to add IPv4 default route via {gateway}: {e}")))
+        netlink_newroute(libc::AF_INET as u8, &gw_bytes).map_err(|e| {
+            AgentdError::Init(format!(
+                "failed to add IPv4 default route via {gateway}: {e}"
+            ))
+        })
     }
 
     /// Adds an IPv6 default route via netlink RTM_NEWROUTE.
     fn add_default_route_v6(gateway: Ipv6Addr) -> AgentdResult<()> {
         let gw_bytes = gateway.octets();
-        netlink_newroute(libc::AF_INET6 as u8, &gw_bytes)
-            .map_err(|e| AgentdError::Init(format!("failed to add IPv6 default route via {gateway}: {e}")))
+        netlink_newroute(libc::AF_INET6 as u8, &gw_bytes).map_err(|e| {
+            AgentdError::Init(format!(
+                "failed to add IPv6 default route via {gateway}: {e}"
+            ))
+        })
     }
 
     /// Sends a netlink RTM_NEWADDR message.
@@ -494,11 +518,11 @@ mod linux {
 
         // RTA attributes
         let mut rta_offset = NLMSG_HDRLEN + IFADDRMSG_LEN;
-        write_rta(&mut buf[rta_offset..], libc::IFA_ADDRESS as u16, addr);
+        write_rta(&mut buf[rta_offset..], libc::IFA_ADDRESS, addr);
         rta_offset += rta_space(addr_len);
 
         if is_ipv4 {
-            write_rta(&mut buf[rta_offset..], libc::IFA_LOCAL as u16, addr);
+            write_rta(&mut buf[rta_offset..], libc::IFA_LOCAL, addr);
         }
 
         netlink_send(&buf)
@@ -540,7 +564,7 @@ mod linux {
 
         // RTA_GATEWAY attribute
         let rta_offset = NLMSG_HDRLEN + RTMSG_LEN;
-        write_rta(&mut buf[rta_offset..], libc::RTA_GATEWAY as u16, gateway);
+        write_rta(&mut buf[rta_offset..], libc::RTA_GATEWAY, gateway);
 
         netlink_send(&buf)
     }
@@ -587,9 +611,7 @@ mod linux {
                 let nlh = ack_buf.as_ptr().cast::<libc::nlmsghdr>();
                 if (*nlh).nlmsg_type == libc::NLMSG_ERROR as u16 {
                     let err = i32::from_ne_bytes(
-                        ack_buf[NLMSG_HDRLEN..NLMSG_HDRLEN + 4]
-                            .try_into()
-                            .unwrap(),
+                        ack_buf[NLMSG_HDRLEN..NLMSG_HDRLEN + 4].try_into().unwrap(),
                     );
                     if err < 0 {
                         return Err(std::io::Error::from_raw_os_error(-err));
@@ -604,10 +626,7 @@ mod linux {
     // ── resolv.conf ────────────────────────────────────────────────────
 
     /// Writes `/etc/resolv.conf` with the configured DNS servers.
-    fn write_resolv_conf(
-        dns_v4: Option<Ipv4Addr>,
-        dns_v6: Option<Ipv6Addr>,
-    ) -> AgentdResult<()> {
+    fn write_resolv_conf(dns_v4: Option<Ipv4Addr>, dns_v6: Option<Ipv6Addr>) -> AgentdResult<()> {
         if dns_v4.is_none() && dns_v6.is_none() {
             return Ok(());
         }
@@ -620,9 +639,8 @@ mod linux {
             content.push_str(&format!("nameserver {dns}\n"));
         }
 
-        std::fs::write("/etc/resolv.conf", &content).map_err(|e| {
-            AgentdError::Init(format!("failed to write /etc/resolv.conf: {e}"))
-        })?;
+        std::fs::write("/etc/resolv.conf", &content)
+            .map_err(|e| AgentdError::Init(format!("failed to write /etc/resolv.conf: {e}")))?;
 
         Ok(())
     }

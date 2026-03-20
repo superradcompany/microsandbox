@@ -27,7 +27,7 @@ fn build_libkrunfw(workspace_root: &Path, out_dir: &Path) {
         }
 
         let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-        let url = libkrunfw_download_url(&arch, &os);
+        let url = libkrunfw_download_url(env!("CARGO_PKG_VERSION"), &arch, &os);
 
         download_to(&url, &dest);
         return;

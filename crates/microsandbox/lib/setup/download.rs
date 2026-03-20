@@ -57,6 +57,7 @@ impl Setup {
         }
 
         let url = microsandbox_utils::libkrunfw_download_url(
+            env!("CARGO_PKG_VERSION"),
             std::env::consts::ARCH,
             std::env::consts::OS,
         );

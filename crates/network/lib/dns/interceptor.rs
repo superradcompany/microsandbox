@@ -5,21 +5,23 @@
 //! and rebind filters, records A/AAAA answers in the pin set, and
 //! synthesizes DNS response frames.
 
-use std::collections::{BTreeMap, HashMap};
-use std::hash::{Hash, Hasher};
-use std::net::IpAddr;
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    hash::{Hash, Hasher},
+    net::IpAddr,
+    sync::{Arc, Mutex, RwLock},
+    time::{Duration, Instant},
+};
 
 use etherparse::TransportSlice;
-use hickory_proto::op::{Message, MessageType, ResponseCode};
-use hickory_proto::rr::{RData, RecordType};
-use hickory_proto::serialize::binary::BinDecodable;
-use hickory_resolver::TokioResolver;
-use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_proto::{
+    op::{Message, MessageType, ResponseCode},
+    rr::{RData, RecordType},
+    serialize::binary::BinDecodable,
+};
+use hickory_resolver::{TokioResolver, name_server::TokioConnectionProvider};
 
-use crate::packet::ParsedFrame;
-use crate::policy::DnsPinSet;
+use crate::{packet::ParsedFrame, policy::DnsPinSet};
 
 use super::DnsFilter;
 
@@ -500,9 +502,8 @@ impl DnsInterceptor {
     fn prune_expired_tcp_streams(&self) {
         let mut streams = self.tcp_streams.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        streams.retain(|_, state| {
-            now.duration_since(state.last_activity) <= TCP_STREAM_IDLE_TIMEOUT
-        });
+        streams
+            .retain(|_, state| now.duration_since(state.last_activity) <= TCP_STREAM_IDLE_TIMEOUT);
     }
 }
 
@@ -563,13 +564,9 @@ fn append_tcp_segment(state: &mut TcpStreamState, payload: &[u8], fin: bool) -> 
 fn drain_pending_segments(state: &mut TcpStreamState) -> Option<bool> {
     let mut close_after_queries = false;
 
-    loop {
-        // Use direct key lookup instead of iter().next() to avoid BTreeMap
-        // natural ordering issues at TCP sequence number wraparound.
-        let segment = match state.pending_segments.remove(&state.next_client_sequence) {
-            Some(seg) => seg,
-            None => break,
-        };
+    // Use direct key lookup instead of iter().next() to avoid BTreeMap
+    // natural ordering issues at TCP sequence number wraparound.
+    while let Some(segment) = state.pending_segments.remove(&state.next_client_sequence) {
         close_after_queries |= append_tcp_segment(state, &segment.payload, segment.fin)?;
     }
 
@@ -725,12 +722,13 @@ fn build_success_response(query: &Message, ips: &[IpAddr], record_type: RecordTy
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
-    use std::time::{Duration, Instant};
+    use std::{
+        net::Ipv4Addr,
+        time::{Duration, Instant},
+    };
 
     use etherparse::PacketBuilder;
-    use hickory_proto::op::Query;
-    use hickory_proto::rr::Name;
+    use hickory_proto::{op::Query, rr::Name};
 
     use super::*;
 

@@ -2,9 +2,7 @@
 
 use clap::{Parser, Subcommand};
 use microsandbox_cli::{
-    commands::{
-        attach, create, exec, inspect, list, ps, pull, remove, run, shell, start, stop,
-    },
+    commands::{attach, create, exec, inspect, list, ps, pull, remove, run, shell, start, stop},
     log_args::{self, LogArgs},
     microvm_cmd::{self, MicrovmArgs},
     supervisor_cmd::{self, SupervisorArgs},

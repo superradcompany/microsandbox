@@ -4,9 +4,10 @@
 //! it to `~/.microsandbox/tls/`. On subsequent starts, loads the existing CA.
 //! User-provided CA paths override generation for corporate PKI integration.
 
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use rcgen::{CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose};
 use rustls::pki_types::CertificateDer;
@@ -146,8 +147,8 @@ fn persist_ca(ca: &CaKeyPair, dir: &Path) -> io::Result<()> {
 
 /// Returns the default TLS directory: `~/.microsandbox/tls/`.
 fn default_tls_dir() -> io::Result<PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| io::Error::other("could not determine home directory"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| io::Error::other("could not determine home directory"))?;
     Ok(home
         .join(microsandbox_utils::BASE_DIR_NAME)
         .join(microsandbox_utils::TLS_SUBDIR))

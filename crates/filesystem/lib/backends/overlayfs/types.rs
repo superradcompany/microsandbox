@@ -40,6 +40,9 @@ pub struct OverlayConfig {
     /// Enable writeback caching (default: false).
     pub writeback: bool,
 
+    /// Whether to fail hard if required xattr reads are unavailable.
+    pub strict: bool,
+
     /// Read-only mode (default: false).
     ///
     /// When true, no writable upper layer exists. All mutation operations
@@ -113,10 +116,6 @@ pub(crate) enum NodeState {
         #[cfg(target_os = "linux")]
         file: File,
 
-        /// Mount ID from statx.
-        #[cfg(target_os = "linux")]
-        mnt_id: u64,
-
         /// Host inode number (macOS — no O_PATH fds).
         #[cfg(target_os = "macos")]
         ino: u64,
@@ -131,10 +130,6 @@ pub(crate) enum NodeState {
         /// O_PATH fd pinning the inode.
         #[cfg(target_os = "linux")]
         file: File,
-
-        /// Mount ID from statx.
-        #[cfg(target_os = "linux")]
-        mnt_id: u64,
 
         /// Host inode number (macOS).
         #[cfg(target_os = "macos")]

@@ -56,16 +56,15 @@ pub(crate) fn do_open(
         open_flags &= !libc::O_APPEND;
     }
 
-    // open_inode_fd adds O_NOFOLLOW and O_CLOEXEC itself for security
-    // (prevents procfd magic-link following), so no need to set them here.
+    // open_inode_fd adds O_CLOEXEC itself and rejects real host symlinks.
     let fd = inode::open_inode_fd(fs, inode, open_flags)?;
 
     // Clear SUID/SGID on open+truncate (HANDLE_KILLPRIV_V2).
     if kill_priv
         && (open_flags & libc::O_TRUNC != 0)
-        && let Ok(Some(ovr)) = stat_override::get_override(fd)
+        && let Some(ovr) = stat_override::get_override(fd, fs.cfg.xattr, fs.cfg.strict)?
     {
-        let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+        let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
         if new_mode != ovr.mode {
             let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
         }
@@ -128,13 +127,11 @@ pub(crate) fn do_write(
     let f = data.file.read().unwrap();
     let written = r.read_to(&f, size as usize, offset)?;
 
-    if kill_priv {
-        let fd = f.as_raw_fd();
-        if let Ok(Some(ovr)) = stat_override::get_override(fd) {
-            let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
-            if new_mode != ovr.mode {
-                let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
-            }
+    let fd = f.as_raw_fd();
+    if kill_priv && let Some(ovr) = stat_override::get_override(fd, fs.cfg.xattr, fs.cfg.strict)? {
+        let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
+        if new_mode != ovr.mode {
+            let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
         }
     }
 

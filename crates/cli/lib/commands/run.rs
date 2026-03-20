@@ -116,7 +116,9 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         let cmd = args.command[0].clone();
         let cmd_args: Vec<String> = args.command[1..].to_vec();
 
-        let output = sandbox.exec(&cmd, |e: ExecOptionsBuilder| e.args(cmd_args)).await?;
+        let output = sandbox
+            .exec(&cmd, |e: ExecOptionsBuilder| e.args(cmd_args))
+            .await?;
 
         std::io::stdout().write_all(&output.stdout)?;
         std::io::stderr().write_all(&output.stderr)?;

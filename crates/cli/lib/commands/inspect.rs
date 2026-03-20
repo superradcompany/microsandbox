@@ -104,9 +104,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                         println!("  {guest:<16}\u{2192} volume:{name}{ro}");
                     }
                     VolumeMount::Tmpfs { guest, size_mib } => {
-                        let size = size_mib
-                            .map(|s| format!(" ({s} MiB)"))
-                            .unwrap_or_default();
+                        let size = size_mib.map(|s| format!(" ({s} MiB)")).unwrap_or_default();
                         println!("  {guest:<16}\u{2192} tmpfs{size}");
                     }
                 }

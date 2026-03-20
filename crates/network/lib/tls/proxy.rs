@@ -4,14 +4,14 @@
 //! extracts SNI from the ClientHello, and dispatches to either the intercept
 //! path (MITM with generated cert) or the bypass path (raw TCP splice).
 
-use std::io;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{io, net::SocketAddr, sync::Arc};
 
 use rustls::ServerConfig;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::task::JoinHandle;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    task::JoinHandle,
+};
 use tokio_rustls::TlsAcceptor;
 
 use super::{BypassMatcher, CertCache, InterceptHandler, NoopHandler};
@@ -72,7 +72,10 @@ impl RedirectGuard {
 impl Drop for RedirectGuard {
     fn drop(&mut self) {
         if let Err(e) = super::redirect::remove(self.sandbox_id) {
-            tracing::warn!(sandbox_id = self.sandbox_id, "failed to remove TLS redirect rules: {e}");
+            tracing::warn!(
+                sandbox_id = self.sandbox_id,
+                "failed to remove TLS redirect rules: {e}"
+            );
         }
     }
 }
@@ -111,14 +114,7 @@ impl TlsProxy {
         let bypass = Arc::new(bypass);
 
         let handle = tokio::spawn(async move {
-            accept_loop(
-                pending.listener,
-                cert_cache,
-                bypass,
-                client_config,
-                handler,
-            )
-            .await;
+            accept_loop(pending.listener, cert_cache, bypass, client_config, handler).await;
         });
 
         Self {
@@ -230,11 +226,11 @@ async fn handle_connection(
     tracing::debug!(%peer_addr, %original_dst, sni = sni_str, "TLS proxy: extracted SNI");
 
     // Bypass decision.
-    if let Some(ref sni) = sni {
-        if bypass.is_bypassed(sni) {
-            tracing::debug!(sni, "TLS proxy: bypassing");
-            return bypass_connection(stream, original_dst, client_hello).await;
-        }
+    if let Some(ref sni) = sni
+        && bypass.is_bypassed(sni)
+    {
+        tracing::debug!(sni, "TLS proxy: bypassing");
+        return bypass_connection(stream, original_dst, client_hello).await;
     }
 
     // Intercept path.
@@ -257,8 +253,16 @@ async fn handle_connection(
         }
     };
     tracing::debug!(domain, "TLS proxy: intercepting");
-    intercept_connection(stream, original_dst, client_hello, domain, cert_cache, client_config, handler)
-        .await
+    intercept_connection(
+        stream,
+        original_dst,
+        client_hello,
+        domain,
+        cert_cache,
+        client_config,
+        handler,
+    )
+    .await
 }
 
 /// Bypass path: splice raw bytes to the real server without TLS termination.
@@ -350,8 +354,8 @@ async fn intercept_connection(
 
     // Wait for both directions to complete.
     let (out_result, in_result) = tokio::join!(outbound, inbound);
-    out_result.map_err(|e| io::Error::other(e))??;
-    in_result.map_err(|e| io::Error::other(e))??;
+    out_result.map_err(io::Error::other)??;
+    in_result.map_err(io::Error::other)??;
     Ok(())
 }
 
@@ -386,8 +390,7 @@ fn get_original_dst(stream: &TcpStream) -> io::Result<SocketAddr> {
 
 #[cfg(target_os = "linux")]
 fn get_original_dst_linux(stream: &TcpStream) -> io::Result<SocketAddr> {
-    use std::mem;
-    use std::os::unix::io::AsRawFd;
+    use std::{mem, os::unix::io::AsRawFd};
 
     let fd = stream.as_raw_fd();
 

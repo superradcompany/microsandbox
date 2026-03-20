@@ -81,7 +81,7 @@ pub(crate) fn do_create(
     }
 
     // Set override xattr with requested permissions.
-    let full_mode = libc::S_IFREG as u32 | file_mode;
+    let full_mode = platform::MODE_REG | file_mode;
     if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, full_mode, 0) {
         unsafe { libc::close(fd) };
         unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
@@ -94,15 +94,15 @@ pub(crate) fn do_create(
     let entry = inode::do_lookup(fs, parent, name)?;
 
     // Reopen for the handle — strip O_CREAT since the file already exists.
-    // open_inode_fd adds O_NOFOLLOW and O_CLOEXEC itself.
+    // open_inode_fd adds O_CLOEXEC itself and rejects real host symlinks.
     let open_fd = inode::open_inode_fd(fs, entry.inode, open_flags & !libc::O_CREAT)?;
 
     // Clear SUID/SGID on create+truncate of existing file (HANDLE_KILLPRIV_V2).
     if kill_priv
         && (open_flags & libc::O_TRUNC != 0)
-        && let Ok(Some(ovr)) = stat_override::get_override(open_fd)
+        && let Some(ovr) = stat_override::get_override(open_fd, fs.cfg.xattr, fs.cfg.strict)?
     {
-        let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+        let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
         if new_mode != ovr.mode {
             let _ = stat_override::set_override(open_fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
         }
@@ -150,7 +150,7 @@ pub(crate) fn do_mkdir(
     }
 
     // Set override xattr.
-    let full_mode = libc::S_IFDIR as u32 | dir_mode;
+    let full_mode = platform::MODE_DIR | dir_mode;
     if let Err(e) =
         stat_override::set_override_at(parent_fd.raw(), name, ctx.uid, ctx.gid, full_mode, 0)
     {
@@ -184,7 +184,7 @@ pub(crate) fn do_mknod(
 
     let parent_fd = inode::get_inode_fd(fs, parent)?;
     let perm_mode = mode & !umask & 0o7777;
-    let file_type = mode & libc::S_IFMT as u32;
+    let file_type = mode & platform::MODE_TYPE_MASK;
 
     // Always create a regular file on host.
     let fd = unsafe {
@@ -264,7 +264,7 @@ pub(crate) fn do_symlink(
         }
 
         // Set override xattr with S_IFLNK.
-        let mode = libc::S_IFLNK as u32 | 0o777;
+        let mode = platform::MODE_LNK | 0o777;
         if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0) {
             unsafe { libc::close(fd) };
             unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
@@ -283,7 +283,7 @@ pub(crate) fn do_symlink(
 
         // Set override metadata on the symlink itself by opening it with
         // O_SYMLINK and writing the xattr through that fd.
-        let mode = libc::S_IFLNK as u32 | 0o777;
+        let mode = platform::MODE_LNK | 0o777;
         let fd = unsafe {
             libc::openat(
                 parent_fd.raw(),
@@ -394,27 +394,13 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
 
         // Real symlink on host — use readlinkat.
         if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
-            let mut buf = vec![0u8; libc::PATH_MAX as usize];
-            let path = format!("/proc/self/fd/{}\0", inode_fd.raw());
-            let ret = unsafe {
-                libc::readlinkat(
-                    libc::AT_FDCWD,
-                    path.as_ptr() as *const libc::c_char,
-                    buf.as_mut_ptr() as *mut libc::c_char,
-                    buf.len(),
-                )
-            };
-            if ret < 0 {
-                return Err(platform::linux_error(io::Error::last_os_error()));
-            }
-            buf.truncate(ret as usize);
-            return Ok(buf);
+            return platform::readlink_fd(inode_fd.raw());
         }
 
         // Verify override xattr says S_IFLNK before reading file content.
         // Without this check, a guest could read any regular file's content via readlink.
-        match stat_override::get_override(inode_fd.raw())? {
-            Some(ovr) if ovr.mode & libc::S_IFMT as u32 == libc::S_IFLNK as u32 => {}
+        match stat_override::get_override(inode_fd.raw(), fs.cfg.xattr, fs.cfg.strict)? {
+            Some(ovr) if ovr.mode & platform::MODE_TYPE_MASK == platform::MODE_LNK => {}
             _ => return Err(platform::einval()),
         }
 
@@ -437,7 +423,7 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
     {
         // On macOS we create real symlinks, so verify it's actually a symlink first.
         let st = inode::stat_inode(fs, ino)?;
-        if st.st_mode as u32 & libc::S_IFMT as u32 != libc::S_IFLNK as u32 {
+        if platform::mode_file_type(st.st_mode) != platform::MODE_LNK {
             return Err(platform::einval());
         }
 

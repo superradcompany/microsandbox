@@ -3,14 +3,18 @@
 //! Evaluates rules against parsed packet headers using first-match-wins semantics.
 //! Domain-based rules are resolved via the DNS pin set.
 
-use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::{HashMap, HashSet},
+    net::IpAddr,
+    sync::{Arc, RwLock},
+};
 
 use crate::packet::{IpProtocol, ParsedFrame};
 
-use super::destination::{matches_cidr, matches_group};
-use super::types::{Action, Destination, Direction, NetworkPolicy, Protocol};
+use super::{
+    destination::{matches_cidr, matches_group},
+    types::{Action, Destination, Direction, NetworkPolicy, Protocol},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -102,10 +106,10 @@ impl PolicyEngine {
                 continue;
             }
 
-            if let Some(ref rule_proto) = rule.protocol {
-                if !matches_protocol(rule_proto, protocol) {
-                    continue;
-                }
+            if let Some(ref rule_proto) = rule.protocol
+                && !matches_protocol(rule_proto, protocol)
+            {
+                continue;
             }
 
             if let Some(ref port_range) = rule.ports {
@@ -169,13 +173,13 @@ fn matches_protocol(rule_proto: &Protocol, frame_proto: Option<IpProtocol>) -> b
         None => return false,
     };
 
-    match (rule_proto, frame_proto) {
-        (Protocol::Tcp, IpProtocol::Tcp) => true,
-        (Protocol::Udp, IpProtocol::Udp) => true,
-        (Protocol::Icmpv4, IpProtocol::Icmpv4) => true,
-        (Protocol::Icmpv6, IpProtocol::Icmpv6) => true,
-        _ => false,
-    }
+    matches!(
+        (rule_proto, frame_proto),
+        (Protocol::Tcp, IpProtocol::Tcp)
+            | (Protocol::Udp, IpProtocol::Udp)
+            | (Protocol::Icmpv4, IpProtocol::Icmpv4)
+            | (Protocol::Icmpv6, IpProtocol::Icmpv6)
+    )
 }
 
 //--------------------------------------------------------------------------------------------------

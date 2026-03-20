@@ -92,16 +92,18 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
 
     if args.interactive && args.tty {
         // Interactive mode with TTY — use attach.
-        let exit_code = sandbox.attach(cmd, |a: AttachOptionsBuilder| {
-            let mut a = a.args(cmd_args);
-            for (k, v) in &env_pairs {
-                a = a.env(k, v);
-            }
-            if let Some(ref cwd) = workdir {
-                a = a.cwd(cwd);
-            }
-            a
-        }).await?;
+        let exit_code = sandbox
+            .attach(cmd, |a: AttachOptionsBuilder| {
+                let mut a = a.args(cmd_args);
+                for (k, v) in &env_pairs {
+                    a = a.env(k, v);
+                }
+                if let Some(ref cwd) = workdir {
+                    a = a.cwd(cwd);
+                }
+                a
+            })
+            .await?;
 
         let _ = sandbox.stop().await;
         let _ = sandbox.wait().await;
@@ -111,16 +113,18 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         }
     } else {
         // Non-interactive: exec and capture output.
-        let output = sandbox.exec(cmd, |e: ExecOptionsBuilder| {
-            let mut e = e.args(cmd_args).tty(tty);
-            for (k, v) in &env_pairs {
-                e = e.env(k, v);
-            }
-            if let Some(ref cwd) = workdir {
-                e = e.cwd(cwd);
-            }
-            e
-        }).await?;
+        let output = sandbox
+            .exec(cmd, |e: ExecOptionsBuilder| {
+                let mut e = e.args(cmd_args).tty(tty);
+                for (k, v) in &env_pairs {
+                    e = e.env(k, v);
+                }
+                if let Some(ref cwd) = workdir {
+                    e = e.cwd(cwd);
+                }
+                e
+            })
+            .await?;
 
         std::io::stdout().write_all(&output.stdout)?;
         std::io::stderr().write_all(&output.stderr)?;

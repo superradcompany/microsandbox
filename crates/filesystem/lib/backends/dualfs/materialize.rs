@@ -6,6 +6,7 @@ use super::{
     lookup::{backend, get_node, resolve_backend_inode},
     types::{BackendId, FileKind, NodeState, ROOT_INODE},
 };
+use crate::backends::shared::platform;
 use crate::{Context, Extensions, SetattrValid};
 use std::{ffi::CString, io, sync::atomic::Ordering};
 
@@ -209,7 +210,7 @@ pub(crate) fn promote_directory_to_merged(
     let cname = CString::new(name).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
 
     // Create directory in target backend.
-    let mode = (src_stat.st_mode as u32) & 0o7777;
+    let mode = platform::mode_u32(src_stat.st_mode) & 0o7777;
     let entry = backend(fs, target).mkdir(
         ctx,
         parent_target_inode,
@@ -384,7 +385,7 @@ fn materialize_regular_file(
     let temp_name =
         CString::new(temp_name_str).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
 
-    let mode = (src_stat.st_mode as u32) & 0o7777;
+    let mode = platform::mode_u32(src_stat.st_mode) & 0o7777;
     let (temp_entry, temp_handle, _) = backend(fs, target).create(
         ctx,
         staging_inode,
@@ -513,7 +514,7 @@ fn materialize_special(
         ctx,
         parent_target_inode,
         name,
-        src_stat.st_mode as u32,
+        platform::mode_u32(src_stat.st_mode),
         src_stat.st_rdev as u32,
         0,
         Extensions::default(),

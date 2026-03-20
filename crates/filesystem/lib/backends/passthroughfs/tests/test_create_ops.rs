@@ -231,6 +231,22 @@ fn test_symlink_stat_shows_link() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn test_host_symlink_open_rejected_but_readlink_allowed() {
+    let sb = TestSandbox::new();
+    std::os::unix::fs::symlink("/host/target", sb.root.join("host-link")).unwrap();
+
+    let entry = sb.lookup_root("host-link").unwrap();
+    TestSandbox::assert_errno(
+        sb.fuse_open(entry.inode, libc::O_RDONLY as u32),
+        LINUX_ELOOP,
+    );
+
+    let target = sb.fs.readlink(sb.ctx(), entry.inode).unwrap();
+    assert_eq!(&target[..], b"/host/target");
+}
+
+#[test]
 fn test_readlink_non_symlink() {
     let sb = TestSandbox::new();
     let (entry, _handle) = sb.fuse_create_root("regular.txt").unwrap();

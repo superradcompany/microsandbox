@@ -65,9 +65,9 @@ pub(crate) fn build_stat_from_meta(ino: u64, meta: &InodeMeta) -> stat64 {
 
     #[cfg(target_os = "linux")]
     {
-        st.st_mode = meta.mode;
-        st.st_nlink = meta.nlink;
-        st.st_rdev = meta.rdev as u64;
+        st.st_mode = meta.mode as _;
+        st.st_nlink = meta.nlink as _;
+        st.st_rdev = meta.rdev as _;
     }
 
     #[cfg(target_os = "macos")]
@@ -209,13 +209,5 @@ pub(crate) fn release_bytes(fs: &MemFs, amount: u64) {
 
 /// Convert a file mode type to a directory entry type.
 pub(crate) fn mode_to_dtype(mode_type: u32) -> u32 {
-    match mode_type & libc::S_IFMT as u32 {
-        m if m == libc::S_IFLNK as u32 => libc::DT_LNK as u32,
-        m if m == libc::S_IFDIR as u32 => libc::DT_DIR as u32,
-        m if m == libc::S_IFCHR as u32 => libc::DT_CHR as u32,
-        m if m == libc::S_IFBLK as u32 => libc::DT_BLK as u32,
-        m if m == libc::S_IFIFO as u32 => libc::DT_FIFO as u32,
-        m if m == libc::S_IFSOCK as u32 => libc::DT_SOCK as u32,
-        _ => libc::DT_REG as u32,
-    }
+    platform::dirent_type_from_mode(mode_type & platform::MODE_TYPE_MASK)
 }

@@ -3,14 +3,18 @@
 //! Creates one TAP device per sandbox, assigns gateway addresses, enables
 //! IP forwarding, and registers the sandbox in shared nftables sets.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::{
+    net::{Ipv4Addr, Ipv6Addr},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+};
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
 
 use super::FrameTransport;
-use crate::config::InterfaceConfig;
-use crate::ready::{MsbnetReady, MsbnetReadyIpv4, MsbnetReadyIpv6};
+use crate::{
+    config::InterfaceConfig,
+    ready::{MsbnetReady, MsbnetReadyIpv4, MsbnetReadyIpv6},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -119,7 +123,7 @@ impl TapLink {
             .unwrap_or_else(|| compute_ipv6_addresses(slot));
         let mac = interface.mac.unwrap_or_else(|| compute_mac(slot));
         let mtu = interface.mtu.unwrap_or(1500u16);
-        if mtu < 68 || mtu > 1500 {
+        if !(68..=1500).contains(&mtu) {
             return Err(std::io::Error::other(format!(
                 "MTU {mtu} is outside supported range (68–1500)"
             )));
@@ -491,7 +495,9 @@ pub(crate) fn nft_script(script: &str) -> std::io::Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(std::io::Error::other(format!("nft script failed: {stderr}")));
+        return Err(std::io::Error::other(format!(
+            "nft script failed: {stderr}"
+        )));
     }
     Ok(())
 }

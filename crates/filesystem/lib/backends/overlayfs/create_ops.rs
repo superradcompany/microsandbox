@@ -22,6 +22,9 @@ use std::{
     sync::{Arc, RwLock, atomic::Ordering},
 };
 
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+
 use super::{OverlayFs, copy_up, inode, types::FileHandle, whiteout};
 use crate::{
     Context, Entry, Extensions, OpenOptions,
@@ -84,7 +87,7 @@ pub(crate) fn do_create(
     }
 
     // Set override xattr with requested permissions.
-    let full_mode = libc::S_IFREG as u32 | file_mode;
+    let full_mode = platform::MODE_REG | file_mode;
     if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, full_mode, 0) {
         unsafe { libc::close(fd) };
         unsafe { libc::unlinkat(upper_parent_fd, name.as_ptr(), 0) };
@@ -104,9 +107,9 @@ pub(crate) fn do_create(
     // kill_priv handling.
     if kill_priv
         && (open_flags & libc::O_TRUNC != 0)
-        && let Ok(Some(ovr)) = stat_override::get_override(*fd_guard)
+        && let Some(ovr) = stat_override::get_override(*fd_guard, true, fs.cfg.strict)?
     {
-        let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+        let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
         if new_mode != ovr.mode {
             stat_override::set_override(*fd_guard, ovr.uid, ovr.gid, new_mode, ovr.rdev)?;
         }
@@ -166,7 +169,7 @@ pub(crate) fn do_mkdir(
     }
 
     // Set override xattr.
-    let full_mode = libc::S_IFDIR as u32 | dir_mode;
+    let full_mode = platform::MODE_DIR | dir_mode;
     if let Err(e) =
         stat_override::set_override_at(upper_parent_fd, name, ctx.uid, ctx.gid, full_mode, 0)
     {
@@ -211,7 +214,7 @@ pub(crate) fn do_mknod(
     whiteout::remove_whiteout(upper_parent_fd, name.to_bytes())?;
 
     let perm_mode = mode & !umask & 0o7777;
-    let file_type = mode & libc::S_IFMT as u32;
+    let file_type = mode & platform::MODE_TYPE_MASK;
 
     // Always create a regular file on host.
     let fd = unsafe {
@@ -297,7 +300,7 @@ pub(crate) fn do_symlink(
             return Err(platform::eio());
         }
 
-        let mode = libc::S_IFLNK as u32 | 0o777;
+        let mode = platform::MODE_LNK | 0o777;
         if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0) {
             unsafe { libc::close(fd) };
             unsafe { libc::unlinkat(upper_parent_fd, name.as_ptr(), 0) };
@@ -313,7 +316,7 @@ pub(crate) fn do_symlink(
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
 
-        let mode = libc::S_IFLNK as u32 | 0o777;
+        let mode = platform::MODE_LNK | 0o777;
         let fd = unsafe {
             libc::openat(
                 upper_parent_fd,

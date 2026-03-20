@@ -12,6 +12,30 @@ use super::{
 };
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+const S_IFREG_MODE: u32 = libc::S_IFREG;
+#[cfg(target_os = "macos")]
+const S_IFREG_MODE: u32 = libc::S_IFREG as u32;
+
+#[cfg(target_os = "linux")]
+const S_IFDIR_MODE: u32 = libc::S_IFDIR;
+#[cfg(target_os = "macos")]
+const S_IFDIR_MODE: u32 = libc::S_IFDIR as u32;
+
+#[cfg(target_os = "linux")]
+const S_IFLNK_MODE: u32 = libc::S_IFLNK;
+#[cfg(target_os = "macos")]
+const S_IFLNK_MODE: u32 = libc::S_IFLNK as u32;
+
+#[cfg(target_os = "linux")]
+const S_IFMT_MODE: u32 = libc::S_IFMT;
+#[cfg(target_os = "macos")]
+const S_IFMT_MODE: u32 = libc::S_IFMT as u32;
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -111,7 +135,7 @@ impl IndexBuilder {
             name: name.to_string(),
             host_ino: ino,
             size: 0,
-            mode: libc::S_IFREG as u32 | (mode & 0o7777),
+            mode: S_IFREG_MODE | (mode & 0o7777),
             uid: 0,
             gid: 0,
             flags: 0,
@@ -132,7 +156,7 @@ impl IndexBuilder {
             name: name.to_string(),
             host_ino: ino,
             size: 0,
-            mode: libc::S_IFDIR as u32 | (mode & 0o7777),
+            mode: S_IFDIR_MODE | (mode & 0o7777),
             uid: 0,
             gid: 0,
             flags: 0,
@@ -149,7 +173,7 @@ impl IndexBuilder {
             name: name.to_string(),
             host_ino: ino,
             size: 0,
-            mode: libc::S_IFLNK as u32 | 0o777,
+            mode: S_IFLNK_MODE | 0o777,
             uid: 0,
             gid: 0,
             flags: 0,
@@ -164,7 +188,7 @@ impl IndexBuilder {
             name: name.to_string(),
             host_ino: 0,
             size: 0,
-            mode: libc::S_IFREG as u32,
+            mode: S_IFREG_MODE,
             uid: 0,
             gid: 0,
             flags: ENTRY_FLAG_WHITEOUT,
@@ -320,7 +344,7 @@ impl IndexBuilder {
                 let (name_off, name_len) = entry_name_offsets[dir_idx][entry_idx];
 
                 // Auto-compute dir_record_idx for directory entries.
-                let dir_record_idx = if entry.mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32 {
+                let dir_record_idx = if entry.mode & S_IFMT_MODE == S_IFDIR_MODE {
                     let child_path = if dir.path.is_empty() {
                         entry.name.clone()
                     } else {

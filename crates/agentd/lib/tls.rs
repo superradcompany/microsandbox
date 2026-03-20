@@ -8,6 +8,7 @@
 //! 3. Sets environment variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, etc.)
 //!    so that common runtimes trust the microsandbox CA.
 
+#[cfg(target_os = "linux")]
 use std::path::Path;
 
 use crate::AgentdResult;
@@ -19,23 +20,27 @@ use crate::AgentdResult;
 /// Distro-specific CA trust directories. If the directory exists, the CA cert
 /// is copied into it. This covers programs that scan the directory rather than
 /// reading the bundle file directly.
+#[cfg(target_os = "linux")]
 const CA_TRUST_DIRS: &[&str] = &[
-    "/usr/local/share/ca-certificates",       // Debian, Ubuntu, Alpine
-    "/etc/pki/ca-trust/source/anchors",       // RHEL, Fedora, CentOS
+    "/usr/local/share/ca-certificates", // Debian, Ubuntu, Alpine
+    "/etc/pki/ca-trust/source/anchors", // RHEL, Fedora, CentOS
 ];
 
 /// Known CA bundle files, tried in order. The CA PEM is appended to the first
 /// existing bundle.
+#[cfg(target_os = "linux")]
 const CA_BUNDLE_PATHS: &[&str] = &[
-    "/etc/ssl/certs/ca-certificates.crt",     // Debian, Ubuntu, Alpine
-    "/etc/pki/tls/certs/ca-bundle.crt",       // RHEL, Fedora, CentOS
-    "/etc/ssl/cert.pem",                      // Alpine fallback
+    "/etc/ssl/certs/ca-certificates.crt", // Debian, Ubuntu, Alpine
+    "/etc/pki/tls/certs/ca-bundle.crt",   // RHEL, Fedora, CentOS
+    "/etc/ssl/cert.pem",                  // Alpine fallback
 ];
 
 /// Fallback path to create if no existing bundle is found.
+#[cfg(target_os = "linux")]
 const FALLBACK_BUNDLE_PATH: &str = "/etc/ssl/certs/ca-certificates.crt";
 
 /// Filename for the CA cert when copied to distro trust directories.
+#[cfg(target_os = "linux")]
 const CA_CERT_FILENAME: &str = "microsandbox-ca.pem";
 
 //--------------------------------------------------------------------------------------------------
@@ -53,7 +58,10 @@ pub fn install_ca_cert() -> AgentdResult<()> {
     }
 
     let ca_pem = std::fs::read_to_string(ca_path)?;
-    eprintln!("tls: CA cert found at {}, installing into guest trust store", ca_path.display());
+    eprintln!(
+        "tls: CA cert found at {}, installing into guest trust store",
+        ca_path.display()
+    );
 
     // Copy to distro-specific trust directories (if they exist).
     copy_to_trust_dirs(&ca_pem);
@@ -68,7 +76,10 @@ pub fn install_ca_cert() -> AgentdResult<()> {
         std::env::set_var("REQUESTS_CA_BUNDLE", &bundle_path);
         std::env::set_var("CURL_CA_BUNDLE", &bundle_path);
         // Node.js appends (does not replace), so point at the raw CA PEM.
-        std::env::set_var("NODE_EXTRA_CA_CERTS", microsandbox_protocol::GUEST_TLS_CA_PATH);
+        std::env::set_var(
+            "NODE_EXTRA_CA_CERTS",
+            microsandbox_protocol::GUEST_TLS_CA_PATH,
+        );
     }
 
     eprintln!("tls: CA cert installed, bundle={bundle_path}");

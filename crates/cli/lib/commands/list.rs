@@ -104,9 +104,7 @@ fn extract_image(config_json: &str) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn print_json(
-    sandboxes: &[microsandbox::sandbox::SandboxInfo],
-) -> anyhow::Result<()> {
+fn print_json(sandboxes: &[microsandbox::sandbox::SandboxInfo]) -> anyhow::Result<()> {
     let entries: Vec<serde_json::Value> = sandboxes
         .iter()
         .map(|s| {

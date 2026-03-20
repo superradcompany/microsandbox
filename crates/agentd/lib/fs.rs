@@ -5,13 +5,15 @@
 
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-use microsandbox_protocol::codec::encode_to_buf;
-use microsandbox_protocol::fs::{
-    FsData, FsEntryInfo, FsOp, FsRequest, FsResponse, FsResponseData, FS_CHUNK_SIZE,
+use microsandbox_protocol::{
+    codec::encode_to_buf,
+    fs::{FS_CHUNK_SIZE, FsData, FsEntryInfo, FsOp, FsRequest, FsResponse, FsResponseData},
+    message::{Message, MessageType},
 };
-use microsandbox_protocol::message::{Message, MessageType};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::mpsc,
+};
 
 use crate::session::SessionOutput;
 
@@ -62,20 +64,18 @@ pub async fn handle_fs_request(
             });
             Ok(None)
         }
-        FsOp::Write { path, mode } => {
-            match handle_write_open(&path, mode).await {
-                Ok(session) => Ok(Some(session)),
-                Err(e) => {
-                    let resp = FsResponse {
-                        ok: false,
-                        error: Some(e),
-                        data: None,
-                    };
-                    encode_response(id, resp, out_buf)?;
-                    Ok(None)
-                }
+        FsOp::Write { path, mode } => match handle_write_open(&path, mode).await {
+            Ok(session) => Ok(Some(session)),
+            Err(e) => {
+                let resp = FsResponse {
+                    ok: false,
+                    error: Some(e),
+                    data: None,
+                };
+                encode_response(id, resp, out_buf)?;
+                Ok(None)
             }
-        }
+        },
         FsOp::Mkdir { path } => {
             let resp = handle_mkdir(&path).await;
             encode_response(id, resp, out_buf)?;
@@ -166,9 +166,7 @@ async fn handle_stat(path: &str) -> FsResponse {
         Ok(meta) => FsResponse {
             ok: true,
             error: None,
-            data: Some(FsResponseData::Stat(metadata_to_entry_info(
-                path, &meta,
-            ))),
+            data: Some(FsResponseData::Stat(metadata_to_entry_info(path, &meta))),
         },
         Err(e) => FsResponse {
             ok: false,
@@ -229,11 +227,7 @@ async fn handle_list(path: &str) -> FsResponse {
 }
 
 /// Stream file contents as `FsData` chunks, then send terminal `FsResponse`.
-async fn handle_read_stream(
-    id: u32,
-    path: &str,
-    tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
-) {
+async fn handle_read_stream(id: u32, path: &str, tx: &mpsc::UnboundedSender<(u32, SessionOutput)>) {
     let file = match tokio::fs::File::open(path).await {
         Ok(f) => f,
         Err(e) => {
@@ -262,7 +256,13 @@ async fn handle_read_stream(
                 };
                 buf.clear();
                 if let Err(e) = encode_to_buf(&msg, &mut buf) {
-                    send_raw_response(id, false, Some(format!("encode chunk frame: {e}")), None, tx);
+                    send_raw_response(
+                        id,
+                        false,
+                        Some(format!("encode chunk frame: {e}")),
+                        None,
+                        tx,
+                    );
                     return;
                 }
                 if tx.send((id, SessionOutput::Raw(buf.clone()))).is_err() {
@@ -288,11 +288,7 @@ fn send_raw_response(
     data: Option<FsResponseData>,
     tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
 ) {
-    let resp = FsResponse {
-        ok,
-        error,
-        data,
-    };
+    let resp = FsResponse { ok, error, data };
     match Message::with_payload(MessageType::FsResponse, id, &resp) {
         Ok(msg) => {
             let mut buf = Vec::new();
@@ -314,12 +310,12 @@ fn send_raw_response(
 /// Open a file for writing and return a write session.
 async fn handle_write_open(path: &str, mode: Option<u32>) -> Result<FsWriteSession, String> {
     // Ensure parent directory exists.
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("mkdir parent: {e}"))?;
-        }
+    if let Some(parent) = std::path::Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("mkdir parent: {e}"))?;
     }
 
     let file = tokio::fs::OpenOptions::new()
@@ -392,16 +388,15 @@ async fn handle_remove_dir(path: &str) -> FsResponse {
 /// Copy a file within the guest.
 async fn handle_copy(src: &str, dst: &str) -> FsResponse {
     // Ensure parent directory of destination exists.
-    if let Some(parent) = std::path::Path::new(dst).parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                return FsResponse {
-                    ok: false,
-                    error: Some(format!("mkdir parent: {e}")),
-                    data: None,
-                };
-            }
-        }
+    if let Some(parent) = std::path::Path::new(dst).parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(e) = tokio::fs::create_dir_all(parent).await
+    {
+        return FsResponse {
+            ok: false,
+            error: Some(format!("mkdir parent: {e}")),
+            data: None,
+        };
     }
 
     match tokio::fs::copy(src, dst).await {
@@ -421,16 +416,15 @@ async fn handle_copy(src: &str, dst: &str) -> FsResponse {
 /// Rename/move a file or directory.
 async fn handle_rename(src: &str, dst: &str) -> FsResponse {
     // Ensure parent directory of destination exists.
-    if let Some(parent) = std::path::Path::new(dst).parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                return FsResponse {
-                    ok: false,
-                    error: Some(format!("mkdir parent: {e}")),
-                    data: None,
-                };
-            }
-        }
+    if let Some(parent) = std::path::Path::new(dst).parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(e) = tokio::fs::create_dir_all(parent).await
+    {
+        return FsResponse {
+            ok: false,
+            error: Some(format!("mkdir parent: {e}")),
+            data: None,
+        };
     }
 
     match tokio::fs::rename(src, dst).await {

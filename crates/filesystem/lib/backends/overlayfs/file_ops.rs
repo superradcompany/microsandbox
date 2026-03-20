@@ -69,9 +69,9 @@ pub(crate) fn do_open(
     // kill_priv: clear SUID/SGID on open+truncate.
     if kill_priv
         && (open_flags & libc::O_TRUNC != 0)
-        && let Ok(Some(ovr)) = stat_override::get_override(*fd_guard)
+        && let Some(ovr) = stat_override::get_override(*fd_guard, true, fs.cfg.strict)?
     {
-        let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+        let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
         if new_mode != ovr.mode {
             stat_override::set_override(*fd_guard, ovr.uid, ovr.gid, new_mode, ovr.rdev)?;
         }
@@ -137,8 +137,9 @@ pub(crate) fn do_write(
     let f = data.file.read().unwrap();
 
     // kill_priv: clear SUID/SGID before first write.
-    if kill_priv && let Ok(Some(ovr)) = stat_override::get_override(f.as_raw_fd()) {
-        let new_mode = ovr.mode & !(libc::S_ISUID as u32 | libc::S_ISGID as u32);
+    if kill_priv && let Some(ovr) = stat_override::get_override(f.as_raw_fd(), true, fs.cfg.strict)?
+    {
+        let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
         if new_mode != ovr.mode {
             stat_override::set_override(f.as_raw_fd(), ovr.uid, ovr.gid, new_mode, ovr.rdev)?;
         }
@@ -162,8 +163,8 @@ pub(crate) fn do_readlink(fs: &OverlayFs, _ctx: Context, ino: u64) -> io::Result
     {
         // Dup the O_PATH fd while the state lock is held to prevent a
         // concurrent copy-up from closing it underneath us. open_node_fd
-        // reopens with O_NOFOLLOW which fails with ELOOP for real symlinks,
-        // so we use the O_PATH fd directly.
+        // rejects real host symlinks before procfd reopen, so readlink uses
+        // the duplicated O_PATH fd directly instead.
         let (dup_fd, st) = {
             let state = node.state.read().unwrap();
             let fd = match &*state {
@@ -181,31 +182,19 @@ pub(crate) fn do_readlink(fs: &OverlayFs, _ctx: Context, ino: u64) -> io::Result
         });
 
         if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
-            // Real symlink — read target via /proc/self/fd/<dup'd O_PATH>.
-            let proc_path = format!("/proc/self/fd/{}\0", dup_fd);
-            let mut buf = vec![0u8; libc::PATH_MAX as usize];
-            let len = unsafe {
-                libc::readlinkat(
-                    libc::AT_FDCWD,
-                    proc_path.as_ptr() as *const libc::c_char,
-                    buf.as_mut_ptr() as *mut libc::c_char,
-                    buf.len(),
-                )
-            };
-            if len < 0 {
-                return Err(platform::linux_error(io::Error::last_os_error()));
-            }
-            buf.truncate(len as usize);
-            return Ok(buf);
+            // Real symlink — read the target from the pinned fd itself.
+            return platform::readlink_fd(dup_fd);
         }
 
         // File-backed symlink: reopen for reading (safe — it's a regular file).
         let fd = inode::open_node_fd(fs, ino, libc::O_RDONLY)?;
-        let _close = scopeguard::guard(fd, |fd| unsafe { libc::close(fd) });
+        let _close = scopeguard::guard(fd, |fd| unsafe {
+            libc::close(fd);
+        });
 
         // Verify xattr says S_IFLNK — missing or wrong type is an integrity error.
-        if let Some(ovr) = stat_override::get_override(fd)? {
-            if ovr.mode & libc::S_IFMT as u32 != libc::S_IFLNK as u32 {
+        if let Some(ovr) = stat_override::get_override(fd, true, fs.cfg.strict)? {
+            if ovr.mode & platform::MODE_TYPE_MASK != platform::MODE_LNK {
                 return Err(platform::eio());
             }
         } else {

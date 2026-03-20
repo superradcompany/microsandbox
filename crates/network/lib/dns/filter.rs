@@ -2,8 +2,7 @@
 
 use std::net::IpAddr;
 
-use crate::policy::DestinationGroup;
-use crate::policy::destination::matches_group;
+use crate::policy::{DestinationGroup, destination::matches_group};
 
 //--------------------------------------------------------------------------------------------------
 // Types

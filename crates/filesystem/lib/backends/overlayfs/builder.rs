@@ -257,6 +257,7 @@ impl OverlayFsBuilder {
             attr_timeout: self.attr_timeout,
             cache_policy: self.cache_policy,
             writeback: false, // Force-disable in read-only mode.
+            strict: self.strict,
             read_only: true,
         };
 
@@ -351,6 +352,7 @@ impl OverlayFsBuilder {
             attr_timeout: self.attr_timeout,
             cache_policy: self.cache_policy,
             writeback: self.writeback,
+            strict: self.strict,
             read_only: false,
         };
 

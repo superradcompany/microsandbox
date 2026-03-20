@@ -26,7 +26,7 @@ use super::{
     MemFs, inode,
     types::{CachePolicy, InodeContent, InodeMeta, MemFsConfig, MemNode, ROOT_INODE},
 };
-use crate::backends::shared::init_binary;
+use crate::backends::shared::{init_binary, platform};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -109,12 +109,12 @@ impl MemFsBuilder {
 
         let root = Arc::new(MemNode {
             inode: ROOT_INODE,
-            kind: libc::S_IFDIR as u32,
+            kind: platform::MODE_DIR,
             lookup_refs: AtomicU64::new(u64::MAX / 2),
             meta: RwLock::new(InodeMeta {
                 uid: 0,
                 gid: 0,
-                mode: libc::S_IFDIR as u32 | 0o755,
+                mode: platform::MODE_DIR | 0o755,
                 rdev: 0,
                 nlink: 2,
                 size: 0,

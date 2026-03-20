@@ -37,11 +37,29 @@ const MAX_ENTRY_COUNT: u64 = 1_000_000;
 const MAX_PATH_DEPTH: usize = 128;
 
 /// File type bits (from libc).
+#[cfg(target_os = "linux")]
+const S_IFREG: u32 = libc::S_IFREG;
+#[cfg(target_os = "macos")]
 const S_IFREG: u32 = libc::S_IFREG as u32;
+#[cfg(target_os = "linux")]
+const S_IFDIR: u32 = libc::S_IFDIR;
+#[cfg(target_os = "macos")]
 const S_IFDIR: u32 = libc::S_IFDIR as u32;
+#[cfg(target_os = "linux")]
+const S_IFLNK: u32 = libc::S_IFLNK;
+#[cfg(target_os = "macos")]
 const S_IFLNK: u32 = libc::S_IFLNK as u32;
+#[cfg(target_os = "linux")]
+const S_IFBLK: u32 = libc::S_IFBLK;
+#[cfg(target_os = "macos")]
 const S_IFBLK: u32 = libc::S_IFBLK as u32;
+#[cfg(target_os = "linux")]
+const S_IFCHR: u32 = libc::S_IFCHR;
+#[cfg(target_os = "macos")]
 const S_IFCHR: u32 = libc::S_IFCHR as u32;
+#[cfg(target_os = "linux")]
+const S_IFIFO: u32 = libc::S_IFIFO;
+#[cfg(target_os = "macos")]
 const S_IFIFO: u32 = libc::S_IFIFO as u32;
 
 //--------------------------------------------------------------------------------------------------

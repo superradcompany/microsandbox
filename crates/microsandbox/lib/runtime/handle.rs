@@ -104,13 +104,10 @@ impl Drop for SupervisorHandle {
     fn drop(&mut self) {
         // Safety net: send SIGTERM to the supervisor so child processes
         // are cleaned up if the handle is dropped without an explicit stop.
-        match self.child.try_wait() {
-            Ok(None) => {
-                if let Some(pid) = self.child.id() {
-                    let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
-                }
-            }
-            Ok(Some(_)) | Err(_) => {}
+        if let Ok(None) = self.child.try_wait()
+            && let Some(pid) = self.child.id()
+        {
+            let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
         }
     }
 }

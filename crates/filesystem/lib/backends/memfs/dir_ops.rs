@@ -31,7 +31,7 @@ pub(crate) fn do_opendir(
 ) -> io::Result<(Option<u64>, OpenOptions)> {
     let node = inode::get_node(fs, ino)?;
 
-    if node.kind != libc::S_IFDIR as u32 {
+    if node.kind != platform::MODE_DIR {
         return Err(platform::enotdir());
     }
 
@@ -196,7 +196,7 @@ fn build_snapshot(fs: &MemFs, ino: u64, node: &super::types::MemNode) -> io::Res
         name: b".".to_vec(),
         inode: ino,
         offset: 0,
-        file_type: libc::DT_DIR as u32,
+        file_type: platform::DIRENT_DIR,
     });
 
     // ".." entry.
@@ -208,7 +208,7 @@ fn build_snapshot(fs: &MemFs, ino: u64, node: &super::types::MemNode) -> io::Res
         name: b"..".to_vec(),
         inode: parent_ino,
         offset: 0,
-        file_type: libc::DT_DIR as u32,
+        file_type: platform::DIRENT_DIR,
     });
 
     // Inject init.krun for root directory.
@@ -217,7 +217,7 @@ fn build_snapshot(fs: &MemFs, ino: u64, node: &super::types::MemNode) -> io::Res
             name: init_binary::INIT_FILENAME.to_vec(),
             inode: init_binary::INIT_INODE,
             offset: 0,
-            file_type: libc::DT_REG as u32,
+            file_type: platform::DIRENT_REG,
         });
     }
 
@@ -227,7 +227,7 @@ fn build_snapshot(fs: &MemFs, ino: u64, node: &super::types::MemNode) -> io::Res
             let nodes = fs.nodes.read().unwrap();
             match nodes.get(&child_ino) {
                 Some(child) => inode::mode_to_dtype(child.kind),
-                None => libc::DT_UNKNOWN as u32,
+                None => libc::DT_UNKNOWN.into(),
             }
         };
 

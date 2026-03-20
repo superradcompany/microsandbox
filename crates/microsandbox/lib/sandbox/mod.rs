@@ -30,8 +30,7 @@ use crate::{
     MicrosandboxResult,
     agent::AgentBridge,
     db::entity::{
-        image as image_entity, sandbox as sandbox_entity,
-        sandbox_image as sandbox_image_entity,
+        image as image_entity, sandbox as sandbox_entity, sandbox_image as sandbox_image_entity,
     },
     runtime::{SupervisorHandle, spawn_supervisor},
 };
@@ -42,6 +41,7 @@ use self::exec::{ExecEvent, ExecHandle, ExecOutput, ExecSink, IntoExecOptions, S
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+pub use crate::db::entity::sandbox::SandboxStatus;
 pub use attach::{
     AttachOptions, AttachOptionsBuilder, IntoAttachCmd, IntoAttachOptions, SessionInfo,
 };
@@ -55,7 +55,6 @@ pub use types::{
     DiskImageFormat, ImageBuilder, ImageSource, IntoImage, MountBuilder, Patch, RootfsSource,
     SecretsConfig, SshConfig, VolumeMount,
 };
-pub use crate::db::entity::sandbox::SandboxStatus;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -257,8 +256,7 @@ impl Sandbox {
         let supervisor = supervisor_entity::Entity::find()
             .filter(supervisor_entity::Column::SandboxId.eq(sandbox.id))
             .filter(
-                supervisor_entity::Column::Status
-                    .eq(supervisor_entity::SupervisorStatus::Running),
+                supervisor_entity::Column::Status.eq(supervisor_entity::SupervisorStatus::Running),
             )
             .order_by_desc(supervisor_entity::Column::StartedAt)
             .one(db)
@@ -289,8 +287,7 @@ impl Sandbox {
         let supervisor = supervisor_entity::Entity::find()
             .filter(supervisor_entity::Column::SandboxId.eq(sandbox.id))
             .filter(
-                supervisor_entity::Column::Status
-                    .eq(supervisor_entity::SupervisorStatus::Running),
+                supervisor_entity::Column::Status.eq(supervisor_entity::SupervisorStatus::Running),
             )
             .order_by_desc(supervisor_entity::Column::StartedAt)
             .one(db)

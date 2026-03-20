@@ -1,28 +1,32 @@
 //! Main agent loop: serial I/O, session management, heartbeat.
 
-use std::collections::HashMap;
-use std::fs::OpenOptions;
-use std::os::fd::AsRawFd;
+use std::{collections::HashMap, fs::OpenOptions, os::fd::AsRawFd};
 
 use chrono::Utc;
-use tokio::io::unix::AsyncFd;
-use tokio::sync::mpsc;
-use tokio::time::{Duration, interval};
-
-use microsandbox_protocol::codec::{MAX_FRAME_SIZE, encode_to_buf, try_decode_from_buf};
-use microsandbox_protocol::core::Ready;
-use microsandbox_protocol::exec::{
-    ExecExited, ExecRequest, ExecResize, ExecSignal, ExecStarted, ExecStdin, ExecStdout,
-    ExecStderr,
+use tokio::{
+    io::unix::AsyncFd,
+    sync::mpsc,
+    time::{Duration, interval},
 };
-use microsandbox_protocol::fs::{FsData, FsRequest};
-use microsandbox_protocol::message::{Message, MessageType};
 
-use crate::error::{AgentdError, AgentdResult};
-use crate::fs::FsWriteSession;
-use crate::heartbeat::{heartbeat_dir_exists, write_heartbeat};
-use crate::serial::{AGENT_PORT_NAME, find_serial_port};
-use crate::session::{ExecSession, SessionOutput};
+use microsandbox_protocol::{
+    codec::{MAX_FRAME_SIZE, encode_to_buf, try_decode_from_buf},
+    core::Ready,
+    exec::{
+        ExecExited, ExecRequest, ExecResize, ExecSignal, ExecStarted, ExecStderr, ExecStdin,
+        ExecStdout,
+    },
+    fs::{FsData, FsRequest},
+    message::{Message, MessageType},
+};
+
+use crate::{
+    error::{AgentdError, AgentdResult},
+    fs::FsWriteSession,
+    heartbeat::{heartbeat_dir_exists, write_heartbeat},
+    serial::{AGENT_PORT_NAME, find_serial_port},
+    session::{ExecSession, SessionOutput},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -54,10 +58,7 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
 
     // Open the port once with read+write. Virtio-console multiport devices
     // only allow a single open; a second open returns EBUSY.
-    let port_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&port_path)?;
+    let port_file = OpenOptions::new().read(true).write(true).open(&port_path)?;
 
     // Set non-blocking for async I/O.
     let port_fd = port_file.as_raw_fd();
@@ -221,8 +222,9 @@ async fn handle_message(
                         &ExecStarted { pid: session.pid() },
                     )
                     .map_err(|e| AgentdError::ExecSession(format!("encode started: {e}")))?;
-                    encode_to_buf(&reply, out_buf)
-                        .map_err(|e| AgentdError::ExecSession(format!("encode started frame: {e}")))?;
+                    encode_to_buf(&reply, out_buf).map_err(|e| {
+                        AgentdError::ExecSession(format!("encode started frame: {e}"))
+                    })?;
                     sessions.insert(msg.id, session);
                 }
                 Err(e) => {
@@ -233,8 +235,9 @@ async fn handle_message(
                         &ExecExited { code: -1 },
                     )
                     .map_err(|e| AgentdError::ExecSession(format!("encode exited: {e}")))?;
-                    encode_to_buf(&reply, out_buf)
-                        .map_err(|e| AgentdError::ExecSession(format!("encode exited frame: {e}")))?;
+                    encode_to_buf(&reply, out_buf).map_err(|e| {
+                        AgentdError::ExecSession(format!("encode exited frame: {e}"))
+                    })?;
                     eprintln!("failed to spawn exec session {}: {e}", msg.id);
                 }
             }
@@ -348,9 +351,7 @@ fn set_nonblocking(fd: i32) -> AgentdResult<()> {
 }
 
 /// Waits for the async fd to be readable.
-async fn async_read_ready(
-    fd: &AsyncFd<std::fs::File>,
-) -> std::io::Result<()> {
+async fn async_read_ready(fd: &AsyncFd<std::fs::File>) -> std::io::Result<()> {
     let mut guard = fd.readable().await?;
     guard.clear_ready();
     Ok(())
@@ -367,10 +368,7 @@ fn read_from_fd(fd: i32, buf: &mut [u8]) -> std::io::Result<usize> {
 }
 
 /// Flushes the write buffer to the async fd.
-async fn flush_write_buf(
-    fd: &AsyncFd<std::fs::File>,
-    buf: &mut Vec<u8>,
-) -> AgentdResult<()> {
+async fn flush_write_buf(fd: &AsyncFd<std::fs::File>, buf: &mut Vec<u8>) -> AgentdResult<()> {
     while !buf.is_empty() {
         let mut guard = fd.writable().await?;
         let raw_fd = fd.as_raw_fd();

@@ -64,8 +64,10 @@ pub(crate) fn do_unlink(
         // Look up the inode by stat identity from the pre-unlink fd.
         let st = platform::fstat(fd);
         if let Ok(st) = st {
-            let alt_key =
-                crate::backends::shared::inode_table::InodeAltKey::new(st.st_ino, st.st_dev as u64);
+            let alt_key = crate::backends::shared::inode_table::InodeAltKey::new(
+                st.st_ino,
+                platform::stat_dev(&st),
+            );
             let inodes = fs.inodes.read().unwrap();
             if let Some(data) = inodes.get_alt(&alt_key) {
                 use std::sync::atomic::Ordering;

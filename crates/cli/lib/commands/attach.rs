@@ -65,26 +65,30 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     // Resolve the command to run (if any, from after --).
     let detach_keys = args.detach_keys.clone();
     let exit_code = if args.command.is_empty() {
-        sandbox.attach((), |a: AttachOptionsBuilder| {
-            let mut a = a;
-            if let Some(ref keys) = detach_keys {
-                a = a.detach_keys(keys);
-            }
-            a
-        }).await?
+        sandbox
+            .attach((), |a: AttachOptionsBuilder| {
+                let mut a = a;
+                if let Some(ref keys) = detach_keys {
+                    a = a.detach_keys(keys);
+                }
+                a
+            })
+            .await?
     } else {
         let cmd = args.command[0].clone();
         let cmd_args: Vec<String> = args.command[1..].to_vec();
-        sandbox.attach(cmd, |a: AttachOptionsBuilder| {
-            let mut a = a;
-            if let Some(ref keys) = detach_keys {
-                a = a.detach_keys(keys);
-            }
-            if !cmd_args.is_empty() {
-                a = a.args(cmd_args);
-            }
-            a
-        }).await?
+        sandbox
+            .attach(cmd, |a: AttachOptionsBuilder| {
+                let mut a = a;
+                if let Some(ref keys) = detach_keys {
+                    a = a.detach_keys(keys);
+                }
+                if !cmd_args.is_empty() {
+                    a = a.args(cmd_args);
+                }
+                a
+            })
+            .await?
     };
 
     let _ = sandbox.stop().await;

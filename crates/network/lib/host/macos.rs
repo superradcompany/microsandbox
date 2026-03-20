@@ -8,16 +8,20 @@
 //! Linux TAP + nftables NAT approach, but handled entirely inside Apple's
 //! framework. No host-side firewall rules are needed.
 
-use std::ffi::{c_char, c_void, CStr};
-use std::net::{Ipv4Addr, Ipv6Addr};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::sync::mpsc;
+use std::{
+    ffi::{CStr, c_char, c_void},
+    net::{Ipv4Addr, Ipv6Addr},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    sync::mpsc,
+};
 
 use block2::{Block, RcBlock};
 
 use super::FrameTransport;
-use crate::config::InterfaceConfig;
-use crate::ready::{MsbnetReady, MsbnetReadyIpv4, MsbnetReadyIpv6};
+use crate::{
+    config::InterfaceConfig,
+    ready::{MsbnetReady, MsbnetReadyIpv4, MsbnetReadyIpv6},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -184,27 +188,21 @@ impl VmnetLink {
         let queue = unsafe { dispatch_get_global_queue(0, 0) };
 
         // Create interface description with shared mode.
-        let desc =
-            unsafe { xpc_dictionary_create(std::ptr::null(), std::ptr::null(), 0) };
-        unsafe {
-            xpc_dictionary_set_uint64(desc, vmnet_operation_mode_key, VMNET_SHARED_MODE)
-        };
+        let desc = unsafe { xpc_dictionary_create(std::ptr::null(), std::ptr::null(), 0) };
+        unsafe { xpc_dictionary_set_uint64(desc, vmnet_operation_mode_key, VMNET_SHARED_MODE) };
 
         // Start the interface with a block callback.
         let (tx, rx) = mpsc::sync_channel::<(u32, Option<StartResult>)>(1);
-        let start_block =
-            RcBlock::new(move |status: u32, interface_param: *mut c_void| {
-                let result =
-                    if status == VMNET_SUCCESS && !interface_param.is_null() {
-                        Some(unsafe { extract_params(interface_param) })
-                    } else {
-                        None
-                    };
-                let _ = tx.send((status, result));
-            });
+        let start_block = RcBlock::new(move |status: u32, interface_param: *mut c_void| {
+            let result = if status == VMNET_SUCCESS && !interface_param.is_null() {
+                Some(unsafe { extract_params(interface_param) })
+            } else {
+                None
+            };
+            let _ = tx.send((status, result));
+        });
 
-        let iface =
-            unsafe { vmnet_start_interface(desc, queue, &start_block) };
+        let iface = unsafe { vmnet_start_interface(desc, queue, &start_block) };
         unsafe { xpc_release(desc) };
 
         let (status, params) = rx
@@ -282,13 +280,10 @@ impl VmnetLink {
 
         // Register the packet-available event callback.
         let write_fd = notify_write.as_raw_fd();
-        let event_block =
-            RcBlock::new(move |_event_mask: u32, _event: *mut c_void| {
-                unsafe {
-                    let byte: u8 = 1;
-                    libc::write(write_fd, (&raw const byte).cast(), 1);
-                }
-            });
+        let event_block = RcBlock::new(move |_event_mask: u32, _event: *mut c_void| unsafe {
+            let byte: u8 = 1;
+            libc::write(write_fd, (&raw const byte).cast(), 1);
+        });
 
         let ret = unsafe {
             vmnet_interface_set_event_callback(
@@ -467,7 +462,9 @@ unsafe fn extract_params(dict: *mut c_void) -> StartResult {
         if ptr.is_null() {
             String::new()
         } else {
-            unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+            unsafe { CStr::from_ptr(ptr) }
+                .to_string_lossy()
+                .into_owned()
         }
     };
 
@@ -572,8 +569,14 @@ mod tests {
     #[test]
     fn test_derive_ipv6_addresses() {
         let (gw, guest) = derive_ipv6_addresses("fd9b:5a14:ba57:e3d3::");
-        assert_eq!(gw.unwrap(), "fd9b:5a14:ba57:e3d3::1".parse::<Ipv6Addr>().unwrap());
-        assert_eq!(guest.unwrap(), "fd9b:5a14:ba57:e3d3::2".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(
+            gw.unwrap(),
+            "fd9b:5a14:ba57:e3d3::1".parse::<Ipv6Addr>().unwrap()
+        );
+        assert_eq!(
+            guest.unwrap(),
+            "fd9b:5a14:ba57:e3d3::2".parse::<Ipv6Addr>().unwrap()
+        );
     }
 
     #[test]

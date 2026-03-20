@@ -42,7 +42,7 @@ pub(crate) fn do_unlink(fs: &MemFs, _ctx: Context, parent: u64, name: &CStr) -> 
 
     // Verify it's not a directory.
     let child_node = inode::get_node(fs, child_ino)?;
-    if child_node.kind == libc::S_IFDIR as u32 {
+    if child_node.kind == platform::MODE_DIR {
         // Re-insert the entry since we shouldn't have removed it.
         if let InodeContent::Directory { children, .. } = &parent_node.content {
             children.write().unwrap().insert(name_bytes, child_ino);
@@ -94,7 +94,7 @@ pub(crate) fn do_rmdir(fs: &MemFs, _ctx: Context, parent: u64, name: &CStr) -> i
     let child_node = inode::get_node(fs, child_ino)?;
 
     // Verify it's a directory.
-    if child_node.kind != libc::S_IFDIR as u32 {
+    if child_node.kind != platform::MODE_DIR {
         return Err(platform::enotdir());
     }
 
@@ -193,7 +193,7 @@ pub(crate) fn do_rename(
     };
 
     let source_node = inode::get_node(fs, source_ino)?;
-    let source_is_dir = source_node.kind == libc::S_IFDIR as u32;
+    let source_is_dir = source_node.kind == platform::MODE_DIR;
 
     // Check destination.
     let dest_ino = match &new_parent.content {
@@ -232,7 +232,7 @@ pub(crate) fn do_rename(
         {
             parent.store(newdir, Ordering::Relaxed);
         }
-        let dest_is_dir = dest_node.kind == libc::S_IFDIR as u32;
+        let dest_is_dir = dest_node.kind == platform::MODE_DIR;
         if dest_is_dir
             && olddir != newdir
             && let InodeContent::Directory { parent, .. } = &dest_node.content
@@ -272,7 +272,7 @@ pub(crate) fn do_rename(
     let mut evict_dest = None;
     if let Some(dest) = dest_ino {
         let dest_node = inode::get_node(fs, dest)?;
-        let dest_is_dir = dest_node.kind == libc::S_IFDIR as u32;
+        let dest_is_dir = dest_node.kind == platform::MODE_DIR;
 
         // Type compatibility checks.
         if source_is_dir && !dest_is_dir {

@@ -42,7 +42,7 @@ pub(crate) fn do_opendir(
     {
         let nodes = fs.nodes.read().unwrap();
         let node = nodes.get(&ino).ok_or_else(platform::enoent)?;
-        if node.kind != libc::S_IFDIR as u32 && ino != ROOT_INODE {
+        if node.kind != platform::MODE_DIR && ino != ROOT_INODE {
             return Err(platform::enotdir());
         }
     }
@@ -104,7 +104,7 @@ pub(crate) fn do_readdirplus(
             Ok(entry) => {
                 // Correct d_type from lookup's stat.
                 let mut de = de;
-                let file_type = entry.attr.st_mode as u32 & libc::S_IFMT as u32;
+                let file_type = platform::mode_file_type(entry.attr.st_mode);
                 de.type_ = mode_to_dtype(file_type);
                 result.push((de, entry));
             }
@@ -360,7 +360,7 @@ fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
             entries.push(MergedDirEntry {
                 name: init_name,
                 offset: 0,
-                file_type: libc::DT_REG as u32,
+                file_type: platform::DIRENT_REG,
             });
         }
     }
@@ -534,7 +534,7 @@ fn get_lower_dir_fd(
 fn correct_entry_dtypes(fs: &OverlayFs, parent_ino: u64, entries: &mut [MergedDirEntry]) {
     for entry in entries.iter_mut() {
         // Only DT_REG entries can have a different guest-visible type.
-        if entry.file_type != libc::DT_REG as u32 {
+        if entry.file_type != platform::DIRENT_REG {
             continue;
         }
 
@@ -547,7 +547,7 @@ fn correct_entry_dtypes(fs: &OverlayFs, parent_ino: u64, entries: &mut [MergedDi
         if let Ok(lookup_entry) = inode::do_lookup(fs, parent_ino, &name_cstr) {
             // do_lookup already patches attr.st_mode with the guest-visible type
             // from the override xattr, so no separate open_node_fd + get_override needed.
-            let guest_type = lookup_entry.attr.st_mode as u32 & libc::S_IFMT as u32;
+            let guest_type = platform::mode_file_type(lookup_entry.attr.st_mode);
             entry.file_type = mode_to_dtype(guest_type);
             inode::forget_one(fs, lookup_entry.inode, 1);
         }
@@ -556,13 +556,5 @@ fn correct_entry_dtypes(fs: &OverlayFs, parent_ino: u64, entries: &mut [MergedDi
 
 /// Convert a file mode type to a directory entry type.
 fn mode_to_dtype(mode_type: u32) -> u32 {
-    match mode_type {
-        m if m == libc::S_IFLNK as u32 => libc::DT_LNK as u32,
-        m if m == libc::S_IFDIR as u32 => libc::DT_DIR as u32,
-        m if m == libc::S_IFCHR as u32 => libc::DT_CHR as u32,
-        m if m == libc::S_IFBLK as u32 => libc::DT_BLK as u32,
-        m if m == libc::S_IFIFO as u32 => libc::DT_FIFO as u32,
-        m if m == libc::S_IFSOCK as u32 => libc::DT_SOCK as u32,
-        _ => libc::DT_REG as u32,
-    }
+    platform::dirent_type_from_mode(mode_type)
 }

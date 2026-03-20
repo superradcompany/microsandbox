@@ -64,17 +64,18 @@ pub enum ImageSource {
 
 /// Builder for configuring a disk image rootfs.
 ///
-/// Used with the closure form of [`SandboxBuilder::image`]:
+/// Used with the closure form of [`crate::sandbox::SandboxBuilder::image`]:
 ///
 /// ```ignore
 /// .image(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
 /// ```
+#[derive(Default)]
 pub struct ImageBuilder {
     source: Option<RootfsSource>,
     error: Option<crate::MicrosandboxError>,
 }
 
-/// Trait for types that can be passed to [`SandboxBuilder::image`].
+/// Trait for types that can be passed to [`crate::sandbox::SandboxBuilder::image`].
 ///
 /// Implemented for:
 /// - `&str`, `String`, `PathBuf` — resolved via [`ImageSource`].
@@ -113,7 +114,6 @@ pub enum VolumeMount {
         /// Size limit in MiB.
         size_mib: Option<u32>,
     },
-
 }
 
 /// Builder for constructing a [`VolumeMount`].
@@ -230,9 +230,9 @@ impl VolumeMount {
     /// Get the guest mount path.
     pub fn guest(&self) -> &str {
         match self {
-            Self::Bind { guest, .. }
-            | Self::Named { guest, .. }
-            | Self::Tmpfs { guest, .. } => guest,
+            Self::Bind { guest, .. } | Self::Named { guest, .. } | Self::Tmpfs { guest, .. } => {
+                guest
+            }
         }
     }
 }
@@ -305,10 +305,7 @@ impl DiskImageFormat {
 impl ImageBuilder {
     /// Create a new image builder.
     pub fn new() -> Self {
-        Self {
-            source: None,
-            error: None,
-        }
+        Self::default()
     }
 
     /// Use a disk image file as the root filesystem.

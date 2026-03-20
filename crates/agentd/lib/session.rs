@@ -1,16 +1,21 @@
 //! Exec session management: spawning processes with PTY or pipe I/O.
 
-use std::ffi::CString;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::process::Stdio;
+use std::{
+    ffi::CString,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    process::Stdio,
+};
 
-use nix::pty::openpty;
-use nix::sys::signal::{Signal, kill};
-use nix::unistd::Pid;
-use tokio::io::AsyncReadExt;
-use tokio::io::unix::AsyncFd;
-use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
+use nix::{
+    pty::openpty,
+    sys::signal::{Signal, kill},
+    unistd::Pid,
+};
+use tokio::{
+    io::{AsyncReadExt, unix::AsyncFd},
+    process::{Child, Command},
+    sync::mpsc,
+};
 
 use microsandbox_protocol::exec::ExecRequest;
 
@@ -99,8 +104,7 @@ impl ExecSession {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             };
-            let ret =
-                unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws) };
+            let ret = unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws) };
             if ret < 0 {
                 return Err(std::io::Error::last_os_error().into());
             }
@@ -141,13 +145,7 @@ impl ExecSession {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        let ret = unsafe {
-            libc::ioctl(
-                pty.master.as_raw_fd(),
-                libc::TIOCSWINSZ,
-                &ws,
-            )
-        };
+        let ret = unsafe { libc::ioctl(pty.master.as_raw_fd(), libc::TIOCSWINSZ, &ws) };
         if ret < 0 {
             return Err(std::io::Error::last_os_error().into());
         }
@@ -212,7 +210,12 @@ impl ExecSession {
             }
 
             // Set controlling terminal.
-            if unsafe { libc::ioctl(slave_fd, libc::TIOCSCTTY.into(), 0) } < 0 {
+            #[cfg(target_os = "linux")]
+            let tiocsctty = libc::TIOCSCTTY;
+            #[cfg(target_os = "macos")]
+            let tiocsctty: libc::c_ulong = libc::TIOCSCTTY.into();
+
+            if unsafe { libc::ioctl(slave_fd, tiocsctty, 0) } < 0 {
                 unsafe { libc::_exit(1) };
             }
 
@@ -375,9 +378,7 @@ fn parse_rlimit_resource(name: &str) -> Option<libc::c_int> {
 
 /// Pre-parses rlimits from the exec request into `(resource_id, rlimit)` tuples
 /// that can be applied in the child process via `setrlimit()`.
-fn parse_rlimits(
-    req: &ExecRequest,
-) -> Vec<(libc::c_int, libc::rlimit)> {
+fn parse_rlimits(req: &ExecRequest) -> Vec<(libc::c_int, libc::rlimit)> {
     req.rlimits
         .iter()
         .filter_map(|rl| {

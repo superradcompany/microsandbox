@@ -72,17 +72,17 @@ fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec<'_>> {
         if opt == "noexec" {
             noexec = true;
         } else if let Some(val) = opt.strip_prefix("size=") {
-            size_mib = Some(val.parse::<u32>().map_err(|_| {
-                AgentdError::Init(format!("invalid tmpfs size: {val}"))
-            })?);
+            size_mib = Some(
+                val.parse::<u32>()
+                    .map_err(|_| AgentdError::Init(format!("invalid tmpfs size: {val}")))?,
+            );
         } else if let Some(val) = opt.strip_prefix("mode=") {
-            mode = Some(u32::from_str_radix(val, 8).map_err(|_| {
-                AgentdError::Init(format!("invalid octal tmpfs mode: {val}"))
-            })?);
+            mode = Some(
+                u32::from_str_radix(val, 8)
+                    .map_err(|_| AgentdError::Init(format!("invalid octal tmpfs mode: {val}")))?,
+            );
         } else {
-            return Err(AgentdError::Init(format!(
-                "unknown tmpfs option: {opt}"
-            )));
+            return Err(AgentdError::Init(format!("unknown tmpfs option: {opt}")));
         }
     }
 
@@ -100,14 +100,18 @@ fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec<'_>> {
     let mut parts = val.split(',');
     let device = parts.next().unwrap();
     if device.is_empty() {
-        return Err(AgentdError::Init("MSB_BLOCK_ROOT has empty device path".into()));
+        return Err(AgentdError::Init(
+            "MSB_BLOCK_ROOT has empty device path".into(),
+        ));
     }
 
     let mut fstype = None;
     for opt in parts {
         if let Some(val) = opt.strip_prefix("fstype=") {
             if val.is_empty() {
-                return Err(AgentdError::Init("MSB_BLOCK_ROOT has empty fstype value".into()));
+                return Err(AgentdError::Init(
+                    "MSB_BLOCK_ROOT has empty fstype value".into(),
+                ));
             }
             fstype = Some(val);
         } else {
@@ -126,12 +130,13 @@ fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec<'_>> {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::os::unix::fs::symlink;
-    use std::path::Path;
+    use std::{os::unix::fs::symlink, path::Path};
 
-    use nix::mount::{MsFlags, mount};
-    use nix::sys::stat::Mode;
-    use nix::unistd::{chdir, chroot, mkdir};
+    use nix::{
+        mount::{MsFlags, mount},
+        sys::stat::Mode,
+        unistd::{chdir, chroot, mkdir},
+    };
 
     use crate::error::{AgentdError, AgentdResult};
 
@@ -206,9 +211,8 @@ mod linux {
 
         // /dev/fd → /proc/self/fd
         if !Path::new("/dev/fd").exists() {
-            symlink("/proc/self/fd", "/dev/fd").map_err(|e| {
-                AgentdError::Init(format!("failed to symlink /dev/fd: {e}"))
-            })?;
+            symlink("/proc/self/fd", "/dev/fd")
+                .map_err(|e| AgentdError::Init(format!("failed to symlink /dev/fd: {e}")))?;
         }
 
         Ok(())
@@ -277,17 +281,10 @@ mod linux {
         chdir("/newroot")
             .map_err(|e| AgentdError::Init(format!("failed to chdir /newroot: {e}")))?;
 
-        mount(
-            Some("."),
-            "/",
-            None::<&str>,
-            MsFlags::MS_MOVE,
-            None::<&str>,
-        )
-        .map_err(|e| AgentdError::Init(format!("failed to MS_MOVE /newroot to /: {e}")))?;
+        mount(Some("."), "/", None::<&str>, MsFlags::MS_MOVE, None::<&str>)
+            .map_err(|e| AgentdError::Init(format!("failed to MS_MOVE /newroot to /: {e}")))?;
 
-        chroot(".")
-            .map_err(|e| AgentdError::Init(format!("failed to chroot: {e}")))?;
+        chroot(".").map_err(|e| AgentdError::Init(format!("failed to chroot: {e}")))?;
 
         chdir("/")
             .map_err(|e| AgentdError::Init(format!("failed to chdir / after chroot: {e}")))?;
@@ -300,9 +297,8 @@ mod linux {
 
     /// Tries every filesystem type listed in `/proc/filesystems` until one succeeds.
     fn try_mount(device: &str, target: &str) -> AgentdResult<()> {
-        let content = std::fs::read_to_string("/proc/filesystems").map_err(|e| {
-            AgentdError::Init(format!("failed to read /proc/filesystems: {e}"))
-        })?;
+        let content = std::fs::read_to_string("/proc/filesystems")
+            .map_err(|e| AgentdError::Init(format!("failed to read /proc/filesystems: {e}")))?;
 
         for line in content.lines() {
             // Skip virtual filesystems marked with "nodev".
@@ -360,20 +356,20 @@ mod linux {
         let path = spec.path;
 
         // Determine the permission mode.
-        let mode = spec.mode.unwrap_or(if path == "/tmp" || path == "/var/tmp" {
-            0o1777
-        } else {
-            0o755
-        });
+        let mode = spec
+            .mode
+            .unwrap_or(if path == "/tmp" || path == "/var/tmp" {
+                0o1777
+            } else {
+                0o755
+            });
 
         // Create the target directory.
-        std::fs::create_dir_all(path).map_err(|e| {
-            AgentdError::Init(format!("failed to create directory {path}: {e}"))
-        })?;
+        std::fs::create_dir_all(path)
+            .map_err(|e| AgentdError::Init(format!("failed to create directory {path}: {e}")))?;
 
         // Flags: nosuid + nodev (sensible safety defaults).
-        let mut flags =
-            MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
+        let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
         if spec.noexec {
             flags |= MsFlags::MS_NOEXEC;
         }

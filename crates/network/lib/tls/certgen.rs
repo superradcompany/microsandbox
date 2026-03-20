@@ -3,12 +3,13 @@
 //! Each intercepted domain gets a short-lived (24h) P-256 EC certificate with
 //! the SNI domain as both CN and SAN. The cert is signed by the CA keypair.
 
-use std::io;
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
 use rcgen::{CertificateParams, DnType, KeyPair};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use rustls::sign::CertifiedKey;
+use rustls::{
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    sign::CertifiedKey,
+};
 
 use super::CaKeyPair;
 
@@ -40,9 +41,7 @@ pub fn generate_cert(domain: &str, ca: &CaKeyPair) -> io::Result<GeneratedCert> 
     let mut params = CertificateParams::new(vec![domain.to_string()])
         .map_err(|e| io::Error::other(format!("failed to create cert params: {e}")))?;
 
-    params
-        .distinguished_name
-        .push(DnType::CommonName, domain);
+    params.distinguished_name.push(DnType::CommonName, domain);
 
     // Short-lived: valid for 24 hours from now.
     let now = time::OffsetDateTime::now_utc();

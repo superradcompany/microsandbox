@@ -1,0 +1,197 @@
+name: Check
+
+on:
+  push:
+    branches: [microsandbox]
+  pull_request:
+    branches: [microsandbox]
+
+env:
+  CARGO_TERM_COLOR: always
+  LIBKRUNFW_VERSION: "5.2.1"
+  LIBKRUNFW_ABI: "5"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build kernel.c on Linux for macOS libkrunfw linking
+  # ---------------------------------------------------------------------------
+  build-kernel:
+    name: Build kernel.c (aarch64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Cache kernel.c
+        id: cache-kernel
+        uses: actions/cache@v4
+        with:
+          path: vendor/libkrunfw/kernel.c
+          key: kernel-c-aarch64-${{ hashFiles('vendor/libkrunfw/**') }}
+
+      - name: Install kernel build deps
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+
+      - name: Build kernel.c
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          cd vendor/libkrunfw
+          make -j$(nproc)
+
+      - name: Upload kernel.c
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-c-aarch64
+          path: vendor/libkrunfw/kernel.c
+
+  # ---------------------------------------------------------------------------
+  # Build agentd on Linux for macOS packaging
+  # ---------------------------------------------------------------------------
+  build-agentd-aarch64:
+    name: Build agentd (aarch64-linux-musl)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install agentd build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build agentd
+        run: |
+          rustup target add --toolchain stable aarch64-unknown-linux-musl
+          cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target aarch64-unknown-linux-musl
+          mkdir -p build
+          cp crates/agentd/target/aarch64-unknown-linux-musl/release/agentd build/agentd
+
+      - name: Upload agentd
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentd-aarch64-linux-musl
+          path: build/agentd
+
+  # ---------------------------------------------------------------------------
+  # Check
+  # ---------------------------------------------------------------------------
+  check:
+    name: Check (${{ matrix.target }})
+    needs: [build-kernel, build-agentd-aarch64]
+    if: always()
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-latest
+            arch: x86_64
+            os: linux
+            agentd_target: x86_64-unknown-linux-musl
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+            os: linux
+            agentd_target: aarch64-unknown-linux-musl
+          - target: darwin-aarch64
+            runner: macos-14
+            arch: aarch64
+            os: darwin
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # -- Linux build deps --
+      - name: Install build deps (Linux)
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+
+      # -- agentd (Linux: native musl) --
+      - name: Build agentd (musl)
+        if: matrix.os == 'linux'
+        run: |
+          rustup target add --toolchain stable ${{ matrix.agentd_target }}
+          cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target ${{ matrix.agentd_target }}
+          mkdir -p build
+          cp crates/agentd/target/${{ matrix.agentd_target }}/release/agentd build/agentd
+
+      # -- agentd (macOS: download prebuilt Linux artifact) --
+      - name: Download agentd (macOS)
+        if: matrix.os == 'darwin'
+        uses: actions/download-artifact@v4
+        with:
+          name: agentd-aarch64-linux-musl
+          path: build/
+
+      # -- libkrunfw (cached) --
+      - name: Cache libkrunfw
+        id: cache-libkrunfw
+        uses: actions/cache@v4
+        with:
+          path: build/libkrunfw*
+          key: libkrunfw-${{ matrix.target }}-${{ hashFiles('vendor/libkrunfw/**') }}
+
+      - name: Build libkrunfw (Linux)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'linux'
+        run: |
+          cd vendor/libkrunfw
+          make -j$(nproc)
+          cd ../..
+          mkdir -p build
+          cp vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} build/
+          cd build
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
+
+      - name: Download kernel.c (macOS)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'darwin'
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-c-aarch64
+          path: vendor/libkrunfw/
+
+      - name: Build libkrunfw (macOS)
+        if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'darwin'
+        run: |
+          cd vendor/libkrunfw
+          cc -fPIC -DABI_VERSION=${{ env.LIBKRUNFW_ABI }} -shared -o libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib kernel.c
+          cd ../..
+          mkdir -p build
+          cp vendor/libkrunfw/libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib build/
+          cd build
+          ln -sf libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib libkrunfw.dylib
+
+      # -- Checks (workspace) --
+      - name: Format
+        run: cargo +stable fmt --all -- --check
+
+      - name: Clippy
+        run: cargo +stable clippy --workspace -- -D warnings
+
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo +stable doc --workspace --no-deps
+
+      # -- Checks (agentd — excluded from workspace, Linux-only) --
+      - name: Format agentd
+        if: matrix.os == 'linux'
+        run: cargo +stable fmt --manifest-path crates/agentd/Cargo.toml -- --check
+
+      - name: Clippy agentd
+        if: matrix.os == 'linux'
+        run: cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target ${{ matrix.agentd_target }} -- -D warnings

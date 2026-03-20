@@ -1,0 +1,52 @@
+default_stages: [pre-commit]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+        exclude: ^vendor/
+      - id: trailing-whitespace
+        exclude: ^vendor/
+      - id: check-toml
+      - id: check-yaml
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt-workspace
+        name: cargo fmt (workspace)
+        entry: cargo fmt --all -- --check
+        language: system
+        pass_filenames: false
+        files: \.(rs|toml)$
+      - id: cargo-clippy-workspace
+        name: cargo clippy (workspace)
+        entry: cargo clippy --workspace -- -D warnings
+        language: system
+        pass_filenames: false
+        files: \.(rs|toml)$
+      - id: cargo-fmt-agentd
+        name: cargo fmt (agentd)
+        entry: cargo fmt --manifest-path crates/agentd/Cargo.toml -- --check
+        language: system
+        pass_filenames: false
+        files: \.(rs|toml)$
+      - id: cargo-clippy-agentd
+        name: cargo clippy (agentd)
+        entry: cargo clippy --manifest-path crates/agentd/Cargo.toml -- -D warnings
+        language: system
+        pass_filenames: false
+        files: \.(rs|toml)$
+      - id: cargo-doc-workspace
+        name: cargo doc (workspace)
+        entry: bash -lc 'RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps'
+        language: system
+        pass_filenames: false
+        files: \.(rs|toml)$
+      - id: cargo-build-msb-release
+        name: cargo build (msb release)
+        entry: cargo build --release -p microsandbox-cli
+        language: system
+        pass_filenames: false
+        files: \.(rs|toml)$
