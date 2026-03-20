@@ -12,7 +12,6 @@ members = [
     "crates/protocol",
     "crates/runtime",
     "crates/utils",
-    "examples/simple-qcow2",
     "examples/simple-root",
 ]
 
