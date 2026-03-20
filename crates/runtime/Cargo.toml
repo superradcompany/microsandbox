@@ -15,11 +15,11 @@ path = "lib/lib.rs"
 chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
 libc.workspace = true
-microsandbox-db = { path = "../db" }
-microsandbox-filesystem = { path = "../filesystem" }
-microsandbox-network = { path = "../network" }
-microsandbox-protocol = { path = "../protocol" }
-microsandbox-utils = { path = "../utils" }
+microsandbox-db = { version = "0.3.0", path = "../db" }
+microsandbox-filesystem = { version = "0.3.0", path = "../filesystem" }
+microsandbox-network = { version = "0.3.0", path = "../network" }
+microsandbox-protocol = { version = "0.3.0", path = "../protocol" }
+microsandbox-utils = { version = "0.3.0", path = "../utils" }
 msb_krun = { version = "0.1.6", features = ["blk", "net"] }
 nix = { workspace = true, features = ["process", "signal"] }
 sea-orm.workspace = true

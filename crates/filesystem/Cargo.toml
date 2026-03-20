@@ -1,5 +1,6 @@
 [package]
 name = "microsandbox-filesystem"
+description = "Filesystem backends and guest filesystem support for microsandbox."
 version.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -11,7 +12,7 @@ path = "lib/lib.rs"
 
 [dependencies]
 libc.workspace = true
-microsandbox-utils = { path = "../utils" }
+microsandbox-utils = { version = "0.3.0", path = "../utils" }
 msb_krun = "0.1.6"
 scopeguard.workspace = true
 tempfile.workspace = true
@@ -21,5 +22,5 @@ tracing.workspace = true
 prebuilt = ["dep:ureq"]
 
 [build-dependencies]
-microsandbox-utils = { path = "../utils" }
+microsandbox-utils = { version = "0.3.0", path = "../utils" }
 ureq = { workspace = true, optional = true }

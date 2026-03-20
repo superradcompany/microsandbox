@@ -5,7 +5,7 @@ members = ["."]
 [workspace.package]
 authors = ["Team MicroSandbox <team@microsandbox.dev>"]
 repository = "https://github.com/zerocore-ai/microsandbox"
-version = "0.2.6"
+version = "0.3.0"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -28,6 +28,7 @@ panic = "abort"
 
 [package]
 name = "microsandbox-agentd"
+description = "Guest init process and agent daemon for microsandbox microVMs."
 version.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -45,7 +46,7 @@ path = "lib/lib.rs"
 chrono.workspace = true
 ciborium.workspace = true
 libc.workspace = true
-microsandbox-protocol = { path = "../protocol" }
+microsandbox-protocol = { version = "0.3.0", path = "../protocol" }
 nix = { workspace = true, features = [
     "fs",
     "mount",
