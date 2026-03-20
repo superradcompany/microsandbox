@@ -176,7 +176,7 @@ jobs:
       # -- Build & Test --
       - name: Build msb
         run: |
-          cargo build --release -p microsandbox-cli
+          cargo build --release --no-default-features -p microsandbox-cli
           mkdir -p build
           cp target/release/msb build/msb
 
@@ -187,7 +187,11 @@ jobs:
 
       - name: Codesign msb (macOS)
         if: matrix.os == 'darwin'
-        run: codesign --entitlements entitlements.plist --force -s - build/msb
+        run: codesign --entitlements msb-entitlements.plist --force -s - build/msb
+
+      - name: Codesign msbnet (macOS)
+        if: matrix.os == 'darwin'
+        run: codesign --entitlements msbnet-entitlements.plist --force -s - build/msbnet
 
       # -- Tests --
       - name: Test workspace

@@ -15,15 +15,19 @@ path = "bin/main.rs"
 name = "microsandbox_cli"
 path = "lib/lib.rs"
 
+[features]
+default = ["prebuilt"]
+prebuilt = ["microsandbox/prebuilt", "microsandbox-runtime/prebuilt"]
+
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
 console.workspace = true
 indicatif.workspace = true
-microsandbox = { version = "0.3.0", path = "../microsandbox" }
+microsandbox = { version = "0.3.0", path = "../microsandbox", default-features = false }
 microsandbox-image = { version = "0.3.0", path = "../image" }
-microsandbox-runtime = { version = "0.3.0", path = "../runtime" }
+microsandbox-runtime = { version = "0.3.0", path = "../runtime", default-features = false }
 rand.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -84,7 +84,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         builder = builder.shell(shell);
     }
     if args.force {
-        builder = builder.force();
+        builder = builder.overwrite();
     }
     for env_str in &args.env {
         let (k, v) = ui::parse_env(env_str).map_err(anyhow::Error::msg)?;

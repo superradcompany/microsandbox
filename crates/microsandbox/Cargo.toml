@@ -12,26 +12,29 @@ name = "microsandbox"
 path = "lib/lib.rs"
 
 [features]
-prebuilt = ["dep:ureq", "microsandbox-filesystem/prebuilt"]
+default = ["prebuilt"]
+prebuilt = ["microsandbox-filesystem/prebuilt", "microsandbox-runtime/prebuilt"]
 
 [dependencies]
 bytes.workspace = true
 chrono.workspace = true
 crossterm.workspace = true
 dirs.workspace = true
+flate2.workspace = true
 futures.workspace = true
 libc.workspace = true
 microsandbox-db = { version = "0.3.0", path = "../db" }
-microsandbox-filesystem = { version = "0.3.0", path = "../filesystem" }
+microsandbox-filesystem = { version = "0.3.0", path = "../filesystem", default-features = false }
 microsandbox-image = { version = "0.3.0", path = "../image" }
 microsandbox-migration = { version = "0.3.0", path = "../migration" }
 microsandbox-network = { version = "0.3.0", path = "../network" }
 microsandbox-protocol = { version = "0.3.0", path = "../protocol" }
-microsandbox-runtime = { version = "0.3.0", path = "../runtime" }
+microsandbox-runtime = { version = "0.3.0", path = "../runtime", default-features = false }
 microsandbox-utils = { version = "0.3.0", path = "../utils" }
 nix = { workspace = true, features = ["process", "signal"] }
 reqwest.workspace = true
 scopeguard.workspace = true
+tar.workspace = true
 sea-orm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -40,10 +43,6 @@ tokio.workspace = true
 tracing.workspace = true
 typed-builder.workspace = true
 which.workspace = true
-
-[build-dependencies]
-microsandbox-utils = { version = "0.3.0", path = "../utils" }
-ureq = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

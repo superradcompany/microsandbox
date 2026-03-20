@@ -19,6 +19,7 @@ tempfile.workspace = true
 tracing.workspace = true
 
 [features]
+default = ["prebuilt"]
 prebuilt = ["dep:ureq"]
 
 [build-dependencies]

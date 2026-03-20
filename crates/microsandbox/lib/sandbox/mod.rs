@@ -175,6 +175,12 @@ impl Sandbox {
 
     /// Inner create logic separated for error-cleanup wrapper.
     async fn create_inner(config: SandboxConfig, sandbox_id: i32) -> MicrosandboxResult<Self> {
+        #[cfg(feature = "prebuilt")]
+        {
+            static SETUP_DONE: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+            SETUP_DONE.get_or_try_init(crate::setup::install).await?;
+        }
+
         let (handle, agent_host_fd) = spawn_supervisor(&config, sandbox_id).await?;
         let bridge = AgentBridge::new(agent_host_fd)?;
         let ready = bridge.wait_ready().await?;
@@ -884,7 +890,7 @@ async fn prepare_create_target(
     if !config.replace_existing {
         if existing.is_some() || dir_exists {
             return Err(crate::MicrosandboxError::Custom(format!(
-                "sandbox '{}' already exists; remove it, start the stopped sandbox, or recreate with .force()",
+                "sandbox '{}' already exists; remove it, start the stopped sandbox, or recreate with .overwrite()",
                 config.name
             )));
         }

@@ -12,7 +12,7 @@ members = [
     "crates/protocol",
     "crates/runtime",
     "crates/utils",
-    "examples/basic",
+    "examples/simple-root",
 ]
 
 [workspace.package]
