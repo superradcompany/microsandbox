@@ -107,7 +107,7 @@ pub(crate) fn do_create(
     // kill_priv handling.
     if kill_priv
         && (open_flags & libc::O_TRUNC != 0)
-        && let Ok(Some(ovr)) = stat_override::get_override(*fd_guard)
+        && let Some(ovr) = stat_override::get_override(*fd_guard, true, fs.cfg.strict)?
     {
         let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
         if new_mode != ovr.mode {

@@ -715,7 +715,7 @@ fn resolve_upper(fs: &OverlayFs, parent: u64, name: &CStr, fd: RawFd) -> io::Res
 
     // Get stat.
     let st = platform::fstat(fd)?;
-    let patched = stat_override::patched_stat(fd, st)?;
+    let patched = stat_override::patched_stat(fd, st, true, fs.cfg.strict)?;
 
     // Build alt key for upper dedup. On Linux, also capture mnt_id for node state.
     #[cfg(target_os = "linux")]
@@ -863,7 +863,7 @@ fn resolve_lower(
         (-1, st)
     } else {
         let fd = open_lower_child_fd(lower_layer, parent, name, fs)?;
-        let p = stat_override::patched_stat(fd, st)?;
+        let p = stat_override::patched_stat(fd, st, true, fs.cfg.strict)?;
         (fd, p)
     };
     let _close = scopeguard::guard(lower_fd, |fd| unsafe {
@@ -1143,7 +1143,7 @@ pub(crate) fn stat_node(fs: &OverlayFs, inode: u64) -> io::Result<stat64> {
     match &*state {
         NodeState::Root { root_fd } => {
             let st = platform::fstat(root_fd.as_raw_fd())?;
-            stat_override::patched_stat(root_fd.as_raw_fd(), st)
+            stat_override::patched_stat(root_fd.as_raw_fd(), st, true, fs.cfg.strict)
         }
         #[cfg(target_os = "linux")]
         NodeState::Lower { file, .. } | NodeState::Upper { file, .. } => {
@@ -1151,7 +1151,7 @@ pub(crate) fn stat_node(fs: &OverlayFs, inode: u64) -> io::Result<stat64> {
             // The fd is borrowed from the File, so we must NOT close it.
             let fd = file.as_raw_fd();
             let st = platform::fstat(fd)?;
-            stat_override::patched_stat(fd, st)
+            stat_override::patched_stat(fd, st, true, fs.cfg.strict)
         }
         #[cfg(target_os = "macos")]
         NodeState::Lower { ino, dev, .. } | NodeState::Upper { ino, dev, .. } => {
@@ -1161,7 +1161,7 @@ pub(crate) fn stat_node(fs: &OverlayFs, inode: u64) -> io::Result<stat64> {
                 libc::close(fd);
             });
             let st = platform::fstat(fd)?;
-            stat_override::patched_stat(fd, st)
+            stat_override::patched_stat(fd, st, true, fs.cfg.strict)
         }
     }
 }

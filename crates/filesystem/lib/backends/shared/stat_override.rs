@@ -60,14 +60,23 @@ pub(crate) struct OverrideStat {
 ///
 /// If no override xattr is present, returns the stat unmodified.
 /// Returns `EIO` if the xattr is corrupt (wrong version, short read).
-pub(crate) fn patched_stat(fd: RawFd, mut st: stat64) -> io::Result<stat64> {
+pub(crate) fn patched_stat(
+    fd: RawFd,
+    mut st: stat64,
+    xattr_enabled: bool,
+    strict: bool,
+) -> io::Result<stat64> {
+    if !xattr_enabled {
+        return Ok(st);
+    }
+
     // Real symlinks on host cannot have user xattrs on Linux.
     #[cfg(target_os = "linux")]
     if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
         return Ok(st);
     }
 
-    match read_override(fd) {
+    match read_override(fd, strict) {
         Ok(Some(ovr)) => {
             st.st_uid = ovr.uid;
             st.st_gid = ovr.gid;
@@ -104,7 +113,7 @@ pub(crate) fn patched_stat(fd: RawFd, mut st: stat64) -> io::Result<stat64> {
 ///
 /// Returns `None` if the xattr does not exist (ENODATA/ENOATTR).
 /// Returns `Err(EIO)` for corrupt data.
-fn read_override(fd: RawFd) -> io::Result<Option<OverrideStat>> {
+fn read_override(fd: RawFd, strict: bool) -> io::Result<Option<OverrideStat>> {
     let mut buf = [0u8; OVERRIDE_SIZE];
 
     #[cfg(target_os = "linux")]
@@ -149,9 +158,9 @@ fn read_override(fd: RawFd) -> io::Result<Option<OverrideStat>> {
             return Ok(None);
         }
 
-        // EOPNOTSUPP means the filesystem doesn't support xattrs.
-        if errno == libc::EOPNOTSUPP {
-            return Ok(None);
+        // EOPNOTSUPP / ENOTSUP means the filesystem doesn't support xattrs.
+        if errno == libc::EOPNOTSUPP || errno == libc::ENOTSUP {
+            return handle_unsupported_xattr(strict);
         }
 
         return Err(platform::linux_error(err));
@@ -171,6 +180,14 @@ fn read_override(fd: RawFd) -> io::Result<Option<OverrideStat>> {
     }
 
     Ok(Some(ovr))
+}
+
+fn handle_unsupported_xattr(strict: bool) -> io::Result<Option<OverrideStat>> {
+    if strict {
+        return Err(platform::eio());
+    }
+
+    Ok(None)
 }
 
 /// Set the override xattr on a file descriptor.
@@ -267,8 +284,16 @@ pub(crate) fn set_override_at(
 /// Read the current override xattr values from a file descriptor.
 ///
 /// Returns `None` if no override is set.
-pub(crate) fn get_override(fd: RawFd) -> io::Result<Option<OverrideStat>> {
-    read_override(fd)
+pub(crate) fn get_override(
+    fd: RawFd,
+    xattr_enabled: bool,
+    strict: bool,
+) -> io::Result<Option<OverrideStat>> {
+    if !xattr_enabled {
+        return Ok(None);
+    }
+
+    read_override(fd, strict)
 }
 
 /// Check if the xattr system is functional by probing the given directory.
@@ -332,4 +357,27 @@ pub(crate) fn probe_xattr_support(dirfd: RawFd) -> io::Result<bool> {
     }
 
     Ok(true)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::handle_unsupported_xattr;
+
+    #[test]
+    fn test_unsupported_xattr_is_eio_in_strict_mode() {
+        let err = match handle_unsupported_xattr(true) {
+            Ok(_) => panic!("strict mode must hard-fail on unsupported xattrs"),
+            Err(err) => err,
+        };
+        assert_eq!(err.raw_os_error(), Some(libc::EIO));
+    }
+
+    #[test]
+    fn test_unsupported_xattr_is_none_in_non_strict_mode() {
+        assert!(handle_unsupported_xattr(false).unwrap().is_none());
+    }
 }

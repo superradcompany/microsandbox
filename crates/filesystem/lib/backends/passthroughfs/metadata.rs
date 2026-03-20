@@ -73,7 +73,7 @@ pub(crate) fn do_setattr(
 
     // Handle uid/gid/mode changes via xattr (not real chown/chmod).
     if valid.intersects(SetattrValid::UID | SetattrValid::GID | SetattrValid::MODE) || kill_priv {
-        let current = stat_override::get_override(*close_fd)?;
+        let current = stat_override::get_override(*close_fd, fs.cfg.xattr, fs.cfg.strict)?;
         let (cur_uid, cur_gid, cur_mode, cur_rdev) = match current {
             Some(ovr) => (ovr.uid, ovr.gid, ovr.mode, ovr.rdev),
             None => {

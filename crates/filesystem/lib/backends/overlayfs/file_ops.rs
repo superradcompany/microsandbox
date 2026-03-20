@@ -69,7 +69,7 @@ pub(crate) fn do_open(
     // kill_priv: clear SUID/SGID on open+truncate.
     if kill_priv
         && (open_flags & libc::O_TRUNC != 0)
-        && let Ok(Some(ovr)) = stat_override::get_override(*fd_guard)
+        && let Some(ovr) = stat_override::get_override(*fd_guard, true, fs.cfg.strict)?
     {
         let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
         if new_mode != ovr.mode {
@@ -137,7 +137,8 @@ pub(crate) fn do_write(
     let f = data.file.read().unwrap();
 
     // kill_priv: clear SUID/SGID before first write.
-    if kill_priv && let Ok(Some(ovr)) = stat_override::get_override(f.as_raw_fd()) {
+    if kill_priv && let Some(ovr) = stat_override::get_override(f.as_raw_fd(), true, fs.cfg.strict)?
+    {
         let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
         if new_mode != ovr.mode {
             stat_override::set_override(f.as_raw_fd(), ovr.uid, ovr.gid, new_mode, ovr.rdev)?;
@@ -192,7 +193,7 @@ pub(crate) fn do_readlink(fs: &OverlayFs, _ctx: Context, ino: u64) -> io::Result
         });
 
         // Verify xattr says S_IFLNK — missing or wrong type is an integrity error.
-        if let Some(ovr) = stat_override::get_override(fd)? {
+        if let Some(ovr) = stat_override::get_override(fd, true, fs.cfg.strict)? {
             if ovr.mode & platform::MODE_TYPE_MASK != platform::MODE_LNK {
                 return Err(platform::eio());
             }

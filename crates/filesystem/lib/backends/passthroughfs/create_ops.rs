@@ -100,7 +100,7 @@ pub(crate) fn do_create(
     // Clear SUID/SGID on create+truncate of existing file (HANDLE_KILLPRIV_V2).
     if kill_priv
         && (open_flags & libc::O_TRUNC != 0)
-        && let Ok(Some(ovr)) = stat_override::get_override(open_fd)
+        && let Some(ovr) = stat_override::get_override(open_fd, fs.cfg.xattr, fs.cfg.strict)?
     {
         let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
         if new_mode != ovr.mode {
@@ -399,7 +399,7 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
 
         // Verify override xattr says S_IFLNK before reading file content.
         // Without this check, a guest could read any regular file's content via readlink.
-        match stat_override::get_override(inode_fd.raw())? {
+        match stat_override::get_override(inode_fd.raw(), fs.cfg.xattr, fs.cfg.strict)? {
             Some(ovr) if ovr.mode & platform::MODE_TYPE_MASK == platform::MODE_LNK => {}
             _ => return Err(platform::einval()),
         }

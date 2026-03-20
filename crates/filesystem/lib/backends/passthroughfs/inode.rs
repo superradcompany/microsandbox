@@ -275,8 +275,12 @@ fn do_lookup_linux(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
             // Close the fd — we already have one for this inode.
             unsafe { libc::close(fd) };
             // Syscall 3: getxattr for override stat.
-            let patched =
-                crate::backends::shared::stat_override::patched_stat(inode_raw_fd(data), st)?;
+            let patched = crate::backends::shared::stat_override::patched_stat(
+                inode_raw_fd(data),
+                st,
+                fs.cfg.xattr,
+                fs.cfg.strict,
+            )?;
             return Ok(Entry {
                 inode: data.inode,
                 generation: 0,
@@ -291,7 +295,12 @@ fn do_lookup_linux(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
     // New inode candidate — take ownership of the fd while we race-proof registration.
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
     // Syscall 3: getxattr for override stat.
-    let patched = crate::backends::shared::stat_override::patched_stat(file.as_raw_fd(), st)?;
+    let patched = crate::backends::shared::stat_override::patched_stat(
+        file.as_raw_fd(),
+        st,
+        fs.cfg.xattr,
+        fs.cfg.strict,
+    )?;
 
     // Recheck under the write lock so concurrent lookups cannot register two
     // synthetic inode numbers for the same host identity.
@@ -341,7 +350,13 @@ fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
     let alt_key = InodeAltKey::new(platform::stat_ino(&st), platform::stat_dev(&st));
 
     // Open a real fd for xattr access via /.vol/dev/ino.
-    let patched = open_and_patch_stat_macos(platform::stat_dev(&st), platform::stat_ino(&st), st)?;
+    let patched = open_and_patch_stat_macos(
+        platform::stat_dev(&st),
+        platform::stat_ino(&st),
+        st,
+        fs.cfg.xattr,
+        fs.cfg.strict,
+    )?;
 
     // Fast path: most lookups hit an already-tracked inode and only need a
     // refcount bump. We still recheck under the write lock below before
@@ -404,19 +419,27 @@ fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
 /// necessary because macOS doesn't store per-inode fds, so we must open a
 /// temporary fd solely for `fgetxattr` to read the override stat.
 #[cfg(target_os = "macos")]
-fn open_and_patch_stat_macos(dev: u64, ino: u64, st: stat64) -> io::Result<stat64> {
+fn open_and_patch_stat_macos(
+    dev: u64,
+    ino: u64,
+    st: stat64,
+    xattr_enabled: bool,
+    strict: bool,
+) -> io::Result<stat64> {
     let path = vol_path(dev, ino);
 
     // Try regular file open.
     if let Ok(fd) = open_macos_path_hardened(path.as_ptr(), libc::O_RDONLY) {
-        let result = crate::backends::shared::stat_override::patched_stat(fd, st);
+        let result =
+            crate::backends::shared::stat_override::patched_stat(fd, st, xattr_enabled, strict);
         unsafe { libc::close(fd) };
         return result;
     }
 
     // Try directory open.
     if let Ok(fd) = open_macos_path_hardened(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) {
-        let result = crate::backends::shared::stat_override::patched_stat(fd, st);
+        let result =
+            crate::backends::shared::stat_override::patched_stat(fd, st, xattr_enabled, strict);
         unsafe { libc::close(fd) };
         return result;
     }
@@ -608,7 +631,12 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
     {
         let fd = get_inode_fd(fs, inode)?;
         let st = platform::fstat(fd.raw())?;
-        crate::backends::shared::stat_override::patched_stat(fd.raw(), st)
+        crate::backends::shared::stat_override::patched_stat(
+            fd.raw(),
+            st,
+            fs.cfg.xattr,
+            fs.cfg.strict,
+        )
     }
 
     #[cfg(target_os = "macos")]
@@ -620,12 +648,23 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
         let ufd = data.unlinked_fd.load(Ordering::Acquire);
         if ufd >= 0 {
             let st = platform::fstat(ufd as i32)?;
-            return crate::backends::shared::stat_override::patched_stat(ufd as i32, st);
+            return crate::backends::shared::stat_override::patched_stat(
+                ufd as i32,
+                st,
+                fs.cfg.xattr,
+                fs.cfg.strict,
+            );
         }
 
         if let Ok(fd) = open_vol_fd(data.dev, data.ino) {
-            let result = platform::fstat(fd)
-                .and_then(|st| crate::backends::shared::stat_override::patched_stat(fd, st));
+            let result = platform::fstat(fd).and_then(|st| {
+                crate::backends::shared::stat_override::patched_stat(
+                    fd,
+                    st,
+                    fs.cfg.xattr,
+                    fs.cfg.strict,
+                )
+            });
             unsafe { libc::close(fd) };
             return result;
         }
@@ -636,6 +675,6 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
-        open_and_patch_stat_macos(data.dev, data.ino, st)
+        open_and_patch_stat_macos(data.dev, data.ino, st, fs.cfg.xattr, fs.cfg.strict)
     }
 }

@@ -11,10 +11,11 @@
 //!
 //! ## RESOLVE_BENEATH
 //!
-//! `openat2(RESOLVE_BENEATH)` (Linux 5.6+) provides kernel-enforced path containment
-//! that blocks `..` traversal, absolute symlinks, and handles concurrent rename races
-//! atomically. Availability is probed at init time and cached in `PassthroughFs::has_openat2`.
-//! Falls back to `openat(O_NOFOLLOW)` on older kernels.
+//! `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)` (Linux 5.6+)
+//! provides kernel-enforced path containment that blocks `..` traversal, symlink traversal,
+//! procfs-style magic links, and concurrent rename races atomically. Availability is probed
+//! at init time and cached in `PassthroughFs::has_openat2`. Falls back to `openat(O_NOFOLLOW)`
+//! on older kernels.
 
 #![cfg_attr(target_os = "linux", allow(dead_code))]
 
@@ -513,6 +514,17 @@ pub(crate) struct OpenHow {
 #[cfg(target_os = "linux")]
 pub(crate) const RESOLVE_BENEATH: u64 = 0x08;
 
+/// `RESOLVE_NO_SYMLINKS` flag — reject all symlink traversal during resolution.
+#[cfg(target_os = "linux")]
+pub(crate) const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+
+/// `RESOLVE_NO_MAGICLINKS` flag — reject procfs-style magic links.
+#[cfg(target_os = "linux")]
+pub(crate) const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+
+#[cfg(target_os = "linux")]
+const OPENAT2_RESOLVE_FLAGS: u64 = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS;
+
 /// Syscall number for `openat2` (same on x86_64 and aarch64).
 #[cfg(target_os = "linux")]
 const SYS_OPENAT2: libc::c_long = 437;
@@ -526,7 +538,7 @@ pub(crate) fn probe_openat2() -> bool {
     let how = OpenHow {
         flags: libc::O_CLOEXEC as u64 | libc::O_PATH as u64,
         mode: 0,
-        resolve: RESOLVE_BENEATH,
+        resolve: OPENAT2_RESOLVE_FLAGS,
     };
     let ret = unsafe {
         libc::syscall(
@@ -541,11 +553,14 @@ pub(crate) fn probe_openat2() -> bool {
         unsafe { libc::close(ret as i32) };
         true
     } else {
-        io::Error::last_os_error().raw_os_error() != Some(libc::ENOSYS)
+        !matches!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENOSYS | libc::EINVAL)
+        )
     }
 }
 
-/// Open a file relative to a directory with `RESOLVE_BENEATH` if available.
+/// Open a file relative to a directory with Linux openat2 containment if available.
 ///
 /// Falls back to regular `openat` if `openat2` is not available.
 #[cfg(target_os = "linux")]
@@ -559,7 +574,7 @@ pub(crate) fn open_beneath(
         let how = OpenHow {
             flags: (flags | libc::O_CLOEXEC) as u64,
             mode: 0,
-            resolve: RESOLVE_BENEATH,
+            resolve: OPENAT2_RESOLVE_FLAGS,
         };
         let ret = unsafe {
             libc::syscall(

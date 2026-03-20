@@ -62,7 +62,7 @@ pub(crate) fn do_open(
     // Clear SUID/SGID on open+truncate (HANDLE_KILLPRIV_V2).
     if kill_priv
         && (open_flags & libc::O_TRUNC != 0)
-        && let Ok(Some(ovr)) = stat_override::get_override(fd)
+        && let Some(ovr) = stat_override::get_override(fd, fs.cfg.xattr, fs.cfg.strict)?
     {
         let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
         if new_mode != ovr.mode {
@@ -127,13 +127,11 @@ pub(crate) fn do_write(
     let f = data.file.read().unwrap();
     let written = r.read_to(&f, size as usize, offset)?;
 
-    if kill_priv {
-        let fd = f.as_raw_fd();
-        if let Ok(Some(ovr)) = stat_override::get_override(fd) {
-            let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
-            if new_mode != ovr.mode {
-                let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
-            }
+    let fd = f.as_raw_fd();
+    if kill_priv && let Some(ovr) = stat_override::get_override(fd, fs.cfg.xattr, fs.cfg.strict)? {
+        let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
+        if new_mode != ovr.mode {
+            let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
         }
     }
 

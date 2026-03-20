@@ -40,6 +40,9 @@ pub struct OverlayConfig {
     /// Enable writeback caching (default: false).
     pub writeback: bool,
 
+    /// Whether to fail hard if required xattr reads are unavailable.
+    pub strict: bool,
+
     /// Read-only mode (default: false).
     ///
     /// When true, no writable upper layer exists. All mutation operations
