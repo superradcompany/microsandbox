@@ -47,11 +47,42 @@ jobs:
           path: vendor/libkrunfw/kernel.c
 
   # ---------------------------------------------------------------------------
+  # Build agentd on Linux for macOS packaging
+  # ---------------------------------------------------------------------------
+  build-agentd-aarch64:
+    name: Build agentd (aarch64-linux-musl)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install agentd build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build agentd
+        run: |
+          rustup target add --toolchain stable aarch64-unknown-linux-musl
+          cargo +stable build --release --manifest-path crates/agentd/Cargo.toml --target aarch64-unknown-linux-musl
+          mkdir -p build
+          cp crates/agentd/target/aarch64-unknown-linux-musl/release/agentd build/agentd
+
+      - name: Upload agentd
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentd-aarch64-linux-musl
+          path: build/agentd
+
+  # ---------------------------------------------------------------------------
   # Check
   # ---------------------------------------------------------------------------
   check:
     name: Check (${{ matrix.target }})
-    needs: build-kernel
+    needs: [build-kernel, build-agentd-aarch64]
     if: always()
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -98,16 +129,13 @@ jobs:
           mkdir -p build
           cp crates/agentd/target/${{ matrix.agentd_target }}/release/agentd build/agentd
 
-      # -- agentd (macOS: cross-compile with musl-cross) --
-      - name: Build agentd (musl-cross)
+      # -- agentd (macOS: download prebuilt Linux artifact) --
+      - name: Download agentd (macOS)
         if: matrix.os == 'darwin'
-        run: |
-          brew install filosottile/musl-cross/musl-cross
-          rustup target add aarch64-unknown-linux-musl
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc \
-            cargo build --release --manifest-path crates/agentd/Cargo.toml --target aarch64-unknown-linux-musl
-          mkdir -p build
-          cp crates/agentd/target/aarch64-unknown-linux-musl/release/agentd build/agentd
+        uses: actions/download-artifact@v4
+        with:
+          name: agentd-aarch64-linux-musl
+          path: build/
 
       # -- libkrunfw (cached) --
       - name: Cache libkrunfw
