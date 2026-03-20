@@ -1,5 +1,6 @@
 [package]
 name = "microsandbox-filesystem"
+description = "Filesystem backends and guest filesystem support for microsandbox."
 version.workspace = true
 authors.workspace = true
 repository.workspace = true

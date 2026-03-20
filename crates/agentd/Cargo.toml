@@ -28,6 +28,7 @@ panic = "abort"
 
 [package]
 name = "microsandbox-agentd"
+description = "Guest init process and agent daemon for microsandbox microVMs."
 version.workspace = true
 authors.workspace = true
 repository.workspace = true

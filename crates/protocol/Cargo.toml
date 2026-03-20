@@ -1,5 +1,6 @@
 [package]
 name = "microsandbox-protocol"
+description = "Wire protocol types and serialization for the microsandbox project."
 version.workspace = true
 authors.workspace = true
 repository.workspace = true

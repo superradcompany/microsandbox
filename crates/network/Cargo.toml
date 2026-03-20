@@ -1,5 +1,6 @@
 [package]
 name = "microsandbox-network"
+description = "Networking stack and msbnet binary for the microsandbox project."
 version.workspace = true
 authors.workspace = true
 repository.workspace = true
