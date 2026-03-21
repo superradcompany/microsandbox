@@ -34,13 +34,15 @@ pub async fn run(args: PsArgs) -> anyhow::Result<()> {
     } else {
         sandboxes
             .into_iter()
-            .filter(|s| s.status == SandboxStatus::Running || s.status == SandboxStatus::Draining)
+            .filter(|s| {
+                s.status() == SandboxStatus::Running || s.status() == SandboxStatus::Draining
+            })
             .collect()
     };
 
     if args.quiet {
         for s in &filtered {
-            println!("{}", s.name);
+            println!("{}", s.name());
         }
         return Ok(());
     }
@@ -57,9 +59,13 @@ pub async fn run(args: PsArgs) -> anyhow::Result<()> {
     let mut table = ui::Table::new(&["Name", "Image", "Status"]);
 
     for s in &filtered {
-        let image = extract_image(&s.config);
-        let status = format!("{:?}", s.status);
-        table.add_row(vec![s.name.clone(), image, ui::format_status(&status)]);
+        let image = extract_image(s.config_json());
+        let status = format!("{:?}", s.status());
+        table.add_row(vec![
+            s.name().to_string(),
+            image,
+            ui::format_status(&status),
+        ]);
     }
 
     table.print();

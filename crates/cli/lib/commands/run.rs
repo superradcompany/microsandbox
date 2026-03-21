@@ -125,8 +125,8 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
             .exec(&cmd, |e: ExecOptionsBuilder| e.args(cmd_args))
             .await?;
 
-        std::io::stdout().write_all(&output.stdout)?;
-        std::io::stderr().write_all(&output.stderr)?;
+        std::io::stdout().write_all(output.stdout_bytes())?;
+        std::io::stderr().write_all(output.stderr_bytes())?;
 
         // Stop and clean up.
         let _ = sandbox.stop().await;

@@ -62,15 +62,16 @@ pub enum StdinMode {
 }
 
 /// Output of a completed command execution.
+#[derive(Debug)]
 pub struct ExecOutput {
     /// Exit status.
     pub status: ExitStatus,
 
     /// Captured stdout.
-    pub stdout: Bytes,
+    stdout: Bytes,
 
     /// Captured stderr.
-    pub stderr: Bytes,
+    stderr: Bytes,
 }
 
 /// Process exit status.
@@ -284,6 +285,28 @@ impl ExecOptionsBuilder {
     }
 }
 
+impl ExecOutput {
+    /// Get stdout as a UTF-8 string.
+    pub fn stdout(&self) -> Result<String, std::string::FromUtf8Error> {
+        String::from_utf8(self.stdout.to_vec())
+    }
+
+    /// Get stderr as a UTF-8 string.
+    pub fn stderr(&self) -> Result<String, std::string::FromUtf8Error> {
+        String::from_utf8(self.stderr.to_vec())
+    }
+
+    /// Get stdout as raw bytes.
+    pub fn stdout_bytes(&self) -> &Bytes {
+        &self.stdout
+    }
+
+    /// Get stderr as raw bytes.
+    pub fn stderr_bytes(&self) -> &Bytes {
+        &self.stderr
+    }
+}
+
 impl ExecHandle {
     /// Create a new exec handle.
     pub(crate) fn new(
@@ -334,24 +357,28 @@ impl ExecHandle {
     pub async fn collect(&mut self) -> MicrosandboxResult<ExecOutput> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let mut exit_code = -1;
+        let mut exit_code: Option<i32> = None;
 
         while let Some(event) = self.events.recv().await {
             match event {
                 ExecEvent::Stdout(data) => stdout.extend_from_slice(&data),
                 ExecEvent::Stderr(data) => stderr.extend_from_slice(&data),
                 ExecEvent::Exited { code } => {
-                    exit_code = code;
+                    exit_code = Some(code);
                     break;
                 }
                 ExecEvent::Started { .. } => {}
             }
         }
 
+        let code = exit_code.ok_or_else(|| {
+            crate::MicrosandboxError::Runtime("exec session ended without exit event".into())
+        })?;
+
         Ok(ExecOutput {
             status: ExitStatus {
-                code: exit_code,
-                success: exit_code == 0,
+                code,
+                success: code == 0,
             },
             stdout: Bytes::from(stdout),
             stderr: Bytes::from(stderr),

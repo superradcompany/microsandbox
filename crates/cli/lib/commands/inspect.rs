@@ -26,36 +26,36 @@ pub struct InspectArgs {
 
 /// Execute the `msb inspect` command.
 pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
-    let info = Sandbox::get(&args.name).await?;
+    let handle = Sandbox::get(&args.name).await?;
 
     if args.format.as_deref() == Some("json") {
         let config: serde_json::Value =
-            serde_json::from_str(&info.config).unwrap_or(serde_json::Value::Null);
+            serde_json::from_str(handle.config_json()).unwrap_or(serde_json::Value::Null);
         let json = serde_json::json!({
-            "name": info.name,
-            "status": format!("{:?}", info.status),
+            "name": handle.name(),
+            "status": format!("{:?}", handle.status()),
             "config": config,
-            "created_at": info.created_at.map(|dt| ui::format_datetime(&dt)),
-            "updated_at": info.updated_at.map(|dt| ui::format_datetime(&dt)),
+            "created_at": handle.created_at().map(|dt| ui::format_datetime(&dt)),
+            "updated_at": handle.updated_at().map(|dt| ui::format_datetime(&dt)),
         });
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
     }
 
-    let status = format!("{:?}", info.status);
+    let status = format!("{:?}", handle.status());
 
-    ui::detail_kv("Name", &info.name);
+    ui::detail_kv("Name", handle.name());
     ui::detail_kv("Status", &ui::format_status(&status));
 
-    if let Some(ref dt) = info.created_at {
-        ui::detail_kv("Created", &ui::format_datetime(dt));
+    if let Some(dt) = handle.created_at() {
+        ui::detail_kv("Created", &ui::format_datetime(&dt));
     }
-    if let Some(ref dt) = info.updated_at {
-        ui::detail_kv("Updated", &ui::format_datetime(dt));
+    if let Some(dt) = handle.updated_at() {
+        ui::detail_kv("Updated", &ui::format_datetime(&dt));
     }
 
     // Parse and display config details.
-    if let Ok(config) = serde_json::from_str::<SandboxConfig>(&info.config) {
+    if let Ok(config) = serde_json::from_str::<SandboxConfig>(handle.config_json()) {
         let image = match &config.image {
             microsandbox::sandbox::RootfsSource::Oci(s) => s.clone(),
             microsandbox::sandbox::RootfsSource::Bind(p) => p.display().to_string(),

@@ -1,7 +1,7 @@
 //! `msb list` command — list all sandboxes.
 
 use clap::Args;
-use microsandbox::sandbox::{Sandbox, SandboxConfig, SandboxStatus};
+use microsandbox::sandbox::{Sandbox, SandboxConfig, SandboxHandle, SandboxStatus};
 
 use crate::ui;
 
@@ -41,9 +41,9 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
         .into_iter()
         .filter(|s| {
             if args.running {
-                s.status == SandboxStatus::Running
+                s.status() == SandboxStatus::Running
             } else if args.stopped {
-                s.status == SandboxStatus::Stopped
+                s.status() == SandboxStatus::Stopped
             } else {
                 true
             }
@@ -57,7 +57,7 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
 
     if args.quiet {
         for s in &filtered {
-            println!("{}", s.name);
+            println!("{}", s.name());
         }
         return Ok(());
     }
@@ -70,16 +70,16 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
     let mut table = ui::Table::new(&["Name", "Image", "Status", "Created"]);
 
     for s in &filtered {
-        let image = extract_image(&s.config);
-        let status = format!("{:?}", s.status);
+        let image = extract_image(s.config_json());
+        let status = format!("{:?}", s.status());
         let created = s
-            .created_at
+            .created_at()
             .as_ref()
             .map(ui::format_datetime)
             .unwrap_or_else(|| "-".to_string());
 
         table.add_row(vec![
-            s.name.clone(),
+            s.name().to_string(),
             image,
             ui::format_status(&status),
             created,
@@ -104,15 +104,15 @@ fn extract_image(config_json: &str) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn print_json(sandboxes: &[microsandbox::sandbox::SandboxInfo]) -> anyhow::Result<()> {
+fn print_json(sandboxes: &[SandboxHandle]) -> anyhow::Result<()> {
     let entries: Vec<serde_json::Value> = sandboxes
         .iter()
         .map(|s| {
             serde_json::json!({
-                "name": s.name,
-                "status": format!("{:?}", s.status),
-                "created_at": s.created_at.map(|dt| ui::format_datetime(&dt)),
-                "image": extract_image(&s.config),
+                "name": s.name(),
+                "status": format!("{:?}", s.status()),
+                "created_at": s.created_at().map(|dt| ui::format_datetime(&dt)),
+                "image": extract_image(s.config_json()),
             })
         })
         .collect();

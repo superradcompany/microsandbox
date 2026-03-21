@@ -30,9 +30,9 @@ pub struct AttachArgs {
 
 /// Execute the `msb attach` command.
 pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
-    let info = Sandbox::get(&args.name).await?;
+    let handle = Sandbox::get(&args.name).await?;
 
-    let sandbox = match info.status {
+    let sandbox = match handle.status() {
         SandboxStatus::Running | SandboxStatus::Draining => {
             anyhow::bail!(
                 "sandbox '{}' is already running in another process; \
@@ -42,7 +42,7 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
         }
         SandboxStatus::Stopped | SandboxStatus::Crashed => {
             let spinner = ui::Spinner::start("Starting", &args.name);
-            match Sandbox::start(&args.name).await {
+            match handle.start().await {
                 Ok(s) => {
                     spinner.finish_success("Started");
                     s
@@ -57,7 +57,7 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
             anyhow::bail!(
                 "sandbox '{}' is in state {:?} and cannot be attached to",
                 args.name,
-                info.status
+                handle.status()
             );
         }
     };
