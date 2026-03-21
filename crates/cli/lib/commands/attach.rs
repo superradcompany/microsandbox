@@ -19,6 +19,10 @@ pub struct AttachArgs {
     #[arg(long)]
     pub detach_keys: Option<String>,
 
+    /// Suppress progress output.
+    #[arg(short, long)]
+    pub quiet: bool,
+
     /// Command to run interactively (after --).
     #[arg(last = true)]
     pub command: Vec<String>,
@@ -41,10 +45,14 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
             );
         }
         SandboxStatus::Stopped | SandboxStatus::Crashed => {
-            let spinner = ui::Spinner::start("Starting", &args.name);
+            let spinner = if args.quiet {
+                ui::Spinner::quiet()
+            } else {
+                ui::Spinner::start("Starting", &args.name)
+            };
             match handle.start().await {
                 Ok(s) => {
-                    spinner.finish_success("Started");
+                    spinner.finish_clear();
                     s
                 }
                 Err(e) => {
@@ -63,7 +71,7 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
     };
 
     // Resolve the command to run (if any, from after --).
-    let detach_keys = args.detach_keys.clone();
+    let detach_keys = args.detach_keys;
     let exit_code = if args.command.is_empty() {
         sandbox
             .attach((), |a: AttachOptionsBuilder| {

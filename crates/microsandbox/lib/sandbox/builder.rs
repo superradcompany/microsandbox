@@ -227,6 +227,21 @@ impl SandboxBuilder {
         let config = self.build()?;
         super::Sandbox::create_detached(config).await
     }
+
+    /// Create the sandbox with pull progress reporting.
+    ///
+    /// Returns a progress handle for per-layer pull events and a task handle
+    /// for the sandbox creation result. Useful for CLI commands that want to
+    /// display per-layer download/extraction progress during sandbox creation.
+    pub fn create_with_pull_progress(
+        self,
+    ) -> crate::MicrosandboxResult<(
+        microsandbox_image::PullProgressHandle,
+        tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
+    )> {
+        let config = self.build()?;
+        Ok(super::Sandbox::create_with_pull_progress(config))
+    }
 }
 
 impl SandboxBuilder {

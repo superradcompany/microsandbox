@@ -54,6 +54,7 @@ pub use exec::{
 };
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
 pub use handle::SandboxHandle;
+pub use microsandbox_image::{PullProgress, PullProgressHandle};
 pub use microsandbox_network::config::NetworkConfig;
 pub use microsandbox_runtime::logging::LogLevel;
 pub use types::{
@@ -75,6 +76,19 @@ pub struct Sandbox {
     bridge: Arc<AgentBridge>,
 }
 
+/// Wrapper for using a raw stdin fd with [`tokio::io::unix::AsyncFd`].
+///
+/// `AsyncFd` requires `AsRawFd`. This wraps the raw fd without taking
+/// ownership — the fd is managed by the process's stdin and must not
+/// be closed by this wrapper.
+struct StdinRawFd(std::os::fd::RawFd);
+
+impl std::os::fd::AsRawFd for StdinRawFd {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.0
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods: Static
 //--------------------------------------------------------------------------------------------------
@@ -90,7 +104,7 @@ impl Sandbox {
     /// Boots the VM with agentd ready to accept commands. Does not run
     /// any user workload — use `exec()`, `shell()`, etc. afterward.
     pub async fn create(config: SandboxConfig) -> MicrosandboxResult<Self> {
-        Self::create_with_mode(config, SupervisorSpawnMode::Attached).await
+        Self::create_with_mode(config, SupervisorSpawnMode::Attached, None).await
     }
 
     /// Create a sandbox that must survive after the creating process exits.
@@ -99,7 +113,25 @@ impl Sandbox {
     /// `msb run --detach`, where the sandbox should keep running in the
     /// background after the command returns.
     pub async fn create_detached(config: SandboxConfig) -> MicrosandboxResult<Self> {
-        Self::create_with_mode(config, SupervisorSpawnMode::Detached).await
+        Self::create_with_mode(config, SupervisorSpawnMode::Detached, None).await
+    }
+
+    /// Create a sandbox with pull progress reporting.
+    ///
+    /// Returns a progress handle for per-layer pull events and a task handle
+    /// for the sandbox creation result. The caller should consume progress
+    /// events until the channel closes, then await the task.
+    pub fn create_with_pull_progress(
+        config: SandboxConfig,
+    ) -> (
+        microsandbox_image::PullProgressHandle,
+        tokio::task::JoinHandle<MicrosandboxResult<Self>>,
+    ) {
+        let (handle, sender) = microsandbox_image::progress_channel();
+        let task = tokio::spawn(async move {
+            Self::create_with_mode(config, SupervisorSpawnMode::Attached, Some(sender)).await
+        });
+        (handle, task)
     }
 
     /// Start an existing stopped sandbox from persisted state.
@@ -116,9 +148,11 @@ impl Sandbox {
     }
 
     async fn create_with_mode(
-        mut config: SandboxConfig,
+        config: SandboxConfig,
         mode: SupervisorSpawnMode,
+        progress: Option<microsandbox_image::PullProgressSender>,
     ) -> MicrosandboxResult<Self> {
+        let mut config = config;
         let mut pinned_manifest_digest: Option<String> = None;
         let mut pinned_reference: Option<String> = None;
 
@@ -133,7 +167,8 @@ impl Sandbox {
 
         // Resolve OCI images before spawning the supervisor.
         if let RootfsSource::Oci(ref reference) = config.image {
-            let pull_result = pull_oci_image(reference, config.registry_auth.take()).await?;
+            let pull_result =
+                pull_oci_image(reference, config.registry_auth.take(), progress).await?;
 
             // Store resolved layer paths for spawn_supervisor.
             config.resolved_rootfs_layers = pull_result.layers;
@@ -519,8 +554,10 @@ impl Sandbox {
         cmd: impl attach::IntoAttachCmd,
         opts: impl attach::IntoAttachOptions,
     ) -> MicrosandboxResult<i32> {
+        use std::os::fd::AsRawFd;
+
         use microsandbox_protocol::exec::ExecResize;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::{AsyncWriteExt, unix::AsyncFd};
 
         let opts = opts.into_attach_options();
         let detach_keys = match &opts.detach_keys {
@@ -565,8 +602,37 @@ impl Sandbox {
             let _ = crossterm::terminal::disable_raw_mode();
         });
 
+        // Set stdin to non-blocking so the async read can be cleanly cancelled.
+        // tokio::io::stdin() uses a blocking thread that can't be cancelled,
+        // causing the first keystroke after exit to be swallowed.
+        let stdin_fd = std::io::stdin().as_raw_fd();
+        let old_stdin_flags = unsafe { libc::fcntl(stdin_fd, libc::F_GETFL) };
+        if old_stdin_flags == -1 {
+            return Err(crate::MicrosandboxError::Terminal(format!(
+                "failed to get stdin flags: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        if unsafe { libc::fcntl(stdin_fd, libc::F_SETFL, old_stdin_flags | libc::O_NONBLOCK) } == -1
+        {
+            return Err(crate::MicrosandboxError::Terminal(format!(
+                "failed to set stdin non-blocking: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        let _nonblock_guard = scopeguard::guard((), |_| {
+            if unsafe { libc::fcntl(stdin_fd, libc::F_SETFL, old_stdin_flags) } == -1 {
+                tracing::warn!(
+                    error = %std::io::Error::last_os_error(),
+                    "failed to restore stdin blocking mode"
+                );
+            }
+        });
+
+        let stdin_async = AsyncFd::new(StdinRawFd(stdin_fd))
+            .map_err(|e| crate::MicrosandboxError::Terminal(format!("async stdin: {e}")))?;
+
         // Set up async I/O.
-        let mut stdin = tokio::io::stdin();
         let mut stdout = tokio::io::stdout();
         let mut sigwinch =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
@@ -577,45 +643,61 @@ impl Sandbox {
         let mut match_pos = 0usize;
 
         loop {
-            let mut input_buf = [0u8; 1024];
-
             tokio::select! {
-                // Read stdin from host terminal.
-                result = stdin.read(&mut input_buf) => {
-                    match result {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            let data = &input_buf[..n];
+                // Read stdin from host terminal (non-blocking fd).
+                result = stdin_async.readable() => {
+                    let mut guard = match result {
+                        Ok(g) => g,
+                        Err(_) => break,
+                    };
 
-                            // Check for detach key sequence.
-                            let mut detached = false;
-                            for &b in data {
-                                if b == detach_seq[match_pos] {
-                                    match_pos += 1;
-                                    if match_pos == detach_seq.len() {
-                                        detached = true;
-                                        break;
-                                    }
-                                } else {
-                                    match_pos = 0;
-                                    // Check if this byte starts a new match.
-                                    if b == detach_seq[0] {
-                                        match_pos = 1;
-                                    }
+                    let mut input_buf = [0u8; 1024];
+                    let n = unsafe {
+                        libc::read(
+                            stdin_fd,
+                            input_buf.as_mut_ptr() as *mut libc::c_void,
+                            input_buf.len(),
+                        )
+                    };
+
+                    if n > 0 {
+                        let data = &input_buf[..n as usize];
+
+                        // Check for detach key sequence.
+                        let mut detached = false;
+                        for &b in data {
+                            if b == detach_seq[match_pos] {
+                                match_pos += 1;
+                                if match_pos == detach_seq.len() {
+                                    detached = true;
+                                    break;
+                                }
+                            } else {
+                                match_pos = 0;
+                                if b == detach_seq[0] {
+                                    match_pos = 1;
                                 }
                             }
-
-                            if detached {
-                                break;
-                            }
-
-                            // Forward to guest.
-                            let payload = ExecStdin { data: data.to_vec() };
-                            if let Ok(msg) = Message::with_payload(MessageType::ExecStdin, id, &payload) {
-                                let _ = self.bridge.send(&msg).await;
-                            }
                         }
-                        Err(_) => break,
+
+                        if detached {
+                            break;
+                        }
+
+                        // Forward to guest.
+                        let payload = ExecStdin { data: data.to_vec() };
+                        if let Ok(msg) = Message::with_payload(MessageType::ExecStdin, id, &payload) {
+                            let _ = self.bridge.send(&msg).await;
+                        }
+                    } else if n == 0 {
+                        break; // EOF
+                    } else {
+                        let err = std::io::Error::last_os_error();
+                        match err.kind() {
+                            std::io::ErrorKind::WouldBlock => guard.clear_ready(),
+                            std::io::ErrorKind::Interrupted => {} // EINTR — retry
+                            _ => break,
+                        }
                     }
                 }
 
@@ -650,7 +732,7 @@ impl Sandbox {
             }
         }
 
-        // Raw mode restored by scopeguard drop.
+        // Guards restore: non-blocking → blocking, raw mode → cooked.
         Ok(exit_code)
     }
 }
@@ -933,9 +1015,13 @@ pub(super) fn pid_is_alive(pid: i32) -> bool {
 /// 1. Explicit `RegistryAuth` from `SandboxBuilder::registry_auth()` (if provided)
 /// 2. Global config `registries.auth` matched by registry hostname
 /// 3. Anonymous fallback
+///
+/// When `progress` is `Some`, uses `pull_with_sender()` to emit per-layer
+/// progress events. The caller must consume the corresponding `PullProgressHandle`.
 async fn pull_oci_image(
     reference: &str,
     explicit_auth: Option<microsandbox_image::RegistryAuth>,
+    progress: Option<microsandbox_image::PullProgressSender>,
 ) -> MicrosandboxResult<microsandbox_image::PullResult> {
     let global = crate::config::config();
     let cache = microsandbox_image::GlobalCache::new(&global.cache_dir())?;
@@ -951,8 +1037,17 @@ async fn pull_oci_image(
 
     let registry = microsandbox_image::Registry::with_auth(platform, cache, auth)?;
     let options = microsandbox_image::PullOptions::default();
-    let result = registry.pull(&image_ref, &options).await?;
-    Ok(result)
+
+    if let Some(sender) = progress {
+        let task = registry.pull_with_sender(&image_ref, &options, sender);
+        let result = task
+            .await
+            .map_err(|e| crate::MicrosandboxError::Custom(format!("pull task panicked: {e}")))??;
+        Ok(result)
+    } else {
+        let result = registry.pull(&image_ref, &options).await?;
+        Ok(result)
+    }
 }
 
 /// Validate rootfs configuration that depends on host filesystem state.

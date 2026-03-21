@@ -99,6 +99,9 @@ impl Registry {
     }
 
     /// Pull with progress reporting.
+    ///
+    /// Creates a progress channel internally and returns both the receiver
+    /// handle and the spawned pull task.
     pub fn pull_with_progress(
         &self,
         reference: &oci_client::Reference,
@@ -107,22 +110,48 @@ impl Registry {
     where
         Self: Send + Sync + 'static,
     {
-        // We can't move self into the task, so we need to do this differently.
-        // Instead, we'll return the handle and the caller must drive the pull separately.
         let (handle, sender) = progress::progress_channel();
+        let task = self.spawn_pull_task(reference, options, sender);
+        (handle, task)
+    }
 
-        // We need to clone the necessary state.
+    /// Pull with an externally-provided progress sender.
+    ///
+    /// Use [`progress_channel()`](crate::progress_channel) to create the
+    /// channel, keep the [`PullProgressHandle`] receiver, and pass the
+    /// [`PullProgressSender`] here.
+    pub fn pull_with_sender(
+        &self,
+        reference: &oci_client::Reference,
+        options: &PullOptions,
+        sender: PullProgressSender,
+    ) -> JoinHandle<ImageResult<PullResult>>
+    where
+        Self: Send + Sync + 'static,
+    {
+        self.spawn_pull_task(reference, options, sender)
+    }
+
+    /// Spawn the pull task with a progress sender.
+    fn spawn_pull_task(
+        &self,
+        reference: &oci_client::Reference,
+        options: &PullOptions,
+        sender: PullProgressSender,
+    ) -> JoinHandle<ImageResult<PullResult>>
+    where
+        Self: Send + Sync + 'static,
+    {
         let reference = reference.clone();
         let options = options.clone();
         let client = self.client.clone();
         let auth = self.auth.clone();
         let platform = self.platform.clone();
 
-        // Create a new GlobalCache from the same directory.
         let layers_dir = self.cache.layers_dir().to_path_buf();
         let cache_parent = layers_dir.parent().unwrap_or(&layers_dir).to_path_buf();
 
-        let task = tokio::spawn(async move {
+        tokio::spawn(async move {
             let cache = GlobalCache::new(&cache_parent)?;
             let registry = Self {
                 client,
@@ -133,9 +162,7 @@ impl Registry {
             registry
                 .pull_inner(&reference, &options, Some(sender))
                 .await
-        });
-
-        (handle, task)
+        })
     }
 
     /// Core pull implementation.

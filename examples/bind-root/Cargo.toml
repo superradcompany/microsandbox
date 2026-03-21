@@ -1,11 +1,11 @@
 [package]
-name = "simple-root"
+name = "bind-root"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [[bin]]
-name = "simple-root"
+name = "bind-root"
 path = "bin/main.rs"
 
 [dependencies]

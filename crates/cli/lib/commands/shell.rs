@@ -18,6 +18,10 @@ pub struct ShellArgs {
     /// Shell to use (overrides sandbox default).
     #[arg(long)]
     pub shell: Option<String>,
+
+    /// Suppress progress output.
+    #[arg(short, long)]
+    pub quiet: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -37,10 +41,14 @@ pub async fn run(args: ShellArgs) -> anyhow::Result<()> {
             );
         }
         SandboxStatus::Stopped | SandboxStatus::Crashed => {
-            let spinner = ui::Spinner::start("Starting", &args.name);
+            let spinner = if args.quiet {
+                ui::Spinner::quiet()
+            } else {
+                ui::Spinner::start("Starting", &args.name)
+            };
             match handle.start().await {
                 Ok(s) => {
-                    spinner.finish_success("Started");
+                    spinner.finish_clear();
                     s
                 }
                 Err(e) => {

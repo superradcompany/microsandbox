@@ -1,4 +1,4 @@
-//! Simple root example demonstrating the microsandbox SDK.
+//! Bind-root example demonstrating the microsandbox SDK with a local directory.
 //!
 //! See [examples/README.md](../../README.md) for prerequisites and usage.
 
@@ -10,7 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Creating sandbox (rootfs={rootfs_path:?})");
 
     // Create a sandbox with a bind-mounted rootfs.
-    let sandbox = Sandbox::builder("simple-root")
+    let sandbox = Sandbox::builder("bind-root")
         .image(rootfs_path)
         .cpus(1)
         .memory(512)

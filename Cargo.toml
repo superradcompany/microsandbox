@@ -12,8 +12,9 @@ members = [
     "crates/protocol",
     "crates/runtime",
     "crates/utils",
+    "examples/bind-root",
     "examples/block-root",
-    "examples/simple-root",
+    "examples/oci-root",
 ]
 
 [workspace.package]

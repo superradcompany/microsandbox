@@ -8,14 +8,19 @@ use std::{
     collections::BTreeSet,
     io::Read,
     path::{Component, Path, PathBuf},
+    pin::Pin,
+    task::{Context, Poll},
 };
 
 use async_compression::tokio::bufread::{GzipDecoder, ZstdDecoder};
-use tokio::io::{AsyncRead, BufReader};
+use tokio::io::{AsyncRead, BufReader, ReadBuf};
 use tokio_tar as tar;
 
 use super::OVERRIDE_XATTR_KEY;
-use crate::error::{ImageError, ImageResult};
+use crate::{
+    error::{ImageError, ImageResult},
+    progress::{PullProgress, PullProgressSender},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -35,6 +40,9 @@ const MAX_ENTRY_COUNT: u64 = 1_000_000;
 
 /// Maximum path depth.
 const MAX_PATH_DEPTH: usize = 128;
+
+/// Minimum bytes between extraction progress reports (64 KiB).
+const EXTRACT_PROGRESS_INTERVAL: u64 = 64 * 1024;
 
 /// File type bits (from libc).
 #[cfg(target_os = "linux")]
@@ -91,6 +99,45 @@ enum LayerCompression {
     Zstd,
 }
 
+/// Wraps an `AsyncRead` and counts bytes read, emitting extraction progress events.
+struct CountingReader<R> {
+    inner: R,
+    bytes_read: u64,
+    total_bytes: u64,
+    last_report: u64,
+    sender: PullProgressSender,
+    layer_index: usize,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl<R: AsyncRead + Unpin> AsyncRead for CountingReader<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let result = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = &result {
+            let n = buf.filled().len() - before;
+            this.bytes_read += n as u64;
+            if this.bytes_read - this.last_report >= EXTRACT_PROGRESS_INTERVAL {
+                this.last_report = this.bytes_read;
+                this.sender.send(PullProgress::LayerExtractProgress {
+                    layer_index: this.layer_index,
+                    bytes_read: this.bytes_read,
+                    total_bytes: this.total_bytes,
+                });
+            }
+        }
+        result
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -104,6 +151,8 @@ pub(crate) async fn extract_layer(
     tar_path: &Path,
     dest: &Path,
     media_type: Option<&str>,
+    progress: Option<&PullProgressSender>,
+    layer_index: usize,
 ) -> ImageResult<ExtractionResult> {
     use tar::Archive;
 
@@ -116,10 +165,30 @@ pub(crate) async fn extract_layer(
             message: format!("failed to open tarball: {e}"),
             source: Some(Box::new(e)),
         })?;
+
+    // Wrap in counting reader when progress reporting is requested.
+    let base_reader: Box<dyn AsyncRead + Unpin + Send> = if let Some(sender) = progress {
+        let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+        Box::new(CountingReader {
+            inner: file,
+            bytes_read: 0,
+            total_bytes: file_size,
+            last_report: 0,
+            sender: sender.clone(),
+            layer_index,
+        })
+    } else {
+        Box::new(file)
+    };
+
     let archive_reader: Box<dyn AsyncRead + Unpin + Send> = match compression {
-        LayerCompression::Plain => Box::new(BufReader::new(file)),
-        LayerCompression::Gzip => Box::new(BufReader::new(GzipDecoder::new(BufReader::new(file)))),
-        LayerCompression::Zstd => Box::new(BufReader::new(ZstdDecoder::new(BufReader::new(file)))),
+        LayerCompression::Plain => Box::new(BufReader::new(base_reader)),
+        LayerCompression::Gzip => Box::new(BufReader::new(GzipDecoder::new(BufReader::new(
+            base_reader,
+        )))),
+        LayerCompression::Zstd => Box::new(BufReader::new(ZstdDecoder::new(BufReader::new(
+            base_reader,
+        )))),
     };
     let mut archive = Archive::new(archive_reader);
 
@@ -646,7 +715,7 @@ fn detect_layer_compression(
     if read >= 2 && header[..2] == [0x1F, 0x8B] {
         return Ok(LayerCompression::Gzip);
     }
-    if read == 4 && header == [0x28, 0xB5, 0x2F, 0xFD] {
+    if read >= 4 && header == [0x28, 0xB5, 0x2F, 0xFD] {
         return Ok(LayerCompression::Zstd);
     }
 
@@ -752,6 +821,8 @@ mod tests {
                 &tar_path,
                 &dest,
                 Some("application/vnd.oci.image.layer.v1.tar"),
+                None,
+                0,
             ))
             .unwrap();
 
@@ -781,5 +852,90 @@ mod tests {
             u32::from_le_bytes(xattr[12..16].try_into().unwrap()) & 0o7777,
             0o700
         );
+    }
+
+    #[test]
+    fn test_extract_layer_emits_progress_events() {
+        use crate::progress::{PullProgress, progress_channel};
+
+        let temp = tempdir().unwrap();
+        let tar_path = temp.path().join("layer.tar");
+        let dest = temp.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+
+        // Build a tarball with enough data to trigger progress reports.
+        let tar_file = std::fs::File::create(&tar_path).unwrap();
+        let mut builder = tar::Builder::new(tar_file);
+
+        // Add a file large enough to exceed EXTRACT_PROGRESS_INTERVAL (64 KiB).
+        let data = vec![0u8; 128 * 1024];
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "bigfile.bin", &data[..])
+            .unwrap();
+        builder.finish().unwrap();
+
+        let (mut handle, sender) = progress_channel();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(extract_layer(
+                &tar_path,
+                &dest,
+                Some("application/vnd.oci.image.layer.v1.tar"),
+                Some(&sender),
+                7, // layer_index
+            ))
+            .unwrap();
+        drop(sender);
+
+        // Collect events.
+        let mut events = Vec::new();
+        while let Some(event) = runtime.block_on(handle.recv()) {
+            events.push(event);
+        }
+
+        // Must have at least one LayerExtractProgress event.
+        let progress_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                PullProgress::LayerExtractProgress {
+                    layer_index,
+                    bytes_read,
+                    total_bytes,
+                } => Some((*layer_index, *bytes_read, *total_bytes)),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            !progress_events.is_empty(),
+            "expected LayerExtractProgress events"
+        );
+
+        // All events should have the correct layer_index.
+        for &(idx, _, _) in &progress_events {
+            assert_eq!(idx, 7);
+        }
+
+        // bytes_read should be monotonically increasing.
+        for window in progress_events.windows(2) {
+            assert!(window[1].1 >= window[0].1);
+        }
+
+        // total_bytes should be the tar file size.
+        let tar_size = std::fs::metadata(&tar_path).unwrap().len();
+        for &(_, _, total) in &progress_events {
+            assert_eq!(total, tar_size);
+        }
     }
 }
