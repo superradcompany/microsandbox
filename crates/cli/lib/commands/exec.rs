@@ -45,9 +45,9 @@ pub struct ExecArgs {
 /// Execute the `msb exec` command.
 pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
     // Check sandbox status.
-    let info = Sandbox::get(&args.name).await?;
+    let handle = Sandbox::get(&args.name).await?;
 
-    let sandbox = match info.status {
+    let sandbox = match handle.status() {
         SandboxStatus::Running | SandboxStatus::Draining => {
             anyhow::bail!(
                 "sandbox '{}' is already running in another process; \
@@ -57,7 +57,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         }
         SandboxStatus::Stopped | SandboxStatus::Crashed => {
             let spinner = ui::Spinner::start("Starting", &args.name);
-            match Sandbox::start(&args.name).await {
+            match handle.start().await {
                 Ok(s) => {
                     spinner.finish_success("Started");
                     s
@@ -72,7 +72,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
             anyhow::bail!(
                 "sandbox '{}' is in state {:?} and cannot be started",
                 args.name,
-                info.status
+                handle.status()
             );
         }
     };
@@ -126,14 +126,14 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
             })
             .await?;
 
-        std::io::stdout().write_all(&output.stdout)?;
-        std::io::stderr().write_all(&output.stderr)?;
+        std::io::stdout().write_all(output.stdout_bytes())?;
+        std::io::stderr().write_all(output.stderr_bytes())?;
 
         let _ = sandbox.stop().await;
         let _ = sandbox.wait().await;
 
-        if !output.status.success {
-            std::process::exit(output.status.code);
+        if !output.status().success {
+            std::process::exit(output.status().code);
         }
     }
 

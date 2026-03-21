@@ -30,9 +30,12 @@ pub async fn run(args: RemoveArgs) -> anyhow::Result<()> {
     for name in &args.names {
         if args.force {
             // Try to stop the sandbox first if it's running.
-            let _ = Sandbox::stop_by_name(name).await;
-            // Give the supervisor a moment to shut down.
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if let Ok(handle) = Sandbox::get(name).await
+                && handle.stop().await.is_ok()
+            {
+                // Give the supervisor a moment to shut down.
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
         }
 
         let spinner = ui::Spinner::start("Removing", name);

@@ -10,6 +10,7 @@ mod builder;
 mod config;
 pub mod exec;
 pub mod fs;
+mod handle;
 mod types;
 
 use std::{path::Path, process::ExitStatus, sync::Arc};
@@ -36,7 +37,7 @@ use crate::{
     runtime::{SupervisorHandle, SupervisorSpawnMode, spawn_supervisor},
 };
 
-use self::exec::{ExecEvent, ExecHandle, ExecOutput, ExecSink, IntoExecOptions, StdinMode};
+use self::exec::{ExecEvent, ExecHandle, ExecSink, IntoExecOptions, StdinMode};
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
@@ -48,8 +49,11 @@ pub use attach::{
 };
 pub use builder::SandboxBuilder;
 pub use config::SandboxConfig;
-pub use exec::{ExecOptionsBuilder, ExitStatus as ExecExitStatus, Rlimit, RlimitResource};
+pub use exec::{
+    ExecOptionsBuilder, ExecOutput, ExitStatus as ExecExitStatus, Rlimit, RlimitResource,
+};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
+pub use handle::SandboxHandle;
 pub use microsandbox_network::config::NetworkConfig;
 pub use microsandbox_runtime::logging::LogLevel;
 pub use types::{
@@ -70,9 +74,6 @@ pub struct Sandbox {
     handle: Arc<Mutex<SupervisorHandle>>,
     bridge: Arc<AgentBridge>,
 }
-
-/// Summary information about a sandbox (re-exported from entity model).
-pub type SandboxInfo = sandbox_entity::Model;
 
 //--------------------------------------------------------------------------------------------------
 // Methods: Static
@@ -167,7 +168,10 @@ impl Sandbox {
         Ok(sandbox)
     }
 
-    async fn start_with_mode(name: &str, mode: SupervisorSpawnMode) -> MicrosandboxResult<Self> {
+    pub(super) async fn start_with_mode(
+        name: &str,
+        mode: SupervisorSpawnMode,
+    ) -> MicrosandboxResult<Self> {
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
         let model = load_sandbox_record_reconciled(db, name).await?;
@@ -229,8 +233,8 @@ impl Sandbox {
         })
     }
 
-    /// Get sandbox info by name from the database.
-    pub async fn get(name: &str) -> MicrosandboxResult<SandboxInfo> {
+    /// Get a sandbox handle by name from the database.
+    pub async fn get(name: &str) -> MicrosandboxResult<SandboxHandle> {
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
@@ -240,11 +244,12 @@ impl Sandbox {
             .await?
             .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(name.into()))?;
 
-        reconcile_sandbox_runtime_state(db, model).await
+        let model = reconcile_sandbox_runtime_state(db, model).await?;
+        build_handle(db, model).await
     }
 
     /// List all sandboxes from the database.
-    pub async fn list() -> MicrosandboxResult<Vec<SandboxInfo>> {
+    pub async fn list() -> MicrosandboxResult<Vec<SandboxHandle>> {
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
@@ -253,120 +258,20 @@ impl Sandbox {
             .all(db)
             .await?;
 
-        let mut reconciled = Vec::with_capacity(sandboxes.len());
+        let mut handles = Vec::with_capacity(sandboxes.len());
         for sandbox in sandboxes {
-            reconciled.push(reconcile_sandbox_runtime_state(db, sandbox).await?);
+            let model = reconcile_sandbox_runtime_state(db, sandbox).await?;
+            handles.push(build_handle(db, model).await?);
         }
 
-        Ok(reconciled)
+        Ok(handles)
     }
 
     /// Remove a stopped sandbox from the database.
+    ///
+    /// Convenience method equivalent to `Sandbox::get(name).await?.remove().await`.
     pub async fn remove(name: &str) -> MicrosandboxResult<()> {
-        // Check if the sandbox exists and its status.
-        let model = Self::get(name).await?;
-        if model.status == SandboxStatus::Running || model.status == SandboxStatus::Draining {
-            return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
-                "cannot remove sandbox '{name}': still running"
-            )));
-        }
-
-        remove_dir_if_exists(&crate::config::config().sandboxes_dir().join(name))?;
-
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
-
-        model.into_active_model().delete(db).await?;
-
-        Ok(())
-    }
-
-    /// Stop a running sandbox by name.
-    ///
-    /// Signals the running supervisor with SIGTERM, or falls back to the
-    /// microVM process group if the sandbox is already orphaned.
-    pub async fn stop_by_name(name: &str) -> MicrosandboxResult<()> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
-        let sandbox = load_sandbox_record(db, name).await?;
-
-        if sandbox.status != SandboxStatus::Running && sandbox.status != SandboxStatus::Draining {
-            return Err(crate::MicrosandboxError::Custom(format!(
-                "sandbox '{name}' is not running"
-            )));
-        }
-
-        let sandbox = reconcile_sandbox_runtime_state(db, sandbox).await?;
-        if sandbox.status != SandboxStatus::Running && sandbox.status != SandboxStatus::Draining {
-            return Ok(());
-        }
-
-        if let Some(pid) = load_latest_running_supervisor_record(db, sandbox.id)
-            .await?
-            .and_then(|supervisor| supervisor.pid)
-            .filter(|pid| pid_is_alive(*pid))
-        {
-            nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid),
-                nix::sys::signal::Signal::SIGTERM,
-            )?;
-            return Ok(());
-        }
-
-        if let Some(pid) = load_latest_running_microvm_record(db, sandbox.id)
-            .await?
-            .and_then(|microvm| microvm.pid)
-            .filter(|pid| pid_is_alive(*pid))
-        {
-            nix::sys::signal::killpg(
-                nix::unistd::Pid::from_raw(pid),
-                nix::sys::signal::Signal::SIGTERM,
-            )?;
-            return Ok(());
-        }
-
-        Ok(())
-    }
-
-    /// Kill a running sandbox by name (SIGKILL).
-    ///
-    /// Signals the running supervisor with SIGKILL, or falls back to the
-    /// microVM process group if the sandbox is already orphaned.
-    pub async fn kill_by_name(name: &str) -> MicrosandboxResult<()> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
-        let sandbox = load_sandbox_record(db, name).await?;
-
-        let sandbox = reconcile_sandbox_runtime_state(db, sandbox).await?;
-        if sandbox.status != SandboxStatus::Running && sandbox.status != SandboxStatus::Draining {
-            return Ok(());
-        }
-
-        if let Some(pid) = load_latest_running_supervisor_record(db, sandbox.id)
-            .await?
-            .and_then(|supervisor| supervisor.pid)
-            .filter(|pid| pid_is_alive(*pid))
-        {
-            nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid),
-                nix::sys::signal::Signal::SIGKILL,
-            )?;
-            return Ok(());
-        }
-
-        if let Some(pid) = load_latest_running_microvm_record(db, sandbox.id)
-            .await?
-            .and_then(|microvm| microvm.pid)
-            .filter(|pid| pid_is_alive(*pid))
-        {
-            nix::sys::signal::killpg(
-                nix::unistd::Pid::from_raw(pid),
-                nix::sys::signal::Signal::SIGKILL,
-            )?;
-            return Ok(());
-        }
-
-        Ok(())
+        Self::get(name).await?.remove().await
     }
 }
 
@@ -754,6 +659,25 @@ impl Sandbox {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Build a [`SandboxHandle`] by eagerly loading supervisor and microVM PIDs.
+async fn build_handle(
+    db: &sea_orm::DatabaseConnection,
+    model: sandbox_entity::Model,
+) -> MicrosandboxResult<SandboxHandle> {
+    let (supervisor, microvm) = tokio::try_join!(
+        load_latest_running_supervisor_record(db, model.id),
+        load_latest_running_microvm_record(db, model.id),
+    )?;
+
+    let supervisor_pid = supervisor
+        .and_then(|s| s.pid)
+        .filter(|pid| pid_is_alive(*pid));
+
+    let vm_pid = microvm.and_then(|m| m.pid).filter(|pid| pid_is_alive(*pid));
+
+    Ok(SandboxHandle::new(model, supervisor_pid, vm_pid))
+}
+
 /// Build an `ExecRequest` by merging sandbox config with caller-provided overrides.
 #[allow(clippy::too_many_arguments)]
 fn build_exec_request(
@@ -838,7 +762,7 @@ async fn event_mapper_task(
 }
 
 /// Update the sandbox status in the database.
-async fn update_sandbox_status(
+pub(super) async fn update_sandbox_status(
     db: &sea_orm::DatabaseConnection,
     sandbox_id: i32,
     status: SandboxStatus,
@@ -860,7 +784,7 @@ async fn update_sandbox_status(
 // Functions: State Reconciliation
 //--------------------------------------------------------------------------------------------------
 
-async fn load_sandbox_record_reconciled(
+pub(super) async fn load_sandbox_record_reconciled(
     db: &sea_orm::DatabaseConnection,
     name: &str,
 ) -> MicrosandboxResult<sandbox_entity::Model> {
@@ -868,7 +792,7 @@ async fn load_sandbox_record_reconciled(
     reconcile_sandbox_runtime_state(db, sandbox).await
 }
 
-async fn reconcile_sandbox_runtime_state(
+pub(super) async fn reconcile_sandbox_runtime_state(
     db: &sea_orm::DatabaseConnection,
     sandbox: sandbox_entity::Model,
 ) -> MicrosandboxResult<sandbox_entity::Model> {
@@ -909,7 +833,7 @@ async fn reconcile_sandbox_runtime_state(
         .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(sandbox.name))
 }
 
-async fn load_latest_running_supervisor_record(
+pub(super) async fn load_latest_running_supervisor_record(
     db: &sea_orm::DatabaseConnection,
     sandbox_id: i32,
 ) -> MicrosandboxResult<Option<supervisor_entity::Model>> {
@@ -922,7 +846,7 @@ async fn load_latest_running_supervisor_record(
         .map_err(Into::into)
 }
 
-async fn load_latest_running_microvm_record(
+pub(super) async fn load_latest_running_microvm_record(
     db: &sea_orm::DatabaseConnection,
     sandbox_id: i32,
 ) -> MicrosandboxResult<Option<microvm_entity::Model>> {
@@ -991,7 +915,7 @@ async fn mark_sandbox_runtime_stale(
     Ok(())
 }
 
-fn pid_is_alive(pid: i32) -> bool {
+pub(super) fn pid_is_alive(pid: i32) -> bool {
     let result = unsafe { libc::kill(pid, 0) };
     if result == 0 {
         return true;
@@ -1070,7 +994,7 @@ fn validate_rootfs_source(rootfs: &RootfsSource) -> MicrosandboxResult<()> {
     Ok(())
 }
 
-fn remove_dir_if_exists(path: &Path) -> MicrosandboxResult<()> {
+pub(super) fn remove_dir_if_exists(path: &Path) -> MicrosandboxResult<()> {
     match std::fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1079,7 +1003,7 @@ fn remove_dir_if_exists(path: &Path) -> MicrosandboxResult<()> {
 }
 
 /// Load a sandbox row by name.
-async fn load_sandbox_record(
+pub(super) async fn load_sandbox_record(
     db: &sea_orm::DatabaseConnection,
     name: &str,
 ) -> MicrosandboxResult<sandbox_entity::Model> {

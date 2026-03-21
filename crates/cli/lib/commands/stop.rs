@@ -28,10 +28,11 @@ pub struct StopArgs {
 pub async fn run(args: StopArgs) -> anyhow::Result<()> {
     let spinner = ui::Spinner::start("Stopping", &args.name);
 
+    let mut handle = Sandbox::get(&args.name).await?;
     let result = if args.force {
-        Sandbox::kill_by_name(&args.name).await
+        handle.kill().await
     } else {
-        Sandbox::stop_by_name(&args.name).await
+        handle.stop().await
     };
 
     match result {
