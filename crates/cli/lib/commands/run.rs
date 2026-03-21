@@ -94,7 +94,11 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         builder = super::create::apply_volume(builder, vol_str)?;
     }
 
-    let sandbox = match builder.create().await {
+    let sandbox = match if args.detach {
+        builder.create_detached().await
+    } else {
+        builder.create().await
+    } {
         Ok(s) => {
             spinner.finish_success("Created");
             s
@@ -107,6 +111,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
 
     // Detach mode: just print the name and exit.
     if args.detach {
+        sandbox.detach().await;
         println!("{name}");
         return Ok(());
     }

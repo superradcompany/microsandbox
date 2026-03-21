@@ -33,6 +33,9 @@ pub struct SupervisorHandle {
 
     /// The supervisor child process handle.
     child: Child,
+
+    /// When true, the Drop impl will NOT send SIGTERM to the supervisor.
+    detached: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -54,6 +57,7 @@ impl SupervisorHandle {
             msbnet_pid,
             sandbox_name,
             child,
+            detached: false,
         }
     }
 
@@ -94,6 +98,12 @@ impl SupervisorHandle {
         let status = self.child.wait().await?;
         Ok(status)
     }
+
+    /// Disarm the SIGTERM safety net so the supervisor keeps running after
+    /// this handle is dropped. Used by detached sandbox flows.
+    pub fn disarm(&mut self) {
+        self.detached = true;
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -102,6 +112,10 @@ impl SupervisorHandle {
 
 impl Drop for SupervisorHandle {
     fn drop(&mut self) {
+        if self.detached {
+            return;
+        }
+
         // Safety net: send SIGTERM to the supervisor so child processes
         // are cleaned up if the handle is dropped without an explicit stop.
         if let Ok(None) = self.child.try_wait()

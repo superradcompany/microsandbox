@@ -11,6 +11,7 @@
 use std::{
     ffi::OsString,
     io::Write,
+    os::fd::{FromRawFd, OwnedFd},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -72,6 +73,10 @@ pub struct SupervisorConfig {
     /// Agent FD (inherited from parent, passed to VM for virtio-console).
     pub agent_fd: i32,
 
+    /// Duplicate of the host-side agent FD kept open by the supervisor so the
+    /// guest agent channel survives after the creating process exits.
+    pub hold_agent_fd: Option<i32>,
+
     /// Network FD inherited by the `msbnet` child.
     pub net_msbnet_fd: Option<i32>,
 
@@ -120,6 +125,12 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
             config.agent_fd
         )));
     }
+
+    let _held_agent_fd = config.hold_agent_fd.take().map(|fd| {
+        // SAFETY: the parent passed a valid inherited duplicate and
+        // transfers ownership of it to the supervisor process.
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    });
 
     if config.net_msbnet_fd.is_some() != config.net_vm_fd.is_some() {
         return Err(crate::RuntimeError::Custom(
@@ -1150,6 +1161,7 @@ mod tests {
             runtime_dir: PathBuf::from("/tmp/runtime"),
             network_config_json: None,
             agent_fd: 7,
+            hold_agent_fd: None,
             net_msbnet_fd: None,
             net_vm_fd: None,
             sandbox_slot: 1,

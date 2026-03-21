@@ -12,4 +12,4 @@ pub(crate) mod spawn;
 //--------------------------------------------------------------------------------------------------
 
 pub use handle::SupervisorHandle;
-pub use spawn::spawn_supervisor;
+pub use spawn::{SupervisorSpawnMode, spawn_supervisor};

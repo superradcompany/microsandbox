@@ -45,6 +45,7 @@ pub struct AgentBridge {
     writer: Arc<Mutex<stream::FdWriter>>,
     next_id: AtomicU32,
     pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Message>>>>,
+    ready: Arc<Mutex<Option<Message>>>,
     reader_handle: JoinHandle<()>,
 }
 
@@ -61,13 +62,19 @@ impl AgentBridge {
         let (reader, writer) = unsafe { stream::from_raw_fd(agent_host_fd) }?;
         let pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Message>>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let ready = Arc::new(Mutex::new(None));
 
-        let reader_handle = tokio::spawn(reader_loop(reader, Arc::clone(&pending)));
+        let reader_handle = tokio::spawn(reader_loop(
+            reader,
+            Arc::clone(&pending),
+            Arc::clone(&ready),
+        ));
 
         Ok(Self {
             writer: Arc::new(Mutex::new(writer)),
             next_id: AtomicU32::new(1),
             pending,
+            ready,
             reader_handle,
         })
     }
@@ -128,18 +135,23 @@ impl AgentBridge {
     /// The ready message is dispatched to correlation ID 0 by convention.
     /// Returns the [`Ready`] payload containing boot timing data.
     pub async fn wait_ready(&self) -> MicrosandboxResult<Ready> {
+        if let Some(msg) = self.ready.lock().await.take() {
+            return decode_ready(msg);
+        }
+
         let (tx, mut rx) = mpsc::unbounded_channel();
         self.pending.lock().await.insert(0, tx);
+
+        if let Some(msg) = self.ready.lock().await.take() {
+            self.pending.lock().await.remove(&0);
+            return decode_ready(msg);
+        }
 
         let msg = rx.recv().await.ok_or_else(|| {
             crate::MicrosandboxError::Runtime("agent bridge closed before ready signal".into())
         })?;
 
-        let ready: Ready = msg.payload().map_err(|e| {
-            crate::MicrosandboxError::Runtime(format!("failed to decode ready payload: {e}"))
-        })?;
-
-        Ok(ready)
+        decode_ready(msg)
     }
 }
 
@@ -151,6 +163,7 @@ impl AgentBridge {
 async fn reader_loop<R: AsyncRead + Unpin>(
     mut reader: R,
     pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Message>>>>,
+    ready: Arc<Mutex<Option<Message>>>,
 ) {
     loop {
         let msg = match codec::read_message(&mut reader).await {
@@ -183,6 +196,14 @@ async fn reader_loop<R: AsyncRead + Unpin>(
                 // Terminal message sent successfully — remove subscription.
                 map.remove(&dispatch_id);
             }
+        } else if dispatch_id == 0 {
+            drop(map);
+            let mut ready_slot = ready.lock().await;
+            if ready_slot.is_none() {
+                *ready_slot = Some(msg);
+            } else {
+                tracing::trace!("agent bridge: duplicate ready message buffered");
+            }
         } else {
             tracing::trace!("agent bridge: no pending handler for id={dispatch_id}");
         }
@@ -193,6 +214,14 @@ async fn reader_loop<R: AsyncRead + Unpin>(
     map.clear();
 }
 
+fn decode_ready(msg: Message) -> MicrosandboxResult<Ready> {
+    let ready: Ready = msg.payload().map_err(|e| {
+        crate::MicrosandboxError::Runtime(format!("failed to decode ready payload: {e}"))
+    })?;
+
+    Ok(ready)
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -200,5 +229,48 @@ async fn reader_loop<R: AsyncRead + Unpin>(
 impl Drop for AgentBridge {
     fn drop(&mut self) {
         self.reader_handle.abort();
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::IntoRawFd;
+
+    use tokio::net::UnixStream;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_wait_ready_accepts_early_ready_message() {
+        let (bridge_side, writer_side) = std::os::unix::net::UnixStream::pair().unwrap();
+        bridge_side.set_nonblocking(true).unwrap();
+        writer_side.set_nonblocking(true).unwrap();
+
+        let bridge = AgentBridge::new(bridge_side.into_raw_fd()).unwrap();
+        let mut writer = UnixStream::from_std(writer_side).unwrap();
+
+        let ready_msg = Message::with_payload(
+            MessageType::Ready,
+            0,
+            &Ready {
+                boot_time_ns: 1,
+                init_time_ns: 2,
+                ready_time_ns: 3,
+            },
+        )
+        .unwrap();
+
+        codec::write_message(&mut writer, &ready_msg).await.unwrap();
+        drop(writer);
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        let ready = bridge.wait_ready().await.unwrap();
+        assert_eq!(ready.boot_time_ns, 1);
+        assert_eq!(ready.init_time_ns, 2);
+        assert_eq!(ready.ready_time_ns, 3);
     }
 }

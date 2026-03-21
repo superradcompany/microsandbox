@@ -221,6 +221,12 @@ impl SandboxBuilder {
         let config = self.build()?;
         super::Sandbox::create(config).await
     }
+
+    /// Create the sandbox for detached/background use.
+    pub async fn create_detached(self) -> MicrosandboxResult<super::Sandbox> {
+        let config = self.build()?;
+        super::Sandbox::create_detached(config).await
+    }
 }
 
 impl SandboxBuilder {

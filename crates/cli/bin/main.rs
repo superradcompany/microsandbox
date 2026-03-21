@@ -28,7 +28,7 @@ struct Cli {
 enum Commands {
     /// Run the supervisor process.
     #[command(hide = true)]
-    Supervisor(SupervisorArgs),
+    Supervisor(Box<SupervisorArgs>),
 
     /// Run the microVM process.
     #[command(hide = true)]
@@ -113,7 +113,7 @@ fn run_async_command(
     runtime.block_on(async move {
         match command {
             // Hidden internal commands.
-            Commands::Supervisor(args) => supervisor_cmd::run(args, log_level)
+            Commands::Supervisor(args) => supervisor_cmd::run(*args, log_level)
                 .await
                 .map_err(Into::into),
             Commands::Microvm(_) => unreachable!("microvm is handled before Tokio starts"),

@@ -82,8 +82,9 @@ pub async fn run(args: CreateArgs) -> anyhow::Result<()> {
         builder = apply_volume(builder, vol_str)?;
     }
 
-    match builder.create().await {
-        Ok(_sandbox) => {
+    match builder.create_detached().await {
+        Ok(sandbox) => {
+            sandbox.detach().await;
             spinner.finish_success("Created");
             // Sandbox stays running — supervisor continues as background process.
         }

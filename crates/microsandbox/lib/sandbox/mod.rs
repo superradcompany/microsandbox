@@ -30,9 +30,10 @@ use crate::{
     MicrosandboxResult,
     agent::AgentBridge,
     db::entity::{
-        image as image_entity, sandbox as sandbox_entity, sandbox_image as sandbox_image_entity,
+        image as image_entity, microvm as microvm_entity, sandbox as sandbox_entity,
+        sandbox_image as sandbox_image_entity, supervisor as supervisor_entity,
     },
-    runtime::{SupervisorHandle, spawn_supervisor},
+    runtime::{SupervisorHandle, SupervisorSpawnMode, spawn_supervisor},
 };
 
 use self::exec::{ExecEvent, ExecHandle, ExecOutput, ExecSink, IntoExecOptions, StdinMode};
@@ -87,7 +88,36 @@ impl Sandbox {
     ///
     /// Boots the VM with agentd ready to accept commands. Does not run
     /// any user workload — use `exec()`, `shell()`, etc. afterward.
-    pub async fn create(mut config: SandboxConfig) -> MicrosandboxResult<Self> {
+    pub async fn create(config: SandboxConfig) -> MicrosandboxResult<Self> {
+        Self::create_with_mode(config, SupervisorSpawnMode::Attached).await
+    }
+
+    /// Create a sandbox that must survive after the creating process exits.
+    ///
+    /// This is intended for detached CLI workflows such as `msb create` and
+    /// `msb run --detach`, where the sandbox should keep running in the
+    /// background after the command returns.
+    pub async fn create_detached(config: SandboxConfig) -> MicrosandboxResult<Self> {
+        Self::create_with_mode(config, SupervisorSpawnMode::Detached).await
+    }
+
+    /// Start an existing stopped sandbox from persisted state.
+    ///
+    /// Reuses the serialized sandbox config and pinned rootfs state without
+    /// re-resolving the original OCI reference.
+    pub async fn start(name: &str) -> MicrosandboxResult<Self> {
+        Self::start_with_mode(name, SupervisorSpawnMode::Attached).await
+    }
+
+    /// Start an existing sandbox in detached/background mode.
+    pub async fn start_detached(name: &str) -> MicrosandboxResult<Self> {
+        Self::start_with_mode(name, SupervisorSpawnMode::Detached).await
+    }
+
+    async fn create_with_mode(
+        mut config: SandboxConfig,
+        mode: SupervisorSpawnMode,
+    ) -> MicrosandboxResult<Self> {
         let mut pinned_manifest_digest: Option<String> = None;
         let mut pinned_reference: Option<String> = None;
 
@@ -115,7 +145,7 @@ impl Sandbox {
 
         // Spawn supervisor + create bridge. On failure, mark the sandbox
         // as stopped so it doesn't appear as a phantom "Running" entry.
-        let sandbox = match Self::create_inner(config, sandbox_id).await {
+        let sandbox = match Self::create_inner(config, sandbox_id, mode).await {
             Ok(sandbox) => sandbox,
             Err(e) => {
                 let _ = update_sandbox_status(db, sandbox_id, SandboxStatus::Stopped).await;
@@ -137,14 +167,10 @@ impl Sandbox {
         Ok(sandbox)
     }
 
-    /// Start an existing stopped sandbox from persisted state.
-    ///
-    /// Reuses the serialized sandbox config and pinned rootfs state without
-    /// re-resolving the original OCI reference.
-    pub async fn start(name: &str) -> MicrosandboxResult<Self> {
+    async fn start_with_mode(name: &str, mode: SupervisorSpawnMode) -> MicrosandboxResult<Self> {
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
-        let model = load_sandbox_record(db, name).await?;
+        let model = load_sandbox_record_reconciled(db, name).await?;
 
         if model.status == SandboxStatus::Running || model.status == SandboxStatus::Draining {
             return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
@@ -152,9 +178,9 @@ impl Sandbox {
             )));
         }
 
-        if model.status != SandboxStatus::Stopped {
+        if model.status != SandboxStatus::Stopped && model.status != SandboxStatus::Crashed {
             return Err(crate::MicrosandboxError::Custom(format!(
-                "cannot start sandbox '{name}': status is {:?} (expected Stopped)",
+                "cannot start sandbox '{name}': status is {:?} (expected Stopped or Crashed)",
                 model.status
             )));
         }
@@ -164,7 +190,7 @@ impl Sandbox {
         validate_start_state(&config, &crate::config::config().sandboxes_dir().join(name))?;
         update_sandbox_status(db, model.id, SandboxStatus::Running).await?;
 
-        match Self::create_inner(config, model.id).await {
+        match Self::create_inner(config, model.id, mode).await {
             Ok(sandbox) => Ok(sandbox),
             Err(err) => {
                 let _ = update_sandbox_status(db, model.id, SandboxStatus::Stopped).await;
@@ -174,14 +200,18 @@ impl Sandbox {
     }
 
     /// Inner create logic separated for error-cleanup wrapper.
-    async fn create_inner(config: SandboxConfig, sandbox_id: i32) -> MicrosandboxResult<Self> {
+    async fn create_inner(
+        config: SandboxConfig,
+        sandbox_id: i32,
+        mode: SupervisorSpawnMode,
+    ) -> MicrosandboxResult<Self> {
         #[cfg(feature = "prebuilt")]
         {
             static SETUP_DONE: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
             SETUP_DONE.get_or_try_init(crate::setup::install).await?;
         }
 
-        let (handle, agent_host_fd) = spawn_supervisor(&config, sandbox_id).await?;
+        let (handle, agent_host_fd) = spawn_supervisor(&config, sandbox_id, mode).await?;
         let bridge = AgentBridge::new(agent_host_fd)?;
         let ready = bridge.wait_ready().await?;
 
@@ -204,11 +234,13 @@ impl Sandbox {
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
-        sandbox_entity::Entity::find()
+        let model = sandbox_entity::Entity::find()
             .filter(sandbox_entity::Column::Name.eq(name))
             .one(db)
             .await?
-            .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(name.into()))
+            .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(name.into()))?;
+
+        reconcile_sandbox_runtime_state(db, model).await
     }
 
     /// List all sandboxes from the database.
@@ -216,11 +248,17 @@ impl Sandbox {
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
-        sandbox_entity::Entity::find()
+        let sandboxes = sandbox_entity::Entity::find()
             .order_by_desc(sandbox_entity::Column::CreatedAt)
             .all(db)
-            .await
-            .map_err(Into::into)
+            .await?;
+
+        let mut reconciled = Vec::with_capacity(sandboxes.len());
+        for sandbox in sandboxes {
+            reconciled.push(reconcile_sandbox_runtime_state(db, sandbox).await?);
+        }
+
+        Ok(reconciled)
     }
 
     /// Remove a stopped sandbox from the database.
@@ -245,10 +283,9 @@ impl Sandbox {
 
     /// Stop a running sandbox by name.
     ///
-    /// Finds the supervisor PID from the database and sends SIGTERM.
+    /// Signals the running supervisor with SIGTERM, or falls back to the
+    /// microVM process group if the sandbox is already orphaned.
     pub async fn stop_by_name(name: &str) -> MicrosandboxResult<()> {
-        use crate::db::entity::supervisor as supervisor_entity;
-
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
         let sandbox = load_sandbox_record(db, name).await?;
@@ -259,58 +296,77 @@ impl Sandbox {
             )));
         }
 
-        let supervisor = supervisor_entity::Entity::find()
-            .filter(supervisor_entity::Column::SandboxId.eq(sandbox.id))
-            .filter(
-                supervisor_entity::Column::Status.eq(supervisor_entity::SupervisorStatus::Running),
-            )
-            .order_by_desc(supervisor_entity::Column::StartedAt)
-            .one(db)
-            .await?;
-
-        match supervisor.and_then(|s| s.pid) {
-            Some(pid) => {
-                nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(pid),
-                    nix::sys::signal::Signal::SIGTERM,
-                )?;
-                Ok(())
-            }
-            None => Err(crate::MicrosandboxError::Custom(format!(
-                "no running supervisor found for sandbox '{name}'"
-            ))),
+        let sandbox = reconcile_sandbox_runtime_state(db, sandbox).await?;
+        if sandbox.status != SandboxStatus::Running && sandbox.status != SandboxStatus::Draining {
+            return Ok(());
         }
+
+        if let Some(pid) = load_latest_running_supervisor_record(db, sandbox.id)
+            .await?
+            .and_then(|supervisor| supervisor.pid)
+            .filter(|pid| pid_is_alive(*pid))
+        {
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGTERM,
+            )?;
+            return Ok(());
+        }
+
+        if let Some(pid) = load_latest_running_microvm_record(db, sandbox.id)
+            .await?
+            .and_then(|microvm| microvm.pid)
+            .filter(|pid| pid_is_alive(*pid))
+        {
+            nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGTERM,
+            )?;
+            return Ok(());
+        }
+
+        Ok(())
     }
 
     /// Kill a running sandbox by name (SIGKILL).
+    ///
+    /// Signals the running supervisor with SIGKILL, or falls back to the
+    /// microVM process group if the sandbox is already orphaned.
     pub async fn kill_by_name(name: &str) -> MicrosandboxResult<()> {
-        use crate::db::entity::supervisor as supervisor_entity;
-
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
         let sandbox = load_sandbox_record(db, name).await?;
 
-        let supervisor = supervisor_entity::Entity::find()
-            .filter(supervisor_entity::Column::SandboxId.eq(sandbox.id))
-            .filter(
-                supervisor_entity::Column::Status.eq(supervisor_entity::SupervisorStatus::Running),
-            )
-            .order_by_desc(supervisor_entity::Column::StartedAt)
-            .one(db)
-            .await?;
-
-        match supervisor.and_then(|s| s.pid) {
-            Some(pid) => {
-                nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(pid),
-                    nix::sys::signal::Signal::SIGKILL,
-                )?;
-                Ok(())
-            }
-            None => Err(crate::MicrosandboxError::Custom(format!(
-                "no running supervisor found for sandbox '{name}'"
-            ))),
+        let sandbox = reconcile_sandbox_runtime_state(db, sandbox).await?;
+        if sandbox.status != SandboxStatus::Running && sandbox.status != SandboxStatus::Draining {
+            return Ok(());
         }
+
+        if let Some(pid) = load_latest_running_supervisor_record(db, sandbox.id)
+            .await?
+            .and_then(|supervisor| supervisor.pid)
+            .filter(|pid| pid_is_alive(*pid))
+        {
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            )?;
+            return Ok(());
+        }
+
+        if let Some(pid) = load_latest_running_microvm_record(db, sandbox.id)
+            .await?
+            .and_then(|microvm| microvm.pid)
+            .filter(|pid| pid_is_alive(*pid))
+        {
+            nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            )?;
+            return Ok(());
+        }
+
+        Ok(())
     }
 }
 
@@ -358,6 +414,18 @@ impl Sandbox {
     /// Wait for the supervisor process to exit.
     pub async fn wait(&self) -> MicrosandboxResult<ExitStatus> {
         self.handle.lock().await.wait().await
+    }
+
+    /// Detach this handle without stopping the sandbox.
+    ///
+    /// Disarms the SIGTERM safety net so the supervisor keeps running after
+    /// this handle is dropped. Intended for CLI flows like `create`, `start`,
+    /// and `run --detach`.
+    pub async fn detach(self) {
+        self.handle.lock().await.disarm();
+        // Normal drop runs — AgentBridge reader task is aborted (fine,
+        // the supervisor holds its own liveness FD) and SupervisorHandle
+        // drops without sending SIGTERM.
     }
 }
 
@@ -788,6 +856,153 @@ async fn update_sandbox_status(
     Ok(())
 }
 
+//--------------------------------------------------------------------------------------------------
+// Functions: State Reconciliation
+//--------------------------------------------------------------------------------------------------
+
+async fn load_sandbox_record_reconciled(
+    db: &sea_orm::DatabaseConnection,
+    name: &str,
+) -> MicrosandboxResult<sandbox_entity::Model> {
+    let sandbox = load_sandbox_record(db, name).await?;
+    reconcile_sandbox_runtime_state(db, sandbox).await
+}
+
+async fn reconcile_sandbox_runtime_state(
+    db: &sea_orm::DatabaseConnection,
+    sandbox: sandbox_entity::Model,
+) -> MicrosandboxResult<sandbox_entity::Model> {
+    if !matches!(
+        sandbox.status,
+        SandboxStatus::Running | SandboxStatus::Draining
+    ) {
+        return Ok(sandbox);
+    }
+
+    let supervisor = load_latest_running_supervisor_record(db, sandbox.id).await?;
+    let microvm = load_latest_running_microvm_record(db, sandbox.id).await?;
+
+    let supervisor_alive = supervisor
+        .as_ref()
+        .and_then(|model| model.pid)
+        .is_some_and(pid_is_alive);
+    let microvm_alive = microvm
+        .as_ref()
+        .and_then(|model| model.pid)
+        .is_some_and(pid_is_alive);
+
+    if supervisor_alive || microvm_alive {
+        return Ok(sandbox);
+    }
+
+    mark_sandbox_runtime_stale(
+        db,
+        sandbox.id,
+        supervisor.as_ref().map(|model| model.id),
+        microvm.as_ref().map(|model| model.id),
+    )
+    .await?;
+
+    sandbox_entity::Entity::find_by_id(sandbox.id)
+        .one(db)
+        .await?
+        .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(sandbox.name))
+}
+
+async fn load_latest_running_supervisor_record(
+    db: &sea_orm::DatabaseConnection,
+    sandbox_id: i32,
+) -> MicrosandboxResult<Option<supervisor_entity::Model>> {
+    supervisor_entity::Entity::find()
+        .filter(supervisor_entity::Column::SandboxId.eq(sandbox_id))
+        .filter(supervisor_entity::Column::Status.eq(supervisor_entity::SupervisorStatus::Running))
+        .order_by_desc(supervisor_entity::Column::StartedAt)
+        .one(db)
+        .await
+        .map_err(Into::into)
+}
+
+async fn load_latest_running_microvm_record(
+    db: &sea_orm::DatabaseConnection,
+    sandbox_id: i32,
+) -> MicrosandboxResult<Option<microvm_entity::Model>> {
+    microvm_entity::Entity::find()
+        .filter(microvm_entity::Column::SandboxId.eq(sandbox_id))
+        .filter(microvm_entity::Column::Status.eq(microvm_entity::MicrovmStatus::Running))
+        .order_by_desc(microvm_entity::Column::StartedAt)
+        .one(db)
+        .await
+        .map_err(Into::into)
+}
+
+async fn mark_sandbox_runtime_stale(
+    db: &sea_orm::DatabaseConnection,
+    sandbox_id: i32,
+    supervisor_id: Option<i32>,
+    microvm_id: Option<i32>,
+) -> MicrosandboxResult<()> {
+    let txn = db.begin().await?;
+    let now = chrono::Utc::now().naive_utc();
+
+    if let Some(supervisor_id) = supervisor_id {
+        supervisor_entity::Entity::update_many()
+            .col_expr(
+                supervisor_entity::Column::Status,
+                Expr::value(supervisor_entity::SupervisorStatus::Stopped),
+            )
+            .col_expr(supervisor_entity::Column::StoppedAt, Expr::value(now))
+            .filter(supervisor_entity::Column::Id.eq(supervisor_id))
+            .exec(&txn)
+            .await?;
+    }
+
+    if let Some(microvm_id) = microvm_id {
+        microvm_entity::Entity::update_many()
+            .col_expr(
+                microvm_entity::Column::Status,
+                Expr::value(microvm_entity::MicrovmStatus::Terminated),
+            )
+            .col_expr(
+                microvm_entity::Column::TerminationReason,
+                Expr::value(microvm_entity::TerminationReason::InternalError),
+            )
+            .col_expr(microvm_entity::Column::TerminatedAt, Expr::value(now))
+            .filter(microvm_entity::Column::Id.eq(microvm_id))
+            .exec(&txn)
+            .await?;
+    }
+
+    // Only mark Crashed if the sandbox is still Running or Draining. This
+    // prevents a concurrent start() from having its Running status overwritten.
+    sandbox_entity::Entity::update_many()
+        .col_expr(
+            sandbox_entity::Column::Status,
+            Expr::value(SandboxStatus::Crashed),
+        )
+        .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
+        .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+        .filter(
+            sandbox_entity::Column::Status.is_in([SandboxStatus::Running, SandboxStatus::Draining]),
+        )
+        .exec(&txn)
+        .await?;
+
+    txn.commit().await?;
+    Ok(())
+}
+
+fn pid_is_alive(pid: i32) -> bool {
+    let result = unsafe { libc::kill(pid, 0) };
+    if result == 0 {
+        return true;
+    }
+
+    matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(code) if code == libc::EPERM
+    )
+}
+
 /// Pull an OCI image and return the pull result.
 ///
 /// Auth resolution:
@@ -899,6 +1114,7 @@ async fn prepare_create_target(
     }
 
     if let Some(model) = existing {
+        let model = reconcile_sandbox_runtime_state(db, model).await?;
         if matches!(
             model.status,
             SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
@@ -1051,14 +1267,18 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use microsandbox_db::entity::{image as image_entity, sandbox_image as sandbox_image_entity};
+    use microsandbox_db::entity::{
+        image as image_entity, microvm as microvm_entity, sandbox_image as sandbox_image_entity,
+        supervisor as supervisor_entity,
+    };
     use microsandbox_migration::{Migrator, MigratorTrait};
-    use sea_orm::{ConnectOptions, Database, EntityTrait};
+    use sea_orm::{ConnectOptions, Database, EntityTrait, Set};
     use tempfile::tempdir;
 
     use super::{
-        RootfsSource, SandboxConfig, insert_sandbox_record, persist_oci_manifest_pin,
-        prepare_create_target, remove_dir_if_exists, validate_rootfs_source,
+        RootfsSource, SandboxConfig, SandboxStatus, insert_sandbox_record,
+        persist_oci_manifest_pin, prepare_create_target, reconcile_sandbox_runtime_state,
+        remove_dir_if_exists, validate_rootfs_source,
     };
 
     fn unique_temp_path(suffix: &str) -> PathBuf {
@@ -1067,6 +1287,14 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("microsandbox-rootfs-{suffix}-{nanos}"))
+    }
+
+    fn dead_pid() -> i32 {
+        let mut pid = 900_000;
+        while super::pid_is_alive(pid) {
+            pid += 1;
+        }
+        pid
     }
 
     #[test]
@@ -1340,6 +1568,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reconcile_sandbox_runtime_state_marks_dead_processes_crashed() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let conn = Database::connect(ConnectOptions::new(&db_url))
+            .await
+            .unwrap();
+        Migrator::up(&conn, None).await.unwrap();
+
+        let config = SandboxConfig {
+            name: "stale".into(),
+            ..Default::default()
+        };
+        let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
+        let dead_supervisor_pid = dead_pid();
+        let dead_microvm_pid = dead_pid();
+
+        let supervisor = supervisor_entity::ActiveModel {
+            sandbox_id: Set(sandbox_id),
+            pid: Set(Some(dead_supervisor_pid)),
+            status: Set(supervisor_entity::SupervisorStatus::Running),
+            ..Default::default()
+        };
+        let supervisor_id = supervisor_entity::Entity::insert(supervisor)
+            .exec(&conn)
+            .await
+            .unwrap()
+            .last_insert_id;
+
+        let microvm = microvm_entity::ActiveModel {
+            sandbox_id: Set(sandbox_id),
+            supervisor_id: Set(supervisor_id),
+            pid: Set(Some(dead_microvm_pid)),
+            status: Set(microvm_entity::MicrovmStatus::Running),
+            ..Default::default()
+        };
+        let microvm_id = microvm_entity::Entity::insert(microvm)
+            .exec(&conn)
+            .await
+            .unwrap()
+            .last_insert_id;
+
+        let sandbox = super::sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(&conn)
+            .await
+            .unwrap()
+            .unwrap();
+        let reconciled = reconcile_sandbox_runtime_state(&conn, sandbox)
+            .await
+            .unwrap();
+        assert_eq!(reconciled.status, SandboxStatus::Crashed);
+
+        let supervisor = supervisor_entity::Entity::find_by_id(supervisor_id)
+            .one(&conn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            supervisor.status,
+            supervisor_entity::SupervisorStatus::Stopped
+        );
+        assert!(supervisor.stopped_at.is_some());
+
+        let microvm = microvm_entity::Entity::find_by_id(microvm_id)
+            .one(&conn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(microvm.status, microvm_entity::MicrovmStatus::Terminated);
+        assert_eq!(
+            microvm.termination_reason,
+            Some(microvm_entity::TerminationReason::InternalError)
+        );
+        assert!(microvm.terminated_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_prepare_create_target_force_replaces_stale_running_sandbox_state() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let conn = Database::connect(ConnectOptions::new(&db_url))
+            .await
+            .unwrap();
+        Migrator::up(&conn, None).await.unwrap();
+
+        let sandbox_dir = temp.path().join("sandboxes").join("stale-running");
+        fs::create_dir_all(sandbox_dir.join("rw")).unwrap();
+        let config = SandboxConfig {
+            name: "stale-running".into(),
+            ..Default::default()
+        };
+        let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
+
+        let supervisor = supervisor_entity::ActiveModel {
+            sandbox_id: Set(sandbox_id),
+            pid: Set(Some(dead_pid())),
+            status: Set(supervisor_entity::SupervisorStatus::Running),
+            ..Default::default()
+        };
+        let supervisor_id = supervisor_entity::Entity::insert(supervisor)
+            .exec(&conn)
+            .await
+            .unwrap()
+            .last_insert_id;
+
+        let microvm = microvm_entity::ActiveModel {
+            sandbox_id: Set(sandbox_id),
+            supervisor_id: Set(supervisor_id),
+            pid: Set(Some(dead_pid())),
+            status: Set(microvm_entity::MicrovmStatus::Running),
+            ..Default::default()
+        };
+        microvm_entity::Entity::insert(microvm)
+            .exec(&conn)
+            .await
+            .unwrap();
+
+        let mut forced = SandboxConfig {
+            name: "stale-running".into(),
+            ..Default::default()
+        };
+        forced.replace_existing = true;
+
+        prepare_create_target(&conn, &forced, &sandbox_dir)
+            .await
+            .unwrap();
+
+        assert!(!sandbox_dir.exists());
+        assert!(
+            super::sandbox_entity::Entity::find_by_id(sandbox_id)
+                .one(&conn)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn test_prepare_create_target_force_rejects_running_sandbox() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
@@ -1355,7 +1722,21 @@ mod tests {
             name: "running".into(),
             ..Default::default()
         };
-        insert_sandbox_record(&conn, &config).await.unwrap();
+        let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
+
+        // Insert a supervisor with the current process PID so reconciliation
+        // considers the sandbox genuinely alive.
+        let live_pid = std::process::id() as i32;
+        let supervisor = supervisor_entity::ActiveModel {
+            sandbox_id: Set(sandbox_id),
+            pid: Set(Some(live_pid)),
+            status: Set(supervisor_entity::SupervisorStatus::Running),
+            ..Default::default()
+        };
+        supervisor_entity::Entity::insert(supervisor)
+            .exec(&conn)
+            .await
+            .unwrap();
 
         let mut forced = SandboxConfig {
             name: "running".into(),

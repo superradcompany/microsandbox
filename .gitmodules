@@ -5,3 +5,6 @@
 [submodule "examples/simple-root/rootfs-alpine"]
 	path = examples/simple-root/rootfs-alpine
 	url = https://github.com/zerocore-ai/rootfs-alpine
+[submodule "examples/block-root/qcow2-alpine"]
+	path = examples/block-root/qcow2-alpine
+	url = https://github.com/zerocore-ai/qcow2-alpine

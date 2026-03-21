@@ -31,6 +31,16 @@ struct StartupInfo {
     msbnet_pid: Option<u32>,
 }
 
+/// How the supervisor should behave relative to the creating process.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SupervisorSpawnMode {
+    /// The creating process keeps the sandbox handle and agent bridge alive.
+    Attached,
+
+    /// The sandbox must survive after the creating process exits.
+    Detached,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -50,10 +60,17 @@ struct StartupInfo {
 pub async fn spawn_supervisor(
     config: &SandboxConfig,
     sandbox_id: i32,
+    mode: SupervisorSpawnMode,
 ) -> MicrosandboxResult<(SupervisorHandle, RawFd)> {
     // Create the agent socket pair (SOCK_STREAM for virtio-console).
     let (host_fd, guest_fd) = create_socketpair(libc::SOCK_STREAM)?;
     let guest_raw_fd = guest_fd.as_raw_fd();
+    let hold_agent_fd = if mode == SupervisorSpawnMode::Detached {
+        Some(duplicate_fd(host_fd.as_raw_fd())?)
+    } else {
+        None
+    };
+    let hold_agent_raw_fd = hold_agent_fd.as_ref().map(AsRawFd::as_raw_fd);
 
     // Create the network socket pair (SOCK_DGRAM for Unixgram frame relay)
     // if networking is enabled.
@@ -117,10 +134,18 @@ pub async fn spawn_supervisor(
         &rw_dir,
         &staging_dir,
         guest_raw_fd,
+        hold_agent_raw_fd,
         net_msbnet_raw_fd,
         net_vm_raw_fd,
         &libkrunfw_path,
     ));
+
+    if mode == SupervisorSpawnMode::Detached {
+        // Detached sandboxes outlive the creating CLI process, so the
+        // supervisor must not stay coupled to the foreground job or terminal.
+        cmd.process_group(0);
+        cmd.stdin(Stdio::null());
+    }
 
     // Capture stdout (for startup JSON), inherit stderr so errors are visible.
     cmd.stdout(Stdio::piped());
@@ -130,6 +155,9 @@ pub async fn spawn_supervisor(
     unsafe {
         cmd.pre_exec(move || {
             clear_cloexec(guest_raw_fd)?;
+            if let Some(hold_agent_raw_fd) = hold_agent_raw_fd {
+                clear_cloexec(hold_agent_raw_fd)?;
+            }
             if let Some(nfd) = net_msbnet_raw_fd {
                 clear_cloexec(nfd)?;
             }
@@ -148,6 +176,7 @@ pub async fn spawn_supervisor(
 
     // Close inherited FDs in the parent by dropping them.
     drop(guest_fd);
+    drop(hold_agent_fd);
     drop(net_fds);
 
     // Read the startup JSON from the supervisor's stdout.
@@ -233,6 +262,17 @@ fn create_socketpair(sock_type: libc::c_int) -> MicrosandboxResult<(OwnedFd, Own
     set_nonblock(fd2.as_raw_fd())?;
 
     Ok((fd1, fd2))
+}
+
+fn duplicate_fd(fd: RawFd) -> MicrosandboxResult<OwnedFd> {
+    let duplicated = unsafe { libc::dup(fd) };
+    if duplicated == -1 {
+        return Err(crate::MicrosandboxError::Io(std::io::Error::last_os_error()));
+    }
+
+    let owned_fd = unsafe { OwnedFd::from_raw_fd(duplicated) };
+    set_cloexec(owned_fd.as_raw_fd())?;
+    Ok(owned_fd)
 }
 
 /// Set non-blocking mode on a file descriptor (preserving other flags).
@@ -340,6 +380,7 @@ fn supervisor_cli_args(
     rw_dir: &Path,
     staging_dir: &Path,
     agent_fd: RawFd,
+    hold_agent_fd: Option<RawFd>,
     net_msbnet_fd: Option<RawFd>,
     net_vm_fd: Option<RawFd>,
     libkrunfw_path: &Path,
@@ -366,6 +407,10 @@ fn supervisor_cli_args(
     }
     args.push(OsString::from("--agent-fd"));
     args.push(OsString::from(agent_fd.to_string()));
+    if let Some(hold_agent_fd) = hold_agent_fd {
+        args.push(OsString::from("--hold-agent-fd"));
+        args.push(OsString::from(hold_agent_fd.to_string()));
+    }
 
     if let Some(nfd) = net_msbnet_fd {
         args.push(OsString::from("--net-msbnet-fd"));
@@ -545,6 +590,7 @@ mod tests {
             9,
             None,
             None,
+            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -571,6 +617,7 @@ mod tests {
             9,
             None,
             None,
+            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -580,6 +627,41 @@ mod tests {
                 Some("--error" | "--warn" | "--info" | "--debug" | "--trace")
             )
         }));
+    }
+
+    #[test]
+    fn test_supervisor_cli_args_include_hold_agent_fd_when_requested() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .unwrap();
+
+        let args = supervisor_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            None,
+            Path::new("/tmp/rootfs-base"),
+            Path::new("/tmp/rw"),
+            Path::new("/tmp/staging"),
+            9,
+            Some(10),
+            None,
+            None,
+            Path::new("/tmp/libkrunfw.dylib"),
+        );
+
+        let rendered = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair == ["--hold-agent-fd", "10"])
+        );
     }
 
     #[test]
@@ -600,6 +682,7 @@ mod tests {
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
@@ -636,6 +719,7 @@ mod tests {
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
@@ -676,6 +760,7 @@ mod tests {
             9,
             None,
             None,
+            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -709,6 +794,7 @@ mod tests {
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
@@ -745,6 +831,7 @@ mod tests {
             9,
             None,
             None,
+            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -774,6 +861,7 @@ mod tests {
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
@@ -807,6 +895,7 @@ mod tests {
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
@@ -850,6 +939,7 @@ mod tests {
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             9,
+            None,
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),

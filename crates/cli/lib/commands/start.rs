@@ -24,8 +24,9 @@ pub struct StartArgs {
 pub async fn run(args: StartArgs) -> anyhow::Result<()> {
     let spinner = ui::Spinner::start("Starting", &args.name);
 
-    match Sandbox::start(&args.name).await {
-        Ok(_sandbox) => {
+    match Sandbox::start_detached(&args.name).await {
+        Ok(sandbox) => {
+            sandbox.detach().await;
             spinner.finish_success("Started");
             // Sandbox stays running — supervisor continues as background process.
         }

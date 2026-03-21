@@ -321,11 +321,15 @@ async fn handle_message(
         }
 
         MessageType::Shutdown => {
-            // Graceful shutdown — signal all sessions and break from main loop.
+            // Graceful shutdown — signal all sessions, then ask the guest
+            // kernel to power off so block-root filesystems can shut down
+            // cleanly instead of leaving ext4 journal recovery pending.
             for (_, session) in sessions.drain() {
                 let _ = session.send_signal(15); // SIGTERM
             }
             write_sessions.clear();
+
+            request_guest_poweroff()?;
             return Err(AgentdError::Shutdown);
         }
 
@@ -395,4 +399,49 @@ fn write_to_fd(fd: i32, buf: &[u8]) -> std::io::Result<usize> {
     } else {
         Ok(n as usize)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn request_guest_poweroff() -> AgentdResult<()> {
+    unsafe {
+        libc::sync();
+    }
+
+    let _ = remount_root_readonly();
+
+    unsafe {
+        libc::sync();
+    }
+
+    let ret = unsafe { libc::reboot(libc::RB_POWER_OFF) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn request_guest_poweroff() -> AgentdResult<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn remount_root_readonly() -> AgentdResult<()> {
+    let target = std::ffi::CString::new("/").expect("static path contains no NUL");
+    let ret = unsafe {
+        libc::mount(
+            std::ptr::null(),
+            target.as_ptr(),
+            std::ptr::null(),
+            (libc::MS_REMOUNT | libc::MS_RDONLY) as libc::c_ulong,
+            std::ptr::null(),
+        )
+    };
+
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    Ok(())
 }

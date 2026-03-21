@@ -74,7 +74,10 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PathsConfig {
-    /// Path to `msb` binary. Resolution: `MSB_PATH` env → this → PATH lookup.
+    /// Path to `msb` binary.
+    ///
+    /// Resolution: `MSB_PATH` env → this → workspace-local (debug only)
+    /// → `~/.microsandbox/bin/msb` → PATH lookup.
     pub msb: Option<PathBuf>,
 
     /// Path to `libkrunfw.{so,dylib}`.
@@ -291,8 +294,9 @@ pub fn set_config(config: GlobalConfig) -> Result<(), GlobalConfig> {
 /// Resolution order:
 /// 1. `MSB_PATH` environment variable
 /// 2. `config().paths.msb`
-/// 3. `~/.microsandbox/bin/msb`
-/// 4. `which::which("msb")`
+/// 3. workspace-local `build/msb` or `target/debug/msb` (debug builds only)
+/// 4. `~/.microsandbox/bin/msb`
+/// 5. `which::which("msb")`
 pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
     if let Ok(path) = std::env::var("MSB_PATH") {
         tracing::debug!(path = %path, source = "MSB_PATH env", "resolved msb binary");
@@ -302,6 +306,27 @@ pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
     if let Some(path) = &config().paths.msb {
         tracing::debug!(path = %path.display(), source = "config.paths.msb", "resolved msb binary");
         return Ok(path.clone());
+    }
+
+    // Only probe workspace-local dev builds in debug builds to prevent
+    // binary hijacking from untrusted parent directories in production.
+    #[cfg(debug_assertions)]
+    {
+        let mut local_candidates = Vec::new();
+        if let Ok(current_dir) = std::env::current_dir() {
+            local_candidates.extend(dev_msb_candidates_from(&current_dir));
+        }
+        if let Ok(current_exe) = std::env::current_exe()
+            && let Some(exe_dir) = current_exe.parent()
+        {
+            local_candidates.extend(dev_msb_candidates_from(exe_dir));
+        }
+        dedupe_paths(&mut local_candidates);
+
+        if let Some(path) = local_candidates.iter().find(|path| path.is_file()) {
+            tracing::debug!(path = %path.display(), source = "workspace-local msb", "resolved msb binary");
+            return Ok(path.clone());
+        }
     }
 
     // Check ~/.microsandbox/bin/msb.
@@ -392,6 +417,37 @@ fn libkrunfw_candidates_from_msb(msb_path: &Path, filename: &str) -> Vec<PathBuf
     }
 
     deduped
+}
+
+fn dev_msb_candidates_from(start: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    for ancestor in start.ancestors() {
+        if !ancestor.join("Cargo.toml").is_file() {
+            continue;
+        }
+
+        candidates.push(ancestor.join("build").join(microsandbox_utils::MSB_BINARY));
+        candidates.push(
+            ancestor
+                .join("target")
+                .join("debug")
+                .join(microsandbox_utils::MSB_BINARY),
+        );
+    }
+
+    dedupe_paths(&mut candidates);
+    candidates
+}
+
+fn dedupe_paths(paths: &mut Vec<PathBuf>) {
+    let mut deduped = Vec::new();
+    for path in paths.drain(..) {
+        if !deduped.iter().any(|existing| existing == &path) {
+            deduped.push(path);
+        }
+    }
+    *paths = deduped;
 }
 
 /// Resolve the default home directory (`~/.microsandbox`).
@@ -499,6 +555,20 @@ mod tests {
         assert_eq!(
             paths[1],
             PathBuf::from("/repo/target/lib/libkrunfw.5.dylib")
+        );
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn test_dev_msb_candidates_from_workspace_root() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+
+        let paths = dev_msb_candidates_from(temp.path());
+        assert_eq!(paths[0], temp.path().join("build").join("msb"));
+        assert_eq!(
+            paths[1],
+            temp.path().join("target").join("debug").join("msb")
         );
         assert_eq!(paths.len(), 2);
     }

@@ -265,11 +265,16 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
     });
 
     // Agent — wire agent_fd through virtio-console multi-port.
-    // Guest discovers port by name via /sys/class/virtio-ports/.
-    // Disable the implicit console — microsandbox VMs are headless and only use
-    // the explicit agent port for host↔guest communication.
+    // Guest discovers the named agent port via /sys/class/virtio-ports/.
+    //
+    // Keep libkrun's implicit console enabled. It provides the guest's real
+    // boot console on hvc0. If we disable it, libkrun reuses the first explicit
+    // virtio-console device for that boot-console path instead. That makes our
+    // explicit agent port share the console path used during boot, which breaks
+    // early agent bring-up for block-root VMs on macOS. Leaving the implicit
+    // console enabled keeps boot console I/O on hvc0 and the agent on its own
+    // named port.
     builder = builder.console(|c| {
-        let c = c.disable_implicit();
         if let Some(agent_fd) = config.agent_fd {
             c.port(microsandbox_protocol::AGENT_PORT_NAME, agent_fd, agent_fd)
         } else {

@@ -49,6 +49,11 @@ pub struct SupervisorArgs {
     #[arg(long)]
     pub agent_fd: RawFd,
 
+    /// Duplicate of the host-side agent FD kept open by the supervisor so the
+    /// agent channel survives after the creating process exits.
+    #[arg(long)]
+    pub hold_agent_fd: Option<RawFd>,
+
     /// Network FD inherited by the `msbnet` child.
     #[arg(long)]
     pub net_msbnet_fd: Option<RawFd>,
@@ -220,6 +225,7 @@ pub async fn run(args: SupervisorArgs, log_level: Option<LogLevel>) -> RuntimeRe
         runtime_dir: args.runtime_dir,
         network_config_json: args.network_config_json,
         agent_fd: args.agent_fd,
+        hold_agent_fd: args.hold_agent_fd,
         net_msbnet_fd: args.net_msbnet_fd,
         net_vm_fd: args.net_vm_fd,
         sandbox_slot: u32::try_from(args.sandbox_id).map_err(|_| {

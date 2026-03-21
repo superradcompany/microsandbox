@@ -12,6 +12,7 @@ members = [
     "crates/protocol",
     "crates/runtime",
     "crates/utils",
+    "examples/block-root",
     "examples/simple-root",
 ]
 
