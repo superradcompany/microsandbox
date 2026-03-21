@@ -53,6 +53,10 @@ pub struct RunArgs {
     #[arg(short, long)]
     pub detach: bool,
 
+    /// Suppress progress output.
+    #[arg(short, long)]
+    pub quiet: bool,
+
     /// Command to execute (after --).
     #[arg(last = true)]
     pub command: Vec<String>,
@@ -66,8 +70,6 @@ pub struct RunArgs {
 pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     let is_named = args.name.is_some();
     let name = args.name.unwrap_or_else(ui::generate_name);
-
-    let spinner = ui::Spinner::start("Creating", &name);
 
     let mut builder = Sandbox::builder(&name).image(args.image.as_str());
 
@@ -94,29 +96,61 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         builder = super::create::apply_volume(builder, vol_str)?;
     }
 
-    let sandbox = match if args.detach {
-        builder.create_detached().await
-    } else {
-        builder.create().await
-    } {
-        Ok(s) => {
-            spinner.finish_success("Created");
-            s
+    let sandbox = if args.detach {
+        let spinner = if args.quiet {
+            ui::Spinner::quiet()
+        } else {
+            ui::Spinner::start("Creating", &name)
+        };
+        match builder.create_detached().await {
+            Ok(s) => {
+                spinner.finish_success("Created");
+                s
+            }
+            Err(e) => {
+                spinner.finish_error();
+                return Err(e.into());
+            }
         }
-        Err(e) => {
-            spinner.finish_error();
-            return Err(e.into());
+    } else {
+        // Non-detach: use pull progress display for per-layer feedback.
+        let (mut progress, task) = builder.create_with_pull_progress()?;
+        let mut display = if args.quiet {
+            ui::PullProgressDisplay::quiet(&args.image)
+        } else {
+            ui::PullProgressDisplay::new(&args.image)
+        };
+
+        while let Some(event) = progress.recv().await {
+            display.handle_event(event);
+        }
+
+        match task.await {
+            Ok(Ok(s)) => {
+                display.finish();
+                s
+            }
+            Ok(Err(e)) => {
+                display.finish();
+                return Err(e.into());
+            }
+            Err(e) => {
+                display.finish();
+                return Err(anyhow::anyhow!("create task panicked: {e}"));
+            }
         }
     };
 
     // Detach mode: just print the name and exit.
     if args.detach {
         sandbox.detach().await;
-        println!("{name}");
+        if !is_named {
+            println!("{name}");
+        }
         return Ok(());
     }
 
-    if !args.command.is_empty() {
+    let exit_code = if !args.command.is_empty() {
         // Non-interactive: exec command and stream output.
         let cmd = args.command[0].clone();
         let cmd_args: Vec<String> = args.command[1..].to_vec();
@@ -128,34 +162,27 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         std::io::stdout().write_all(output.stdout_bytes())?;
         std::io::stderr().write_all(output.stderr_bytes())?;
 
-        // Stop and clean up.
-        let _ = sandbox.stop().await;
-        let _ = sandbox.wait().await;
-
-        // Remove unnamed (ephemeral) sandboxes.
-        if !is_named {
-            let _ = Sandbox::remove(&name).await;
-        }
-
-        if !output.status().success {
-            std::process::exit(output.status().code);
+        if output.status().success {
+            0
+        } else {
+            output.status().code
         }
     } else {
         // Interactive: attach to sandbox shell.
-        let exit_code = sandbox.attach((), ()).await?;
+        sandbox.attach((), ()).await?
+    };
 
-        // Stop and clean up.
-        let _ = sandbox.stop().await;
-        let _ = sandbox.wait().await;
+    // Stop and clean up.
+    let _ = sandbox.stop().await;
+    let _ = sandbox.wait().await;
 
-        // Remove unnamed (ephemeral) sandboxes.
-        if !is_named {
-            let _ = Sandbox::remove(&name).await;
-        }
+    // Remove unnamed (ephemeral) sandboxes.
+    if !is_named {
+        let _ = Sandbox::remove(&name).await;
+    }
 
-        if exit_code != 0 {
-            std::process::exit(exit_code);
-        }
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
 
     Ok(())

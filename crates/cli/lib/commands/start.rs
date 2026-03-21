@@ -14,6 +14,10 @@ use crate::ui;
 pub struct StartArgs {
     /// Name of the sandbox to start.
     pub name: String,
+
+    /// Suppress progress output.
+    #[arg(short, long)]
+    pub quiet: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -22,7 +26,11 @@ pub struct StartArgs {
 
 /// Execute the `msb start` command.
 pub async fn run(args: StartArgs) -> anyhow::Result<()> {
-    let spinner = ui::Spinner::start("Starting", &args.name);
+    let spinner = if args.quiet {
+        ui::Spinner::quiet()
+    } else {
+        ui::Spinner::start("Starting", &args.name)
+    };
 
     match Sandbox::start_detached(&args.name).await {
         Ok(sandbox) => {

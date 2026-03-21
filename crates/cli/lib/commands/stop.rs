@@ -18,6 +18,10 @@ pub struct StopArgs {
     /// Force kill (SIGKILL instead of graceful shutdown).
     #[arg(long)]
     pub force: bool,
+
+    /// Suppress progress output.
+    #[arg(short, long)]
+    pub quiet: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -26,7 +30,11 @@ pub struct StopArgs {
 
 /// Execute the `msb stop` command.
 pub async fn run(args: StopArgs) -> anyhow::Result<()> {
-    let spinner = ui::Spinner::start("Stopping", &args.name);
+    let spinner = if args.quiet {
+        ui::Spinner::quiet()
+    } else {
+        ui::Spinner::start("Stopping", &args.name)
+    };
 
     let mut handle = Sandbox::get(&args.name).await?;
     let result = if args.force {

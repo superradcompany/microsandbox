@@ -121,24 +121,30 @@ impl Layer {
             remove_file_if_exists(part_path)?;
         }
 
+        let digest_display = self.digest.to_string();
+        let digest_str: std::sync::Arc<str> = digest_display.as_str().into();
+
         // Re-check after lock — another process may have completed the download.
         if tar_path.exists() {
-            if let Some(expected) = expected_size {
-                if let Ok(meta) = std::fs::metadata(tar_path)
-                    && meta.len() == expected
-                {
-                    return Ok(());
+            let already_complete = if let Some(expected) = expected_size {
+                matches!(std::fs::metadata(tar_path), Ok(meta) if meta.len() == expected)
+            } else {
+                matches!(std::fs::metadata(tar_path), Ok(meta) if meta.len() > 0)
+            };
+
+            if already_complete {
+                if let Some(p) = progress {
+                    p.send(crate::progress::PullProgress::LayerDownloadComplete {
+                        layer_index,
+                        digest: digest_str,
+                        downloaded_bytes: expected_size.unwrap_or(0),
+                    });
                 }
-            } else if let Ok(meta) = std::fs::metadata(tar_path)
-                && meta.len() > 0
-            {
                 return Ok(());
             }
         }
 
         // Stream the blob to a .part file.
-        let digest_display = self.digest.to_string();
-        let digest_str: std::sync::Arc<str> = digest_display.as_str().into();
         let expected_hex = self.digest.hex();
 
         let download_start = determine_download_start(part_path, expected_size, expected_hex)?;
@@ -315,14 +321,21 @@ impl Layer {
         })?;
 
         // Run the extraction pipeline.
-        let result =
-            match extraction::extract_layer(&self.tar_path, extracting_dir, media_type).await {
-                Ok(result) => result,
-                Err(e) => {
-                    let _ = std::fs::remove_dir_all(extracting_dir);
-                    return Err(e);
-                }
-            };
+        let result = match extraction::extract_layer(
+            &self.tar_path,
+            extracting_dir,
+            media_type,
+            progress,
+            layer_index,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(extracting_dir);
+                return Err(e);
+            }
+        };
 
         write_pending_implicit_dirs(&self.implicit_dirs_path, &result.implicit_dirs)?;
 

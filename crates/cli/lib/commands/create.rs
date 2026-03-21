@@ -46,6 +46,10 @@ pub struct CreateArgs {
     /// Replace existing stopped sandbox with same name.
     #[arg(long)]
     pub force: bool,
+
+    /// Suppress progress output.
+    #[arg(short, long)]
+    pub quiet: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -54,8 +58,13 @@ pub struct CreateArgs {
 
 /// Execute the `msb create` command.
 pub async fn run(args: CreateArgs) -> anyhow::Result<()> {
+    let is_named = args.name.is_some();
     let name = args.name.unwrap_or_else(ui::generate_name);
-    let spinner = ui::Spinner::start("Creating", &name);
+    let spinner = if args.quiet {
+        ui::Spinner::quiet()
+    } else {
+        ui::Spinner::start("Creating", &name)
+    };
 
     let mut builder = Sandbox::builder(&name).image(args.image.as_str());
 
@@ -86,7 +95,10 @@ pub async fn run(args: CreateArgs) -> anyhow::Result<()> {
         Ok(sandbox) => {
             sandbox.detach().await;
             spinner.finish_success("Created");
-            // Sandbox stays running — supervisor continues as background process.
+            // Print auto-generated name to stdout so it's scriptable.
+            if !is_named {
+                println!("{name}");
+            }
         }
         Err(e) => {
             spinner.finish_error();

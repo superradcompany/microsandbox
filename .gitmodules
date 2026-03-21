@@ -2,8 +2,8 @@
 	path = vendor/libkrunfw
 	url = https://github.com/zerocore-ai/libkrunfw.git
 	branch = krunfw
-[submodule "examples/simple-root/rootfs-alpine"]
-	path = examples/simple-root/rootfs-alpine
+[submodule "examples/bind-root/rootfs-alpine"]
+	path = examples/bind-root/rootfs-alpine
 	url = https://github.com/zerocore-ai/rootfs-alpine
 [submodule "examples/block-root/qcow2-alpine"]
 	path = examples/block-root/qcow2-alpine

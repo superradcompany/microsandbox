@@ -33,6 +33,10 @@ pub struct ExecArgs {
     #[arg(short, long)]
     pub workdir: Option<String>,
 
+    /// Suppress progress output.
+    #[arg(short, long)]
+    pub quiet: bool,
+
     /// Command to execute (after --).
     #[arg(last = true, required = true)]
     pub command: Vec<String>,
@@ -56,10 +60,14 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
             );
         }
         SandboxStatus::Stopped | SandboxStatus::Crashed => {
-            let spinner = ui::Spinner::start("Starting", &args.name);
+            let spinner = if args.quiet {
+                ui::Spinner::quiet()
+            } else {
+                ui::Spinner::start("Starting", &args.name)
+            };
             match handle.start().await {
                 Ok(s) => {
-                    spinner.finish_success("Started");
+                    spinner.finish_clear();
                     s
                 }
                 Err(e) => {
@@ -87,7 +95,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         .map(|s| ui::parse_env(s).map_err(anyhow::Error::msg))
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let workdir = args.workdir.clone();
+    let workdir = args.workdir;
     let tty = args.tty;
 
     if args.interactive && args.tty {

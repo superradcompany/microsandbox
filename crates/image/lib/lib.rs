@@ -28,7 +28,7 @@ pub use digest::Digest;
 pub use error::{ImageError, ImageResult};
 pub use oci_client::Reference;
 pub use platform::Platform;
-pub use progress::{PullProgress, PullProgressHandle};
+pub use progress::{PullProgress, PullProgressHandle, PullProgressSender, progress_channel};
 pub use pull::{PullOptions, PullPolicy, PullResult};
 pub use registry::Registry;
 pub use store::GlobalCache;

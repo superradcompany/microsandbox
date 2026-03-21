@@ -19,6 +19,10 @@ pub struct RemoveArgs {
     /// Force removal (stop running sandbox first).
     #[arg(long)]
     pub force: bool,
+
+    /// Suppress progress output.
+    #[arg(short, long)]
+    pub quiet: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -27,18 +31,21 @@ pub struct RemoveArgs {
 
 /// Execute the `msb remove` command.
 pub async fn run(args: RemoveArgs) -> anyhow::Result<()> {
+    let mut failed = false;
+
     for name in &args.names {
         if args.force {
-            // Try to stop the sandbox first if it's running.
-            if let Ok(handle) = Sandbox::get(name).await
-                && handle.stop().await.is_ok()
-            {
-                // Give the supervisor a moment to shut down.
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            // Kill the sandbox first if it's running.
+            if let Ok(mut handle) = Sandbox::get(name).await {
+                let _ = handle.kill().await;
             }
         }
 
-        let spinner = ui::Spinner::start("Removing", name);
+        let spinner = if args.quiet {
+            ui::Spinner::quiet()
+        } else {
+            ui::Spinner::start("Removing", name)
+        };
 
         match Sandbox::remove(name).await {
             Ok(()) => {
@@ -46,9 +53,16 @@ pub async fn run(args: RemoveArgs) -> anyhow::Result<()> {
             }
             Err(e) => {
                 spinner.finish_error();
-                ui::error(&format!("{e}"));
+                if !args.quiet {
+                    ui::error(&format!("{e}"));
+                }
+                failed = true;
             }
         }
+    }
+
+    if failed {
+        std::process::exit(1);
     }
 
     Ok(())

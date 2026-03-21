@@ -10,7 +10,14 @@ use std::{
 };
 
 use console::style;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use microsandbox_image::PullProgress;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const BRAILLE_TICKS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "⠋"];
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -22,6 +29,7 @@ pub struct Spinner {
     start: Instant,
     label: String,
     target: String,
+    quiet: bool,
 }
 
 /// Minimal table renderer with column alignment.
@@ -43,7 +51,7 @@ impl Spinner {
             let pb = ProgressBar::new_spinner();
             pb.set_style(
                 ProgressStyle::default_spinner()
-                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "⠋"])
+                    .tick_strings(BRAILLE_TICKS)
                     .template(&format!("   {{spinner}} {:<12} {{msg}}", label))
                     .unwrap(),
             );
@@ -59,29 +67,51 @@ impl Spinner {
             start: Instant::now(),
             label: label.to_string(),
             target: target.to_string(),
+            quiet: false,
+        }
+    }
+
+    /// Create a no-op spinner that produces no output.
+    pub fn quiet() -> Self {
+        Self {
+            pb: None,
+            start: Instant::now(),
+            label: String::new(),
+            target: String::new(),
+            quiet: true,
         }
     }
 
     /// Finish with success. Shows `✓ <past_tense> <target> (duration)`.
     pub fn finish_success(self, past_tense: &str) {
-        let elapsed = self.start.elapsed();
-        let duration = if elapsed.as_millis() > 500 {
-            format!(" ({})", format_duration(elapsed))
-        } else {
-            String::new()
-        };
-
         if let Some(pb) = self.pb {
             pb.finish_and_clear();
         }
 
-        eprintln!(
-            "   {} {:<12} {}{}",
-            style("✓").green(),
-            past_tense,
-            self.target,
-            style(duration).dim()
-        );
+        if !self.quiet {
+            let elapsed = self.start.elapsed();
+            let duration = if elapsed.as_millis() > 500 {
+                format!(" ({})", format_duration(elapsed))
+            } else {
+                String::new()
+            };
+
+            eprintln!(
+                "   {} {:<12} {}{}",
+                style("✓").green(),
+                past_tense,
+                self.target,
+                style(duration).dim()
+            );
+        }
+    }
+
+    /// Finish and clear entirely — no output remains on screen.
+    /// Use before handing the terminal to guest output.
+    pub fn finish_clear(self) {
+        if let Some(pb) = self.pb {
+            pb.finish_and_clear();
+        }
     }
 
     /// Finish with error. Shows `✗ <label> <target>`.
@@ -89,7 +119,9 @@ impl Spinner {
         if let Some(pb) = self.pb {
             pb.finish_and_clear();
         }
-        eprintln!("   {} {:<12} {}", style("✗").red(), self.label, self.target);
+        if !self.quiet {
+            eprintln!("   {} {:<12} {}", style("✗").red(), self.label, self.target);
+        }
     }
 }
 
@@ -262,4 +294,176 @@ pub fn format_duration(d: Duration) -> String {
 /// Format a chrono NaiveDateTime for display.
 pub fn format_datetime(dt: &chrono::NaiveDateTime) -> String {
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+//--------------------------------------------------------------------------------------------------
+// Types: Pull Progress Display
+//--------------------------------------------------------------------------------------------------
+
+/// Ephemeral multi-line pull progress display.
+///
+/// Shows a header spinner and per-layer progress bars with phase-colored
+/// styling. All output is cleared when [`finish`](Self::finish) is called.
+pub struct PullProgressDisplay {
+    mp: MultiProgress,
+    header: ProgressBar,
+    layer_bars: Vec<ProgressBar>,
+    reference: String,
+    download_style: ProgressStyle,
+    extract_style: ProgressStyle,
+    index_style: ProgressStyle,
+    done_style: ProgressStyle,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods: Pull Progress Display
+//--------------------------------------------------------------------------------------------------
+
+impl PullProgressDisplay {
+    /// Create a new pull progress display for the given image reference.
+    pub fn new(reference: &str) -> Self {
+        Self::new_inner(reference, false)
+    }
+
+    /// Create a no-op pull progress display that produces no output.
+    pub fn quiet(reference: &str) -> Self {
+        Self::new_inner(reference, true)
+    }
+
+    fn new_inner(reference: &str, quiet: bool) -> Self {
+        let is_tty = !quiet && std::io::stderr().is_terminal();
+
+        let mp = MultiProgress::new();
+        if !is_tty {
+            mp.set_draw_target(ProgressDrawTarget::hidden());
+        }
+
+        let header = mp.add(ProgressBar::new_spinner());
+        header.set_style(
+            ProgressStyle::default_spinner()
+                .tick_strings(BRAILLE_TICKS)
+                .template("   {spinner} {msg}")
+                .unwrap(),
+        );
+        header.set_message(format!("{:<12} {}", "Pulling", reference));
+        header.enable_steady_tick(Duration::from_millis(80));
+
+        Self {
+            mp,
+            header,
+            layer_bars: Vec::new(),
+            reference: reference.to_string(),
+            download_style: ProgressStyle::default_bar()
+                .template(
+                    "     {prefix}  {bar:36.magenta/dim}  {bytes}/{total_bytes}  {msg:.magenta}",
+                )
+                .unwrap()
+                .progress_chars("█░"),
+            extract_style: ProgressStyle::default_bar()
+                .template("     {prefix}  {bar:36.blue/dim}  {bytes}/{total_bytes}  {msg:.blue}")
+                .unwrap()
+                .progress_chars("█░"),
+            index_style: ProgressStyle::default_spinner()
+                .tick_strings(BRAILLE_TICKS)
+                .template("     {prefix}  {spinner:.cyan} {msg:.cyan}")
+                .unwrap(),
+            done_style: ProgressStyle::default_bar()
+                .template("     {prefix}  {msg}")
+                .unwrap(),
+        }
+    }
+
+    /// Process a single pull progress event, updating the display.
+    pub fn handle_event(&mut self, event: PullProgress) {
+        match event {
+            PullProgress::Resolving { .. } => {
+                self.header
+                    .set_message(format!("{:<12} {}...", "Resolving", self.reference));
+            }
+            PullProgress::Resolved { layer_count, .. } => {
+                self.header.set_message(format!(
+                    "{:<12} {} ({} layer{})",
+                    "Pulling",
+                    self.reference,
+                    layer_count,
+                    if layer_count == 1 { "" } else { "s" }
+                ));
+
+                let width = layer_count.to_string().len();
+                for i in 0..layer_count {
+                    let pb = self.mp.add(ProgressBar::new(1));
+                    pb.set_style(self.download_style.clone());
+                    pb.set_prefix(format!("layer {:>width$}/{layer_count}", i + 1));
+                    pb.set_message("downloading");
+                    self.layer_bars.push(pb);
+                }
+            }
+            PullProgress::LayerDownloadProgress {
+                layer_index,
+                downloaded_bytes,
+                total_bytes,
+                ..
+            } => {
+                if let Some(pb) = self.layer_bars.get(layer_index) {
+                    if let Some(total) = total_bytes {
+                        pb.set_length(total);
+                    }
+                    pb.set_position(downloaded_bytes);
+                }
+            }
+            PullProgress::LayerDownloadComplete {
+                layer_index,
+                downloaded_bytes,
+                ..
+            } => {
+                if let Some(pb) = self.layer_bars.get(layer_index) {
+                    pb.set_position(downloaded_bytes);
+                }
+            }
+            PullProgress::LayerExtractStarted { layer_index, .. } => {
+                if let Some(pb) = self.layer_bars.get(layer_index) {
+                    pb.set_style(self.extract_style.clone());
+                    pb.set_position(0);
+                    pb.set_length(1);
+                    pb.set_message("extracting");
+                }
+            }
+            PullProgress::LayerExtractProgress {
+                layer_index,
+                bytes_read,
+                total_bytes,
+            } => {
+                if let Some(pb) = self.layer_bars.get(layer_index) {
+                    pb.set_length(total_bytes);
+                    pb.set_position(bytes_read);
+                }
+            }
+            PullProgress::LayerExtractComplete { layer_index, .. } => {
+                if let Some(pb) = self.layer_bars.get(layer_index) {
+                    pb.set_position(pb.length().unwrap_or(0));
+                }
+            }
+            PullProgress::LayerIndexStarted { layer_index } => {
+                if let Some(pb) = self.layer_bars.get(layer_index) {
+                    pb.set_style(self.index_style.clone());
+                    pb.set_message("indexing");
+                    pb.enable_steady_tick(Duration::from_millis(80));
+                }
+            }
+            PullProgress::LayerIndexComplete { layer_index } => {
+                if let Some(pb) = self.layer_bars.get(layer_index) {
+                    pb.disable_steady_tick();
+                    pb.set_style(self.done_style.clone());
+                    pb.set_message(format!("{}", style("✓").green()));
+                    pb.tick();
+                }
+            }
+            PullProgress::Complete { .. } => {}
+        }
+    }
+
+    /// Clear all ephemeral progress output from the terminal.
+    pub fn finish(self) {
+        let _ = self.mp.clear();
+    }
 }

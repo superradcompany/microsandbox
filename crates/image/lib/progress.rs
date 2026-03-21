@@ -66,6 +66,17 @@ pub enum PullProgress {
         diff_id: Arc<str>,
     },
 
+    /// Byte-level extraction progress for a single layer.
+    /// Tracks compressed bytes read from the layer tarball.
+    LayerExtractProgress {
+        /// Layer index (0-based).
+        layer_index: usize,
+        /// Compressed bytes read so far.
+        bytes_read: u64,
+        /// Total compressed file size.
+        total_bytes: u64,
+    },
+
     /// Layer extraction completed.
     LayerExtractComplete {
         /// Layer index.
@@ -102,7 +113,7 @@ pub struct PullProgressHandle {
 
 /// Emits progress events. Uses `try_send` — never blocks downloads.
 #[derive(Clone)]
-pub(crate) struct PullProgressSender {
+pub struct PullProgressSender {
     tx: mpsc::Sender<PullProgress>,
 }
 
@@ -124,7 +135,7 @@ impl PullProgressHandle {
 
 impl PullProgressSender {
     /// Emit a progress event. Silently discards if receiver is full or dropped.
-    pub(crate) fn send(&self, event: PullProgress) {
+    pub fn send(&self, event: PullProgress) {
         let _ = self.tx.try_send(event);
     }
 }
@@ -134,7 +145,7 @@ impl PullProgressSender {
 //--------------------------------------------------------------------------------------------------
 
 /// Create a progress channel pair.
-pub(crate) fn progress_channel() -> (PullProgressHandle, PullProgressSender) {
+pub fn progress_channel() -> (PullProgressHandle, PullProgressSender) {
     let (tx, rx) = mpsc::channel(DEFAULT_PROGRESS_CHANNEL_CAPACITY);
     (PullProgressHandle { rx }, PullProgressSender { tx })
 }
