@@ -132,8 +132,8 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         let _ = sandbox.stop().await;
         let _ = sandbox.wait().await;
 
-        if !output.status.success {
-            std::process::exit(output.status.code);
+        if !output.status().success {
+            std::process::exit(output.status().code);
         }
     }
 

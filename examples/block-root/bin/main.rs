@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = sandbox.shell("echo 'Hello from microsandbox!'", ()).await?;
     println!("stdout: {}", output.stdout()?);
     println!("stderr: {}", output.stderr()?);
-    println!("exit code: {}", output.status.code);
+    println!("exit code: {}", output.status().code);
 
     // Run a few more commands.
     let output = sandbox.shell("uname -a", ()).await?;

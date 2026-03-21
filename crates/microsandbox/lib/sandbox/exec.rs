@@ -65,7 +65,7 @@ pub enum StdinMode {
 #[derive(Debug)]
 pub struct ExecOutput {
     /// Exit status.
-    pub status: ExitStatus,
+    status: ExitStatus,
 
     /// Captured stdout.
     stdout: Bytes,
@@ -286,6 +286,11 @@ impl ExecOptionsBuilder {
 }
 
 impl ExecOutput {
+    /// Get the exit status.
+    pub fn status(&self) -> ExitStatus {
+        self.status
+    }
+
     /// Get stdout as a UTF-8 string.
     pub fn stdout(&self) -> Result<String, std::string::FromUtf8Error> {
         String::from_utf8(self.stdout.to_vec())

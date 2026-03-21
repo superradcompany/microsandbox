@@ -137,8 +137,8 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
             let _ = Sandbox::remove(&name).await;
         }
 
-        if !output.status.success {
-            std::process::exit(output.status.code);
+        if !output.status().success {
+            std::process::exit(output.status().code);
         }
     } else {
         // Interactive: attach to sandbox shell.
