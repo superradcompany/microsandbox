@@ -205,23 +205,42 @@ for info in sandboxes:
 
 ## Runtime process architecture
 
-When you create a sandbox, microsandbox spawns a small tree of processes on the host. Understanding this tree helps make sense of the lifecycle methods and supervisor policies.
+When you create a sandbox, microsandbox spawns several processes on the host and boots a guest VM. Understanding what runs where helps make sense of the lifecycle methods and supervisor policies.
 
 ```mermaid
 graph TD
-    A["Your Application<br/><small>microsandbox library, Sandbox handles, AgentBridge</small>"] --> B["Supervisor<br/><small>msb supervisor</small>"]
-    A -. "virtio-console" .-> F
-    B --> C["msbnet<br/><small>network policy, DNS, port forwarding</small>"]
-    B --> D["MicroVM<br/><small>msb microvm</small>"]
-    D --> E["Guest VM (KVM)"]
-    E --> F["agentd (PID 1)<br/><small>exec, fs, events</small>"]
+    subgraph Host["Host"]
+        A["Your Application<br/><small>microsandbox library, AgentBridge</small>"]
+        B["Supervisor<br/><small>msb supervisor</small>"]
+        C["msbnet<br/><small>network policy, DNS, port forwarding</small>"]
+        D["MicroVM Process<br/><small>msb microvm</small>"]
+    end
+
+    subgraph Guest["Guest VM"]
+        F["agentd (PID 1)<br/><small>exec, fs, events</small>"]
+    end
+
+    A -- "fork+exec" --> B
+    B -- "fork+exec" --> C
+    B -- "fork+exec" --> D
+    D -- "Vm::enter()" --> F
+    A -. "virtio-console (CBOR)" .-> F
+    C <-. "socket pair (ethernet frames)" .-> D
+
+    style Host fill:#f5f0ff,stroke:#a770ef,color:#333
+    style Guest fill:#fef4e8,stroke:#e8a838,color:#333
+    style A fill:#d4bfff,stroke:#8b5cf6,color:#1a1a1a
+    style B fill:#d4bfff,stroke:#8b5cf6,color:#1a1a1a
+    style C fill:#d4bfff,stroke:#8b5cf6,color:#1a1a1a
+    style D fill:#d4bfff,stroke:#8b5cf6,color:#1a1a1a
+    style F fill:#fdd49e,stroke:#d97706,color:#1a1a1a
 ```
 
-Your application communicates with the guest agent (`agentd`) directly over a virtio-console channel using CBOR-encoded messages. This is how `exec`, `attach`, `fs`, and `emit` calls work, bypassing the supervisor entirely.
+There are two separate communication paths here. Your application talks to the guest agent (`agentd`) directly over a virtio-console channel using CBOR-encoded messages. This is how `exec`, `attach`, `fs`, and `emit` calls work. The supervisor is not involved in this path at all.
 
-The **supervisor** is a separate process that watches over the VM and `msbnet`. It handles:
+The **supervisor** is a separate host process that watches over the MicroVM and `msbnet` processes. It handles:
 
-- Forwarding signals (SIGTERM → graceful stop, SIGUSR1 → drain)
+- Forwarding signals (SIGTERM for graceful stop, SIGUSR1 for drain)
 - Detecting child exits and applying restart/shutdown policies
 - Monitoring idle state via the agentd heartbeat
 - Enforcing maximum sandbox lifetime
