@@ -12,7 +12,7 @@ Run a command and wait for it to complete. You get back the exit code, stdout, a
 
 <CodeGroup>
 ```rust Rust
-let output = sb.execv("python", ["-c", "print('hello')"]).await?;
+let output = sb.exec("python", ["-c", "print('hello')"]).await?;
 println!("{}", output.stdout()?);     // "hello\n"
 println!("{}", output.status().code); // 0
 ```
@@ -93,7 +93,7 @@ For long-running processes or large output, use streaming to get events as they 
 
 <CodeGroup>
 ```rust Rust
-let mut handle = sb.execv_stream("tail", ["-f", "/var/log/app.log"]).await?;
+let mut handle = sb.exec_stream("tail", ["-f", "/var/log/app.log"]).await?;
 
 while let Some(event) = handle.recv().await {
     match event {
@@ -137,8 +137,7 @@ Bridge your terminal directly to a process running inside the sandbox. This give
 
 <CodeGroup>
 ```rust Rust
-let shell = sb.config().shell.as_deref().unwrap_or("/bin/sh");
-let exit_code = sb.attach(shell, |a| a).await?;
+let exit_code = sb.attach_shell().await?;
 
 let exit_code = sb.attach("python", |a| a
     .env("DEBUG", "1")

@@ -4,6 +4,7 @@ use std::io::{IsTerminal, Write};
 
 use clap::Args;
 use microsandbox::sandbox::Sandbox;
+use microsandbox::sandbox::{AttachOptionsBuilder, ExecOptionsBuilder, ExecOutput};
 
 use crate::ui;
 
@@ -145,9 +146,13 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         let cmd_args = parts;
 
         if interactive {
-            sandbox.attach(cmd, |a| a.args(cmd_args)).await?
+            sandbox
+                .attach(cmd, |a: AttachOptionsBuilder| a.args(cmd_args))
+                .await?
         } else {
-            let output = sandbox.exec(&cmd, |e| e.args(cmd_args)).await?;
+            let output: ExecOutput = sandbox
+                .exec(&cmd, |e: ExecOptionsBuilder| e.args(cmd_args))
+                .await?;
 
             std::io::stdout().write_all(output.stdout_bytes())?;
             std::io::stderr().write_all(output.stderr_bytes())?;

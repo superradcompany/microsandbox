@@ -40,6 +40,16 @@ pub struct AttachOptionsBuilder {
     options: AttachOptions,
 }
 
+/// Trait for types that can be converted to attach options.
+///
+/// Enables ergonomic calling patterns:
+/// - `sandbox.attach("bash", ["-l"])` — args array
+/// - `sandbox.attach("zsh", |a| a.env("TERM", "xterm"))` — closure
+pub trait IntoAttachOptions {
+    /// Convert into attach options.
+    fn into_attach_options(self) -> AttachOptions;
+}
+
 /// Parsed detach key sequence.
 ///
 /// Matches raw stdin bytes against the configured detach sequence.
@@ -195,6 +205,30 @@ impl DetachKeys {
     /// Returns the detach key sequence bytes.
     pub fn sequence(&self) -> &[u8] {
         &self.sequence
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+/// Closure pattern: `sandbox.attach("zsh", |a| a.env("TERM", "xterm"))`
+impl<F> IntoAttachOptions for F
+where
+    F: FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
+{
+    fn into_attach_options(self) -> AttachOptions {
+        self(AttachOptionsBuilder::default()).build()
+    }
+}
+
+/// Args array: `sandbox.attach("bash", ["-l", "--norc"])`
+impl<const N: usize> IntoAttachOptions for [&str; N] {
+    fn into_attach_options(self) -> AttachOptions {
+        AttachOptions {
+            args: self.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
     }
 }
 

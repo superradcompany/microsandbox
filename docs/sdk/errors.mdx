@@ -22,7 +22,7 @@ async fn get_or_create(name: &str) -> Result<Sandbox, Error> {
     }
 }
 
-match sb.execv("python", ["script.py"]).await {
+match sb.exec("python", ["script.py"]).await {
     Ok(output) if output.status().success => {
         println!("{}", output.stdout()?);
     }
@@ -106,7 +106,7 @@ use microsandbox::Sandbox;
         .create()
         .await?;
 
-    let output = sb.execv("python", ["-c", "print('hello')"]).await?;
+    let output = sb.exec("python", ["-c", "print('hello')"]).await?;
 } // sb is dropped here, resources are cleaned up
 ```
 

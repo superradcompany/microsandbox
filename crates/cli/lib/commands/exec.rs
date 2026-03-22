@@ -3,6 +3,7 @@
 use std::io::{IsTerminal, Write};
 
 use clap::Args;
+use microsandbox::sandbox::{AttachOptionsBuilder, ExecOptionsBuilder, ExecOutput};
 
 use crate::ui;
 
@@ -58,7 +59,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
     if interactive {
         // Interactive mode with TTY — use attach.
         let exit_code = sandbox
-            .attach(cmd, |a| {
+            .attach(cmd, |a: AttachOptionsBuilder| {
                 let mut a = a.args(cmd_args);
                 for (k, v) in &env_pairs {
                     a = a.env(k, v);
@@ -77,8 +78,8 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         }
     } else {
         // Non-interactive: exec and capture output.
-        let output = sandbox
-            .exec(cmd, |e| {
+        let output: ExecOutput = sandbox
+            .exec(cmd, |e: ExecOptionsBuilder| {
                 let mut e = e.args(cmd_args);
                 for (k, v) in &env_pairs {
                     e = e.env(k, v);

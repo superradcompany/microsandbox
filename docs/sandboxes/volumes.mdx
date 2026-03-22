@@ -117,7 +117,7 @@ let reader = Sandbox::builder("reader")
     .volume("/data", |v| v.named("shared-data").readonly())
     .create()
     .await?;
-let output = reader.execv("cat", ["/data/message.txt"]).await?;
+let output = reader.exec("cat", ["/data/message.txt"]).await?;
 // => "hello"
 ```
 
