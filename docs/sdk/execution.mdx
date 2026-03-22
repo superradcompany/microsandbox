@@ -96,7 +96,6 @@ Use `exec_stream` to receive stdout, stderr, and exit events as they happen inst
 
 <CodeGroup>
 ```rust Rust
-use futures::StreamExt;
 use microsandbox::exec::ExecEvent;
 
 let mut handle = sb.execv_stream("tail", ["-f", "/var/log/app.log"]).await?;
@@ -175,7 +174,8 @@ Bridge your terminal to a fully interactive PTY session inside the sandbox. Pres
 <CodeGroup>
 ```rust Rust
 // Attach to the default shell
-let exit_code = sb.attach((), ()).await?;
+let shell = sb.config().shell.as_deref().unwrap_or("/bin/sh");
+let exit_code = sb.attach(shell, |a| a).await?;
 
 // Attach to a specific command with options
 let exit_code = sb.attach("python", |a| a

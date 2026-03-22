@@ -137,7 +137,8 @@ Bridge your terminal directly to a process running inside the sandbox. This give
 
 <CodeGroup>
 ```rust Rust
-let exit_code = sb.attach((), ()).await?;
+let shell = sb.config().shell.as_deref().unwrap_or("/bin/sh");
+let exit_code = sb.attach(shell, |a| a).await?;
 
 let exit_code = sb.attach("python", |a| a
     .env("DEBUG", "1")
