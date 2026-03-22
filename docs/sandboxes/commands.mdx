@@ -12,7 +12,7 @@ Run a command and wait for it to complete. You get back the exit code, stdout, a
 
 <CodeGroup>
 ```rust Rust
-let output = sb.exec("python", ["-c", "print('hello')"]).await?;
+let output = sb.execv("python", ["-c", "print('hello')"]).await?;
 println!("{}", output.stdout()?);     // "hello\n"
 println!("{}", output.status().code); // 0
 ```
@@ -93,10 +93,10 @@ For long-running processes or large output, use streaming to get events as they 
 
 <CodeGroup>
 ```rust Rust
-let mut handle = sb.exec_stream("tail", |e| e.args(["-f", "/var/log/app.log"])).await?;
+let mut handle = sb.execv_stream("tail", ["-f", "/var/log/app.log"]).await?;
 
-while let Some(event) = handle.events().next().await {
-    match event? {
+while let Some(event) = handle.recv().await {
+    match event {
         ExecEvent::Stdout(data) => print!("{}", String::from_utf8_lossy(&data)),
         ExecEvent::Stderr(data) => eprint!("{}", String::from_utf8_lossy(&data)),
         ExecEvent::Exited { code } => break,

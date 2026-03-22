@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create()
         .await?;
 
-    let output = sb.exec("python", ["-c", "print('Hello, World!')"]).await?;
+    let output = sb.execv("python", ["-c", "print('Hello, World!')"]).await?;
     println!("{}", output.stdout()?);
 
     sb.stop().await?;

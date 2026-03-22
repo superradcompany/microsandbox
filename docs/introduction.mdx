@@ -191,7 +191,7 @@ let sb = Sandbox::builder("base")
     .create()
     .await?;
 
-sb.exec("pip", ["install", "-r", "requirements.txt"]).await?;
+sb.execv("pip", ["install", "-r", "requirements.txt"]).await?;
 
 let snapshot = sb.snapshot().await?;
 

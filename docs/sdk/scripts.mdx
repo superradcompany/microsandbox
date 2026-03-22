@@ -26,8 +26,8 @@ let sb = Sandbox::builder("worker")
     .create()
     .await?;
 
-sb.exec("setup", ()).await?;
-let output = sb.exec("start", ()).await?;
+sb.shell("setup").await?;
+let output = sb.shell("start").await?;
 ```
 
 ```typescript TypeScript

@@ -548,6 +548,44 @@ impl Sandbox {
         }
     }
 
+    /// Execute a command with arguments and wait for completion.
+    ///
+    /// Convenience method when you only need to pass arguments without
+    /// other options (env, timeout, rlimits, etc.). For those, use [`exec`](Self::exec).
+    ///
+    /// - `sandbox.execv("ls", ["-la", "/tmp"])`
+    /// - `sandbox.execv("python", ["-c", "print('hi')"])`
+    pub async fn execv(
+        &self,
+        cmd: impl Into<String>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> MicrosandboxResult<ExecOutput> {
+        let opts = ExecOptions {
+            args: args.into_iter().map(Into::into).collect(),
+            ..Default::default()
+        };
+        let mut handle = self.exec_stream_inner(cmd.into(), opts).await?;
+        handle.collect().await
+    }
+
+    /// Execute a command with arguments and return a streaming handle.
+    ///
+    /// Like [`execv`](Self::execv) but returns a streaming [`ExecHandle`]
+    /// instead of waiting for completion.
+    ///
+    /// - `sandbox.execv_stream("tail", ["-f", "/var/log/app.log"])`
+    pub async fn execv_stream(
+        &self,
+        cmd: impl Into<String>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> MicrosandboxResult<ExecHandle> {
+        let opts = ExecOptions {
+            args: args.into_iter().map(Into::into).collect(),
+            ..Default::default()
+        };
+        self.exec_stream_inner(cmd.into(), opts).await
+    }
+
     /// Run a shell command and wait for completion.
     ///
     /// Uses the sandbox's configured shell (default: `/bin/sh`) to interpret

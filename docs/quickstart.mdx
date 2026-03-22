@@ -53,7 +53,7 @@ icon: "bolt"
             .create()
             .await?;
 
-        let output = sb.exec("python", ["-c", "print('Hello from a microVM!')"]).await?;
+        let output = sb.execv("python", ["-c", "print('Hello from a microVM!')"]).await?;
         println!("{}", output.stdout()?); // Hello from a microVM!
 
         sb.stop().await?;
