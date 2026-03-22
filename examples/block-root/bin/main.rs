@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a sandbox with a qcow2 disk image rootfs.
     let sandbox = Sandbox::builder("block-root")
-        .image(|image: ImageBuilder| image.disk(image_path.clone()).fstype("ext4"))
+        .image(|image: ImageBuilder| image.disk(image_path).fstype("ext4"))
         .cpus(1)
         .memory(512)
         .overwrite()
@@ -32,8 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("os-release:\n{}", output.stdout()?);
 
     // Stop the sandbox gracefully.
-    sandbox.stop().await?;
-    sandbox.wait().await?;
+    sandbox.stop_and_wait().await?;
 
     println!("Sandbox stopped.");
     Ok(())

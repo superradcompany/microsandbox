@@ -44,14 +44,10 @@ use self::exec::{ExecEvent, ExecHandle, ExecSink, IntoExecOptions, StdinMode};
 //--------------------------------------------------------------------------------------------------
 
 pub use crate::db::entity::sandbox::SandboxStatus;
-pub use attach::{
-    AttachOptions, AttachOptionsBuilder, IntoAttachCmd, IntoAttachOptions, SessionInfo,
-};
+pub use attach::{AttachOptions, AttachOptionsBuilder, IntoAttachCmd, IntoAttachOptions};
 pub use builder::SandboxBuilder;
 pub use config::SandboxConfig;
-pub use exec::{
-    ExecOptionsBuilder, ExecOutput, ExitStatus as ExecExitStatus, Rlimit, RlimitResource,
-};
+pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
 pub use handle::SandboxHandle;
 pub use microsandbox_image::{PullProgress, PullProgressHandle};
@@ -94,7 +90,7 @@ impl std::os::fd::AsRawFd for StdinRawFd {
 //--------------------------------------------------------------------------------------------------
 
 impl Sandbox {
-    /// Create a builder for a new sandbox.
+    /// Start building a new sandbox configuration.
     pub fn builder(name: impl Into<String>) -> SandboxBuilder {
         SandboxBuilder::new(name)
     }
@@ -315,22 +311,26 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 
 impl Sandbox {
-    /// Get the sandbox name.
+    /// Unique name identifying this sandbox.
     pub fn name(&self) -> &str {
         &self.config.name
     }
 
-    /// Get the sandbox configuration.
+    /// The full configuration this sandbox was created with (image, cpus,
+    /// memory, env, mounts, etc.).
     pub fn config(&self) -> &SandboxConfig {
         &self.config
     }
 
-    /// Get the agent bridge for low-level communication with agentd.
+    /// Low-level access to the guest agent protocol. Use this for custom
+    /// extensions — prefer [`exec`](Self::exec), [`shell`](Self::shell),
+    /// and [`fs`](Self::fs) for standard operations.
     pub fn bridge(&self) -> &AgentBridge {
         &self.bridge
     }
 
-    /// Access the filesystem API for this sandbox.
+    /// Read, write, and manage files inside the running sandbox.
+    /// Operations go through the guest agent (agentd).
     pub fn fs(&self) -> fs::SandboxFs<'_> {
         fs::SandboxFs::new(&self.bridge)
     }
@@ -339,6 +339,17 @@ impl Sandbox {
     pub async fn stop(&self) -> MicrosandboxResult<()> {
         let msg = Message::new(MessageType::Shutdown, 0, Vec::new());
         self.bridge.send(&msg).await
+    }
+
+    /// Stop the sandbox gracefully and wait for the supervisor to exit.
+    ///
+    /// Always waits for the supervisor even if the stop signal fails
+    /// (e.g., agent already exited).
+    pub async fn stop_and_wait(&self) -> MicrosandboxResult<ExitStatus> {
+        let stop_result = self.stop().await;
+        let wait_result = self.wait().await;
+        stop_result?;
+        wait_result
     }
 
     /// Kill the sandbox immediately (SIGKILL to VM process).
@@ -494,7 +505,8 @@ impl Sandbox {
         self.exec(shell, opts).await
     }
 
-    /// Execute a shell command with streaming I/O.
+    /// Like [`shell`](Self::shell) but returns a streaming [`ExecHandle`]
+    /// instead of waiting for completion.
     pub async fn shell_stream(
         &self,
         script: impl Into<String>,
@@ -504,34 +516,6 @@ impl Sandbox {
         let mut opts = opts.into_exec_options();
         opts.args = vec!["-c".to_string(), script.into()];
         self.exec_stream(shell, opts).await
-    }
-
-    /// Run a named script (defined via `.script()` in builder).
-    ///
-    /// Scripts are available at `/.msb/scripts/<name>` in the guest.
-    pub async fn run(
-        &self,
-        name: &str,
-        opts: impl IntoExecOptions,
-    ) -> MicrosandboxResult<ExecOutput> {
-        if !self.config.scripts.contains_key(name) {
-            return Err(crate::MicrosandboxError::ScriptNotFound(name.to_string()));
-        }
-        let script_path = format!("/.msb/scripts/{name}");
-        self.shell(&format!("sh {script_path}"), opts).await
-    }
-
-    /// Run a named script with streaming I/O.
-    pub async fn run_stream(
-        &self,
-        name: &str,
-        opts: impl IntoExecOptions,
-    ) -> MicrosandboxResult<ExecHandle> {
-        if !self.config.scripts.contains_key(name) {
-            return Err(crate::MicrosandboxError::ScriptNotFound(name.to_string()));
-        }
-        let script_path = format!("/.msb/scripts/{name}");
-        self.shell_stream(&format!("sh {script_path}"), opts).await
     }
 }
 

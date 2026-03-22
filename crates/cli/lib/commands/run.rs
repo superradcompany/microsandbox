@@ -77,7 +77,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         builder = builder.cpus(cpus);
     }
     if let Some(ref mem) = args.memory {
-        builder = builder.memory(ui::parse_memory(mem).map_err(anyhow::Error::msg)?);
+        builder = builder.memory(ui::parse_size_mib(mem).map_err(anyhow::Error::msg)?);
     }
     if let Some(ref workdir) = args.workdir {
         builder = builder.workdir(workdir);
@@ -173,8 +173,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     };
 
     // Stop and clean up.
-    let _ = sandbox.stop().await;
-    let _ = sandbox.wait().await;
+    let _ = sandbox.stop_and_wait().await;
 
     // Remove unnamed (ephemeral) sandboxes.
     if !is_named {

@@ -194,31 +194,33 @@ pub trait IntoExecOptions {
 //--------------------------------------------------------------------------------------------------
 
 impl ExecOptionsBuilder {
-    /// Add a single argument.
+    /// Append a command-line argument (e.g., `"-la"` or `"/tmp"`).
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.options.args.push(arg.into());
         self
     }
 
-    /// Add multiple arguments.
+    /// Append multiple command-line arguments.
     pub fn args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.options.args.extend(args.into_iter().map(Into::into));
         self
     }
 
-    /// Set the working directory.
+    /// Override the working directory for this command (overrides the
+    /// sandbox default set via the builder's `workdir` method).
     pub fn cwd(mut self, cwd: impl Into<String>) -> Self {
         self.options.cwd = Some(cwd.into());
         self
     }
 
-    /// Add an environment variable.
+    /// Set an environment variable for this command. Merged on top of
+    /// the sandbox-level env vars.
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.options.env.push((key.into(), value.into()));
         self
     }
 
-    /// Add multiple environment variables.
+    /// Set multiple environment variables for this command.
     pub fn envs(
         mut self,
         vars: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
@@ -229,7 +231,7 @@ impl ExecOptionsBuilder {
         self
     }
 
-    /// Set execution timeout.
+    /// Kill the process with SIGKILL if it hasn't exited within this duration.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.options.timeout = Some(timeout);
         self
@@ -253,7 +255,8 @@ impl ExecOptionsBuilder {
         self
     }
 
-    /// Allocate a PTY.
+    /// Allocate a pseudo-terminal. Enable for interactive programs (shells,
+    /// editors, `top`); disable for scripts and batch jobs (default: false).
     pub fn tty(mut self, enabled: bool) -> Self {
         self.options.tty = enabled;
         self
@@ -279,14 +282,14 @@ impl ExecOptionsBuilder {
         self
     }
 
-    /// Build the options.
+    /// Finalize the options. Called automatically when using the closure form.
     pub fn build(self) -> ExecOptions {
         self.options
     }
 }
 
 impl ExecOutput {
-    /// Get the exit status.
+    /// Exit code and success flag of the completed process.
     pub fn status(&self) -> ExitStatus {
         self.status
     }
@@ -390,7 +393,8 @@ impl ExecHandle {
         })
     }
 
-    /// Send a signal to the running process.
+    /// Send a Unix signal (e.g., `libc::SIGTERM`, `libc::SIGINT`) to the
+    /// running process inside the guest.
     pub async fn signal(&self, signal: i32) -> MicrosandboxResult<()> {
         let payload = ExecSignal { signal };
         let msg = Message::with_payload(MessageType::ExecSignal, self.id, &payload)?;

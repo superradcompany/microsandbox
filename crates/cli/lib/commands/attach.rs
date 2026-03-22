@@ -91,16 +91,13 @@ pub async fn run(args: AttachArgs) -> anyhow::Result<()> {
                 if let Some(ref keys) = detach_keys {
                     a = a.detach_keys(keys);
                 }
-                if !cmd_args.is_empty() {
-                    a = a.args(cmd_args);
-                }
+                a = a.args(cmd_args);
                 a
             })
             .await?
     };
 
-    let _ = sandbox.stop().await;
-    let _ = sandbox.wait().await;
+    let _ = sandbox.stop_and_wait().await;
 
     if exit_code != 0 {
         std::process::exit(exit_code);

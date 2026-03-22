@@ -55,32 +55,35 @@ impl SandboxHandle {
         }
     }
 
-    /// Get the sandbox name.
+    /// Unique name identifying this sandbox.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Get the sandbox status at the time this handle was created.
+    /// Snapshot of sandbox status from when this handle was created.
+    /// Not live — call [`Sandbox::get`] again for a fresh reading.
     pub fn status(&self) -> SandboxStatus {
         self.status
     }
 
-    /// Get the raw JSON sandbox configuration.
+    /// The serialized sandbox configuration as stored in the database.
+    /// Use [`config()`](Self::config) for a deserialized version.
     pub fn config_json(&self) -> &str {
         &self.config_json
     }
 
-    /// Deserialize the sandbox configuration.
+    /// Parse the stored configuration. Returns an error if the JSON
+    /// is malformed (e.g., schema changed since the sandbox was created).
     pub fn config(&self) -> MicrosandboxResult<SandboxConfig> {
         Ok(serde_json::from_str(&self.config_json)?)
     }
 
-    /// Get the creation timestamp.
+    /// When this sandbox was first created, if recorded.
     pub fn created_at(&self) -> Option<chrono::NaiveDateTime> {
         self.created_at
     }
 
-    /// Get the last update timestamp.
+    /// When this sandbox's database record was last modified.
     pub fn updated_at(&self) -> Option<chrono::NaiveDateTime> {
         self.updated_at
     }
@@ -146,7 +149,11 @@ impl SandboxHandle {
         if all_dead {
             let db = crate::db::init_global(Some(crate::config::config().database.max_connections))
                 .await?;
-            let _ = super::update_sandbox_status(db, self.db_id, SandboxStatus::Stopped).await;
+            if let Err(e) =
+                super::update_sandbox_status(db, self.db_id, SandboxStatus::Stopped).await
+            {
+                tracing::warn!(sandbox = %self.name, error = %e, "failed to update sandbox status after kill");
+            }
             self.status = SandboxStatus::Stopped;
         }
 

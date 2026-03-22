@@ -72,7 +72,7 @@ pub async fn run(args: CreateArgs) -> anyhow::Result<()> {
         builder = builder.cpus(cpus);
     }
     if let Some(ref mem) = args.memory {
-        builder = builder.memory(ui::parse_memory(mem).map_err(anyhow::Error::msg)?);
+        builder = builder.memory(ui::parse_size_mib(mem).map_err(anyhow::Error::msg)?);
     }
     if let Some(ref workdir) = args.workdir {
         builder = builder.workdir(workdir);

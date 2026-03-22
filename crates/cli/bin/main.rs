@@ -2,7 +2,9 @@
 
 use clap::{Parser, Subcommand};
 use microsandbox_cli::{
-    commands::{attach, create, exec, inspect, list, ps, pull, remove, run, shell, start, stop},
+    commands::{
+        attach, create, exec, inspect, list, ps, pull, remove, run, shell, start, stop, volume,
+    },
     log_args::{self, LogArgs},
     microvm_cmd::{self, MicrovmArgs},
     supervisor_cmd::{self, SupervisorArgs},
@@ -71,6 +73,9 @@ enum Commands {
 
     /// Show detailed sandbox information.
     Inspect(inspect::InspectArgs),
+
+    /// Manage named volumes.
+    Volume(volume::VolumeArgs),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -131,6 +136,7 @@ fn run_async_command(
             Commands::Shell(args) => shell::run(args).await.map_err(Into::into),
             Commands::Pull(args) => pull::run(args).await.map_err(Into::into),
             Commands::Inspect(args) => inspect::run(args).await.map_err(Into::into),
+            Commands::Volume(args) => volume::run(args).await.map_err(Into::into),
         }
     })
 }

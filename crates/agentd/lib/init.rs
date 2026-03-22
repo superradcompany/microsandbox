@@ -27,19 +27,30 @@ struct BlockRootSpec<'a> {
     fstype: Option<&'a str>,
 }
 
+/// Parsed virtiofs volume mount specification.
+#[derive(Debug)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct VolumeMountSpec<'a> {
+    tag: &'a str,
+    guest_path: &'a str,
+    readonly: bool,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
 /// Performs synchronous PID 1 initialization.
 ///
-/// Mounts essential filesystems, applies tmpfs mounts from `MSB_TMPFS` env var,
-/// configures networking from `MSB_NET*` env vars, and prepares runtime directories.
+/// Mounts essential filesystems, applies volume and tmpfs mounts from
+/// `MSB_MOUNTS` / `MSB_TMPFS` env vars, configures networking from
+/// `MSB_NET*` env vars, and prepares runtime directories.
 #[cfg(target_os = "linux")]
 pub fn init() -> AgentdResult<()> {
     linux::mount_filesystems()?;
     linux::mount_runtime()?;
     linux::mount_block_root()?;
+    linux::apply_volume_mounts()?;
     linux::apply_tmpfs_mounts()?;
     crate::network::apply_network_config()?;
     crate::tls::install_ca_cert()?;
@@ -122,6 +133,50 @@ fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec<'_>> {
     }
 
     Ok(BlockRootSpec { device, fstype })
+}
+
+/// Parses a single virtiofs volume mount entry: `tag:guest_path[:ro]`
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_volume_mount_entry(entry: &str) -> AgentdResult<VolumeMountSpec<'_>> {
+    let parts: Vec<&str> = entry.split(':').collect();
+    if parts.len() < 2 {
+        return Err(AgentdError::Init(format!(
+            "MSB_MOUNTS entry must be tag:path[:ro], got: {entry}"
+        )));
+    }
+
+    let tag = parts[0];
+    let guest_path = parts[1];
+    let readonly = match parts.get(2) {
+        Some(&"ro") => true,
+        None => false,
+        Some(flag) => {
+            return Err(AgentdError::Init(format!(
+                "MSB_MOUNTS unknown flag '{flag}' (expected 'ro')"
+            )));
+        }
+    };
+
+    if parts.len() > 3 {
+        return Err(AgentdError::Init(format!(
+            "MSB_MOUNTS entry has too many parts: {entry}"
+        )));
+    }
+
+    if tag.is_empty() {
+        return Err(AgentdError::Init("MSB_MOUNTS entry has empty tag".into()));
+    }
+    if guest_path.is_empty() || !guest_path.starts_with('/') {
+        return Err(AgentdError::Init(format!(
+            "MSB_MOUNTS guest path must be absolute: {guest_path}"
+        )));
+    }
+
+    Ok(VolumeMountSpec {
+        tag,
+        guest_path,
+        readonly,
+    })
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -327,6 +382,55 @@ mod linux {
         Err(AgentdError::Init(format!(
             "failed to mount {device} at {target}: no supported filesystem found"
         )))
+    }
+
+    /// Reads `MSB_MOUNTS` env var and mounts each virtiofs volume.
+    ///
+    /// For each entry, creates the guest mount point directory and mounts the
+    /// virtiofs share using the tag provided by the host. If the entry
+    /// specifies `:ro`, the mount is made read-only via `MS_RDONLY`.
+    ///
+    /// Missing env var is not an error (no volume mounts requested).
+    /// Parse failures and mount failures are hard errors.
+    pub fn apply_volume_mounts() -> AgentdResult<()> {
+        let val = match std::env::var(microsandbox_protocol::ENV_MOUNTS) {
+            Ok(v) if !v.is_empty() => v,
+            _ => return Ok(()),
+        };
+
+        for entry in val.split(';') {
+            if entry.is_empty() {
+                continue;
+            }
+
+            let spec = super::parse_volume_mount_entry(entry)?;
+            mount_virtiofs(&spec)?;
+        }
+
+        Ok(())
+    }
+
+    /// Mounts a single virtiofs share from a parsed spec.
+    fn mount_virtiofs(spec: &super::VolumeMountSpec<'_>) -> AgentdResult<()> {
+        let path = spec.guest_path;
+
+        // Create the mount point directory.
+        std::fs::create_dir_all(path)
+            .map_err(|e| AgentdError::Init(format!("failed to create directory {path}: {e}")))?;
+
+        let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
+        if spec.readonly {
+            flags |= MsFlags::MS_RDONLY;
+        }
+
+        mount(Some(spec.tag), path, Some("virtiofs"), flags, None::<&str>).map_err(|e| {
+            AgentdError::Init(format!(
+                "failed to mount virtiofs tag '{}' at {path}: {e}",
+                spec.tag
+            ))
+        })?;
+
+        Ok(())
     }
 
     /// Reads `MSB_TMPFS` env var and mounts each tmpfs entry.

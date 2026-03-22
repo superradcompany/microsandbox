@@ -25,7 +25,8 @@ pub struct SandboxBuilder {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxBuilder {
-    /// Create a new builder with the given sandbox name.
+    /// Start building a sandbox configuration. The name must be unique
+    /// among existing sandboxes (unless [`overwrite`](Self::overwrite) is set).
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             config: SandboxConfig {
@@ -64,7 +65,7 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set the number of virtual CPUs.
+    /// Allocate virtual CPUs for this sandbox (default: 1).
     pub fn cpus(mut self, count: u8) -> Self {
         self.config.cpus = count;
         self
@@ -98,13 +99,17 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set the working directory inside the sandbox.
+    /// Default working directory for commands executed in this sandbox
+    /// (e.g., `/app`). Used by [`exec`](super::Sandbox::exec),
+    /// [`shell`](super::Sandbox::shell), and [`attach`](super::Sandbox::attach)
+    /// unless overridden per-command.
     pub fn workdir(mut self, path: impl Into<String>) -> Self {
         self.config.workdir = Some(path.into());
         self
     }
 
-    /// Set the default shell.
+    /// Shell used by [`shell()`](super::Sandbox::shell) to interpret
+    /// commands (default: `/bin/sh`).
     pub fn shell(mut self, shell: impl Into<String>) -> Self {
         self.config.shell = Some(shell.into());
         self
@@ -128,13 +133,15 @@ impl SandboxBuilder {
         self
     }
 
-    /// Add an environment variable.
+    /// Set an environment variable visible to all commands in this sandbox.
+    /// Can be called multiple times. Per-command env vars (on exec/shell)
+    /// are merged on top.
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.config.env.push((key.into(), value.into()));
         self
     }
 
-    /// Add multiple environment variables.
+    /// Set multiple environment variables at once. See [`env`](Self::env).
     pub fn envs(
         mut self,
         vars: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
@@ -145,13 +152,15 @@ impl SandboxBuilder {
         self
     }
 
-    /// Add a named script.
+    /// Register a script that will be mounted at `/.msb/scripts/<name>` in
+    /// the guest. Scripts are added to `PATH` so they can be invoked by name
+    /// via [`exec`](super::Sandbox::exec).
     pub fn script(mut self, name: impl Into<String>, content: impl Into<String>) -> Self {
         self.config.scripts.insert(name.into(), content.into());
         self
     }
 
-    /// Add multiple scripts.
+    /// Register multiple scripts at once. See [`script`](Self::script).
     pub fn scripts(
         mut self,
         scripts: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
@@ -162,7 +171,9 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set the shutdown escalation mode.
+    /// How aggressively to shut down children when drain is triggered.
+    /// `Graceful` (default) waits, then SIGTERM, then SIGKILL.
+    /// `Terminate` sends SIGTERM immediately. `Kill` sends SIGKILL immediately.
     pub fn shutdown_mode(mut self, mode: ShutdownMode) -> Self {
         self.config.supervisor_policy.shutdown_mode = mode;
         self
@@ -180,7 +191,8 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set the idle timeout in seconds.
+    /// Auto-drain the sandbox after this many seconds of inactivity.
+    /// Inactivity is detected via agentd heartbeat. Omit to disable (default).
     pub fn idle_timeout(mut self, secs: u64) -> Self {
         self.config.supervisor_policy.idle_timeout_secs = Some(secs);
         self

@@ -19,7 +19,13 @@ use crate::{
 
 /// Filesystem operations on a volume's host-side directory.
 pub struct VolumeFs<'a> {
-    volume: &'a super::Volume,
+    root: VolumeRoot<'a>,
+}
+
+/// Internal path storage — borrowed from a `Volume` or owned from a `VolumeHandle`.
+enum VolumeRoot<'a> {
+    Borrowed(&'a Path),
+    Owned(PathBuf),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -27,23 +33,40 @@ pub struct VolumeFs<'a> {
 //--------------------------------------------------------------------------------------------------
 
 impl<'a> VolumeFs<'a> {
-    /// Create a new volume filesystem handle.
-    pub(crate) fn new(volume: &'a super::Volume) -> Self {
-        Self { volume }
+    /// Create a volume filesystem handle from a borrowed path.
+    pub(crate) fn from_path_ref(path: &'a Path) -> Self {
+        Self {
+            root: VolumeRoot::Borrowed(path),
+        }
+    }
+
+    /// Create a volume filesystem handle from an owned path.
+    pub(crate) fn from_path(path: PathBuf) -> Self {
+        Self {
+            root: VolumeRoot::Owned(path),
+        }
+    }
+
+    /// Get the root path of the volume.
+    fn root_path(&self) -> &Path {
+        match &self.root {
+            VolumeRoot::Borrowed(p) => p,
+            VolumeRoot::Owned(p) => p,
+        }
     }
 
     //----------------------------------------------------------------------------------------------
     // Read Operations
     //----------------------------------------------------------------------------------------------
 
-    /// Read a file to bytes.
+    /// Read an entire file into memory as raw bytes.
     pub async fn read(&self, path: &str) -> MicrosandboxResult<Bytes> {
         let full = self.resolve(path)?;
         let data = tokio::fs::read(&full).await?;
         Ok(Bytes::from(data))
     }
 
-    /// Read a file to string.
+    /// Read an entire file into memory as a UTF-8 string.
     pub async fn read_to_string(&self, path: &str) -> MicrosandboxResult<String> {
         let full = self.resolve(path)?;
         let data = tokio::fs::read_to_string(&full).await?;
@@ -54,7 +77,8 @@ impl<'a> VolumeFs<'a> {
     // Write Operations
     //----------------------------------------------------------------------------------------------
 
-    /// Write bytes to a file.
+    /// Write data to a file, creating parent directories as needed.
+    /// Overwrites if the file already exists.
     pub async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
         let full = self.resolve(path)?;
 
@@ -71,7 +95,8 @@ impl<'a> VolumeFs<'a> {
     // Directory Operations
     //----------------------------------------------------------------------------------------------
 
-    /// List directory contents.
+    /// List the immediate children of a directory (non-recursive).
+    /// Each entry includes the path, kind, size, permissions, and modification time.
     pub async fn list(&self, path: &str) -> MicrosandboxResult<Vec<FsEntry>> {
         let full = self.resolve(path)?;
         let mut dir = tokio::fs::read_dir(&full).await?;
@@ -80,7 +105,7 @@ impl<'a> VolumeFs<'a> {
         while let Some(entry) = dir.next_entry().await? {
             let entry_path = entry.path();
             let rel_path = entry_path
-                .strip_prefix(self.volume.path())
+                .strip_prefix(self.root_path())
                 .unwrap_or(&entry_path);
 
             match entry.metadata().await {
@@ -123,7 +148,7 @@ impl<'a> VolumeFs<'a> {
     // File Operations
     //----------------------------------------------------------------------------------------------
 
-    /// Remove a file.
+    /// Delete a single file. Use [`remove_dir`](Self::remove_dir) for directories.
     pub async fn remove(&self, path: &str) -> MicrosandboxResult<()> {
         let full = self.resolve(path)?;
         tokio::fs::remove_file(&full).await?;
@@ -167,7 +192,8 @@ impl<'a> VolumeFs<'a> {
         Ok(std_metadata_to_fs(&meta))
     }
 
-    /// Check if a path exists.
+    /// Check whether a file or directory exists at the given path.
+    /// Returns `false` (not an error) if the path is absent.
     pub async fn exists(&self, path: &str) -> MicrosandboxResult<bool> {
         let full = self.resolve(path)?;
         Ok(tokio::fs::try_exists(&full).await.unwrap_or(false))
@@ -181,7 +207,7 @@ impl<'a> VolumeFs<'a> {
 impl VolumeFs<'_> {
     /// Resolve a relative path against the volume root, preventing path traversal.
     fn resolve(&self, path: &str) -> MicrosandboxResult<PathBuf> {
-        let root = self.volume.path();
+        let root = self.root_path();
 
         // Strip leading slash for joining.
         let clean = path.strip_prefix('/').unwrap_or(path);

@@ -58,10 +58,6 @@ pub enum MicrosandboxError {
     #[error("exec timed out after {0:?}")]
     ExecTimeout(std::time::Duration),
 
-    /// The requested script was not found in sandbox configuration.
-    #[error("script not found: {0}")]
-    ScriptNotFound(String),
-
     /// A terminal operation failed.
     #[error("terminal error: {0}")]
     Terminal(String),

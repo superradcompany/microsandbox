@@ -211,9 +211,10 @@ async fn handle_message(
 ) -> AgentdResult<()> {
     match msg.t {
         MessageType::ExecRequest => {
-            let req: ExecRequest = msg
+            let mut req: ExecRequest = msg
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode exec request: {e}")))?;
+            prepend_scripts_to_path(&mut req);
             match ExecSession::spawn(msg.id, &req, session_tx.clone()) {
                 Ok(session) => {
                     let reply = Message::with_payload(
@@ -339,6 +340,28 @@ async fn handle_message(
     }
 
     Ok(())
+}
+
+/// Prepends `/.msb/scripts` to PATH in the exec request's environment.
+///
+/// If the request already has a PATH entry, prepends to it. Otherwise
+/// inherits from agentd's environment and prepends.
+/// Default PATH for the guest when no PATH is inherited.
+const DEFAULT_GUEST_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+fn prepend_scripts_to_path(req: &mut microsandbox_protocol::exec::ExecRequest) {
+    let scripts = microsandbox_protocol::SCRIPTS_PATH;
+
+    // Check if the request already specifies PATH.
+    if let Some(entry) = req.env.iter_mut().find(|e| e.starts_with("PATH=")) {
+        let existing = &entry["PATH=".len()..];
+        *entry = format!("PATH={scripts}:{existing}");
+    } else {
+        // Inherit from agentd's process environment, falling back to a
+        // sensible default since PID 1 in a minimal guest may not have PATH.
+        let inherited = std::env::var("PATH").unwrap_or_else(|_| DEFAULT_GUEST_PATH.to_string());
+        req.env.push(format!("PATH={scripts}:{inherited}"));
+    }
 }
 
 /// Sets a file descriptor to non-blocking mode.

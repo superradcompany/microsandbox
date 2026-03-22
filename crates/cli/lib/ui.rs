@@ -244,19 +244,24 @@ pub fn detail_kv_indent(key: &str, value: &str) {
     println!("  {:<14}{value}", style(format!("{key}:")).cyan());
 }
 
-/// Parse a memory size string (e.g., "512M", "1G") into MiB.
-pub fn parse_memory(s: &str) -> Result<u32, String> {
+/// Parse a human-readable size string (e.g., "512M", "1G", "1.5G") into MiB.
+///
+/// Bare numbers are treated as MiB.
+pub fn parse_size_mib(s: &str) -> Result<u32, String> {
     let s = s.trim();
-    if let Some(num) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
-        num.parse::<u32>()
-            .map(|n| n * 1024)
-            .map_err(|e| format!("invalid memory size: {e}"))
-    } else if let Some(num) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
-        num.parse::<u32>()
-            .map_err(|e| format!("invalid memory size: {e}"))
+    if let Some(n) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
+        let val: f64 = n.trim().parse().map_err(|e| format!("invalid size: {e}"))?;
+        if val < 0.0 {
+            return Err("size must not be negative".into());
+        }
+        Ok((val * 1024.0) as u32)
+    } else if let Some(n) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
+        n.trim()
+            .parse::<u32>()
+            .map_err(|e| format!("invalid size: {e}"))
     } else {
         s.parse::<u32>()
-            .map_err(|e| format!("invalid memory size (expected e.g. 512M, 1G): {e}"))
+            .map_err(|e| format!("invalid size (expected e.g. 512M, 1G): {e}"))
     }
 }
 

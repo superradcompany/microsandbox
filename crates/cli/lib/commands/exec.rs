@@ -113,8 +113,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
             })
             .await?;
 
-        let _ = sandbox.stop().await;
-        let _ = sandbox.wait().await;
+        let _ = sandbox.stop_and_wait().await;
 
         if exit_code != 0 {
             std::process::exit(exit_code);
@@ -137,8 +136,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         std::io::stdout().write_all(output.stdout_bytes())?;
         std::io::stderr().write_all(output.stderr_bytes())?;
 
-        let _ = sandbox.stop().await;
-        let _ = sandbox.wait().await;
+        let _ = sandbox.stop_and_wait().await;
 
         if !output.status().success {
             std::process::exit(output.status().code);

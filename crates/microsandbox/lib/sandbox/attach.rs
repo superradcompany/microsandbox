@@ -69,57 +69,37 @@ pub(crate) struct DetachKeys {
     sequence: Vec<u8>,
 }
 
-/// Information about an active session (stub — deferred).
-///
-/// Session listing and reconnection require protocol extensions
-/// (`core.sessions.list`, `core.session.attach`) that are not yet implemented.
-pub struct SessionInfo {
-    /// Unique session ID.
-    pub id: String,
-
-    /// Command being executed.
-    pub cmd: String,
-
-    /// When the session was started.
-    pub started_at: chrono::DateTime<chrono::Utc>,
-
-    /// Whether session has TTY.
-    pub tty: bool,
-
-    /// Process ID in guest.
-    pub pid: Option<u32>,
-}
-
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
 impl AttachOptionsBuilder {
-    /// Add a single argument.
+    /// Append a command-line argument to the attached command.
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.options.args.push(arg.into());
         self
     }
 
-    /// Add multiple arguments.
+    /// Append multiple command-line arguments.
     pub fn args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.options.args.extend(args.into_iter().map(Into::into));
         self
     }
 
-    /// Set the working directory.
+    /// Override the working directory for the attached session.
     pub fn cwd(mut self, cwd: impl Into<String>) -> Self {
         self.options.cwd = Some(cwd.into());
         self
     }
 
-    /// Add an environment variable.
+    /// Set an environment variable for the attached session. Merged on
+    /// top of sandbox-level env vars.
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.options.env.push((key.into(), value.into()));
         self
     }
 
-    /// Add multiple environment variables.
+    /// Set multiple environment variables for the attached session.
     pub fn envs(
         mut self,
         vars: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
@@ -130,7 +110,9 @@ impl AttachOptionsBuilder {
         self
     }
 
-    /// Set the detach key sequence.
+    /// Key sequence to detach from the session without stopping it.
+    /// Uses Docker-style syntax: `"ctrl-]"` (default), `"ctrl-p,ctrl-q"`,
+    /// or a single character like `"q"`.
     pub fn detach_keys(mut self, keys: impl Into<String>) -> Self {
         self.options.detach_keys = Some(keys.into());
         self
@@ -161,7 +143,7 @@ impl AttachOptionsBuilder {
         self
     }
 
-    /// Build the options.
+    /// Finalize the options. Called automatically when using the closure form.
     pub fn build(self) -> AttachOptions {
         self.options
     }

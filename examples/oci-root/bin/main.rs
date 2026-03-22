@@ -31,8 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("os-release:\n{}", output.stdout()?);
 
     // Stop the sandbox gracefully.
-    sandbox.stop().await?;
-    sandbox.wait().await?;
+    sandbox.stop_and_wait().await?;
 
     println!("Sandbox stopped.");
     Ok(())

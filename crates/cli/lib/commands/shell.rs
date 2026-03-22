@@ -72,8 +72,7 @@ pub async fn run(args: ShellArgs) -> anyhow::Result<()> {
         None => sandbox.attach((), ()).await?,
     };
 
-    let _ = sandbox.stop().await;
-    let _ = sandbox.wait().await;
+    let _ = sandbox.stop_and_wait().await;
 
     if exit_code != 0 {
         std::process::exit(exit_code);

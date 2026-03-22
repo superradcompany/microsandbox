@@ -106,7 +106,7 @@ impl<'a> SandboxFs<'a> {
     // Read Operations
     //----------------------------------------------------------------------------------------------
 
-    /// Read a file to bytes.
+    /// Read an entire file from the guest filesystem into memory.
     pub async fn read(&self, path: &str) -> MicrosandboxResult<Bytes> {
         let id = self.bridge.next_id();
         let mut rx = self.bridge.subscribe(id).await;
@@ -143,7 +143,7 @@ impl<'a> SandboxFs<'a> {
         Ok(Bytes::from(data))
     }
 
-    /// Read a file to string.
+    /// Read an entire file from the guest filesystem as a UTF-8 string.
     pub async fn read_to_string(&self, path: &str) -> MicrosandboxResult<String> {
         let data = self.read(path).await?;
         String::from_utf8(Vec::from(data))
@@ -172,7 +172,7 @@ impl<'a> SandboxFs<'a> {
     // Write Operations
     //----------------------------------------------------------------------------------------------
 
-    /// Write bytes to a file.
+    /// Write data to a file in the guest, creating it if it doesn't exist.
     pub async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
         let data = data.as_ref();
         let id = self.bridge.next_id();
@@ -236,7 +236,7 @@ impl<'a> SandboxFs<'a> {
     // Directory Operations
     //----------------------------------------------------------------------------------------------
 
-    /// List directory contents.
+    /// List the immediate children of a directory in the guest (non-recursive).
     pub async fn list(&self, path: &str) -> MicrosandboxResult<Vec<FsEntry>> {
         let req = FsRequest {
             op: FsOp::List {
@@ -289,7 +289,7 @@ impl<'a> SandboxFs<'a> {
     // File Operations
     //----------------------------------------------------------------------------------------------
 
-    /// Remove a file.
+    /// Delete a single file. Use [`remove_dir`](Self::remove_dir) for directories.
     pub async fn remove(&self, path: &str) -> MicrosandboxResult<()> {
         let req = FsRequest {
             op: FsOp::Remove {
@@ -356,7 +356,7 @@ impl<'a> SandboxFs<'a> {
         }
     }
 
-    /// Check if a path exists.
+    /// Check whether a file or directory exists at the given path in the guest.
     pub async fn exists(&self, path: &str) -> MicrosandboxResult<bool> {
         match self.stat(path).await {
             Ok(_) => Ok(true),

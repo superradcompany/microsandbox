@@ -26,10 +26,21 @@ submodule.
 cargo run -p block-root
 ```
 
+## named-volume
+
+Creates a named volume, mounts it into two sandboxes (writer and reader),
+and demonstrates persistence across sandbox lifecycles. Also shows the
+host-side `VolumeFs` API and `VolumeHandle` metadata. Pulls `alpine:latest`
+on first run.
+
+```sh
+cargo run -p named-volume
+```
+
 ## oci-root
 
 Pulls an OCI image (`alpine:latest`) from a registry and boots a sandbox from
-it. No submodules needed — the image is fetched on first run.
+it.
 
 ```sh
 cargo run -p oci-root

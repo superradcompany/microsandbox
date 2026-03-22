@@ -18,6 +18,9 @@ pub const RUNTIME_FS_TAG: &str = "msb_runtime";
 /// Guest mount point for the runtime filesystem.
 pub const RUNTIME_MOUNT_POINT: &str = "/.msb";
 
+/// Guest path for named scripts (added to PATH by agentd).
+pub const SCRIPTS_PATH: &str = "/.msb/scripts";
+
 //--------------------------------------------------------------------------------------------------
 // Constants: Guest Init Environment Variables
 //--------------------------------------------------------------------------------------------------
@@ -83,6 +86,22 @@ pub const ENV_NET_IPV4: &str = "MSB_NET_IPV4";
 /// Example:
 /// - `MSB_NET_IPV6=addr=fd42:6d73:62:2a::2/64,gw=fd42:6d73:62:2a::1,dns=fd42:6d73:62:2a::1`
 pub const ENV_NET_IPV6: &str = "MSB_NET_IPV6";
+
+/// Environment variable carrying virtiofs volume mount specs for guest init.
+///
+/// Format: `tag:guest_path[:ro][;tag:guest_path[:ro];...]`
+///
+/// - `tag` — virtiofs tag name (required, matches the tag used in `--mount`)
+/// - `guest_path` — mount point inside the guest (required)
+/// - `ro` — mount read-only (optional suffix)
+///
+/// Entries are separated by `;`.
+///
+/// Examples:
+/// - `MSB_MOUNTS=data:/data` — mount virtiofs tag `data` at `/data`
+/// - `MSB_MOUNTS=data:/data:ro` — mount read-only
+/// - `MSB_MOUNTS=data:/data;cache:/cache:ro` — two mounts
+pub const ENV_MOUNTS: &str = "MSB_MOUNTS";
 
 /// Guest-side path to the CA certificate for TLS interception.
 ///

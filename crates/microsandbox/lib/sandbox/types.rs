@@ -171,7 +171,8 @@ impl MountBuilder {
         self
     }
 
-    /// Use a named volume.
+    /// Mount a named volume created via [`Volume::create`](crate::volume::Volume::create).
+    /// The volume persists across sandbox restarts and can be shared between sandboxes.
     pub fn named(mut self, name: impl Into<String>) -> Self {
         self.mount = MountKind::Named(name.into());
         self
@@ -183,7 +184,8 @@ impl MountBuilder {
         self
     }
 
-    /// Make the mount read-only.
+    /// Prevent writes to this mount. Enforced both at the host (virtiofs
+    /// server rejects writes) and guest (kernel returns `EROFS`).
     pub fn readonly(mut self) -> Self {
         self.readonly = true;
         self
@@ -204,6 +206,25 @@ impl MountBuilder {
 
     /// Build the volume mount.
     pub(crate) fn build(self) -> crate::MicrosandboxResult<VolumeMount> {
+        // Validate guest path.
+        if !self.guest.starts_with('/') {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "guest mount path must be absolute: {}",
+                self.guest
+            )));
+        }
+        if self.guest == "/" {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "cannot mount a volume at guest root /".into(),
+            ));
+        }
+        if self.guest.contains(':') || self.guest.contains(';') {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "guest mount path must not contain ':' or ';': {}",
+                self.guest
+            )));
+        }
+
         match self.mount {
             MountKind::Bind(host) => Ok(VolumeMount::Bind {
                 host,
@@ -227,7 +248,7 @@ impl MountBuilder {
 }
 
 impl VolumeMount {
-    /// Get the guest mount path.
+    /// The absolute path where this mount appears inside the guest.
     pub fn guest(&self) -> &str {
         match self {
             Self::Bind { guest, .. } | Self::Named { guest, .. } | Self::Tmpfs { guest, .. } => {
