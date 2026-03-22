@@ -16,49 +16,28 @@ use super::exec::Rlimit;
 #[derive(Debug, Clone, Default)]
 pub struct AttachOptions {
     /// Arguments.
-    pub args: Vec<String>,
+    pub(crate) args: Vec<String>,
 
     /// Environment variables (merged with sandbox env).
-    pub env: Vec<(String, String)>,
+    pub(crate) env: Vec<(String, String)>,
 
     /// Working directory (default: sandbox's workdir).
-    pub cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
 
     /// Detach key sequence (default: `"ctrl-]"`).
     ///
     /// Uses Docker-style syntax: `"ctrl-<char>"` for control keys,
     /// comma-separated for multi-key sequences (e.g., `"ctrl-p,ctrl-q"`).
-    pub detach_keys: Option<String>,
+    pub(crate) detach_keys: Option<String>,
 
     /// Resource limits.
-    pub rlimits: Vec<Rlimit>,
+    pub(crate) rlimits: Vec<Rlimit>,
 }
 
-/// Builder for [`AttachOptions`].
+/// Builder for `AttachOptions`.
 #[derive(Default)]
 pub struct AttachOptionsBuilder {
     options: AttachOptions,
-}
-
-/// Trait for types that can be converted to an optional command string.
-///
-/// Enables ergonomic `cmd` patterns:
-/// - `sandbox.attach((), ())` — default shell
-/// - `sandbox.attach("bash", ())` — specific command
-pub trait IntoAttachCmd {
-    /// Convert into an optional command string.
-    fn into_attach_cmd(self) -> Option<String>;
-}
-
-/// Trait for types that can be converted to [`AttachOptions`].
-///
-/// Enables ergonomic `opts` patterns:
-/// - `sandbox.attach("bash", ())` — no options
-/// - `sandbox.attach("zsh", |a| a.env("TERM", "xterm"))` — closure
-/// - `sandbox.attach("bash", options)` — pre-built AttachOptions
-pub trait IntoAttachOptions {
-    /// Convert into attach options.
-    fn into_attach_options(self) -> AttachOptions;
 }
 
 /// Parsed detach key sequence.
@@ -216,55 +195,6 @@ impl DetachKeys {
     /// Returns the detach key sequence bytes.
     pub fn sequence(&self) -> &[u8] {
         &self.sequence
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Trait Implementations
-//--------------------------------------------------------------------------------------------------
-
-/// Unit type for default shell: `sandbox.attach((), ())`
-impl IntoAttachCmd for () {
-    fn into_attach_cmd(self) -> Option<String> {
-        None
-    }
-}
-
-/// String for specific command: `sandbox.attach("bash", ())`
-impl IntoAttachCmd for &str {
-    fn into_attach_cmd(self) -> Option<String> {
-        Some(self.to_string())
-    }
-}
-
-/// Owned string for specific command: `sandbox.attach(String::from("bash"), ())`
-impl IntoAttachCmd for String {
-    fn into_attach_cmd(self) -> Option<String> {
-        Some(self)
-    }
-}
-
-/// No options: `sandbox.attach("bash", ())`
-impl IntoAttachOptions for () {
-    fn into_attach_options(self) -> AttachOptions {
-        AttachOptions::default()
-    }
-}
-
-/// Closure pattern: `sandbox.attach("zsh", |a| a.env("TERM", "xterm"))`
-impl<F> IntoAttachOptions for F
-where
-    F: FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
-{
-    fn into_attach_options(self) -> AttachOptions {
-        self(AttachOptionsBuilder::default()).build()
-    }
-}
-
-/// Direct options: `sandbox.attach("bash", options)`
-impl IntoAttachOptions for AttachOptions {
-    fn into_attach_options(self) -> AttachOptions {
-        self
     }
 }
 

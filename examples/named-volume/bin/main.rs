@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     writer
-        .shell("echo 'hello from sandbox A' > /data/message.txt", ())
+        .shell("echo 'hello from sandbox A' > /data/message.txt")
         .await?;
 
     writer.stop_and_wait().await?;
@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create()
         .await?;
 
-    let output = reader.shell("cat /data/message.txt", ()).await?;
+    let output = reader.shell("cat /data/message.txt").await?;
     println!("{}", output.stdout()?);
 
     reader.stop_and_wait().await?;

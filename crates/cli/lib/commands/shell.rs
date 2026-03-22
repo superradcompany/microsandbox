@@ -1,7 +1,8 @@
-//! `msb shell` command — interactive shell in a sandbox (alias for attach).
+//! `msb shell` command — interactive shell or run a shell script in a sandbox.
+
+use std::io::{IsTerminal, Write};
 
 use clap::Args;
-use microsandbox::sandbox::{Sandbox, SandboxStatus};
 
 use crate::ui;
 
@@ -9,7 +10,7 @@ use crate::ui;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Interactive shell in a running sandbox.
+/// Open an interactive shell or run a shell script in a sandbox.
 #[derive(Debug, Args)]
 pub struct ShellArgs {
     /// Name of the sandbox.
@@ -22,7 +23,18 @@ pub struct ShellArgs {
     /// Suppress progress output.
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Script to execute (after --). Opens interactive shell if omitted.
+    #[arg(last = true)]
+    pub command: Vec<String>,
 }
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Maximum size for stdin script input (1 MiB).
+const MAX_STDIN_SCRIPT_SIZE: usize = 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -30,52 +42,78 @@ pub struct ShellArgs {
 
 /// Execute the `msb shell` command.
 pub async fn run(args: ShellArgs) -> anyhow::Result<()> {
-    let handle = Sandbox::get(&args.name).await?;
+    let sandbox = super::resolve_and_start(&args.name, args.quiet).await?;
 
-    let sandbox = match handle.status() {
-        SandboxStatus::Running | SandboxStatus::Draining => {
-            anyhow::bail!(
-                "sandbox '{}' is already running in another process; \
-                 cross-process attach is not yet supported",
-                args.name
-            );
+    let interactive = std::io::stdin().is_terminal();
+
+    // Resolve which shell to use: CLI flag > sandbox config > /bin/sh.
+    let shell = args
+        .shell
+        .as_deref()
+        .or(sandbox.config().shell.as_deref())
+        .unwrap_or("/bin/sh");
+
+    if args.command.is_empty() && interactive {
+        // No command, TTY present — interactive shell session.
+        let exit_code = sandbox.attach(shell, |a| a).await?;
+
+        if let Err(e) = sandbox.stop_and_wait().await {
+            ui::warn(&format!("failed to stop sandbox: {e}"));
         }
-        SandboxStatus::Stopped | SandboxStatus::Crashed => {
-            let spinner = if args.quiet {
-                ui::Spinner::quiet()
-            } else {
-                ui::Spinner::start("Starting", &args.name)
-            };
-            match handle.start().await {
-                Ok(s) => {
-                    spinner.finish_clear();
-                    s
-                }
-                Err(e) => {
-                    spinner.finish_error();
-                    return Err(e.into());
-                }
+
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+    } else if !args.command.is_empty() && interactive {
+        // Command provided with TTY — interactive shell with script.
+        let script = args.command.join(" ");
+
+        let exit_code = sandbox.attach(shell, |a| a.args(["-c", &script])).await?;
+
+        if let Err(e) = sandbox.stop_and_wait().await {
+            ui::warn(&format!("failed to stop sandbox: {e}"));
+        }
+
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+    } else {
+        // Non-interactive — run script and capture output.
+        let script = if args.command.is_empty() {
+            // Read script from stdin (e.g. `echo "ls" | msb shell test`).
+            let buf = tokio::task::spawn_blocking(|| {
+                use std::io::Read;
+                let mut buf = Vec::new();
+                std::io::stdin()
+                    .take(MAX_STDIN_SCRIPT_SIZE as u64)
+                    .read_to_end(&mut buf)?;
+                String::from_utf8(buf).map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "stdin is not valid UTF-8")
+                })
+            })
+            .await??;
+
+            if buf.trim().is_empty() {
+                return Ok(());
             }
+
+            buf
+        } else {
+            args.command.join(" ")
+        };
+
+        let output = sandbox.exec(shell, |e| e.args(["-c", &script])).await?;
+
+        std::io::stdout().write_all(output.stdout_bytes())?;
+        std::io::stderr().write_all(output.stderr_bytes())?;
+
+        if let Err(e) = sandbox.stop_and_wait().await {
+            ui::warn(&format!("failed to stop sandbox: {e}"));
         }
-        _ => {
-            anyhow::bail!(
-                "sandbox '{}' is in state {:?} and cannot be attached to",
-                args.name,
-                handle.status()
-            );
+
+        if !output.status().success {
+            std::process::exit(output.status().code);
         }
-    };
-
-    // Use the specified shell or default.
-    let exit_code = match args.shell {
-        Some(ref shell) => sandbox.attach(shell.as_str(), ()).await?,
-        None => sandbox.attach((), ()).await?,
-    };
-
-    let _ = sandbox.stop_and_wait().await;
-
-    if exit_code != 0 {
-        std::process::exit(exit_code);
     }
 
     Ok(())

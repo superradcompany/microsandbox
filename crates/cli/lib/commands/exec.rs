@@ -1,9 +1,8 @@
 //! `msb exec` command — execute a command in a sandbox.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use clap::Args;
-use microsandbox::sandbox::{AttachOptionsBuilder, ExecOptionsBuilder, Sandbox, SandboxStatus};
 
 use crate::ui;
 
@@ -16,14 +15,6 @@ use crate::ui;
 pub struct ExecArgs {
     /// Name of the sandbox.
     pub name: String,
-
-    /// Keep stdin open (interactive).
-    #[arg(short, long)]
-    pub interactive: bool,
-
-    /// Allocate a pseudo-TTY.
-    #[arg(short, long)]
-    pub tty: bool,
 
     /// Environment variable (KEY=value). Can be repeated.
     #[arg(short, long)]
@@ -48,45 +39,11 @@ pub struct ExecArgs {
 
 /// Execute the `msb exec` command.
 pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
-    // Check sandbox status.
-    let handle = Sandbox::get(&args.name).await?;
+    let sandbox = super::resolve_and_start(&args.name, args.quiet).await?;
 
-    let sandbox = match handle.status() {
-        SandboxStatus::Running | SandboxStatus::Draining => {
-            anyhow::bail!(
-                "sandbox '{}' is already running in another process; \
-                 cross-process exec is not yet supported",
-                args.name
-            );
-        }
-        SandboxStatus::Stopped | SandboxStatus::Crashed => {
-            let spinner = if args.quiet {
-                ui::Spinner::quiet()
-            } else {
-                ui::Spinner::start("Starting", &args.name)
-            };
-            match handle.start().await {
-                Ok(s) => {
-                    spinner.finish_clear();
-                    s
-                }
-                Err(e) => {
-                    spinner.finish_error();
-                    return Err(e.into());
-                }
-            }
-        }
-        _ => {
-            anyhow::bail!(
-                "sandbox '{}' is in state {:?} and cannot be started",
-                args.name,
-                handle.status()
-            );
-        }
-    };
-
-    let cmd = args.command[0].clone();
-    let cmd_args: Vec<String> = args.command[1..].to_vec();
+    let mut parts = args.command;
+    let cmd = parts.remove(0);
+    let cmd_args = parts;
 
     // Build exec options.
     let env_pairs: Vec<(String, String)> = args
@@ -96,12 +53,12 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     let workdir = args.workdir;
-    let tty = args.tty;
+    let interactive = std::io::stdin().is_terminal();
 
-    if args.interactive && args.tty {
+    if interactive {
         // Interactive mode with TTY — use attach.
         let exit_code = sandbox
-            .attach(cmd, |a: AttachOptionsBuilder| {
+            .attach(cmd, |a| {
                 let mut a = a.args(cmd_args);
                 for (k, v) in &env_pairs {
                     a = a.env(k, v);
@@ -113,7 +70,9 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
             })
             .await?;
 
-        let _ = sandbox.stop_and_wait().await;
+        if let Err(e) = sandbox.stop_and_wait().await {
+            ui::warn(&format!("failed to stop sandbox: {e}"));
+        }
 
         if exit_code != 0 {
             std::process::exit(exit_code);
@@ -121,8 +80,8 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
     } else {
         // Non-interactive: exec and capture output.
         let output = sandbox
-            .exec(cmd, |e: ExecOptionsBuilder| {
-                let mut e = e.args(cmd_args).tty(tty);
+            .exec(cmd, |e| {
+                let mut e = e.args(cmd_args);
                 for (k, v) in &env_pairs {
                     e = e.env(k, v);
                 }
@@ -136,7 +95,9 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         std::io::stdout().write_all(output.stdout_bytes())?;
         std::io::stderr().write_all(output.stderr_bytes())?;
 
-        let _ = sandbox.stop_and_wait().await;
+        if let Err(e) = sandbox.stop_and_wait().await {
+            ui::warn(&format!("failed to stop sandbox: {e}"));
+        }
 
         if !output.status().success {
             std::process::exit(output.status().code);
