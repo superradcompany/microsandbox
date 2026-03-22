@@ -26,8 +26,8 @@ pub struct SandboxHandle {
     name: String,
     status: SandboxStatus,
     config_json: String,
-    created_at: Option<chrono::NaiveDateTime>,
-    updated_at: Option<chrono::NaiveDateTime>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
     supervisor_pid: Option<i32>,
     vm_pid: Option<i32>,
 }
@@ -48,8 +48,8 @@ impl SandboxHandle {
             name: model.name,
             status: model.status,
             config_json: model.config,
-            created_at: model.created_at,
-            updated_at: model.updated_at,
+            created_at: model.created_at.map(|dt| dt.and_utc()),
+            updated_at: model.updated_at.map(|dt| dt.and_utc()),
             supervisor_pid,
             vm_pid,
         }
@@ -79,12 +79,12 @@ impl SandboxHandle {
     }
 
     /// When this sandbox was first created, if recorded.
-    pub fn created_at(&self) -> Option<chrono::NaiveDateTime> {
+    pub fn created_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         self.created_at
     }
 
     /// When this sandbox's database record was last modified.
-    pub fn updated_at(&self) -> Option<chrono::NaiveDateTime> {
+    pub fn updated_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         self.updated_at
     }
 

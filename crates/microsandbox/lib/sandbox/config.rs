@@ -8,7 +8,7 @@ use microsandbox_runtime::{
 };
 use serde::{Deserialize, Serialize};
 
-use microsandbox_image::RegistryAuth;
+use microsandbox_image::{PullPolicy, RegistryAuth};
 
 use microsandbox_network::config::NetworkConfig;
 
@@ -101,6 +101,30 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub ssh: SshConfig,
 
+    /// Image entrypoint (inherited from image config, overridable).
+    #[serde(default)]
+    pub entrypoint: Option<Vec<String>>,
+
+    /// Image default command (inherited from image config, overridable).
+    #[serde(default)]
+    pub cmd: Option<Vec<String>>,
+
+    /// User identity inside sandbox (inherited from image config, overridable).
+    #[serde(default)]
+    pub user: Option<String>,
+
+    /// Image labels (merged from image config, user labels override).
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+
+    /// Signal for graceful shutdown (inherited from image config, overridable).
+    #[serde(default)]
+    pub stop_signal: Option<String>,
+
+    /// Pull policy for OCI images. Default: `IfMissing`.
+    #[serde(default)]
+    pub pull_policy: PullPolicy,
+
     /// Supervisor lifecycle policy.
     #[serde(default)]
     pub supervisor_policy: SupervisorPolicy,
@@ -154,6 +178,12 @@ impl Default for SandboxConfig {
             network: NetworkConfig::default(),
             secrets: SecretsConfig::default(),
             ssh: SshConfig::default(),
+            entrypoint: None,
+            cmd: None,
+            user: None,
+            labels: HashMap::new(),
+            stop_signal: None,
+            pull_policy: PullPolicy::default(),
             supervisor_policy: SupervisorPolicy::default(),
             child_policies: ChildPolicies::default(),
             registry_auth: None,

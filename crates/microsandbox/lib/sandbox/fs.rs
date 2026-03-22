@@ -78,6 +78,9 @@ pub struct FsMetadata {
 
     /// Last modification time.
     pub modified: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Creation time.
+    pub created: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// A streaming reader for file data from the sandbox.
@@ -497,6 +500,7 @@ fn entry_info_to_metadata(info: &FsEntryInfo) -> FsMetadata {
     FsMetadata {
         kind: parse_kind(&info.kind),
         modified: parse_modified(info.modified),
+        created: None,
         size: info.size,
         mode: info.mode,
         readonly: info.mode & 0o200 == 0,

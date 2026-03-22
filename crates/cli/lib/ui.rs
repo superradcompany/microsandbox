@@ -296,8 +296,8 @@ pub fn format_duration(d: Duration) -> String {
     }
 }
 
-/// Format a chrono NaiveDateTime for display.
-pub fn format_datetime(dt: &chrono::NaiveDateTime) -> String {
+/// Format a chrono DateTime for display.
+pub fn format_datetime(dt: &chrono::DateTime<chrono::Utc>) -> String {
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 

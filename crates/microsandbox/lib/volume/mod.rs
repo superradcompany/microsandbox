@@ -4,6 +4,7 @@
 //! `~/.microsandbox/volumes/<name>/` with metadata tracked in the database.
 
 pub mod fs;
+pub use fs::{VolumeFsReadStream, VolumeFsWriteSink};
 
 use std::path::PathBuf;
 
@@ -47,7 +48,7 @@ pub struct VolumeHandle {
     quota_mib: Option<u32>,
     used_bytes: u64,
     labels: Vec<(String, String)>,
-    created_at: Option<chrono::NaiveDateTime>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Builder for creating a volume.
@@ -79,7 +80,7 @@ impl VolumeHandle {
             quota_mib: model.quota_mib.map(|v| v.max(0) as u32),
             used_bytes: model.size_bytes.unwrap_or(0).max(0) as u64,
             labels,
-            created_at: model.created_at,
+            created_at: model.created_at.map(|dt| dt.and_utc()),
         }
     }
 
@@ -106,7 +107,7 @@ impl VolumeHandle {
     }
 
     /// When this volume was first created, if recorded.
-    pub fn created_at(&self) -> Option<chrono::NaiveDateTime> {
+    pub fn created_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         self.created_at
     }
 

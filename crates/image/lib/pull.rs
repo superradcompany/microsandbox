@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::{config::ImageConfig, digest::Digest};
 
 //--------------------------------------------------------------------------------------------------
@@ -9,7 +11,7 @@ use crate::{config::ImageConfig, digest::Digest};
 //--------------------------------------------------------------------------------------------------
 
 /// Controls when the registry is contacted for manifest freshness.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PullPolicy {
     /// Use cached layers if complete, pull otherwise.
     #[default]

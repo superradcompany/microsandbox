@@ -86,8 +86,8 @@ pub struct ExitStatus {
 
 /// Handle to a streaming exec session.
 pub struct ExecHandle {
-    /// Correlation ID for this session.
-    pub(crate) id: u32,
+    /// Correlation ID for this session (protocol-level u32, exposed as String).
+    id: u32,
 
     /// Event receiver.
     events: mpsc::UnboundedReceiver<ExecEvent>,
@@ -329,6 +329,11 @@ impl ExecHandle {
             stdin,
             bridge,
         }
+    }
+
+    /// Get the execution session ID.
+    pub fn id(&self) -> String {
+        self.id.to_string()
     }
 
     /// Receive the next exec event.

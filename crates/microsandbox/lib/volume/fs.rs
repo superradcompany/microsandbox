@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
     MicrosandboxError, MicrosandboxResult,
@@ -26,6 +27,20 @@ pub struct VolumeFs<'a> {
 enum VolumeRoot<'a> {
     Borrowed(&'a Path),
     Owned(PathBuf),
+}
+
+/// Chunk size for streaming volume reads (64 KiB).
+const STREAM_CHUNK_SIZE: usize = 64 * 1024;
+
+/// A streaming reader for file data from a volume's host-side directory.
+pub struct VolumeFsReadStream {
+    file: tokio::fs::File,
+    buf: Vec<u8>,
+}
+
+/// A streaming writer for file data to a volume's host-side directory.
+pub struct VolumeFsWriteSink {
+    file: tokio::fs::File,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -73,6 +88,17 @@ impl<'a> VolumeFs<'a> {
         Ok(data)
     }
 
+    /// Read a file with streaming. Returns a [`VolumeFsReadStream`] that
+    /// yields chunks of bytes.
+    pub async fn read_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsReadStream> {
+        let full = self.resolve(path)?;
+        let file = tokio::fs::File::open(&full).await?;
+        Ok(VolumeFsReadStream {
+            file,
+            buf: vec![0u8; STREAM_CHUNK_SIZE],
+        })
+    }
+
     //----------------------------------------------------------------------------------------------
     // Write Operations
     //----------------------------------------------------------------------------------------------
@@ -89,6 +115,19 @@ impl<'a> VolumeFs<'a> {
 
         tokio::fs::write(&full, data.as_ref()).await?;
         Ok(())
+    }
+
+    /// Write to a file with streaming. Returns a [`VolumeFsWriteSink`] that
+    /// accepts chunks of bytes. Creates parent directories as needed.
+    pub async fn write_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsWriteSink> {
+        let full = self.resolve(path)?;
+
+        if let Some(parent) = full.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let file = tokio::fs::File::create(&full).await?;
+        Ok(VolumeFsWriteSink { file })
     }
 
     //----------------------------------------------------------------------------------------------
@@ -259,6 +298,56 @@ impl VolumeFs<'_> {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods: VolumeFsReadStream
+//--------------------------------------------------------------------------------------------------
+
+impl VolumeFsReadStream {
+    /// Receive the next chunk of file data.
+    ///
+    /// Returns `None` at EOF.
+    pub async fn recv(&mut self) -> MicrosandboxResult<Option<Bytes>> {
+        let n = self.file.read(&mut self.buf).await?;
+        if n == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(Bytes::copy_from_slice(&self.buf[..n])))
+        }
+    }
+
+    /// Read the remaining file data into a single `Bytes` buffer.
+    pub async fn collect(mut self) -> MicrosandboxResult<Bytes> {
+        let mut data = Vec::new();
+        let mut buf = vec![0u8; STREAM_CHUNK_SIZE];
+        loop {
+            let n = self.file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            data.extend_from_slice(&buf[..n]);
+        }
+        Ok(Bytes::from(data))
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods: VolumeFsWriteSink
+//--------------------------------------------------------------------------------------------------
+
+impl VolumeFsWriteSink {
+    /// Write a chunk of data to the file.
+    pub async fn write(&mut self, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
+        self.file.write_all(data.as_ref()).await?;
+        Ok(())
+    }
+
+    /// Flush and close the file.
+    pub async fn close(mut self) -> MicrosandboxResult<()> {
+        self.file.flush().await?;
+        Ok(())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -296,6 +385,14 @@ fn metadata_to_entry(path: &str, meta: &std::fs::Metadata) -> FsEntry {
     }
 }
 
+/// Extract the creation time from `std::fs::Metadata`.
+fn std_created(meta: &std::fs::Metadata) -> Option<chrono::DateTime<chrono::Utc>> {
+    meta.created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0).unwrap_or_default())
+}
+
 /// Convert `std::fs::Metadata` to `FsMetadata`.
 fn std_metadata_to_fs(meta: &std::fs::Metadata) -> FsMetadata {
     use std::os::unix::fs::MetadataExt;
@@ -306,5 +403,6 @@ fn std_metadata_to_fs(meta: &std::fs::Metadata) -> FsMetadata {
         mode: meta.mode(),
         readonly: meta.permissions().readonly(),
         modified: std_modified(meta),
+        created: std_created(meta),
     }
 }

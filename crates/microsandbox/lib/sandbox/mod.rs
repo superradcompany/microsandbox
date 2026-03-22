@@ -50,7 +50,7 @@ pub use config::SandboxConfig;
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
 pub use handle::SandboxHandle;
-pub use microsandbox_image::{PullProgress, PullProgressHandle};
+pub use microsandbox_image::{PullPolicy, PullProgress, PullProgressHandle};
 pub use microsandbox_network::config::NetworkConfig;
 pub use microsandbox_runtime::logging::LogLevel;
 pub use types::{
