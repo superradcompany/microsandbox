@@ -10,7 +10,7 @@ use microsandbox_protocol::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::{MicrosandboxResult, agent::AgentBridge};
+use crate::{MicrosandboxResult, agent::AgentClient};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -96,7 +96,7 @@ pub struct ExecHandle {
     stdin: Option<ExecSink>,
 
     /// Bridge reference for sending signals/stdin.
-    bridge: Arc<AgentBridge>,
+    client: Arc<AgentClient>,
 }
 
 /// Events emitted by a streaming exec session.
@@ -124,7 +124,7 @@ pub enum ExecEvent {
 /// Sink for writing to a running process's stdin.
 pub struct ExecSink {
     id: u32,
-    bridge: Arc<AgentBridge>,
+    client: Arc<AgentClient>,
 }
 
 /// A POSIX resource limit.
@@ -309,13 +309,13 @@ impl ExecHandle {
         id: u32,
         events: mpsc::UnboundedReceiver<ExecEvent>,
         stdin: Option<ExecSink>,
-        bridge: Arc<AgentBridge>,
+        client: Arc<AgentClient>,
     ) -> Self {
         Self {
             id,
             events,
             stdin,
-            bridge,
+            client,
         }
     }
 
@@ -391,7 +391,7 @@ impl ExecHandle {
     pub async fn signal(&self, signal: i32) -> MicrosandboxResult<()> {
         let payload = ExecSignal { signal };
         let msg = Message::with_payload(MessageType::ExecSignal, self.id, &payload)?;
-        self.bridge.send(&msg).await
+        self.client.send(&msg).await
     }
 
     /// Send SIGKILL to the running process.
@@ -402,8 +402,8 @@ impl ExecHandle {
 
 impl ExecSink {
     /// Create a new stdin sink.
-    pub(crate) fn new(id: u32, bridge: Arc<AgentBridge>) -> Self {
-        Self { id, bridge }
+    pub(crate) fn new(id: u32, client: Arc<AgentClient>) -> Self {
+        Self { id, client }
     }
 
     /// Write data to the process's stdin.
@@ -412,14 +412,14 @@ impl ExecSink {
             data: data.as_ref().to_vec(),
         };
         let msg = Message::with_payload(MessageType::ExecStdin, self.id, &payload)?;
-        self.bridge.send(&msg).await
+        self.client.send(&msg).await
     }
 
     /// Close stdin (sends EOF to the process).
     pub async fn close(&self) -> MicrosandboxResult<()> {
         let payload = ExecStdin { data: Vec::new() };
         let msg = Message::with_payload(MessageType::ExecStdin, self.id, &payload)?;
-        self.bridge.send(&msg).await
+        self.client.send(&msg).await
     }
 }
 

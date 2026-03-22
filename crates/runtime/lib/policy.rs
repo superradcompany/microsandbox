@@ -134,7 +134,7 @@ impl Default for SupervisorPolicy {
     fn default() -> Self {
         Self {
             shutdown_mode: ShutdownMode::Graceful,
-            grace_secs: 15,
+            grace_secs: 3,
             max_duration_secs: None,
             idle_timeout_secs: None,
         }
@@ -184,7 +184,7 @@ mod tests {
     fn test_default_supervisor_policy() {
         let policy = SupervisorPolicy::default();
         assert_eq!(policy.shutdown_mode, ShutdownMode::Graceful);
-        assert_eq!(policy.grace_secs, 15);
+        assert_eq!(policy.grace_secs, 3);
         assert!(policy.max_duration_secs.is_none());
         assert!(policy.idle_timeout_secs.is_none());
     }

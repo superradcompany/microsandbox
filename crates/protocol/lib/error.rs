@@ -33,6 +33,15 @@ pub enum ProtocolError {
         max: u32,
     },
 
+    /// The frame payload is too short to contain the required header fields.
+    #[error("frame payload too short: {size} bytes (minimum {min})")]
+    FrameTooShort {
+        /// The size of the frame payload.
+        size: u32,
+        /// The minimum required size.
+        min: u32,
+    },
+
     /// Unexpected end of stream.
     #[error("unexpected end of stream")]
     UnexpectedEof,

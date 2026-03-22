@@ -19,6 +19,7 @@ pub mod heartbeat;
 pub mod logging;
 pub mod monitor;
 pub mod policy;
+pub mod relay;
 pub mod supervisor;
 pub mod termination;
 pub mod vm;

@@ -4,8 +4,6 @@ use std::io::{IsTerminal, Write};
 
 use clap::Args;
 
-use crate::ui;
-
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -53,26 +51,23 @@ pub async fn run(args: ShellArgs) -> anyhow::Result<()> {
         .or(sandbox.config().shell.as_deref())
         .unwrap_or("/bin/sh");
 
-    if args.command.is_empty() && interactive {
-        // No command, TTY present — interactive shell session.
-        let exit_code = sandbox.attach(shell, |a| a).await?;
+    if interactive {
+        // Interactive mode — attach with optional script.
+        let script = if args.command.is_empty() {
+            None
+        } else {
+            Some(args.command.join(" "))
+        };
 
-        if let Err(e) = sandbox.stop_and_wait().await {
-            ui::warn(&format!("failed to stop sandbox: {e}"));
-        }
+        let exit_code = if let Some(ref script) = script {
+            sandbox
+                .attach(shell, |a| a.args(["-c", script.as_str()]))
+                .await?
+        } else {
+            sandbox.attach(shell, |a| a).await?
+        };
 
-        if exit_code != 0 {
-            std::process::exit(exit_code);
-        }
-    } else if !args.command.is_empty() && interactive {
-        // Command provided with TTY — interactive shell with script.
-        let script = args.command.join(" ");
-
-        let exit_code = sandbox.attach(shell, |a| a.args(["-c", &script])).await?;
-
-        if let Err(e) = sandbox.stop_and_wait().await {
-            ui::warn(&format!("failed to stop sandbox: {e}"));
-        }
+        super::maybe_stop(&sandbox).await;
 
         if exit_code != 0 {
             std::process::exit(exit_code);
@@ -94,6 +89,7 @@ pub async fn run(args: ShellArgs) -> anyhow::Result<()> {
             .await??;
 
             if buf.trim().is_empty() {
+                super::maybe_stop(&sandbox).await;
                 return Ok(());
             }
 
@@ -107,9 +103,7 @@ pub async fn run(args: ShellArgs) -> anyhow::Result<()> {
         std::io::stdout().write_all(output.stdout_bytes())?;
         std::io::stderr().write_all(output.stderr_bytes())?;
 
-        if let Err(e) = sandbox.stop_and_wait().await {
-            ui::warn(&format!("failed to stop sandbox: {e}"));
-        }
+        super::maybe_stop(&sandbox).await;
 
         if !output.status().success {
             std::process::exit(output.status().code);

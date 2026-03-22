@@ -1,13 +1,12 @@
 //! Agent communication with the guest VM.
 //!
-//! The [`AgentBridge`] provides request/response messaging with agentd
-//! over a virtio-console FD pair using the CBOR-based agent protocol.
+//! The [`AgentClient`] provides request/response messaging with agentd
+//! through the supervisor's agent relay socket.
 
-mod bridge;
-mod stream;
+mod client;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use bridge::AgentBridge;
+pub use client::AgentClient;

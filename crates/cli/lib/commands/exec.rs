@@ -70,9 +70,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
             })
             .await?;
 
-        if let Err(e) = sandbox.stop_and_wait().await {
-            ui::warn(&format!("failed to stop sandbox: {e}"));
-        }
+        super::maybe_stop(&sandbox).await;
 
         if exit_code != 0 {
             std::process::exit(exit_code);
@@ -95,9 +93,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         std::io::stdout().write_all(output.stdout_bytes())?;
         std::io::stderr().write_all(output.stderr_bytes())?;
 
-        if let Err(e) = sandbox.stop_and_wait().await {
-            ui::warn(&format!("failed to stop sandbox: {e}"));
-        }
+        super::maybe_stop(&sandbox).await;
 
         if !output.status().success {
             std::process::exit(output.status().code);

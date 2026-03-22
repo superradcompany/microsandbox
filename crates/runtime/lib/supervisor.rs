@@ -5,13 +5,12 @@
 //! captures console logs, updates the database, and manages the sandbox
 //! lifecycle (idle detection, max duration, drain, graceful shutdown).
 //!
-//! The supervisor does NOT handle agent protocol communication — that stays
-//! in the user application process via AgentBridge.
+//! The supervisor owns the agent bridge and exposes a Unix domain socket
+//! relay (`agent.sock`) for SDK and CLI client connections.
 
 use std::{
     ffi::OsString,
     io::Write,
-    os::fd::{FromRawFd, OwnedFd},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -70,12 +69,8 @@ pub struct SupervisorConfig {
     /// Serialized network config JSON consumed by `msbnet`.
     pub network_config_json: Option<String>,
 
-    /// Agent FD (inherited from parent, passed to VM for virtio-console).
-    pub agent_fd: i32,
-
-    /// Duplicate of the host-side agent FD kept open by the supervisor so the
-    /// guest agent channel survives after the creating process exits.
-    pub hold_agent_fd: Option<i32>,
+    /// Path to the Unix domain socket for the agent relay.
+    pub agent_sock_path: PathBuf,
 
     /// Network FD inherited by the `msbnet` child.
     pub net_msbnet_fd: Option<i32>,
@@ -118,19 +113,11 @@ struct StartupInfo {
 pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
     tracing::info!(sandbox = %config.sandbox_name, "supervisor starting");
 
-    // Validate agent FD.
-    if config.agent_fd < 0 {
-        return Err(crate::RuntimeError::Custom(format!(
-            "invalid agent_fd: {}",
-            config.agent_fd
-        )));
-    }
+    // Create the agent relay (socketpair + Unix socket listener).
+    let mut relay = crate::relay::AgentRelay::new(&config.agent_sock_path).await?;
 
-    let _held_agent_fd = config.hold_agent_fd.take().map(|fd| {
-        // SAFETY: the parent passed a valid inherited duplicate and
-        // transfers ownership of it to the supervisor process.
-        unsafe { OwnedFd::from_raw_fd(fd) }
-    });
+    // Consume the guest FD and store it in the VM config for spawn_vm_process.
+    config.vm_config.agent_fd = relay.take_guest_fd();
 
     if config.net_msbnet_fd.is_some() != config.net_vm_fd.is_some() {
         return Err(crate::RuntimeError::Custom(
@@ -210,6 +197,7 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
         }
     };
     close_supervisor_fd(&mut config.net_vm_fd);
+    close_supervisor_fd(&mut config.vm_config.agent_fd);
     let vm_pid = vm_child.id().ok_or_else(|| {
         crate::RuntimeError::Custom("VM child exited before PID could be read".to_string())
     })?;
@@ -282,6 +270,20 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
         cleanup_startup_children(&mut vm_child, &mut msbnet_child).await;
         return Err(err.into());
     }
+
+    // Wait for agentd readiness before accepting client connections.
+    relay.wait_ready().await?;
+
+    // Spawn the relay as a background task.
+    // The drain notification channel lets the relay tell the supervisor when a
+    // client sends core.shutdown, so the supervisor can start drain escalation.
+    let (relay_shutdown_tx, relay_shutdown_rx) = tokio::sync::watch::channel(false);
+    let (relay_drain_tx, mut relay_drain_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let relay_handle = tokio::spawn(async move {
+        if let Err(e) = relay.run(relay_shutdown_rx, relay_drain_tx).await {
+            tracing::error!("agent relay error: {e}");
+        }
+    });
 
     // Periodic timers.
     let mut idle_interval = tokio::time::interval(Duration::from_secs(5));
@@ -462,6 +464,21 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
                 );
             }
 
+            // ── Relay drain notification — core.shutdown from a client ────
+            Some(()) = relay_drain_rx.recv() => {
+                try_start_drain(
+                    TerminationReason::DrainRequested,
+                    "core.shutdown received via relay, triggering drain",
+                    &mut drain,
+                    &config.supervisor_policy,
+                    &mut vm_monitor,
+                    &mut grace_timer,
+                    &mut grace_timer_active,
+                    &mut kill_timer,
+                    &mut kill_timer_active,
+                );
+            }
+
             // ── Grace timer — escalate to SIGTERM ─────────────────────────
             _ = &mut grace_timer, if grace_timer_active => {
                 grace_timer_active = false;
@@ -545,6 +562,10 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
         _ => sandbox_entity::SandboxStatus::Crashed,
     };
     update_sandbox_status(&db, config.sandbox_id, final_status).await?;
+
+    // Shut down the agent relay.
+    let _ = relay_shutdown_tx.send(true);
+    relay_handle.abort();
 
     tracing::info!(
         sandbox = %config.sandbox_name,
@@ -700,25 +721,15 @@ fn spawn_vm_process(
     cmd.stderr(Stdio::piped());
 
     // Clear CLOEXEC on inherited FDs so they survive exec.
-    let agent_fd = config.agent_fd;
+    let agent_fd = config.vm_config.agent_fd;
     let net_fd = config.net_vm_fd;
     unsafe {
         cmd.pre_exec(move || {
-            let flags = libc::fcntl(agent_fd, libc::F_GETFD);
-            if flags == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::fcntl(agent_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
-                return Err(std::io::Error::last_os_error());
+            if let Some(afd) = agent_fd {
+                clear_fd_cloexec(afd)?;
             }
             if let Some(nfd) = net_fd {
-                let flags = libc::fcntl(nfd, libc::F_GETFD);
-                if flags == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::fcntl(nfd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
+                clear_fd_cloexec(nfd)?;
             }
             Ok(())
         });
@@ -809,8 +820,10 @@ fn microvm_cli_args(config: &SupervisorConfig) -> Vec<OsString> {
         args.push(exec_path.clone().into_os_string());
     }
 
-    args.push(OsString::from("--agent-fd"));
-    args.push(OsString::from(config.agent_fd.to_string()));
+    if let Some(agent_fd) = config.vm_config.agent_fd {
+        args.push(OsString::from("--agent-fd"));
+        args.push(OsString::from(agent_fd.to_string()));
+    }
 
     if let Some(net_fd) = config.net_vm_fd {
         args.push(OsString::from("--net-fd"));
@@ -1160,8 +1173,7 @@ mod tests {
             log_dir: PathBuf::from("/tmp/logs"),
             runtime_dir: PathBuf::from("/tmp/runtime"),
             network_config_json: None,
-            agent_fd: 7,
-            hold_agent_fd: None,
+            agent_sock_path: PathBuf::from("/tmp/agent.sock"),
             net_msbnet_fd: None,
             net_vm_fd: None,
             sandbox_slot: 1,
@@ -1187,7 +1199,7 @@ mod tests {
                 exec_path: Some(PathBuf::from("/bin/sh")),
                 exec_args: vec!["-lc".into(), "echo hi".into()],
                 net_fd: None,
-                agent_fd: None,
+                agent_fd: Some(7),
             },
         }
     }

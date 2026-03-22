@@ -45,14 +45,9 @@ pub struct SupervisorArgs {
     #[arg(long)]
     pub network_config_json: Option<String>,
 
-    /// Agent FD (inherited from parent, for VM's virtio-console).
+    /// Path to the Unix domain socket for the agent relay.
     #[arg(long)]
-    pub agent_fd: RawFd,
-
-    /// Duplicate of the host-side agent FD kept open by the supervisor so the
-    /// agent channel survives after the creating process exits.
-    #[arg(long)]
-    pub hold_agent_fd: Option<RawFd>,
+    pub agent_sock: PathBuf,
 
     /// Network FD inherited by the `msbnet` child.
     #[arg(long)]
@@ -72,7 +67,7 @@ pub struct SupervisorArgs {
     pub shutdown_mode: ShutdownMode,
 
     /// Grace period in seconds between drain escalation steps.
-    #[arg(long, default_value_t = 15)]
+    #[arg(long, default_value_t = 3)]
     pub grace_secs: u64,
 
     /// Hard cap on total sandbox lifetime in seconds.
@@ -224,8 +219,7 @@ pub async fn run(args: SupervisorArgs, log_level: Option<LogLevel>) -> RuntimeRe
         log_dir: args.log_dir,
         runtime_dir: args.runtime_dir,
         network_config_json: args.network_config_json,
-        agent_fd: args.agent_fd,
-        hold_agent_fd: args.hold_agent_fd,
+        agent_sock_path: args.agent_sock,
         net_msbnet_fd: args.net_msbnet_fd,
         net_vm_fd: args.net_vm_fd,
         sandbox_slot: u32::try_from(args.sandbox_id).map_err(|_| {

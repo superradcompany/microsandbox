@@ -11,13 +11,38 @@ use crate::error::ProtocolResult;
 /// Current protocol version.
 pub const PROTOCOL_VERSION: u8 = 1;
 
+/// Frame flag: this is the last message for the given correlation ID.
+///
+/// Set on terminal message types such as `ExecExited` and `FsResponse`.
+pub const FLAG_TERMINAL: u8 = 0b0000_0001;
+
+/// Frame flag: this is the first message of a new session.
+///
+/// Set on session-initiating message types such as `ExecRequest` and `FsRequest`.
+pub const FLAG_SESSION_START: u8 = 0b0000_0010;
+
+/// Frame flag: this message requests sandbox shutdown.
+///
+/// Set on `Shutdown` messages. The supervisor relay uses this to trigger
+/// drain escalation (SIGTERM → SIGKILL) if the guest doesn't exit voluntarily.
+pub const FLAG_SHUTDOWN: u8 = 0b0000_0100;
+
+/// Size of the frame header fields that sit between the length prefix and the
+/// CBOR payload: `[id: u32 BE][flags: u8]` = 5 bytes.
+pub const FRAME_HEADER_SIZE: usize = 5;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
 /// The message envelope sent over the wire.
 ///
-/// Each message contains a version, type, correlation ID, and a CBOR payload.
+/// Each message contains a version, type, correlation ID, flags, and a CBOR payload.
+///
+/// Wire format: `[len: u32 BE][id: u32 BE][flags: u8][CBOR(v, t, p)]`
+///
+/// The `id` and `flags` fields live in the binary frame header (outside CBOR)
+/// so that relay intermediaries can route frames without CBOR parsing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     /// Protocol version.
@@ -28,7 +53,16 @@ pub struct Message {
 
     /// Correlation ID used to associate requests with responses and
     /// to identify exec sessions.
+    ///
+    /// Serialized in the binary frame header, not in CBOR.
+    #[serde(skip)]
     pub id: u32,
+
+    /// Frame flags computed from the message type.
+    ///
+    /// Serialized in the binary frame header, not in CBOR.
+    #[serde(skip)]
+    pub flags: u8,
 
     /// The CBOR-encoded payload bytes.
     #[serde(with = "serde_bytes")]
@@ -85,10 +119,12 @@ pub enum MessageType {
 impl Message {
     /// Creates a new message with the current protocol version and raw payload bytes.
     pub fn new(t: MessageType, id: u32, p: Vec<u8>) -> Self {
+        let flags = t.flags();
         Self {
             v: PROTOCOL_VERSION,
             t,
             id,
+            flags,
             p,
         }
     }
@@ -101,10 +137,12 @@ impl Message {
     ) -> ProtocolResult<Self> {
         let mut p = Vec::new();
         ciborium::into_writer(payload, &mut p)?;
+        let flags = t.flags();
         Ok(Self {
             v: PROTOCOL_VERSION,
             t,
             id,
+            flags,
             p,
         })
     }
@@ -116,6 +154,16 @@ impl Message {
 }
 
 impl MessageType {
+    /// Computes the frame flags byte for this message type.
+    pub fn flags(&self) -> u8 {
+        match self {
+            Self::ExecExited | Self::FsResponse => FLAG_TERMINAL,
+            Self::ExecRequest | Self::FsRequest => FLAG_SESSION_START,
+            Self::Shutdown => FLAG_SHUTDOWN,
+            _ => 0,
+        }
+    }
+
     /// Returns the wire string representation.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -252,8 +300,35 @@ mod tests {
 
         assert_eq!(msg.t, MessageType::ExecExited);
         assert_eq!(msg.id, 7);
+        assert_eq!(msg.flags, FLAG_TERMINAL);
 
         let payload: ExecExited = msg.payload().unwrap();
         assert_eq!(payload.code, 42);
+    }
+
+    #[test]
+    fn test_message_type_flags() {
+        assert_eq!(MessageType::ExecExited.flags(), FLAG_TERMINAL);
+        assert_eq!(MessageType::FsResponse.flags(), FLAG_TERMINAL);
+        assert_eq!(MessageType::ExecRequest.flags(), FLAG_SESSION_START);
+        assert_eq!(MessageType::FsRequest.flags(), FLAG_SESSION_START);
+        assert_eq!(MessageType::Ready.flags(), 0);
+        assert_eq!(MessageType::Shutdown.flags(), FLAG_SHUTDOWN);
+        assert_eq!(MessageType::ExecStarted.flags(), 0);
+        assert_eq!(MessageType::ExecStdin.flags(), 0);
+        assert_eq!(MessageType::ExecStdout.flags(), 0);
+        assert_eq!(MessageType::ExecStderr.flags(), 0);
+        assert_eq!(MessageType::ExecResize.flags(), 0);
+        assert_eq!(MessageType::ExecSignal.flags(), 0);
+        assert_eq!(MessageType::FsData.flags(), 0);
+    }
+
+    #[test]
+    fn test_message_new_computes_flags() {
+        let msg = Message::new(MessageType::ExecRequest, 1, Vec::new());
+        assert_eq!(msg.flags, FLAG_SESSION_START);
+
+        let msg = Message::new(MessageType::ExecStdout, 1, Vec::new());
+        assert_eq!(msg.flags, 0);
     }
 }

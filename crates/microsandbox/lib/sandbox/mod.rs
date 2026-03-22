@@ -2,7 +2,7 @@
 //!
 //! The [`Sandbox`] struct represents a running sandbox. It is created via
 //! [`Sandbox::builder`] or [`Sandbox::create`], and provides lifecycle
-//! methods (stop, kill, drain, wait) and access to the [`AgentBridge`]
+//! methods (stop, kill, drain, wait) and access to the [`AgentClient`]
 //! for guest communication.
 
 mod attach;
@@ -29,7 +29,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::{
     MicrosandboxResult,
-    agent::AgentBridge,
+    agent::AgentClient,
     db::entity::{
         image as image_entity, microvm as microvm_entity, sandbox as sandbox_entity,
         sandbox_image as sandbox_image_entity, supervisor as supervisor_entity,
@@ -68,8 +68,8 @@ pub use types::{
 /// lifecycle management and access to the agent bridge for guest communication.
 pub struct Sandbox {
     config: SandboxConfig,
-    handle: Arc<Mutex<SupervisorHandle>>,
-    bridge: Arc<AgentBridge>,
+    handle: Option<Arc<Mutex<SupervisorHandle>>>,
+    client: Arc<AgentClient>,
 }
 
 /// Wrapper for using a raw stdin fd with [`tokio::io::unix::AsyncFd`].
@@ -268,10 +268,12 @@ impl Sandbox {
             SETUP_DONE.get_or_try_init(crate::setup::install).await?;
         }
 
-        let (handle, agent_host_fd) = spawn_supervisor(&config, sandbox_id, mode).await?;
-        let bridge = AgentBridge::new(agent_host_fd)?;
-        let ready = bridge.wait_ready().await?;
+        let (handle, agent_sock_path) = spawn_supervisor(&config, sandbox_id, mode).await?;
 
+        // Wait for the relay socket to become available.
+        let client = wait_for_relay(&agent_sock_path).await?;
+
+        let ready = client.ready();
         tracing::info!(
             boot_time_ms = ready.boot_time_ns / 1_000_000,
             init_time_ms = ready.init_time_ns / 1_000_000,
@@ -281,8 +283,8 @@ impl Sandbox {
 
         Ok(Self {
             config,
-            handle: Arc::new(Mutex::new(handle)),
-            bridge: Arc::new(bridge),
+            handle: Some(Arc::new(Mutex::new(handle))),
+            client: Arc::new(client),
         })
     }
 
@@ -344,31 +346,46 @@ impl Sandbox {
         &self.config
     }
 
-    /// Low-level access to the guest agent protocol. Use this for custom
+    /// Low-level access to the guest agent client. Use this for custom
     /// extensions — prefer [`exec`](Self::exec), [`shell`](Self::shell),
     /// and [`fs`](Self::fs) for standard operations.
-    pub fn bridge(&self) -> &AgentBridge {
-        &self.bridge
+    pub fn client(&self) -> &AgentClient {
+        &self.client
+    }
+
+    /// Returns `true` if this sandbox handle owns the supervisor lifecycle.
+    ///
+    /// When `true`, dropping this handle or calling [`stop`](Self::stop)
+    /// will terminate the sandbox. When `false`, the sandbox was created by
+    /// another process and will continue running after disconnect.
+    pub fn owns_lifecycle(&self) -> bool {
+        self.handle.is_some()
     }
 
     /// Read, write, and manage files inside the running sandbox.
     /// Operations go through the guest agent (agentd).
     pub fn fs(&self) -> fs::SandboxFs<'_> {
-        fs::SandboxFs::new(&self.bridge)
+        fs::SandboxFs::new(&self.client)
     }
 
     /// Stop the sandbox gracefully by sending `core.shutdown` to agentd.
     pub async fn stop(&self) -> MicrosandboxResult<()> {
         let msg = Message::new(MessageType::Shutdown, 0, Vec::new());
-        self.bridge.send(&msg).await
+        self.client.send(&msg).await
     }
 
     /// Stop the sandbox gracefully and wait for the supervisor to exit.
     ///
-    /// Always waits for the supervisor even if the stop signal fails
-    /// (e.g., agent already exited).
+    /// If this handle does not own the lifecycle (connected to an existing
+    /// sandbox), only the stop signal is sent — wait is skipped since we
+    /// don't have a supervisor handle to wait on.
     pub async fn stop_and_wait(&self) -> MicrosandboxResult<ExitStatus> {
         let stop_result = self.stop().await;
+        if self.handle.is_none() {
+            stop_result?;
+            // No handle to wait on — return a synthetic success status.
+            return Ok(std::process::ExitStatus::default());
+        }
         let wait_result = self.wait().await;
         stop_result?;
         wait_result
@@ -376,17 +393,32 @@ impl Sandbox {
 
     /// Kill the sandbox immediately (SIGKILL to VM process).
     pub async fn kill(&self) -> MicrosandboxResult<()> {
-        self.handle.lock().await.kill_vm()
+        match &self.handle {
+            Some(h) => h.lock().await.kill_vm(),
+            None => Err(crate::MicrosandboxError::Runtime(
+                "cannot kill: not the lifecycle owner".into(),
+            )),
+        }
     }
 
     /// Trigger a graceful drain (SIGUSR1 to supervisor).
     pub async fn drain(&self) -> MicrosandboxResult<()> {
-        self.handle.lock().await.drain_supervisor()
+        match &self.handle {
+            Some(h) => h.lock().await.drain_supervisor(),
+            None => Err(crate::MicrosandboxError::Runtime(
+                "cannot drain: not the lifecycle owner".into(),
+            )),
+        }
     }
 
     /// Wait for the supervisor process to exit.
     pub async fn wait(&self) -> MicrosandboxResult<ExitStatus> {
-        self.handle.lock().await.wait().await
+        match &self.handle {
+            Some(h) => h.lock().await.wait().await,
+            None => Err(crate::MicrosandboxError::Runtime(
+                "cannot wait: not the lifecycle owner".into(),
+            )),
+        }
     }
 
     /// Detach this handle without stopping the sandbox.
@@ -395,10 +427,11 @@ impl Sandbox {
     /// this handle is dropped. Intended for CLI flows like `create`, `start`,
     /// and `run --detach`.
     pub async fn detach(self) {
-        self.handle.lock().await.disarm();
-        // Normal drop runs — AgentBridge reader task is aborted (fine,
-        // the supervisor holds its own liveness FD) and SupervisorHandle
-        // drops without sending SIGTERM.
+        if let Some(h) = &self.handle {
+            h.lock().await.disarm();
+        }
+        // Normal drop runs — client reader task is aborted and
+        // SupervisorHandle drops without sending SIGTERM.
     }
 }
 
@@ -435,23 +468,23 @@ impl Sandbox {
         } = opts;
 
         // Allocate correlation ID and subscribe BEFORE sending.
-        let id = self.bridge.next_id();
-        let rx = self.bridge.subscribe(id).await;
+        let id = self.client.next_id();
+        let rx = self.client.subscribe(id).await;
 
         let req = build_exec_request(&self.config, cmd, args, cwd, &env, &rlimits, tty, 24, 80);
         let msg = Message::with_payload(MessageType::ExecRequest, id, &req)?;
-        self.bridge.send(&msg).await?;
+        self.client.send(&msg).await?;
 
         // Build stdin sink (if Pipe mode).
         let stdin = match &stdin_mode {
-            StdinMode::Pipe => Some(ExecSink::new(id, Arc::clone(&self.bridge))),
+            StdinMode::Pipe => Some(ExecSink::new(id, Arc::clone(&self.client))),
             _ => None,
         };
 
         // Handle StdinMode::Bytes — send bytes then close.
         if let StdinMode::Bytes(ref data) = stdin_mode {
             let data = data.clone();
-            let bridge = Arc::clone(&self.bridge);
+            let bridge = Arc::clone(&self.client);
             tokio::spawn(async move {
                 let payload = ExecStdin { data };
                 if let Ok(msg) = Message::with_payload(MessageType::ExecStdin, id, &payload) {
@@ -473,7 +506,7 @@ impl Sandbox {
             id,
             event_rx,
             stdin,
-            Arc::clone(&self.bridge),
+            Arc::clone(&self.client),
         ))
     }
 
@@ -576,8 +609,8 @@ impl Sandbox {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
 
         // Allocate ID and subscribe.
-        let id = self.bridge.next_id();
-        let mut rx = self.bridge.subscribe(id).await;
+        let id = self.client.next_id();
+        let mut rx = self.client.subscribe(id).await;
 
         // Build ExecRequest with tty=true.
         let req = build_exec_request(
@@ -592,7 +625,7 @@ impl Sandbox {
             cols,
         );
         let msg = Message::with_payload(MessageType::ExecRequest, id, &req)?;
-        self.bridge.send(&msg).await?;
+        self.client.send(&msg).await?;
 
         // Enter raw mode.
         crossterm::terminal::enable_raw_mode()
@@ -686,7 +719,7 @@ impl Sandbox {
                         // Forward to guest.
                         let payload = ExecStdin { data: data.to_vec() };
                         if let Ok(msg) = Message::with_payload(MessageType::ExecStdin, id, &payload) {
-                            let _ = self.bridge.send(&msg).await;
+                            let _ = self.client.send(&msg).await;
                         }
                     } else if n == 0 {
                         break; // EOF
@@ -724,7 +757,7 @@ impl Sandbox {
                     if let Ok((new_cols, new_rows)) = crossterm::terminal::size() {
                         let payload = ExecResize { rows: new_rows, cols: new_cols };
                         if let Ok(msg) = Message::with_payload(MessageType::ExecResize, id, &payload) {
-                            let _ = self.bridge.send(&msg).await;
+                            let _ = self.client.send(&msg).await;
                         }
                     }
                 }
@@ -739,6 +772,25 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Wait for the agent relay socket to become available and connect.
+///
+/// The supervisor creates the relay socket asynchronously during startup.
+/// This function retries the connection with brief delays until it succeeds
+/// or a timeout is reached.
+async fn wait_for_relay(sock_path: &std::path::Path) -> MicrosandboxResult<AgentClient> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+
+    loop {
+        match AgentClient::connect(sock_path).await {
+            Ok(client) => return Ok(client),
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
 
 /// Build a [`SandboxHandle`] by eagerly loading supervisor and microVM PIDs.
 async fn build_handle(

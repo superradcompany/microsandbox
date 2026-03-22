@@ -12,7 +12,7 @@ use microsandbox_protocol::{
 };
 use tokio::sync::mpsc;
 
-use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentBridge};
+use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -23,7 +23,7 @@ use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentBridge};
 /// All operations go through the agent protocol (`core.fs.*` messages),
 /// which are handled by agentd inside the guest VM.
 pub struct SandboxFs<'a> {
-    bridge: &'a Arc<AgentBridge>,
+    client: &'a Arc<AgentClient>,
 }
 
 /// A filesystem entry returned from listing or stat operations.
@@ -91,7 +91,7 @@ pub struct FsReadStream {
 /// A streaming writer for file data to the sandbox.
 pub struct FsWriteSink {
     id: u32,
-    bridge: Arc<AgentBridge>,
+    client: Arc<AgentClient>,
     rx: mpsc::UnboundedReceiver<Message>,
 }
 
@@ -101,8 +101,8 @@ pub struct FsWriteSink {
 
 impl<'a> SandboxFs<'a> {
     /// Create a new filesystem handle.
-    pub(crate) fn new(bridge: &'a Arc<AgentBridge>) -> Self {
-        Self { bridge }
+    pub(crate) fn new(client: &'a Arc<AgentClient>) -> Self {
+        Self { client }
     }
 
     //----------------------------------------------------------------------------------------------
@@ -111,8 +111,8 @@ impl<'a> SandboxFs<'a> {
 
     /// Read an entire file from the guest filesystem into memory.
     pub async fn read(&self, path: &str) -> MicrosandboxResult<Bytes> {
-        let id = self.bridge.next_id();
-        let mut rx = self.bridge.subscribe(id).await;
+        let id = self.client.next_id();
+        let mut rx = self.client.subscribe(id).await;
 
         let req = FsRequest {
             op: FsOp::Read {
@@ -120,7 +120,7 @@ impl<'a> SandboxFs<'a> {
             },
         };
         let msg = Message::with_payload(MessageType::FsRequest, id, &req)?;
-        self.bridge.send(&msg).await?;
+        self.client.send(&msg).await?;
 
         // Collect FsData chunks until FsResponse (terminal).
         let mut data = Vec::new();
@@ -157,8 +157,8 @@ impl<'a> SandboxFs<'a> {
     ///
     /// Returns an [`FsReadStream`] that yields chunks of data as they arrive.
     pub async fn read_stream(&self, path: &str) -> MicrosandboxResult<FsReadStream> {
-        let id = self.bridge.next_id();
-        let rx = self.bridge.subscribe(id).await;
+        let id = self.client.next_id();
+        let rx = self.client.subscribe(id).await;
 
         let req = FsRequest {
             op: FsOp::Read {
@@ -166,7 +166,7 @@ impl<'a> SandboxFs<'a> {
             },
         };
         let msg = Message::with_payload(MessageType::FsRequest, id, &req)?;
-        self.bridge.send(&msg).await?;
+        self.client.send(&msg).await?;
 
         Ok(FsReadStream { rx })
     }
@@ -178,8 +178,8 @@ impl<'a> SandboxFs<'a> {
     /// Write data to a file in the guest, creating it if it doesn't exist.
     pub async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
         let data = data.as_ref();
-        let id = self.bridge.next_id();
-        let mut rx = self.bridge.subscribe(id).await;
+        let id = self.client.next_id();
+        let mut rx = self.client.subscribe(id).await;
 
         // Send write request.
         let req = FsRequest {
@@ -189,7 +189,7 @@ impl<'a> SandboxFs<'a> {
             },
         };
         let msg = Message::with_payload(MessageType::FsRequest, id, &req)?;
-        self.bridge.send(&msg).await?;
+        self.client.send(&msg).await?;
 
         // Send data chunks.
         for chunk in data.chunks(FS_CHUNK_SIZE) {
@@ -197,13 +197,13 @@ impl<'a> SandboxFs<'a> {
                 data: chunk.to_vec(),
             };
             let msg = Message::with_payload(MessageType::FsData, id, &fs_data)?;
-            self.bridge.send(&msg).await?;
+            self.client.send(&msg).await?;
         }
 
         // Send EOF.
         let eof = FsData { data: Vec::new() };
         let msg = Message::with_payload(MessageType::FsData, id, &eof)?;
-        self.bridge.send(&msg).await?;
+        self.client.send(&msg).await?;
 
         // Wait for terminal response.
         wait_for_ok_response(&mut rx).await
@@ -214,10 +214,10 @@ impl<'a> SandboxFs<'a> {
     /// Returns an [`FsWriteSink`] for writing data in chunks. Call
     /// [`FsWriteSink::close`] when done writing.
     pub async fn write_stream(&self, path: &str) -> MicrosandboxResult<FsWriteSink> {
-        let id = self.bridge.next_id();
+        let id = self.client.next_id();
 
         // Subscribe before sending to avoid race.
-        let rx = self.bridge.subscribe(id).await;
+        let rx = self.client.subscribe(id).await;
 
         let req = FsRequest {
             op: FsOp::Write {
@@ -226,11 +226,11 @@ impl<'a> SandboxFs<'a> {
             },
         };
         let msg = Message::with_payload(MessageType::FsRequest, id, &req)?;
-        self.bridge.send(&msg).await?;
+        self.client.send(&msg).await?;
 
         Ok(FsWriteSink {
             id,
-            bridge: Arc::clone(self.bridge),
+            client: Arc::clone(self.client),
             rx,
         })
     }
@@ -247,7 +247,7 @@ impl<'a> SandboxFs<'a> {
             },
         };
         let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.bridge.request(msg).await?;
+        let resp_msg = self.client.request(msg).await?;
         let resp: FsResponse = resp_msg.payload()?;
 
         if !resp.ok {
@@ -272,7 +272,7 @@ impl<'a> SandboxFs<'a> {
             },
         };
         let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.bridge.request(msg).await?;
+        let resp_msg = self.client.request(msg).await?;
         check_response(resp_msg)
     }
 
@@ -284,7 +284,7 @@ impl<'a> SandboxFs<'a> {
             },
         };
         let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.bridge.request(msg).await?;
+        let resp_msg = self.client.request(msg).await?;
         check_response(resp_msg)
     }
 
@@ -300,7 +300,7 @@ impl<'a> SandboxFs<'a> {
             },
         };
         let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.bridge.request(msg).await?;
+        let resp_msg = self.client.request(msg).await?;
         check_response(resp_msg)
     }
 
@@ -313,7 +313,7 @@ impl<'a> SandboxFs<'a> {
             },
         };
         let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.bridge.request(msg).await?;
+        let resp_msg = self.client.request(msg).await?;
         check_response(resp_msg)
     }
 
@@ -326,7 +326,7 @@ impl<'a> SandboxFs<'a> {
             },
         };
         let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.bridge.request(msg).await?;
+        let resp_msg = self.client.request(msg).await?;
         check_response(resp_msg)
     }
 
@@ -342,7 +342,7 @@ impl<'a> SandboxFs<'a> {
             },
         };
         let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.bridge.request(msg).await?;
+        let resp_msg = self.client.request(msg).await?;
         let resp: FsResponse = resp_msg.payload()?;
 
         if !resp.ok {
@@ -448,7 +448,7 @@ impl FsWriteSink {
             data: data.as_ref().to_vec(),
         };
         let msg = Message::with_payload(MessageType::FsData, self.id, &fs_data)?;
-        self.bridge.send(&msg).await
+        self.client.send(&msg).await
     }
 
     /// Close the write stream (sends EOF) and wait for confirmation.
@@ -458,7 +458,7 @@ impl FsWriteSink {
     pub async fn close(mut self) -> MicrosandboxResult<()> {
         let eof = FsData { data: Vec::new() };
         let msg = Message::with_payload(MessageType::FsData, self.id, &eof)?;
-        self.bridge.send(&msg).await?;
+        self.client.send(&msg).await?;
 
         // Wait for the terminal FsResponse from the guest.
         wait_for_ok_response(&mut self.rx).await

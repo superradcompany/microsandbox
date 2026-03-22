@@ -25,21 +25,28 @@ pub mod volume;
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Resolve an existing sandbox by name and ensure it is started.
+/// Stop the sandbox if we own its lifecycle (i.e., we started it).
 ///
-/// If the sandbox is stopped or crashed, it will be started with a spinner.
-/// Returns an error if the sandbox is already running in another process or
-/// is in an unexpected state.
+/// When connecting to an already-running sandbox, this is a no-op.
+pub async fn maybe_stop(sandbox: &Sandbox) {
+    if sandbox.owns_lifecycle()
+        && let Err(e) = sandbox.stop_and_wait().await
+    {
+        ui::warn(&format!("failed to stop sandbox: {e}"));
+    }
+}
+
+/// Resolve an existing sandbox by name and ensure it is accessible.
+///
+/// If the sandbox is already running, connects to the existing supervisor
+/// via the agent relay socket. If stopped or crashed, starts it with a spinner.
 pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbox> {
     let handle = Sandbox::get(name).await?;
 
     match handle.status() {
         SandboxStatus::Running | SandboxStatus::Draining => {
-            anyhow::bail!(
-                "sandbox '{}' is already running in another process; \
-                 cross-process access is not yet supported",
-                name
-            );
+            // Connect to the running supervisor via the agent relay.
+            Ok(handle.connect().await?)
         }
         SandboxStatus::Stopped | SandboxStatus::Crashed => {
             let spinner = if quiet {
@@ -58,7 +65,7 @@ pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbo
                 }
             }
         }
-        _ => {
+        SandboxStatus::Paused => {
             anyhow::bail!(
                 "sandbox '{}' is in state {:?} and cannot be started",
                 name,

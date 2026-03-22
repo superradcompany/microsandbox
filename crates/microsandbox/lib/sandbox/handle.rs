@@ -2,8 +2,11 @@
 
 use sea_orm::EntityTrait;
 
+use std::sync::Arc;
+
 use crate::{
-    MicrosandboxResult, db::entity::sandbox as sandbox_entity, runtime::SupervisorSpawnMode,
+    MicrosandboxResult, agent::AgentClient, db::entity::sandbox as sandbox_entity,
+    runtime::SupervisorSpawnMode,
 };
 
 use super::{Sandbox, SandboxConfig, SandboxStatus};
@@ -103,16 +106,43 @@ impl SandboxHandle {
         Sandbox::start_with_mode(&self.name, SupervisorSpawnMode::Detached).await
     }
 
+    /// Connect to a running sandbox's supervisor via the agent relay socket.
+    ///
+    /// Returns a [`Sandbox`] handle that communicates through the relay
+    /// without owning the supervisor lifecycle. The sandbox will continue
+    /// running after this handle is dropped.
+    pub async fn connect(&self) -> MicrosandboxResult<Sandbox> {
+        if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
+            return Err(crate::MicrosandboxError::Custom(format!(
+                "sandbox '{}' is not running (status: {:?})",
+                self.name, self.status
+            )));
+        }
+
+        let global = crate::config::config();
+        let sock_path = global
+            .sandboxes_dir()
+            .join(&self.name)
+            .join("runtime")
+            .join("agent.sock");
+
+        let client = AgentClient::connect(&sock_path).await?;
+        let config: SandboxConfig = serde_json::from_str(&self.config_json)?;
+
+        Ok(Sandbox {
+            config,
+            handle: None,
+            client: Arc::new(client),
+        })
+    }
+
     /// Stop the sandbox gracefully (SIGTERM).
     ///
     /// Signals the running supervisor with SIGTERM, or falls back to the
     /// microVM process group if the supervisor is already gone.
     pub async fn stop(&self) -> MicrosandboxResult<()> {
         if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
-            return Err(crate::MicrosandboxError::Custom(format!(
-                "sandbox '{}' is not running",
-                self.name
-            )));
+            return Ok(());
         }
 
         signal_pids(

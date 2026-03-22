@@ -1,12 +1,13 @@
 //! Spawning the supervisor process.
 //!
-//! [`spawn_supervisor`] creates a Unix socket pair for the agent channel,
-//! assembles CLI arguments from [`SandboxConfig`], fork+execs `msb supervisor`,
-//! and reads the startup JSON to obtain child PIDs.
+//! [`spawn_supervisor`] assembles CLI arguments from [`SandboxConfig`],
+//! fork+execs `msb supervisor`, and reads the startup JSON to obtain child PIDs.
+//! The supervisor creates the agent socketpair internally and exposes a Unix
+//! domain socket relay for client connections.
 
 use std::{
     ffi::OsString,
-    os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
+    os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     path::Path,
     process::Stdio,
 };
@@ -47,31 +48,19 @@ pub enum SupervisorSpawnMode {
 
 /// Spawn the supervisor process for a sandbox.
 ///
-/// Returns a [`SupervisorHandle`] and the host-side raw FD for the agent
-/// channel (to be wrapped in an [`AgentBridge`](crate::agent::AgentBridge)).
+/// Returns a [`SupervisorHandle`] and the path to the agent relay socket.
 ///
 /// The function:
-/// 1. Creates a Unix socket pair for host↔agentd communication
-/// 2. Resolves the `msb` binary path
-/// 3. Creates sandbox directories (logs, runtime, scripts)
-/// 4. Builds CLI arguments from the config
-/// 5. Spawns `msb supervisor` with the guest FD inherited
-/// 6. Reads startup JSON from stdout to get child PIDs
+/// 1. Resolves the `msb` binary path
+/// 2. Creates sandbox directories (logs, runtime, scripts)
+/// 3. Builds CLI arguments from the config
+/// 4. Spawns `msb supervisor` with `--agent-sock` for the relay
+/// 5. Reads startup JSON from stdout to get child PIDs
 pub async fn spawn_supervisor(
     config: &SandboxConfig,
     sandbox_id: i32,
     mode: SupervisorSpawnMode,
-) -> MicrosandboxResult<(SupervisorHandle, RawFd)> {
-    // Create the agent socket pair (SOCK_STREAM for virtio-console).
-    let (host_fd, guest_fd) = create_socketpair(libc::SOCK_STREAM)?;
-    let guest_raw_fd = guest_fd.as_raw_fd();
-    let hold_agent_fd = if mode == SupervisorSpawnMode::Detached {
-        Some(duplicate_fd(host_fd.as_raw_fd())?)
-    } else {
-        None
-    };
-    let hold_agent_raw_fd = hold_agent_fd.as_ref().map(AsRawFd::as_raw_fd);
-
+) -> MicrosandboxResult<(SupervisorHandle, std::path::PathBuf)> {
     // Create the network socket pair (SOCK_DGRAM for Unixgram frame relay)
     // if networking is enabled.
     let net_fds = if config.network.enabled {
@@ -121,6 +110,9 @@ pub async fn spawn_supervisor(
         tokio::fs::write(&script_path, content).await?;
     }
 
+    // Compute the agent relay socket path.
+    let agent_sock_path = runtime_dir.join("agent.sock");
+
     // Build the command.
     let mut cmd = Command::new(&msb_path);
     cmd.args(supervisor_cli_args(
@@ -133,8 +125,7 @@ pub async fn spawn_supervisor(
         &empty_rootfs_dir,
         &rw_dir,
         &staging_dir,
-        guest_raw_fd,
-        hold_agent_raw_fd,
+        &agent_sock_path,
         net_msbnet_raw_fd,
         net_vm_raw_fd,
         &libkrunfw_path,
@@ -151,13 +142,10 @@ pub async fn spawn_supervisor(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::inherit());
 
-    // Clear CLOEXEC on inherited FDs so they survive exec.
+    // Clear CLOEXEC on inherited network FDs so they survive exec.
+    // Agent FDs are no longer inherited — the supervisor creates its own socketpair.
     unsafe {
         cmd.pre_exec(move || {
-            clear_cloexec(guest_raw_fd)?;
-            if let Some(hold_agent_raw_fd) = hold_agent_raw_fd {
-                clear_cloexec(hold_agent_raw_fd)?;
-            }
             if let Some(nfd) = net_msbnet_raw_fd {
                 clear_cloexec(nfd)?;
             }
@@ -175,8 +163,6 @@ pub async fn spawn_supervisor(
     })?;
 
     // Close inherited FDs in the parent by dropping them.
-    drop(guest_fd);
-    drop(hold_agent_fd);
     drop(net_fds);
 
     // Read the startup JSON from the supervisor's stdout.
@@ -216,9 +202,6 @@ pub async fn spawn_supervisor(
         }
     };
 
-    // Transfer ownership of the host FD to the caller.
-    let host_raw_fd = host_fd.into_raw_fd();
-
     let handle = SupervisorHandle::new(
         supervisor_pid,
         startup.vm_pid,
@@ -227,7 +210,7 @@ pub async fn spawn_supervisor(
         child,
     );
 
-    Ok((handle, host_raw_fd))
+    Ok((handle, agent_sock_path))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -262,17 +245,6 @@ fn create_socketpair(sock_type: libc::c_int) -> MicrosandboxResult<(OwnedFd, Own
     set_nonblock(fd2.as_raw_fd())?;
 
     Ok((fd1, fd2))
-}
-
-fn duplicate_fd(fd: RawFd) -> MicrosandboxResult<OwnedFd> {
-    let duplicated = unsafe { libc::dup(fd) };
-    if duplicated == -1 {
-        return Err(crate::MicrosandboxError::Io(std::io::Error::last_os_error()));
-    }
-
-    let owned_fd = unsafe { OwnedFd::from_raw_fd(duplicated) };
-    set_cloexec(owned_fd.as_raw_fd())?;
-    Ok(owned_fd)
 }
 
 /// Set non-blocking mode on a file descriptor (preserving other flags).
@@ -393,8 +365,7 @@ fn supervisor_cli_args(
     empty_rootfs_dir: &Path,
     rw_dir: &Path,
     staging_dir: &Path,
-    agent_fd: RawFd,
-    hold_agent_fd: Option<RawFd>,
+    agent_sock_path: &Path,
     net_msbnet_fd: Option<RawFd>,
     net_vm_fd: Option<RawFd>,
     libkrunfw_path: &Path,
@@ -419,12 +390,8 @@ fn supervisor_cli_args(
         args.push(OsString::from("--network-config-json"));
         args.push(OsString::from(network_config_json));
     }
-    args.push(OsString::from("--agent-fd"));
-    args.push(OsString::from(agent_fd.to_string()));
-    if let Some(hold_agent_fd) = hold_agent_fd {
-        args.push(OsString::from("--hold-agent-fd"));
-        args.push(OsString::from(hold_agent_fd.to_string()));
-    }
+    args.push(OsString::from("--agent-sock"));
+    args.push(agent_sock_path.as_os_str().to_os_string());
 
     if let Some(nfd) = net_msbnet_fd {
         args.push(OsString::from("--net-msbnet-fd"));
@@ -613,8 +580,7 @@ mod tests {
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
-            9,
-            None,
+            Path::new("/tmp/agent.sock"),
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
@@ -640,8 +606,7 @@ mod tests {
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
-            9,
-            None,
+            Path::new("/tmp/agent.sock"),
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
@@ -656,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn test_supervisor_cli_args_include_hold_agent_fd_when_requested() {
+    fn test_supervisor_cli_args_include_agent_sock_path() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
@@ -672,8 +637,7 @@ mod tests {
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
-            9,
-            Some(10),
+            Path::new("/tmp/agent.sock"),
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
@@ -686,7 +650,7 @@ mod tests {
         assert!(
             rendered
                 .windows(2)
-                .any(|pair| pair == ["--hold-agent-fd", "10"])
+                .any(|pair| pair == ["--agent-sock", "/tmp/agent.sock"])
         );
     }
 
@@ -707,8 +671,7 @@ mod tests {
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
-            9,
-            None,
+            Path::new("/tmp/agent.sock"),
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
@@ -744,8 +707,7 @@ mod tests {
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
-            9,
-            None,
+            Path::new("/tmp/agent.sock"),
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
@@ -783,8 +745,7 @@ mod tests {
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
-            9,
-            None,
+            Path::new("/tmp/agent.sock"),
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
@@ -819,8 +780,7 @@ mod tests {
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
-            9,
-            None,
+            Path::new("/tmp/agent.sock"),
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
@@ -854,8 +814,7 @@ mod tests {
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
-            9,
-            None,
+            Path::new("/tmp/agent.sock"),
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
@@ -886,8 +845,7 @@ mod tests {
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
-            9,
-            None,
+            Path::new("/tmp/agent.sock"),
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
@@ -920,8 +878,7 @@ mod tests {
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
-            9,
-            None,
+            Path::new("/tmp/agent.sock"),
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
@@ -964,8 +921,7 @@ mod tests {
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
-            9,
-            None,
+            Path::new("/tmp/agent.sock"),
             None,
             None,
             Path::new("/tmp/libkrunfw.dylib"),
