@@ -303,6 +303,12 @@ impl Registry {
 
                         result
                     } else {
+                        // Already extracted — send completion events so the UI
+                        // advances this layer's bar to the done state.
+                        if let Some(ref p) = progress {
+                            p.send(PullProgress::LayerIndexComplete { layer_index: i });
+                        }
+
                         crate::layer::extraction::ExtractionResult {
                             implicit_dirs: match layer.pending_implicit_dirs() {
                                 Ok(implicit_dirs) => implicit_dirs,

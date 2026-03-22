@@ -112,8 +112,11 @@ impl Layer {
         // Acquire cross-process download lock.
         let lock_file = open_lock_file(&self.download_lock_path)?;
         flock_exclusive(&lock_file)?;
+        let download_lock_path = self.download_lock_path.clone();
         let _guard = scopeguard::guard(lock_file, |f| {
             let _ = flock_unlock(&f);
+            drop(f);
+            let _ = std::fs::remove_file(&download_lock_path);
         });
 
         if force {
@@ -284,8 +287,11 @@ impl Layer {
         // Cross-process lock.
         let lock_file = open_lock_file(&self.lock_path)?;
         flock_exclusive(&lock_file)?;
+        let lock_path = self.lock_path.clone();
         let _flock_guard = scopeguard::guard(lock_file, |f| {
             let _ = flock_unlock(&f);
+            drop(f);
+            let _ = std::fs::remove_file(&lock_path);
         });
 
         // Re-check after lock.

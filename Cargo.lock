@@ -2164,6 +2164,7 @@ dependencies = [
  "clap",
  "console",
  "indicatif",
+ "libc",
  "microsandbox",
  "microsandbox-image",
  "microsandbox-runtime",

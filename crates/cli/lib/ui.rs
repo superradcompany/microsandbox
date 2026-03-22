@@ -6,6 +6,7 @@
 
 use std::{
     io::IsTerminal,
+    os::fd::AsRawFd,
     time::{Duration, Instant},
 };
 
@@ -30,6 +31,16 @@ pub struct Spinner {
     label: String,
     target: String,
     quiet: bool,
+    _echo_guard: Option<EchoGuard>,
+}
+
+/// RAII guard that disables terminal echo while held.
+///
+/// Prevents stray keypresses (e.g. Enter) from injecting newlines that
+/// desync indicatif's cursor tracking, which causes ghost lines.
+struct EchoGuard {
+    original: libc::termios,
+    fd: i32,
 }
 
 /// Minimal table renderer with column alignment.
@@ -68,6 +79,7 @@ impl Spinner {
             label: label.to_string(),
             target: target.to_string(),
             quiet: false,
+            _echo_guard: EchoGuard::acquire(),
         }
     }
 
@@ -79,6 +91,7 @@ impl Spinner {
             label: String::new(),
             target: String::new(),
             quiet: true,
+            _echo_guard: None,
         }
     }
 
@@ -121,6 +134,41 @@ impl Spinner {
         }
         if !self.quiet {
             eprintln!("   {} {:<12} {}", style("✗").red(), self.label, self.target);
+        }
+    }
+}
+
+impl EchoGuard {
+    /// Disable terminal echo on stdin. Returns `None` if stdin is not a TTY.
+    fn acquire() -> Option<Self> {
+        if !std::io::stdin().is_terminal() {
+            return None;
+        }
+
+        let fd = std::io::stdin().as_raw_fd();
+        let mut original: libc::termios = unsafe { std::mem::zeroed() };
+
+        if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+            return None;
+        }
+
+        let mut modified = original;
+        modified.c_lflag &= !libc::ECHO;
+        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &modified) } != 0 {
+            return None;
+        }
+
+        Some(Self { original, fd })
+    }
+}
+
+impl Drop for EchoGuard {
+    fn drop(&mut self) {
+        // Flush any keypresses that accumulated while echo was off,
+        // so they don't spill into the shell prompt after we restore.
+        unsafe {
+            libc::tcflush(self.fd, libc::TCIFLUSH);
+            libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
         }
     }
 }
@@ -318,6 +366,7 @@ pub struct PullProgressDisplay {
     extract_style: ProgressStyle,
     index_style: ProgressStyle,
     done_style: ProgressStyle,
+    _echo_guard: Option<EchoGuard>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -358,6 +407,7 @@ impl PullProgressDisplay {
             header,
             layer_bars: Vec::new(),
             reference: reference.to_string(),
+            _echo_guard: if is_tty { EchoGuard::acquire() } else { None },
             download_style: ProgressStyle::default_bar()
                 .template(
                     "     {prefix}  {bar:36.magenta/dim}  {bytes}/{total_bytes}  {msg:.magenta}",
@@ -422,6 +472,7 @@ impl PullProgressDisplay {
                 ..
             } => {
                 if let Some(pb) = self.layer_bars.get(layer_index) {
+                    pb.set_length(downloaded_bytes);
                     pb.set_position(downloaded_bytes);
                 }
             }
