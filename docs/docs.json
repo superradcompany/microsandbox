@@ -1,6 +1,6 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "sequoia",
+  "theme": "aspen",
   "name": "microsandbox",
   "logo": {
     "light": "/logo/light.svg",
