@@ -1,0 +1,194 @@
+---
+title: Commands
+description: Execute commands, stream output, and interact with sandboxes
+icon: "terminal"
+---
+
+Once a sandbox is running, you can execute commands inside it, stream their output in real time, or attach an interactive terminal session. All communication happens over a virtio-console channel between the host and the guest agent, with no SSH or network overhead.
+
+## Execute a command
+
+Run a command and wait for it to complete. You get back the exit code, stdout, and stderr.
+
+<CodeGroup>
+```rust Rust
+let output = sb.exec("python", ["-c", "print('hello')"]).await?;
+println!("{}", output.stdout()?);     // "hello\n"
+println!("{}", output.status().code); // 0
+```
+
+```typescript TypeScript
+const output = await sb.exec("python", ["-c", "print('hello')"])
+console.log(output.stdout.toString()) // "hello\n"
+console.log(output.status.success)    // true
+console.log(output.status.code)       // 0
+```
+
+```python Python
+output = await sb.exec("python", ["-c", "print('hello')"])
+print(output.stdout.decode())  # "hello\n"
+print(output.status.success)   # True
+```
+
+</CodeGroup>
+
+## Execution options
+
+You can override the working directory, set environment variables, apply resource limits, and set a timeout, all on a per-command basis.
+
+<CodeGroup>
+```rust Rust
+let output = sb.exec("python", |e| e
+    .args(["compute.py"])
+    .cwd("/app")
+    .env("PYTHONPATH", "/app/lib")
+    .timeout(Duration::from_secs(30))
+    .rlimit(RlimitResource::Nofile, 1024)
+).await?;
+```
+
+```typescript TypeScript
+const output = await sb.exec({
+    cmd: "python",
+    args: ["compute.py"],
+    cwd: "/app",
+    env: { PYTHONPATH: "/app/lib" },
+    timeoutMs: 30_000,
+    rlimits: { nofile: 1024 },
+})
+```
+
+```python Python
+output = await sb.exec(
+    "python", ["compute.py"],
+    cwd="/app",
+    env={"PYTHONPATH": "/app/lib"},
+    timeout=30.0,
+    rlimits={"nofile": 1024},
+)
+```
+</CodeGroup>
+
+## Shell commands
+
+Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Useful for pipelines and shell syntax.
+
+<CodeGroup>
+```rust Rust
+let output = sb.shell("ls -la /app && echo done", ()).await?;
+```
+
+```typescript TypeScript
+const output = await sb.shell("ls -la /app && echo done")
+```
+
+```python Python
+output = await sb.shell("ls -la /app && echo done")
+```
+</CodeGroup>
+
+## Stream output
+
+For long-running processes or large output, use streaming to get events as they happen instead of waiting for the command to finish.
+
+<CodeGroup>
+```rust Rust
+let mut handle = sb.exec_stream("tail", |e| e.args(["-f", "/var/log/app.log"])).await?;
+
+while let Some(event) = handle.events().next().await {
+    match event? {
+        ExecEvent::Stdout(data) => print!("{}", String::from_utf8_lossy(&data)),
+        ExecEvent::Stderr(data) => eprint!("{}", String::from_utf8_lossy(&data)),
+        ExecEvent::Exited { code } => break,
+        _ => {}
+    }
+}
+```
+
+```typescript TypeScript
+const handle = await sb.execStream({ cmd: "tail", args: ["-f", "/var/log/app.log"] })
+
+for await (const event of handle.events()) {
+    switch (event.type) {
+        case 'stdout': process.stdout.write(event.data); break
+        case 'stderr': process.stderr.write(event.data); break
+        case 'exited': console.log(`Exited: ${event.code}`); break
+    }
+}
+```
+
+```python Python
+handle = await sb.exec_stream("tail", ["-f", "/var/log/app.log"])
+
+async for event in handle.events():
+    match event:
+        case StdoutEvent(data=data):
+            sys.stdout.buffer.write(data)
+        case StderrEvent(data=data):
+            sys.stderr.buffer.write(data)
+        case ExitedEvent(code=code):
+            break
+```
+</CodeGroup>
+
+## Interactive attach
+
+Bridge your terminal directly to a process running inside the sandbox. This gives you a fully interactive PTY session, useful for debugging or running interactive tools like shells, REPLs, or editors.
+
+<CodeGroup>
+```rust Rust
+let exit_code = sb.attach((), ()).await?;
+
+let exit_code = sb.attach("python", |a| a
+    .env("DEBUG", "1")
+    .cwd("/app")
+    .detach_keys("ctrl-q")
+).await?;
+```
+
+```typescript TypeScript
+// Attach to the default shell
+const exitCode = await sb.attach()
+
+// Attach to a specific command with custom detach keys
+await sb.attach("bash", a => a.env("DEBUG", "1").cwd("/app").detachKeys("ctrl-q"))
+```
+
+```python Python
+exit_code = await sb.attach()
+
+await sb.attach("bash", env={"DEBUG": "1"}, cwd="/app", detach_keys="ctrl-q")
+```
+</CodeGroup>
+
+<Tip>
+  Press `Ctrl+]` (or your configured detach keys) to detach from the session without stopping the process.
+</Tip>
+
+## Write stdin
+
+When streaming, you can pipe data into the process's stdin.
+
+<CodeGroup>
+```rust Rust
+let mut handle = sb.exec_stream("python", |e| e.stdin_pipe().tty(true)).await?;
+let stdin = handle.take_stdin().unwrap();
+stdin.write(b"print('hello')\n").await?;
+stdin.write(b"exit()\n").await?;
+handle.wait().await?;
+```
+
+```typescript TypeScript
+const handle = await sb.execStream({ cmd: "python", stdin: "pipe", tty: true })
+await handle.write("print('hello')\n")
+await handle.write("exit()\n")
+await handle.wait()
+```
+
+```python Python
+handle = await sb.exec_stream("python", stdin_pipe=True, tty=True)
+await handle.write(b"print('hello')\n")
+await handle.write(b"exit()\n")
+await handle.wait()
+```
+</CodeGroup>

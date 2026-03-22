@@ -1,0 +1,415 @@
+---
+title: Networking
+description: Network policies, secrets, and TLS interception
+icon: "network-wired"
+---
+
+## Preset policies
+
+microsandbox ships with preset policies that cover common scenarios. `public_only` is the default and blocks private address ranges while allowing public internet access.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, NetworkPolicy};
+
+// No network access
+let sb1 = Sandbox::builder("isolated")
+    .image("python:3.12")
+    .network(|n| n.policy(NetworkPolicy::none()))
+    .create()
+    .await?;
+
+// Public internet only (default)
+let sb2 = Sandbox::builder("web-agent")
+    .image("python:3.12")
+    .network(|n| n.policy(NetworkPolicy::public_only()))
+    .create()
+    .await?;
+
+// Unrestricted access
+let sb3 = Sandbox::builder("dev")
+    .image("python:3.12")
+    .network(|n| n.policy(NetworkPolicy::allow_all()))
+    .create()
+    .await?;
+
+// Allow only specific hosts
+let sb4 = Sandbox::builder("scoped-agent")
+    .image("python:3.12")
+    .network(|n| n.policy(NetworkPolicy::allowlist(["api.openai.com", "pypi.org"])))
+    .create()
+    .await?;
+
+// Block specific destinations
+let sb5 = Sandbox::builder("safe-agent")
+    .image("python:3.12")
+    .network(|n| n.policy(NetworkPolicy::denylist([
+        DestinationGroup::CloudMetadata,
+        DestinationGroup::PrivateNetworks,
+    ])))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { NetworkPolicy, DestinationGroup, Sandbox } from 'microsandbox'
+
+// No network access
+const sb1 = await Sandbox.create({
+    name: "isolated",
+    image: "python:3.12",
+    network: NetworkPolicy.none(),
+})
+
+// Public internet only (default)
+const sb2 = await Sandbox.create({
+    name: "web-agent",
+    image: "python:3.12",
+    network: NetworkPolicy.publicOnly(),
+})
+
+// Unrestricted access
+const sb3 = await Sandbox.create({
+    name: "dev",
+    image: "python:3.12",
+    network: NetworkPolicy.allowAll(),
+})
+
+// Allow only specific hosts
+const sb4 = await Sandbox.create({
+    name: "scoped-agent",
+    image: "python:3.12",
+    network: NetworkPolicy.allowlist(["api.openai.com", "pypi.org"]),
+})
+
+// Block specific destinations
+const sb5 = await Sandbox.create({
+    name: "safe-agent",
+    image: "python:3.12",
+    network: NetworkPolicy.denylist([
+        DestinationGroup.CloudMetadata,
+        DestinationGroup.PrivateNetworks,
+    ]),
+})
+```
+
+```python Python
+from microsandbox import Sandbox, NetworkPolicy, DestinationGroup
+
+# No network access
+sb1 = await Sandbox.create("isolated", image="python:3.12",
+    network=NetworkPolicy.none())
+
+# Public internet only (default)
+sb2 = await Sandbox.create("web-agent", image="python:3.12",
+    network=NetworkPolicy.public_only())
+
+# Unrestricted access
+sb3 = await Sandbox.create("dev", image="python:3.12",
+    network=NetworkPolicy.allow_all())
+
+# Allow only specific hosts
+sb4 = await Sandbox.create("scoped-agent", image="python:3.12",
+    network=NetworkPolicy.allowlist(["api.openai.com", "pypi.org"]))
+
+# Block specific destinations
+sb5 = await Sandbox.create("safe-agent", image="python:3.12",
+    network=NetworkPolicy.denylist([
+        DestinationGroup.CLOUD_METADATA,
+        DestinationGroup.PRIVATE_NETWORKS,
+    ]))
+```
+</CodeGroup>
+
+## Custom policies
+
+Build a policy with explicit egress and ingress rules for fine-grained control.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::network::*;
+
+let policy = NetworkPolicy::builder()
+    .default_egress(Action::Deny)
+    .default_ingress(Action::Deny)
+    .egress(Rule::builder()
+        .name("allow-https")
+        .protocol(Protocol::Tcp)
+        .ports(443)
+        .action(Action::Allow)
+        .build())
+    .egress(Rule::builder()
+        .name("allow-dns")
+        .protocol(Protocol::Udp)
+        .ports(53)
+        .action(Action::Allow)
+        .build())
+    .deny_egress_to(Destination::Group(DestinationGroup::CloudMetadata))
+    .deny_egress_to(Destination::Group(DestinationGroup::PrivateNetworks))
+    .build();
+
+let sb = Sandbox::builder("secure-agent")
+    .image("alpine:latest")
+    .network(|n| n.policy(policy))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Network, NetworkPolicy, Action, Rule, DestinationGroup, Sandbox } from 'microsandbox'
+
+const sb = await Sandbox.create({
+    name: "secure-agent",
+    image: "alpine:latest",
+    network: Network.configure({
+        policy: NetworkPolicy.configure({
+            defaultEgress: Action.Deny,
+            defaultIngress: Action.Deny,
+            rules: [
+                Rule.allowEgressTo("0.0.0.0/0"),
+                Rule.denyEgressTo(DestinationGroup.CloudMetadata),
+            ],
+        }),
+    }),
+})
+```
+
+```python Python
+from microsandbox import Sandbox, Network, NetworkPolicy, Action, DestinationGroup
+
+sb = await Sandbox.create(
+    "secure-agent",
+    image="alpine:latest",
+    network=Network(
+        policy=NetworkPolicy(
+            default_egress=Action.DENY,
+            default_ingress=Action.DENY,
+            allow_egress_to=["0.0.0.0/0"],
+            deny_egress_to=[
+                DestinationGroup.CLOUD_METADATA,
+                DestinationGroup.PRIVATE_NETWORKS,
+            ],
+        ),
+    ),
+)
+```
+</CodeGroup>
+
+## Port mapping
+
+Expose ports from the sandbox to the host to make services accessible.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, NetworkPolicy};
+
+let sb = Sandbox::builder("api")
+    .image("python:3.12")
+    .network(|n| n
+        .policy(NetworkPolicy::public_only())
+        .port(8080, 80)
+    )
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Network, NetworkPolicy, Sandbox } from 'microsandbox'
+
+const sb = await Sandbox.create({
+    name: "api",
+    image: "python:3.12",
+    network: Network.configure({
+        policy: NetworkPolicy.publicOnly(),
+        ports: [{ host: 8080, guest: 80 }],
+    }),
+})
+```
+
+```python Python
+from microsandbox import Sandbox, Network, NetworkPolicy
+
+sb = await Sandbox.create(
+    "api",
+    image="python:3.12",
+    network=Network(
+        policy=NetworkPolicy.public_only(),
+        ports={8080: 80},
+    ),
+)
+```
+</CodeGroup>
+
+## DNS interception
+
+Intercept DNS queries from sandboxes to block specific domains or prevent DNS rebinding attacks.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, NetworkPolicy, DnsMode};
+
+let sb = Sandbox::builder("safe-agent")
+    .image("python:3.12")
+    .network(|n| n
+        .policy(NetworkPolicy::public_only())
+        .dns(DnsMode::Intercepted)
+        .block_domain("malware.example.com")
+        .block_domain("*.tracking.com")
+    )
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Network, NetworkPolicy, DnsMode, Sandbox } from 'microsandbox'
+
+const sb = await Sandbox.create({
+    name: "safe-agent",
+    image: "python:3.12",
+    network: Network.configure({
+        policy: NetworkPolicy.publicOnly(),
+        dns: {
+            mode: DnsMode.Intercepted,
+            blockDomains: ["malware.example.com", "*.tracking.com"],
+        },
+    }),
+})
+```
+
+```python Python
+from microsandbox import Sandbox, Network, NetworkPolicy, DnsMode
+
+sb = await Sandbox.create(
+    "safe-agent",
+    image="python:3.12",
+    network=Network(
+        policy=NetworkPolicy.public_only(),
+        dns=DnsMode.INTERCEPTED,
+        block_domains=["malware.example.com", "*.tracking.com"],
+    ),
+)
+```
+</CodeGroup>
+
+## Secrets
+
+Bind secrets to allowed hosts so credentials are never sent to unauthorized destinations.
+
+<Note>
+  Secrets are future work and not yet available in the current SDK.
+</Note>
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, SecretViolationAction};
+
+let sb = Sandbox::builder("agent")
+    .image("python:3.12")
+    .secret(|s| s
+        .env("GITHUB_TOKEN")
+        .value(std::env::var("GITHUB_TOKEN")?)
+        .allow_host("api.github.com")
+        .allow_host_pattern("*.githubusercontent.com")
+    )
+    .secret_env("OPENAI_API_KEY", api_key, "api.openai.com")
+    .on_secret_violation(SecretViolationAction::BlockAndLog)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox, Secret, SecretViolationAction } from 'microsandbox'
+
+const sb = await Sandbox.create({
+    name: "agent",
+    image: "python:3.12",
+    secrets: [
+        Secret.env("GITHUB_TOKEN", {
+            value: process.env.GITHUB_TOKEN!,
+            allowHosts: ["api.github.com"],
+            allowHostPatterns: ["*.githubusercontent.com"],
+        }),
+        Secret.env("OPENAI_API_KEY", {
+            value: process.env.OPENAI_API_KEY!,
+            allowHosts: ["api.openai.com"],
+        }),
+    ],
+    secretViolationAction: SecretViolationAction.BlockAndLog,
+})
+```
+
+```python Python
+import os
+from microsandbox import Sandbox, Secret, SecretViolationAction
+
+sb = await Sandbox.create(
+    "agent",
+    image="python:3.12",
+    secrets=[
+        Secret(
+            env="GITHUB_TOKEN",
+            value=os.environ["GITHUB_TOKEN"],
+            allow_hosts=["api.github.com"],
+            allow_host_patterns=["*.githubusercontent.com"],
+        ),
+        Secret.simple("OPENAI_API_KEY", os.environ["OPENAI_API_KEY"], "api.openai.com"),
+    ],
+    on_secret_violation=SecretViolationAction.BLOCK_AND_LOG,
+)
+```
+</CodeGroup>
+
+## TLS interception
+
+Inspect HTTPS traffic with an auto-generated CA. Cert-pinned domains can be bypassed.
+
+<Note>
+  TLS interception is future work and not yet available in the current SDK.
+</Note>
+
+<CodeGroup>
+```rust Rust
+use microsandbox::tls::*;
+
+let sb = Sandbox::builder("agent")
+    .image("python:3.12")
+    .network(|n| n
+        .tls(|t| t
+            .ca_storage("/var/lib/microsandbox/ca")
+            .ca_cn("My Agent Sandbox CA")
+            .bypass("pinned-api.example.com")
+        )
+    )
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Network, Sandbox, TlsMode } from 'microsandbox'
+
+const sb = await Sandbox.create({
+    name: "agent",
+    image: "python:3.12",
+    network: Network.configure({
+        tls: {
+            mode: TlsMode.Intercept,
+            bypassDomains: ["pinned-api.example.com", "*.gov"],
+        },
+    }),
+})
+```
+
+```python Python
+from microsandbox import Sandbox, TLSConfig, TlsMode
+
+sb = await Sandbox.create(
+    "agent",
+    image="python:3.12",
+    tls=TLSConfig(
+        mode=TlsMode.INTERCEPT,
+        ca_cn="My Agent Sandbox CA",
+        bypass=["pinned-api.example.com", "bank.com", "*.gov"],
+    ),
+)
+```
+</CodeGroup>

@@ -1,0 +1,97 @@
+---
+title: Overview
+description: Install the SDK and create your first sandbox
+icon: "play"
+---
+
+## Installation
+
+<CodeGroup>
+```bash Rust
+cargo add microsandbox
+```
+
+```bash TypeScript
+npm install microsandbox
+```
+
+```bash Python
+pip install microsandbox
+```
+</CodeGroup>
+
+## Quick start
+
+Create a sandbox from a container image, run a command, print the output, and stop it.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, NetworkPolicy};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let sb = Sandbox::builder("my-sandbox")
+        .image("python:3.12")
+        .memory(512)
+        .cpus(2)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .workdir("/app")
+        .volume("/app/src", |v| v.bind("./src").readonly())
+        .network(|n| n.policy(NetworkPolicy::public_only()))
+        .create()
+        .await?;
+
+    let output = sb.exec("python", ["-c", "print('Hello, World!')"]).await?;
+    println!("{}", output.stdout()?);
+
+    sb.stop().await?;
+    Ok(())
+}
+```
+
+```typescript TypeScript
+import { Mount, Network, Sandbox } from 'microsandbox'
+
+const sb = await Sandbox.create({
+    name: "my-sandbox",
+    image: "python:3.12",
+    memoryMiB: 512,
+    cpus: 2,
+    env: { PYTHONDONTWRITEBYTECODE: "1" },
+    workdir: "/app",
+    volumes: {
+        "/app/src": Mount.bind("./src", { readonly: true }),
+    },
+    network: Network.publicOnly(),
+})
+
+const output = await sb.exec("python", ["-c", "print('Hello, World!')"])
+console.log("Output:", output.stdout.toString())
+
+await sb.stop()
+```
+
+```python Python
+import asyncio
+from microsandbox import Sandbox, NetworkPolicy, Volume
+
+async def main():
+    sb = await Sandbox.create(
+        "my-sandbox",
+        image="python:3.12",
+        memory=512,
+        cpus=2,
+        env={"PYTHONDONTWRITEBYTECODE": "1"},
+        workdir="/app",
+        volumes={"/app/src": Volume.bind("./src", readonly=True)},
+        network=NetworkPolicy.public_only(),
+    )
+
+    output = await sb.exec("python", ["-c", "print('Hello, World!')"])
+    print(output.stdout.decode())
+
+    await sb.stop()
+
+asyncio.run(main())
+```
+</CodeGroup>

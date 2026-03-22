@@ -1,0 +1,94 @@
+---
+title: OCI Images
+description: Use standard container images from any registry
+icon: "layer-group"
+---
+
+microsandbox uses standard OCI container images as root filesystems. You can pull from Docker Hub, GitHub Container Registry, or any private registry. The same images you already use with Docker work out of the box.
+
+## Pull policies
+
+By default, microsandbox pulls an image only if it isn't already cached locally. You can change this behavior with pull policies.
+
+| Policy | Behavior |
+|--------|----------|
+| `IfMissing` | Pull only if not cached (default) |
+| `Always` | Always check the registry for updates |
+| `Never` | Use local cache only, fail if missing |
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python:3.12")
+    .pull_policy(PullPolicy::Always)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { PullPolicy, Sandbox } from 'microsandbox'
+
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "python:3.12",
+    pullPolicy: PullPolicy.Always,
+})
+```
+
+```python Python
+from microsandbox import Sandbox, PullPolicy
+
+sb = await Sandbox.create("worker", image="python:3.12", pull_policy=PullPolicy.ALWAYS)
+```
+</CodeGroup>
+
+## Private registries
+
+Authenticate to private registries by passing credentials when creating a sandbox.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("registry.corp.io/team/app:latest")
+    .registry_auth(RegistryAuth::Basic {
+        username: "deploy".into(),
+        password: std::env::var("REGISTRY_PASSWORD")?,
+    })
+    .pull_policy(PullPolicy::Always)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "registry.corp.io/team/app:latest",
+    registryAuth: { username: "deploy", password: process.env.REGISTRY_TOKEN },
+    pullPolicy: PullPolicy.Always,
+})
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="registry.corp.io/team/app:latest",
+    registry_auth={"username": "deploy", "password": os.environ["REGISTRY_TOKEN"]},
+    pull_policy=PullPolicy.ALWAYS,
+)
+```
+</CodeGroup>
+
+## Image storage
+
+Images are cached in the global microsandbox home directory:
+
+| Path | Description |
+|------|-------------|
+| `~/.microsandbox/cache/layers/` | Downloaded and extracted image layers |
+| `~/.microsandbox/db/` | SQLite database tracking image metadata |
+
+Layers are content-addressable and deduplicated, so if two images share a layer, it's only stored once.
+
+<Tip>
+  Use `msb pull` from the CLI to pre-pull images before creating sandboxes. This avoids pull latency during sandbox creation.
+</Tip>

@@ -1,0 +1,142 @@
+---
+title: Volumes
+description: Create, mount, and manage persistent storage
+icon: "hard-drive"
+---
+
+## Create a named volume
+
+Named volumes are managed by microsandbox and stored at `~/.microsandbox/volumes/<name>/`. You can set a storage quota at creation time.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Volume;
+
+let cache = Volume::builder("pip-cache")
+    .quota(1024)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Volume } from 'microsandbox'
+
+const cache = await Volume.create({ name: "pip-cache", quotaMib: 1024 })
+```
+
+```python Python
+from microsandbox import Volume
+
+cache = await Volume.create("pip-cache", quota=1024)
+```
+</CodeGroup>
+
+## Mount volumes
+
+Sandboxes support three mount types: bind mounts from the host, named volumes for persistent shared storage, and tmpfs for ephemeral scratch space.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, Volume};
+
+let cache = Volume::builder("pip-cache")
+    .quota(1024)
+    .create()
+    .await?;
+
+let sb = Sandbox::builder("worker")
+    .image("python:3.12")
+    .volume("/app/src", |v| v.bind("./src").readonly())
+    .volume("/root/.cache/pip", |v| v.named(cache.name()))
+    .volume("/tmp/scratch", |v| v.tmpfs().size(100))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Mount, Sandbox, Volume } from 'microsandbox'
+
+const cache = await Volume.create({ name: "pip-cache", quotaMib: 1024 })
+
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "python:3.12",
+    volumes: {
+        "/app/src": Mount.bind("./src", { readonly: true }),
+        "/root/.cache/pip": Mount.named(cache.name),
+        "/tmp/scratch": Mount.tmpfs({ sizeMiB: 100 }),
+    },
+})
+```
+
+```python Python
+from microsandbox import Sandbox, Volume
+
+cache = await Volume.create("pip-cache", quota=1024)
+
+sb = await Sandbox.create(
+    "worker",
+    image="python:3.12",
+    volumes={
+        "/app/src": Volume.bind("./src", readonly=True),
+        "/root/.cache/pip": Volume.named(cache.name),
+        "/tmp/scratch": Volume.tmpfs(size_mib=100),
+    },
+)
+```
+</CodeGroup>
+
+## Host-side file access
+
+You can read and write files in a named volume from the host without a running sandbox.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Volume;
+
+let vol = Volume::get("pip-cache").await?;
+vol.fs().write("/requirements.txt", "requests==2.28.0").await?;
+let content = vol.fs().read_to_string("/requirements.txt").await?;
+```
+
+```typescript TypeScript
+import { Volume } from 'microsandbox'
+
+const vol = await Volume.get("pip-cache")
+await vol.fs.write("/requirements.txt", "requests==2.28.0")
+const data = await vol.fs.readString("/requirements.txt")
+```
+
+```python Python
+from microsandbox import Volume
+
+cache = await Volume.get("pip-cache")
+await cache.fs.write("/requirements.txt", "requests==2.28.0")
+content = await cache.fs.read_string("/requirements.txt")
+```
+</CodeGroup>
+
+## List and remove volumes
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Volume;
+
+let volumes = Volume::list().await?;
+Volume::remove("old-cache").await?;
+```
+
+```typescript TypeScript
+import { Volume } from 'microsandbox'
+
+const volumes = await Volume.list()
+await Volume.remove("old-cache")
+```
+
+```python Python
+from microsandbox import Volume
+
+volumes = await Volume.list()
+await Volume.remove("old-cache")
+```
+</CodeGroup>

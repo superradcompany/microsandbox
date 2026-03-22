@@ -1,0 +1,136 @@
+---
+title: Sandbox Commands
+description: Create, run, and interact with sandboxes from the CLI
+icon: "cube"
+---
+
+## msb run
+
+Create a sandbox and optionally run a command. If no `--name` is given, the sandbox is ephemeral and removed after the command finishes.
+
+```bash
+# Ephemeral: runs and cleans up
+msb run python:3.11 -- python -c "print('hello')"
+
+# Named: persists after exit
+msb run --name devbox ubuntu:22.04 -- bash
+
+# With volumes, ports, and environment
+msb run --name api \
+  -v ./src:/app \
+  -v pydata:/data \
+  -p 8000:8000 \
+  -e DEBUG=true \
+  -w /app \
+  python:3.11
+
+# Detached (runs in background)
+msb run -d --name worker python:3.11 -- python worker.py
+```
+
+| Flag | Description |
+|------|-------------|
+| `--name`, `-n` | Sandbox name (if omitted, sandbox is ephemeral) |
+| `-c`, `--cpus` | Number of vCPUs |
+| `-m`, `--memory` | Memory (e.g., `512`, `1G`, `2G`) |
+| `-v`, `--volume` | Volume mount (`host:guest` or `name:guest`) |
+| `-p`, `--port` | Port mapping (`host:guest`) |
+| `-e`, `--env` | Environment variable (`KEY=VALUE`) |
+| `-w`, `--workdir` | Working directory inside the sandbox |
+| `--shell` | Default shell |
+| `-d`, `--detach` | Run in background |
+| `--rm` | Remove sandbox on exit (default for unnamed) |
+| `--secret` | Bind a secret (`NAME` reads from env, or `NAME=VALUE`) |
+| `--network` | Network policy (`none`, `public`, `allowlist`, `denylist`) |
+| `--allow` | Allow egress to host (use with `--network`) |
+| `--deny` | Deny egress to host (use with `--network`) |
+| `-q`, `--quiet` | Suppress non-essential output |
+
+## msb create
+
+Create and boot a sandbox without running a command. Takes the same resource and configuration flags as `msb run`, plus:
+
+| Flag | Description |
+|------|-------------|
+| `--force` | Replace existing sandbox with same name |
+
+```bash
+msb create python:3.11 --name worker -c 2 -m 1G
+msb create --force python:3.11 --name worker   # Replace existing
+```
+
+## msb start
+
+Resume a stopped sandbox.
+
+```bash
+msb start devbox
+```
+
+## msb stop
+
+```bash
+msb stop devbox           # Graceful shutdown (SIGTERM)
+msb stop --force devbox   # Force kill (SIGKILL)
+```
+
+## msb exec
+
+Execute a command inside a running sandbox.
+
+```bash
+msb exec devbox -- python -c "print('hello')"
+msb exec devbox -- ls -la /app
+```
+
+| Flag | Description |
+|------|-------------|
+| `-i`, `--interactive` | Keep stdin open |
+| `-t`, `--tty` | Allocate a pseudo-TTY |
+| `-e`, `--env` | Set environment variables |
+| `--workdir` | Override working directory |
+
+## msb shell
+
+Open an interactive shell session inside a sandbox.
+
+```bash
+msb shell devbox
+msb shell devbox --shell /bin/zsh
+```
+
+## msb attach
+
+Attach your terminal to the sandbox's main process. Press `Ctrl+]` to detach.
+
+```bash
+msb attach devbox
+msb attach devbox --detach-keys ctrl-q
+```
+
+## msb ls / ps
+
+```bash
+msb ls                    # All sandboxes (running and stopped)
+msb ps                    # Running sandboxes only
+msb ls --format json      # JSON output
+```
+
+## msb inspect
+
+Show detailed configuration and status for a sandbox.
+
+```bash
+msb inspect devbox
+msb inspect devbox --format json
+```
+
+## msb rm
+
+Remove a stopped sandbox and its associated state.
+
+```bash
+msb rm devbox
+msb rm --force devbox     # Stop and remove in one step
+msb rm worker-1 worker-2  # Remove multiple
+```

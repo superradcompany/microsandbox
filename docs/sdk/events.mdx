@@ -1,0 +1,107 @@
+---
+title: Events
+description: Bidirectional host-guest communication
+icon: "tower-broadcast"
+---
+
+The events API lets the host and guest exchange typed messages over a Unix domain socket. The host subscribes to named events from the guest and emits events into the guest, all without polling or SSH.
+
+## Receive events from guest
+
+Subscribe to named events emitted by guest processes. The callback fires each time a matching event arrives.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, EventData};
+use serde::Deserialize;
+
+let sb = Sandbox::get("worker").await?.start().await?;
+
+let _sub = sb.on_event("task.progress", |event: EventData| {
+    #[derive(Deserialize)]
+    struct Progress { percent: u32, message: String }
+
+    if let Some(data) = event.data {
+        if let Ok(p) = data.deserialized::<Progress>() {
+            println!("[{}%] {}", p.percent, p.message);
+        }
+    }
+});
+```
+
+```typescript TypeScript
+import { Sandbox, EventData } from 'microsandbox'
+
+const sb = await Sandbox.get("worker")
+
+const sub = sb.onEvent("task.progress", (event: EventData) => {
+    const { percent, message } = event.data as { percent: number; message: string }
+    console.log(`[${percent}%] ${message}`)
+})
+```
+
+```python Python
+from microsandbox import Sandbox
+
+sb = await Sandbox.get("worker")
+
+progress_sub = sb.on_event("task.progress", lambda event: (
+    print(f"[{event.data['percent']}%] {event.data['message']}")
+))
+```
+</CodeGroup>
+
+## Send events to guest
+
+Emit a named event with typed data into the guest. Any process listening on the agent socket receives it.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct TaskConfig { input_file: String, output_dir: String }
+
+sb.emit("task.start", TaskConfig {
+    input_file: "/data/input.txt".into(),
+    output_dir: "/data/output".into(),
+}).await?;
+```
+
+```typescript TypeScript
+await sb.emit("task.start", {
+    inputFile: "/data/input.txt",
+    options: ["--verbose"],
+})
+```
+
+```python Python
+await sb.emit("task.start", {
+    "input_file": "/data/input.txt",
+    "output_dir": "/data/output",
+    "options": ["--verbose"],
+})
+```
+</CodeGroup>
+
+## Guest socket
+
+Guest processes communicate with the host by connecting to `/run/agent.sock` inside the sandbox. This is a standard Unix domain socket, so no special library is needed. Any language that can open a socket and write JSON can emit events.
+
+For example, a Python script running inside the guest can send a progress event:
+
+```python
+# Inside the guest -- plain Python, no SDK required
+import json, socket
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect("/run/agent.sock")
+sock.sendall(json.dumps({
+    "event": "task.progress",
+    "data": {"percent": 50, "message": "Halfway done"},
+}).encode() + b"\n")
+sock.close()
+```
+
+The host subscription registered with `on_event("task.progress", ...)` receives this message automatically.

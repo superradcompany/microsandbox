@@ -1,0 +1,232 @@
+---
+title: Volumes
+description: Persist and share data across sandboxes
+icon: "hard-drive"
+---
+
+Volumes let you persist data across sandbox restarts, share data between sandboxes, and mount host directories into the guest. microsandbox supports three types of mounts: bind mounts, named volumes, and tmpfs.
+
+## Bind mounts
+
+Mount a directory from the host machine directly into the sandbox. Changes made inside the sandbox are reflected on the host, and vice versa.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("dev")
+    .image("python:3.12")
+    .volume("/app/src", |v| v.bind("./src").readonly())
+    .volume("/app/data", |v| v.bind("./data"))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+    name: "dev",
+    image: "python:3.12",
+    volumes: {
+        "/app/src": Mount.bind("./src", { readonly: true }),
+        "/app/data": Mount.bind("./data"),
+    },
+})
+```
+
+```python Python
+sb = await Sandbox.create(
+    "dev",
+    image="python:3.12",
+    volumes={
+        "/app/src": Volume.bind("./src", readonly=True),
+        "/app/data": Volume.bind("./data"),
+    },
+)
+```
+</CodeGroup>
+
+## Named volumes
+
+Named volumes are managed by microsandbox and stored at `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox and can be shared between multiple sandboxes.
+
+### Create a volume
+
+<CodeGroup>
+```rust Rust
+let cache = Volume::builder("pip-cache")
+    .quota(1024)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const cache = await Volume.create({ name: "pip-cache", quotaMib: 1024 })
+```
+
+```python Python
+cache = await Volume.create("pip-cache", quota=1024)
+```
+
+</CodeGroup>
+
+### Mount in a sandbox
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python:3.12")
+    .volume("/root/.cache/pip", |v| v.named(cache.name()))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "python:3.12",
+    volumes: {
+        "/root/.cache/pip": Mount.named(cache.name),
+    },
+})
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="python:3.12",
+    volumes={"/root/.cache/pip": Volume.named(cache.name)},
+)
+```
+</CodeGroup>
+
+### Share between sandboxes
+
+Named volumes are the simplest way to share data between sandboxes. One sandbox writes, another reads.
+
+<CodeGroup>
+```rust Rust
+// Writer
+let writer = Sandbox::builder("writer")
+    .image("alpine:latest")
+    .volume("/data", |v| v.named("shared-data"))
+    .create()
+    .await?;
+writer.shell("echo 'hello' > /data/message.txt", ()).await?;
+
+// Reader (read-only)
+let reader = Sandbox::builder("reader")
+    .image("alpine:latest")
+    .volume("/data", |v| v.named("shared-data").readonly())
+    .create()
+    .await?;
+let output = reader.exec("cat", ["/data/message.txt"]).await?;
+// => "hello"
+```
+
+```typescript TypeScript
+// Writer
+const writer = await Sandbox.create({
+    name: "writer",
+    image: "alpine:latest",
+    volumes: { "/data": Mount.named("shared-data") },
+})
+await writer.exec("sh", ["-c", "echo 'hello' > /data/message.txt"])
+
+// Reader (read-only)
+const reader = await Sandbox.create({
+    name: "reader",
+    image: "alpine:latest",
+    volumes: { "/data": Mount.named("shared-data", { readonly: true }) },
+})
+const output = await reader.exec("cat", ["/data/message.txt"])
+// => "hello"
+```
+
+```python Python
+# Writer
+writer = await Sandbox.create(
+    "writer", image="alpine:latest",
+    volumes={"/data": Volume.named("shared-data")},
+)
+await writer.exec("sh", ["-c", "echo 'hello' > /data/message.txt"])
+
+# Reader (read-only)
+reader = await Sandbox.create(
+    "reader", image="alpine:latest",
+    volumes={"/data": Volume.named("shared-data", readonly=True)},
+)
+output = await reader.exec("cat", ["/data/message.txt"])
+# => "hello"
+```
+</CodeGroup>
+
+### Host-side access
+
+You can read and write files in a named volume from the host without a running sandbox.
+
+<CodeGroup>
+```rust Rust
+let vol = Volume::get("pip-cache").await?;
+vol.fs().write("/requirements.txt", "requests==2.28.0").await?;
+```
+
+```typescript TypeScript
+const vol = await Volume.get("pip-cache")
+await vol.fs.write("/requirements.txt", "requests==2.28.0")
+const data = await vol.fs.readString("/requirements.txt")
+```
+
+```python Python
+cache = await Volume.get("pip-cache")
+await cache.fs.write("/requirements.txt", "requests==2.28.0")
+```
+</CodeGroup>
+
+### Manage volumes
+
+<CodeGroup>
+```rust Rust
+let volumes = Volume::list().await?;
+Volume::remove("old-cache").await?;
+```
+
+```typescript TypeScript
+const volumes = await Volume.list()
+await Volume.remove("old-cache")
+```
+
+```python Python
+volumes = await Volume.list()
+await Volume.remove("old-cache")
+```
+</CodeGroup>
+
+## Tmpfs
+
+An in-memory filesystem that disappears when the sandbox stops. Useful for scratch space that doesn't need to persist.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("alpine:latest")
+    .volume("/tmp/scratch", |v| v.tmpfs().size(100))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "alpine:latest",
+    volumes: {
+        "/tmp/scratch": Mount.tmpfs({ sizeMiB: 100 }),
+    },
+})
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="alpine:latest",
+    volumes={"/tmp/scratch": Volume.tmpfs(size_mib=100)},
+)
+```
+</CodeGroup>
