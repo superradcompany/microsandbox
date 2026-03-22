@@ -25,6 +25,7 @@ chrono.workspace = true
 clap.workspace = true
 console.workspace = true
 indicatif.workspace = true
+libc.workspace = true
 microsandbox = { version = "0.3.2", path = "../microsandbox", default-features = false }
 microsandbox-image = { version = "0.3.2", path = "../image" }
 microsandbox-runtime = { version = "0.3.2", path = "../runtime", default-features = false }
