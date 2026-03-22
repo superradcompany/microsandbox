@@ -205,7 +205,7 @@ for info in sandboxes:
 
 ## Runtime process architecture
 
-When you create a sandbox, microsandbox spawns several processes on the host and boots a guest VM. Understanding what runs where helps make sense of the lifecycle methods and supervisor policies.
+When you create a sandbox, a few things start running behind the scenes. Here's what runs where and how they talk to each other.
 
 ```mermaid
 graph TD
