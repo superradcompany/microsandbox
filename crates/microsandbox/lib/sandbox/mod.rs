@@ -37,14 +37,14 @@ use crate::{
     runtime::{SupervisorHandle, SupervisorSpawnMode, spawn_supervisor},
 };
 
-use self::exec::{ExecEvent, ExecHandle, ExecSink, IntoExecOptions, StdinMode};
+use self::exec::{ExecEvent, ExecHandle, ExecOptions, ExecSink, StdinMode};
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
 pub use crate::db::entity::sandbox::SandboxStatus;
-pub use attach::{AttachOptions, AttachOptionsBuilder, IntoAttachCmd, IntoAttachOptions};
+pub use attach::AttachOptionsBuilder;
 pub use builder::SandboxBuilder;
 pub use config::SandboxConfig;
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
@@ -123,10 +123,32 @@ impl Sandbox {
         microsandbox_image::PullProgressHandle,
         tokio::task::JoinHandle<MicrosandboxResult<Self>>,
     ) {
+        Self::create_with_pull_progress_and_mode(config, SupervisorSpawnMode::Attached)
+    }
+
+    /// Create a detached sandbox with pull progress reporting.
+    ///
+    /// Like `create_with_pull_progress` but spawns the supervisor in detached
+    /// mode so the sandbox survives after the creating process exits.
+    pub fn create_detached_with_pull_progress(
+        config: SandboxConfig,
+    ) -> (
+        microsandbox_image::PullProgressHandle,
+        tokio::task::JoinHandle<MicrosandboxResult<Self>>,
+    ) {
+        Self::create_with_pull_progress_and_mode(config, SupervisorSpawnMode::Detached)
+    }
+
+    fn create_with_pull_progress_and_mode(
+        config: SandboxConfig,
+        mode: SupervisorSpawnMode,
+    ) -> (
+        microsandbox_image::PullProgressHandle,
+        tokio::task::JoinHandle<MicrosandboxResult<Self>>,
+    ) {
         let (handle, sender) = microsandbox_image::progress_channel();
-        let task = tokio::spawn(async move {
-            Self::create_with_mode(config, SupervisorSpawnMode::Attached, Some(sender)).await
-        });
+        let task =
+            tokio::spawn(async move { Self::create_with_mode(config, mode, Some(sender)).await });
         (handle, task)
     }
 
@@ -391,37 +413,43 @@ impl Sandbox {
     pub async fn exec_stream(
         &self,
         cmd: impl Into<String>,
-        opts: impl IntoExecOptions,
+        opts: impl FnOnce(exec::ExecOptionsBuilder) -> exec::ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecHandle> {
-        let cmd = cmd.into();
-        let opts = opts.into_exec_options();
+        let opts = opts(exec::ExecOptionsBuilder::default()).build();
+        self.exec_stream_inner(cmd.into(), opts).await
+    }
+
+    async fn exec_stream_inner(
+        &self,
+        cmd: String,
+        opts: ExecOptions,
+    ) -> MicrosandboxResult<ExecHandle> {
+        let ExecOptions {
+            args,
+            cwd,
+            env,
+            rlimits,
+            tty,
+            stdin: stdin_mode,
+            timeout: _,
+        } = opts;
 
         // Allocate correlation ID and subscribe BEFORE sending.
         let id = self.bridge.next_id();
         let rx = self.bridge.subscribe(id).await;
 
-        let req = build_exec_request(
-            &self.config,
-            cmd,
-            opts.args.clone(),
-            opts.cwd.clone(),
-            &opts.env,
-            &opts.rlimits,
-            opts.tty,
-            24,
-            80,
-        );
+        let req = build_exec_request(&self.config, cmd, args, cwd, &env, &rlimits, tty, 24, 80);
         let msg = Message::with_payload(MessageType::ExecRequest, id, &req)?;
         self.bridge.send(&msg).await?;
 
         // Build stdin sink (if Pipe mode).
-        let stdin = match &opts.stdin {
+        let stdin = match &stdin_mode {
             StdinMode::Pipe => Some(ExecSink::new(id, Arc::clone(&self.bridge))),
             _ => None,
         };
 
         // Handle StdinMode::Bytes — send bytes then close.
-        if let StdinMode::Bytes(ref data) = opts.stdin {
+        if let StdinMode::Bytes(ref data) = stdin_mode {
             let data = data.clone();
             let bridge = Arc::clone(&self.bridge);
             tokio::spawn(async move {
@@ -453,17 +481,16 @@ impl Sandbox {
     ///
     /// Returns captured stdout/stderr.
     ///
-    /// - `sandbox.exec("ls", ["-la"])` — command + args
-    /// - `sandbox.exec("python", |e| e.args(["-c", "print('hi')"]).env("HOME", "/root"))` — closure
-    /// - `sandbox.exec("cat", ())` — no options
+    /// - `sandbox.exec("cat", |e| e)` — no options
+    /// - `sandbox.exec("python", |e| e.args(["-c", "print('hi')"]).env("HOME", "/root"))` — with options
     pub async fn exec(
         &self,
         cmd: impl Into<String>,
-        opts: impl IntoExecOptions,
+        opts: impl FnOnce(exec::ExecOptionsBuilder) -> exec::ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecOutput> {
-        let opts = opts.into_exec_options();
+        let opts = opts(exec::ExecOptionsBuilder::default()).build();
         let timeout_duration = opts.timeout;
-        let mut handle = self.exec_stream(cmd, opts).await?;
+        let mut handle = self.exec_stream_inner(cmd.into(), opts).await?;
 
         match timeout_duration {
             Some(duration) => {
@@ -488,34 +515,29 @@ impl Sandbox {
         }
     }
 
-    /// Execute a shell command and wait for completion.
+    /// Run a shell command and wait for completion.
     ///
-    /// Uses the sandbox's configured shell (default: `/bin/sh`).
+    /// Uses the sandbox's configured shell (default: `/bin/sh`) to interpret
+    /// the script via `<shell> -c "<script>"`.
     ///
-    /// - `sandbox.shell("echo hello", ())` — no options
-    /// - `sandbox.shell("make test", |e| e.env("CI", "true"))` — with env
-    pub async fn shell(
-        &self,
-        script: impl Into<String>,
-        opts: impl IntoExecOptions,
-    ) -> MicrosandboxResult<ExecOutput> {
-        let shell = self.config.shell.as_deref().unwrap_or("/bin/sh");
-        let mut opts = opts.into_exec_options();
-        opts.args = vec!["-c".to_string(), script.into()];
-        self.exec(shell, opts).await
+    /// - `sandbox.shell("echo hello")`
+    /// - `sandbox.shell("ENV=val cmd | other_cmd")`
+    pub async fn shell(&self, script: impl Into<String>) -> MicrosandboxResult<ExecOutput> {
+        let mut handle = self.shell_stream(script).await?;
+        handle.collect().await
     }
 
+    /// Run a shell command with streaming I/O.
+    ///
     /// Like [`shell`](Self::shell) but returns a streaming [`ExecHandle`]
     /// instead of waiting for completion.
-    pub async fn shell_stream(
-        &self,
-        script: impl Into<String>,
-        opts: impl IntoExecOptions,
-    ) -> MicrosandboxResult<ExecHandle> {
+    pub async fn shell_stream(&self, script: impl Into<String>) -> MicrosandboxResult<ExecHandle> {
         let shell = self.config.shell.as_deref().unwrap_or("/bin/sh");
-        let mut opts = opts.into_exec_options();
-        opts.args = vec!["-c".to_string(), script.into()];
-        self.exec_stream(shell, opts).await
+        let opts = ExecOptions {
+            args: vec!["-c".to_string(), script.into()],
+            ..Default::default()
+        };
+        self.exec_stream_inner(shell.to_string(), opts).await
     }
 }
 
@@ -529,33 +551,26 @@ impl Sandbox {
     /// Bridges the host terminal to a guest process running in a PTY.
     /// Returns the exit code when the process exits or the user detaches.
     ///
-    /// - `sandbox.attach((), ())` — default shell, no options
-    /// - `sandbox.attach("bash", ())` — specific command, no options
-    /// - `sandbox.attach((), |a| a.detach_keys("ctrl-q"))` — default shell with options
+    /// - `sandbox.attach("bash", |a| a)` — specific command, no options
+    /// - `sandbox.attach("/bin/sh", |a| a.detach_keys("ctrl-q"))` — with options
     /// - `sandbox.attach("zsh", |a| a.env("TERM", "xterm"))` — command with options
     pub async fn attach(
         &self,
-        cmd: impl attach::IntoAttachCmd,
-        opts: impl attach::IntoAttachOptions,
+        cmd: impl Into<String>,
+        opts: impl FnOnce(attach::AttachOptionsBuilder) -> attach::AttachOptionsBuilder,
     ) -> MicrosandboxResult<i32> {
         use std::os::fd::AsRawFd;
 
         use microsandbox_protocol::exec::ExecResize;
         use tokio::io::{AsyncWriteExt, unix::AsyncFd};
 
-        let opts = opts.into_attach_options();
+        let opts = opts(attach::AttachOptionsBuilder::default()).build();
         let detach_keys = match &opts.detach_keys {
             Some(spec) => attach::DetachKeys::parse(spec)?,
             None => attach::DetachKeys::default_keys(),
         };
 
-        // Resolve command (default to sandbox shell).
-        let cmd = cmd.into_attach_cmd().unwrap_or_else(|| {
-            self.config
-                .shell
-                .clone()
-                .unwrap_or_else(|| "/bin/sh".into())
-        });
+        let cmd = cmd.into();
 
         // Get terminal size.
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));

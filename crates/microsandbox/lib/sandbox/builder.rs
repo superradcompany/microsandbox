@@ -254,6 +254,20 @@ impl SandboxBuilder {
         let config = self.build()?;
         Ok(super::Sandbox::create_with_pull_progress(config))
     }
+
+    /// Create a detached sandbox with pull progress reporting.
+    ///
+    /// Like `create_with_pull_progress` but spawns the supervisor in detached
+    /// mode so the sandbox survives after the creating process exits.
+    pub fn create_detached_with_pull_progress(
+        self,
+    ) -> crate::MicrosandboxResult<(
+        microsandbox_image::PullProgressHandle,
+        tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
+    )> {
+        let config = self.build()?;
+        Ok(super::Sandbox::create_detached_with_pull_progress(config))
+    }
 }
 
 impl SandboxBuilder {

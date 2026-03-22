@@ -177,18 +177,6 @@ pub enum RlimitResource {
     Rttime,
 }
 
-/// Trait for types that can be converted to [`ExecOptions`].
-///
-/// Enables ergonomic calling patterns:
-/// - `sandbox.exec("ls", ["-la"])` — args array
-/// - `sandbox.exec("python", |e| e.args(["-c", "print('hi')"]))` — closure
-/// - `sandbox.exec("cat", ())` — no options
-/// - `sandbox.exec("my-app", options)` — pre-built ExecOptions
-pub trait IntoExecOptions {
-    /// Convert into exec options.
-    fn into_exec_options(self) -> ExecOptions;
-}
-
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -462,40 +450,6 @@ impl RlimitResource {
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
-
-/// No options: `sandbox.exec("cat", ())`
-impl IntoExecOptions for () {
-    fn into_exec_options(self) -> ExecOptions {
-        ExecOptions::default()
-    }
-}
-
-/// Closure pattern: `sandbox.exec("python", |e| e.args(["-c", "print('hi')"]))`
-impl<F> IntoExecOptions for F
-where
-    F: FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
-{
-    fn into_exec_options(self) -> ExecOptions {
-        self(ExecOptionsBuilder::default()).build()
-    }
-}
-
-/// Direct options: `sandbox.exec("my-app", options)`
-impl IntoExecOptions for ExecOptions {
-    fn into_exec_options(self) -> ExecOptions {
-        self
-    }
-}
-
-/// Args array: `sandbox.exec("ls", ["-la", "/tmp"])`
-impl<const N: usize> IntoExecOptions for [&str; N] {
-    fn into_exec_options(self) -> ExecOptions {
-        ExecOptions {
-            args: self.iter().map(|s| s.to_string()).collect(),
-            ..Default::default()
-        }
-    }
-}
 
 /// String to `RlimitResource` conversion.
 ///

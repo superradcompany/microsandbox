@@ -19,16 +19,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Run a command.
-    let output = sandbox.shell("echo 'Hello from microsandbox!'", ()).await?;
+    let output = sandbox.shell("echo 'Hello from microsandbox!'").await?;
     println!("stdout: {}", output.stdout()?);
     println!("stderr: {}", output.stderr()?);
     println!("exit code: {}", output.status().code);
 
     // Run a few more commands.
-    let output = sandbox.shell("uname -a", ()).await?;
+    let output = sandbox.shell("uname -a").await?;
     println!("uname: {}", output.stdout()?);
 
-    let output = sandbox.shell("cat /etc/os-release", ()).await?;
+    let output = sandbox.shell("cat /etc/os-release").await?;
     println!("os-release:\n{}", output.stdout()?);
 
     // Stop the sandbox gracefully.

@@ -60,11 +60,6 @@ pub struct CreateArgs {
 pub async fn run(args: CreateArgs) -> anyhow::Result<()> {
     let is_named = args.name.is_some();
     let name = args.name.unwrap_or_else(ui::generate_name);
-    let spinner = if args.quiet {
-        ui::Spinner::quiet()
-    } else {
-        ui::Spinner::start("Creating", &name)
-    };
 
     let mut builder = Sandbox::builder(&name).image(args.image.as_str());
 
@@ -91,18 +86,33 @@ pub async fn run(args: CreateArgs) -> anyhow::Result<()> {
         builder = apply_volume(builder, vol_str)?;
     }
 
-    match builder.create_detached().await {
-        Ok(sandbox) => {
+    let (mut progress, task) = builder.create_detached_with_pull_progress()?;
+    let mut display = if args.quiet {
+        ui::PullProgressDisplay::quiet(&args.image)
+    } else {
+        ui::PullProgressDisplay::new(&args.image)
+    };
+
+    while let Some(event) = progress.recv().await {
+        display.handle_event(event);
+    }
+
+    match task.await {
+        Ok(Ok(sandbox)) => {
+            display.finish();
             sandbox.detach().await;
-            spinner.finish_success("Created");
             // Print auto-generated name to stdout so it's scriptable.
             if !is_named {
                 println!("{name}");
             }
         }
-        Err(e) => {
-            spinner.finish_error();
+        Ok(Err(e)) => {
+            display.finish();
             return Err(e.into());
+        }
+        Err(e) => {
+            display.finish();
+            return Err(anyhow::anyhow!("create task panicked: {e}"));
         }
     }
 

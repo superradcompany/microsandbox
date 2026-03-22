@@ -1,9 +1,9 @@
 //! `msb run` command — create and start a new sandbox.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use clap::Args;
-use microsandbox::sandbox::{ExecOptionsBuilder, Sandbox};
+use microsandbox::sandbox::Sandbox;
 
 use crate::ui;
 
@@ -96,48 +96,35 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         builder = super::create::apply_volume(builder, vol_str)?;
     }
 
-    let sandbox = if args.detach {
-        let spinner = if args.quiet {
-            ui::Spinner::quiet()
-        } else {
-            ui::Spinner::start("Creating", &name)
-        };
-        match builder.create_detached().await {
-            Ok(s) => {
-                spinner.finish_success("Created");
-                s
-            }
-            Err(e) => {
-                spinner.finish_error();
-                return Err(e.into());
-            }
-        }
+    // Create sandbox with pull progress — select attached vs detached mode.
+    let (mut progress, task) = if args.detach {
+        builder.create_detached_with_pull_progress()?
     } else {
-        // Non-detach: use pull progress display for per-layer feedback.
-        let (mut progress, task) = builder.create_with_pull_progress()?;
-        let mut display = if args.quiet {
-            ui::PullProgressDisplay::quiet(&args.image)
-        } else {
-            ui::PullProgressDisplay::new(&args.image)
-        };
+        builder.create_with_pull_progress()?
+    };
 
-        while let Some(event) = progress.recv().await {
-            display.handle_event(event);
+    let mut display = if args.quiet {
+        ui::PullProgressDisplay::quiet(&args.image)
+    } else {
+        ui::PullProgressDisplay::new(&args.image)
+    };
+
+    while let Some(event) = progress.recv().await {
+        display.handle_event(event);
+    }
+
+    let sandbox = match task.await {
+        Ok(Ok(s)) => {
+            display.finish();
+            s
         }
-
-        match task.await {
-            Ok(Ok(s)) => {
-                display.finish();
-                s
-            }
-            Ok(Err(e)) => {
-                display.finish();
-                return Err(e.into());
-            }
-            Err(e) => {
-                display.finish();
-                return Err(anyhow::anyhow!("create task panicked: {e}"));
-            }
+        Ok(Err(e)) => {
+            display.finish();
+            return Err(e.into());
+        }
+        Err(e) => {
+            display.finish();
+            return Err(anyhow::anyhow!("create task panicked: {e}"));
         }
     };
 
@@ -150,30 +137,41 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let interactive = std::io::stdin().is_terminal();
+
     let exit_code = if !args.command.is_empty() {
-        // Non-interactive: exec command and stream output.
-        let cmd = args.command[0].clone();
-        let cmd_args: Vec<String> = args.command[1..].to_vec();
+        let mut parts = args.command;
+        let cmd = parts.remove(0);
+        let cmd_args = parts;
 
-        let output = sandbox
-            .exec(&cmd, |e: ExecOptionsBuilder| e.args(cmd_args))
-            .await?;
-
-        std::io::stdout().write_all(output.stdout_bytes())?;
-        std::io::stderr().write_all(output.stderr_bytes())?;
-
-        if output.status().success {
-            0
+        if interactive {
+            sandbox.attach(cmd, |a| a.args(cmd_args)).await?
         } else {
-            output.status().code
+            let output = sandbox.exec(&cmd, |e| e.args(cmd_args)).await?;
+
+            std::io::stdout().write_all(output.stdout_bytes())?;
+            std::io::stderr().write_all(output.stderr_bytes())?;
+
+            if output.status().success {
+                0
+            } else {
+                output.status().code
+            }
         }
+    } else if interactive {
+        // No command, TTY — interactive shell.
+        let shell = sandbox.config().shell.as_deref().unwrap_or("/bin/sh");
+        sandbox.attach(shell, |a| a).await?
     } else {
-        // Interactive: attach to sandbox shell.
-        sandbox.attach((), ()).await?
+        // No command, no TTY — nothing to do.
+        ui::warn("no command provided and stdin is not a terminal");
+        0
     };
 
     // Stop and clean up.
-    let _ = sandbox.stop_and_wait().await;
+    if let Err(e) = sandbox.stop_and_wait().await {
+        ui::warn(&format!("failed to stop sandbox: {e}"));
+    }
 
     // Remove unnamed (ephemeral) sandboxes.
     if !is_named {

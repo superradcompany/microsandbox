@@ -2,9 +2,7 @@
 
 use clap::{Parser, Subcommand};
 use microsandbox_cli::{
-    commands::{
-        attach, create, exec, inspect, list, ps, pull, remove, run, shell, start, stop, volume,
-    },
+    commands::{create, exec, inspect, list, ps, pull, remove, run, shell, start, stop, volume},
     log_args::{self, LogArgs},
     microvm_cmd::{self, MicrovmArgs},
     supervisor_cmd::{self, SupervisorArgs},
@@ -62,10 +60,7 @@ enum Commands {
     /// Execute a command in a sandbox.
     Exec(exec::ExecArgs),
 
-    /// Attach to a sandbox with interactive terminal.
-    Attach(attach::AttachArgs),
-
-    /// Interactive shell in a sandbox.
+    /// Shell in a sandbox (interactive or scripted).
     Shell(shell::ShellArgs),
 
     /// Pull an image from a registry.
@@ -132,7 +127,6 @@ fn run_async_command(
             Commands::Ps(args) => ps::run(args).await.map_err(Into::into),
             Commands::Remove(args) => remove::run(args).await.map_err(Into::into),
             Commands::Exec(args) => exec::run(args).await.map_err(Into::into),
-            Commands::Attach(args) => attach::run(args).await.map_err(Into::into),
             Commands::Shell(args) => shell::run(args).await.map_err(Into::into),
             Commands::Pull(args) => pull::run(args).await.map_err(Into::into),
             Commands::Inspect(args) => inspect::run(args).await.map_err(Into::into),
