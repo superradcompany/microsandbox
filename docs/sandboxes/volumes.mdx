@@ -109,7 +109,7 @@ let writer = Sandbox::builder("writer")
     .volume("/data", |v| v.named("shared-data"))
     .create()
     .await?;
-writer.shell("echo 'hello' > /data/message.txt", ()).await?;
+writer.shell("echo 'hello' > /data/message.txt").await?;
 
 // Reader (read-only)
 let reader = Sandbox::builder("reader")

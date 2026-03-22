@@ -75,7 +75,7 @@ Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Us
 
 <CodeGroup>
 ```rust Rust
-let output = sb.shell("ls -la /app && echo done", ()).await?;
+let output = sb.shell("ls -la /app && echo done").await?;
 ```
 
 ```typescript TypeScript
