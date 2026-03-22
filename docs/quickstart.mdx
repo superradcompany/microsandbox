@@ -1,0 +1,113 @@
+---
+title: Quickstart
+description: Get a sandbox running in under 5 minutes
+icon: "bolt"
+---
+
+<Steps>
+  <Step title="Install the SDK">
+    <CodeGroup>
+    ```bash Rust
+    cargo add microsandbox
+    ```
+
+    ```bash TypeScript
+    npm install microsandbox
+    ```
+
+    ```bash Python
+    pip install microsandbox
+    ```
+
+    </CodeGroup>
+
+    <Tip>
+      There are SDKs for many other languages as well. Check the [SDK reference](/sdk/rust) for the full list.
+    </Tip>
+  </Step>
+
+  <Step title="Install the CLI">
+    The SDK embeds the runtime directly, so no separate server process is needed. Install the `msb` CLI to manage images, volumes, and sandboxes from the terminal.
+
+    ```bash
+    curl -fsSL https://get.microsandbox.dev | sh
+    ```
+
+    <Note>
+      microsandbox requires Linux with KVM enabled, or macOS with Apple Silicon (M-series chip).
+    </Note>
+  </Step>
+
+  <Step title="Run code in a sandbox">
+    Create a sandbox, execute code inside it, and get the result back in just a few lines.
+
+    <CodeGroup>
+    ```rust Rust
+    use microsandbox::Sandbox;
+
+    #[tokio::main]
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
+        let sb = Sandbox::builder("hello")
+            .image("python:3.12")
+            .memory(512)
+            .create()
+            .await?;
+
+        let output = sb.exec("python", ["-c", "print('Hello from a microVM!')"]).await?;
+        println!("{}", output.stdout()?); // Hello from a microVM!
+
+        sb.stop().await?;
+        Ok(())
+    }
+    ```
+
+    ```typescript TypeScript
+    import { Sandbox } from 'microsandbox'
+
+    const sb = await Sandbox.create({
+        name: "hello",
+        image: "python:3.12",
+        memoryMiB: 512,
+    })
+
+    const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"])
+    console.log(output.stdout.toString()) // Hello from a microVM!
+
+    await sb.stop()
+    ```
+
+    ```python Python
+    import asyncio
+    from microsandbox import Sandbox
+
+    async def main():
+        sb = await Sandbox.create("hello", image="python:3.12", memory=512)
+
+        output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"])
+        print(output.stdout.decode())  # Hello from a microVM!
+
+        await sb.stop()
+
+    asyncio.run(main())
+    ```
+
+    </CodeGroup>
+  </Step>
+</Steps>
+
+## What just happened?
+
+When you called `Sandbox.create`, microsandbox:
+
+1. Pulled the `python:3.12` image from Docker Hub (if not already cached)
+2. Booted a microVM with its own Linux kernel, capped at 512 MiB
+3. Mounted the image layers as a copy-on-write filesystem
+4. Started the guest agent (`agentd`) inside the VM to accept commands
+
+When you called `exec`, the SDK sent a command to the guest agent over a virtio-console channel, which spawned the process inside the VM and streamed the output back.
+
+## Next steps
+
+- [Understand sandbox configuration](/sandboxes/overview): images, resources, volumes, and networking
+- [Run commands and stream output](/sandboxes/commands): `exec`, `shell`, `attach`, and streaming
+- [Manage sandboxes with the CLI](/cli/overview): create, inspect, and manage sandboxes from the terminal

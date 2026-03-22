@@ -1,0 +1,169 @@
+---
+title: Overview
+description: What sandboxes are and how to configure them
+icon: "circle-info"
+---
+
+A sandbox is a lightweight microVM: a real virtual machine with its own Linux kernel, filesystem, and network stack. You create one from a container image, run code inside it, and tear it down when you're done. Each sandbox is fully isolated from the host and from other sandboxes.
+
+Unlike containers, which share the host kernel and rely on namespace isolation, microsandbox gives every sandbox its own kernel. This means an escape from a sandbox would require exploiting a KVM hypervisor vulnerability, which is a fundamentally harder attack than a container breakout.
+
+## Creating a sandbox
+
+At minimum, a sandbox needs a name and an image. Everything else has sensible defaults.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python:3.12")
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "python:3.12",
+})
+```
+
+```python Python
+sb = await Sandbox.create("worker", image="python:3.12")
+```
+
+</CodeGroup>
+
+## Configuration options
+
+You can customize CPU, memory, environment variables, working directory, shell, and more.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python:3.12")
+    .memory(1024)
+    .cpus(2)
+    .workdir("/app")
+    .env("DEBUG", "true")
+    .env("API_PORT", "8000")
+    .volume("/app/src", |v| v.bind("./src").readonly())
+    .volume("/data", |v| v.named("my-data"))
+    .volume("/tmp/scratch", |v| v.tmpfs().size(100))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "python:3.12",
+    memoryMiB: 1024,
+    cpus: 2,
+    workdir: "/app",
+    env: { DEBUG: "true", API_PORT: "8000" },
+    volumes: {
+        "/app/src": Mount.bind("./src", { readonly: true }),
+        "/data": Mount.named("my-data"),
+        "/tmp/scratch": Mount.tmpfs({ sizeMiB: 100 }),
+    },
+})
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="python:3.12",
+    memory=1024,
+    cpus=2,
+    workdir="/app",
+    env={"DEBUG": "true", "API_PORT": "8000"},
+    volumes={
+        "/app/src": Volume.bind("./src", readonly=True),
+        "/data": Volume.named("my-data"),
+        "/tmp/scratch": Volume.tmpfs(size_mib=100),
+    },
+)
+```
+
+</CodeGroup>
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `image` | — | OCI image, local path, or disk image |
+| `cpus` | `1` | Number of virtual CPUs |
+| `memory` | `512` | Guest memory in MiB |
+| `workdir` | — | Default working directory for commands |
+| `shell` | `/bin/sh` | Shell used by `shell()` calls |
+| `env` | `{}` | Environment variables |
+| `volumes` | `[]` | Volume mounts (bind, named, or tmpfs) |
+| `network` | `public` | Network policy and port mappings |
+| `scripts` | `{}` | Named scripts stored at `/.msb/scripts/` |
+
+<Tip>
+  The `cpus` and `memory` values are limits, not reservations. A sandbox with `memory: 512` doesn't hold 512 MiB at all times. It only uses what it actually needs, up to that limit. This means you can run many sandboxes on a single host without overcommitting resources.
+</Tip>
+
+## Rootfs sources
+
+microsandbox supports three ways to provide a root filesystem for a sandbox.
+
+### OCI images
+
+The most common option. Pull any image from any container registry.
+
+<CodeGroup>
+```rust Rust
+Sandbox::builder("worker").image("python:3.12").create().await?;
+```
+
+```typescript TypeScript
+await Sandbox.create({ name: "worker", image: "python:3.12" })
+```
+
+```python Python
+await Sandbox.create("worker", image="python:3.12")
+```
+</CodeGroup>
+
+### Bind mounts
+
+Use a local directory on the host as the root filesystem directly.
+
+<CodeGroup>
+```rust Rust
+Sandbox::builder("worker").image("./my-rootfs").create().await?;
+```
+
+```typescript TypeScript
+await Sandbox.create({ name: "worker", image: "./my-rootfs" })
+```
+
+```python Python
+await Sandbox.create("worker", image="./my-rootfs")
+```
+</CodeGroup>
+
+### Disk images
+
+Boot from a QCOW2, Raw, or VMDK disk image via virtio-blk. See [Disk Images](/images/disk-images) for details.
+
+<CodeGroup>
+```rust Rust
+Sandbox::builder("worker")
+    .image(|i| i.disk("./alpine.qcow2").fstype("ext4"))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await Sandbox.create({
+    name: "worker",
+    image: i => i.disk("./alpine.qcow2").fstype("ext4"),
+})
+```
+
+```python Python
+await Sandbox.create("worker",
+    image=lambda i: i.disk("./alpine.qcow2").fstype("ext4"))
+```
+</CodeGroup>

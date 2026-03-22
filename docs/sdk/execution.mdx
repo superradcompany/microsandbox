@@ -1,0 +1,245 @@
+---
+title: Execution
+description: Run commands, stream output, and interact with sandboxes
+icon: "terminal"
+---
+
+## exec
+
+Run a command and collect stdout, stderr, and the exit code once it completes.
+
+<CodeGroup>
+```rust Rust
+let output = sb.exec("python", ["-c", "print('hello')"]).await?;
+println!("{}", output.stdout()?);     // "hello\n"
+println!("{}", output.status().code); // 0
+```
+
+```typescript TypeScript
+const output = await sb.exec("python", ["-c", "print('hello')"])
+console.log(output.stdout.toString()) // "hello\n"
+console.log(output.status.code)       // 0
+```
+
+```python Python
+output = await sb.exec("python", ["-c", "print('hello')"])
+print(output.stdout.decode())  # "hello\n"
+print(output.status.code)      # 0
+```
+</CodeGroup>
+
+## shell
+
+Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Useful for pipelines, redirects, and other shell syntax.
+
+<CodeGroup>
+```rust Rust
+let output = sb.shell("ls -la /app && echo done", ()).await?;
+println!("{}", output.stdout()?);
+```
+
+```typescript TypeScript
+const output = await sb.shell("ls -la /app && echo done")
+console.log(output.stdout.toString())
+```
+
+```python Python
+output = await sb.shell("ls -la /app && echo done")
+print(output.stdout.decode())
+```
+</CodeGroup>
+
+## Execution options
+
+Override the working directory, environment variables, resource limits, and timeout on a per-command basis.
+
+<CodeGroup>
+```rust Rust
+use std::time::Duration;
+use microsandbox::RlimitResource;
+
+let output = sb.exec("python", |e| e
+    .args(["compute.py"])
+    .cwd("/app")
+    .env("PYTHONPATH", "/app/lib")
+    .timeout(Duration::from_secs(30))
+    .rlimit(RlimitResource::Nofile, 1024)
+    .rlimit("cpu", 60)
+).await?;
+```
+
+```typescript TypeScript
+const output = await sb.exec({
+    cmd: "python",
+    args: ["compute.py"],
+    cwd: "/app",
+    env: { PYTHONPATH: "/app/lib" },
+    timeoutMs: 30_000,
+    rlimits: { nofile: 1024 },
+})
+```
+
+```python Python
+output = await sb.exec(
+    "python", ["compute.py"],
+    cwd="/app",
+    env={"PYTHONPATH": "/app/lib"},
+    timeout=30.0,
+    rlimits={"nofile": 1024, "as": (512 * 1024 * 1024, 1024 * 1024 * 1024)},
+)
+```
+</CodeGroup>
+
+## Streaming
+
+Use `exec_stream` to receive stdout, stderr, and exit events as they happen instead of waiting for the command to finish.
+
+<CodeGroup>
+```rust Rust
+use futures::StreamExt;
+use microsandbox::exec::ExecEvent;
+
+let mut handle = sb.exec_stream("tail", |e| e.args(["-f", "/var/log/app.log"])).await?;
+
+while let Some(event) = handle.events().next().await {
+    match event? {
+        ExecEvent::Stdout(data) => print!("{}", String::from_utf8_lossy(&data)),
+        ExecEvent::Stderr(data) => eprint!("{}", String::from_utf8_lossy(&data)),
+        ExecEvent::Exited { code } => break,
+        _ => {}
+    }
+}
+```
+
+```typescript TypeScript
+const handle = await sb.execStream({ cmd: "tail", args: ["-f", "/var/log/app.log"] })
+
+for await (const event of handle.events()) {
+    switch (event.type) {
+        case 'stdout': process.stdout.write(event.data); break
+        case 'stderr': process.stderr.write(event.data); break
+        case 'exited': console.log(`Exited: ${event.code}`); break
+    }
+}
+```
+
+```python Python
+import sys
+from microsandbox import StdoutEvent, StderrEvent, ExitedEvent
+
+handle = await sb.exec_stream("tail", ["-f", "/var/log/app.log"])
+
+async for event in handle.events():
+    match event:
+        case StdoutEvent(data=data):
+            sys.stdout.buffer.write(data)
+        case StderrEvent(data=data):
+            sys.stderr.buffer.write(data)
+        case ExitedEvent(code=code):
+            break
+```
+</CodeGroup>
+
+## Interactive stdin
+
+Pipe data into a running process by opening a streaming handle with `stdin_pipe` enabled.
+
+<CodeGroup>
+```rust Rust
+let mut handle = sb.exec_stream("python", |e| e.stdin_pipe().tty(true)).await?;
+let stdin = handle.take_stdin().unwrap();
+stdin.write(b"print('hello')\n").await?;
+stdin.write(b"exit()\n").await?;
+handle.wait().await?;
+```
+
+```typescript TypeScript
+const handle = await sb.execStream({ cmd: "python", stdin: "pipe", tty: true })
+await handle.write("print('hello')\n")
+await handle.write("exit()\n")
+await handle.wait()
+```
+
+```python Python
+handle = await sb.exec_stream("python", stdin_pipe=True, tty=True)
+await handle.write(b"print('hello')\n")
+await handle.write(b"exit()\n")
+await handle.wait()
+```
+</CodeGroup>
+
+## Attach
+
+Bridge your terminal to a fully interactive PTY session inside the sandbox. Press the detach keys (default `Ctrl+]`) to disconnect without stopping the process.
+
+<CodeGroup>
+```rust Rust
+// Attach to the default shell
+let exit_code = sb.attach((), ()).await?;
+
+// Attach to a specific command with options
+let exit_code = sb.attach("python", |a| a
+    .env("DEBUG", "1")
+    .cwd("/app")
+    .detach_keys("ctrl-q")
+).await?;
+```
+
+```typescript TypeScript
+// Attach to the default shell
+const exitCode = await sb.attach()
+
+// Attach to a specific command with options
+await sb.attach("bash", a => a.env("DEBUG", "1").cwd("/app").detachKeys("ctrl-q"))
+```
+
+```python Python
+# Attach to the default shell
+exit_code = await sb.attach()
+
+# Attach to a specific command with options
+await sb.attach("bash", env={"DEBUG": "1"}, cwd="/app", detach_keys="ctrl-q")
+```
+</CodeGroup>
+
+## Sessions
+
+List background processes and reattach to them by session ID.
+
+<CodeGroup>
+```rust Rust
+// Start a background process and capture its session ID
+let handle = sb.exec_stream("python", |e| e.args(["server.py"])).await?;
+let session_id = handle.id().to_string();
+
+// List active sessions
+let sessions = sb.sessions().await?;
+
+// Reattach to a session by ID
+let mut handle = sb.session(&session_id).await?;
+```
+
+```typescript TypeScript
+// Start a background process and capture its session ID
+const handle = await sb.execStream("python", ["server.py"])
+const sessionId = handle.id
+
+// List active sessions
+const sessions = await sb.sessions()
+
+// Reattach to a session by ID
+const reattached = await sb.session(sessionId)
+```
+
+```python Python
+# Start a background process and capture its session ID
+handle = await sb.exec_stream("python", ["server.py"])
+session_id = handle.id
+
+# List active sessions
+sessions = await sb.sessions()
+
+# Reattach to a session by ID
+reattached = await sb.session(session_id)
+```
+</CodeGroup>

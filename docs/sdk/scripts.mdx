@@ -1,0 +1,128 @@
+---
+title: Scripts & Patches
+description: Inject scripts and overlay files into sandboxes
+icon: "scroll"
+---
+
+## Scripts
+
+Scripts are files mounted at `/.msb/scripts/` inside the sandbox. The scripts directory is added to `PATH` by the guest agent during init, so each script is callable by name through `exec()` or `run()`.
+
+<CodeGroup>
+```rust Rust
+use indoc::indoc;
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("worker")
+    .image("ubuntu:22.04")
+    .script("setup", indoc! {"
+        #!/bin/bash
+        apt-get update && apt-get install -y python3 curl
+    "})
+    .script("start", indoc! {"
+        #!/bin/bash
+        exec python3 /app/main.py
+    "})
+    .create()
+    .await?;
+
+sb.exec("setup", ()).await?;
+let output = sb.exec("start", ()).await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from 'microsandbox'
+
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "ubuntu:22.04",
+    scripts: {
+        setup: "#!/bin/bash\napt-get update && apt-get install -y python3 curl",
+        run: "#!/bin/bash\nexec python3 /app/main.py",
+    },
+})
+
+await sb.run("setup")
+const output = await sb.run("run")
+```
+
+```python Python
+import textwrap
+from microsandbox import Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="ubuntu:22.04",
+    scripts={
+        "setup": textwrap.dedent("""\
+            #!/bin/bash
+            apt-get update && apt-get install -y python3 curl
+        """),
+        "run": textwrap.dedent("""\
+            #!/bin/bash
+            exec python3 /app/main.py
+        """),
+    },
+)
+
+await sb.run("setup")
+output = await sb.run("run")
+```
+</CodeGroup>
+
+## Patches
+
+Patches overlay arbitrary files onto the rootfs before boot. You can copy directories, write text files, create directories, and add symlinks.
+
+<Note>
+  Patches are future work and not yet available.
+</Note>
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, Patch};
+
+let sb = Sandbox::builder("worker")
+    .image("ubuntu:22.04")
+    .patch(|p| p
+        .image("my-python-deps:v1")
+        .copy_dir("./src", "/app")
+        .text("/app/config.json", r#"{"env": "production"}"#)
+        .mkdir("/var/log/app")
+        .symlink("/usr/bin/python3", "/usr/bin/python")
+    )
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Patch, Sandbox } from 'microsandbox'
+
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "ubuntu:22.04",
+    patches: [
+        Patch.image("my-python-deps:v1"),
+        Patch.copyDir("./src", "/app"),
+        Patch.text("/app/config.json", '{"env": "production"}'),
+        Patch.mkdir("/var/log/app"),
+        Patch.symlink("/usr/bin/python3", "/usr/bin/python"),
+    ],
+})
+```
+
+```python Python
+from microsandbox import Sandbox, Patch
+
+sb = await Sandbox.create(
+    "worker",
+    image="ubuntu:22.04",
+    patches=Patch(
+        image="my-python-deps:v1",
+        copy_files=[("./src", "/app")],
+        files={"/app/config.json": '{"env": "production"}'},
+        mkdir=["/var/log/app"],
+    ),
+)
+```
+</CodeGroup>

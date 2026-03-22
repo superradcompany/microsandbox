@@ -1,0 +1,306 @@
+---
+title: Introduction
+description: Every agent deserves its own machine
+icon: "house"
+---
+
+When AI agents run, they write code, pull packages from the internet, call tools, and sometimes do things they were never meant to do because of prompt injection. All of that happens with your API keys, on your network, touching your filesystem. Containers can isolate the compute, but they share the host kernel, they can't prevent a secret from leaking over a DNS query, and they don't give you any way to see or control what's happening at the network or filesystem level.
+
+microsandbox takes a different approach. Every sandbox is a real microVM with its own kernel. The networking and filesystem are programmable from the host, and secrets are protected at the network layer so they can't be exfiltrated even if the guest is compromised.
+
+You can put the agent itself inside a sandbox, give an agent a sandbox it controls through the SDK, or just run the code and tools it uses in isolation.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, NetworkPolicy};
+
+let sb = Sandbox::builder("sandbox")
+    .image("python:3.12")
+    .memory(512)
+    .cpus(2)
+    .secret(|s| s
+        .env("OPENAI_API_KEY")
+        .value(std::env::var("OPENAI_API_KEY")?)
+        .allow_host("api.openai.com")
+    )
+    .network(|n| n.policy(NetworkPolicy::public_only()))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { NetworkPolicy, Sandbox, Secret } from 'microsandbox'
+
+const sb = await Sandbox.create({
+    name: "sandbox",
+    image: "python:3.12",
+    memoryMiB: 512,
+    cpus: 2,
+    secrets: [
+        Secret.env("OPENAI_API_KEY", {
+            value: process.env.OPENAI_API_KEY!,
+            allowHosts: ["api.openai.com"],
+        }),
+    ],
+    network: NetworkPolicy.publicOnly(),
+})
+```
+
+```python Python
+import os
+from microsandbox import Sandbox, Secret, NetworkPolicy
+
+sb = await Sandbox.create(
+    "sandbox",
+    image="python:3.12",
+    memory=512,
+    cpus=2,
+    secrets=[
+        Secret.simple("OPENAI_API_KEY", os.environ["OPENAI_API_KEY"], "api.openai.com"),
+    ],
+    network=NetworkPolicy.public_only(),
+)
+```
+</CodeGroup>
+
+## What makes it different
+
+### Secrets that can't leak
+
+The guest never sees real credentials. microsandbox injects random placeholders into environment variables, and only substitutes the real values at the network layer when the request goes to a verified TLS connection on an allowed host. DNS rebinding protection, cloud metadata blocking, and DNS-to-IP binding activate automatically when secrets are configured.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("sandbox")
+    .image("python:3.12")
+    .secret_env("OPENAI_API_KEY", api_key, "api.openai.com")
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+    name: "sandbox",
+    image: "python:3.12",
+    secrets: [
+        Secret.env("OPENAI_API_KEY", {
+            value: process.env.OPENAI_API_KEY!,
+            allowHosts: ["api.openai.com"],
+        }),
+    ],
+})
+```
+
+```python Python
+sb = await Sandbox.create(
+    "sandbox",
+    image="python:3.12",
+    secrets=[
+        Secret.simple("OPENAI_API_KEY", os.environ["OPENAI_API_KEY"], "api.openai.com"),
+    ],
+)
+```
+</CodeGroup>
+
+### Programmable network layer
+
+Every packet leaving a sandbox passes through `msbnet`, a host-side process that enforces network policies. You can inspect DNS queries, analyze HTTP traffic, drop packets at the IP level, or build custom data loss prevention. The guest sees a normal network stack. For full control, implement the `NetBackend` trait to handle raw ethernet frames.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("sandbox")
+    .image("python:3.12")
+    .network(|n| n
+        .policy(NetworkPolicy::allowlist(["api.openai.com", "pypi.org"]))
+    )
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+    name: "sandbox",
+    image: "python:3.12",
+    network: NetworkPolicy.allowlist(["api.openai.com", "pypi.org"]),
+})
+```
+
+```python Python
+sb = await Sandbox.create(
+    "sandbox",
+    image="python:3.12",
+    network=NetworkPolicy.allowlist(["api.openai.com", "pypi.org"]),
+)
+```
+</CodeGroup>
+
+### Extensible filesystem backends
+
+Mount custom filesystem implementations into any sandbox. Intercept reads and writes with hooks, build virtual filesystems, or proxy to remote storage. microsandbox provides a POSIX-compatible `DynFileSystem` trait and built-in backends for passthrough, overlay, in-memory, and proxy filesystems. All with zero-copy I/O.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("encrypted")
+    .image("python:3.12")
+    .volume("/secrets", |v| v
+        .bind("/data/secrets")
+        .on_read(move |_path, data| decrypt(data, &key))
+        .on_write(move |_path, data| encrypt(data, &key))
+    )
+    .create().await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+    name: "encrypted",
+    image: "python:3.12",
+    volumes: {
+        "/secrets": Mount.bind("/data/secrets", {
+            hooks: {
+                onRead: (path, data) => decrypt(data, key),
+                onWrite: (path, data) => encrypt(data, key),
+            },
+        }),
+    },
+})
+```
+
+```python Python
+sb = await Sandbox.create(
+    "encrypted",
+    image="python:3.12",
+    volumes={
+        "/secrets": Volume.bind(
+            "/data/secrets",
+            on_read=lambda path, data: decrypt(data, key),
+            on_write=lambda path, data: encrypt(data, key),
+        ),
+    },
+)
+```
+</CodeGroup>
+
+### Snapshot, fork, restore
+
+Capture the full VM state (memory, CPU registers, filesystem) at any point. Then fork hundreds of identical sandboxes from that single baseline with sub-millisecond restore and no re-boot. Install your dependencies once, snapshot, and fork workers on demand. Each fork gets a copy-on-write filesystem overlay, and you can override memory, CPUs, or environment variables per fork.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("base")
+    .image("python:3.12")
+    .create()
+    .await?;
+
+sb.exec("pip", ["install", "-r", "requirements.txt"]).await?;
+
+let snapshot = sb.snapshot().await?;
+
+// Fork 10 workers (skips pip install entirely)
+let workers: Vec<Sandbox> = futures::future::try_join_all(
+    (0..10).map(|i| snapshot.restore(format!("worker-{i}")))
+).await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({ name: "base", image: "python:3.12" })
+await sb.exec("pip", ["install", "-r", "requirements.txt"])
+
+const snapshot = await sb.snapshot()
+
+// Fork 10 workers (skips pip install entirely)
+const workers = await Promise.all(
+    Array.from({ length: 10 }, (_, i) => snapshot.restore(`worker-${i}`))
+)
+```
+
+```python Python
+sb = await Sandbox.create("base", image="python:3.12")
+await sb.exec("pip", ["install", "-r", "requirements.txt"])
+
+snapshot = await sb.snapshot()
+
+# Fork 10 workers (skips pip install entirely)
+workers = await asyncio.gather(*(snapshot.restore(f"worker-{i}") for i in range(10)))
+```
+</CodeGroup>
+
+### Spawn sandboxes from sandboxes
+
+Code running inside a sandbox can spawn peer sandboxes alongside itself. This is designed for multi-agent systems where agents need to create sub-environments. Peer sandboxes inherit nothing by default (their own network, filesystem, secrets), and the orchestrator coordinates via the SDK, not shared state. If the code isn't running inside a microsandbox, the spawn call fails safely.
+
+### Composable plugin system
+
+Extend microsandbox with in-process Rust plugins or out-of-process plugins in any language. Plugins hook into lifecycle events, exec calls, filesystem operations, or network traffic. They compose naturally, so you can stack an audit logger, a rate limiter, and a network monitor without them knowing about each other.
+
+### Bidirectional events
+
+Guest processes can emit typed events to the host via `/run/agent.sock`, and the host can send events back. No special libraries required in the guest since any language can write JSON to a Unix socket. This enables structured communication beyond stdin/stdout, like progress reporting, task completion signals, or custom RPC.
+
+<CodeGroup>
+```rust Rust
+// Receive events from guest
+let _sub = sb.on_event("task.progress", |event: EventData| {
+    if let Ok(p) = event.data.unwrap().deserialized::<Progress>() {
+        println!("[{}%] {}", p.percent, p.message);
+    }
+});
+
+// Send events to guest
+sb.emit("task.start", TaskConfig {
+    input_file: "/data/input.txt".into(),
+    output_dir: "/data/output".into(),
+}).await?;
+```
+
+```typescript TypeScript
+// Receive events from guest
+const sub = sb.onEvent("task.progress", (event: EventData) => {
+    const { percent, message } = event.data as { percent: number; message: string }
+    console.log(`[${percent}%] ${message}`)
+})
+
+// Send events to guest
+await sb.emit("task.start", { inputFile: "/data/input.txt", options: ["--verbose"] })
+```
+
+```python Python
+# Receive events from guest
+progress_sub = sb.on_event("task.progress", lambda event: (
+    print(f"[{event.data['percent']}%] {event.data['message']}")
+))
+
+# Send events to guest
+await sb.emit("task.start", {
+    "input_file": "/data/input.txt",
+    "output_dir": "/data/output",
+})
+```
+</CodeGroup>
+
+## The basics
+
+On top of all this, microsandbox handles the fundamentals well:
+
+- **Under 200ms boot.** libkrun microVMs, not QEMU. Pre-patched kernel loaded as a shared library. Zero-copy mmap.
+- **No daemon.** The runtime embeds directly into your application. No root process, no socket, no background service.
+- **Any OCI image.** Docker Hub, GHCR, ECR, GCR, or any OCI-compatible registry. Your existing images work.
+- **Cross-platform.** Native on macOS and Linux. Same CLI, same SDKs, same Sandboxfile.
+- **Multi-language SDKs.** Rust, TypeScript, and Python with consistent APIs across all of them.
+- **Declarative projects.** Define multi-sandbox environments in a `Sandboxfile` with per-sandbox secrets, network policies, dependency ordering, and scripts. Think Compose, but for microVMs.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="bolt" href="/quickstart">
+    Get a sandbox running in under 5 minutes
+  </Card>
+  <Card title="Sandbox overview" icon="box" href="/sandboxes/overview">
+    Configuration, rootfs sources, and lifecycle
+  </Card>
+  <Card title="CLI reference" icon="square-terminal" href="/cli/overview">
+    Manage sandboxes from the terminal
+  </Card>
+  <Card title="SDK reference" icon="code" href="/sdk/rust">
+    Full API documentation for all SDKs
+  </Card>
+</CardGroup>

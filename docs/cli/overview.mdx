@@ -1,0 +1,67 @@
+---
+title: CLI Overview
+description: Manage sandboxes from the terminal
+icon: "book"
+---
+
+The `msb` CLI lets you create, manage, and interact with sandboxes directly from the terminal. It auto-detects TTY and interactivity, so no `-it` flags are needed.
+
+## Install
+
+```bash
+curl -fsSL https://get.microsandbox.dev | sh
+```
+
+<Note>
+  microsandbox requires Linux with KVM enabled, or macOS with Apple Silicon (M-series chip).
+</Note>
+
+## Quick reference
+
+```bash
+# Run a one-off command (ephemeral, auto-removed)
+msb run python:3.11 -- python -c "print('Hello!')"
+
+# Interactive shell (auto-detects TTY)
+msb run alpine:latest -- sh
+
+# Create a persistent sandbox
+msb run --name devbox ubuntu:22.04 -- bash
+
+# Resume later
+msb start devbox
+msb shell devbox
+
+# Execute in a running sandbox
+msb exec devbox -- ls -la /app
+
+# Attach with detach keys
+msb attach devbox --detach-keys ctrl-q
+
+# Manage
+msb ls                   # List all sandboxes
+msb ps                   # Running sandboxes only
+msb inspect devbox       # Detailed info
+msb stop devbox          # Graceful shutdown
+msb rm devbox            # Remove stopped sandbox
+
+# Images
+msb pull python:3.11     # Pre-pull to cache
+
+# Volumes
+msb volume create data --size 10G
+msb volume ls
+msb volume rm data
+```
+
+## Global options
+
+| Flag | Description |
+|------|-------------|
+| `--error` | Show only errors |
+| `--warn` | Show warnings and errors |
+| `--info` | Show info, warnings, and errors |
+| `--debug` | Show debug output |
+| `--trace` | Show all output including trace |
+
+For detailed command reference, see [Sandbox Commands](/cli/sandbox-commands), [Volume Commands](/cli/volume-commands), and [Image Commands](/cli/image-commands).

@@ -1,0 +1,590 @@
+---
+title: Sandbox
+description: Create, configure, and manage sandbox lifecycle
+icon: "cube"
+---
+
+## Create with options
+
+Configure memory, CPUs, working directory, shell, environment variables, volumes, and network when creating a sandbox.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, NetworkPolicy};
+
+let sb = Sandbox::builder("worker")
+    .image("python:3.12")
+    .memory(1024)
+    .cpus(2)
+    .workdir("/app")
+    .shell("/bin/bash")
+    .env("DEBUG", "true")
+    .env("API_PORT", "8000")
+    .volume("/app/src", |v| v.bind("./src").readonly())
+    .volume("/data", |v| v.named("my-data"))
+    .volume("/tmp/scratch", |v| v.tmpfs().size(100))
+    .network(|n| n.policy(NetworkPolicy::public_only()))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Mount, Network, Sandbox } from 'microsandbox'
+
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "python:3.12",
+    memoryMiB: 1024,
+    cpus: 2,
+    workdir: "/app",
+    shell: "/bin/bash",
+    env: { DEBUG: "true", API_PORT: "8000" },
+    volumes: {
+        "/app/src": Mount.bind("./src", { readonly: true }),
+        "/data": Mount.named("my-data"),
+        "/tmp/scratch": Mount.tmpfs({ sizeMiB: 100 }),
+    },
+    network: Network.publicOnly(),
+})
+```
+
+```python Python
+from microsandbox import Sandbox, NetworkPolicy, Volume
+
+sb = await Sandbox.create(
+    "worker",
+    image="python:3.12",
+    memory=1024,
+    cpus=2,
+    workdir="/app",
+    shell="/bin/bash",
+    env={"DEBUG": "true", "API_PORT": "8000"},
+    volumes={
+        "/app/src": Volume.bind("./src", readonly=True),
+        "/data": Volume.named("my-data"),
+        "/tmp/scratch": Volume.tmpfs(size_mib=100),
+    },
+    network=NetworkPolicy.public_only(),
+)
+```
+</CodeGroup>
+
+## Detached creation
+
+Create a sandbox that keeps running after your process exits. Useful for long-running agents or background workers.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python:3.12")
+    .create_detached()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "python:3.12",
+    detached: true,
+})
+```
+
+```python Python
+sb = await Sandbox.create("worker", image="python:3.12", detached=True)
+```
+</CodeGroup>
+
+## Overwrite existing
+
+Replace a stopped sandbox with the same name instead of failing on conflict.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python:3.12")
+    .overwrite()
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "python:3.12",
+    overwrite: true,
+})
+```
+
+```python Python
+sb = await Sandbox.create("worker", image="python:3.12", overwrite=True)
+```
+</CodeGroup>
+
+## Config inspection
+
+Build a sandbox configuration without booting the VM. Useful for serializing, storing, or modifying configs before creation.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+
+let config = Sandbox::builder("preview")
+    .image("python:3.12")
+    .memory(1024)
+    .build();
+
+println!("{}", serde_json::to_string_pretty(&config)?);
+let sb = Sandbox::create(config).await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from 'microsandbox'
+
+const config = Sandbox.buildConfig({
+    name: "preview",
+    image: "python:3.12",
+    memoryMiB: 1024,
+})
+
+console.log(JSON.stringify(config, null, 2))
+const sb = await Sandbox.create(config)
+```
+
+```python Python
+import json
+from microsandbox import SandboxConfig, Sandbox
+
+config = SandboxConfig("preview", image="python:3.12", memory=1024)
+print(json.dumps(config.to_dict(), indent=2))
+
+config.memory = 2048
+sb = await Sandbox.create_from_config(config)
+```
+</CodeGroup>
+
+## Disk image rootfs
+
+Boot from a qcow2 or raw disk image instead of an OCI container image. The filesystem type is auto-detected by default.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+
+// Auto-detect filesystem
+let sb = Sandbox::builder("vm-sandbox")
+    .image("./ubuntu-22.04.qcow2")
+    .cpus(2)
+    .memory(2048)
+    .create()
+    .await?;
+
+// Explicit filesystem type
+let sb = Sandbox::builder("vm-sandbox")
+    .image(|i| i.disk("./alpine.raw").fstype("ext4"))
+    .cpus(1)
+    .memory(512)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from 'microsandbox'
+
+// Auto-detect filesystem
+const sb = await Sandbox.create({
+    name: "vm-sandbox",
+    image: "./ubuntu-22.04.qcow2",
+    cpus: 2,
+    memoryMiB: 2048,
+})
+
+// Explicit filesystem type
+const sb2 = await Sandbox.create({
+    name: "vm-sandbox",
+    image: i => i.disk("./alpine.raw").fstype("ext4"),
+    cpus: 1,
+    memoryMiB: 512,
+})
+```
+
+```python Python
+from microsandbox import Sandbox
+
+# Auto-detect filesystem
+sb = await Sandbox.create(
+    "vm-sandbox",
+    image="./ubuntu-22.04.qcow2",
+    cpus=2,
+    memory=2048,
+)
+
+# Explicit filesystem type
+sb = await Sandbox.create(
+    "vm-sandbox",
+    image=lambda i: i.disk("./alpine.raw").fstype("ext4"),
+    cpus=1,
+    memory=512,
+)
+```
+</CodeGroup>
+
+## Private registry
+
+Authenticate to private container registries and control when images are pulled.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, RegistryAuth, PullPolicy};
+
+// Explicit auth with pull policy
+let sb = Sandbox::builder("worker")
+    .image("registry.corp.io/team/app:latest")
+    .registry_auth(RegistryAuth::Basic {
+        username: "deploy".into(),
+        password: std::env::var("REGISTRY_PASSWORD")?,
+    })
+    .pull_policy(PullPolicy::Always)
+    .create()
+    .await?;
+
+// Use cached image, never pull
+let sb = Sandbox::builder("offline")
+    .image("python:3.12")
+    .pull_policy(PullPolicy::Never)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { PullPolicy, Sandbox } from 'microsandbox'
+
+// Explicit auth with pull policy
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "private.registry.io/org/app:v1",
+    registryAuth: { username: "deploy", password: process.env.REGISTRY_TOKEN! },
+    pullPolicy: PullPolicy.Always,
+})
+
+// Use cached image, never pull
+const sb2 = await Sandbox.create({
+    name: "offline",
+    image: "python:3.12",
+    pullPolicy: PullPolicy.Never,
+})
+```
+
+```python Python
+import os
+from microsandbox import Sandbox, PullPolicy
+
+# Explicit auth with pull policy
+sb = await Sandbox.create(
+    "worker",
+    image="private.registry.io/org/app:v1",
+    registry_auth={"username": "deploy", "password": os.environ["REGISTRY_TOKEN"]},
+    pull_policy=PullPolicy.ALWAYS,
+)
+
+# Use cached image, never pull
+sb = await Sandbox.create(
+    "offline",
+    image="python:3.12",
+    pull_policy=PullPolicy.NEVER,
+)
+```
+</CodeGroup>
+
+Pull policies control whether the SDK fetches the image from the registry:
+
+| Policy | Behavior |
+|--------|----------|
+| `Always` | Pull the image every time, even if cached locally |
+| `IfMissing` | Pull only if the image is not already cached (default) |
+| `Never` | Never pull; fail if the image is not cached |
+
+## Lifecycle
+
+### Stop, start, kill
+
+Stop sends a graceful shutdown signal. Start reboots a stopped sandbox from persisted state. Kill sends SIGKILL for unresponsive sandboxes.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+
+sb.stop().await?;
+
+let sb = Sandbox::start("worker").await?;
+
+sb.kill().await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from 'microsandbox'
+
+await sb.stop()
+
+const sb = await Sandbox.start("worker")
+
+await sb.kill()
+```
+
+```python Python
+from microsandbox import Sandbox
+
+await sb.stop()
+
+sb = await Sandbox.start("worker")
+
+await sb.kill()
+```
+</CodeGroup>
+
+### Pause and resume
+
+Freeze all processes without shutting down. The VM stays in memory but uses no CPU. Resume is instant with no boot time.
+
+<CodeGroup>
+```rust Rust
+sb.pause().await?;
+sb.resume().await?;
+```
+
+```typescript TypeScript
+await sb.pause()
+await sb.resume()
+```
+
+```python Python
+await sb.pause()
+await sb.resume()
+```
+</CodeGroup>
+
+### Drain
+
+Trigger a graceful shutdown that lets existing commands finish but rejects new ones. The sandbox transitions to `Draining` and eventually to `Stopped`.
+
+<CodeGroup>
+```rust Rust
+sb.drain().await?;
+```
+
+```typescript TypeScript
+await sb.drain()
+```
+
+```python Python
+await sb.drain()
+```
+</CodeGroup>
+
+### Detach
+
+Release the sandbox handle without stopping the sandbox. The sandbox continues running in the background.
+
+<CodeGroup>
+```rust Rust
+sb.detach().await;
+```
+
+```typescript TypeScript
+await sb.detach()
+```
+
+```python Python
+await sb.detach()
+```
+</CodeGroup>
+
+### Wait
+
+Wait for the sandbox to terminate without triggering a stop. Blocks until the sandbox exits on its own.
+
+<CodeGroup>
+```rust Rust
+let exit_status = sb.wait().await?;
+```
+
+```typescript TypeScript
+const exitStatus = await sb.wait()
+```
+
+```python Python
+exit_status = await sb.wait()
+```
+</CodeGroup>
+
+### List, get, remove
+
+Query sandbox inventory and clean up stopped sandboxes.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+
+for handle in Sandbox::list().await? {
+    println!("{}: {:?}", handle.name(), handle.status());
+}
+
+let handle = Sandbox::get("worker").await?;
+let sb = handle.start().await?;
+
+Sandbox::remove("old-sandbox").await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from 'microsandbox'
+
+const sandboxes = await Sandbox.list()
+for (const info of sandboxes) {
+    console.log(`${info.name}: ${info.status}`)
+}
+
+const existing = await Sandbox.get("my-sandbox")
+
+await Sandbox.remove("old-sandbox")
+```
+
+```python Python
+from microsandbox import Sandbox
+
+sandboxes = await Sandbox.list()
+for info in sandboxes:
+    print(f"{info.name}: {info.status}")
+
+sb = await Sandbox.get("my-sandbox")
+
+await Sandbox.remove("old-sandbox")
+```
+</CodeGroup>
+
+### Graceful shutdown with timeout fallback
+
+Attempt a graceful stop, then force-kill if the sandbox does not shut down in time.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+use std::time::Duration;
+
+let mut handle = Sandbox::get("worker").await?;
+match tokio::time::timeout(Duration::from_secs(30), handle.stop()).await {
+    Ok(Ok(())) => println!("Stopped"),
+    Ok(Err(e)) => eprintln!("Error: {e}"),
+    Err(_) => handle.kill().await?,
+}
+```
+
+```typescript TypeScript
+import { Sandbox } from 'microsandbox'
+
+const sb = await Sandbox.get("worker")
+try {
+    await Promise.race([
+        sb.stop(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 30_000)),
+    ])
+} catch {
+    await sb.kill()
+}
+```
+
+```python Python
+import asyncio
+from microsandbox import Sandbox
+
+sb = await Sandbox.get("worker")
+try:
+    await asyncio.wait_for(sb.stop(), timeout=30)
+except asyncio.TimeoutError:
+    await sb.kill()
+```
+</CodeGroup>
+
+## Supervisor policies
+
+Configure how the supervisor handles shutdown escalation, idle detection, and maximum sandbox lifetime.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, ShutdownMode, LogLevel};
+
+let sb = Sandbox::builder("worker")
+    .image("python:3.12")
+    .shutdown_mode(ShutdownMode::Terminate)
+    .grace_period(30)
+    .max_duration(3600)
+    .idle_timeout(300)
+    .log_level(LogLevel::Debug)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox, ShutdownMode, LogLevel } from 'microsandbox'
+
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "python:3.12",
+    shutdownMode: ShutdownMode.Graceful,
+    gracePeriod: 30,
+    maxDuration: 3600,
+    idleTimeout: 300,
+    logLevel: LogLevel.Debug,
+})
+```
+
+```python Python
+from microsandbox import Sandbox, ShutdownMode, LogLevel
+
+sb = await Sandbox.create(
+    "worker",
+    image="python:3.12",
+    shutdown_mode=ShutdownMode.TERMINATE,
+    grace_period=30,
+    max_duration=3600,
+    idle_timeout=300,
+    log_level=LogLevel.DEBUG,
+)
+```
+</CodeGroup>
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `shutdown_mode` | `Terminate` | How the supervisor escalates shutdown signals |
+| `grace_period` | `10` | Seconds between escalation steps |
+| `max_duration` | none | Maximum sandbox lifetime in seconds; triggers drain when exceeded |
+| `idle_timeout` | none | Auto-drain after this many seconds of inactivity |
+| `log_level` | none | Override supervisor log verbosity |
+
+## Custom init
+
+Replace the default init binary with your own. The custom init must exist in the guest filesystem (from the image or a volume). When set, the embedded init is not patched into the filesystem.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("ubuntu:22.04")
+    .init("/usr/local/bin/my-init")
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "ubuntu:22.04",
+    init: "/usr/local/bin/my-init",
+})
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="ubuntu:22.04",
+    init="/usr/local/bin/my-init",
+)
+```
+</CodeGroup>

@@ -1,0 +1,110 @@
+---
+title: Filesystem
+description: Read and write files inside a running sandbox
+icon: "folder-open"
+---
+
+You can read, write, and manage files inside a sandbox without mounting volumes or using SSH. The filesystem API communicates directly with the guest agent over a virtio-console channel, giving you programmatic access to the guest filesystem from the host.
+
+This is particularly useful for AI agent workflows where you need to write generated code into the sandbox, read back results, or inspect logs.
+
+## Write a file
+
+<CodeGroup>
+```rust Rust
+sb.fs().write("/app/config.json", r#"{"debug": true}"#).await?;
+```
+
+```typescript TypeScript
+await sb.fs.write("/app/config.json", '{"debug": true}')
+```
+
+```python Python
+await sb.fs.write("/app/config.json", '{"debug": true}')
+```
+
+</CodeGroup>
+
+## Read a file
+
+<CodeGroup>
+```rust Rust
+let content = sb.fs().read_to_string("/app/config.json").await?;
+```
+
+```typescript TypeScript
+const content = await sb.fs.readString("/app/config.json")
+```
+
+```python Python
+content = await sb.fs.read_string("/app/config.json")
+```
+
+</CodeGroup>
+
+## List a directory
+
+<CodeGroup>
+```rust Rust
+let entries = sb.fs().list("/app").await?;
+for entry in entries {
+    println!("{}: {:?}", entry.path, entry.kind);
+}
+```
+
+```typescript TypeScript
+const entries = await sb.fs.list("/app")
+for (const entry of entries) {
+    console.log(`${entry.path}: ${entry.kind}`)
+}
+```
+
+```python Python
+entries = await sb.fs.list("/app")
+for entry in entries:
+    print(f"{entry.path}: {entry.kind}")
+```
+</CodeGroup>
+
+## Stream large files
+
+For files that are too large to read into memory at once, use streaming. Chunks are transferred at approximately 3 MiB granularity.
+
+<CodeGroup>
+```rust Rust
+let mut stream = sb.fs().read_stream("/app/data.bin").await?;
+while let Some(chunk) = stream.next().await {
+    process(chunk?);
+}
+```
+
+```typescript TypeScript
+const stream = await sb.fs.readStream("/app/data.bin")
+for await (const chunk of stream) {
+    processChunk(chunk)
+}
+```
+
+```python Python
+async for chunk in sb.fs.read_stream("/app/data.bin"):
+    process_chunk(chunk)
+```
+</CodeGroup>
+
+## Copy from host
+
+Copy a file from the host machine into the sandbox in a single call.
+
+<CodeGroup>
+```rust Rust
+sb.fs().copy_from_host("./local-file.txt", "/app/remote-file.txt").await?;
+```
+
+```typescript TypeScript
+await sb.fs.copyFromHost("./local-file.txt", "/app/remote-file.txt")
+```
+
+```python Python
+await sb.fs.copy_from_host("./local-file.txt", "/app/remote-file.txt")
+```
+</CodeGroup>

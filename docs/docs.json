@@ -1,0 +1,121 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "sequoia",
+  "name": "microsandbox",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg",
+    "href": "https://microsandbox.dev"
+  },
+  "favicon": "/logo/light.svg",
+  "colors": {
+    "primary": "#A770EF",
+    "light": "#A770EF",
+    "dark": "#A770EF"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/zerocore-ai/microsandbox"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "icon": "rocket",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Sandboxes",
+            "icon": "box",
+            "pages": [
+              "sandboxes/overview",
+              "sandboxes/lifecycle",
+              "sandboxes/commands",
+              "sandboxes/filesystem",
+              "sandboxes/volumes",
+              "sandboxes/networking"
+            ]
+          },
+          {
+            "group": "Images",
+            "icon": "layer-group",
+            "pages": [
+              "images/overview",
+              "images/disk-images"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "SDK Reference",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "icon": "flag",
+            "pages": [
+              "sdk/overview"
+            ]
+          },
+          {
+            "group": "Core",
+            "icon": "circle",
+            "pages": [
+              "sdk/sandbox",
+              "sdk/execution",
+              "sdk/filesystem",
+              "sdk/volumes"
+            ]
+          },
+          {
+            "group": "Features",
+            "icon": "puzzle-piece",
+            "pages": [
+              "sdk/snapshots",
+              "sdk/networking",
+              "sdk/events"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "icon": "gear",
+            "pages": [
+              "sdk/scripts",
+              "sdk/metrics",
+              "sdk/errors"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "CLI Reference",
+        "groups": [
+          {
+            "group": "CLI",
+            "icon": "terminal",
+            "pages": [
+              "cli/overview",
+              "cli/sandbox-commands",
+              "cli/volume-commands",
+              "cli/image-commands"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/zerocore-ai/microsandbox",
+      "discord": "https://discord.gg/T95Y3XnEAK",
+      "x": "https://x.com/microsandbox"
+    }
+  }
+}
