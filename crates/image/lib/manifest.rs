@@ -49,4 +49,12 @@ impl OciManifest {
     pub fn is_index(&self) -> bool {
         matches!(self, Self::Index(_))
     }
+
+    /// Return the config blob digest for a single-platform manifest.
+    pub fn config_digest(&self) -> Option<String> {
+        match self {
+            Self::Image(m) => Some(m.config().digest().to_string()),
+            Self::Index(_) => None,
+        }
+    }
 }

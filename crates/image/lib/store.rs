@@ -50,9 +50,11 @@ pub struct GlobalCache {
 
 /// Cached metadata for a pulled image reference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct CachedImageMetadata {
+pub struct CachedImageMetadata {
     /// Content-addressable digest of the resolved manifest.
     pub manifest_digest: String,
+    /// Content-addressable digest of the config blob.
+    pub config_digest: String,
     /// Parsed OCI image configuration.
     pub config: ImageConfig,
     /// Layer metadata in bottom-to-top order.
@@ -61,7 +63,7 @@ pub(crate) struct CachedImageMetadata {
 
 /// Cached metadata for a single layer descriptor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct CachedLayerMetadata {
+pub struct CachedLayerMetadata {
     /// Compressed layer digest from the manifest.
     pub digest: String,
     /// OCI media type of the layer blob.
@@ -161,19 +163,17 @@ impl GlobalCache {
     }
 
     /// Read cached metadata for an image reference.
-    pub(crate) fn read_image_metadata(
+    pub fn read_image_metadata(
         &self,
         reference: &Reference,
     ) -> ImageResult<Option<CachedImageMetadata>> {
         let path = self.image_metadata_path(reference);
-        if !path.exists() {
-            return Ok(None);
-        }
 
-        let data = std::fs::read_to_string(&path).map_err(|e| ImageError::Cache {
-            path: path.clone(),
-            source: e,
-        })?;
+        let data = match std::fs::read_to_string(&path) {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(ImageError::Cache { path, source: e }),
+        };
 
         match serde_json::from_str::<CachedImageMetadata>(&data) {
             Ok(metadata) => Ok(Some(metadata)),
@@ -203,6 +203,16 @@ impl GlobalCache {
         std::fs::rename(&temp_path, &path).map_err(|e| ImageError::Cache { path, source: e })?;
 
         Ok(())
+    }
+
+    /// Delete cached metadata for an image reference.
+    pub fn delete_image_metadata(&self, reference: &Reference) -> ImageResult<()> {
+        let path = self.image_metadata_path(reference);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(ImageError::Cache { path, source: e }),
+        }
     }
 
     /// Path to the cached metadata file for an image reference.

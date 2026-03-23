@@ -1,8 +1,10 @@
 //! Entry point for the `msb` CLI binary.
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use microsandbox_cli::{
-    commands::{create, exec, inspect, list, ps, pull, remove, run, shell, start, stop, volume},
+    commands::{
+        create, exec, image, inspect, list, ps, pull, remove, run, shell, start, stop, volume,
+    },
     log_args::{self, LogArgs},
     microvm_cmd::{self, MicrovmArgs},
     supervisor_cmd::{self, SupervisorArgs},
@@ -16,6 +18,10 @@ use microsandbox_cli::{
 #[derive(Parser)]
 #[command(name = "msb", version, about = "Microsandbox CLI", styles = microsandbox_cli::styles::styles())]
 struct Cli {
+    /// Display the complete command tree with descriptions.
+    #[arg(long, global = true)]
+    tree: bool,
+
     #[command(flatten)]
     logs: LogArgs,
 
@@ -63,13 +69,25 @@ enum Commands {
     /// Shell in a sandbox (interactive or scripted).
     Shell(shell::ShellArgs),
 
-    /// Pull an image from a registry.
+    /// Manage OCI images.
+    Image(image::ImageArgs),
+
+    /// Pull an image from a registry (alias for `image pull`).
     Pull(pull::PullArgs),
+
+    /// List cached images (alias for `image ls`).
+    #[command(hide = true)]
+    Images(image::ImageListArgs),
+
+    /// Remove a cached image (alias for `image rm`).
+    #[command(hide = true)]
+    Rmi(image::ImageRemoveArgs),
 
     /// Show detailed sandbox information.
     Inspect(inspect::InspectArgs),
 
     /// Manage named volumes.
+    #[command(visible_alias = "vol")]
     Volume(volume::VolumeArgs),
 }
 
@@ -78,6 +96,10 @@ enum Commands {
 //--------------------------------------------------------------------------------------------------
 
 fn main() {
+    // Ensure terminal echo is restored even if a panic aborts the process
+    // (release profile sets `panic = "abort"`, so Drop impls don't run).
+    microsandbox_cli::ui::install_panic_hook();
+
     // Auto-set MSB_PATH so the library can find the msb binary
     // when spawning supervisor processes.
     // Safety: called before any threads are spawned (single-threaded at this point).
@@ -85,6 +107,13 @@ fn main() {
         && let Ok(exe) = std::env::current_exe()
     {
         unsafe { std::env::set_var("MSB_PATH", &exe) };
+    }
+
+    // Handle --tree before Cli::parse() so it works even when
+    // required arguments (e.g. `msb run --tree`) are missing.
+    if let Some(tree) = microsandbox_cli::tree::try_show_tree(&Cli::command()) {
+        println!("{tree}");
+        return;
     }
 
     let cli = Cli::parse();
@@ -128,7 +157,10 @@ fn run_async_command(
             Commands::Remove(args) => remove::run(args).await.map_err(Into::into),
             Commands::Exec(args) => exec::run(args).await.map_err(Into::into),
             Commands::Shell(args) => shell::run(args).await.map_err(Into::into),
-            Commands::Pull(args) => pull::run(args).await.map_err(Into::into),
+            Commands::Image(args) => image::run(args).await.map_err(Into::into),
+            Commands::Pull(args) => image::run_pull(args).await.map_err(Into::into),
+            Commands::Images(args) => image::run_list(args).await.map_err(Into::into),
+            Commands::Rmi(args) => image::run_remove(args).await.map_err(Into::into),
             Commands::Inspect(args) => inspect::run(args).await.map_err(Into::into),
             Commands::Volume(args) => volume::run(args).await.map_err(Into::into),
         }

@@ -35,9 +35,6 @@ msb shell devbox
 # Execute in a running sandbox
 msb exec devbox -- ls -la /app
 
-# Attach with detach keys
-msb attach devbox --detach-keys ctrl-q
-
 # Manage
 msb ls                   # List all sandboxes
 msb ps                   # Running sandboxes only
@@ -58,10 +55,27 @@ msb volume rm data
 
 | Flag | Description |
 |------|-------------|
+| `--tree` | Display the complete command tree with descriptions |
 | `--error` | Show only errors |
 | `--warn` | Show warnings and errors |
 | `--info` | Show info, warnings, and errors |
 | `--debug` | Show debug output |
 | `--trace` | Show all output including trace |
+
+## Command tree
+
+Use `--tree` as an alternative to `--help` to see every command, subcommand, and flag at once:
+
+```bash
+msb --tree
+```
+
+You can also scope it to a specific subcommand:
+
+```bash
+msb image --tree    # Show only image commands
+msb volume --tree   # Show only volume commands
+msb run --tree      # Show all flags for run
+```
 
 For detailed command reference, see [Sandbox Commands](/cli/sandbox-commands), [Volume Commands](/cli/volume-commands), and [Image Commands](/cli/image-commands).

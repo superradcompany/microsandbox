@@ -10,6 +10,7 @@ use crate::ui;
 
 pub mod create;
 pub mod exec;
+pub mod image;
 pub mod inspect;
 pub mod list;
 pub mod ps;

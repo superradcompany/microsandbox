@@ -1,6 +1,6 @@
 #!/bin/sh
 # Microsandbox installer
-# Usage: curl -fsSL https://microsandbox.dev/install | sh
+# Usage: curl -fsSL https://get.microsandbox.dev | sh
 set -eu
 
 # ---------------------------------------------------------------------------
@@ -242,19 +242,23 @@ main() {
     info "Extracting..."
     tar -xzf "$_bundle"
 
-    # Install binaries
+    # Install binaries.
+    # install(1) unlinks the target first, so the binary gets a fresh inode
+    # even if a previous version is running.
     mkdir -p "$BIN_DIR"
     install -m 755 msb "$BIN_DIR/msb"
     install -m 755 msbnet "$BIN_DIR/msbnet"
 
-    # Install libkrunfw
+    # Install libkrunfw. Use install(1) on Linux (handles running binaries).
+    # On macOS, cp+mv for a fresh inode — macOS caches code signatures on the
+    # vnode, so overwriting a running library in-place can cause issues.
     mkdir -p "$LIB_DIR"
     if [ "$OS" = "linux" ]; then
-        cp "libkrunfw.so.${LIBKRUNFW_VERSION}" "$LIB_DIR/"
+        install -m 644 "libkrunfw.so.${LIBKRUNFW_VERSION}" "$LIB_DIR/libkrunfw.so.${LIBKRUNFW_VERSION}"
         ln -sf "libkrunfw.so.${LIBKRUNFW_VERSION}" "$LIB_DIR/libkrunfw.so.${LIBKRUNFW_ABI}"
         ln -sf "libkrunfw.so.${LIBKRUNFW_ABI}" "$LIB_DIR/libkrunfw.so"
     elif [ "$OS" = "darwin" ]; then
-        cp "libkrunfw.${LIBKRUNFW_ABI}.dylib" "$LIB_DIR/"
+        cp "libkrunfw.${LIBKRUNFW_ABI}.dylib" "$LIB_DIR/libkrunfw.${LIBKRUNFW_ABI}.dylib.tmp" && mv "$LIB_DIR/libkrunfw.${LIBKRUNFW_ABI}.dylib.tmp" "$LIB_DIR/libkrunfw.${LIBKRUNFW_ABI}.dylib"
         ln -sf "libkrunfw.${LIBKRUNFW_ABI}.dylib" "$LIB_DIR/libkrunfw.dylib"
     fi
 

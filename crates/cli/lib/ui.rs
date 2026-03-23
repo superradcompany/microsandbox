@@ -58,7 +58,7 @@ impl Spinner {
     /// target is the object name (e.g., "mybox").
     pub fn start(label: &str, target: &str) -> Self {
         let is_tty = std::io::stderr().is_terminal();
-        let pb = if is_tty {
+        let (pb, echo_guard) = if is_tty {
             let pb = ProgressBar::new_spinner();
             pb.set_style(
                 ProgressStyle::default_spinner()
@@ -68,9 +68,9 @@ impl Spinner {
             );
             pb.set_message(target.to_string());
             pb.enable_steady_tick(Duration::from_millis(80));
-            Some(pb)
+            (Some(pb), EchoGuard::acquire())
         } else {
-            None
+            (None, None)
         };
 
         Self {
@@ -79,7 +79,7 @@ impl Spinner {
             label: label.to_string(),
             target: target.to_string(),
             quiet: false,
-            _echo_guard: EchoGuard::acquire(),
+            _echo_guard: echo_guard,
         }
     }
 
@@ -188,6 +188,9 @@ impl Table {
     }
 
     /// Print the table to stdout with column alignment.
+    ///
+    /// Uses visible (display) width so ANSI escape codes in cell values
+    /// don't break column alignment.
     pub fn print(&self) {
         if self.rows.is_empty() {
             return;
@@ -199,7 +202,7 @@ impl Table {
         for row in &self.rows {
             for (i, cell) in row.iter().enumerate() {
                 if i < col_count {
-                    widths[i] = widths[i].max(cell.len());
+                    widths[i] = widths[i].max(console::measure_text_width(cell));
                 }
             }
         }
@@ -226,7 +229,9 @@ impl Table {
                 .enumerate()
                 .map(|(i, cell)| {
                     if i < col_count - 1 {
-                        format!("{:<width$}    ", cell, width = widths[i])
+                        let vis = console::measure_text_width(cell);
+                        let padding = widths[i].saturating_sub(vis) + 4;
+                        format!("{cell}{:padding$}", "", padding = padding)
                     } else {
                         cell.clone()
                     }
@@ -240,6 +245,29 @@ impl Table {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Install a panic hook that restores terminal echo before aborting.
+///
+/// With `panic = "abort"` in the release profile, `Drop` impls are not called
+/// on panic, which would leave the terminal with echo disabled. This hook
+/// ensures echo is restored before the default panic handler runs.
+pub fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Best-effort: restore echo on stdin if it's a TTY.
+        if std::io::stdin().is_terminal() {
+            let fd = std::io::stdin().as_raw_fd();
+            let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+            if unsafe { libc::tcgetattr(fd, &mut termios) } == 0 {
+                termios.c_lflag |= libc::ECHO;
+                unsafe {
+                    libc::tcsetattr(fd, libc::TCSANOW, &termios);
+                }
+            }
+        }
+        default(info);
+    }));
+}
 
 /// Print a styled error message to stderr.
 pub fn error(msg: &str) {
@@ -299,10 +327,14 @@ pub fn parse_size_mib(s: &str) -> Result<u32, String> {
     let s = s.trim();
     if let Some(n) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
         let val: f64 = n.trim().parse().map_err(|e| format!("invalid size: {e}"))?;
-        if val < 0.0 {
-            return Err("size must not be negative".into());
+        if val.is_nan() || val.is_infinite() || val < 0.0 {
+            return Err("size must be a finite positive number".into());
         }
-        Ok((val * 1024.0) as u32)
+        let mib = val * 1024.0;
+        if mib > u32::MAX as f64 {
+            return Err("size too large".into());
+        }
+        Ok(mib as u32)
     } else if let Some(n) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
         n.trim()
             .parse::<u32>()

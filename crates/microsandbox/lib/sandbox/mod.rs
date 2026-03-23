@@ -22,8 +22,7 @@ use microsandbox_protocol::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, Set, TransactionTrait,
-    sea_query::{Expr, OnConflict},
+    QueryOrder, Set, TransactionTrait, sea_query::Expr,
 };
 use tokio::sync::{Mutex, mpsc};
 
@@ -31,7 +30,7 @@ use crate::{
     MicrosandboxResult,
     agent::AgentClient,
     db::entity::{
-        image as image_entity, microvm as microvm_entity, sandbox as sandbox_entity,
+        microvm as microvm_entity, sandbox as sandbox_entity,
         sandbox_image as sandbox_image_entity, supervisor as supervisor_entity,
     },
     runtime::{SupervisorHandle, SupervisorSpawnMode, spawn_supervisor},
@@ -193,7 +192,17 @@ impl Sandbox {
             // Store resolved layer paths for spawn_supervisor.
             config.resolved_rootfs_layers = pull_result.layers;
             pinned_manifest_digest = Some(pull_result.manifest_digest.to_string());
-            pinned_reference = Some(reference);
+            pinned_reference = Some(reference.clone());
+
+            // Persist full image metadata to database.
+            let cache_dir = crate::config::config().cache_dir();
+            if let Ok(cache) = microsandbox_image::GlobalCache::new(&cache_dir)
+                && let Ok(image_ref) = reference.parse::<microsandbox_image::Reference>()
+                && let Ok(Some(metadata)) = cache.read_image_metadata(&image_ref)
+                && let Err(e) = crate::image::Image::persist(&reference, metadata).await
+            {
+                tracing::warn!(error = %e, "failed to persist image metadata to database");
+            }
         }
 
         // Insert the sandbox record and keep its stable database ID.
@@ -1293,7 +1302,7 @@ async fn replace_oci_manifest_pin<C: ConnectionTrait>(
     reference: &str,
     manifest_digest: &str,
 ) -> MicrosandboxResult<()> {
-    let image_id = upsert_image_record(db, reference).await?;
+    let image_id = crate::image::upsert_image_record(db, reference, None).await?;
     let now = chrono::Utc::now().naive_utc();
 
     sandbox_image_entity::Entity::delete_many()
@@ -1312,36 +1321,6 @@ async fn replace_oci_manifest_pin<C: ConnectionTrait>(
     .await?;
 
     Ok(())
-}
-
-async fn upsert_image_record<C: ConnectionTrait>(
-    db: &C,
-    reference: &str,
-) -> MicrosandboxResult<i32> {
-    let now = chrono::Utc::now().naive_utc();
-
-    image_entity::Entity::insert(image_entity::ActiveModel {
-        reference: Set(reference.to_string()),
-        last_used_at: Set(Some(now)),
-        created_at: Set(Some(now)),
-        ..Default::default()
-    })
-    .on_conflict(
-        OnConflict::column(image_entity::Column::Reference)
-            .update_columns([image_entity::Column::LastUsedAt])
-            .to_owned(),
-    )
-    .exec(db)
-    .await?;
-
-    image_entity::Entity::find()
-        .filter(image_entity::Column::Reference.eq(reference))
-        .one(db)
-        .await?
-        .map(|model| model.id)
-        .ok_or_else(|| {
-            crate::MicrosandboxError::Custom(format!("image '{}' missing after upsert", reference))
-        })
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -31,4 +31,4 @@ pub use platform::Platform;
 pub use progress::{PullProgress, PullProgressHandle, PullProgressSender, progress_channel};
 pub use pull::{PullOptions, PullPolicy, PullResult};
 pub use registry::Registry;
-pub use store::GlobalCache;
+pub use store::{CachedImageMetadata, CachedLayerMetadata, GlobalCache};

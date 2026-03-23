@@ -374,6 +374,7 @@ impl Registry {
         let layers = extracted_dirs;
         let cached_image = CachedImageMetadata {
             manifest_digest: manifest_digest.to_string(),
+            config_digest: manifest.config_digest().unwrap_or_default(),
             config: image_config.clone(),
             layers: layer_descriptors
                 .iter()
@@ -998,6 +999,9 @@ mod tests {
         let metadata = CachedImageMetadata {
             manifest_digest:
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            config_digest:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                     .to_string(),
             config: ImageConfig {
                 env: vec!["PATH=/usr/bin".into()],

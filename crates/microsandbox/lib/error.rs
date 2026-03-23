@@ -66,6 +66,14 @@ pub enum MicrosandboxError {
     #[error("sandbox fs error: {0}")]
     SandboxFs(String),
 
+    /// The requested image was not found.
+    #[error("image not found: {0}")]
+    ImageNotFound(String),
+
+    /// The image is in use by one or more sandboxes.
+    #[error("image in use by sandbox(es): {0}")]
+    ImageInUse(String),
+
     /// The requested volume was not found.
     #[error("volume not found: {0}")]
     VolumeNotFound(String),

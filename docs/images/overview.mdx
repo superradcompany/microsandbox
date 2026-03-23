@@ -78,44 +78,6 @@ sb = await Sandbox.create(
 ```
 </CodeGroup>
 
-## Image config inheritance
-
-OCI images carry runtime configuration set by the image author — environment variables, default command, entrypoint, working directory, and more. When you create a sandbox from an OCI image, microsandbox inherits these as defaults. Your sandbox configuration overrides them.
-
-### Merge rules
-
-| Field | Merge behavior | Example |
-|-------|---------------|---------|
-| `env` | Image env vars form the base. User env vars override by key, new keys are appended. | Image sets `PATH=/usr/local/bin`, user sets `PATH=/custom` → `PATH=/custom` |
-| `entrypoint` | Image value used unless user sets one. Full replacement, not appended. | Image sets `["/entrypoint.sh"]`, user doesn't override → `["/entrypoint.sh"]` |
-| `cmd` | Image value used unless user sets one. Full replacement. | Image sets `["python3"]`, user doesn't override → `["python3"]` |
-| `workdir` | Image value used unless user sets one. | Image sets `/app`, user sets `/workspace` → `/workspace` |
-| `user` | Image value used unless user sets one. | Image sets `postgres`, user doesn't override → `postgres` |
-| `stop_signal` | Image value used unless user sets one. | Image sets `SIGQUIT`, user doesn't override → `SIGQUIT` |
-| `labels` | Image labels form the base. User labels override on key conflict. | Image sets `version=1.0`, user sets `version=custom` → `version=custom` |
-
-For environment variables specifically, the merge is key-aware: if the image defines `PATH=/usr/local/bin:/usr/bin` and the user sets `PATH=/custom/bin`, the user's value replaces the image's `PATH` entirely. Image env vars with keys the user didn't set are preserved.
-
-### Command resolution
-
-When running a sandbox, microsandbox resolves the process to execute following OCI semantics:
-
-1. **User provides a command** (`-- <cmd>`): The image `entrypoint` is preserved as a prefix. The user command replaces the image `cmd` (default arguments).
-2. **No user command**: The image `entrypoint` + `cmd` are used together.
-3. **No user command, no image command**: Falls back to the configured shell (default `/bin/sh`).
-
-| Image config | User command | Effective process |
-|-------------|-------------|-------------------|
-| `entrypoint=["/entrypoint.sh"]`, `cmd=["postgres"]` | — | `/entrypoint.sh postgres` |
-| `entrypoint=["/entrypoint.sh"]`, `cmd=["postgres"]` | `-- bash` | `/entrypoint.sh bash` |
-| `entrypoint=null`, `cmd=["python3"]` | — | `python3` |
-| `entrypoint=null`, `cmd=["python3"]` | `-- bash` | `bash` |
-| `entrypoint=null`, `cmd=null` | — | `/bin/sh` (shell fallback) |
-
-<Note>
-  The `entrypoint` is always preserved when set. Providing a command via `--` replaces only the `cmd` portion (the default arguments), not the entrypoint itself. This matches standard OCI container behavior — the entrypoint typically handles initialization that must always run.
-</Note>
-
 ## Image storage
 
 Images are cached in the global microsandbox home directory:

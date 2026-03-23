@@ -153,7 +153,7 @@ install:
 
     # Install libkrunfw to ~/.microsandbox/lib/.
     mkdir -p ~/.microsandbox/lib
-    cp build/libkrunfw.so.{{ LIBKRUNFW_VERSION }} ~/.microsandbox/lib/
+    install -m644 build/libkrunfw.so.{{ LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.{{ LIBKRUNFW_VERSION }}
     ln -sf libkrunfw.so.{{ LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.{{ LIBKRUNFW_ABI }}
     ln -sf libkrunfw.so.{{ LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
     echo "Installed libkrunfw → ~/.microsandbox/lib/"
@@ -170,16 +170,19 @@ install:
     test -f build/msbnet || { echo "error: build/msbnet not found. Run 'just build' first."; exit 1; }
     test -f build/libkrunfw.{{ LIBKRUNFW_ABI }}.dylib || { echo "error: build/libkrunfw.{{ LIBKRUNFW_ABI }}.dylib not found. Run 'just build-deps' first."; exit 1; }
 
-    # Install msb and msbnet to ~/.microsandbox/bin/ (cp preserves codesign; install strips it).
+    # Install msb and msbnet to ~/.microsandbox/bin/.
+    # Atomic mv to a fresh inode — macOS caches code signatures on the vnode,
+    # so cp over a running binary can block new executions.
     mkdir -p ~/.microsandbox/bin
-    cp build/msb ~/.microsandbox/bin/msb
-    cp build/msbnet ~/.microsandbox/bin/msbnet
+    install -m755 build/msb ~/.microsandbox/bin/msb.tmp && mv ~/.microsandbox/bin/msb.tmp ~/.microsandbox/bin/msb
+    install -m755 build/msbnet ~/.microsandbox/bin/msbnet.tmp && mv ~/.microsandbox/bin/msbnet.tmp ~/.microsandbox/bin/msbnet
     echo "Installed msb → ~/.microsandbox/bin/msb"
     echo "Installed msbnet → ~/.microsandbox/bin/msbnet"
 
     # Install libkrunfw to ~/.microsandbox/lib/.
+    # Atomic install to avoid corrupting a running VM's mmap'd library.
     mkdir -p ~/.microsandbox/lib
-    cp build/libkrunfw.{{ LIBKRUNFW_ABI }}.dylib ~/.microsandbox/lib/
+    cp build/libkrunfw.{{ LIBKRUNFW_ABI }}.dylib ~/.microsandbox/lib/libkrunfw.{{ LIBKRUNFW_ABI }}.dylib.tmp && mv ~/.microsandbox/lib/libkrunfw.{{ LIBKRUNFW_ABI }}.dylib.tmp ~/.microsandbox/lib/libkrunfw.{{ LIBKRUNFW_ABI }}.dylib
     ln -sf libkrunfw.{{ LIBKRUNFW_ABI }}.dylib ~/.microsandbox/lib/libkrunfw.dylib
     echo "Installed libkrunfw → ~/.microsandbox/lib/"
 
