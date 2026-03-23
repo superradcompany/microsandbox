@@ -10,7 +10,7 @@ build-deps: build-agentd build-libkrunfw
 build-agentd:
     @command -v musl-gcc >/dev/null || { echo "error: musl-gcc not found. Install your distro's musl toolchain."; exit 1; }
     rustup target add x86_64-unknown-linux-musl 2>/dev/null || true
-    cargo build --release -p microsandbox-agentd --target x86_64-unknown-linux-musl
+    cargo build --release --manifest-path crates/agentd/Cargo.toml --target-dir target --target x86_64-unknown-linux-musl
     mkdir -p build
     cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
     touch build/agentd
