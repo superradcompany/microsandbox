@@ -114,20 +114,10 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         display.handle_event(event);
     }
 
-    let sandbox = match task.await {
-        Ok(Ok(s)) => {
-            display.finish();
-            s
-        }
-        Ok(Err(e)) => {
-            display.finish();
-            return Err(e.into());
-        }
-        Err(e) => {
-            display.finish();
-            return Err(anyhow::anyhow!("create task panicked: {e}"));
-        }
-    };
+    display.finish();
+    let sandbox = task
+        .await
+        .map_err(|e| anyhow::anyhow!("create task panicked: {e}"))??;
 
     // Detach mode: just print the name and exit.
     if args.detach {
@@ -140,15 +130,49 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
 
     let interactive = std::io::stdin().is_terminal();
 
-    let exit_code = if !args.command.is_empty() {
-        let mut parts = args.command;
-        let cmd = parts.remove(0);
-        let cmd_args = parts;
+    // Resolve the command to run (OCI semantics):
+    //   - `entrypoint` is always preserved when set.
+    //   - `-- <cmd>` from the user replaces the image `cmd` (default args).
+    //   - With no user command, image `entrypoint + cmd` is used.
+    //   - Shell fallback only when nothing else is available.
+    let (cmd, cmd_args) = if !args.command.is_empty() {
+        let config = sandbox.config();
+        match &config.entrypoint {
+            Some(ep) if !ep.is_empty() => {
+                // Entrypoint preserved, user command replaces image cmd.
+                let bin = ep[0].clone();
+                let args = ep[1..].iter().cloned().chain(args.command).collect();
+                (bin, args)
+            }
+            _ => {
+                // No entrypoint — user command is the full command.
+                let mut parts = args.command;
+                let cmd = parts.remove(0);
+                (cmd, parts)
+            }
+        }
+    } else if let Some((cmd, cmd_args)) = resolve_image_command(sandbox.config()) {
+        (cmd, cmd_args)
+    } else if interactive {
+        let shell = sandbox.config().shell.as_deref().unwrap_or("/bin/sh");
+        (shell.to_string(), vec![])
+    } else {
+        ui::warn("no command provided and stdin is not a terminal");
 
+        if let Err(e) = sandbox.stop_and_wait().await {
+            ui::warn(&format!("failed to stop sandbox: {e}"));
+        }
+        if !is_named {
+            let _ = Sandbox::remove(&name).await;
+        }
+        return Ok(());
+    };
+
+    let result: anyhow::Result<i32> = async {
         if interactive {
-            sandbox
-                .attach(cmd, |a: AttachOptionsBuilder| a.args(cmd_args))
-                .await?
+            Ok(sandbox
+                .attach(&cmd, |a: AttachOptionsBuilder| a.args(cmd_args))
+                .await?)
         } else {
             let output: ExecOutput = sandbox
                 .exec(&cmd, |e: ExecOptionsBuilder| e.args(cmd_args))
@@ -157,23 +181,16 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
             std::io::stdout().write_all(output.stdout_bytes())?;
             std::io::stderr().write_all(output.stderr_bytes())?;
 
-            if output.status().success {
+            Ok(if output.status().success {
                 0
             } else {
                 output.status().code
-            }
+            })
         }
-    } else if interactive {
-        // No command, TTY — interactive shell.
-        let shell = sandbox.config().shell.as_deref().unwrap_or("/bin/sh");
-        sandbox.attach(shell, |a| a).await?
-    } else {
-        // No command, no TTY — nothing to do.
-        ui::warn("no command provided and stdin is not a terminal");
-        0
-    };
+    }
+    .await;
 
-    // Stop and clean up.
+    // Cleanup always runs, even on exec/attach/IO errors.
     if let Err(e) = sandbox.stop_and_wait().await {
         ui::warn(&format!("failed to stop sandbox: {e}"));
     }
@@ -183,9 +200,40 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         let _ = Sandbox::remove(&name).await;
     }
 
+    let exit_code = result?;
+
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
 
     Ok(())
+}
+
+/// Resolve the default process from OCI image config.
+///
+/// Follows OCI semantics:
+/// - `entrypoint` + `cmd`: entrypoint is the binary, cmd provides default arguments.
+/// - `entrypoint` only: entrypoint is the full command.
+/// - `cmd` only: cmd[0] is the binary, cmd[1..] are arguments.
+/// - Neither set: returns `None`.
+fn resolve_image_command(
+    config: &microsandbox::sandbox::SandboxConfig,
+) -> Option<(String, Vec<String>)> {
+    match (&config.entrypoint, &config.cmd) {
+        (Some(ep), cmd) if !ep.is_empty() => {
+            let bin = ep[0].clone();
+            let args = ep[1..]
+                .iter()
+                .chain(cmd.iter().flatten())
+                .cloned()
+                .collect();
+            Some((bin, args))
+        }
+        (_, Some(cmd)) if !cmd.is_empty() => {
+            let bin = cmd[0].clone();
+            let args = cmd[1..].to_vec();
+            Some((bin, args))
+        }
+        _ => None,
+    }
 }

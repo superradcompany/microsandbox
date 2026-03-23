@@ -1281,8 +1281,8 @@ pub(crate) fn get_upper_dir_fd(fs: &OverlayFs, parent_node: &OverlayNode) -> Opt
 /// Otherwise, walks the primary_parent/primary_name chain to root,
 /// checking each ancestor for a redirect as the base path.
 ///
-/// Returns empty Vec for root nodes or nodes whose parent can be
-/// opened directly via their fd (same-layer Lower).
+/// Returns empty Vec for root nodes only. Lower and Upper nodes
+/// return the full path built via parent chain walk.
 pub(crate) fn get_parent_lower_path(
     fs: &OverlayFs,
     parent_node: &OverlayNode,
@@ -1294,14 +1294,13 @@ pub(crate) fn get_parent_lower_path(
     }
     drop(redirect);
 
-    // If this is a Root or Lower node, the path is implicit from the fd.
-    // Only need to build path for Upper nodes (that were created from scratch
-    // or copied up from a lower layer in a different position).
+    // Root is always at the layer root, so the path is empty.
+    // Lower and Upper nodes need the path built via parent chain walk
+    // because the path is needed for cross-layer lookups (opening the
+    // same directory on a different layer by walking from that layer's root).
     let state = parent_node.state.read().unwrap();
-    match &*state {
-        NodeState::Root { .. } => return Ok(Vec::new()),
-        NodeState::Lower { .. } => return Ok(Vec::new()),
-        NodeState::Upper { .. } => {}
+    if matches!(&*state, NodeState::Root { .. }) {
+        return Ok(Vec::new());
     }
     drop(state);
 
@@ -1666,9 +1665,8 @@ fn open_macos_vol(path: &CStr) -> io::Result<RawFd> {
 /// Build the overlay path for a node by walking the `primary_parent`/`primary_name`
 /// chain to root, joining components with `/`.
 ///
-/// Unlike `get_parent_lower_path`, this always walks the full chain (never
-/// short-circuits for Lower nodes) because the index is keyed by path string,
-/// not by fd.
+/// Similar to `get_parent_lower_path` but returns a single `/`-joined byte
+/// string (for index lookups) instead of a `Vec` of path components.
 ///
 /// Returns `b""` for root, `b"etc"`, `b"usr/bin"`, etc.
 pub(crate) fn build_overlay_path(fs: &OverlayFs, node: &OverlayNode) -> io::Result<Vec<u8>> {

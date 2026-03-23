@@ -1,6 +1,9 @@
 //! Sandbox configuration.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 use microsandbox_runtime::{
     logging::LogLevel,
@@ -8,7 +11,7 @@ use microsandbox_runtime::{
 };
 use serde::{Deserialize, Serialize};
 
-use microsandbox_image::{PullPolicy, RegistryAuth};
+use microsandbox_image::{ImageConfig, PullPolicy, RegistryAuth};
 
 use microsandbox_network::config::NetworkConfig;
 
@@ -157,6 +160,81 @@ pub struct SandboxConfig {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl SandboxConfig {
+    /// Apply OCI image config as defaults. User-provided values take precedence.
+    ///
+    /// - `env`: image env vars form the base; user env vars override by key, otherwise append.
+    /// - `cmd`, `entrypoint`, `workdir`, `user`, `stop_signal`: image value used only if user did not set one.
+    /// - `labels`: image labels form the base; user labels override on key conflict.
+    pub fn merge_image_defaults(&mut self, image: &ImageConfig) {
+        self.env = merge_env(&image.env, &self.env);
+
+        if self.cmd.is_none() {
+            self.cmd = image.cmd.clone();
+        }
+        if self.entrypoint.is_none() {
+            self.entrypoint = image.entrypoint.clone();
+        }
+        if self.workdir.is_none() {
+            self.workdir = image
+                .working_dir
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+        }
+        if self.user.is_none() {
+            self.user = image
+                .user
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+        }
+        if self.stop_signal.is_none() {
+            self.stop_signal = image
+                .stop_signal
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+        }
+
+        let mut merged = image.labels.clone();
+        merged.extend(self.labels.drain());
+        self.labels = merged;
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Merge image env vars with user env vars.
+///
+/// Image entries are included first (preserving image order) unless the user
+/// overrides the same key, then all user entries follow.
+fn merge_env(image_env: &[String], user_env: &[(String, String)]) -> Vec<(String, String)> {
+    let user_keys: HashSet<&str> = user_env.iter().map(|(k, _)| k.as_str()).collect();
+
+    let mut merged: Vec<(String, String)> = image_env
+        .iter()
+        .filter_map(|entry| match entry.split_once('=') {
+            Some(pair) => Some(pair),
+            None => {
+                tracing::warn!(entry = %entry, "skipping malformed image env var (expected KEY=VALUE)");
+                None
+            }
+        })
+        .filter(|(k, _)| !user_keys.contains(k))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+
+    merged.extend(user_env.iter().cloned());
+    merged
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
@@ -199,9 +277,154 @@ impl Default for SandboxConfig {
 
 #[cfg(test)]
 mod tests {
-    use microsandbox_image::RegistryAuth;
+    use std::collections::HashMap;
 
-    use super::SandboxConfig;
+    use microsandbox_image::{ImageConfig, RegistryAuth};
+
+    use super::{SandboxConfig, merge_env};
+
+    #[test]
+    fn test_merge_env_image_base_with_user_override() {
+        let image_env = vec![
+            "PATH=/usr/local/bin:/usr/bin".to_string(),
+            "PYTHON_VERSION=3.14".to_string(),
+        ];
+        let user_env = vec![
+            ("PATH".to_string(), "/custom/bin".to_string()),
+            ("MY_VAR".to_string(), "hello".to_string()),
+        ];
+
+        let merged = merge_env(&image_env, &user_env);
+
+        assert_eq!(
+            merged,
+            vec![
+                ("PYTHON_VERSION".to_string(), "3.14".to_string()),
+                ("PATH".to_string(), "/custom/bin".to_string()),
+                ("MY_VAR".to_string(), "hello".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_merge_env_empty_user_inherits_image() {
+        let image_env = vec!["PATH=/usr/bin".to_string(), "LANG=C.UTF-8".to_string()];
+        let user_env = vec![];
+
+        let merged = merge_env(&image_env, &user_env);
+
+        assert_eq!(
+            merged,
+            vec![
+                ("PATH".to_string(), "/usr/bin".to_string()),
+                ("LANG".to_string(), "C.UTF-8".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_merge_env_empty_image_keeps_user() {
+        let image_env = vec![];
+        let user_env = vec![("MY_VAR".to_string(), "val".to_string())];
+
+        let merged = merge_env(&image_env, &user_env);
+
+        assert_eq!(merged, vec![("MY_VAR".to_string(), "val".to_string())]);
+    }
+
+    #[test]
+    fn test_merge_image_defaults_replace_fields() {
+        let image = ImageConfig {
+            cmd: Some(vec!["python3".to_string()]),
+            entrypoint: Some(vec!["/entrypoint.sh".to_string()]),
+            working_dir: Some("/app".to_string()),
+            user: Some("appuser".to_string()),
+            stop_signal: Some("SIGTERM".to_string()),
+            ..Default::default()
+        };
+
+        let mut config = SandboxConfig::default();
+        config.merge_image_defaults(&image);
+
+        assert_eq!(config.cmd, Some(vec!["python3".to_string()]));
+        assert_eq!(config.entrypoint, Some(vec!["/entrypoint.sh".to_string()]));
+        assert_eq!(config.workdir, Some("/app".to_string()));
+        assert_eq!(config.user, Some("appuser".to_string()));
+        assert_eq!(config.stop_signal, Some("SIGTERM".to_string()));
+    }
+
+    #[test]
+    fn test_merge_image_defaults_user_overrides_take_precedence() {
+        let image = ImageConfig {
+            cmd: Some(vec!["python3".to_string()]),
+            entrypoint: Some(vec!["/entrypoint.sh".to_string()]),
+            working_dir: Some("/app".to_string()),
+            user: Some("appuser".to_string()),
+            stop_signal: Some("SIGTERM".to_string()),
+            ..Default::default()
+        };
+
+        let mut config = SandboxConfig {
+            cmd: Some(vec!["bash".to_string()]),
+            workdir: Some("/workspace".to_string()),
+            user: Some("root".to_string()),
+            ..Default::default()
+        };
+        config.merge_image_defaults(&image);
+
+        assert_eq!(config.cmd, Some(vec!["bash".to_string()]));
+        assert_eq!(config.entrypoint, Some(vec!["/entrypoint.sh".to_string()]));
+        assert_eq!(config.workdir, Some("/workspace".to_string()));
+        assert_eq!(config.user, Some("root".to_string()));
+        assert_eq!(config.stop_signal, Some("SIGTERM".to_string()));
+    }
+
+    #[test]
+    fn test_merge_image_defaults_labels_merged_user_wins() {
+        let image = ImageConfig {
+            labels: HashMap::from([
+                ("maintainer".to_string(), "alice".to_string()),
+                ("version".to_string(), "1.0".to_string()),
+            ]),
+            ..Default::default()
+        };
+
+        let mut config = SandboxConfig {
+            labels: HashMap::from([
+                ("version".to_string(), "custom".to_string()),
+                ("my.label".to_string(), "foo".to_string()),
+            ]),
+            ..Default::default()
+        };
+        config.merge_image_defaults(&image);
+
+        assert_eq!(config.labels.get("maintainer").unwrap(), "alice");
+        assert_eq!(config.labels.get("version").unwrap(), "custom");
+        assert_eq!(config.labels.get("my.label").unwrap(), "foo");
+    }
+
+    #[test]
+    fn test_merge_image_defaults_empty_strings_treated_as_none() {
+        let image = ImageConfig {
+            working_dir: Some(String::new()),
+            user: Some(String::new()),
+            stop_signal: Some(String::new()),
+            ..Default::default()
+        };
+
+        let mut config = SandboxConfig::default();
+        config.merge_image_defaults(&image);
+
+        assert!(
+            config.workdir.is_none(),
+            "empty working_dir should not propagate"
+        );
+        assert!(config.user.is_none(), "empty user should not propagate");
+        assert!(
+            config.stop_signal.is_none(),
+            "empty stop_signal should not propagate"
+        );
+    }
 
     #[test]
     fn test_sandbox_config_serializes_pinned_rootfs_layers_but_redacts_registry_auth() {

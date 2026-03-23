@@ -166,11 +166,10 @@ impl Sandbox {
     }
 
     async fn create_with_mode(
-        config: SandboxConfig,
+        mut config: SandboxConfig,
         mode: SupervisorSpawnMode,
         progress: Option<microsandbox_image::PullProgressSender>,
     ) -> MicrosandboxResult<Self> {
-        let mut config = config;
         let mut pinned_manifest_digest: Option<String> = None;
         let mut pinned_reference: Option<String> = None;
 
@@ -184,14 +183,17 @@ impl Sandbox {
         prepare_create_target(db, &config, &sandbox_dir).await?;
 
         // Resolve OCI images before spawning the supervisor.
-        if let RootfsSource::Oci(ref reference) = config.image {
+        if let RootfsSource::Oci(reference) = config.image.clone() {
             let pull_result =
-                pull_oci_image(reference, config.registry_auth.take(), progress).await?;
+                pull_oci_image(&reference, config.registry_auth.take(), progress).await?;
+
+            // Merge image config defaults under user-provided config.
+            config.merge_image_defaults(&pull_result.config);
 
             // Store resolved layer paths for spawn_supervisor.
             config.resolved_rootfs_layers = pull_result.layers;
             pinned_manifest_digest = Some(pull_result.manifest_digest.to_string());
-            pinned_reference = Some(reference.clone());
+            pinned_reference = Some(reference);
         }
 
         // Insert the sandbox record and keep its stable database ID.
@@ -836,12 +838,17 @@ fn build_exec_request(
     rows: u16,
     cols: u16,
 ) -> ExecRequest {
-    let env: Vec<String> = config
+    let mut env: Vec<String> = config
         .env
         .iter()
         .chain(env.iter())
         .map(|(k, v)| format!("{k}={v}"))
         .collect();
+
+    // Inject TERM for TTY sessions if not already set (mirrors Docker behavior).
+    if tty && !env.iter().any(|e| e.starts_with("TERM=")) {
+        env.push("TERM=xterm-256color".to_string());
+    }
 
     let rlimits: Vec<ExecRlimit> = rlimits
         .iter()
