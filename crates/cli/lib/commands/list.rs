@@ -67,7 +67,7 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut table = ui::Table::new(&["Name", "Image", "Status", "Created"]);
+    let mut table = ui::Table::new(&["NAME", "IMAGE", "STATUS", "CREATED"]);
 
     for s in &filtered {
         let image = extract_image(s.config_json());

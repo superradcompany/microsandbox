@@ -43,9 +43,9 @@ pub struct CreateArgs {
     #[arg(short, long)]
     pub env: Vec<String>,
 
-    /// Replace existing stopped sandbox with same name.
+    /// Destroy and recreate an existing sandbox with the same name.
     #[arg(long)]
-    pub force: bool,
+    pub replace: bool,
 
     /// Suppress progress output.
     #[arg(short, long)]
@@ -75,7 +75,7 @@ pub async fn run(args: CreateArgs) -> anyhow::Result<()> {
     if let Some(ref shell) = args.shell {
         builder = builder.shell(shell);
     }
-    if args.force {
+    if args.replace {
         builder = builder.overwrite();
     }
     for env_str in &args.env {

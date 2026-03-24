@@ -12,6 +12,7 @@ pub mod create;
 pub mod exec;
 pub mod image;
 pub mod inspect;
+pub mod install;
 pub mod list;
 pub mod ps;
 pub mod pull;
@@ -20,6 +21,7 @@ pub mod run;
 pub mod shell;
 pub mod start;
 pub mod stop;
+pub mod uninstall;
 pub mod volume;
 
 //--------------------------------------------------------------------------------------------------

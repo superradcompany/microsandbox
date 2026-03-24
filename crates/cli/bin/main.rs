@@ -3,7 +3,8 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use microsandbox_cli::{
     commands::{
-        create, exec, image, inspect, list, ps, pull, remove, run, shell, start, stop, volume,
+        create, exec, image, inspect, install, list, ps, pull, remove, run, shell, start, stop,
+        uninstall, volume,
     },
     log_args::{self, LogArgs},
     microvm_cmd::{self, MicrovmArgs},
@@ -89,6 +90,12 @@ enum Commands {
     /// Manage named volumes.
     #[command(visible_alias = "vol")]
     Volume(volume::VolumeArgs),
+
+    /// Install a sandbox alias as a command.
+    Install(install::InstallArgs),
+
+    /// Remove an installed sandbox alias.
+    Uninstall(uninstall::UninstallArgs),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -163,6 +170,8 @@ fn run_async_command(
             Commands::Rmi(args) => image::run_remove(args).await.map_err(Into::into),
             Commands::Inspect(args) => inspect::run(args).await.map_err(Into::into),
             Commands::Volume(args) => volume::run(args).await.map_err(Into::into),
+            Commands::Install(args) => install::run(args).await.map_err(Into::into),
+            Commands::Uninstall(args) => uninstall::run(args).await.map_err(Into::into),
         }
     })
 }

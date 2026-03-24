@@ -214,9 +214,9 @@ impl Table {
             .enumerate()
             .map(|(i, h)| {
                 if i < col_count - 1 {
-                    format!("{:<width$}    ", h.to_uppercase(), width = widths[i])
+                    format!("{:<width$}    ", h, width = widths[i])
                 } else {
-                    h.to_uppercase()
+                    h.to_string()
                 }
             })
             .collect();
@@ -287,9 +287,12 @@ pub fn warn(msg: &str) {
     eprintln!("{} {msg}", style("warn:").yellow().bold());
 }
 
-/// Print a one-shot success message to stderr.
-pub fn success(msg: &str) {
-    eprintln!("{} {msg}", style("✓").green());
+/// Print a one-shot success action to stderr.
+///
+/// Follows the same format as spinner completions:
+/// `   ✓ {verb:<12} {target}`
+pub fn success(verb: &str, target: &str) {
+    eprintln!("   {} {:<12} {}", style("✓").green(), verb, target);
 }
 
 /// Format a sandbox status with appropriate color.

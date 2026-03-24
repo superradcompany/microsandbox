@@ -86,7 +86,15 @@ pub struct ImageRemoveArgs {
 /// Execute the `msb image` command.
 pub async fn run(args: ImageArgs) -> anyhow::Result<()> {
     match args.command {
-        ImageCommands::Pull(args) => run_pull_inner(args.reference, args.force, args.quiet).await,
+        ImageCommands::Pull(args) => {
+            run_pull_inner(
+                args.reference,
+                args.force,
+                args.quiet,
+                microsandbox_image::PullPolicy::Always,
+            )
+            .await
+        }
         ImageCommands::List(args) => run_list(args).await,
         ImageCommands::Inspect(args) => run_inspect(args).await,
         ImageCommands::Remove(args) => run_remove(args).await,
@@ -95,11 +103,22 @@ pub async fn run(args: ImageArgs) -> anyhow::Result<()> {
 
 /// Execute `msb pull` (top-level alias).
 pub async fn run_pull(args: pull::PullArgs) -> anyhow::Result<()> {
-    run_pull_inner(args.reference, args.force, args.quiet).await
+    run_pull_inner(
+        args.reference,
+        args.force,
+        args.quiet,
+        microsandbox_image::PullPolicy::Always,
+    )
+    .await
 }
 
 /// Shared pull logic with DB persistence.
-async fn run_pull_inner(reference: String, force: bool, quiet: bool) -> anyhow::Result<()> {
+async fn run_pull_inner(
+    reference: String,
+    force: bool,
+    quiet: bool,
+    pull_policy: microsandbox_image::PullPolicy,
+) -> anyhow::Result<()> {
     let start = Instant::now();
 
     let global = microsandbox::config::config();
@@ -113,7 +132,7 @@ async fn run_pull_inner(reference: String, force: bool, quiet: bool) -> anyhow::
     let registry = microsandbox_image::Registry::with_auth(platform, cache, auth)?;
 
     let options = microsandbox_image::PullOptions {
-        pull_policy: microsandbox_image::PullPolicy::Always,
+        pull_policy,
         force,
         ..Default::default()
     };
@@ -161,11 +180,15 @@ async fn run_pull_inner(reference: String, force: bool, quiet: bool) -> anyhow::
     }
 
     if !quiet {
-        let elapsed = start.elapsed();
-        let duration = if elapsed.as_millis() > 500 {
-            format!(" ({})", ui::format_duration(elapsed))
+        let suffix = if result.cached {
+            " (already cached)".to_string()
         } else {
-            String::new()
+            let elapsed = start.elapsed();
+            if elapsed.as_millis() > 500 {
+                format!(" ({})", ui::format_duration(elapsed))
+            } else {
+                String::new()
+            }
         };
 
         eprintln!(
@@ -173,15 +196,31 @@ async fn run_pull_inner(reference: String, force: bool, quiet: bool) -> anyhow::
             style("✓").green(),
             "Pulled",
             reference,
-            style(duration).dim()
+            style(suffix).dim()
         );
-
-        if result.cached {
-            eprintln!("   (already cached)");
-        }
     }
 
     Ok(())
+}
+
+/// Pull an image if not already cached.
+///
+/// Uses `PullPolicy::Missing` — skips the pull entirely when the image is
+/// already in the local cache (no network call).  Returns `Ok(())` silently
+/// if the reference is not a valid OCI image (e.g. a local directory path).
+pub(crate) async fn pull_if_missing(reference: &str, quiet: bool) -> anyhow::Result<()> {
+    // Local paths (directories, disk images) are not pullable.
+    if reference.starts_with('.') || reference.starts_with('/') {
+        return Ok(());
+    }
+
+    run_pull_inner(
+        reference.to_string(),
+        false,
+        quiet,
+        microsandbox_image::PullPolicy::IfMissing,
+    )
+    .await
 }
 
 /// Execute `msb image list` / `msb images`.

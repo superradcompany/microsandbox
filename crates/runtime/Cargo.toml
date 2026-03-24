@@ -24,7 +24,7 @@ microsandbox-filesystem = { version = "0.3.2", path = "../filesystem", default-f
 microsandbox-network = { version = "0.3.2", path = "../network" }
 microsandbox-protocol = { version = "0.3.2", path = "../protocol" }
 microsandbox-utils = { version = "0.3.2", path = "../utils" }
-msb_krun = { version = "0.1.6", features = ["blk", "net"] }
+msb_krun = { version = "0.1.8", features = ["blk", "net"] }
 nix = { workspace = true, features = ["process", "signal"] }
 sea-orm.workspace = true
 serde.workspace = true

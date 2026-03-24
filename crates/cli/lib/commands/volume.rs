@@ -143,7 +143,7 @@ async fn list(args: VolumeListArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut table = ui::Table::new(&["Name", "Quota", "Created"]);
+    let mut table = ui::Table::new(&["NAME", "QUOTA", "CREATED"]);
 
     for v in &volumes {
         let quota = v
@@ -190,11 +190,11 @@ async fn inspect(args: VolumeInspectArgs) -> anyhow::Result<()> {
     let volumes_dir = microsandbox::config::config().volumes_dir();
     let path = volumes_dir.join(handle.name());
 
-    println!("Name:       {}", handle.name());
-    println!("Quota:      {quota}");
-    println!("Created:    {created}");
-    println!("Path:       {}", path.display());
-    println!("Labels:     {labels_str}");
+    ui::detail_kv("Name", handle.name());
+    ui::detail_kv("Quota", &quota);
+    ui::detail_kv("Created", &created);
+    ui::detail_kv("Path", &path.display().to_string());
+    ui::detail_kv("Labels", &labels_str);
 
     Ok(())
 }

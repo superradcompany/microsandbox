@@ -46,9 +46,9 @@ pub struct RunArgs {
     #[arg(short, long)]
     pub env: Vec<String>,
 
-    /// Replace existing stopped sandbox with same name.
+    /// Destroy and recreate an existing sandbox with the same name.
     #[arg(long)]
-    pub force: bool,
+    pub replace: bool,
 
     /// Run in background (detach).
     #[arg(short, long)]
@@ -70,8 +70,58 @@ pub struct RunArgs {
 /// Execute the `msb run` command.
 pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     let is_named = args.name.is_some();
-    let name = args.name.unwrap_or_else(ui::generate_name);
+    let name = args.name.clone().unwrap_or_else(ui::generate_name);
 
+    // Named sandboxes are reused if they already exist (unless --replace).
+    if is_named && !args.replace && Sandbox::get(&name).await.is_ok() {
+        return run_existing(name, args).await;
+    }
+
+    run_new(name, is_named, args).await
+}
+
+/// Run in an existing named sandbox — start if stopped, connect if running.
+async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
+    let has_resource_flags = args.cpus.is_some()
+        || args.memory.is_some()
+        || !args.volume.is_empty()
+        || args.workdir.is_some()
+        || args.shell.is_some()
+        || !args.env.is_empty();
+    if has_resource_flags {
+        ui::warn(&format!(
+            "sandbox '{name}' already exists; image and resource flags ignored (use --replace to recreate)"
+        ));
+    }
+
+    let sandbox = super::resolve_and_start(&name, args.quiet).await?;
+
+    // Detach mode: ensure running and exit.
+    if args.detach {
+        sandbox.detach().await;
+        return Ok(());
+    }
+
+    let interactive = std::io::stdin().is_terminal();
+
+    let result: anyhow::Result<i32> = async {
+        let (cmd, cmd_args) = resolve_command(sandbox.config(), args.command, interactive)?;
+        match cmd {
+            Some(cmd) => exec_in_sandbox(&sandbox, &cmd, cmd_args, interactive).await,
+            None => Ok(0),
+        }
+    }
+    .await;
+
+    // Stop only if we own the lifecycle (i.e., we started it from stopped).
+    // Always runs, even if resolve_command or exec failed.
+    super::maybe_stop(&sandbox).await;
+
+    handle_exit(result?)
+}
+
+/// Create a new sandbox and run in it.
+async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<()> {
     let mut builder = Sandbox::builder(&name).image(args.image.as_str());
 
     if let Some(cpus) = args.cpus {
@@ -86,7 +136,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     if let Some(ref shell) = args.shell {
         builder = builder.shell(shell);
     }
-    if args.force {
+    if args.replace {
         builder = builder.overwrite();
     }
     for env_str in &args.env {
@@ -130,65 +180,21 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
 
     let interactive = std::io::stdin().is_terminal();
 
-    // Resolve the command to run (OCI semantics):
-    //   - `entrypoint` is always preserved when set.
-    //   - `-- <cmd>` from the user replaces the image `cmd` (default args).
-    //   - With no user command, image `entrypoint + cmd` is used.
-    //   - Shell fallback only when nothing else is available.
-    let (cmd, cmd_args) = if !args.command.is_empty() {
-        let config = sandbox.config();
-        match &config.entrypoint {
-            Some(ep) if !ep.is_empty() => {
-                // Entrypoint preserved, user command replaces image cmd.
-                let bin = ep[0].clone();
-                let args = ep[1..].iter().cloned().chain(args.command).collect();
-                (bin, args)
+    let (cmd, cmd_args) = resolve_command(sandbox.config(), args.command, interactive)?;
+    let (cmd, cmd_args) = match (cmd, cmd_args) {
+        (Some(cmd), args) => (cmd, args),
+        (None, _) => {
+            if let Err(e) = sandbox.stop_and_wait().await {
+                ui::warn(&format!("failed to stop sandbox: {e}"));
             }
-            _ => {
-                // No entrypoint — user command is the full command.
-                let mut parts = args.command;
-                let cmd = parts.remove(0);
-                (cmd, parts)
+            if !is_named {
+                let _ = Sandbox::remove(&name).await;
             }
+            return Ok(());
         }
-    } else if let Some((cmd, cmd_args)) = resolve_image_command(sandbox.config()) {
-        (cmd, cmd_args)
-    } else if interactive {
-        let shell = sandbox.config().shell.as_deref().unwrap_or("/bin/sh");
-        (shell.to_string(), vec![])
-    } else {
-        ui::warn("no command provided and stdin is not a terminal");
-
-        if let Err(e) = sandbox.stop_and_wait().await {
-            ui::warn(&format!("failed to stop sandbox: {e}"));
-        }
-        if !is_named {
-            let _ = Sandbox::remove(&name).await;
-        }
-        return Ok(());
     };
 
-    let result: anyhow::Result<i32> = async {
-        if interactive {
-            Ok(sandbox
-                .attach(&cmd, |a: AttachOptionsBuilder| a.args(cmd_args))
-                .await?)
-        } else {
-            let output: ExecOutput = sandbox
-                .exec(&cmd, |e: ExecOptionsBuilder| e.args(cmd_args))
-                .await?;
-
-            std::io::stdout().write_all(output.stdout_bytes())?;
-            std::io::stderr().write_all(output.stderr_bytes())?;
-
-            Ok(if output.status().success {
-                0
-            } else {
-                output.status().code
-            })
-        }
-    }
-    .await;
+    let result = exec_in_sandbox(&sandbox, &cmd, cmd_args, interactive).await;
 
     // Cleanup always runs, even on exec/attach/IO errors.
     if let Err(e) = sandbox.stop_and_wait().await {
@@ -200,12 +206,73 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         let _ = Sandbox::remove(&name).await;
     }
 
-    let exit_code = result?;
+    handle_exit(result?)
+}
 
+/// Resolve the command to run following OCI semantics.
+///
+/// Returns `(Some(cmd), args)` or `(None, _)` when no command is available.
+fn resolve_command(
+    config: &microsandbox::sandbox::SandboxConfig,
+    user_command: Vec<String>,
+    interactive: bool,
+) -> anyhow::Result<(Option<String>, Vec<String>)> {
+    if !user_command.is_empty() {
+        match &config.entrypoint {
+            Some(ep) if !ep.is_empty() => {
+                let bin = ep[0].clone();
+                let args = ep[1..].iter().cloned().chain(user_command).collect();
+                Ok((Some(bin), args))
+            }
+            _ => {
+                let mut parts = user_command;
+                let cmd = parts.remove(0);
+                Ok((Some(cmd), parts))
+            }
+        }
+    } else if let Some((cmd, cmd_args)) = resolve_image_command(config) {
+        Ok((Some(cmd), cmd_args))
+    } else if interactive {
+        let shell = config.shell.as_deref().unwrap_or("/bin/sh");
+        Ok((Some(shell.to_string()), vec![]))
+    } else {
+        ui::warn("no command provided and stdin is not a terminal");
+        Ok((None, vec![]))
+    }
+}
+
+/// Execute or attach to a command in a sandbox.
+async fn exec_in_sandbox(
+    sandbox: &Sandbox,
+    cmd: &str,
+    cmd_args: Vec<String>,
+    interactive: bool,
+) -> anyhow::Result<i32> {
+    if interactive {
+        Ok(sandbox
+            .attach(cmd, |a: AttachOptionsBuilder| a.args(cmd_args))
+            .await?)
+    } else {
+        let output: ExecOutput = sandbox
+            .exec(cmd, |e: ExecOptionsBuilder| e.args(cmd_args))
+            .await?;
+
+        std::io::stdout().write_all(output.stdout_bytes())?;
+        std::io::stderr().write_all(output.stderr_bytes())?;
+
+        Ok(if output.status().success {
+            0
+        } else {
+            output.status().code
+        })
+    }
+}
+
+/// Exit the process with a non-zero code if needed.
+fn handle_exit(exit_code: i32) -> anyhow::Result<()> {
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
-
     Ok(())
 }
 
