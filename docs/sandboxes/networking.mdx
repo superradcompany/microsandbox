@@ -6,7 +6,7 @@ icon: "network-wired"
 
 By default, sandboxes use a `public` network policy, which means they can reach the public internet but not private address ranges. You can change this to fully isolate a sandbox, restrict it to specific hosts, or allow unrestricted access. This is critical for AI agent workflows where you need to allow API calls to specific services while blocking everything else.
 
-microsandbox enforces network policies using a dedicated `msbnet` process that handles packet filtering, port forwarding, and DNS interception.
+microsandbox enforces network policies using an in-process networking stack that handles packet filtering, port forwarding, and DNS interception.
 
 ## Network presets
 
@@ -166,12 +166,12 @@ sb = await Sandbox.create(
 </CodeGroup>
 
 <Note>
-  DNS interception requires the `msbnet` process, which runs alongside the sandbox's microVM. It handles both DNS queries and packet-level policy enforcement.
+  DNS interception is handled by the in-process networking stack that runs alongside the sandbox's microVM. It handles both DNS queries and packet-level policy enforcement.
 </Note>
 
 ## How it works
 
-When networking is enabled, microsandbox spawns a `msbnet` process alongside each sandbox's microVM. Network traffic from the sandbox passes through `msbnet`, which enforces packet filtering rules based on the configured policy:
+When networking is enabled, microsandbox runs an in-process networking stack alongside each sandbox's microVM. Network traffic from the sandbox passes through this stack, which enforces packet filtering rules based on the configured policy:
 
 - **`none`:** No network interfaces are created. The sandbox is completely isolated.
 - **`public_only`:** Traffic to private address ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`) is blocked. Only public internet is accessible. This is the default.

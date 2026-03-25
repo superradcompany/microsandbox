@@ -8,7 +8,6 @@ members = [
     "crates/image",
     "crates/microsandbox",
     "crates/migration",
-    "crates/network",
     "crates/protocol",
     "crates/runtime",
     "crates/utils",

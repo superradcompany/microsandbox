@@ -143,7 +143,7 @@ fn validate_alias_name(name: &str) -> anyhow::Result<()> {
         anyhow::bail!("alias name must not contain '/' or '..'");
     }
 
-    const RESERVED: &[&str] = &["msb", "msbnet", "agentd"];
+    const RESERVED: &[&str] = &["msb", "agentd"];
     if RESERVED.contains(&name) {
         anyhow::bail!("alias name '{name}' would shadow a microsandbox binary");
     }

@@ -188,20 +188,10 @@ jobs:
           mkdir -p build
           cp target/release/msb build/msb
 
-      # -- msbnet --
-      - name: Build msbnet
-        run: |
-          cargo build --release -p microsandbox-network --bin msbnet
-          cp target/release/msbnet build/msbnet
-
       # -- macOS codesign --
       - name: Codesign msb
         if: matrix.os == 'darwin'
         run: codesign --entitlements msb-entitlements.plist --force -s - build/msb
-
-      - name: Codesign msbnet
-        if: matrix.os == 'darwin'
-        run: codesign --entitlements msbnet-entitlements.plist --force -s - build/msbnet
 
       # -- Stage release artifacts --
       - name: Stage artifacts
@@ -214,17 +204,14 @@ jobs:
           # Standalone libkrunfw
           cp build/${{ matrix.libkrunfw_file }} artifacts/${{ matrix.libkrunfw_asset }}
 
-          # Standalone msbnet
-          cp build/msbnet artifacts/msbnet-${{ matrix.target }}
-
           # Standalone agentd (Linux only — guest binary)
           if [ "${{ matrix.os }}" = "linux" ]; then
             cp build/agentd artifacts/agentd-${{ matrix.arch }}
           fi
 
-          # Bundle: msb + libkrunfw + msbnet
+          # Bundle: msb + libkrunfw
           tar -czf artifacts/microsandbox-${{ matrix.target }}.tar.gz \
-            -C build msb msbnet ${{ matrix.libkrunfw_file }}
+            -C build msb ${{ matrix.libkrunfw_file }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

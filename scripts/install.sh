@@ -247,7 +247,6 @@ main() {
     # even if a previous version is running.
     mkdir -p "$BIN_DIR"
     install -m 755 msb "$BIN_DIR/msb"
-    install -m 755 msbnet "$BIN_DIR/msbnet"
 
     # Install libkrunfw. Use install(1) on Linux (handles running binaries).
     # On macOS, cp+mv for a fresh inode — macOS caches code signatures on the
@@ -263,7 +262,6 @@ main() {
     fi
 
     success "Installed msb to $BIN_DIR/msb"
-    success "Installed msbnet to $BIN_DIR/msbnet"
     success "Installed libkrunfw to $LIB_DIR/"
 
     # Print setup instructions

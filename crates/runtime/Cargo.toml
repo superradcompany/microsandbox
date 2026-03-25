@@ -21,7 +21,6 @@ clap = { workspace = true, features = ["derive"] }
 libc.workspace = true
 microsandbox-db = { version = "0.3.2", path = "../db" }
 microsandbox-filesystem = { version = "0.3.2", path = "../filesystem", default-features = false }
-microsandbox-network = { version = "0.3.2", path = "../network" }
 microsandbox-protocol = { version = "0.3.2", path = "../protocol" }
 microsandbox-utils = { version = "0.3.2", path = "../utils" }
 msb_krun = { version = "0.1.8", features = ["blk", "net"] }

@@ -41,17 +41,9 @@ pub struct SupervisorArgs {
     #[arg(long)]
     pub runtime_dir: PathBuf,
 
-    /// Serialized network config JSON for `msbnet`.
-    #[arg(long)]
-    pub network_config_json: Option<String>,
-
     /// Path to the Unix domain socket for the agent relay.
     #[arg(long)]
     pub agent_sock: PathBuf,
-
-    /// Network FD inherited by the `msbnet` child.
-    #[arg(long)]
-    pub net_msbnet_fd: Option<RawFd>,
 
     /// Network FD inherited by the VM child.
     #[arg(long)]
@@ -179,7 +171,6 @@ pub async fn run(args: SupervisorArgs, log_level: Option<LogLevel>) -> RuntimeRe
             restart_window_secs: args.vm_restart_window,
             shutdown_timeout_ms: args.vm_shutdown_timeout_ms,
         },
-        msbnet: ChildPolicy::msbnet_default(),
     };
 
     let supervisor_policy = SupervisorPolicy {
@@ -218,9 +209,7 @@ pub async fn run(args: SupervisorArgs, log_level: Option<LogLevel>) -> RuntimeRe
         sandbox_db_path: args.sandbox_db_path,
         log_dir: args.log_dir,
         runtime_dir: args.runtime_dir,
-        network_config_json: args.network_config_json,
         agent_sock_path: args.agent_sock,
-        net_msbnet_fd: args.net_msbnet_fd,
         net_vm_fd: args.net_vm_fd,
         sandbox_slot: u32::try_from(args.sandbox_id).map_err(|_| {
             microsandbox_runtime::RuntimeError::Custom(format!(

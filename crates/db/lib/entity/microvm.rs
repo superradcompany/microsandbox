@@ -31,10 +31,6 @@ pub enum TerminationReason {
     #[sea_orm(string_value = "VmFailed")]
     VmFailed,
 
-    /// msbnet restart limit exhausted, triggered ShutdownAll.
-    #[sea_orm(string_value = "MsbnetRestartsExhausted")]
-    MsbnetRestartsExhausted,
-
     /// Sandbox exceeded `max_duration_secs`.
     #[sea_orm(string_value = "MaxDurationExceeded")]
     MaxDurationExceeded,
@@ -122,7 +118,6 @@ impl std::fmt::Display for TerminationReason {
         match self {
             Self::VmCompleted => f.write_str("VmCompleted"),
             Self::VmFailed => f.write_str("VmFailed"),
-            Self::MsbnetRestartsExhausted => f.write_str("MsbnetRestartsExhausted"),
             Self::MaxDurationExceeded => f.write_str("MaxDurationExceeded"),
             Self::IdleTimeout => f.write_str("IdleTimeout"),
             Self::DrainRequested => f.write_str("DrainRequested"),

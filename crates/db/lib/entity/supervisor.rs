@@ -51,10 +51,6 @@ pub enum Relation {
     /// A supervisor has many microvms.
     #[sea_orm(has_many = "super::microvm::Entity")]
     Microvm,
-
-    /// A supervisor has many msbnets.
-    #[sea_orm(has_many = "super::msbnet::Entity")]
-    Msbnet,
 }
 
 impl Related<super::sandbox::Entity> for Entity {
@@ -66,12 +62,6 @@ impl Related<super::sandbox::Entity> for Entity {
 impl Related<super::microvm::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Microvm.def()
-    }
-}
-
-impl Related<super::msbnet::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Msbnet.def()
     }
 }
 

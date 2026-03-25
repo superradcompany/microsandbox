@@ -1,7 +1,7 @@
 //! Serializable network configuration types.
 //!
 //! These types represent the user-facing declarative network configuration
-//! that flows from `SandboxBuilder` through the supervisor to `msbnet`.
+//! for sandbox networking.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -14,9 +14,6 @@ use crate::policy::NetworkPolicy;
 //--------------------------------------------------------------------------------------------------
 
 /// Complete network configuration for a sandbox.
-///
-/// Declarative and serializable. Closure-based hooks and custom backend
-/// objects are not supported in the subprocess architecture and are deferred.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkConfig {
     /// Whether networking is enabled for this sandbox.
@@ -31,17 +28,13 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub ports: Vec<PublishedPort>,
 
-    /// Packet policy enforced by `msbnet`.
+    /// Packet policy.
     #[serde(default)]
     pub policy: NetworkPolicy,
 
     /// DNS interception and filtering settings.
     #[serde(default)]
     pub dns: DnsConfig,
-
-    /// TLS interception configuration.
-    #[serde(default)]
-    pub tls: crate::tls::TlsConfig,
 }
 
 /// Network interface configuration (dual-stack).

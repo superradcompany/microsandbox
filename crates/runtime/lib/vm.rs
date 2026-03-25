@@ -72,7 +72,7 @@ pub struct VmConfig {
     /// Arguments to the executable.
     pub exec_args: Vec<String>,
 
-    /// Socket pair FD for network backend (msbnet communication via Unixgram).
+    /// Socket pair FD for network backend.
     pub net_fd: Option<RawFd>,
 
     /// Agent FD for virtio-console (agentd communication).
@@ -282,7 +282,7 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
         }
     });
 
-    // Network — use msb_krun's built-in Unixgram backend to relay frames to msbnet.
+    // Network — use msb_krun's built-in Unixgram backend to relay frames.
     if let Some(raw_fd) = config.net_fd {
         // SAFETY: The supervisor creates a socketpair and passes one end as net_fd.
         // This process owns the FD (inherited across fork+exec with CLOEXEC cleared).

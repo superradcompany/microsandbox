@@ -75,7 +75,7 @@ pub struct MicrovmArgs {
     #[arg(long)]
     pub exec_path: Option<PathBuf>,
 
-    /// Socket pair FD for RelayNetBackend (msbnet communication).
+    /// Socket pair FD for RelayNetBackend.
     #[arg(long)]
     pub net_fd: Option<RawFd>,
 

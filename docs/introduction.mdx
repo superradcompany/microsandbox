@@ -104,7 +104,7 @@ sb = await Sandbox.create(
 
 ### Programmable network layer
 
-Every packet leaving a sandbox passes through `msbnet`, a host-side process that enforces network policies. You can inspect DNS queries, analyze HTTP traffic, drop packets at the IP level, or build custom data loss prevention. The guest sees a normal network stack. For full control, implement the `NetBackend` trait to handle raw ethernet frames.
+Every packet leaving a sandbox passes through an in-process networking stack that enforces network policies. You can inspect DNS queries, analyze HTTP traffic, drop packets at the IP level, or build custom data loss prevention. The guest sees a normal network stack. For full control, implement the `NetBackend` trait to handle raw ethernet frames.
 
 <CodeGroup>
 ```rust Rust

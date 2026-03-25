@@ -13,7 +13,7 @@ pub const BASE_DIR_NAME: &str = ".microsandbox";
 /// Subdirectory for shared libraries (libkrunfw).
 pub const LIB_SUBDIR: &str = "lib";
 
-/// Subdirectory for helper binaries (msbnet).
+/// Subdirectory for helper binaries.
 pub const BIN_SUBDIR: &str = "bin";
 
 /// Subdirectory for the database.
@@ -46,9 +46,6 @@ pub const SSH_SUBDIR: &str = "ssh";
 
 /// Guest agent binary name.
 pub const AGENTD_BINARY: &str = "agentd";
-
-/// Network helper binary name.
-pub const MSBNET_BINARY: &str = "msbnet";
 
 /// CLI binary name.
 pub const MSB_BINARY: &str = "msb";

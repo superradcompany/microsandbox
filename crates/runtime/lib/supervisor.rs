@@ -1,9 +1,9 @@
-//! Supervisor process: spawns and monitors child processes (VM, msbnet).
+//! Supervisor process: spawns and monitors the VM child process.
 //!
 //! The supervisor is a separate process spawned by the `microsandbox` library.
-//! It spawns the VM (and msbnet) as children, monitors them via waitpid,
-//! captures console logs, updates the database, and manages the sandbox
-//! lifecycle (idle detection, max duration, drain, graceful shutdown).
+//! It spawns the VM as a child, monitors it via waitpid, captures console logs,
+//! updates the database, and manages the sandbox lifecycle (idle detection, max
+//! duration, drain, graceful shutdown).
 //!
 //! The supervisor owns the agent bridge and exposes a Unix domain socket
 //! relay (`agent.sock`) for SDK and CLI client connections.
@@ -26,7 +26,7 @@ use sea_orm::{
 };
 use serde::Serialize;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     signal::unix::SignalKind,
 };
 
@@ -66,14 +66,8 @@ pub struct SupervisorConfig {
     /// Runtime directory (scripts, heartbeat).
     pub runtime_dir: PathBuf,
 
-    /// Serialized network config JSON consumed by `msbnet`.
-    pub network_config_json: Option<String>,
-
     /// Path to the Unix domain socket for the agent relay.
     pub agent_sock_path: PathBuf,
-
-    /// Network FD inherited by the `msbnet` child.
-    pub net_msbnet_fd: Option<i32>,
 
     /// Network FD inherited by the VM child.
     pub net_vm_fd: Option<i32>,
@@ -98,7 +92,6 @@ pub struct SupervisorConfig {
 #[derive(Debug, Serialize)]
 struct StartupInfo {
     vm_pid: u32,
-    msbnet_pid: Option<u32>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -119,18 +112,6 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
     // Consume the guest FD and store it in the VM config for spawn_vm_process.
     config.vm_config.agent_fd = relay.take_guest_fd();
 
-    if config.net_msbnet_fd.is_some() != config.net_vm_fd.is_some() {
-        return Err(crate::RuntimeError::Custom(
-            "network fd configuration is incomplete".to_string(),
-        ));
-    }
-
-    if config.net_msbnet_fd.is_some() != config.network_config_json.is_some() {
-        return Err(crate::RuntimeError::Custom(
-            "network config JSON is missing for enabled networking".to_string(),
-        ));
-    }
-
     // Connect to the database.
     let db = connect_db(&config.sandbox_db_path).await?;
 
@@ -144,58 +125,8 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
     // Resolve the msb binary path (self) for spawning children.
     let msb_path = std::env::current_exe()?;
 
-    // If networking is enabled, spawn msbnet before the VM.
-    // msbnet performs privileged setup and writes readiness JSON to stdout.
-    // We parse that JSON and inject MSB_NET* env vars into the VM config.
-    let mut msbnet_pid: Option<u32> = None;
-    let mut msbnet_child: Option<tokio::process::Child> = None;
-
-    if let Some(net_fd) = config.net_msbnet_fd {
-        let network_config_json = config.network_config_json.as_deref().ok_or_else(|| {
-            crate::RuntimeError::Custom(
-                "network config JSON was not provided for msbnet startup".to_string(),
-            )
-        })?;
-        let (child, ready) =
-            spawn_msbnet_process(&msb_path, net_fd, config.sandbox_slot, network_config_json)
-                .await?;
-        close_supervisor_fd(&mut config.net_msbnet_fd);
-
-        let pid = child.id().ok_or_else(|| {
-            crate::RuntimeError::Custom("msbnet child exited before PID could be read".to_string())
-        })?;
-        msbnet_pid = Some(pid);
-        msbnet_child = Some(child);
-
-        // Inject MSB_NET* env vars into the VM exec config.
-        for (key, value) in ready.to_env_vars() {
-            config.vm_config.env.push(format!("{key}={value}"));
-        }
-
-        // If TLS interception is enabled, write the CA cert to the runtime
-        // mount so agentd can install it into the guest trust store.
-        if let Some(ref tls_ready) = ready.tls
-            && tls_ready.enabled
-        {
-            let tls_dir = config.runtime_dir.join("tls");
-            std::fs::create_dir_all(&tls_dir)?;
-            std::fs::write(tls_dir.join("ca.pem"), &tls_ready.ca_pem)?;
-            tracing::info!("wrote CA cert to runtime/tls/ca.pem for guest trust store injection");
-        }
-
-        tracing::info!(%pid, "msbnet ready");
-    }
-
     // Spawn VM process.
-    let mut vm_child = match spawn_vm_process(&msb_path, &config) {
-        Ok(child) => child,
-        Err(err) => {
-            if let Some(ref mut child) = msbnet_child {
-                terminate_child(child, "msbnet").await;
-            }
-            return Err(err);
-        }
-    };
+    let mut vm_child = spawn_vm_process(&msb_path, &config)?;
     close_supervisor_fd(&mut config.net_vm_fd);
     close_supervisor_fd(&mut config.vm_config.agent_fd);
     let vm_pid = vm_child.id().ok_or_else(|| {
@@ -207,7 +138,7 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
         match insert_microvm_record(&db, config.sandbox_id, supervisor_db_id, vm_pid).await {
             Ok(microvm_db_id) => microvm_db_id,
             Err(err) => {
-                cleanup_startup_children(&mut vm_child, &mut msbnet_child).await;
+                terminate_child(&mut vm_child, "vm").await;
                 return Err(err);
             }
         };
@@ -223,13 +154,6 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
     // Initialize child process monitor.
     let vm_policy = config.child_policies.vm.clone();
     let mut vm_monitor = ChildProcess::new(vm_pid, "vm".to_string(), vm_policy);
-    let mut msbnet_monitor = msbnet_pid.map(|pid| {
-        ChildProcess::new(
-            pid,
-            "msbnet".to_string(),
-            config.child_policies.msbnet.clone(),
-        )
-    });
 
     // Heartbeat reader.
     let heartbeat_reader = HeartbeatReader::new(&config.runtime_dir);
@@ -238,36 +162,36 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
     let mut sigterm = match tokio::signal::unix::signal(SignalKind::terminate()) {
         Ok(sigterm) => sigterm,
         Err(err) => {
-            cleanup_startup_children(&mut vm_child, &mut msbnet_child).await;
+            terminate_child(&mut vm_child, "vm").await;
             return Err(err.into());
         }
     };
     let mut sigint = match tokio::signal::unix::signal(SignalKind::interrupt()) {
         Ok(sigint) => sigint,
         Err(err) => {
-            cleanup_startup_children(&mut vm_child, &mut msbnet_child).await;
+            terminate_child(&mut vm_child, "vm").await;
             return Err(err.into());
         }
     };
     let mut sigusr1 = match tokio::signal::unix::signal(SignalKind::user_defined1()) {
         Ok(sigusr1) => sigusr1,
         Err(err) => {
-            cleanup_startup_children(&mut vm_child, &mut msbnet_child).await;
+            terminate_child(&mut vm_child, "vm").await;
             return Err(err.into());
         }
     };
 
     // Write startup info to stdout only after all fallible startup work succeeds.
-    let startup = StartupInfo { vm_pid, msbnet_pid };
+    let startup = StartupInfo { vm_pid };
     let startup_json = match serde_json::to_string(&startup) {
         Ok(startup_json) => startup_json,
         Err(err) => {
-            cleanup_startup_children(&mut vm_child, &mut msbnet_child).await;
+            terminate_child(&mut vm_child, "vm").await;
             return Err(err.into());
         }
     };
     if let Err(err) = write_startup_info(&startup_json) {
-        cleanup_startup_children(&mut vm_child, &mut msbnet_child).await;
+        terminate_child(&mut vm_child, "vm").await;
         return Err(err.into());
     }
 
@@ -345,39 +269,6 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
                         }
                         break;
                     }
-                }
-            }
-
-            // ── msbnet process exit ──────────────────────────────────────
-            status = async {
-                match msbnet_child.as_mut() {
-                    Some(child) => Some(child.wait().await),
-                    None => None,
-                }
-            }, if msbnet_child.is_some()
-                && msbnet_monitor.as_ref().is_some_and(|monitor| !monitor.has_exited()) =>
-            {
-                let status = status
-                    .expect("msbnet wait branch polled without child")?;
-
-                if let Some(ref mut monitor) = msbnet_monitor {
-                    tracing::info!(pid = monitor.pid(), ?status, "msbnet process exited");
-                    monitor.mark_exited();
-                }
-
-                if drain.is_none() {
-                    let mut d =
-                        DrainState::new(TerminationReason::MsbnetRestartsExhausted);
-                    begin_drain(
-                        &mut d,
-                        &config.supervisor_policy,
-                        &mut vm_monitor,
-                        &mut grace_timer,
-                        &mut grace_timer_active,
-                        &mut kill_timer,
-                        &mut kill_timer_active,
-                    );
-                    drain = Some(d);
                 }
             }
 
@@ -509,35 +400,6 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
 
     // ── Shutdown: record results ─────────────────────────────────────────────
 
-    if let Some(ref mut child) = msbnet_child
-        && msbnet_monitor
-            .as_ref()
-            .is_some_and(|monitor| !monitor.has_exited())
-    {
-        if let Some(pid) = child.id() {
-            let pid = nix::unistd::Pid::from_raw(pid as i32);
-            let grace_ms = config.child_policies.msbnet.shutdown_timeout_ms;
-
-            // Send SIGTERM first to allow Drop cleanup (nftables, TAP removal).
-            let _ = nix::sys::signal::killpg(pid, Signal::SIGTERM);
-
-            if grace_ms > 0 {
-                let exited =
-                    tokio::time::timeout(Duration::from_millis(grace_ms), child.wait()).await;
-
-                if exited.is_err() {
-                    let _ = nix::sys::signal::killpg(pid, Signal::SIGKILL);
-                    let _ = child.wait().await;
-                }
-            } else {
-                let _ = nix::sys::signal::killpg(pid, Signal::SIGKILL);
-                let _ = child.wait().await;
-            }
-        } else {
-            let _ = child.wait().await;
-        }
-    }
-
     let reason = drain
         .as_ref()
         .map(|d| *d.reason())
@@ -580,126 +442,6 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
 //--------------------------------------------------------------------------------------------------
 // Functions: Child Process Spawning
 //--------------------------------------------------------------------------------------------------
-
-/// Spawns the `msbnet` process and waits for its readiness JSON.
-///
-/// The msbnet binary performs privileged network setup (TAP device, nftables)
-/// and writes a single JSON line to stdout with the resolved parameters.
-async fn spawn_msbnet_process(
-    msb_path: &Path,
-    net_fd: i32,
-    slot: u32,
-    network_config_json: &str,
-) -> RuntimeResult<(
-    tokio::process::Child,
-    microsandbox_network::ready::MsbnetReady,
-)> {
-    // Resolve the msbnet binary path.
-    let msbnet_path = msb_path
-        .parent()
-        .map(|p| p.join("msbnet"))
-        .unwrap_or_else(|| PathBuf::from("msbnet"));
-
-    const SUDO_CLOSE_FROM_FD: i32 = 4;
-    const MSBNET_NET_FD: i32 = 3;
-
-    let launch_via_sudo = unsafe { libc::geteuid() } != 0;
-
-    let mut cmd = if launch_via_sudo {
-        let mut cmd = tokio::process::Command::new("sudo");
-        cmd.arg("--non-interactive");
-        cmd.arg("--close-from");
-        cmd.arg(SUDO_CLOSE_FROM_FD.to_string());
-        cmd.arg(msbnet_path.as_os_str());
-        cmd.arg("--net-fd");
-        cmd.arg(MSBNET_NET_FD.to_string());
-        cmd.arg("--slot");
-        cmd.arg(slot.to_string());
-        cmd.arg("--config-json");
-        cmd.arg(network_config_json);
-        cmd
-    } else {
-        let mut cmd = tokio::process::Command::new(&msbnet_path);
-        cmd.arg("--net-fd");
-        cmd.arg(net_fd.to_string());
-        cmd.arg("--slot");
-        cmd.arg(slot.to_string());
-        cmd.arg("--config-json");
-        cmd.arg(network_config_json);
-        cmd
-    };
-
-    // Own process group.
-    cmd.process_group(0);
-
-    // Pipe stdout for readiness JSON, stderr inherited.
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::inherit());
-    cmd.stdin(Stdio::null());
-
-    // Clear CLOEXEC on the net FD so msbnet inherits it.
-    unsafe {
-        cmd.pre_exec(move || {
-            if launch_via_sudo {
-                if net_fd != MSBNET_NET_FD && libc::dup2(net_fd, MSBNET_NET_FD) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                clear_fd_cloexec(MSBNET_NET_FD)?;
-            } else {
-                clear_fd_cloexec(net_fd)?;
-            }
-            Ok(())
-        });
-    }
-
-    let mut child = cmd.spawn().map_err(|e| {
-        crate::RuntimeError::Custom(format!(
-            "failed to spawn msbnet at {}: {e}",
-            msbnet_path.display()
-        ))
-    })?;
-
-    tracing::info!(pid = child.id(), "spawned msbnet process");
-
-    // Read the readiness JSON from msbnet's stdout (first line).
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            terminate_child(&mut child, "msbnet").await;
-            return Err(crate::RuntimeError::Custom(
-                "failed to capture msbnet stdout".to_string(),
-            ));
-        }
-    };
-
-    let mut reader = tokio::io::BufReader::new(stdout);
-    let mut line = String::new();
-    match tokio::time::timeout(Duration::from_secs(30), reader.read_line(&mut line)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(err)) => {
-            terminate_child(&mut child, "msbnet").await;
-            return Err(err.into());
-        }
-        Err(_) => {
-            terminate_child(&mut child, "msbnet").await;
-            return Err(crate::RuntimeError::Custom(
-                "msbnet readiness timeout: no JSON received within 30 seconds".to_string(),
-            ));
-        }
-    }
-
-    let ready: microsandbox_network::ready::MsbnetReady = match serde_json::from_str(line.trim()) {
-        Ok(ready) => ready,
-        Err(err) => {
-            terminate_child(&mut child, "msbnet").await;
-            return Err(crate::RuntimeError::Custom(format!(
-                "failed to parse msbnet readiness JSON: {err} (line: {line:?})"
-            )));
-        }
-    };
-
-    Ok((child, ready))
-}
 
 fn spawn_vm_process(
     msb_path: &Path,
@@ -877,16 +619,6 @@ async fn terminate_child(child: &mut tokio::process::Child, name: &str) {
             error = %err,
             "failed while waiting for terminated child",
         );
-    }
-}
-
-async fn cleanup_startup_children(
-    vm_child: &mut tokio::process::Child,
-    msbnet_child: &mut Option<tokio::process::Child>,
-) {
-    terminate_child(vm_child, "vm").await;
-    if let Some(child) = msbnet_child.as_mut() {
-        terminate_child(child, "msbnet").await;
     }
 }
 
@@ -1172,9 +904,7 @@ mod tests {
             sandbox_db_path: PathBuf::from("/tmp/test.db"),
             log_dir: PathBuf::from("/tmp/logs"),
             runtime_dir: PathBuf::from("/tmp/runtime"),
-            network_config_json: None,
             agent_sock_path: PathBuf::from("/tmp/agent.sock"),
-            net_msbnet_fd: None,
             net_vm_fd: None,
             sandbox_slot: 1,
             forward_output: false,
