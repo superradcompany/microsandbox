@@ -94,6 +94,3 @@ rustls-pemfile = "2"
 rustls-native-certs = "0.8"
 rcgen = { version = "0.13", features = ["x509-parser"] }
 lru = "0.12"
-
-[patch.crates-io]
-msb_krun = { path = "../libkrun/src/krun" }
