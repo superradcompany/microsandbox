@@ -12,8 +12,9 @@ name = "microsandbox_runtime"
 path = "lib/lib.rs"
 
 [features]
-default = ["prebuilt"]
+default = ["prebuilt", "net"]
 prebuilt = ["microsandbox-filesystem/prebuilt"]
+net = ["dep:microsandbox-network", "msb_krun/net"]
 
 [dependencies]
 chrono.workspace = true
@@ -21,11 +22,12 @@ clap = { workspace = true, features = ["derive"] }
 libc.workspace = true
 microsandbox-db = { version = "0.3.2", path = "../db" }
 microsandbox-filesystem = { version = "0.3.2", path = "../filesystem", default-features = false }
-microsandbox-network = { version = "0.3.2", path = "../network" }
+microsandbox-network = { version = "0.3.2", path = "../network", optional = true }
 microsandbox-protocol = { version = "0.3.2", path = "../protocol" }
 microsandbox-utils = { version = "0.3.2", path = "../utils" }
-msb_krun = { version = "0.1.8", features = ["blk", "net"] }
+msb_krun = { version = "0.1.8", features = ["blk"] }
 nix = { workspace = true, features = ["process", "signal"] }
+rustls = { workspace = true }
 sea-orm.workspace = true
 serde.workspace = true
 serde_json.workspace = true

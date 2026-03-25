@@ -1,15 +1,7 @@
-//! DNS interception, resolution, and filtering.
+//! DNS interception via smoltcp UDP socket + async resolution.
 //!
-//! `msbnet` intercepts DNS queries (UDP/TCP port 53) destined for the sandbox
-//! gateway, resolves them via host nameservers, applies domain and rebind
-//! filters, records A/AAAA answers in the pin set, and synthesizes responses.
+//! DNS queries (UDP port 53) flow through smoltcp to a bound UDP socket.
+//! The poll loop reads queries, applies domain filters, resolves via the
+//! host's DNS resolvers, and sends responses back through the smoltcp socket.
 
-mod filter;
-mod interceptor;
-
-//--------------------------------------------------------------------------------------------------
-// Re-Exports
-//--------------------------------------------------------------------------------------------------
-
-pub use filter::*;
-pub use interceptor::*;
+pub mod interceptor;

@@ -1,56 +1,39 @@
 [package]
 name = "microsandbox-network"
-description = "Networking stack and msbnet binary for the microsandbox project."
+description = "Networking types and smoltcp engine for the microsandbox project."
 version.workspace = true
 authors.workspace = true
 repository.workspace = true
 license.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "msbnet"
-path = "bin/main.rs"
-
 [lib]
 path = "lib/lib.rs"
 
-[features]
-default = ["tls"]
-tls = [
-    "dep:rustls",
-    "dep:tokio-rustls",
-    "dep:rustls-pemfile",
-    "dep:rustls-native-certs",
-    "dep:rcgen",
-    "dep:lru",
-]
-
 [dependencies]
-clap = { workspace = true }
-dirs = { workspace = true }
-etherparse = { workspace = true }
+bytes = { workspace = true }
+crossbeam-queue = { workspace = true }
 hickory-proto = { workspace = true }
 hickory-resolver = { workspace = true }
 ipnetwork = { workspace = true }
 libc = { workspace = true }
-lru = { workspace = true, optional = true }
-microsandbox-protocol = { version = "0.3.2", path = "../protocol" }
-microsandbox-utils = { version = "0.3.2", path = "../utils" }
-nix = { workspace = true, features = ["user"] }
-rcgen = { workspace = true, optional = true }
-rustls = { workspace = true, optional = true }
-rustls-native-certs = { workspace = true, optional = true }
-rustls-pemfile = { workspace = true, optional = true }
+lru = { workspace = true }
+msb_krun = { version = "0.1.8", features = ["net"] }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
+smoltcp = { workspace = true, features = [
+    "medium-ethernet",
+    "proto-ipv4",
+    "proto-ipv6",
+    "socket-tcp",
+    "socket-udp",
+    "socket-icmp",
+    "socket-dns",
+    "async",
+    "alloc",
+] }
 tokio = { workspace = true }
-time = "0.3"
-tokio-rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true }
 tracing = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-block2 = "0.6"

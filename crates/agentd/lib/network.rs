@@ -1,7 +1,7 @@
 //! Guest-side network configuration from `MSB_NET*` environment variables.
 //!
 //! Configures the guest network interface using ioctls and netlink, following
-//! the parameters provided by the host supervisor via `msbnet`.
+//! the parameters from host.
 //!
 //! This module only performs real work on Linux. On other platforms, it is a no-op.
 

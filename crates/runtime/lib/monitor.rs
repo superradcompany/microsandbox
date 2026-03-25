@@ -1,8 +1,7 @@
 //! Child process monitoring with restart tracking.
 //!
-//! Each child (VM, msbnet) is tracked as a `ChildProcess` with its lifecycle
-//! policy and restart state. The supervisor polls children and applies policies
-//! on exit.
+//! Each child is tracked as a `ChildProcess` with its lifecycle policy and
+//! restart state. The supervisor polls children and applies policies on exit.
 
 use nix::{sys::signal::Signal, unistd::Pid};
 
@@ -14,7 +13,7 @@ use crate::{RuntimeResult, policy::ChildPolicy};
 
 /// Tracks a child process with its policy and restart state.
 pub struct ChildProcess {
-    /// Display name (e.g., "vm", "msbnet").
+    /// Display name (e.g., "vm").
     name: String,
 
     /// Process ID, if currently running.

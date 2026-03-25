@@ -5,12 +5,7 @@
 //! The supervisor creates the agent socketpair internally and exposes a Unix
 //! domain socket relay for client connections.
 
-use std::{
-    ffi::OsString,
-    os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd},
-    path::Path,
-    process::Stdio,
-};
+use std::{ffi::OsString, path::Path, process::Stdio};
 
 use serde::Deserialize;
 use tokio::{io::AsyncBufReadExt, process::Command};
@@ -29,7 +24,6 @@ use crate::{
 #[derive(Debug, Deserialize)]
 struct StartupInfo {
     vm_pid: u32,
-    msbnet_pid: Option<u32>,
 }
 
 /// How the supervisor should behave relative to the creating process.
@@ -61,17 +55,6 @@ pub async fn spawn_supervisor(
     sandbox_id: i32,
     mode: SupervisorSpawnMode,
 ) -> MicrosandboxResult<(SupervisorHandle, std::path::PathBuf)> {
-    // Create the network socket pair (SOCK_DGRAM for Unixgram frame relay)
-    // if networking is enabled.
-    let net_fds = if config.network.enabled {
-        let (msbnet_fd, vm_fd) = create_socketpair(libc::SOCK_DGRAM)?;
-        Some((msbnet_fd, vm_fd))
-    } else {
-        None
-    };
-    let net_msbnet_raw_fd = net_fds.as_ref().map(|(msbnet_fd, _)| msbnet_fd.as_raw_fd());
-    let net_vm_raw_fd = net_fds.as_ref().map(|(_, vm_fd)| vm_fd.as_raw_fd());
-
     // Resolve paths.
     let msb_path = config::resolve_msb_path()?;
     let libkrunfw_path = config::resolve_libkrunfw_path()?;
@@ -79,11 +62,6 @@ pub async fn spawn_supervisor(
     let sandbox_dir = global.sandboxes_dir().join(&config.name);
     let log_dir = sandbox_dir.join("logs");
     let runtime_dir = sandbox_dir.join("runtime");
-    let network_config_json = if config.network.enabled {
-        Some(serde_json::to_string(&config.network)?)
-    } else {
-        None
-    };
     let scripts_dir = runtime_dir.join("scripts");
     let empty_rootfs_dir = sandbox_dir.join("rootfs-base");
     let rw_dir = sandbox_dir.join("rw");
@@ -121,13 +99,10 @@ pub async fn spawn_supervisor(
         &db_path,
         &log_dir,
         &runtime_dir,
-        network_config_json.as_deref(),
         &empty_rootfs_dir,
         &rw_dir,
         &staging_dir,
         &agent_sock_path,
-        net_msbnet_raw_fd,
-        net_vm_raw_fd,
         &libkrunfw_path,
     ));
 
@@ -142,28 +117,11 @@ pub async fn spawn_supervisor(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::inherit());
 
-    // Clear CLOEXEC on inherited network FDs so they survive exec.
-    // Agent FDs are no longer inherited — the supervisor creates its own socketpair.
-    unsafe {
-        cmd.pre_exec(move || {
-            if let Some(nfd) = net_msbnet_raw_fd {
-                clear_cloexec(nfd)?;
-            }
-            if let Some(nfd) = net_vm_raw_fd {
-                clear_cloexec(nfd)?;
-            }
-            Ok(())
-        });
-    }
-
     // Spawn the supervisor.
     let mut child = cmd.spawn()?;
     let supervisor_pid = child.id().ok_or_else(|| {
         crate::MicrosandboxError::Runtime("supervisor process exited immediately".into())
     })?;
-
-    // Close inherited FDs in the parent by dropping them.
-    drop(net_fds);
 
     // Read the startup JSON from the supervisor's stdout.
     let stdout = child.stdout.take().ok_or_else(|| {
@@ -202,13 +160,7 @@ pub async fn spawn_supervisor(
         }
     };
 
-    let handle = SupervisorHandle::new(
-        supervisor_pid,
-        startup.vm_pid,
-        startup.msbnet_pid,
-        config.name.clone(),
-        child,
-    );
+    let handle = SupervisorHandle::new(supervisor_pid, startup.vm_pid, config.name.clone(), child);
 
     Ok((handle, agent_sock_path))
 }
@@ -216,74 +168,6 @@ pub async fn spawn_supervisor(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
-
-/// Create a Unix socket pair with `FD_CLOEXEC` set on both ends.
-///
-/// We set `FD_CLOEXEC` with `fcntl()` instead of relying on `SOCK_CLOEXEC`
-/// because Darwin's libc bindings do not expose that socket type flag.
-///
-/// `sock_type` is typically `libc::SOCK_STREAM` (for agent channel)
-/// or `libc::SOCK_DGRAM` (for Unixgram network frame relay).
-fn create_socketpair(sock_type: libc::c_int) -> MicrosandboxResult<(OwnedFd, OwnedFd)> {
-    let mut fds = [0i32; 2];
-    let ret = unsafe { libc::socketpair(libc::AF_UNIX, sock_type, 0, fds.as_mut_ptr()) };
-    if ret != 0 {
-        return Err(crate::MicrosandboxError::Io(std::io::Error::last_os_error()));
-    }
-
-    let fd1 = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-    let fd2 = unsafe { OwnedFd::from_raw_fd(fds[1]) };
-
-    set_cloexec(fd1.as_raw_fd())?;
-    set_cloexec(fd2.as_raw_fd())?;
-
-    // Set non-blocking mode on both ends. Tokio's AsyncFd requires
-    // non-blocking fds — a blocking fd can stall the single-threaded
-    // runtime on spurious epoll/kqueue wakeups. SOCK_NONBLOCK is not
-    // available on macOS, so we use fcntl instead.
-    set_nonblock(fd1.as_raw_fd())?;
-    set_nonblock(fd2.as_raw_fd())?;
-
-    Ok((fd1, fd2))
-}
-
-/// Set non-blocking mode on a file descriptor (preserving other flags).
-fn set_nonblock(fd: RawFd) -> std::io::Result<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Set the close-on-exec flag on a file descriptor (preserving other flags).
-fn set_cloexec(fd: RawFd) -> std::io::Result<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let ret = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
-    if ret == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Clear the close-on-exec flag on a file descriptor (preserving other flags).
-fn clear_cloexec(fd: RawFd) -> std::io::Result<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let ret = unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) };
-    if ret == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
 
 async fn terminate_startup_supervisor(
     child: &mut tokio::process::Child,
@@ -361,13 +245,10 @@ fn supervisor_cli_args(
     db_path: &Path,
     log_dir: &Path,
     runtime_dir: &Path,
-    network_config_json: Option<&str>,
     empty_rootfs_dir: &Path,
     rw_dir: &Path,
     staging_dir: &Path,
     agent_sock_path: &Path,
-    net_msbnet_fd: Option<RawFd>,
-    net_vm_fd: Option<RawFd>,
     libkrunfw_path: &Path,
 ) -> Vec<OsString> {
     let mut args = vec![OsString::from("supervisor")];
@@ -386,22 +267,8 @@ fn supervisor_cli_args(
     args.push(log_dir.as_os_str().to_os_string());
     args.push(OsString::from("--runtime-dir"));
     args.push(runtime_dir.as_os_str().to_os_string());
-    if let Some(network_config_json) = network_config_json {
-        args.push(OsString::from("--network-config-json"));
-        args.push(OsString::from(network_config_json));
-    }
     args.push(OsString::from("--agent-sock"));
     args.push(agent_sock_path.as_os_str().to_os_string());
-
-    if let Some(nfd) = net_msbnet_fd {
-        args.push(OsString::from("--net-msbnet-fd"));
-        args.push(OsString::from(nfd.to_string()));
-    }
-
-    if let Some(nfd) = net_vm_fd {
-        args.push(OsString::from("--net-vm-fd"));
-        args.push(OsString::from(nfd.to_string()));
-    }
 
     let sp = &config.supervisor_policy;
     args.push(OsString::from("--shutdown-mode"));
@@ -535,6 +402,17 @@ fn supervisor_cli_args(
         )));
     }
 
+    // Network configuration.
+    #[cfg(feature = "net")]
+    {
+        let net_json =
+            serde_json::to_string(&config.network).expect("failed to serialize network config");
+        args.push(OsString::from("--network-config"));
+        args.push(OsString::from(net_json));
+        args.push(OsString::from("--sandbox-slot"));
+        args.push(OsString::from(sandbox_id.to_string()));
+    }
+
     for (key, value) in &config.env {
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!("{key}={value}")));
@@ -576,13 +454,10 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
-            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
-            None,
-            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -602,13 +477,10 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
-            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
-            None,
-            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -633,13 +505,10 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
-            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
-            None,
-            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -667,13 +536,10 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
-            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
-            None,
-            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -703,13 +569,10 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
-            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
-            None,
-            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -741,13 +604,10 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
-            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
-            None,
-            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -776,13 +636,10 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
-            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
-            None,
-            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -810,13 +667,10 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
-            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
-            None,
-            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -841,13 +695,10 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
-            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
-            None,
-            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -874,13 +725,10 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
-            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
-            None,
-            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 
@@ -917,13 +765,10 @@ mod tests {
             Path::new("/tmp/msb.db"),
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
-            None,
             Path::new("/tmp/rootfs-base"),
             Path::new("/tmp/rw"),
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
-            None,
-            None,
             Path::new("/tmp/libkrunfw.dylib"),
         );
 

@@ -50,7 +50,12 @@ pub use exec::{ExecOptionsBuilder, ExecOutput, IntoExecOptions, Rlimit, RlimitRe
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
 pub use handle::SandboxHandle;
 pub use microsandbox_image::{PullPolicy, PullProgress, PullProgressHandle};
+#[cfg(feature = "net")]
+pub use microsandbox_network::builder::SecretBuilder;
+#[cfg(feature = "net")]
 pub use microsandbox_network::config::NetworkConfig;
+#[cfg(feature = "net")]
+pub use microsandbox_network::policy::NetworkPolicy;
 pub use microsandbox_runtime::logging::LogLevel;
 pub use types::{
     DiskImageFormat, ImageBuilder, ImageSource, IntoImage, MountBuilder, Patch, RootfsSource,

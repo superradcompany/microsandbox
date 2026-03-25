@@ -1,7 +1,7 @@
 //! Handle to a running supervisor process.
 //!
-//! [`SupervisorHandle`] holds the PIDs of the supervisor, VM, and msbnet
-//! processes and provides methods for lifecycle management (signals, wait).
+//! [`SupervisorHandle`] holds the PIDs of the supervisor and VM processes
+//! and provides methods for lifecycle management (signals, wait).
 
 use std::process::ExitStatus;
 
@@ -25,9 +25,6 @@ pub struct SupervisorHandle {
     /// PID of the VM process (`msb microvm`).
     vm_pid: u32,
 
-    /// PID of the msbnet process (if spawned).
-    msbnet_pid: Option<u32>,
-
     /// Name of the sandbox this supervisor manages.
     sandbox_name: String,
 
@@ -47,14 +44,12 @@ impl SupervisorHandle {
     pub(crate) fn new(
         supervisor_pid: u32,
         vm_pid: u32,
-        msbnet_pid: Option<u32>,
         sandbox_name: String,
         child: Child,
     ) -> Self {
         Self {
             supervisor_pid,
             vm_pid,
-            msbnet_pid,
             sandbox_name,
             child,
             detached: false,
@@ -69,11 +64,6 @@ impl SupervisorHandle {
     /// Get the VM PID.
     pub fn vm_pid(&self) -> u32 {
         self.vm_pid
-    }
-
-    /// Get the msbnet PID, if running.
-    pub fn msbnet_pid(&self) -> Option<u32> {
-        self.msbnet_pid
     }
 
     /// Get the sandbox name.

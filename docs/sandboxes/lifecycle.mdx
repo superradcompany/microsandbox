@@ -212,8 +212,7 @@ graph TD
     subgraph Host["Host"]
         A["Your Application<br/><small>microsandbox library, AgentBridge</small>"]
         B["Supervisor<br/><small>msb supervisor</small>"]
-        C["msbnet<br/><small>network policy, DNS, port forwarding</small>"]
-        D["MicroVM Process<br/><small>msb microvm</small>"]
+        D["MicroVM Process<br/><small>msb microvm + in-process networking</small>"]
     end
 
     subgraph Guest["Guest VM"]
@@ -221,24 +220,21 @@ graph TD
     end
 
     A -- "fork+exec" --> B
-    B -- "fork+exec" --> C
     B -- "fork+exec" --> D
     D -- "Vm::enter()" --> F
     A -. "virtio-console (CBOR)" .-> F
-    C <-. "socket pair (ethernet frames)" .-> D
 
     style Host fill:#f5f0ff,stroke:#a770ef,color:#333
     style Guest fill:#fef4e8,stroke:#e8a838,color:#333
     style A fill:#d4bfff,stroke:#8b5cf6,color:#1a1a1a
     style B fill:#d4bfff,stroke:#8b5cf6,color:#1a1a1a
-    style C fill:#d4bfff,stroke:#8b5cf6,color:#1a1a1a
     style D fill:#d4bfff,stroke:#8b5cf6,color:#1a1a1a
     style F fill:#fdd49e,stroke:#d97706,color:#1a1a1a
 ```
 
 There are two separate communication paths here. Your application talks to the guest agent (`agentd`) directly over a virtio-console channel using CBOR-encoded messages. This is how `exec`, `attach`, `fs`, and `emit` calls work. The supervisor is not involved in this path at all.
 
-The **supervisor** is a separate host process that watches over the MicroVM and `msbnet` processes. It handles:
+The **supervisor** is a separate host process that watches over the MicroVM process. It handles:
 
 - Forwarding signals (SIGTERM for graceful stop, SIGUSR1 for drain)
 - Detecting child exits and applying restart/shutdown policies

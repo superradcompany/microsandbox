@@ -1,13 +1,15 @@
 //! Serializable network configuration types.
 //!
 //! These types represent the user-facing declarative network configuration
-//! that flows from `SandboxBuilder` through the supervisor to `msbnet`.
+//! for sandbox networking. Designed for the smoltcp in-process engine.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use serde::{Deserialize, Serialize};
 
 use crate::policy::NetworkPolicy;
+use crate::secrets::config::SecretsConfig;
+use crate::tls::TlsConfig;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -15,23 +17,25 @@ use crate::policy::NetworkPolicy;
 
 /// Complete network configuration for a sandbox.
 ///
-/// Declarative and serializable. Closure-based hooks and custom backend
-/// objects are not supported in the subprocess architecture and are deferred.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Narrowed for the smoltcp in-process engine. Gateway, prefix length, and
+/// other host-backend details are engine internals derived from the sandbox
+/// slot — the user only specifies what matters: interface overrides, ports,
+/// policy, DNS, TLS, and connection limits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
     /// Whether networking is enabled for this sandbox.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// Network interface settings.
+    /// Guest interface overrides. Unset fields derived from sandbox slot.
     #[serde(default)]
-    pub interface: InterfaceConfig,
+    pub interface: InterfaceOverrides,
 
-    /// Port mappings (host:guest).
+    /// Host → guest port mappings.
     #[serde(default)]
     pub ports: Vec<PublishedPort>,
 
-    /// Packet policy enforced by `msbnet`.
+    /// Egress/ingress policy rules.
     #[serde(default)]
     pub policy: NetworkPolicy,
 
@@ -39,29 +43,39 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub dns: DnsConfig,
 
-    /// TLS interception configuration.
+    /// TLS interception settings.
     #[serde(default)]
-    pub tls: crate::tls::TlsConfig,
+    pub tls: TlsConfig,
+
+    /// Secret injection settings.
+    #[serde(default)]
+    pub secrets: SecretsConfig,
+
+    /// Max concurrent guest connections. Default: 256.
+    #[serde(default)]
+    pub max_connections: Option<usize>,
 }
 
-/// Network interface configuration (dual-stack).
+/// Optional overrides for the guest interface.
+///
+/// If omitted, values are derived deterministically from the sandbox slot.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct InterfaceConfig {
-    /// Guest MAC address. Auto-generated if `None`.
+pub struct InterfaceOverrides {
+    /// Guest MAC address. Default: derived from slot.
     #[serde(default)]
     pub mac: Option<[u8; 6]>,
 
-    /// MTU. Defaults to backend-reported value if `None`.
+    /// Interface MTU. Default: 1500.
     #[serde(default)]
     pub mtu: Option<u16>,
 
-    /// IPv4 configuration. Auto-assigned from the pool if `None`.
+    /// Guest IPv4 address. Default: derived from slot (100.96.0.0/11 pool).
     #[serde(default)]
-    pub ipv4: Option<Ipv4Config>,
+    pub ipv4_address: Option<Ipv4Addr>,
 
-    /// IPv6 configuration. Auto-assigned from the pool if `None`.
+    /// Guest IPv6 address. Default: derived from slot (fd42:6d73:62::/48 pool).
     #[serde(default)]
-    pub ipv6: Option<Ipv6Config>,
+    pub ipv6_address: Option<Ipv6Addr>,
 }
 
 /// DNS interception settings for the sandbox.
@@ -76,34 +90,8 @@ pub struct DnsConfig {
     pub blocked_suffixes: Vec<String>,
 
     /// Whether DNS rebinding protection is enabled.
-    #[serde(default = "default_rebind_protection")]
+    #[serde(default = "default_true")]
     pub rebind_protection: bool,
-}
-
-/// IPv4 address configuration for a sandbox interface.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Ipv4Config {
-    /// Guest IPv4 address.
-    pub address: Ipv4Addr,
-
-    /// Prefix length (e.g. `30` for a `/30` subnet).
-    pub prefix_len: u8,
-
-    /// Default gateway.
-    pub gateway: Ipv4Addr,
-}
-
-/// IPv6 address configuration for a sandbox interface.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Ipv6Config {
-    /// Guest IPv6 address.
-    pub address: Ipv6Addr,
-
-    /// Prefix length (e.g. `64` for a `/64` prefix).
-    pub prefix_len: u8,
-
-    /// Default gateway.
-    pub gateway: Ipv6Addr,
 }
 
 /// A published port mapping between host and guest.
@@ -139,12 +127,27 @@ pub enum PortProtocol {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interface: InterfaceOverrides::default(),
+            ports: Vec::new(),
+            policy: NetworkPolicy::default(),
+            dns: DnsConfig::default(),
+            tls: TlsConfig::default(),
+            secrets: SecretsConfig::default(),
+            max_connections: None,
+        }
+    }
+}
+
 impl Default for DnsConfig {
     fn default() -> Self {
         Self {
             blocked_domains: Vec::new(),
             blocked_suffixes: Vec::new(),
-            rebind_protection: default_rebind_protection(),
+            rebind_protection: true,
         }
     }
 }
@@ -153,10 +156,10 @@ impl Default for DnsConfig {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn default_host_bind() -> IpAddr {
-    IpAddr::V4(Ipv4Addr::LOCALHOST)
+fn default_true() -> bool {
+    true
 }
 
-fn default_rebind_protection() -> bool {
-    true
+fn default_host_bind() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::LOCALHOST)
 }

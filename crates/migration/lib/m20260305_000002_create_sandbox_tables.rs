@@ -1,4 +1,4 @@
-//! Migration: Create sandbox tables (sandboxes, supervisors, microvms, msbnets, sandbox_metrics).
+//! Migration: Create sandbox tables (sandboxes, supervisors, microvms, sandbox_metrics).
 
 use sea_orm_migration::prelude::*;
 
@@ -49,18 +49,6 @@ enum Microvm {
     SignalsSent,
     StartedAt,
     TerminatedAt,
-}
-
-#[derive(Iden)]
-enum Msbnet {
-    Table,
-    Id,
-    SandboxId,
-    SupervisorId,
-    Pid,
-    Status,
-    StartedAt,
-    StoppedAt,
 }
 
 #[derive(Iden)]
@@ -181,41 +169,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // msbnets
-        manager
-            .create_table(
-                Table::create()
-                    .table(Msbnet::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(Msbnet::Id)
-                            .integer()
-                            .not_null()
-                            .auto_increment()
-                            .primary_key(),
-                    )
-                    .col(ColumnDef::new(Msbnet::SandboxId).integer().not_null())
-                    .col(ColumnDef::new(Msbnet::SupervisorId).integer().not_null())
-                    .col(ColumnDef::new(Msbnet::Pid).integer())
-                    .col(ColumnDef::new(Msbnet::Status).text().not_null())
-                    .col(ColumnDef::new(Msbnet::StartedAt).date_time())
-                    .col(ColumnDef::new(Msbnet::StoppedAt).date_time())
-                    .foreign_key(
-                        ForeignKey::create()
-                            .from(Msbnet::Table, Msbnet::SandboxId)
-                            .to(Sandbox::Table, Sandbox::Id)
-                            .on_delete(ForeignKeyAction::Cascade),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .from(Msbnet::Table, Msbnet::SupervisorId)
-                            .to(Supervisor::Table, Supervisor::Id)
-                            .on_delete(ForeignKeyAction::Cascade),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-
         // sandbox_metrics
         manager
             .create_table(
@@ -270,9 +223,6 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .drop_table(Table::drop().table(SandboxMetric::Table).to_owned())
-            .await?;
-        manager
-            .drop_table(Table::drop().table(Msbnet::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(Microvm::Table).to_owned())

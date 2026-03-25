@@ -1,74 +1,79 @@
-//! Published port management.
+//! Published port handling: host-side listeners that forward connections
+//! into the guest VM via smoltcp.
 //!
-//! Binds host-side TCP/UDP listeners and proxies traffic to guest ports
-//! through regular kernel sockets. The existing frame relay handles L2
-//! transport automatically — the publisher operates at the application layer.
+//! For each configured [`PublishedPort`], a tokio TCP or UDP listener binds
+//! on the host. When a connection arrives, the poll loop creates a smoltcp
+//! socket that connects to the guest, and a relay task bridges the host
+//! socket to the smoltcp socket via channels.
 
-use std::{
-    collections::HashMap,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 
-use tokio::{
-    net::{TcpListener, TcpStream, UdpSocket},
-    sync::Mutex,
-};
+use bytes::Bytes;
+use smoltcp::iface::{Interface, SocketHandle, SocketSet};
+use smoltcp::socket::tcp;
+use smoltcp::wire::IpEndpoint;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 
 use crate::config::{PortProtocol, PublishedPort};
+use crate::shared::SharedState;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// UDP session idle timeout.
-const UDP_SESSION_TIMEOUT: Duration = Duration::from_secs(60);
+/// TCP socket buffer sizes for inbound connections.
+const TCP_RX_BUF_SIZE: usize = 65536;
+const TCP_TX_BUF_SIZE: usize = 65536;
 
-/// Maximum concurrent UDP sessions per published port.
-const MAX_UDP_SESSIONS: usize = 1024;
+/// Channel capacity for relay tasks.
+const CHANNEL_CAPACITY: usize = 32;
+
+/// Buffer size for reading from host sockets.
+const RELAY_BUF_SIZE: usize = 16384;
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Manages all published port listeners for a sandbox.
+/// Manages published port listeners and inbound connections.
+///
+/// Spawns tokio listeners for each published port. When connections arrive,
+/// they are queued for the poll loop to create smoltcp sockets and initiate
+/// connections to the guest.
 pub struct PortPublisher {
-    /// Handles to spawned listener tasks (kept alive via JoinHandle).
-    _handles: Vec<tokio::task::JoinHandle<()>>,
+    /// Receives accepted connections from listener tasks.
+    inbound_rx: mpsc::Receiver<InboundConnection>,
+    /// Held to keep the channel open (listener tasks hold clones).
+    _inbound_tx: mpsc::Sender<InboundConnection>,
+    /// Tracked inbound connections (smoltcp socket → relay state).
+    connections: Vec<InboundRelay>,
+    /// Guest IPv4 address (for smoltcp connect target).
+    guest_ipv4: Ipv4Addr,
+    /// Ephemeral port counter.
+    ephemeral_port: Arc<AtomicU16>,
 }
 
-/// Resolved guest addresses used by published-port listeners.
-pub struct GuestAddresses {
-    pub ipv4: Option<Ipv4Addr>,
-    pub ipv6: Option<Ipv6Addr>,
+/// An accepted host-side connection waiting to be wired to the guest.
+struct InboundConnection {
+    /// The accepted host-side TCP stream.
+    stream: TcpStream,
+    /// Guest port to connect to.
+    guest_port: u16,
 }
 
-/// A single UDP session mapping an external peer to a guest-facing socket.
-struct UdpSession {
-    /// Socket connected to the guest for this peer (shared with response relay task).
-    guest_socket: Arc<UdpSocket>,
-
-    /// Last time this session was active.
-    last_active: Instant,
-}
-
-/// A bound but not yet active listener, ready to be passed to [`PortPublisher::start_from`].
-pub enum PendingListener {
-    /// A bound TCP listener.
-    Tcp {
-        /// The bound TCP listener.
-        listener: TcpListener,
-        /// Guest address to proxy to.
-        guest_addr: SocketAddr,
-    },
-    /// A bound UDP socket.
-    Udp {
-        /// The bound UDP socket.
-        socket: UdpSocket,
-        /// Guest address to relay to.
-        guest_addr: SocketAddr,
-    },
+/// A single inbound connection relay (host socket ↔ smoltcp socket).
+struct InboundRelay {
+    handle: SocketHandle,
+    /// Send data from smoltcp socket to host relay task.
+    to_host: mpsc::Sender<Bytes>,
+    /// Receive data from host relay task to write to smoltcp socket.
+    from_host: mpsc::Receiver<Bytes>,
+    /// Partial data that couldn't be fully written to smoltcp socket.
+    write_buf: Option<(Bytes, usize)>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -76,294 +81,268 @@ pub enum PendingListener {
 //--------------------------------------------------------------------------------------------------
 
 impl PortPublisher {
-    /// Binds host-side listeners for all published ports.
-    ///
-    /// This performs the privileged `bind()` syscalls but does not spawn relay
-    /// tasks. Call [`PortPublisher::start_from`] after dropping privileges to begin
-    /// relaying.
-    pub async fn bind(
+    /// Create a new publisher and spawn listeners for all published ports.
+    pub fn new(
         ports: &[PublishedPort],
-        guest_ipv4: Option<Ipv4Addr>,
-        guest_ipv6: Option<Ipv6Addr>,
-    ) -> std::io::Result<Vec<PendingListener>> {
-        let mut pending = Vec::with_capacity(ports.len());
-        let guest_addresses = GuestAddresses {
-            ipv4: guest_ipv4,
-            ipv6: guest_ipv6,
-        };
+        guest_ipv4: Ipv4Addr,
+        shared: Arc<SharedState>,
+        tokio_handle: &tokio::runtime::Handle,
+    ) -> Self {
+        let (inbound_tx, inbound_rx) = mpsc::channel(64);
 
+        // Spawn a listener for each published TCP port.
         for port in ports {
-            let guest_ip = resolve_guest_ip(port.host_bind, &guest_addresses)?;
-            let host_bind = SocketAddr::new(port.host_bind, port.host_port);
-            let guest_addr = SocketAddr::new(guest_ip, port.guest_port);
+            if port.protocol == PortProtocol::Tcp {
+                let tx = inbound_tx.clone();
+                let bind_addr = SocketAddr::new(port.host_bind, port.host_port);
+                let guest_port = port.guest_port;
+                let shared = shared.clone();
 
-            match port.protocol {
-                PortProtocol::Tcp => {
-                    let listener = TcpListener::bind(host_bind).await?;
-                    tracing::info!(%host_bind, %guest_addr, "published TCP port");
-                    pending.push(PendingListener::Tcp {
-                        listener,
-                        guest_addr,
-                    });
-                }
-                PortProtocol::Udp => {
-                    let socket = UdpSocket::bind(host_bind).await?;
-                    tracing::info!(%host_bind, %guest_addr, "published UDP port");
-                    pending.push(PendingListener::Udp { socket, guest_addr });
-                }
+                tokio_handle.spawn(async move {
+                    if let Err(e) = tcp_listener_task(bind_addr, guest_port, tx, shared).await {
+                        tracing::error!(
+                            bind = %bind_addr,
+                            error = %e,
+                            "published port listener failed",
+                        );
+                    }
+                });
             }
+            // TODO: UDP published ports.
         }
 
-        Ok(pending)
+        Self {
+            inbound_rx,
+            _inbound_tx: inbound_tx,
+            connections: Vec::new(),
+            guest_ipv4,
+            ephemeral_port: Arc::new(AtomicU16::new(49152)),
+        }
     }
 
-    /// Spawns relay tasks from pre-bound listeners.
+    /// Accept queued inbound connections: create smoltcp sockets and
+    /// initiate connections to the guest.
     ///
-    /// Each listener gets its own tokio task:
-    /// - TCP: one `TcpListener`, spawns a sub-task per accepted connection.
-    /// - UDP: one `UdpSocket`, maintains a session map for peer tracking.
-    pub fn start_from(pending: Vec<PendingListener>) -> Self {
-        let mut handles = Vec::with_capacity(pending.len());
+    /// Must be called each poll iteration.
+    pub fn accept_inbound(
+        &mut self,
+        iface: &mut Interface,
+        sockets: &mut SocketSet<'_>,
+        shared: &Arc<SharedState>,
+        tokio_handle: &tokio::runtime::Handle,
+    ) {
+        while let Ok(conn) = self.inbound_rx.try_recv() {
+            // Create smoltcp TCP socket.
+            let rx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_RX_BUF_SIZE]);
+            let tx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_TX_BUF_SIZE]);
+            let mut socket = tcp::Socket::new(rx_buf, tx_buf);
 
-        for listener in pending {
-            let handle = match listener {
-                PendingListener::Tcp {
-                    listener,
-                    guest_addr,
-                } => tokio::spawn(async move {
-                    tcp_listener_loop(listener, guest_addr).await;
-                }),
-                PendingListener::Udp { socket, guest_addr } => tokio::spawn(async move {
-                    udp_relay_loop(socket, guest_addr).await;
-                }),
-            };
-            handles.push(handle);
-        }
+            // Connect to the guest.
+            let remote = IpEndpoint::new(IpAddr::V4(self.guest_ipv4).into(), conn.guest_port);
+            let local_port = self.alloc_ephemeral_port();
 
-        Self { _handles: handles }
-    }
-
-    /// Binds and starts listeners in one call (convenience for unprivileged use).
-    pub async fn start(
-        ports: &[PublishedPort],
-        guest_ipv4: Option<Ipv4Addr>,
-        guest_ipv6: Option<Ipv6Addr>,
-    ) -> std::io::Result<Self> {
-        let pending = Self::bind(ports, guest_ipv4, guest_ipv6).await?;
-        Ok(Self::start_from(pending))
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions: TCP
-//--------------------------------------------------------------------------------------------------
-
-/// Accepts TCP connections and spawns a proxy task for each.
-async fn tcp_listener_loop(listener: TcpListener, guest_addr: SocketAddr) {
-    loop {
-        let (client_stream, peer_addr) = match listener.accept().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                tracing::warn!("TCP accept error: {e}");
+            if socket.connect(iface.context(), remote, local_port).is_err() {
+                tracing::debug!(
+                    guest_port = conn.guest_port,
+                    "failed to connect smoltcp socket to guest",
+                );
                 continue;
             }
-        };
 
-        tracing::debug!(%peer_addr, %guest_addr, "TCP connection accepted");
+            let handle = sockets.add(socket);
 
-        tokio::spawn(async move {
-            if let Err(e) = tcp_proxy(client_stream, guest_addr).await {
-                tracing::debug!(%peer_addr, %guest_addr, "TCP proxy ended: {e}");
+            // Create channel pair for relay.
+            let (to_host_tx, to_host_rx) = mpsc::channel(CHANNEL_CAPACITY);
+            let (from_host_tx, from_host_rx) = mpsc::channel(CHANNEL_CAPACITY);
+
+            // Spawn relay task: host TcpStream ↔ channels.
+            let shared_clone = shared.clone();
+            tokio_handle.spawn(async move {
+                let _ =
+                    inbound_relay_task(conn.stream, to_host_rx, from_host_tx, shared_clone).await;
+            });
+
+            self.connections.push(InboundRelay {
+                handle,
+                to_host: to_host_tx,
+                from_host: from_host_rx,
+                write_buf: None,
+            });
+        }
+    }
+
+    /// Relay data between smoltcp sockets and host relay tasks.
+    pub fn relay_data(&mut self, sockets: &mut SocketSet<'_>) {
+        let mut relay_buf = [0u8; RELAY_BUF_SIZE];
+
+        for relay in &mut self.connections {
+            let socket = sockets.get_mut::<tcp::Socket>(relay.handle);
+
+            // Detect relay task exit — close the smoltcp socket.
+            if relay.to_host.is_closed() {
+                write_host_data(socket, relay);
+                if relay.write_buf.is_none() {
+                    socket.close();
+                }
+                continue;
             }
+
+            // smoltcp → host: read from socket, send via channel.
+            while socket.can_recv() {
+                match socket.recv_slice(&mut relay_buf) {
+                    Ok(n) if n > 0 => {
+                        let data = Bytes::copy_from_slice(&relay_buf[..n]);
+                        if relay.to_host.try_send(data).is_err() {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+
+            // host → smoltcp: write pending data, then drain channel.
+            write_host_data(socket, relay);
+        }
+    }
+
+    /// Remove closed inbound connections.
+    pub fn cleanup_closed(&mut self, sockets: &mut SocketSet<'_>) {
+        self.connections.retain(|relay| {
+            let socket = sockets.get::<tcp::Socket>(relay.handle);
+            let closed = matches!(socket.state(), tcp::State::Closed | tcp::State::TimeWait);
+            if closed {
+                sockets.remove(relay.handle);
+            }
+            !closed
         });
     }
 }
 
-/// Proxies bytes bidirectionally between a client and the guest.
-async fn tcp_proxy(mut client: TcpStream, guest_addr: SocketAddr) -> std::io::Result<()> {
-    let mut guest = TcpStream::connect(guest_addr).await?;
-    tokio::io::copy_bidirectional(&mut client, &mut guest).await?;
+impl PortPublisher {
+    fn alloc_ephemeral_port(&self) -> u16 {
+        loop {
+            let port = self.ephemeral_port.fetch_add(1, Ordering::Relaxed);
+            // Wrap around in the ephemeral range.
+            if port == 0 || port < 49152 {
+                self.ephemeral_port.store(49152, Ordering::Relaxed);
+                continue;
+            }
+            return port;
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Listener task: accepts TCP connections on the host and queues them.
+async fn tcp_listener_task(
+    bind_addr: SocketAddr,
+    guest_port: u16,
+    inbound_tx: mpsc::Sender<InboundConnection>,
+    _shared: Arc<SharedState>,
+) -> std::io::Result<()> {
+    let listener = TcpListener::bind(bind_addr).await?;
+    tracing::debug!(bind = %bind_addr, guest_port, "published port listener started");
+
+    loop {
+        let (stream, _peer) = listener.accept().await?;
+        let conn = InboundConnection { stream, guest_port };
+        if inbound_tx.send(conn).await.is_err() {
+            break; // Publisher dropped.
+        }
+    }
+
     Ok(())
 }
 
-//--------------------------------------------------------------------------------------------------
-// Functions: UDP
-//--------------------------------------------------------------------------------------------------
-
-/// Relays UDP datagrams between external peers and the guest.
-async fn udp_relay_loop(host_socket: UdpSocket, guest_addr: SocketAddr) {
-    let host_socket = Arc::new(host_socket);
-    let sessions: Arc<Mutex<HashMap<SocketAddr, UdpSession>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
-    let mut buf = [0u8; 65535];
+/// Relay task: bridges a host TcpStream to channels connected to smoltcp.
+async fn inbound_relay_task(
+    stream: TcpStream,
+    mut to_host_rx: mpsc::Receiver<Bytes>,
+    from_host_tx: mpsc::Sender<Bytes>,
+    shared: Arc<SharedState>,
+) -> std::io::Result<()> {
+    let (mut rx, mut tx) = stream.into_split();
+    let mut buf = vec![0u8; RELAY_BUF_SIZE];
 
     loop {
-        let (n, peer_addr) = match host_socket.recv_from(&mut buf).await {
-            Ok(result) => result,
-            Err(e) => {
-                tracing::warn!("UDP recv error: {e}");
-                continue;
-            }
-        };
-
-        let data = &buf[..n];
-
-        // Look up or create a session. Clone the socket Arc, then drop
-        // the lock before any await to avoid holding it across send_to.
-        let guest_socket = {
-            let mut map = sessions.lock().await;
-
-            if let Some(session) = map.get_mut(&peer_addr) {
-                session.last_active = Instant::now();
-                Some(Arc::clone(&session.guest_socket))
-            } else {
-                None
-            }
-        };
-
-        if let Some(socket) = guest_socket {
-            if let Err(e) = socket.send_to(data, guest_addr).await {
-                tracing::debug!(%peer_addr, "UDP send to guest failed: {e}");
-            }
-            continue;
-        }
-
-        // Enforce session cap to prevent fd exhaustion under attack.
-        if sessions.lock().await.len() >= MAX_UDP_SESSIONS {
-            tracing::warn!(%peer_addr, "UDP session limit reached, dropping datagram");
-            continue;
-        }
-
-        // New session: create a guest-facing UDP socket.
-        let bind_addr = if guest_addr.is_ipv6() {
-            "[::]:0"
-        } else {
-            "0.0.0.0:0"
-        };
-        let guest_socket = match UdpSocket::bind(bind_addr).await {
-            Ok(s) => Arc::new(s),
-            Err(e) => {
-                tracing::warn!(%peer_addr, "failed to bind guest UDP socket: {e}");
-                continue;
-            }
-        };
-
-        // Send the first datagram.
-        if let Err(e) = guest_socket.send_to(data, guest_addr).await {
-            tracing::debug!(%peer_addr, "UDP send to guest failed: {e}");
-            continue;
-        }
-
-        // Register the new session.
-        sessions.lock().await.insert(
-            peer_addr,
-            UdpSession {
-                guest_socket: Arc::clone(&guest_socket),
-                last_active: Instant::now(),
-            },
-        );
-
-        // Spawn a task to relay responses from guest back to this peer.
-        let host_socket_clone = Arc::clone(&host_socket);
-        let sessions_clone = Arc::clone(&sessions);
-
-        tokio::spawn(async move {
-            let mut resp_buf = [0u8; 65535];
-            loop {
-                let recv_result = tokio::time::timeout(
-                    UDP_SESSION_TIMEOUT,
-                    guest_socket.recv_from(&mut resp_buf),
-                )
-                .await;
-
-                match recv_result {
-                    Ok(Ok((n, _from))) => {
-                        if let Err(e) = host_socket_clone.send_to(&resp_buf[..n], peer_addr).await {
-                            tracing::debug!(%peer_addr, "UDP send to peer failed: {e}");
+        tokio::select! {
+            // smoltcp → host: data from guest arrives via channel.
+            data = to_host_rx.recv() => {
+                match data {
+                    Some(bytes) => {
+                        if let Err(e) = tx.write_all(&bytes).await {
+                            tracing::debug!(error = %e, "write to host client failed");
                             break;
                         }
-                        if let Some(session) = sessions_clone.lock().await.get_mut(&peer_addr) {
-                            session.last_active = Instant::now();
+                    }
+                    None => break,
+                }
+            }
+
+            // host → smoltcp: data from host client to write to guest.
+            result = rx.read(&mut buf) => {
+                match result {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let data = Bytes::copy_from_slice(&buf[..n]);
+                        if from_host_tx.send(data).await.is_err() {
+                            break;
                         }
+                        shared.proxy_wake.wake();
                     }
-                    Ok(Err(e)) => {
-                        tracing::debug!(%peer_addr, "UDP recv from guest failed: {e}");
-                        break;
-                    }
-                    Err(_timeout) => {
-                        tracing::debug!(%peer_addr, "UDP session timed out");
-                        sessions_clone.lock().await.remove(&peer_addr);
+                    Err(e) => {
+                        tracing::debug!(error = %e, "read from host client failed");
                         break;
                     }
                 }
             }
-
-            sessions_clone.lock().await.remove(&peer_addr);
-        });
+        }
     }
+
+    Ok(())
 }
 
-fn resolve_guest_ip(
-    host_bind: IpAddr,
-    guest_addresses: &GuestAddresses,
-) -> std::io::Result<IpAddr> {
-    match host_bind {
-        IpAddr::V4(_) => guest_addresses
-            .ipv4
-            .map(IpAddr::V4)
-            .or_else(|| guest_addresses.ipv6.map(IpAddr::V6)),
-        IpAddr::V6(_) => guest_addresses
-            .ipv6
-            .map(IpAddr::V6)
-            .or_else(|| guest_addresses.ipv4.map(IpAddr::V4)),
+/// Write data from the host relay channel to the smoltcp socket.
+fn write_host_data(socket: &mut tcp::Socket<'_>, relay: &mut InboundRelay) {
+    // First, try to finish writing any pending partial data.
+    if let Some((data, offset)) = &mut relay.write_buf {
+        if socket.can_send() {
+            match socket.send_slice(&data[*offset..]) {
+                Ok(written) => {
+                    *offset += written;
+                    if *offset >= data.len() {
+                        relay.write_buf = None;
+                    }
+                }
+                Err(_) => return,
+            }
+        } else {
+            return;
+        }
     }
-    .ok_or_else(|| {
-        std::io::Error::other(format!(
-            "no guest address available for published port bind family {host_bind}"
-        ))
-    })
-}
 
-//--------------------------------------------------------------------------------------------------
-// Tests
-//--------------------------------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use std::net::TcpListener as StdTcpListener;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn test_start_does_not_leak_earlier_listener_on_later_bind_failure() {
-        let reserved = StdTcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let reserved_port = reserved.local_addr().unwrap().port();
-        let first = StdTcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let first_port = first.local_addr().unwrap().port();
-        drop(first);
-
-        let ports = vec![
-            PublishedPort {
-                host_port: first_port,
-                guest_port: 8080,
-                protocol: PortProtocol::Tcp,
-                host_bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            },
-            PublishedPort {
-                host_port: reserved_port,
-                guest_port: 8081,
-                protocol: PortProtocol::Tcp,
-                host_bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            },
-        ];
-
-        assert!(
-            PortPublisher::start(&ports, Some(Ipv4Addr::new(100, 96, 0, 2)), None)
-                .await
-                .is_err()
-        );
-
-        StdTcpListener::bind(("127.0.0.1", first_port)).unwrap();
+    // Then drain the channel.
+    while relay.write_buf.is_none() {
+        match relay.from_host.try_recv() {
+            Ok(data) => {
+                if socket.can_send() {
+                    match socket.send_slice(&data) {
+                        Ok(written) if written < data.len() => {
+                            relay.write_buf = Some((data, written));
+                        }
+                        Err(_) => {
+                            relay.write_buf = Some((data, 0));
+                        }
+                        _ => {}
+                    }
+                } else {
+                    relay.write_buf = Some((data, 0));
+                }
+            }
+            Err(_) => break,
+        }
     }
 }

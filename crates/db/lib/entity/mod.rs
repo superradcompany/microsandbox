@@ -7,7 +7,6 @@ pub mod layer;
 pub mod manifest;
 pub mod manifest_layer;
 pub mod microvm;
-pub mod msbnet;
 pub mod sandbox;
 pub mod sandbox_image;
 pub mod sandbox_metric;

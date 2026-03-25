@@ -16,8 +16,9 @@ name = "microsandbox_cli"
 path = "lib/lib.rs"
 
 [features]
-default = ["prebuilt"]
+default = ["prebuilt", "net"]
 prebuilt = ["microsandbox/prebuilt", "microsandbox-runtime/prebuilt"]
+net = ["dep:microsandbox-network", "microsandbox/net", "microsandbox-runtime/net"]
 
 [dependencies]
 anyhow.workspace = true
@@ -28,6 +29,7 @@ indicatif.workspace = true
 libc.workspace = true
 microsandbox = { version = "0.3.2", path = "../microsandbox", default-features = false }
 microsandbox-image = { version = "0.3.2", path = "../image" }
+microsandbox-network = { version = "0.3.2", path = "../network", optional = true }
 microsandbox-runtime = { version = "0.3.2", path = "../runtime", default-features = false }
 rand.workspace = true
 serde_json.workspace = true

@@ -83,9 +83,6 @@ pub struct PathsConfig {
     /// Path to `libkrunfw.{so,dylib}`.
     pub libkrunfw: Option<PathBuf>,
 
-    /// Path to `msbnet` binary.
-    pub msbnet: Option<PathBuf>,
-
     /// Cache directory.
     pub cache: Option<PathBuf>,
 

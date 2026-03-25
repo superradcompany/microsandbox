@@ -180,18 +180,9 @@ jobs:
           mkdir -p build
           cp target/release/msb build/msb
 
-      - name: Build msbnet
-        run: |
-          cargo build --release -p microsandbox-network --bin msbnet
-          cp target/release/msbnet build/msbnet
-
       - name: Codesign msb (macOS)
         if: matrix.os == 'darwin'
         run: codesign --entitlements msb-entitlements.plist --force -s - build/msb
-
-      - name: Codesign msbnet (macOS)
-        if: matrix.os == 'darwin'
-        run: codesign --entitlements msbnet-entitlements.plist --force -s - build/msbnet
 
       # -- Tests --
       - name: Test workspace

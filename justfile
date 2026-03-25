@@ -100,56 +100,38 @@ build-libkrunfw:
 # Build the msb CLI binary.
 [linux]
 build-msb mode="debug": build-agentd
-    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features -p microsandbox-cli
+    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features --features net -p microsandbox-cli
     mkdir -p build
     cp target/{{ mode }}/msb build/msb
 
 # Build and sign the msb CLI binary.
 [macos]
 build-msb mode="debug": build-agentd
-    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features -p microsandbox-cli
+    cargo build {{ if mode == "release" { "--release" } else { "" } }} --no-default-features --features net -p microsandbox-cli
     mkdir -p build
     cp target/{{ mode }}/msb build/msb
     codesign --entitlements msb-entitlements.plist --force -s - build/msb
 
-# Build the msbnet binary.
+# Build everything: agentd, libkrunfw, and msb.
 [linux]
-build-msbnet mode="debug":
-    cargo build {{ if mode == "release" { "--release" } else { "" } }} -p microsandbox-network --bin msbnet
-    mkdir -p build
-    cp target/{{ mode }}/msbnet build/msbnet
+build mode="debug": (build-msb mode) _ensure-libkrunfw
 
-# Build and sign the msbnet binary.
+# Build everything: agentd, libkrunfw, and msb.
 [macos]
-build-msbnet mode="debug":
-    cargo build {{ if mode == "release" { "--release" } else { "" } }} -p microsandbox-network --bin msbnet
-    mkdir -p build
-    cp target/{{ mode }}/msbnet build/msbnet
-    codesign --entitlements msbnet-entitlements.plist --force -s - build/msbnet
+build mode="debug": (build-msb mode) _ensure-libkrunfw
 
-# Build everything: agentd, libkrunfw, msb, and msbnet.
-[linux]
-build mode="debug": (build-msb mode) _ensure-libkrunfw (build-msbnet mode)
-
-# Build everything: agentd, libkrunfw, msb, and msbnet.
-[macos]
-build mode="debug": (build-msb mode) _ensure-libkrunfw (build-msbnet mode)
-
-# Install msb, msbnet, and libkrunfw to ~/.microsandbox/{bin,lib}/ and configure shell paths. Requires: just build.
+# Install msb and libkrunfw to ~/.microsandbox/{bin,lib}/ and configure shell paths. Requires: just build.
 [linux]
 install:
     #!/usr/bin/env bash
     set -euo pipefail
     test -f build/msb || { echo "error: build/msb not found. Run 'just build' first."; exit 1; }
-    test -f build/msbnet || { echo "error: build/msbnet not found. Run 'just build' first."; exit 1; }
     test -f build/libkrunfw.so.{{ LIBKRUNFW_VERSION }} || { echo "error: build/libkrunfw.so.{{ LIBKRUNFW_VERSION }} not found. Run 'just build-deps' first."; exit 1; }
 
-    # Install msb and msbnet to ~/.microsandbox/bin/.
+    # Install msb to ~/.microsandbox/bin/.
     mkdir -p ~/.microsandbox/bin
     install -m755 build/msb ~/.microsandbox/bin/msb
-    install -m755 build/msbnet ~/.microsandbox/bin/msbnet
     echo "Installed msb → ~/.microsandbox/bin/msb"
-    echo "Installed msbnet → ~/.microsandbox/bin/msbnet"
 
     # Install libkrunfw to ~/.microsandbox/lib/.
     mkdir -p ~/.microsandbox/lib
@@ -161,23 +143,20 @@ install:
     echo ""
     echo "Remember to add ~/.microsandbox/bin to your PATH and ~/.microsandbox/lib to your LD_LIBRARY_PATH."
 
-# Install msb, msbnet, and libkrunfw to ~/.microsandbox/{bin,lib}/. Requires: just build.
+# Install msb and libkrunfw to ~/.microsandbox/{bin,lib}/. Requires: just build.
 [macos]
 install:
     #!/usr/bin/env bash
     set -euo pipefail
     test -f build/msb || { echo "error: build/msb not found. Run 'just build' first."; exit 1; }
-    test -f build/msbnet || { echo "error: build/msbnet not found. Run 'just build' first."; exit 1; }
     test -f build/libkrunfw.{{ LIBKRUNFW_ABI }}.dylib || { echo "error: build/libkrunfw.{{ LIBKRUNFW_ABI }}.dylib not found. Run 'just build-deps' first."; exit 1; }
 
-    # Install msb and msbnet to ~/.microsandbox/bin/.
+    # Install msb to ~/.microsandbox/bin/.
     # Atomic mv to a fresh inode — macOS caches code signatures on the vnode,
     # so cp over a running binary can block new executions.
     mkdir -p ~/.microsandbox/bin
     install -m755 build/msb ~/.microsandbox/bin/msb.tmp && mv ~/.microsandbox/bin/msb.tmp ~/.microsandbox/bin/msb
-    install -m755 build/msbnet ~/.microsandbox/bin/msbnet.tmp && mv ~/.microsandbox/bin/msbnet.tmp ~/.microsandbox/bin/msbnet
     echo "Installed msb → ~/.microsandbox/bin/msb"
-    echo "Installed msbnet → ~/.microsandbox/bin/msbnet"
 
     # Install libkrunfw to ~/.microsandbox/lib/.
     # Atomic install to avoid corrupting a running VM's mmap'd library.
@@ -194,9 +173,8 @@ uninstall:
     #!/usr/bin/env bash
     set -euo pipefail
     rm -f ~/.microsandbox/bin/msb
-    rm -f ~/.microsandbox/bin/msbnet
     rm -f ~/.microsandbox/lib/libkrunfw*
-    echo "Removed msb, msbnet, and libkrunfw from ~/.microsandbox/"
+    echo "Removed msb and libkrunfw from ~/.microsandbox/"
 
 # Clean build artifacts.
 clean:

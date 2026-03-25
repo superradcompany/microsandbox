@@ -8,8 +8,7 @@ use tar::Archive;
 
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_utils::{
-    BASE_DIR_NAME, BIN_SUBDIR, LIB_SUBDIR, LIBKRUNFW_ABI, MSB_BINARY, MSBNET_BINARY,
-    PREBUILT_VERSION,
+    BASE_DIR_NAME, BIN_SUBDIR, LIB_SUBDIR, LIBKRUNFW_ABI, MSB_BINARY, PREBUILT_VERSION,
 };
 
 use super::verify::verify_installation;
@@ -63,7 +62,6 @@ impl Setup {
         // Skip if all binaries are already present.
         if !self.force
             && bin_dir.join(MSB_BINARY).exists()
-            && bin_dir.join(MSBNET_BINARY).exists()
             && lib_dir.join(&libkrunfw_name).exists()
         {
             return Ok(());
@@ -115,7 +113,7 @@ impl Setup {
 
 /// Install microsandbox runtime dependencies with default settings.
 ///
-/// This downloads the microsandbox bundle tarball and extracts `msb`, `msbnet`,
+/// This downloads the microsandbox bundle tarball and extracts `msb`
 /// and `libkrunfw` to `~/.microsandbox/{bin,lib}/`.
 pub async fn install() -> MicrosandboxResult<()> {
     Setup::builder().build().install().await

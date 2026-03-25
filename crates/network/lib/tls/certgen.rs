@@ -1,99 +1,46 @@
-//! Per-domain certificate generation signed by the microsandbox CA.
-//!
-//! Each intercepted domain gets a short-lived (24h) P-256 EC certificate with
-//! the SNI domain as both CN and SAN. The cert is signed by the CA keypair.
+//! Per-domain certificate generation signed by the sandbox CA.
 
-use std::{io, sync::Arc};
+use rcgen::{CertificateParams, DistinguishedName};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
-use rcgen::{CertificateParams, DnType, KeyPair};
-use rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-    sign::CertifiedKey,
-};
-
-use super::CaKeyPair;
+use super::ca::CertAuthority;
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// A generated certificate and private key for a specific domain.
-pub struct GeneratedCert {
-    /// DER-encoded leaf certificate.
-    pub cert_der: Vec<u8>,
-
-    /// DER-encoded private key (PKCS#8).
-    pub key_der: Vec<u8>,
-
-    /// DER-encoded CA certificate (for the chain).
-    pub ca_cert_der: Vec<u8>,
+/// A generated certificate + key for a specific domain.
+pub struct DomainCert {
+    /// Certificate chain: [leaf, CA].
+    pub chain: Vec<CertificateDer<'static>>,
+    /// Leaf certificate private key.
+    pub key: PrivateKeyDer<'static>,
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Generates a short-lived certificate for the given domain, signed by the CA.
-pub fn generate_cert(domain: &str, ca: &CaKeyPair) -> io::Result<GeneratedCert> {
-    let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
-        .map_err(|e| io::Error::other(format!("failed to generate domain keypair: {e}")))?;
-
+/// Generate a certificate for `domain` signed by the given CA.
+pub fn generate_domain_cert(domain: &str, ca: &CertAuthority, _validity_hours: u64) -> DomainCert {
     let mut params = CertificateParams::new(vec![domain.to_string()])
-        .map_err(|e| io::Error::other(format!("failed to create cert params: {e}")))?;
+        .expect("invalid domain for certificate SAN");
 
-    params.distinguished_name.push(DnType::CommonName, domain);
+    let mut dn = DistinguishedName::new();
+    dn.push(rcgen::DnType::CommonName, domain);
+    params.distinguished_name = dn;
 
-    // Short-lived: valid for 24 hours from now.
-    let now = time::OffsetDateTime::now_utc();
-    params.not_before = now;
-    params.not_after = now + time::Duration::hours(24);
+    let key_pair = rcgen::KeyPair::generate().expect("failed to generate domain key pair");
 
-    // Sign with the CA.
-    let cert = params
+    let cert_der = params
         .signed_by(&key_pair, &ca.cert, &ca.key_pair)
-        .map_err(|e| io::Error::other(format!("failed to sign domain cert: {e}")))?;
+        .expect("failed to sign domain certificate");
 
-    Ok(GeneratedCert {
-        cert_der: cert.der().to_vec(),
-        key_der: key_pair.serialize_der(),
-        ca_cert_der: ca.cert_der.clone(),
-    })
-}
-
-/// Converts a `GeneratedCert` into a rustls `CertifiedKey` for use in TLS
-/// handshakes.
-pub fn to_certified_key(cert: &GeneratedCert) -> io::Result<Arc<CertifiedKey>> {
-    let cert_chain = vec![
-        CertificateDer::from(cert.cert_der.clone()),
-        CertificateDer::from(cert.ca_cert_der.clone()),
-    ];
-
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_der.clone()));
-    let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
-        .map_err(|e| io::Error::other(format!("failed to create signing key: {e}")))?;
-
-    Ok(Arc::new(CertifiedKey::new(cert_chain, signing_key)))
-}
-
-//--------------------------------------------------------------------------------------------------
-// Tests
-//--------------------------------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tls::ca;
-
-    #[test]
-    fn test_generate_and_convert() {
-        let ca_config = crate::tls::CaConfig::default();
-        let ca_kp = ca::generate_ca(&ca_config).unwrap();
-
-        let cert = generate_cert("example.com", &ca_kp).unwrap();
-        assert!(!cert.cert_der.is_empty());
-        assert!(!cert.key_der.is_empty());
-
-        let certified = to_certified_key(&cert).unwrap();
-        assert_eq!(certified.cert.len(), 2); // leaf + CA
+    DomainCert {
+        chain: vec![
+            CertificateDer::from(cert_der.der().to_vec()),
+            ca.cert_der.clone(),
+        ],
+        key: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der())),
     }
 }

@@ -1,12 +1,18 @@
-//! `microsandbox-network` provides networking types and the `msbnet` runtime
-//! for sandbox network isolation, policy enforcement, and DNS interception.
+//! `microsandbox-network` provides the smoltcp in-process networking engine
+//! for sandbox network isolation and policy enforcement.
 
+pub mod backend;
+pub mod builder;
 pub mod config;
+pub mod conn;
+pub mod device;
 pub mod dns;
-pub mod engine;
-pub mod host;
-pub mod packet;
+pub mod network;
 pub mod policy;
+pub mod proxy;
 pub mod publisher;
-pub mod ready;
+pub mod secrets;
+pub mod shared;
+pub mod stack;
 pub mod tls;
+pub mod udp_relay;
