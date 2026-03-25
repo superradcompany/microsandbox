@@ -173,7 +173,6 @@ mod tests {
             "manifest",
             "manifest_layer",
             "microvm",
-            "msbnet",
             "sandbox",
             "sandbox_image",
             "sandbox_metric",
