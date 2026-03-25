@@ -69,9 +69,6 @@ pub struct SupervisorConfig {
     /// Path to the Unix domain socket for the agent relay.
     pub agent_sock_path: PathBuf,
 
-    /// Network FD inherited by the VM child.
-    pub net_vm_fd: Option<i32>,
-
     /// Sandbox slot (database id) for deterministic network address allocation.
     pub sandbox_slot: u32,
 
@@ -127,7 +124,6 @@ pub async fn run(mut config: SupervisorConfig) -> RuntimeResult<()> {
 
     // Spawn VM process.
     let mut vm_child = spawn_vm_process(&msb_path, &config)?;
-    close_supervisor_fd(&mut config.net_vm_fd);
     close_supervisor_fd(&mut config.vm_config.agent_fd);
     let vm_pid = vm_child.id().ok_or_else(|| {
         crate::RuntimeError::Custom("VM child exited before PID could be read".to_string())
@@ -464,14 +460,10 @@ fn spawn_vm_process(
 
     // Clear CLOEXEC on inherited FDs so they survive exec.
     let agent_fd = config.vm_config.agent_fd;
-    let net_fd = config.net_vm_fd;
     unsafe {
         cmd.pre_exec(move || {
             if let Some(afd) = agent_fd {
                 clear_fd_cloexec(afd)?;
-            }
-            if let Some(nfd) = net_fd {
-                clear_fd_cloexec(nfd)?;
             }
             Ok(())
         });
@@ -567,9 +559,17 @@ fn microvm_cli_args(config: &SupervisorConfig) -> Vec<OsString> {
         args.push(OsString::from(agent_fd.to_string()));
     }
 
-    if let Some(net_fd) = config.net_vm_fd {
-        args.push(OsString::from("--net-fd"));
-        args.push(OsString::from(net_fd.to_string()));
+    // Network config as JSON + sandbox slot.
+    #[cfg(feature = "net")]
+    {
+        if config.vm_config.network.enabled {
+            let net_json = serde_json::to_string(&config.vm_config.network)
+                .expect("failed to serialize network config");
+            args.push(OsString::from("--network-config"));
+            args.push(OsString::from(net_json));
+        }
+        args.push(OsString::from("--sandbox-slot"));
+        args.push(OsString::from(config.sandbox_slot.to_string()));
     }
 
     if !config.vm_config.exec_args.is_empty() {
@@ -905,7 +905,6 @@ mod tests {
             log_dir: PathBuf::from("/tmp/logs"),
             runtime_dir: PathBuf::from("/tmp/runtime"),
             agent_sock_path: PathBuf::from("/tmp/agent.sock"),
-            net_vm_fd: None,
             sandbox_slot: 1,
             forward_output: false,
             child_policies: ChildPolicies::default(),
@@ -928,7 +927,10 @@ mod tests {
                 workdir: Some(PathBuf::from("/work")),
                 exec_path: Some(PathBuf::from("/bin/sh")),
                 exec_args: vec!["-lc".into(), "echo hi".into()],
-                net_fd: None,
+                #[cfg(feature = "net")]
+                network: microsandbox_network::config::NetworkConfig::default(),
+                #[cfg(feature = "net")]
+                sandbox_slot: 0,
                 agent_fd: Some(7),
             },
         }

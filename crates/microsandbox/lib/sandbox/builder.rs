@@ -1,5 +1,7 @@
 //! Fluent builder for [`SandboxConfig`].
 
+#[cfg(feature = "net")]
+use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
 use microsandbox_runtime::policy::ShutdownMode;
 
 use microsandbox_image::RegistryAuth;
@@ -131,6 +133,68 @@ impl SandboxBuilder {
     pub fn init(mut self, path: impl Into<String>) -> Self {
         self.config.init = Some(path.into());
         self
+    }
+
+    /// Configure networking via a closure.
+    ///
+    /// ```ignore
+    /// .network(|n| n
+    ///     .port(8080, 80)
+    ///     .policy(NetworkPolicy::public_only())
+    ///     .block_domain("evil.com")
+    ///     .tls(|t| t.bypass("*.internal.com"))
+    /// )
+    /// ```
+    #[cfg(feature = "net")]
+    pub fn network(mut self, f: impl FnOnce(NetworkBuilder) -> NetworkBuilder) -> Self {
+        self.config.network = f(NetworkBuilder::new()).build();
+        self
+    }
+
+    /// Add a secret with placeholder-based protection via a closure.
+    ///
+    /// The sandbox receives a placeholder; the real value is substituted
+    /// by the TLS proxy only for allowed hosts.
+    ///
+    /// ```ignore
+    /// .secret(|s| s
+    ///     .env("OPENAI_API_KEY")
+    ///     .value(api_key)
+    ///     .allow_host("api.openai.com")
+    /// )
+    /// ```
+    ///
+    /// Automatically enables TLS interception if not already enabled.
+    #[cfg(feature = "net")]
+    pub fn secret(mut self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self {
+        let entry = f(SecretBuilder::new()).build();
+        self.config.network.secrets.secrets.push(entry);
+        // Auto-enable TLS when secrets are configured.
+        if !self.config.network.tls.enabled {
+            self.config.network.tls.enabled = true;
+        }
+        self
+    }
+
+    /// Shorthand: add a secret with env var, value, and allowed host.
+    ///
+    /// Placeholder is auto-generated as `$MSB_<env_var>`.
+    /// Automatically enables TLS interception.
+    ///
+    /// ```ignore
+    /// .secret_env("OPENAI_API_KEY", api_key, "api.openai.com")
+    /// ```
+    #[cfg(feature = "net")]
+    pub fn secret_env(
+        self,
+        env_var: impl Into<String>,
+        value: impl Into<String>,
+        allowed_host: impl Into<String>,
+    ) -> Self {
+        let env_var = env_var.into();
+        let value = value.into();
+        let allowed_host = allowed_host.into();
+        self.secret(|s| s.env(&env_var).value(value).allow_host(allowed_host))
     }
 
     /// Set an environment variable visible to all commands in this sandbox.

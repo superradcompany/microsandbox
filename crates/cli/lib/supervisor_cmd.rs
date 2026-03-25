@@ -3,7 +3,7 @@
 //! Parses CLI arguments, builds a `SupervisorConfig`, and delegates to
 //! `microsandbox_runtime::supervisor::run()`.
 
-use std::{os::fd::RawFd, path::PathBuf};
+use std::path::PathBuf;
 
 use clap::Args;
 use microsandbox_runtime::{
@@ -44,10 +44,6 @@ pub struct SupervisorArgs {
     /// Path to the Unix domain socket for the agent relay.
     #[arg(long)]
     pub agent_sock: PathBuf,
-
-    /// Network FD inherited by the VM child.
-    #[arg(long)]
-    pub net_vm_fd: Option<RawFd>,
 
     /// Forward VM console output to supervisor stdout.
     #[arg(long = "forward")]
@@ -152,6 +148,16 @@ pub struct SupervisorArgs {
     #[arg(long)]
     pub exec_path: Option<PathBuf>,
 
+    /// Network configuration as JSON.
+    #[cfg(feature = "net")]
+    #[arg(long)]
+    pub network_config: Option<String>,
+
+    /// Sandbox slot for deterministic network address derivation.
+    #[cfg(feature = "net")]
+    #[arg(long, default_value_t = 0)]
+    pub sandbox_slot: u64,
+
     /// Arguments to pass to the executable.
     #[arg(last = true)]
     pub exec_args: Vec<String>,
@@ -198,7 +204,17 @@ pub async fn run(args: SupervisorArgs, log_level: Option<LogLevel>) -> RuntimeRe
         workdir: args.workdir,
         exec_path: args.exec_path,
         exec_args: args.exec_args,
-        net_fd: None,
+        #[cfg(feature = "net")]
+        network: args
+            .network_config
+            .as_deref()
+            .map(|json| {
+                serde_json::from_str::<microsandbox_network::config::NetworkConfig>(json)
+                    .expect("invalid network config JSON")
+            })
+            .unwrap_or_default(),
+        #[cfg(feature = "net")]
+        sandbox_slot: args.sandbox_slot,
         agent_fd: None,
     };
 
@@ -210,7 +226,6 @@ pub async fn run(args: SupervisorArgs, log_level: Option<LogLevel>) -> RuntimeRe
         log_dir: args.log_dir,
         runtime_dir: args.runtime_dir,
         agent_sock_path: args.agent_sock,
-        net_vm_fd: args.net_vm_fd,
         sandbox_slot: u32::try_from(args.sandbox_id).map_err(|_| {
             microsandbox_runtime::RuntimeError::Custom(format!(
                 "sandbox_id {} is negative and cannot be used as a network slot",

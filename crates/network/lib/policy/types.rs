@@ -1,7 +1,11 @@
 //! Policy types: rules, actions, destinations, and protocol matching.
 
+use std::net::SocketAddr;
+
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
+
+use super::destination::{matches_cidr, matches_group};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -148,11 +152,64 @@ impl NetworkPolicy {
             rules: vec![],
         }
     }
+
+    /// Public internet only — deny loopback, private, link-local, and
+    /// cloud metadata addresses.
+    pub fn public_only() -> Self {
+        Self {
+            default_action: Action::Allow,
+            rules: vec![
+                Rule::deny_outbound(Destination::Group(DestinationGroup::Loopback)),
+                Rule::deny_outbound(Destination::Group(DestinationGroup::Private)),
+                Rule::deny_outbound(Destination::Group(DestinationGroup::LinkLocal)),
+                Rule::deny_outbound(Destination::Group(DestinationGroup::Metadata)),
+            ],
+        }
+    }
+
+    /// Evaluate an outbound connection against the policy.
+    ///
+    /// Returns the action from the first matching rule, or the default
+    /// action if no rule matches.
+    pub fn evaluate_egress(&self, dst: SocketAddr, protocol: Protocol) -> Action {
+        for rule in &self.rules {
+            if rule.direction != Direction::Outbound {
+                continue;
+            }
+            if let Some(ref rule_proto) = rule.protocol
+                && *rule_proto != protocol
+            {
+                continue;
+            }
+            if let Some(ref ports) = rule.ports
+                && !ports.contains(dst.port())
+            {
+                continue;
+            }
+            if !matches_destination(&rule.destination, dst.ip()) {
+                continue;
+            }
+            return rule.action;
+        }
+        self.default_action
+    }
+}
+
+impl Action {
+    /// Returns `true` if this action allows the traffic.
+    pub fn is_allow(self) -> bool {
+        matches!(self, Action::Allow)
+    }
+
+    /// Returns `true` if this action denies the traffic.
+    pub fn is_deny(self) -> bool {
+        matches!(self, Action::Deny)
+    }
 }
 
 impl Default for NetworkPolicy {
     fn default() -> Self {
-        Self::allow_all()
+        Self::public_only()
     }
 }
 
@@ -197,5 +254,21 @@ impl PortRange {
     /// Returns `true` if the port falls within this range.
     pub fn contains(&self, port: u16) -> bool {
         port >= self.start && port <= self.end
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Check if an IP address matches a destination specification.
+fn matches_destination(dest: &Destination, addr: std::net::IpAddr) -> bool {
+    match dest {
+        Destination::Any => true,
+        Destination::Cidr(network) => matches_cidr(network, addr),
+        Destination::Group(group) => matches_group(*group, addr),
+        // Domain and DomainSuffix require a DNS pin set for IP→domain
+        // reverse lookup. Without pins, they don't match by IP alone.
+        Destination::Domain(_) | Destination::DomainSuffix(_) => false,
     }
 }

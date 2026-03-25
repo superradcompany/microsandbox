@@ -1,6 +1,6 @@
 [package]
 name = "microsandbox-network"
-description = "Networking types for the microsandbox project."
+description = "Networking types and smoltcp engine for the microsandbox project."
 version.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -11,5 +11,29 @@ edition.workspace = true
 path = "lib/lib.rs"
 
 [dependencies]
+bytes = { workspace = true }
+crossbeam-queue = { workspace = true }
+hickory-proto = { workspace = true }
+hickory-resolver = { workspace = true }
 ipnetwork = { workspace = true }
+libc = { workspace = true }
+lru = { workspace = true }
+msb_krun = { version = "0.1.8", features = ["net"] }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
 serde = { workspace = true }
+smoltcp = { workspace = true, features = [
+    "medium-ethernet",
+    "proto-ipv4",
+    "proto-ipv6",
+    "socket-tcp",
+    "socket-udp",
+    "socket-icmp",
+    "socket-dns",
+    "async",
+    "alloc",
+] }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tracing = { workspace = true }

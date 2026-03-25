@@ -4,13 +4,10 @@
 //! from msb_krun and never returns. The calling process is effectively
 //! replaced by the VMM event loop, which calls `_exit()` on guest shutdown.
 
-use std::{
-    os::fd::{FromRawFd, OwnedFd, RawFd},
-    path::PathBuf,
-};
+use std::{os::fd::RawFd, path::PathBuf};
 
 use microsandbox_filesystem::{DynFileSystem, OverlayFs, PassthroughConfig, PassthroughFs};
-use msb_krun::{NetBackend, VmBuilder};
+use msb_krun::VmBuilder;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -72,8 +69,13 @@ pub struct VmConfig {
     /// Arguments to the executable.
     pub exec_args: Vec<String>,
 
-    /// Socket pair FD for network backend.
-    pub net_fd: Option<RawFd>,
+    /// Network configuration for the smoltcp in-process stack.
+    #[cfg(feature = "net")]
+    pub network: microsandbox_network::config::NetworkConfig,
+
+    /// Sandbox slot for deterministic network address derivation.
+    #[cfg(feature = "net")]
+    pub sandbox_slot: u64,
 
     /// Agent FD for virtio-console (agentd communication).
     pub agent_fd: Option<RawFd>,
@@ -103,7 +105,6 @@ impl std::fmt::Debug for VmConfig {
             .field("workdir", &self.workdir)
             .field("exec_path", &self.exec_path)
             .field("exec_args", &self.exec_args)
-            .field("net_fd", &self.net_fd)
             .field("agent_fd", &self.agent_fd)
             .finish()
     }
@@ -243,6 +244,52 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
         builder = builder.fs(move |fs| fs.tag(&tag).custom(backend));
     }
 
+    // Network — in-process smoltcp stack via SmoltcpNetwork.
+    // Must be set up BEFORE the exec builder so MSB_NET* env vars are in
+    // exec_env when the closure captures it.
+    #[cfg(feature = "net")]
+    if config.network.enabled {
+        // Rustls requires an explicit crypto provider in the microvm process.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let mut network =
+            microsandbox_network::network::SmoltcpNetwork::new(config.network, config.sandbox_slot);
+
+        // Create a tokio runtime for proxy tasks, DNS resolution, and
+        // published port listeners.
+        let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(msb_krun::Error::Io)?;
+
+        network.start(tokio_rt.handle().clone());
+
+        let guest_mac = network.guest_mac();
+        let net_backend = network.take_backend();
+
+        // Write CA cert to the runtime dir so agentd can install it in the
+        // guest trust store. The runtime dir is mounted at /.msb via virtiofs.
+        if let Some(ca_pem) = network.ca_cert_pem()
+            && let Some(runtime_host_dir) = find_runtime_dir(&config.mounts)
+        {
+            let tls_dir = runtime_host_dir.join("tls");
+            let _ = std::fs::create_dir_all(&tls_dir);
+            let _ = std::fs::write(tls_dir.join("ca.pem"), &ca_pem);
+        }
+
+        // Add MSB_NET* env vars for guest init.
+        for (key, value) in network.guest_env_vars() {
+            exec_env.push(format!("{key}={value}"));
+        }
+
+        builder = builder.net(move |n| n.mac(guest_mac).custom(net_backend));
+
+        // Keep the tokio runtime alive for the lifetime of the VM process.
+        // enter() below never returns, so this is effectively forever.
+        std::mem::forget(tokio_rt);
+    }
+
     // Execution configuration.
     builder = builder.exec(|mut e| {
         if let Some(ref path) = config.exec_path {
@@ -265,15 +312,6 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
     });
 
     // Agent — wire agent_fd through virtio-console multi-port.
-    // Guest discovers the named agent port via /sys/class/virtio-ports/.
-    //
-    // Keep libkrun's implicit console enabled. It provides the guest's real
-    // boot console on hvc0. If we disable it, libkrun reuses the first explicit
-    // virtio-console device for that boot-console path instead. That makes our
-    // explicit agent port share the console path used during boot, which breaks
-    // early agent bring-up for block-root VMs on macOS. Leaving the implicit
-    // console enabled keeps boot console I/O on hvc0 and the agent on its own
-    // named port.
     builder = builder.console(|c| {
         if let Some(agent_fd) = config.agent_fd {
             c.port(microsandbox_protocol::AGENT_PORT_NAME, agent_fd, agent_fd)
@@ -282,16 +320,25 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
         }
     });
 
-    // Network — use msb_krun's built-in Unixgram backend to relay frames.
-    if let Some(raw_fd) = config.net_fd {
-        // SAFETY: The supervisor creates a socketpair and passes one end as net_fd.
-        // This process owns the FD (inherited across fork+exec with CLOEXEC cleared).
-        let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-        let backend = msb_krun::backends::net::Unixgram::new(owned_fd);
-        builder = builder.net(|n| n.custom(Box::new(backend) as Box<dyn NetBackend + Send>));
-    }
-
     builder.build()?.enter()
+}
+
+/// Extract the runtime directory host path from the mount specs.
+///
+/// The supervisor passes `--mount msb_runtime:/host/path` which the microvm
+/// parses as a `tag:host_path` string.
+#[cfg(feature = "net")]
+fn find_runtime_dir(mounts: &[String]) -> Option<PathBuf> {
+    let tag = microsandbox_protocol::RUNTIME_FS_TAG;
+    for spec in mounts {
+        let spec = spec.strip_suffix(":ro").unwrap_or(spec);
+        if let Some((t, path)) = spec.split_once(':')
+            && t == tag
+        {
+            return Some(PathBuf::from(path));
+        }
+    }
+    None
 }
 
 /// Build an OverlayFs backend from rootfs lower layers.
@@ -373,7 +420,10 @@ mod tests {
             workdir: None,
             exec_path: None,
             exec_args: Vec::new(),
-            net_fd: None,
+            #[cfg(feature = "net")]
+            network: microsandbox_network::config::NetworkConfig::default(),
+            #[cfg(feature = "net")]
+            sandbox_slot: 0,
             agent_fd: None,
         })
         .unwrap_err();
@@ -404,7 +454,10 @@ mod tests {
             workdir: None,
             exec_path: None,
             exec_args: Vec::new(),
-            net_fd: None,
+            #[cfg(feature = "net")]
+            network: microsandbox_network::config::NetworkConfig::default(),
+            #[cfg(feature = "net")]
+            sandbox_slot: 0,
             agent_fd: None,
         })
         .unwrap_err();

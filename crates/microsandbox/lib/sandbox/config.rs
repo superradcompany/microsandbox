@@ -13,8 +13,6 @@ use serde::{Deserialize, Serialize};
 
 use microsandbox_image::{ImageConfig, PullPolicy, RegistryAuth};
 
-use microsandbox_network::config::NetworkConfig;
-
 use super::types::{Patch, RootfsSource, SecretsConfig, SshConfig, VolumeMount};
 
 //--------------------------------------------------------------------------------------------------
@@ -93,8 +91,9 @@ pub struct SandboxConfig {
     pub patches: Vec<Patch>,
 
     /// Network configuration.
+    #[cfg(feature = "net")]
     #[serde(default)]
-    pub network: NetworkConfig,
+    pub network: microsandbox_network::config::NetworkConfig,
 
     /// Secrets configuration.
     #[serde(default)]
@@ -253,7 +252,8 @@ impl Default for SandboxConfig {
             env: Vec::new(),
             mounts: Vec::new(),
             patches: Vec::new(),
-            network: NetworkConfig::default(),
+            #[cfg(feature = "net")]
+            network: microsandbox_network::config::NetworkConfig::default(),
             secrets: SecretsConfig::default(),
             ssh: SshConfig::default(),
             entrypoint: None,

@@ -75,9 +75,15 @@ pub struct MicrovmArgs {
     #[arg(long)]
     pub exec_path: Option<PathBuf>,
 
-    /// Socket pair FD for RelayNetBackend.
+    /// Network configuration as JSON.
+    #[cfg(feature = "net")]
     #[arg(long)]
-    pub net_fd: Option<RawFd>,
+    pub network_config: Option<String>,
+
+    /// Sandbox slot for deterministic network address derivation.
+    #[cfg(feature = "net")]
+    #[arg(long, default_value_t = 0)]
+    pub sandbox_slot: u64,
 
     /// Agent FD for virtio-console (agentd communication).
     #[arg(long)]
@@ -114,7 +120,17 @@ pub fn run(args: MicrovmArgs) -> RuntimeResult<()> {
         workdir: args.workdir,
         exec_path: args.exec_path,
         exec_args: args.exec_args,
-        net_fd: args.net_fd,
+        #[cfg(feature = "net")]
+        network: args
+            .network_config
+            .as_deref()
+            .map(|json| {
+                serde_json::from_str::<microsandbox_network::config::NetworkConfig>(json)
+                    .expect("invalid network config JSON")
+            })
+            .unwrap_or_default(),
+        #[cfg(feature = "net")]
+        sandbox_slot: args.sandbox_slot,
         agent_fd: args.agent_fd,
     };
 

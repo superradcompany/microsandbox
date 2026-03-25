@@ -12,8 +12,9 @@ name = "microsandbox"
 path = "lib/lib.rs"
 
 [features]
-default = ["prebuilt"]
+default = ["prebuilt", "net"]
 prebuilt = ["microsandbox-filesystem/prebuilt", "microsandbox-runtime/prebuilt"]
+net = ["dep:microsandbox-network", "microsandbox-runtime/net"]
 
 [dependencies]
 bytes.workspace = true
@@ -27,7 +28,7 @@ microsandbox-db = { version = "0.3.2", path = "../db" }
 microsandbox-filesystem = { version = "0.3.2", path = "../filesystem", default-features = false }
 microsandbox-image = { version = "0.3.2", path = "../image" }
 microsandbox-migration = { version = "0.3.2", path = "../migration" }
-microsandbox-network = { version = "0.3.2", path = "../network" }
+microsandbox-network = { version = "0.3.2", path = "../network", optional = true }
 microsandbox-protocol = { version = "0.3.2", path = "../protocol" }
 microsandbox-runtime = { version = "0.3.2", path = "../runtime", default-features = false }
 microsandbox-utils = { version = "0.3.2", path = "../utils" }

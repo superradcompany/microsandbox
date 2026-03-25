@@ -402,6 +402,17 @@ fn supervisor_cli_args(
         )));
     }
 
+    // Network configuration.
+    #[cfg(feature = "net")]
+    {
+        let net_json =
+            serde_json::to_string(&config.network).expect("failed to serialize network config");
+        args.push(OsString::from("--network-config"));
+        args.push(OsString::from(net_json));
+        args.push(OsString::from("--sandbox-slot"));
+        args.push(OsString::from(sandbox_id.to_string()));
+    }
+
     for (key, value) in &config.env {
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!("{key}={value}")));

@@ -14,6 +14,11 @@ members = [
     "examples/bind-root",
     "examples/block-root",
     "examples/named-volume",
+    "examples/net-basic",
+    "examples/net-dns",
+    "examples/net-policy",
+    "examples/net-secrets",
+    "examples/net-tls",
     "examples/oci-root",
 ]
 
@@ -40,6 +45,7 @@ chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
 clap = { version = "4.5", features = ["color", "derive"] }
 console = "0.16"
+crossbeam-queue = "0.3"
 crossterm = { version = "0.29.0", features = ["events"] }
 dirs = "6.0"
 etherparse = "0.19"
@@ -61,6 +67,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = "1.0"
 sha2 = "0.10"
+smoltcp = { version = "0.13", default-features = false }
 tar = "0.4"
 tempfile = "3.15"
 thiserror = "2.0"
@@ -87,3 +94,6 @@ rustls-pemfile = "2"
 rustls-native-certs = "0.8"
 rcgen = { version = "0.13", features = ["x509-parser"] }
 lru = "0.12"
+
+[patch.crates-io]
+msb_krun = { path = "../libkrun/src/krun" }
