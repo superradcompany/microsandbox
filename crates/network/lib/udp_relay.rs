@@ -30,7 +30,9 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(60);
 const OUTBOUND_CHANNEL_CAPACITY: usize = 64;
 
 /// Buffer size for receiving responses from the real server.
-const RECV_BUF_SIZE: usize = 65535;
+/// Sized to match the MTU (1500) plus generous headroom for
+/// reassembled datagrams while avoiding 64 KiB per session.
+const RECV_BUF_SIZE: usize = 4096;
 
 /// Ethernet header length.
 const ETH_HDR_LEN: usize = 14;
@@ -129,16 +131,6 @@ impl UdpRelay {
         self.sessions
             .retain(|_, session| session.last_active.elapsed() <= SESSION_TIMEOUT);
     }
-
-    /// Number of active sessions.
-    pub fn len(&self) -> usize {
-        self.sessions.len()
-    }
-
-    /// Returns `true` if no sessions are active.
-    pub fn is_empty(&self) -> bool {
-        self.sessions.is_empty()
-    }
 }
 
 impl UdpRelay {
@@ -196,6 +188,9 @@ async fn udp_relay_task(
         SocketAddr::V6(_) => (std::net::Ipv6Addr::UNSPECIFIED, 0u16).into(),
     };
     let socket = UdpSocket::bind(bind_addr).await?;
+    // Connect to the destination to restrict accepted source addresses,
+    // preventing host-network entities from injecting spoofed datagrams.
+    socket.connect(guest_dst).await?;
 
     let mut recv_buf = vec![0u8; RECV_BUF_SIZE];
     let timeout = SESSION_TIMEOUT;
@@ -206,26 +201,27 @@ async fn udp_relay_task(
             data = outbound_rx.recv() => {
                 match data {
                     Some(payload) => {
-                        let _ = socket.send_to(&payload, guest_dst).await;
+                        let _ = socket.send(&payload).await;
                     }
                     // Channel closed — session dropped by poll loop.
                     None => break,
                 }
             }
 
-            // Inbound: server → guest.
-            result = socket.recv_from(&mut recv_buf) => {
+            // Inbound: server → guest (only from the connected destination).
+            result = socket.recv(&mut recv_buf) => {
                 match result {
-                    Ok((n, _from)) => {
-                        let frame = construct_udp_response(
+                    Ok(n) => {
+                        if let Some(frame) = construct_udp_response(
                             guest_dst,
                             guest_src,
                             &recv_buf[..n],
                             gateway_mac,
                             guest_mac,
-                        );
-                        let _ = shared.rx_ring.push(frame);
-                        shared.rx_wake.wake();
+                        ) {
+                            let _ = shared.rx_ring.push(frame);
+                            shared.rx_wake.wake();
+                        }
                     }
                     Err(e) => {
                         tracing::debug!(error = %e, "UDP relay recv failed");
@@ -253,9 +249,9 @@ fn construct_udp_response(
     payload: &[u8],
     gateway_mac: EthernetAddress,
     guest_mac: EthernetAddress,
-) -> Vec<u8> {
+) -> Option<Vec<u8>> {
     match (src.ip(), dst.ip()) {
-        (IpAddr::V4(src_ip), IpAddr::V4(dst_ip)) => construct_udp_response_v4(
+        (IpAddr::V4(src_ip), IpAddr::V4(dst_ip)) => Some(construct_udp_response_v4(
             src_ip,
             src.port(),
             dst_ip,
@@ -263,8 +259,8 @@ fn construct_udp_response(
             payload,
             gateway_mac,
             guest_mac,
-        ),
-        (IpAddr::V6(src_ip), IpAddr::V6(dst_ip)) => construct_udp_response_v6(
+        )),
+        (IpAddr::V6(src_ip), IpAddr::V6(dst_ip)) => Some(construct_udp_response_v6(
             src_ip,
             src.port(),
             dst_ip,
@@ -272,8 +268,8 @@ fn construct_udp_response(
             payload,
             gateway_mac,
             guest_mac,
-        ),
-        _ => vec![], // Mismatched address families — shouldn't happen.
+        )),
+        _ => None, // Mismatched address families — shouldn't happen.
     }
 }
 
@@ -367,10 +363,15 @@ fn construct_udp_response_v6(
     udp_pkt.set_src_port(src_port);
     udp_pkt.set_dst_port(dst_port);
     udp_pkt.set_len(udp_len as u16);
-    // IPv6 UDP checksum is mandatory but we set 0 for now.
-    // TODO: compute proper UDP checksum over IPv6 pseudo-header.
-    udp_pkt.set_checksum(0);
+    // Copy payload BEFORE computing checksum — fill_checksum reads the
+    // payload bytes, so they must be in place first.
     udp_pkt.payload_mut()[..payload.len()].copy_from_slice(payload);
+    // IPv6 UDP checksum is mandatory per RFC 8200 section 8.1.
+    // A zero checksum causes the receiver to discard the packet.
+    udp_pkt.fill_checksum(
+        &smoltcp::wire::IpAddress::from(src_ip),
+        &smoltcp::wire::IpAddress::from(dst_ip),
+    );
 
     buf
 }
@@ -436,6 +437,67 @@ mod tests {
         assert_eq!(udp.src_port(), 53);
         assert_eq!(udp.dst_port(), 12345);
         assert_eq!(udp.payload(), b"hello");
+    }
+
+    #[test]
+    fn construct_v6_response_has_correct_structure() {
+        let payload = b"hello ipv6";
+        let src = "2001:db8::1".parse::<std::net::Ipv6Addr>().unwrap();
+        let dst = "fd42:6d73:62::2".parse::<std::net::Ipv6Addr>().unwrap();
+        let frame = construct_udp_response_v6(
+            src,
+            53,
+            dst,
+            12345,
+            payload,
+            EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]),
+            EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]),
+        );
+
+        let ipv6_hdr_len = 40;
+        assert_eq!(
+            frame.len(),
+            ETH_HDR_LEN + ipv6_hdr_len + UDP_HDR_LEN + payload.len()
+        );
+
+        // Parse back.
+        let eth = EthernetFrame::new_checked(&frame).unwrap();
+        assert_eq!(eth.ethertype(), EthernetProtocol::Ipv6);
+
+        let ipv6 = Ipv6Packet::new_checked(eth.payload()).unwrap();
+        assert_eq!(ipv6.next_header(), IpProtocol::Udp);
+
+        let udp = UdpPacket::new_checked(ipv6.payload()).unwrap();
+        assert_eq!(udp.src_port(), 53);
+        assert_eq!(udp.dst_port(), 12345);
+        assert_eq!(udp.payload(), b"hello ipv6");
+        // Verify checksum is non-zero (mandatory for IPv6 UDP per RFC 8200).
+        assert_ne!(udp.checksum(), 0, "IPv6 UDP checksum must not be zero");
+        // Verify checksum is correct.
+        assert!(
+            udp.verify_checksum(
+                &smoltcp::wire::IpAddress::from(src),
+                &smoltcp::wire::IpAddress::from(dst),
+            ),
+            "IPv6 UDP checksum must be valid"
+        );
+    }
+
+    #[test]
+    fn extract_payload_from_v6_udp_frame() {
+        let src = "2001:db8::1".parse::<std::net::Ipv6Addr>().unwrap();
+        let dst = "fd42:6d73:62::2".parse::<std::net::Ipv6Addr>().unwrap();
+        let frame = construct_udp_response_v6(
+            src,
+            80,
+            dst,
+            54321,
+            b"v6 data",
+            EthernetAddress([0; 6]),
+            EthernetAddress([0; 6]),
+        );
+        let payload = extract_udp_payload(&frame).unwrap();
+        assert_eq!(payload, b"v6 data");
     }
 
     #[test]

@@ -1,19 +1,83 @@
-//! MicroVM configuration and entry point.
+//! Sandbox process entry point and VM configuration.
 //!
-//! The `enter()` function takes over the calling process via `Vm::enter()`
-//! from msb_krun and never returns. The calling process is effectively
-//! replaced by the VMM event loop, which calls `_exit()` on guest shutdown.
+//! The [`enter()`] function starts background services (agent relay,
+//! heartbeat, idle timeout), configures the VMM, and hands control to
+//! `Vm::enter()` from msb_krun. It **never returns** — the VMM calls
+//! `_exit()` on guest shutdown after running exit observers.
 
-use std::{os::fd::RawFd, path::PathBuf};
+use std::io::Write;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
+use microsandbox_db::entity::run as run_entity;
 use microsandbox_filesystem::{DynFileSystem, OverlayFs, PassthroughConfig, PassthroughFs};
 use msb_krun::VmBuilder;
+use sea_orm::{ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait, Set};
+use serde::Serialize;
+
+use crate::console::{AgentConsoleBackend, ConsoleSharedState};
+use crate::heartbeat::HeartbeatReader;
+use crate::logging::LogLevel;
+use crate::relay::AgentRelay;
+use crate::{RuntimeError, RuntimeResult};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Exit reason tags stored in the shared `AtomicU8`.
+const EXIT_REASON_COMPLETED: u8 = 0;
+const EXIT_REASON_IDLE_TIMEOUT: u8 = 1;
+const EXIT_REASON_MAX_DURATION: u8 = 2;
+const EXIT_REASON_SIGNAL: u8 = 3;
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Configuration for the microVM process.
+/// Full configuration for the sandbox process.
+///
+/// Combines VM hardware settings with sandbox-level metadata (name, DB,
+/// agent relay, lifecycle policies). Passed to [`enter()`].
+#[derive(Debug)]
+pub struct Config {
+    /// Name of the sandbox.
+    pub sandbox_name: String,
+
+    /// Database ID of the sandbox row.
+    pub sandbox_id: i32,
+
+    /// Selected tracing verbosity.
+    pub log_level: Option<LogLevel>,
+
+    /// Path to the sandbox database file.
+    pub sandbox_db_path: PathBuf,
+
+    /// Directory for log files.
+    pub log_dir: PathBuf,
+
+    /// Runtime directory (scripts, heartbeat).
+    pub runtime_dir: PathBuf,
+
+    /// Path to the Unix domain socket for the agent relay.
+    pub agent_sock_path: PathBuf,
+
+    /// Whether to forward VM console output to stdout.
+    pub forward_output: bool,
+
+    /// Idle timeout in seconds (None = no idle timeout).
+    pub idle_timeout_secs: Option<u64>,
+
+    /// Maximum sandbox lifetime in seconds (None = no limit).
+    pub max_duration_secs: Option<u64>,
+
+    /// VM hardware and rootfs configuration.
+    pub vm: VmConfig,
+}
+
+/// VM hardware and rootfs configuration.
 pub struct VmConfig {
     /// Path to the libkrunfw shared library.
     pub libkrunfw_path: PathBuf,
@@ -49,9 +113,6 @@ pub struct VmConfig {
     pub mounts: Vec<String>,
 
     /// Pre-built filesystem backends as `(tag, backend)` pairs.
-    ///
-    /// These bypass the string-based mount path and are registered directly
-    /// with the VM builder.
     pub backends: Vec<(String, Box<dyn DynFileSystem + Send + Sync>)>,
 
     /// Path to the init binary in the guest.
@@ -76,9 +137,12 @@ pub struct VmConfig {
     /// Sandbox slot for deterministic network address derivation.
     #[cfg(feature = "net")]
     pub sandbox_slot: u64,
+}
 
-    /// Agent FD for virtio-console (agentd communication).
-    pub agent_fd: Option<RawFd>,
+/// JSON structure written to stdout on startup.
+#[derive(Debug, Serialize)]
+struct StartupInfo {
+    pid: u32,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -105,7 +169,6 @@ impl std::fmt::Debug for VmConfig {
             .field("workdir", &self.workdir)
             .field("exec_path", &self.exec_path)
             .field("exec_args", &self.exec_args)
-            .field("agent_fd", &self.agent_fd)
             .finish()
     }
 }
@@ -114,113 +177,291 @@ impl std::fmt::Debug for VmConfig {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Enter the microVM.
+/// Enter the sandbox process.
 ///
-/// This function **never returns** — it takes over the calling process
-/// via `Vm::enter()` (from msb_krun) and calls `_exit()` on guest shutdown.
-pub fn enter(config: VmConfig) -> ! {
-    let result = build_and_enter(config);
+/// This function **never returns**. It starts background services (agent
+/// relay, heartbeat, idle timeout), configures the VMM, writes a startup
+/// JSON to stdout, and calls `Vm::enter()` which takes over the process.
+pub fn enter(config: Config) -> ! {
+    let result = run(config);
     match result {
         Ok(infallible) => match infallible {},
         Err(e) => {
-            eprintln!("microvm error: {e}");
+            eprintln!("sandbox error: {e}");
             std::process::exit(1);
         }
     }
 }
 
-//--------------------------------------------------------------------------------------------------
-// Functions: Helpers
-//--------------------------------------------------------------------------------------------------
+fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
+    tracing::info!(sandbox = %config.sandbox_name, "sandbox starting");
 
-fn validate_disk_format(format: Option<&str>) -> msb_krun::Result<msb_krun::DiskImageFormat> {
-    match format.unwrap_or("raw") {
-        "qcow2" => Ok(msb_krun::DiskImageFormat::Qcow2),
-        "raw" => Ok(msb_krun::DiskImageFormat::Raw),
-        "vmdk" => Ok(msb_krun::DiskImageFormat::Vmdk),
-        other => Err(msb_krun::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("unknown disk image format: {other}"),
-        ))),
+    // Create console shared state (ring buffers + wake pipes).
+    let shared = Arc::new(ConsoleSharedState::new());
+    let console_backend = AgentConsoleBackend::new(Arc::clone(&shared));
+
+    // Build tokio runtime for relay, heartbeat, and timer tasks.
+    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .map_err(|e| RuntimeError::Custom(format!("tokio runtime: {e}")))?;
+
+    // Create agent relay (bind agent.sock).
+    let mut relay = tokio_rt.block_on(AgentRelay::new(
+        &config.agent_sock_path,
+        Arc::clone(&shared),
+    ))?;
+
+    // Set up runtime directory.
+    std::fs::create_dir_all(&config.runtime_dir)?;
+    std::fs::create_dir_all(config.runtime_dir.join("scripts"))?;
+
+    // Connect to DB and insert records.
+    let db = tokio_rt.block_on(connect_db(&config.sandbox_db_path))?;
+    let pid = std::process::id();
+    let run_db_id = tokio_rt.block_on(insert_run(&db, config.sandbox_id, pid))?;
+
+    // Shared termination reason — background tasks store the reason before
+    // triggering exit; the exit observer reads it for the DB update.
+    let exit_reason: Arc<std::sync::atomic::AtomicU8> =
+        Arc::new(std::sync::atomic::AtomicU8::new(EXIT_REASON_COMPLETED));
+
+    // Build the VM with an exit observer for DB cleanup and socket removal.
+    // The on_exit closure runs synchronously on the VMM thread before _exit().
+    let rt_handle = tokio_rt.handle().clone();
+    let exit_db = db.clone();
+    let exit_sandbox_id = config.sandbox_id;
+    let exit_run_id = run_db_id;
+    let exit_reason_for_observer = Arc::clone(&exit_reason);
+    let exit_sock_path = config.agent_sock_path.clone();
+    let vm = match build_vm(
+        &config,
+        console_backend,
+        move |exit_code: i32| {
+            use microsandbox_db::entity::sandbox as sandbox_entity;
+            use sea_orm::QueryFilter;
+            use sea_orm::sea_query::Expr;
+
+            // Map (exit_code, reason tag) → TerminationReason.
+            let reason_tag = exit_reason_for_observer.load(std::sync::atomic::Ordering::SeqCst);
+            let reason = match reason_tag {
+                EXIT_REASON_IDLE_TIMEOUT => run_entity::TerminationReason::IdleTimeout,
+                EXIT_REASON_MAX_DURATION => run_entity::TerminationReason::MaxDurationExceeded,
+                EXIT_REASON_SIGNAL => run_entity::TerminationReason::Signal,
+                _ if exit_code == 0 => run_entity::TerminationReason::Completed,
+                _ => run_entity::TerminationReason::Failed,
+            };
+
+            rt_handle.block_on(async {
+                let now = chrono::Utc::now().naive_utc();
+
+                // Mark run as terminated with exit code and reason.
+                let _ = run_entity::Entity::update_many()
+                    .col_expr(
+                        run_entity::Column::Status,
+                        Expr::value(run_entity::RunStatus::Terminated),
+                    )
+                    .col_expr(run_entity::Column::TerminationReason, Expr::value(reason))
+                    .col_expr(run_entity::Column::ExitCode, Expr::value(exit_code))
+                    .col_expr(run_entity::Column::TerminatedAt, Expr::value(now))
+                    .filter(run_entity::Column::Id.eq(exit_run_id))
+                    .exec(&exit_db)
+                    .await;
+
+                // Mark sandbox as stopped.
+                let _ = sandbox_entity::Entity::update_many()
+                    .col_expr(
+                        sandbox_entity::Column::Status,
+                        Expr::value(sandbox_entity::SandboxStatus::Stopped),
+                    )
+                    .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
+                    .filter(sandbox_entity::Column::Id.eq(exit_sandbox_id))
+                    .exec(&exit_db)
+                    .await;
+            });
+
+            // Clean up agent.sock — the relay's async cleanup won't run because
+            // _exit() is called immediately after this observer returns.
+            let _ = std::fs::remove_file(&exit_sock_path);
+        },
+        tokio_rt.handle().clone(),
+    ) {
+        Ok(vm) => vm,
+        Err(e) => {
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            return Err(e);
+        }
+    };
+    let exit_handle = vm.exit_handle();
+
+    // Spawn background tasks.
+    let (_relay_shutdown_tx, relay_shutdown_rx) = tokio::sync::watch::channel(false);
+    let (relay_drain_tx, mut relay_drain_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+    // Relay: spawn a blocking task for wait_ready, then run the accept loop.
+    // wait_ready() must run AFTER enter() starts the VM (agentd sends core.ready),
+    // so it runs on a background thread, not blocking the main thread.
+    tokio_rt.spawn(async move {
+        let ready_result =
+            tokio::task::spawn_blocking(move || relay.wait_ready().map(|()| relay)).await;
+
+        match ready_result {
+            Ok(Ok(relay)) => {
+                if let Err(e) = relay.run(relay_shutdown_rx, relay_drain_tx).await {
+                    tracing::error!("agent relay error: {e}");
+                }
+            }
+            Ok(Err(e)) => tracing::error!("agent relay wait_ready failed: {e}"),
+            Err(e) => tracing::error!("agent relay wait_ready task panicked: {e}"),
+        }
+    });
+
+    // Shutdown listener: when the relay receives core.shutdown from an SDK
+    // client (e.g. sandbox.stop()), trigger VM exit.
+    {
+        let shutdown_exit_handle = exit_handle.clone();
+        tokio_rt.spawn(async move {
+            if relay_drain_rx.recv().await.is_some() {
+                tracing::info!("core.shutdown received, triggering exit");
+                shutdown_exit_handle.trigger();
+            }
+        });
     }
+
+    // Heartbeat/idle timeout monitor.
+    if let Some(idle_secs) = config.idle_timeout_secs {
+        let heartbeat_reader = HeartbeatReader::new(&config.runtime_dir);
+        let idle_exit_handle = exit_handle.clone();
+        let idle_reason = Arc::clone(&exit_reason);
+        tokio_rt.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                if heartbeat_reader.is_idle(idle_secs) {
+                    tracing::info!("sandbox idle for {idle_secs}s, triggering exit");
+                    idle_reason.store(
+                        EXIT_REASON_IDLE_TIMEOUT,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    idle_exit_handle.trigger();
+                    break;
+                }
+            }
+        });
+    }
+
+    // Max duration timer.
+    if let Some(max_secs) = config.max_duration_secs {
+        let max_exit_handle = exit_handle.clone();
+        let max_reason = Arc::clone(&exit_reason);
+        tokio_rt.spawn(async move {
+            tokio::time::sleep(Duration::from_secs(max_secs)).await;
+            tracing::info!("max duration {max_secs}s exceeded, triggering exit");
+            max_reason.store(
+                EXIT_REASON_MAX_DURATION,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            max_exit_handle.trigger();
+        });
+    }
+
+    // Write startup info to stdout BEFORE log capture redirects fd 1.
+    let startup = StartupInfo { pid };
+    let startup_json = serde_json::to_string(&startup)
+        .map_err(|e| RuntimeError::Custom(format!("serialize startup: {e}")))?;
+    write_startup_info(&startup_json)?;
+
+    // Console log capture: redirect stdout/stderr through pipes so
+    // background threads can tee to rotating log files.
+    setup_log_capture(&config.log_dir, config.forward_output)?;
+
+    // Forget the tokio runtime (keep background tasks alive).
+    std::mem::forget(tokio_rt);
+
+    // Enter the VM (never returns).
+    tracing::info!(sandbox = %config.sandbox_name, "entering VM");
+    vm.enter()
+        .map_err(|e| RuntimeError::Custom(format!("VM enter: {e}")))
 }
 
-fn append_block_root_env(env: &mut Vec<String>) {
-    let prefix = format!("{}=", microsandbox_protocol::ENV_BLOCK_ROOT);
-    if env.iter().any(|entry| entry.starts_with(&prefix)) {
-        return;
-    }
+//--------------------------------------------------------------------------------------------------
+// Functions: VM Builder
+//--------------------------------------------------------------------------------------------------
 
-    env.push(format!("{prefix}/dev/vda"));
-}
-
-fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallible> {
-    let mut exec_env = config.env.clone();
+/// Build the `Vm` from config with an exit observer for cleanup.
+fn build_vm(
+    config: &Config,
+    console_backend: AgentConsoleBackend,
+    on_exit: impl Fn(i32) + Send + 'static,
+    tokio_handle: tokio::runtime::Handle,
+) -> RuntimeResult<msb_krun::Vm> {
+    let mut exec_env = config.vm.env.clone();
+    let vm = &config.vm;
 
     let mut builder = VmBuilder::new()
-        .machine(|m| m.vcpus(config.vcpus).memory_mib(config.memory_mib as usize))
+        .machine(|m| m.vcpus(vm.vcpus).memory_mib(vm.memory_mib as usize))
         .kernel(|k| {
-            let k = k.krunfw_path(&config.libkrunfw_path);
-            if let Some(ref init_path) = config.init_path {
+            let k = k.krunfw_path(&vm.libkrunfw_path);
+            if let Some(ref init_path) = vm.init_path {
                 k.init_path(init_path)
             } else {
                 k
             }
         });
 
-    // Root filesystem — either direct passthrough or OverlayFs, never both.
-    if let Some(rootfs_path) = config.rootfs_path.as_ref() {
-        if !config.rootfs_lowers.is_empty()
-            || config.rootfs_upper.is_some()
-            || config.rootfs_staging.is_some()
-        {
-            return Err(msb_krun::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "rootfs_path cannot be combined with overlay rootfs fields",
-            )));
-        }
-
+    // Root filesystem.
+    if let Some(ref rootfs_path) = vm.rootfs_path {
         let cfg = PassthroughConfig {
             root_dir: rootfs_path.clone(),
             ..Default::default()
         };
-        let backend = PassthroughFs::new(cfg)?;
+        let backend =
+            PassthroughFs::new(cfg).map_err(|e| RuntimeError::Custom(format!("rootfs: {e}")))?;
         builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
-    } else if !config.rootfs_lowers.is_empty() {
+    } else if !vm.rootfs_lowers.is_empty() {
         let overlay = build_overlay_rootfs(
-            &config.rootfs_lowers,
-            config.rootfs_upper.as_deref(),
-            config.rootfs_staging.as_deref(),
-        )?;
+            &vm.rootfs_lowers,
+            vm.rootfs_upper.as_deref(),
+            vm.rootfs_staging.as_deref(),
+        )
+        .map_err(|e| RuntimeError::Custom(format!("overlay rootfs: {e}")))?;
         builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(overlay)));
-    } else if config.rootfs_upper.is_some() || config.rootfs_staging.is_some() {
-        return Err(msb_krun::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "overlay rootfs requires at least one lower layer",
-        )));
-    } else if let Some(ref disk_path) = config.rootfs_disk {
-        // Empty trampoline: PassthroughFs injects /init.krun (agentd) automatically.
-        let empty_trampoline = tempfile::tempdir().map_err(msb_krun::Error::Io)?;
+    } else if let Some(ref disk_path) = vm.rootfs_disk {
+        let empty_trampoline = tempfile::tempdir()?;
         let cfg = PassthroughConfig {
             root_dir: empty_trampoline.path().to_path_buf(),
             ..Default::default()
         };
-        let backend = PassthroughFs::new(cfg)?;
+        let backend = PassthroughFs::new(cfg)
+            .map_err(|e| RuntimeError::Custom(format!("trampoline rootfs: {e}")))?;
         builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
 
-        let format = validate_disk_format(config.rootfs_disk_format.as_deref())?;
+        let format = validate_disk_format(vm.rootfs_disk_format.as_deref())
+            .map_err(|e| RuntimeError::Custom(format!("disk format: {e}")))?;
         let disk_path = disk_path.clone();
-        let readonly = config.rootfs_disk_readonly;
+        let readonly = vm.rootfs_disk_readonly;
         builder = builder.disk(move |d| d.path(&disk_path).format(format).read_only(readonly));
         append_block_root_env(&mut exec_env);
 
-        // Keep the trampoline directory alive until VM exits.
-        // enter() never returns, so we prevent cleanup on drop.
         let _ = empty_trampoline.keep();
     }
 
-    // Additional mounts (tag:host_path[:ro] format).
-    for mount_spec in &config.mounts {
+    // Runtime directory mount — agentd mounts this at /.msb for scripts
+    // and heartbeat.
+    {
+        let runtime_tag = microsandbox_protocol::RUNTIME_FS_TAG.to_string();
+        let cfg = PassthroughConfig {
+            root_dir: config.runtime_dir.clone(),
+            ..Default::default()
+        };
+        let backend = PassthroughFs::new(cfg)
+            .map_err(|e| RuntimeError::Custom(format!("runtime mount: {e}")))?;
+        builder = builder.fs(move |fs| fs.tag(&runtime_tag).custom(Box::new(backend)));
+    }
+
+    // Additional mounts.
+    for mount_spec in &vm.mounts {
         let (spec, _readonly) = match mount_spec.strip_suffix(":ro") {
             Some(s) => (s, true),
             None => (mount_spec.as_str(), false),
@@ -232,103 +473,254 @@ fn build_and_enter(config: VmConfig) -> msb_krun::Result<std::convert::Infallibl
                 root_dir: PathBuf::from(path),
                 ..Default::default()
             };
-            let backend = PassthroughFs::new(cfg)?;
+            let backend = PassthroughFs::new(cfg)
+                .map_err(|e| RuntimeError::Custom(format!("mount {tag}: {e}")))?;
             builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
-        } else {
-            tracing::warn!(mount = %mount_spec, "skipping malformed mount spec (expected tag:path)");
         }
     }
 
-    // Pre-built backend mounts.
-    for (tag, backend) in config.backends {
-        builder = builder.fs(move |fs| fs.tag(&tag).custom(backend));
-    }
-
-    // Network — in-process smoltcp stack via SmoltcpNetwork.
-    // Must be set up BEFORE the exec builder so MSB_NET* env vars are in
-    // exec_env when the closure captures it.
+    // Network.
     #[cfg(feature = "net")]
-    if config.network.enabled {
-        // Rustls requires an explicit crypto provider in the microvm process.
+    if vm.network.enabled {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let mut network =
-            microsandbox_network::network::SmoltcpNetwork::new(config.network, config.sandbox_slot);
+            microsandbox_network::network::SmoltcpNetwork::new(vm.network.clone(), vm.sandbox_slot);
 
-        // Create a tokio runtime for proxy tasks, DNS resolution, and
-        // published port listeners.
-        let tokio_rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .map_err(msb_krun::Error::Io)?;
-
-        network.start(tokio_rt.handle().clone());
+        network.start(tokio_handle.clone());
 
         let guest_mac = network.guest_mac();
         let net_backend = network.take_backend();
 
-        // Write CA cert to the runtime dir so agentd can install it in the
-        // guest trust store. The runtime dir is mounted at /.msb via virtiofs.
-        if let Some(ca_pem) = network.ca_cert_pem()
-            && let Some(runtime_host_dir) = find_runtime_dir(&config.mounts)
-        {
-            let tls_dir = runtime_host_dir.join("tls");
+        if let Some(ca_pem) = network.ca_cert_pem() {
+            let tls_dir = config.runtime_dir.join("tls");
             let _ = std::fs::create_dir_all(&tls_dir);
             let _ = std::fs::write(tls_dir.join("ca.pem"), &ca_pem);
         }
 
-        // Add MSB_NET* env vars for guest init.
         for (key, value) in network.guest_env_vars() {
             exec_env.push(format!("{key}={value}"));
         }
 
         builder = builder.net(move |n| n.mac(guest_mac).custom(net_backend));
-
-        // Keep the tokio runtime alive for the lifetime of the VM process.
-        // enter() below never returns, so this is effectively forever.
-        std::mem::forget(tokio_rt);
     }
 
     // Execution configuration.
     builder = builder.exec(|mut e| {
-        if let Some(ref path) = config.exec_path {
+        if let Some(ref path) = vm.exec_path {
             e = e.path(path);
         }
-        if !config.exec_args.is_empty() {
-            e = e.args(&config.exec_args);
+        if !vm.exec_args.is_empty() {
+            e = e.args(&vm.exec_args);
         }
         for env_str in &exec_env {
             if let Some((key, value)) = env_str.split_once('=') {
                 e = e.env(key, value);
-            } else {
-                tracing::warn!(env = %env_str, "skipping malformed env var (expected KEY=VALUE)");
             }
         }
-        if let Some(ref workdir) = config.workdir {
+        if let Some(ref workdir) = vm.workdir {
             e = e.workdir(workdir);
         }
         e
     });
 
-    // Agent — wire agent_fd through virtio-console multi-port.
+    // Console — ring-buffer-based custom backend.
     builder = builder.console(|c| {
-        if let Some(agent_fd) = config.agent_fd {
-            c.port(microsandbox_protocol::AGENT_PORT_NAME, agent_fd, agent_fd)
-        } else {
-            c
-        }
+        c.custom(
+            microsandbox_protocol::AGENT_PORT_NAME,
+            Box::new(console_backend),
+        )
     });
 
-    builder.build()?.enter()
+    // Exit observer — runs synchronously before _exit() for DB cleanup.
+    builder = builder.on_exit(on_exit);
+
+    builder
+        .build()
+        .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Helpers
+//--------------------------------------------------------------------------------------------------
+
+/// Set up console log capture.
+///
+/// Duplicates stdout and stderr, then spawns background threads that read
+/// from the originals and write to rotating log files. If `forward` is true,
+/// output is also written to the original stdout/stderr (tee behavior).
+fn setup_log_capture(log_dir: &std::path::Path, forward: bool) -> RuntimeResult<()> {
+    // Create pipe pairs for stdout and stderr.
+    let (stdout_read, stdout_write) = create_pipe()?;
+    let (stderr_read, stderr_write) = create_pipe()?;
+
+    // Save the original stdout/stderr for forwarding.
+    let orig_stdout: Option<std::fs::File> = if forward {
+        Some(unsafe { std::fs::File::from_raw_fd(libc::dup(libc::STDOUT_FILENO)) })
+    } else {
+        None
+    };
+    let orig_stderr: Option<std::fs::File> = if forward {
+        Some(unsafe { std::fs::File::from_raw_fd(libc::dup(libc::STDERR_FILENO)) })
+    } else {
+        None
+    };
+
+    // Redirect stdout/stderr to the write ends of our pipes.
+    unsafe {
+        libc::dup2(stdout_write.as_raw_fd(), libc::STDOUT_FILENO);
+        libc::dup2(stderr_write.as_raw_fd(), libc::STDERR_FILENO);
+    }
+    drop(stdout_write);
+    drop(stderr_write);
+
+    // Spawn background threads to tee pipe output to log files.
+    spawn_log_thread("log-stdout", stdout_read, log_dir, "vm.stdout", orig_stdout)?;
+    spawn_log_thread("log-stderr", stderr_read, log_dir, "vm.stderr", orig_stderr)?;
+
+    Ok(())
+}
+
+/// Write startup info JSON to stdout.
+fn write_startup_info(json: &str) -> RuntimeResult<()> {
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{json}")?;
+    stdout.flush()?;
+    Ok(())
+}
+
+/// Connect to the sandbox database.
+async fn connect_db(db_path: &std::path::Path) -> RuntimeResult<DatabaseConnection> {
+    let url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let opts = ConnectOptions::new(url).max_connections(1).to_owned();
+    let db = Database::connect(opts)
+        .await
+        .map_err(|e| RuntimeError::Custom(format!("database connect: {e}")))?;
+    Ok(db)
+}
+
+/// Insert a run record into the database.
+async fn insert_run(db: &DatabaseConnection, sandbox_id: i32, pid: u32) -> RuntimeResult<i32> {
+    let now = chrono::Utc::now().naive_utc();
+    let record = run_entity::ActiveModel {
+        sandbox_id: Set(sandbox_id),
+        pid: Set(Some(pid as i32)),
+        status: Set(run_entity::RunStatus::Running),
+        started_at: Set(Some(now)),
+        ..Default::default()
+    };
+    let result = run_entity::Entity::insert(record)
+        .exec(db)
+        .await
+        .map_err(|e| RuntimeError::Custom(format!("insert run: {e}")))?;
+    Ok(result.last_insert_id)
+}
+
+/// Mark a run record as failed (Terminated + InternalError) on startup error.
+async fn mark_run_failed(db: &DatabaseConnection, run_id: i32) -> RuntimeResult<()> {
+    use sea_orm::QueryFilter;
+    use sea_orm::sea_query::Expr;
+
+    let now = chrono::Utc::now().naive_utc();
+    run_entity::Entity::update_many()
+        .col_expr(
+            run_entity::Column::Status,
+            Expr::value(run_entity::RunStatus::Terminated),
+        )
+        .col_expr(
+            run_entity::Column::TerminationReason,
+            Expr::value(run_entity::TerminationReason::InternalError),
+        )
+        .col_expr(run_entity::Column::TerminatedAt, Expr::value(now))
+        .filter(run_entity::Column::Id.eq(run_id))
+        .exec(db)
+        .await
+        .map_err(|e| RuntimeError::Custom(format!("mark run failed: {e}")))?;
+    Ok(())
+}
+
+/// Create a pipe pair, returning `(read_end, write_end)` as `OwnedFd`.
+fn create_pipe() -> RuntimeResult<(OwnedFd, OwnedFd)> {
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(RuntimeError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// Spawn a background thread that reads from a pipe and writes to a
+/// rotating log file. If `forward` is `Some`, also tees to that file
+/// (typically the original stdout/stderr saved before redirect).
+fn spawn_log_thread(
+    name: &str,
+    pipe_read: OwnedFd,
+    log_dir: &std::path::Path,
+    log_prefix: &str,
+    forward: Option<std::fs::File>,
+) -> RuntimeResult<()> {
+    use crate::logging::RotatingLog;
+    use std::io::Read;
+
+    const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
+
+    let log_dir = log_dir.to_path_buf();
+    let log_prefix = log_prefix.to_string();
+
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let mut log = match RotatingLog::new(&log_dir, &log_prefix, MAX_LOG_BYTES) {
+                Ok(log) => log,
+                Err(e) => {
+                    let _ = writeln!(std::io::stderr(), "failed to create {log_prefix} log: {e}");
+                    return;
+                }
+            };
+            let mut reader = unsafe { std::fs::File::from_raw_fd(pipe_read.into_raw_fd()) };
+            let mut fwd = forward;
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let _ = log.write(&buf[..n]);
+                        if let Some(ref mut f) = fwd {
+                            let _ = std::io::Write::write_all(f, &buf[..n]);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+        .map_err(|e| RuntimeError::Custom(format!("spawn {name} thread: {e}")))?;
+
+    Ok(())
+}
+
+/// Validate a disk image format string.
+pub fn validate_disk_format(format: Option<&str>) -> msb_krun::Result<msb_krun::DiskImageFormat> {
+    match format.unwrap_or("raw") {
+        "qcow2" => Ok(msb_krun::DiskImageFormat::Qcow2),
+        "raw" => Ok(msb_krun::DiskImageFormat::Raw),
+        "vmdk" => Ok(msb_krun::DiskImageFormat::Vmdk),
+        other => Err(msb_krun::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unknown disk image format: {other}"),
+        ))),
+    }
+}
+
+/// Append the default block root env var if not already set.
+pub fn append_block_root_env(env: &mut Vec<String>) {
+    let prefix = format!("{}=", microsandbox_protocol::ENV_BLOCK_ROOT);
+    if env.iter().any(|entry| entry.starts_with(&prefix)) {
+        return;
+    }
+    env.push(format!("{prefix}/dev/vda"));
 }
 
 /// Extract the runtime directory host path from the mount specs.
-///
-/// The supervisor passes `--mount msb_runtime:/host/path` which the microvm
-/// parses as a `tag:host_path` string.
-#[cfg(feature = "net")]
-fn find_runtime_dir(mounts: &[String]) -> Option<PathBuf> {
+pub fn find_runtime_dir(mounts: &[String]) -> Option<PathBuf> {
     let tag = microsandbox_protocol::RUNTIME_FS_TAG;
     for spec in mounts {
         let spec = spec.strip_suffix(":ro").unwrap_or(spec);
@@ -344,7 +736,7 @@ fn find_runtime_dir(mounts: &[String]) -> Option<PathBuf> {
 /// Build an OverlayFs backend from rootfs lower layers.
 ///
 /// Layers are ordered bottom-to-top: the first entry is the lowest (base) layer.
-fn build_overlay_rootfs(
+pub fn build_overlay_rootfs(
     layers: &[PathBuf],
     upper_dir: Option<&std::path::Path>,
     staging_dir: Option<&std::path::Path>,
@@ -357,7 +749,6 @@ fn build_overlay_rootfs(
     let mut overlay_builder = OverlayFs::builder();
 
     for layer in layers {
-        // Check if a sidecar index exists for this layer.
         let index_path = layer.with_extension("index");
         if index_path.exists() {
             overlay_builder = overlay_builder.layer_with_index(layer, &index_path);
@@ -395,78 +786,7 @@ mod tests {
     use microsandbox_utils::index::IndexBuilder;
     use tempfile::tempdir;
 
-    use super::{
-        VmConfig, append_block_root_env, build_and_enter, build_overlay_rootfs,
-        validate_disk_format,
-    };
-
-    #[test]
-    fn test_build_and_enter_rejects_rootfs_path_combined_with_overlay_fields() {
-        let err = build_and_enter(VmConfig {
-            libkrunfw_path: PathBuf::from("/tmp/libkrunfw"),
-            vcpus: 1,
-            memory_mib: 512,
-            rootfs_path: Some(PathBuf::from("/tmp/rootfs")),
-            rootfs_lowers: vec![PathBuf::from("/tmp/layer0")],
-            rootfs_upper: Some(PathBuf::from("/tmp/rw")),
-            rootfs_staging: Some(PathBuf::from("/tmp/staging")),
-            rootfs_disk: None,
-            rootfs_disk_format: None,
-            rootfs_disk_readonly: false,
-            mounts: Vec::new(),
-            backends: Vec::new(),
-            init_path: None,
-            env: Vec::new(),
-            workdir: None,
-            exec_path: None,
-            exec_args: Vec::new(),
-            #[cfg(feature = "net")]
-            network: microsandbox_network::config::NetworkConfig::default(),
-            #[cfg(feature = "net")]
-            sandbox_slot: 0,
-            agent_fd: None,
-        })
-        .unwrap_err();
-
-        assert!(
-            err.to_string()
-                .contains("rootfs_path cannot be combined with overlay rootfs fields")
-        );
-    }
-
-    #[test]
-    fn test_build_and_enter_rejects_overlay_dirs_without_lowers() {
-        let err = build_and_enter(VmConfig {
-            libkrunfw_path: PathBuf::from("/tmp/libkrunfw"),
-            vcpus: 1,
-            memory_mib: 512,
-            rootfs_path: None,
-            rootfs_lowers: Vec::new(),
-            rootfs_upper: Some(PathBuf::from("/tmp/rw")),
-            rootfs_staging: Some(PathBuf::from("/tmp/staging")),
-            rootfs_disk: None,
-            rootfs_disk_format: None,
-            rootfs_disk_readonly: false,
-            mounts: Vec::new(),
-            backends: Vec::new(),
-            init_path: None,
-            env: Vec::new(),
-            workdir: None,
-            exec_path: None,
-            exec_args: Vec::new(),
-            #[cfg(feature = "net")]
-            network: microsandbox_network::config::NetworkConfig::default(),
-            #[cfg(feature = "net")]
-            sandbox_slot: 0,
-            agent_fd: None,
-        })
-        .unwrap_err();
-
-        assert!(
-            err.to_string()
-                .contains("overlay rootfs requires at least one lower layer")
-        );
-    }
+    use super::{append_block_root_env, build_overlay_rootfs, validate_disk_format};
 
     #[test]
     fn test_build_overlay_rootfs_rejects_mismatched_upper_staging() {
@@ -474,13 +794,11 @@ mod tests {
         let lower = create_dir(temp.path(), "lower.extracted");
         let staging = create_dir(temp.path(), "staging");
 
-        // upper missing but staging present → error
         match build_overlay_rootfs(&[lower.clone()], None, Some(&staging)) {
             Ok(_) => panic!("expected mismatched upper/staging to be rejected"),
             Err(err) => assert!(err.to_string().contains("both be set or both be omitted")),
         }
 
-        // upper present but staging missing → error
         let upper = create_dir(temp.path(), "rw");
         match build_overlay_rootfs(&[lower], Some(&upper), None) {
             Ok(_) => panic!("expected mismatched upper/staging to be rejected"),
@@ -492,8 +810,6 @@ mod tests {
     fn test_build_overlay_rootfs_read_only() {
         let temp = tempdir().unwrap();
         let lower = create_dir(temp.path(), "lower.extracted");
-
-        // Both None → read-only mode (should succeed).
         build_overlay_rootfs(&[lower], None, None).unwrap();
     }
 
@@ -503,7 +819,6 @@ mod tests {
         let lower = create_dir(temp.path(), "lower.extracted");
         let upper = create_dir(temp.path(), "rw");
         let staging = create_dir(temp.path(), "staging");
-
         assert!(build_overlay_rootfs(&[lower], Some(&upper), Some(&staging)).is_ok());
     }
 
@@ -519,7 +834,6 @@ mod tests {
             .file("", "hello.txt", 0o644)
             .build();
         std::fs::write(&index_path, index).unwrap();
-
         assert!(build_overlay_rootfs(&[lower], Some(&upper), Some(&staging)).is_ok());
     }
 
@@ -533,7 +847,6 @@ mod tests {
     fn test_append_block_root_env_adds_default_device() {
         let mut env = vec!["FOO=bar".to_string()];
         append_block_root_env(&mut env);
-
         assert!(env.contains(&"FOO=bar".to_string()));
         assert!(env.contains(&format!(
             "{}=/dev/vda",
@@ -549,7 +862,6 @@ mod tests {
         );
         let mut env = vec![existing.clone()];
         append_block_root_env(&mut env);
-
         assert_eq!(env, vec![existing]);
     }
 
@@ -561,7 +873,6 @@ mod tests {
         let staging = create_dir(temp.path(), "staging");
         let index_path = lower.with_extension("index");
         std::fs::write(&index_path, b"definitely not a valid index").unwrap();
-
         assert!(build_overlay_rootfs(&[lower], Some(&upper), Some(&staging)).is_ok());
     }
 

@@ -9,6 +9,7 @@
 //! [`stage_next_frame()`]: SmoltcpDevice::stage_next_frame
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use smoltcp::phy::{self, DeviceCapabilities, Medium};
 use smoltcp::time::Instant;
@@ -37,6 +38,10 @@ pub struct SmoltcpDevice {
     /// Single-frame slot. Set by the poll loop via `stage_next_frame()`,
     /// consumed by smoltcp's `poll()` via `receive()`.
     pending_rx: Option<Vec<u8>>,
+    /// Set by `TxToken::consume` when a frame is pushed to `rx_ring`.
+    /// The poll loop checks this flag after the egress loop and calls
+    /// `rx_wake.wake()` once instead of per-frame (coalesced wakes).
+    pub(crate) frames_emitted: AtomicBool,
 }
 
 /// Token returned by the `Device::receive()` implementation — delivers one
@@ -65,6 +70,7 @@ impl SmoltcpDevice {
             shared,
             mtu,
             pending_rx: None,
+            frames_emitted: AtomicBool::new(false),
         }
     }
 
@@ -138,9 +144,10 @@ impl<'a> phy::TxToken for SmoltcpTxToken<'a> {
     {
         let mut buf = vec![0u8; len];
         let result = f(&mut buf);
-        // Push the frame to rx_ring for the guest and wake the NetWorker.
+        // Push the frame to rx_ring for the guest. Don't wake yet —
+        // the poll loop will coalesce wakes after the egress loop.
         let _ = self.device.shared.rx_ring.push(buf);
-        self.device.shared.rx_wake.wake();
+        self.device.frames_emitted.store(true, Ordering::Relaxed);
         result
     }
 }

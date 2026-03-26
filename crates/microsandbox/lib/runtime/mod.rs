@@ -1,7 +1,7 @@
-//! Runtime process management.
+//! Sandbox process management.
 //!
-//! Provides [`SupervisorHandle`] for interacting with a running supervisor
-//! process and [`spawn_supervisor`] for starting one from a
+//! Provides [`ProcessHandle`] for interacting with a running sandbox
+//! process and [`spawn_sandbox`] for starting one from a
 //! [`crate::sandbox::SandboxConfig`].
 
 pub(crate) mod handle;
@@ -11,5 +11,5 @@ pub(crate) mod spawn;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use handle::SupervisorHandle;
-pub use spawn::{SupervisorSpawnMode, spawn_supervisor};
+pub use handle::ProcessHandle;
+pub use spawn::{SpawnMode, spawn_sandbox};

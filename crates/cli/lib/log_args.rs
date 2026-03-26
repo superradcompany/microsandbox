@@ -90,25 +90,25 @@ mod tests {
 
     #[derive(Debug, Subcommand)]
     enum TestCommand {
-        Supervisor,
-        Microvm,
+        Sandbox,
+        Run,
     }
 
     #[test]
     fn test_global_log_flag_after_subcommand() {
-        let cli = TestCli::parse_from(["msb", "supervisor", "--debug"]);
+        let cli = TestCli::parse_from(["msb", "run", "--debug"]);
         assert_eq!(cli.logs.selected_level(), Some(LogLevel::Debug));
     }
 
     #[test]
     fn test_no_log_flag_means_silent() {
-        let cli = TestCli::parse_from(["msb", "microvm"]);
+        let cli = TestCli::parse_from(["msb", "sandbox"]);
         assert_eq!(cli.logs.selected_level(), None);
     }
 
     #[test]
     fn test_log_flags_conflict() {
-        let err = TestCli::try_parse_from(["msb", "--info", "--debug", "supervisor"]).unwrap_err();
+        let err = TestCli::try_parse_from(["msb", "--info", "--debug", "sandbox"]).unwrap_err();
         let rendered = err.to_string();
         assert!(rendered.contains("--debug"));
         assert!(rendered.contains("--info"));

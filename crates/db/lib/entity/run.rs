@@ -1,4 +1,4 @@
-//! Entity definition for the `microvms` table.
+//! Entity definition for the `run` table.
 
 use sea_orm::entity::prelude::*;
 
@@ -6,30 +6,30 @@ use sea_orm::entity::prelude::*;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// The status of a microVM process.
+/// The status of a sandbox run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Text")]
-pub enum MicrovmStatus {
-    /// The microVM is running.
+pub enum RunStatus {
+    /// The sandbox is running.
     #[sea_orm(string_value = "Running")]
     Running,
 
-    /// The microVM has terminated.
+    /// The run has terminated.
     #[sea_orm(string_value = "Terminated")]
     Terminated,
 }
 
-/// The reason a sandbox's microVM terminated.
+/// The reason a sandbox run terminated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Text")]
 pub enum TerminationReason {
-    /// VM exited with code 0 (guest shutdown cleanly).
-    #[sea_orm(string_value = "VmCompleted")]
-    VmCompleted,
+    /// Sandbox exited cleanly (exit code 0).
+    #[sea_orm(string_value = "Completed")]
+    Completed,
 
-    /// VM exited with non-zero code or was killed by signal.
-    #[sea_orm(string_value = "VmFailed")]
-    VmFailed,
+    /// Sandbox exited with non-zero code or was killed by signal.
+    #[sea_orm(string_value = "Failed")]
+    Failed,
 
     /// Sandbox exceeded `max_duration_secs`.
     #[sea_orm(string_value = "MaxDurationExceeded")]
@@ -44,24 +44,23 @@ pub enum TerminationReason {
     DrainRequested,
 
     /// SIGTERM/SIGINT received from external source.
-    #[sea_orm(string_value = "SupervisorSignal")]
-    SupervisorSignal,
+    #[sea_orm(string_value = "Signal")]
+    Signal,
 
-    /// Supervisor internal error.
+    /// Internal error.
     #[sea_orm(string_value = "InternalError")]
     InternalError,
 }
 
-/// The microVM process entity model.
+/// A single run of a sandbox.
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-#[sea_orm(table_name = "microvm")]
+#[sea_orm(table_name = "run")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
     pub sandbox_id: i32,
-    pub supervisor_id: i32,
     pub pid: Option<i32>,
-    pub status: MicrovmStatus,
+    pub status: RunStatus,
     pub exit_code: Option<i32>,
     pub exit_signal: Option<i32>,
     pub termination_reason: Option<TerminationReason>,
@@ -75,10 +74,10 @@ pub struct Model {
 // Types: Relations
 //--------------------------------------------------------------------------------------------------
 
-/// Relations for the microvm entity.
+/// Relations for the run entity.
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    /// A microvm belongs to a sandbox.
+    /// A run belongs to a sandbox.
     #[sea_orm(
         belongs_to = "super::sandbox::Entity",
         from = "Column::SandboxId",
@@ -86,26 +85,11 @@ pub enum Relation {
         on_delete = "Cascade"
     )]
     Sandbox,
-
-    /// A microvm belongs to a supervisor.
-    #[sea_orm(
-        belongs_to = "super::supervisor::Entity",
-        from = "Column::SupervisorId",
-        to = "super::supervisor::Column::Id",
-        on_delete = "Cascade"
-    )]
-    Supervisor,
 }
 
 impl Related<super::sandbox::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Sandbox.def()
-    }
-}
-
-impl Related<super::supervisor::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Supervisor.def()
     }
 }
 
@@ -116,12 +100,12 @@ impl Related<super::supervisor::Entity> for Entity {
 impl std::fmt::Display for TerminationReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::VmCompleted => f.write_str("VmCompleted"),
-            Self::VmFailed => f.write_str("VmFailed"),
+            Self::Completed => f.write_str("Completed"),
+            Self::Failed => f.write_str("Failed"),
             Self::MaxDurationExceeded => f.write_str("MaxDurationExceeded"),
             Self::IdleTimeout => f.write_str("IdleTimeout"),
             Self::DrainRequested => f.write_str("DrainRequested"),
-            Self::SupervisorSignal => f.write_str("SupervisorSignal"),
+            Self::Signal => f.write_str("Signal"),
             Self::InternalError => f.write_str("InternalError"),
         }
     }

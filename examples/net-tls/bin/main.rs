@@ -3,9 +3,6 @@
 //! Demonstrates TLS interception: the sandbox CA is auto-generated, installed
 //! in the guest trust store by agentd, and HTTPS connections are transparently
 //! intercepted. Bypass domains skip interception entirely.
-//!
-//! NOTE: TLS interception is still under development. This example is a test
-//! harness for debugging the handshake flow.
 
 use microsandbox::sandbox::Sandbox;
 

@@ -1,7 +1,7 @@
-//! Handle to a running supervisor process.
+//! Handle to a running sandbox process.
 //!
-//! [`SupervisorHandle`] holds the PIDs of the supervisor and VM processes
-//! and provides methods for lifecycle management (signals, wait).
+//! [`ProcessHandle`] holds the PID of the sandbox process and provides
+//! methods for lifecycle management (signals, wait).
 
 use std::process::ExitStatus;
 
@@ -17,21 +17,18 @@ use crate::MicrosandboxResult;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Handle to a running supervisor process and its children.
-pub struct SupervisorHandle {
-    /// PID of the supervisor process (`msb supervisor`).
-    supervisor_pid: u32,
+/// Handle to a running sandbox process.
+pub struct ProcessHandle {
+    /// PID of the sandbox process.
+    pid: u32,
 
-    /// PID of the VM process (`msb microvm`).
-    vm_pid: u32,
-
-    /// Name of the sandbox this supervisor manages.
+    /// Name of the sandbox this process manages.
     sandbox_name: String,
 
-    /// The supervisor child process handle.
+    /// The sandbox child process handle.
     child: Child,
 
-    /// When true, the Drop impl will NOT send SIGTERM to the supervisor.
+    /// When true, the Drop impl will NOT send SIGTERM.
     detached: bool,
 }
 
@@ -39,31 +36,20 @@ pub struct SupervisorHandle {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl SupervisorHandle {
-    /// Create a new supervisor handle.
-    pub(crate) fn new(
-        supervisor_pid: u32,
-        vm_pid: u32,
-        sandbox_name: String,
-        child: Child,
-    ) -> Self {
+impl ProcessHandle {
+    /// Create a new handle.
+    pub(crate) fn new(pid: u32, sandbox_name: String, child: Child) -> Self {
         Self {
-            supervisor_pid,
-            vm_pid,
+            pid,
             sandbox_name,
             child,
             detached: false,
         }
     }
 
-    /// Get the supervisor PID.
-    pub fn supervisor_pid(&self) -> u32 {
-        self.supervisor_pid
-    }
-
-    /// Get the VM PID.
-    pub fn vm_pid(&self) -> u32 {
-        self.vm_pid
+    /// Get the sandbox process PID.
+    pub fn pid(&self) -> u32 {
+        self.pid
     }
 
     /// Get the sandbox name.
@@ -71,25 +57,28 @@ impl SupervisorHandle {
         &self.sandbox_name
     }
 
-    /// Send SIGKILL to the VM process for immediate termination.
-    pub fn kill_vm(&self) -> MicrosandboxResult<()> {
-        signal::kill(Pid::from_raw(self.vm_pid as i32), Signal::SIGKILL)?;
+    /// Send SIGKILL to the sandbox process for immediate termination.
+    pub fn kill(&self) -> MicrosandboxResult<()> {
+        signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGKILL)?;
         Ok(())
     }
 
-    /// Send SIGUSR1 to the supervisor to trigger a graceful drain.
-    pub fn drain_supervisor(&self) -> MicrosandboxResult<()> {
-        signal::kill(Pid::from_raw(self.supervisor_pid as i32), Signal::SIGUSR1)?;
+    /// Send SIGUSR1 to the sandbox process to trigger a graceful drain.
+    ///
+    /// The libkrun signal handler catches SIGUSR1, writes to the exit event
+    /// fd, exit observers run, and the process terminates.
+    pub fn drain(&self) -> MicrosandboxResult<()> {
+        signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGUSR1)?;
         Ok(())
     }
 
-    /// Wait for the supervisor process to exit.
+    /// Wait for the sandbox process to exit.
     pub async fn wait(&mut self) -> MicrosandboxResult<ExitStatus> {
         let status = self.child.wait().await?;
         Ok(status)
     }
 
-    /// Disarm the SIGTERM safety net so the supervisor keeps running after
+    /// Disarm the SIGTERM safety net so the sandbox keeps running after
     /// this handle is dropped. Used by detached sandbox flows.
     pub fn disarm(&mut self) {
         self.detached = true;
@@ -100,14 +89,14 @@ impl SupervisorHandle {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
-impl Drop for SupervisorHandle {
+impl Drop for ProcessHandle {
     fn drop(&mut self) {
         if self.detached {
             return;
         }
 
-        // Safety net: send SIGTERM to the supervisor so child processes
-        // are cleaned up if the handle is dropped without an explicit stop.
+        // Safety net: send SIGTERM so the sandbox process is cleaned up
+        // if the handle is dropped without an explicit stop.
         if let Ok(None) = self.child.try_wait()
             && let Some(pid) = self.child.id()
         {

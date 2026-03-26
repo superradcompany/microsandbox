@@ -1,26 +1,24 @@
-//! Handler for the `msb supervisor` subcommand.
+//! Handler for the `msb sandbox` subcommand.
 //!
-//! Parses CLI arguments, builds a `SupervisorConfig`, and delegates to
-//! `microsandbox_runtime::supervisor::run()`.
+//! Parses CLI arguments, builds a [`microsandbox_runtime::vm::Config`], and delegates to
+//! [`microsandbox_runtime::vm::enter()`]. This command **never returns**
+//! — the VMM calls `_exit()` on guest shutdown.
 
 use std::path::PathBuf;
 
 use clap::Args;
 use microsandbox_runtime::{
-    RuntimeResult,
     logging::LogLevel,
-    policy::{ChildPolicies, ChildPolicy, ExitAction, ShutdownMode, SupervisorPolicy},
-    supervisor::SupervisorConfig,
-    vm::VmConfig,
+    vm::{Config, VmConfig},
 };
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Arguments for the `msb supervisor` subcommand.
+/// Arguments for the `msb sandbox` subcommand.
 #[derive(Debug, Args)]
-pub struct SupervisorArgs {
+pub struct SandboxArgs {
     /// Name of the sandbox.
     #[arg(long = "name")]
     pub sandbox_name: String,
@@ -45,18 +43,9 @@ pub struct SupervisorArgs {
     #[arg(long)]
     pub agent_sock: PathBuf,
 
-    /// Forward VM console output to supervisor stdout.
+    /// Forward VM console output to stdout.
     #[arg(long = "forward")]
     pub forward_output: bool,
-
-    // ── Supervisor policy ────────────────────────────────────────────────
-    /// Shutdown mode: graceful, terminate, or kill.
-    #[arg(long, default_value = "graceful")]
-    pub shutdown_mode: ShutdownMode,
-
-    /// Grace period in seconds between drain escalation steps.
-    #[arg(long, default_value_t = 3)]
-    pub grace_secs: u64,
 
     /// Hard cap on total sandbox lifetime in seconds.
     #[arg(long)]
@@ -66,28 +55,7 @@ pub struct SupervisorArgs {
     #[arg(long)]
     pub idle_timeout: Option<u64>,
 
-    // ── VM child policy ──────────────────────────────────────────────────
-    /// VM exit action: shutdown-all, restart, or ignore.
-    #[arg(long, default_value = "shutdown-all")]
-    pub vm_on_exit: ExitAction,
-
-    /// Max VM restart attempts before falling back to shutdown-all.
-    #[arg(long, default_value_t = 0)]
-    pub vm_max_restarts: u32,
-
-    /// Delay in milliseconds between VM restart attempts.
-    #[arg(long, default_value_t = 0)]
-    pub vm_restart_delay_ms: u64,
-
-    /// Window in seconds for counting VM restart attempts.
-    #[arg(long, default_value_t = 0)]
-    pub vm_restart_window: u64,
-
-    /// Grace period in milliseconds before SIGKILL on VM shutdown.
-    #[arg(long, default_value_t = 0)]
-    pub vm_shutdown_timeout_ms: u64,
-
-    // ── VM passthrough args ──────────────────────────────────────────────
+    // ── VM configuration ─────────────────────────────────────────────────
     /// Path to the libkrunfw shared library.
     #[arg(long)]
     pub libkrunfw_path: PathBuf,
@@ -167,25 +135,8 @@ pub struct SupervisorArgs {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Run the supervisor with the given CLI arguments.
-pub async fn run(args: SupervisorArgs, log_level: Option<LogLevel>) -> RuntimeResult<()> {
-    let child_policies = ChildPolicies {
-        vm: ChildPolicy {
-            on_exit: args.vm_on_exit,
-            max_restarts: args.vm_max_restarts,
-            restart_delay_ms: args.vm_restart_delay_ms,
-            restart_window_secs: args.vm_restart_window,
-            shutdown_timeout_ms: args.vm_shutdown_timeout_ms,
-        },
-    };
-
-    let supervisor_policy = SupervisorPolicy {
-        shutdown_mode: args.shutdown_mode,
-        grace_secs: args.grace_secs,
-        max_duration_secs: args.max_duration,
-        idle_timeout_secs: args.idle_timeout,
-    };
-
+/// Run the sandbox process. This function **never returns**.
+pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
     let vm_config = VmConfig {
         libkrunfw_path: args.libkrunfw_path,
         vcpus: args.vcpus,
@@ -215,10 +166,9 @@ pub async fn run(args: SupervisorArgs, log_level: Option<LogLevel>) -> RuntimeRe
             .unwrap_or_default(),
         #[cfg(feature = "net")]
         sandbox_slot: args.sandbox_slot,
-        agent_fd: None,
     };
 
-    let config = SupervisorConfig {
+    let config = Config {
         sandbox_name: args.sandbox_name,
         sandbox_id: args.sandbox_id,
         log_level,
@@ -226,17 +176,11 @@ pub async fn run(args: SupervisorArgs, log_level: Option<LogLevel>) -> RuntimeRe
         log_dir: args.log_dir,
         runtime_dir: args.runtime_dir,
         agent_sock_path: args.agent_sock,
-        sandbox_slot: u32::try_from(args.sandbox_id).map_err(|_| {
-            microsandbox_runtime::RuntimeError::Custom(format!(
-                "sandbox_id {} is negative and cannot be used as a network slot",
-                args.sandbox_id
-            ))
-        })?,
         forward_output: args.forward_output,
-        child_policies,
-        supervisor_policy,
-        vm_config,
+        idle_timeout_secs: args.idle_timeout,
+        max_duration_secs: args.max_duration,
+        vm: vm_config,
     };
 
-    microsandbox_runtime::supervisor::run(config).await
+    microsandbox_runtime::vm::enter(config)
 }

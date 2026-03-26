@@ -9,10 +9,11 @@
 //! a background tokio task via a channel. Responses come back through another
 //! channel and are written to the smoltcp socket on the next poll iteration.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use smoltcp::iface::{SocketHandle, SocketSet};
+use smoltcp::iface::SocketSet;
 use smoltcp::socket::udp;
 use smoltcp::storage::PacketMetadata;
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
@@ -52,11 +53,22 @@ const CHANNEL_CAPACITY: usize = 64;
 /// [`process()`]: DnsInterceptor::process
 pub struct DnsInterceptor {
     /// Handle to the smoltcp UDP socket bound to gateway:53.
-    socket_handle: SocketHandle,
+    socket_handle: smoltcp::iface::SocketHandle,
     /// Sends queries to the background resolver task.
     query_tx: mpsc::Sender<DnsQuery>,
     /// Receives responses from the background resolver task.
     response_rx: mpsc::Receiver<DnsResponse>,
+}
+
+/// Pre-processed DNS config with lowercased block lists (avoids per-query allocations).
+struct NormalizedDnsConfig {
+    /// O(1) exact-match lookup for blocked domains.
+    blocked_domains: HashSet<String>,
+    /// Lowercased suffixes WITHOUT leading dot (for exact match against the suffix itself).
+    blocked_suffixes: Vec<String>,
+    /// Dot-prefixed lowercased suffixes (for `ends_with` matching without per-query `format!`).
+    blocked_suffixes_dotted: Vec<String>,
+    rebind_protection: bool,
 }
 
 /// A DNS query extracted from the smoltcp socket.
@@ -113,8 +125,26 @@ impl DnsInterceptor {
         let (query_tx, query_rx) = mpsc::channel(CHANNEL_CAPACITY);
         let (response_tx, response_rx) = mpsc::channel(CHANNEL_CAPACITY);
 
+        // Pre-lowercase block lists once to avoid per-query allocations.
+        let suffixes: Vec<String> = dns_config
+            .blocked_suffixes
+            .iter()
+            .map(|s| s.to_lowercase().trim_start_matches('.').to_string())
+            .collect();
+        let suffixes_dotted: Vec<String> = suffixes.iter().map(|s| format!(".{s}")).collect();
+        let normalized = Arc::new(NormalizedDnsConfig {
+            blocked_domains: dns_config
+                .blocked_domains
+                .iter()
+                .map(|d| d.to_lowercase())
+                .collect(),
+            blocked_suffixes: suffixes,
+            blocked_suffixes_dotted: suffixes_dotted,
+            rebind_protection: dns_config.rebind_protection,
+        });
+
         // Spawn background resolver task.
-        tokio_handle.spawn(dns_resolver_task(query_rx, response_tx, dns_config, shared));
+        tokio_handle.spawn(dns_resolver_task(query_rx, response_tx, normalized, shared));
 
         Self {
             socket_handle,
@@ -150,16 +180,16 @@ impl DnsInterceptor {
         }
 
         // Write responses to the smoltcp socket.
-        while let Ok(response) = self.response_rx.try_recv() {
-            if socket.can_send() {
-                let _ = socket.send_slice(&response.data, response.dest);
+        // Check can_send() BEFORE consuming from the channel so
+        // undeliverable responses remain for the next poll iteration.
+        while socket.can_send() {
+            match self.response_rx.try_recv() {
+                Ok(response) => {
+                    let _ = socket.send_slice(&response.data, response.dest);
+                }
+                Err(_) => break,
             }
         }
-    }
-
-    /// Return the socket handle (for external use if needed).
-    pub fn socket_handle(&self) -> SocketHandle {
-        self.socket_handle
     }
 }
 
@@ -174,7 +204,7 @@ impl DnsInterceptor {
 async fn dns_resolver_task(
     mut query_rx: mpsc::Receiver<DnsQuery>,
     response_tx: mpsc::Sender<DnsResponse>,
-    dns_config: DnsConfig,
+    dns_config: Arc<NormalizedDnsConfig>,
     shared: Arc<SharedState>,
 ) {
     // Create a system resolver that uses the host's /etc/resolv.conf.
@@ -206,8 +236,8 @@ async fn dns_resolver_task(
                     }
                 }
                 None => {
-                    // Query was blocked or failed — send SERVFAIL.
-                    if let Some(servfail) = build_servfail(&query.data) {
+                    // Query was blocked or failed — send REFUSED.
+                    if let Some(servfail) = build_refused(&query.data) {
                         let response = DnsResponse {
                             data: servfail,
                             dest: query.source,
@@ -222,13 +252,15 @@ async fn dns_resolver_task(
     }
 }
 
-/// Resolve a single DNS query. Returns `None` if the domain is blocked.
+/// Resolve a single DNS query. Returns `None` if the domain is blocked
+/// or contains rebind-protected addresses.
 async fn resolve_query(
     raw_query: &[u8],
-    dns_config: &DnsConfig,
+    dns_config: &NormalizedDnsConfig,
     resolver: &hickory_resolver::TokioResolver,
 ) -> Option<Bytes> {
     use hickory_proto::op::Message;
+    use hickory_proto::rr::RData;
     use hickory_proto::serialize::binary::BinDecodable;
 
     // Parse the DNS query.
@@ -255,12 +287,33 @@ async fn resolve_query(
         .await
         .ok()?;
 
-    // Build a DNS response message from the lookup result.
-    let mut response_msg = query_msg.clone();
+    // DNS rebind protection: reject responses containing private/reserved IPs.
+    if dns_config.rebind_protection {
+        for record in lookup.records() {
+            let is_private = match record.data() {
+                RData::A(a) => is_private_ipv4((*a).into()),
+                RData::AAAA(aaaa) => is_private_ipv6((*aaaa).into()),
+                _ => false,
+            };
+            if is_private {
+                tracing::debug!(
+                    domain = %domain,
+                    "DNS rebind protection: response contains private IP"
+                );
+                return None;
+            }
+        }
+    }
+
+    // Build a fresh DNS response (avoids cloning the entire query message).
+    let mut response_msg = Message::new();
     response_msg.set_id(query_id);
     response_msg.set_message_type(hickory_proto::op::MessageType::Response);
+    response_msg.set_op_code(query_msg.op_code());
     response_msg.set_response_code(hickory_proto::op::ResponseCode::NoError);
+    response_msg.set_recursion_desired(query_msg.recursion_desired());
     response_msg.set_recursion_available(true);
+    response_msg.add_query(question.clone());
 
     // Add answer records.
     let answers: Vec<_> = lookup.records().to_vec();
@@ -273,40 +326,70 @@ async fn resolve_query(
     Some(Bytes::from(response_bytes))
 }
 
+/// Check if an IPv4 address is in a private/reserved range (for rebind protection).
+fn is_private_ipv4(addr: std::net::Ipv4Addr) -> bool {
+    let octets = addr.octets();
+    addr.is_loopback()                                        // 127.0.0.0/8
+        || octets[0] == 10                                    // 10.0.0.0/8
+        || (octets[0] == 172 && (octets[1] & 0xf0) == 16)    // 172.16.0.0/12
+        || (octets[0] == 192 && octets[1] == 168)             // 192.168.0.0/16
+        || (octets[0] == 100 && (octets[1] & 0xc0) == 64)    // 100.64.0.0/10 (CGNAT)
+        || (octets[0] == 169 && octets[1] == 254)             // 169.254.0.0/16 (link-local)
+        || addr.is_unspecified() // 0.0.0.0
+}
+
+/// Check if an IPv6 address is in a private/reserved range (for rebind protection).
+fn is_private_ipv6(addr: std::net::Ipv6Addr) -> bool {
+    let segments = addr.segments();
+    addr.is_loopback()                       // ::1
+        || (segments[0] & 0xfe00) == 0xfc00  // fc00::/7 (ULA)
+        || (segments[0] & 0xffc0) == 0xfe80  // fe80::/10 (link-local)
+        || addr.is_unspecified() // ::
+}
+
 /// Check if a domain is blocked by the DNS config.
-fn is_domain_blocked(domain: &str, config: &DnsConfig) -> bool {
+///
+/// Block lists are pre-lowercased in [`NormalizedDnsConfig`], so only the
+/// queried domain needs lowercasing (once per query instead of per entry).
+fn is_domain_blocked(domain: &str, config: &NormalizedDnsConfig) -> bool {
     let domain_lower = domain.to_lowercase();
 
-    // Check exact domain matches.
-    if config
-        .blocked_domains
-        .iter()
-        .any(|d| d.to_lowercase() == domain_lower)
-    {
+    // Check exact domain matches — O(1) via HashSet.
+    if config.blocked_domains.contains(&domain_lower) {
         return true;
     }
 
-    // Check suffix matches.
-    if config.blocked_suffixes.iter().any(|suffix| {
-        let suffix_lower = suffix.to_lowercase();
-        let suffix_lower = suffix_lower.trim_start_matches('.');
-        domain_lower == suffix_lower || domain_lower.ends_with(&format!(".{suffix_lower}"))
-    }) {
-        return true;
+    // Check suffix matches (already lowercased with pre-computed dot-prefixed forms).
+    for (suffix, dotted) in config
+        .blocked_suffixes
+        .iter()
+        .zip(config.blocked_suffixes_dotted.iter())
+    {
+        if domain_lower == *suffix || domain_lower.ends_with(dotted.as_str()) {
+            return true;
+        }
     }
 
     false
 }
 
-/// Build a SERVFAIL response for a query that was blocked or failed.
-fn build_servfail(raw_query: &[u8]) -> Option<Bytes> {
+/// Build a REFUSED response for a query that was blocked by policy.
+///
+/// Uses REFUSED (RCODE 5) instead of SERVFAIL (RCODE 2) because the
+/// refusal is a policy decision, not a server failure. Most stub resolvers
+/// do not retry REFUSED, avoiding unnecessary latency.
+fn build_refused(raw_query: &[u8]) -> Option<Bytes> {
     use hickory_proto::op::Message;
     use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 
     let query_msg = Message::from_bytes(raw_query).ok()?;
-    let mut response = query_msg.clone();
+    let mut response = Message::new();
+    response.set_id(query_msg.id());
+    for q in query_msg.queries() {
+        response.add_query(q.clone());
+    }
     response.set_message_type(hickory_proto::op::MessageType::Response);
-    response.set_response_code(hickory_proto::op::ResponseCode::ServFail);
+    response.set_response_code(hickory_proto::op::ResponseCode::Refused);
     response.set_recursion_available(true);
 
     let bytes = response.to_bytes().ok()?;
@@ -321,13 +404,26 @@ fn build_servfail(raw_query: &[u8]) -> Option<Bytes> {
 mod tests {
     use super::*;
 
+    fn normalized(domains: Vec<&str>, suffixes: Vec<&str>) -> NormalizedDnsConfig {
+        let blocked_suffixes: Vec<String> = suffixes
+            .iter()
+            .map(|s| s.to_lowercase().trim_start_matches('.').to_string())
+            .collect();
+        let blocked_suffixes_dotted = blocked_suffixes.iter().map(|s| format!(".{s}")).collect();
+        NormalizedDnsConfig {
+            blocked_domains: domains
+                .iter()
+                .map(|d| d.to_lowercase())
+                .collect::<HashSet<_>>(),
+            blocked_suffixes,
+            blocked_suffixes_dotted,
+            rebind_protection: false,
+        }
+    }
+
     #[test]
     fn test_exact_domain_blocked() {
-        let config = DnsConfig {
-            blocked_domains: vec!["evil.com".to_string()],
-            blocked_suffixes: vec![],
-            rebind_protection: false,
-        };
+        let config = normalized(vec!["evil.com"], vec![]);
         assert!(is_domain_blocked("evil.com", &config));
         assert!(is_domain_blocked("Evil.COM", &config));
         assert!(!is_domain_blocked("not-evil.com", &config));
@@ -336,11 +432,7 @@ mod tests {
 
     #[test]
     fn test_suffix_domain_blocked() {
-        let config = DnsConfig {
-            blocked_domains: vec![],
-            blocked_suffixes: vec![".evil.com".to_string()],
-            rebind_protection: false,
-        };
+        let config = normalized(vec![], vec![".evil.com"]);
         assert!(is_domain_blocked("sub.evil.com", &config));
         assert!(is_domain_blocked("deep.sub.evil.com", &config));
         assert!(is_domain_blocked("evil.com", &config));
@@ -349,7 +441,7 @@ mod tests {
 
     #[test]
     fn test_no_blocks_nothing_blocked() {
-        let config = DnsConfig::default();
+        let config = normalized(vec![], vec![]);
         assert!(!is_domain_blocked("anything.com", &config));
     }
 }

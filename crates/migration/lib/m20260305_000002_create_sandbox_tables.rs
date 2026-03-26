@@ -1,4 +1,4 @@
-//! Migration: Create sandbox tables (sandboxes, supervisors, microvms, sandbox_metrics).
+//! Migration: Create sandbox tables (sandboxes, runs, sandbox_metrics).
 
 use sea_orm_migration::prelude::*;
 
@@ -24,22 +24,10 @@ enum Sandbox {
 }
 
 #[derive(Iden)]
-enum Supervisor {
+enum Run {
     Table,
     Id,
     SandboxId,
-    Pid,
-    Status,
-    StartedAt,
-    StoppedAt,
-}
-
-#[derive(Iden)]
-enum Microvm {
-    Table,
-    Id,
-    SandboxId,
-    SupervisorId,
     Pid,
     Status,
     ExitCode,
@@ -101,68 +89,33 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // supervisors
+        // runs
         manager
             .create_table(
                 Table::create()
-                    .table(Supervisor::Table)
+                    .table(Run::Table)
                     .if_not_exists()
                     .col(
-                        ColumnDef::new(Supervisor::Id)
+                        ColumnDef::new(Run::Id)
                             .integer()
                             .not_null()
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(Supervisor::SandboxId).integer().not_null())
-                    .col(ColumnDef::new(Supervisor::Pid).integer())
-                    .col(ColumnDef::new(Supervisor::Status).text().not_null())
-                    .col(ColumnDef::new(Supervisor::StartedAt).date_time())
-                    .col(ColumnDef::new(Supervisor::StoppedAt).date_time())
+                    .col(ColumnDef::new(Run::SandboxId).integer().not_null())
+                    .col(ColumnDef::new(Run::Pid).integer())
+                    .col(ColumnDef::new(Run::Status).text().not_null())
+                    .col(ColumnDef::new(Run::ExitCode).integer())
+                    .col(ColumnDef::new(Run::ExitSignal).integer())
+                    .col(ColumnDef::new(Run::TerminationReason).text())
+                    .col(ColumnDef::new(Run::TerminationDetail).text())
+                    .col(ColumnDef::new(Run::SignalsSent).text())
+                    .col(ColumnDef::new(Run::StartedAt).date_time())
+                    .col(ColumnDef::new(Run::TerminatedAt).date_time())
                     .foreign_key(
                         ForeignKey::create()
-                            .from(Supervisor::Table, Supervisor::SandboxId)
+                            .from(Run::Table, Run::SandboxId)
                             .to(Sandbox::Table, Sandbox::Id)
-                            .on_delete(ForeignKeyAction::Cascade),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-
-        // microvms
-        manager
-            .create_table(
-                Table::create()
-                    .table(Microvm::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(Microvm::Id)
-                            .integer()
-                            .not_null()
-                            .auto_increment()
-                            .primary_key(),
-                    )
-                    .col(ColumnDef::new(Microvm::SandboxId).integer().not_null())
-                    .col(ColumnDef::new(Microvm::SupervisorId).integer().not_null())
-                    .col(ColumnDef::new(Microvm::Pid).integer())
-                    .col(ColumnDef::new(Microvm::Status).text().not_null())
-                    .col(ColumnDef::new(Microvm::ExitCode).integer())
-                    .col(ColumnDef::new(Microvm::ExitSignal).integer())
-                    .col(ColumnDef::new(Microvm::TerminationReason).text())
-                    .col(ColumnDef::new(Microvm::TerminationDetail).text())
-                    .col(ColumnDef::new(Microvm::SignalsSent).text())
-                    .col(ColumnDef::new(Microvm::StartedAt).date_time())
-                    .col(ColumnDef::new(Microvm::TerminatedAt).date_time())
-                    .foreign_key(
-                        ForeignKey::create()
-                            .from(Microvm::Table, Microvm::SandboxId)
-                            .to(Sandbox::Table, Sandbox::Id)
-                            .on_delete(ForeignKeyAction::Cascade),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .from(Microvm::Table, Microvm::SupervisorId)
-                            .to(Supervisor::Table, Supervisor::Id)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
@@ -225,10 +178,7 @@ impl MigrationTrait for Migration {
             .drop_table(Table::drop().table(SandboxMetric::Table).to_owned())
             .await?;
         manager
-            .drop_table(Table::drop().table(Microvm::Table).to_owned())
-            .await?;
-        manager
-            .drop_table(Table::drop().table(Supervisor::Table).to_owned())
+            .drop_table(Table::drop().table(Run::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(Sandbox::Table).to_owned())

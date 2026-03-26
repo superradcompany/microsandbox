@@ -2,7 +2,7 @@
 //!
 //! The guest agent (agentd) writes `/.msb/heartbeat.json` every 5 seconds.
 //! On the host, this file appears in the sandbox runtime directory via the
-//! virtiofs mount. The supervisor reads it to detect idle sandboxes.
+//! virtiofs mount. The sandbox process reads it to detect idle sandboxes.
 
 use std::path::{Path, PathBuf};
 

@@ -19,7 +19,7 @@ pub struct SecretsConfig {
 }
 
 /// A single secret entry (serializable form passed to the network engine).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SecretEntry {
     /// Environment variable name exposed to the sandbox (holds the placeholder).
     pub env_var: String,
@@ -92,18 +92,36 @@ pub enum ViolationAction {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl std::fmt::Debug for SecretEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretEntry")
+            .field("env_var", &self.env_var)
+            .field("value", &"[REDACTED]")
+            .field("placeholder", &self.placeholder)
+            .field("allowed_hosts", &self.allowed_hosts)
+            .field("injection", &self.injection)
+            .field("require_tls_identity", &self.require_tls_identity)
+            .finish()
+    }
+}
+
 impl HostPattern {
     /// Check if a hostname matches this pattern.
+    ///
+    /// Uses ASCII case-insensitive comparison to avoid `to_lowercase()`
+    /// allocations (DNS hostnames are ASCII per RFC 4343).
     pub fn matches(&self, hostname: &str) -> bool {
-        let hostname = hostname.to_lowercase();
         match self {
-            HostPattern::Exact(h) => hostname == h.to_lowercase(),
+            HostPattern::Exact(h) => hostname.eq_ignore_ascii_case(h),
             HostPattern::Wildcard(pattern) => {
-                let pattern = pattern.to_lowercase();
                 if let Some(suffix) = pattern.strip_prefix("*.") {
-                    hostname == suffix || hostname.ends_with(&format!(".{suffix}"))
+                    hostname.eq_ignore_ascii_case(suffix)
+                        || (hostname.len() > suffix.len() + 1
+                            && hostname.as_bytes()[hostname.len() - suffix.len() - 1] == b'.'
+                            && hostname[hostname.len() - suffix.len()..]
+                                .eq_ignore_ascii_case(suffix))
                 } else {
-                    hostname == pattern
+                    hostname.eq_ignore_ascii_case(pattern)
                 }
             }
             HostPattern::Any => true,

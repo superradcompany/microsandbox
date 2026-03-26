@@ -2,6 +2,7 @@
 
 pub mod index;
 pub mod size;
+pub mod wake_pipe;
 
 //--------------------------------------------------------------------------------------------------
 // Constants: Directory Layout

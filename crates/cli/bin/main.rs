@@ -7,8 +7,7 @@ use microsandbox_cli::{
         uninstall, volume,
     },
     log_args::{self, LogArgs},
-    microvm_cmd::{self, MicrovmArgs},
-    supervisor_cmd::{self, SupervisorArgs},
+    sandbox_cmd::{self, SandboxArgs},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -33,13 +32,9 @@ struct Cli {
 /// Top-level commands.
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the supervisor process.
+    /// Run the sandbox process (internal).
     #[command(hide = true)]
-    Supervisor(Box<SupervisorArgs>),
-
-    /// Run the microVM process.
-    #[command(hide = true)]
-    Microvm(MicrovmArgs),
+    Sandbox(Box<SandboxArgs>),
 
     /// Create and start a new sandbox.
     Run(run::RunArgs),
@@ -108,7 +103,7 @@ fn main() {
     microsandbox_cli::ui::install_panic_hook();
 
     // Auto-set MSB_PATH so the library can find the msb binary
-    // when spawning supervisor processes.
+    // when spawning sandbox processes.
     // Safety: called before any threads are spawned (single-threaded at this point).
     if std::env::var("MSB_PATH").is_err()
         && let Ok(exe) = std::env::current_exe()
@@ -128,7 +123,8 @@ fn main() {
     log_args::init_tracing(log_level);
 
     let result: Result<(), Box<dyn std::error::Error>> = match cli.command {
-        Commands::Microvm(args) => microvm_cmd::run(args).map_err(Into::into),
+        // Sandbox process entry — never returns (VMM takes over).
+        Commands::Sandbox(args) => sandbox_cmd::run(*args, log_level),
         command => run_async_command(command, log_level),
     };
 
@@ -140,7 +136,7 @@ fn main() {
 
 fn run_async_command(
     command: Commands,
-    log_level: Option<microsandbox::LogLevel>,
+    _log_level: Option<microsandbox::LogLevel>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -148,13 +144,8 @@ fn run_async_command(
 
     runtime.block_on(async move {
         match command {
-            // Hidden internal commands.
-            Commands::Supervisor(args) => supervisor_cmd::run(*args, log_level)
-                .await
-                .map_err(Into::into),
-            Commands::Microvm(_) => unreachable!("microvm is handled before Tokio starts"),
+            Commands::Sandbox(_) => unreachable!("handled before Tokio starts"),
 
-            // User-facing commands.
             Commands::Run(args) => run::run(args).await.map_err(Into::into),
             Commands::Create(args) => create::run(args).await.map_err(Into::into),
             Commands::Start(args) => start::run(args).await.map_err(Into::into),

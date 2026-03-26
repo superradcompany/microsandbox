@@ -60,22 +60,20 @@ impl NetworkBuilder {
     }
 
     /// Publish a TCP port: `host_port` on the host maps to `guest_port` in the guest.
-    pub fn port(mut self, host_port: u16, guest_port: u16) -> Self {
-        self.config.ports.push(PublishedPort {
-            host_port,
-            guest_port,
-            protocol: PortProtocol::Tcp,
-            host_bind: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        });
-        self
+    pub fn port(self, host_port: u16, guest_port: u16) -> Self {
+        self.add_port(host_port, guest_port, PortProtocol::Tcp)
     }
 
     /// Publish a UDP port.
-    pub fn port_udp(mut self, host_port: u16, guest_port: u16) -> Self {
+    pub fn port_udp(self, host_port: u16, guest_port: u16) -> Self {
+        self.add_port(host_port, guest_port, PortProtocol::Udp)
+    }
+
+    fn add_port(mut self, host_port: u16, guest_port: u16, protocol: PortProtocol) -> Self {
         self.config.ports.push(PublishedPort {
             host_port,
             guest_port,
-            protocol: PortProtocol::Udp,
+            protocol,
             host_bind: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         });
         self

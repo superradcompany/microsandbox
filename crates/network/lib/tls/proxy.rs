@@ -59,24 +59,14 @@ async fn tls_proxy_task(
     tls_state: Arc<TlsState>,
 ) -> io::Result<()> {
     // Phase 0: Buffer initial data to extract SNI from ClientHello.
-    let mut initial_buf = Vec::with_capacity(CLIENT_HELLO_BUF_SIZE);
-    let sni_name = loop {
-        let data = from_smoltcp
-            .recv()
-            .await
-            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed"))?;
-        initial_buf.extend_from_slice(&data);
-
-        if let Some(name) = sni::extract_sni(&initial_buf) {
-            break name;
-        }
-        if initial_buf.len() >= CLIENT_HELLO_BUF_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "ClientHello too large or no SNI found",
-            ));
-        }
-    };
+    // Timeout prevents a slow/malicious guest from holding a proxy slot indefinitely.
+    let sni_name = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        extract_sni_from_channel(&mut from_smoltcp),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "SNI extraction timed out"))?;
+    let (sni_name, initial_buf) = sni_name?;
 
     if tls_state.should_bypass(&sni_name) {
         tracing::debug!(sni = %sni_name, dst = %dst, "TLS bypass");
@@ -150,16 +140,12 @@ async fn intercept_relay(
     // tls_intercepted = true because we're in intercept_relay (not bypass).
     let secrets_handler = SecretsHandler::new(&tls_state.secrets, sni_name, true);
 
-    // Generate per-domain certificate.
+    // Get or generate per-domain certificate (includes cached ServerConfig).
     let domain_cert = tls_state.get_or_generate_cert(sni_name);
 
-    // Build guest-facing TLS server.
-    let server_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(domain_cert.chain.clone(), domain_cert.key.clone_key())
+    // Reuse cached ServerConfig — avoids cert chain clone + key clone + rebuild per connection.
+    let mut guest_tls = rustls::ServerConnection::new(domain_cert.server_config.clone())
         .map_err(io::Error::other)?;
-    let mut guest_tls =
-        rustls::ServerConnection::new(Arc::new(server_config)).map_err(io::Error::other)?;
 
     // Feed the buffered ClientHello.
     guest_tls
@@ -167,21 +153,29 @@ async fn intercept_relay(
         .map_err(io::Error::other)?;
     guest_tls.process_new_packets().map_err(io::Error::other)?;
 
-    // Send ServerHello etc. back to guest.
-    flush_to_guest(&mut guest_tls, &to_smoltcp, &shared).await?;
+    // Reusable buffer for TLS output — avoids per-flush heap allocation.
+    let mut tls_buf = Vec::with_capacity(RELAY_BUF_SIZE + 256);
 
-    // Complete guest-facing TLS handshake.
-    while guest_tls.is_handshaking() {
-        let data = from_smoltcp
-            .recv()
-            .await
-            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed"))?;
-        guest_tls
-            .read_tls(&mut &data[..])
-            .map_err(io::Error::other)?;
-        guest_tls.process_new_packets().map_err(io::Error::other)?;
-        flush_to_guest(&mut guest_tls, &to_smoltcp, &shared).await?;
-    }
+    // Send ServerHello etc. back to guest.
+    flush_to_guest(&mut guest_tls, &to_smoltcp, &shared, &mut tls_buf).await?;
+
+    // Complete guest-facing TLS handshake with timeout to prevent resource exhaustion.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while guest_tls.is_handshaking() {
+            let data = from_smoltcp
+                .recv()
+                .await
+                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed"))?;
+            guest_tls
+                .read_tls(&mut &data[..])
+                .map_err(io::Error::other)?;
+            guest_tls.process_new_packets().map_err(io::Error::other)?;
+            flush_to_guest(&mut guest_tls, &to_smoltcp, &shared, &mut tls_buf).await?;
+        }
+        Ok::<_, io::Error>(())
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))??;
 
     // Connect to real server with TLS.
     let server_stream = TcpStream::connect(dst).await?;
@@ -250,7 +244,7 @@ async fn intercept_relay(
                             .writer()
                             .write_all(&server_buf[..n])
                             .map_err(io::Error::other)?;
-                        flush_to_guest(&mut guest_tls, &to_smoltcp, &shared).await?;
+                        flush_to_guest(&mut guest_tls, &to_smoltcp, &shared, &mut tls_buf).await?;
                     }
                     Err(e) => return Err(e),
                 }
@@ -261,19 +255,47 @@ async fn intercept_relay(
     Ok(())
 }
 
+/// Buffer channel data until a complete ClientHello with SNI is received.
+async fn extract_sni_from_channel(
+    from_smoltcp: &mut mpsc::Receiver<Bytes>,
+) -> io::Result<(String, Vec<u8>)> {
+    let mut initial_buf = Vec::with_capacity(CLIENT_HELLO_BUF_SIZE);
+    loop {
+        let data = from_smoltcp
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed"))?;
+        initial_buf.extend_from_slice(&data);
+
+        if let Some(name) = sni::extract_sni(&initial_buf) {
+            return Ok((name, initial_buf));
+        }
+        if initial_buf.len() >= CLIENT_HELLO_BUF_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "ClientHello too large or no SNI found",
+            ));
+        }
+    }
+}
+
 /// Flush pending TLS output from the guest-facing rustls connection
 /// to the smoltcp channel.
+///
+/// Reuses `buf` across calls to avoid per-flush heap allocation. The
+/// buffer grows to steady-state capacity on the first call and stays there.
 async fn flush_to_guest(
     guest_tls: &mut rustls::ServerConnection,
     to_smoltcp: &mpsc::Sender<Bytes>,
     shared: &SharedState,
+    buf: &mut Vec<u8>,
 ) -> io::Result<()> {
     if guest_tls.wants_write() {
-        let mut output = Vec::new();
-        guest_tls.write_tls(&mut output)?;
-        if !output.is_empty() {
+        buf.clear();
+        guest_tls.write_tls(buf)?;
+        if !buf.is_empty() {
             to_smoltcp
-                .send(Bytes::from(output))
+                .send(Bytes::copy_from_slice(buf))
                 .await
                 .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "channel closed"))?;
             shared.proxy_wake.wake();

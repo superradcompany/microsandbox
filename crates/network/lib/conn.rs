@@ -4,12 +4,13 @@
 //! between smoltcp sockets and proxy task channels, and cleans up closed
 //! connections.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 
 use bytes::Bytes;
 use smoltcp::iface::{SocketHandle, SocketSet};
 use smoltcp::socket::tcp;
+use smoltcp::wire::IpListenEndpoint;
 use tokio::sync::mpsc;
 
 //--------------------------------------------------------------------------------------------------
@@ -48,12 +49,20 @@ const RELAY_BUF_SIZE: usize = 16384;
 pub struct ConnectionTracker {
     /// Active connections keyed by smoltcp socket handle.
     connections: HashMap<SocketHandle, Connection>,
+    /// Secondary index for O(1) duplicate-SYN detection by (src, dst) 4-tuple.
+    connection_keys: HashSet<(SocketAddr, SocketAddr)>,
     /// Max concurrent connections (from NetworkConfig).
     max_connections: usize,
 }
 
+/// Maximum number of poll iterations to attempt flushing remaining data
+/// after the proxy task has exited before force-aborting the socket.
+const DEFERRED_CLOSE_LIMIT: u16 = 64;
+
 /// Internal state for a single tracked TCP connection.
 struct Connection {
+    /// Guest source address (from the guest's SYN).
+    src: SocketAddr,
     /// Original destination (from the guest's SYN).
     dst: SocketAddr,
     /// Sends data from smoltcp socket to proxy task (guest → server).
@@ -67,6 +76,8 @@ struct Connection {
     proxy_spawned: bool,
     /// Partial data from proxy that couldn't be fully written to smoltcp socket.
     write_buf: Option<(Bytes, usize)>,
+    /// Counter for deferred close attempts (prevents stalling forever).
+    close_attempts: u16,
 }
 
 /// Proxy-side channel ends, created at socket creation time and taken when
@@ -83,8 +94,6 @@ struct ProxyChannels {
 /// Returned by [`ConnectionTracker::take_new_connections()`]. The poll loop
 /// passes this to the proxy task spawner.
 pub struct NewConnection {
-    /// Socket handle (for logging/debugging).
-    pub handle: SocketHandle,
     /// Original destination the guest was connecting to.
     pub dst: SocketAddr,
     /// Receive data from smoltcp socket (guest → proxy task).
@@ -102,22 +111,32 @@ impl ConnectionTracker {
     pub fn new(max_connections: Option<usize>) -> Self {
         Self {
             connections: HashMap::new(),
+            connection_keys: HashSet::new(),
             max_connections: max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS),
         }
     }
 
-    /// Returns `true` if a tracked socket already exists for this destination.
-    pub fn has_socket_for(&self, dst: &SocketAddr) -> bool {
-        self.connections.values().any(|c| c.dst == *dst)
+    /// Returns `true` if a tracked socket already exists for this exact
+    /// connection (same source AND destination). O(1) via HashSet lookup.
+    pub fn has_socket_for(&self, src: &SocketAddr, dst: &SocketAddr) -> bool {
+        self.connection_keys.contains(&(*src, *dst))
     }
 
     /// Create a smoltcp TCP socket for an incoming SYN and register it.
     ///
-    /// The socket is put into LISTEN state on the destination port so smoltcp
-    /// will complete the three-way handshake when it processes the SYN frame.
+    /// The socket is put into LISTEN state on the destination IP + port so
+    /// smoltcp will complete the three-way handshake when it processes the
+    /// SYN frame. Binding to the specific destination IP (not just port)
+    /// prevents socket dispatch ambiguity when multiple connections target
+    /// different IPs on the same port.
     ///
     /// Returns `false` if at `max_connections` limit.
-    pub fn create_tcp_socket(&mut self, dst: SocketAddr, sockets: &mut SocketSet<'_>) -> bool {
+    pub fn create_tcp_socket(
+        &mut self,
+        src: SocketAddr,
+        dst: SocketAddr,
+        sockets: &mut SocketSet<'_>,
+    ) -> bool {
         if self.connections.len() >= self.max_connections {
             return false;
         }
@@ -127,9 +146,14 @@ impl ConnectionTracker {
         let tx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_TX_BUF_SIZE]);
         let mut socket = tcp::Socket::new(rx_buf, tx_buf);
 
-        // Listen on the destination port. With any_ip mode, smoltcp will
-        // accept the SYN regardless of destination IP.
-        if socket.listen(dst.port()).is_err() {
+        // Listen on the specific destination IP + port. With any_ip mode,
+        // binding to the IP ensures the correct socket accepts each SYN
+        // when multiple connections target the same port on different IPs.
+        let listen_endpoint = IpListenEndpoint {
+            addr: Some(dst.ip().into()),
+            port: dst.port(),
+        };
+        if socket.listen(listen_endpoint).is_err() {
             return false;
         }
 
@@ -142,9 +166,11 @@ impl ConnectionTracker {
         // proxy → smoltcp (server sends data, proxy relays to guest):
         let (from_proxy_tx, from_proxy_rx) = mpsc::channel(CHANNEL_CAPACITY);
 
+        self.connection_keys.insert((src, dst));
         self.connections.insert(
             handle,
             Connection {
+                src,
                 dst,
                 to_proxy: to_proxy_tx,
                 from_proxy: from_proxy_rx,
@@ -154,6 +180,7 @@ impl ConnectionTracker {
                 }),
                 proxy_spawned: false,
                 write_buf: None,
+                close_attempts: 0,
             },
         );
 
@@ -181,6 +208,13 @@ impl ConnectionTracker {
                 write_proxy_data(socket, conn);
                 if conn.write_buf.is_none() {
                     socket.close();
+                } else {
+                    // Abort if we've been trying to flush for too long
+                    // (guest stopped reading, socket send buffer full).
+                    conn.close_attempts += 1;
+                    if conn.close_attempts >= DEFERRED_CLOSE_LIMIT {
+                        socket.abort();
+                    }
                 }
                 continue;
             }
@@ -221,7 +255,6 @@ impl ConnectionTracker {
 
                 if let Some(channels) = conn.proxy_channels.take() {
                     new.push(NewConnection {
-                        handle,
                         dst: conn.dst,
                         from_smoltcp: channels.from_smoltcp,
                         to_smoltcp: channels.to_smoltcp,
@@ -234,31 +267,22 @@ impl ConnectionTracker {
     }
 
     /// Remove closed connections and their sockets.
+    ///
+    /// Only removes sockets in the `Closed` state. Sockets in `TimeWait`
+    /// are left for smoltcp to handle naturally (2*MSL timer), preventing
+    /// delayed duplicate segments from being accepted by a reused port.
     pub fn cleanup_closed(&mut self, sockets: &mut SocketSet<'_>) {
-        let closed: Vec<SocketHandle> = self
-            .connections
-            .keys()
-            .filter(|&&handle| {
-                let socket = sockets.get::<tcp::Socket>(handle);
-                matches!(socket.state(), tcp::State::Closed | tcp::State::TimeWait)
-            })
-            .copied()
-            .collect();
-
-        for handle in closed {
-            self.connections.remove(&handle);
-            sockets.remove(handle);
-        }
-    }
-
-    /// Number of active connections.
-    pub fn len(&self) -> usize {
-        self.connections.len()
-    }
-
-    /// Returns `true` if no connections are tracked.
-    pub fn is_empty(&self) -> bool {
-        self.connections.is_empty()
+        let keys = &mut self.connection_keys;
+        self.connections.retain(|&handle, conn| {
+            let socket = sockets.get::<tcp::Socket>(handle);
+            if matches!(socket.state(), tcp::State::Closed) {
+                keys.remove(&(conn.src, conn.dst));
+                sockets.remove(handle);
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 

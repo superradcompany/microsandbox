@@ -52,13 +52,9 @@ pub struct Model {
 /// Relations for the sandbox entity.
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    /// A sandbox has many supervisors.
-    #[sea_orm(has_many = "super::supervisor::Entity")]
-    Supervisor,
-
-    /// A sandbox has many microvms.
-    #[sea_orm(has_many = "super::microvm::Entity")]
-    Microvm,
+    /// A sandbox has many runs.
+    #[sea_orm(has_many = "super::run::Entity")]
+    Run,
 
     /// A sandbox has many metrics.
     #[sea_orm(has_many = "super::sandbox_metric::Entity")]
@@ -69,15 +65,9 @@ pub enum Relation {
     Snapshot,
 }
 
-impl Related<super::supervisor::Entity> for Entity {
+impl Related<super::run::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Supervisor.def()
-    }
-}
-
-impl Related<super::microvm::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Microvm.def()
+        Relation::Run.def()
     }
 }
 

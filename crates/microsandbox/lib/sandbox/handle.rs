@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::{
     MicrosandboxResult, agent::AgentClient, db::entity::sandbox as sandbox_entity,
-    runtime::SupervisorSpawnMode,
+    runtime::SpawnMode,
 };
 
 use super::{Sandbox, SandboxConfig, SandboxStatus};
@@ -31,8 +31,7 @@ pub struct SandboxHandle {
     config_json: String,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
-    supervisor_pid: Option<i32>,
-    vm_pid: Option<i32>,
+    pid: Option<i32>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -40,12 +39,8 @@ pub struct SandboxHandle {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxHandle {
-    /// Create a handle from a database entity model and its resolved process PIDs.
-    pub(super) fn new(
-        model: sandbox_entity::Model,
-        supervisor_pid: Option<i32>,
-        vm_pid: Option<i32>,
-    ) -> Self {
+    /// Create a handle from a database entity model and its resolved process PID.
+    pub(super) fn new(model: sandbox_entity::Model, pid: Option<i32>) -> Self {
         Self {
             db_id: model.id,
             name: model.name,
@@ -53,8 +48,7 @@ impl SandboxHandle {
             config_json: model.config,
             created_at: model.created_at.map(|dt| dt.and_utc()),
             updated_at: model.updated_at.map(|dt| dt.and_utc()),
-            supervisor_pid,
-            vm_pid,
+            pid,
         }
     }
 
@@ -96,20 +90,20 @@ impl SandboxHandle {
     /// Boots the VM using the persisted configuration and pinned rootfs state.
     /// The handle remains usable if start fails.
     pub async fn start(&self) -> MicrosandboxResult<Sandbox> {
-        Sandbox::start_with_mode(&self.name, SupervisorSpawnMode::Attached).await
+        Sandbox::start_with_mode(&self.name, SpawnMode::Attached).await
     }
 
     /// Start this sandbox in detached/background mode.
     ///
     /// The handle remains usable if start fails.
     pub async fn start_detached(&self) -> MicrosandboxResult<Sandbox> {
-        Sandbox::start_with_mode(&self.name, SupervisorSpawnMode::Detached).await
+        Sandbox::start_with_mode(&self.name, SpawnMode::Detached).await
     }
 
-    /// Connect to a running sandbox's supervisor via the agent relay socket.
+    /// Connect to a running sandbox via the agent relay socket.
     ///
     /// Returns a [`Sandbox`] handle that communicates through the relay
-    /// without owning the supervisor lifecycle. The sandbox will continue
+    /// without owning the process lifecycle. The sandbox will continue
     /// running after this handle is dropped.
     pub async fn connect(&self) -> MicrosandboxResult<Sandbox> {
         if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
@@ -137,37 +131,25 @@ impl SandboxHandle {
     }
 
     /// Stop the sandbox gracefully (SIGTERM).
-    ///
-    /// Signals the running supervisor with SIGTERM, or falls back to the
-    /// microVM process group if the supervisor is already gone.
     pub async fn stop(&self) -> MicrosandboxResult<()> {
         if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
             return Ok(());
         }
 
-        signal_pids(
-            self.supervisor_pid,
-            self.vm_pid,
-            nix::sys::signal::Signal::SIGTERM,
-        )?;
+        signal_pid(self.pid, nix::sys::signal::Signal::SIGTERM)?;
         Ok(())
     }
 
     /// Kill the sandbox immediately (SIGKILL).
     ///
-    /// Signals the running supervisor with SIGKILL, or falls back to the
-    /// microVM process group if the supervisor is already gone. Waits for the
-    /// process to exit (up to 5 seconds) and marks the sandbox as `Stopped`.
+    /// Waits for the process to exit (up to 5 seconds) and marks the
+    /// sandbox as `Stopped`.
     pub async fn kill(&mut self) -> MicrosandboxResult<()> {
         if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
             return Ok(());
         }
 
-        let pids = signal_pids(
-            self.supervisor_pid,
-            self.vm_pid,
-            nix::sys::signal::Signal::SIGKILL,
-        )?;
+        let pids = signal_pid(self.pid, nix::sys::signal::Signal::SIGKILL)?;
 
         if !pids.is_empty() {
             wait_for_exit(&pids, std::time::Duration::from_secs(5)).await;
@@ -218,21 +200,12 @@ impl SandboxHandle {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Send a signal to the supervisor or microVM process from cached PIDs.
+/// Send a signal to the sandbox process.
 ///
 /// Returns the PIDs that were signalled.
-fn signal_pids(
-    supervisor_pid: Option<i32>,
-    vm_pid: Option<i32>,
-    signal: nix::sys::signal::Signal,
-) -> MicrosandboxResult<Vec<i32>> {
-    if let Some(pid) = supervisor_pid.filter(|pid| super::pid_is_alive(*pid)) {
+fn signal_pid(pid: Option<i32>, signal: nix::sys::signal::Signal) -> MicrosandboxResult<Vec<i32>> {
+    if let Some(pid) = pid.filter(|pid| super::pid_is_alive(*pid)) {
         nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal)?;
-        return Ok(vec![pid]);
-    }
-
-    if let Some(pid) = vm_pid.filter(|pid| super::pid_is_alive(*pid)) {
-        nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid), signal)?;
         return Ok(vec![pid]);
     }
 

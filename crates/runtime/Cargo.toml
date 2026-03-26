@@ -17,15 +17,17 @@ prebuilt = ["microsandbox-filesystem/prebuilt"]
 net = ["dep:microsandbox-network", "msb_krun/net"]
 
 [dependencies]
+bytes = { workspace = true }
 chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
+crossbeam-queue = { workspace = true }
 libc.workspace = true
 microsandbox-db = { version = "0.3.2", path = "../db" }
 microsandbox-filesystem = { version = "0.3.2", path = "../filesystem", default-features = false }
 microsandbox-network = { version = "0.3.2", path = "../network", optional = true }
 microsandbox-protocol = { version = "0.3.2", path = "../protocol" }
 microsandbox-utils = { version = "0.3.2", path = "../utils" }
-msb_krun = { version = "0.1.8", features = ["blk"] }
+msb_krun = { version = "0.1.9", features = ["blk"] }
 nix = { workspace = true, features = ["process", "signal"] }
 rustls = { workspace = true }
 sea-orm.workspace = true
