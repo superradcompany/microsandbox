@@ -1,11 +1,11 @@
 [package]
-name = "oci-root"
+name = "root-bind"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [[bin]]
-name = "oci-root"
+name = "root-bind"
 path = "bin/main.rs"
 
 [dependencies]

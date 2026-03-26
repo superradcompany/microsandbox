@@ -11,15 +11,15 @@ members = [
     "crates/protocol",
     "crates/runtime",
     "crates/utils",
-    "examples/bind-root",
-    "examples/block-root",
-    "examples/named-volume",
     "examples/net-basic",
     "examples/net-dns",
     "examples/net-policy",
     "examples/net-secrets",
     "examples/net-tls",
-    "examples/oci-root",
+    "examples/root-bind",
+    "examples/root-block",
+    "examples/root-oci",
+    "examples/volume-named",
 ]
 
 [workspace.package]

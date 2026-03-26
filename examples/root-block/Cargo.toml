@@ -1,11 +1,11 @@
 [package]
-name = "bind-root"
+name = "root-block"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [[bin]]
-name = "bind-root"
+name = "root-block"
 path = "bin/main.rs"
 
 [dependencies]

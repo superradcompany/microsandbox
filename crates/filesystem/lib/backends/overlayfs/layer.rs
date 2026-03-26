@@ -60,6 +60,10 @@ pub(crate) fn open_child_beneath(
 }
 
 /// Open a child entry in a layer directory with containment.
+///
+/// Tries `openat(O_NOFOLLOW)` first. If the target is a symlink, macOS
+/// returns ELOOP — fall back to `O_SYMLINK` which opens the symlink itself
+/// without following it.
 #[cfg(target_os = "macos")]
 pub(crate) fn open_child_beneath(
     parent_fd: RawFd,
@@ -72,6 +76,21 @@ pub(crate) fn open_child_beneath(
             parent_fd,
             name.as_ptr(),
             flags | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd >= 0 {
+        return Ok(fd);
+    }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() != Some(libc::ELOOP) {
+        return Err(platform::linux_error(err));
+    }
+    // Symlink — reopen with O_SYMLINK to get an fd to the link itself.
+    let fd = unsafe {
+        libc::openat(
+            parent_fd,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK,
         )
     };
     if fd < 0 {

@@ -306,14 +306,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bind-root"
-version = "0.1.0"
-dependencies = [
- "microsandbox",
- "tokio",
-]
-
-[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -347,14 +339,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
-]
-
-[[package]]
-name = "block-root"
-version = "0.1.0"
-dependencies = [
- "microsandbox",
- "tokio",
 ]
 
 [[package]]
@@ -2608,14 +2592,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "named-volume"
-version = "0.1.0"
-dependencies = [
- "microsandbox",
- "tokio",
-]
-
-[[package]]
 name = "native-tls"
 version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2791,14 +2767,6 @@ dependencies = [
  "tokio",
  "tracing",
  "unicase",
-]
-
-[[package]]
-name = "oci-root"
-version = "0.1.0"
-dependencies = [
- "microsandbox",
- "tokio",
 ]
 
 [[package]]
@@ -3520,6 +3488,30 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "root-bind"
+version = "0.1.0"
+dependencies = [
+ "microsandbox",
+ "tokio",
+]
+
+[[package]]
+name = "root-block"
+version = "0.1.0"
+dependencies = [
+ "microsandbox",
+ "tokio",
+]
+
+[[package]]
+name = "root-oci"
+version = "0.1.0"
+dependencies = [
+ "microsandbox",
+ "tokio",
 ]
 
 [[package]]
@@ -5038,6 +5030,14 @@ checksum = "506c62fdf617a5176827c2f9afbcf1be155b03a9b4bf9617a60dbc07e3a1642f"
 dependencies = [
  "bitflags 1.3.2",
  "libc",
+]
+
+[[package]]
+name = "volume-named"
+version = "0.1.0"
+dependencies = [
+ "microsandbox",
+ "tokio",
 ]
 
 [[package]]
