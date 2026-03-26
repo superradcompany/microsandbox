@@ -20,7 +20,7 @@ ipnetwork = { workspace = true }
 libc = { workspace = true }
 lru = { workspace = true }
 microsandbox-utils = { version = "0.3.2", path = "../utils" }
-msb_krun = { version = "0.1.8", features = ["net"] }
+msb_krun = { version = "0.1.9", features = ["net"] }
 rcgen = { workspace = true }
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
