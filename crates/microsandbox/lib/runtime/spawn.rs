@@ -106,11 +106,15 @@ pub async fn spawn_sandbox(
         &libkrunfw_path,
     ));
 
+    // Prevent the sandbox process from inheriting the parent's terminal on
+    // stdin — the VMM's implicit console auto-detects terminals and sets raw
+    // mode, which corrupts the parent's terminal output (\n without \r).
+    cmd.stdin(Stdio::null());
+
     if mode == SpawnMode::Detached {
         // Detached sandboxes outlive the creating CLI process, so the
-        // supervisor must not stay coupled to the foreground job or terminal.
+        // sandbox must not stay coupled to the foreground job or terminal.
         cmd.process_group(0);
-        cmd.stdin(Stdio::null());
     }
 
     // Capture stdout (for startup JSON), inherit stderr so errors are visible.
