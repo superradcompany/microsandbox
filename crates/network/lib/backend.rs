@@ -74,11 +74,22 @@ impl NetBackend for SmoltcpBackend {
     fn read_frame(&mut self, buf: &mut [u8]) -> Result<usize, ReadError> {
         let frame = self.shared.rx_ring.pop().ok_or(ReadError::NothingRead)?;
 
+        let total_len = VIRTIO_NET_HDR_LEN + frame.len();
+        if total_len > buf.len() {
+            // Frame too large for the buffer — drop it to avoid panicking.
+            tracing::debug!(
+                frame_len = frame.len(),
+                buf_len = buf.len(),
+                "dropping oversized frame from rx_ring"
+            );
+            return Err(ReadError::NothingRead);
+        }
+
         // Prepend zeroed virtio-net header.
         buf[..VIRTIO_NET_HDR_LEN].fill(0);
-        buf[VIRTIO_NET_HDR_LEN..VIRTIO_NET_HDR_LEN + frame.len()].copy_from_slice(&frame);
+        buf[VIRTIO_NET_HDR_LEN..total_len].copy_from_slice(&frame);
 
-        Ok(VIRTIO_NET_HDR_LEN + frame.len())
+        Ok(total_len)
     }
 
     /// No partial writes — queue push is atomic.

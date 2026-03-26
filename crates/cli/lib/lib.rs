@@ -1,6 +1,5 @@
 //! `microsandbox-cli` provides the `msb` CLI binary for managing microsandbox
-//! environments. Includes hidden runtime subcommands (`supervisor`, `microvm`)
-//! used internally by the `microsandbox` library.
+//! environments.
 
 #![warn(missing_docs)]
 
@@ -10,8 +9,7 @@
 
 pub mod commands;
 pub mod log_args;
-pub mod microvm_cmd;
+pub mod sandbox_cmd;
 pub mod styles;
-pub mod supervisor_cmd;
 pub mod tree;
 pub mod ui;

@@ -3,6 +3,8 @@
 //! Scans decrypted plaintext for placeholder strings and replaces them
 //! with real secret values, but only when the destination host is allowed.
 
+use std::borrow::Cow;
+
 use super::config::{SecretsConfig, ViolationAction};
 
 //--------------------------------------------------------------------------------------------------
@@ -20,6 +22,8 @@ pub struct SecretsHandler {
     all_placeholders: Vec<String>,
     /// Violation action.
     on_violation: ViolationAction,
+    /// Whether any ineligible secrets exist (pre-computed for fast-path skip).
+    has_ineligible: bool,
     /// Whether this connection is TLS-intercepted (not bypass).
     tls_intercepted: bool,
 }
@@ -69,10 +73,13 @@ impl SecretsHandler {
             }
         }
 
+        let has_ineligible = eligible.len() < all_placeholders.len();
+
         Self {
             eligible,
             all_placeholders,
             on_violation: config.on_violation.clone(),
+            has_ineligible,
             tls_intercepted,
         }
     }
@@ -87,30 +94,47 @@ impl SecretsHandler {
     ///
     /// Returns `None` if a violation is detected (placeholder going to a
     /// disallowed host) or `BlockAndTerminate` is triggered.
-    pub fn substitute(&self, data: &[u8]) -> Option<Vec<u8>> {
-        // Check for violations: any placeholder present but NOT in eligible set.
-        if self.has_violation(data) {
-            match self.on_violation {
-                ViolationAction::Block => return None,
-                ViolationAction::BlockAndLog => {
-                    tracing::warn!("secret violation: placeholder detected for disallowed host");
-                    return None;
-                }
-                ViolationAction::BlockAndTerminate => {
-                    tracing::error!(
-                        "secret violation: placeholder detected for disallowed host — terminating"
-                    );
-                    return None;
+    pub fn substitute<'a>(&self, data: &'a [u8]) -> Option<Cow<'a, [u8]>> {
+        // Fast path: skip violation check when no ineligible secrets exist.
+        if self.has_ineligible {
+            let text = String::from_utf8_lossy(data);
+            if self.has_violation(&text) {
+                match self.on_violation {
+                    ViolationAction::Block => return None,
+                    ViolationAction::BlockAndLog => {
+                        tracing::warn!(
+                            "secret violation: placeholder detected for disallowed host"
+                        );
+                        return None;
+                    }
+                    ViolationAction::BlockAndTerminate => {
+                        tracing::error!(
+                            "secret violation: placeholder detected for disallowed host — terminating"
+                        );
+                        return None;
+                    }
                 }
             }
         }
 
         if self.eligible.is_empty() {
-            return Some(data.to_vec());
+            // No substitution needed — return borrowed slice (zero-copy).
+            return Some(Cow::Borrowed(data));
         }
 
+        // Split raw bytes at the header boundary BEFORE converting to owned strings.
+        // This avoids position shifts from from_utf8_lossy replacement chars.
         let boundary = find_header_boundary(data);
-        let mut output = String::from_utf8_lossy(data).into_owned();
+        let (header_bytes, body_bytes) = match boundary {
+            Some(pos) => (&data[..pos], &data[pos..]),
+            None => (data, &[] as &[u8]),
+        };
+        let mut header_str = String::from_utf8_lossy(header_bytes).into_owned();
+        let mut body_str = if boundary.is_some() {
+            String::from_utf8_lossy(body_bytes).into_owned()
+        } else {
+            String::new()
+        };
 
         for secret in &self.eligible {
             // Skip secrets that require TLS identity on non-intercepted connections.
@@ -118,41 +142,37 @@ impl SecretsHandler {
                 continue;
             }
 
-            if let Some(boundary_pos) = boundary {
-                let (headers, body) = output.split_at(boundary_pos);
-                let mut result = String::new();
-
+            if boundary.is_some() {
                 // Header portion: substitute based on headers/basic_auth/query_params scopes.
                 if secret.inject_headers || secret.inject_basic_auth || secret.inject_query_params {
-                    result = substitute_in_headers(
-                        headers,
-                        &secret.placeholder,
-                        &secret.value,
-                        secret.inject_headers,
-                        secret.inject_basic_auth,
-                        secret.inject_query_params,
-                    );
-                } else {
-                    result.push_str(headers);
+                    // Guard: only allocate a new String if the placeholder is actually present.
+                    if header_str.contains(&secret.placeholder) {
+                        header_str = substitute_in_headers(
+                            &header_str,
+                            &secret.placeholder,
+                            &secret.value,
+                            secret.inject_headers,
+                            secret.inject_basic_auth,
+                            secret.inject_query_params,
+                        );
+                    }
                 }
 
                 // Body portion.
-                if secret.inject_body {
-                    result.push_str(&body.replace(&secret.placeholder, &secret.value));
-                } else {
-                    result.push_str(body);
+                if secret.inject_body && body_str.contains(&secret.placeholder) {
+                    body_str = body_str.replace(&secret.placeholder, &secret.value);
                 }
-
-                output = result;
             } else {
                 // No boundary found — treat entire message as headers.
-                if secret.inject_headers {
-                    output = output.replace(&secret.placeholder, &secret.value);
+                if secret.inject_headers && header_str.contains(&secret.placeholder) {
+                    header_str = header_str.replace(&secret.placeholder, &secret.value);
                 }
             }
         }
 
-        Some(output.into_bytes())
+        let mut output = header_str;
+        output.push_str(&body_str);
+        Some(Cow::Owned(output.into_bytes()))
     }
 
     /// Returns true if no secrets are configured.
@@ -163,17 +183,16 @@ impl SecretsHandler {
 
 impl SecretsHandler {
     /// Check if any placeholder appears in data for a host that isn't allowed.
-    fn has_violation(&self, data: &[u8]) -> bool {
-        let text = String::from_utf8_lossy(data);
-        let eligible_placeholders: Vec<&str> = self
-            .eligible
-            .iter()
-            .map(|s| s.placeholder.as_str())
-            .collect();
+    fn has_violation(&self, text: &str) -> bool {
+        // Fast path: if all placeholders have matching eligible entries, no
+        // violation is possible (every secret is allowed for this host).
+        if self.eligible.len() == self.all_placeholders.len() {
+            return false;
+        }
 
         for placeholder in &self.all_placeholders {
             if text.contains(placeholder.as_str())
-                && !eligible_placeholders.contains(&placeholder.as_str())
+                && !self.eligible.iter().any(|s| s.placeholder == *placeholder)
             {
                 return true;
             }
@@ -215,9 +234,10 @@ fn substitute_in_headers(
             // Request line — substitute in query portion.
             result.push_str(&line.replace(placeholder, value));
         } else if inject_basic_auth
-            && (line.starts_with("Authorization:")
-                || line.starts_with("authorization:")
-                || line.to_lowercase().starts_with("authorization:"))
+            && line
+                .as_bytes()
+                .get(..14)
+                .is_some_and(|b| b.eq_ignore_ascii_case(b"authorization:"))
         {
             // Authorization header — substitute.
             result.push_str(&line.replace(placeholder, value));
@@ -271,7 +291,7 @@ mod tests {
         let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
         let output = handler.substitute(input).unwrap();
         assert_eq!(
-            String::from_utf8(output).unwrap(),
+            String::from_utf8(output.into_owned()).unwrap(),
             "GET / HTTP/1.1\r\nAuthorization: Bearer real-secret\r\n\r\n"
         );
     }
@@ -292,7 +312,11 @@ mod tests {
 
         let input = b"POST / HTTP/1.1\r\n\r\n{\"key\": \"$KEY\"}";
         let output = handler.substitute(input).unwrap();
-        assert!(String::from_utf8(output).unwrap().contains("$KEY"));
+        assert!(
+            String::from_utf8(output.into_owned())
+                .unwrap()
+                .contains("$KEY")
+        );
     }
 
     #[test]
@@ -305,7 +329,7 @@ mod tests {
         let input = b"POST / HTTP/1.1\r\n\r\n{\"key\": \"$KEY\"}";
         let output = handler.substitute(input).unwrap();
         assert_eq!(
-            String::from_utf8(output).unwrap(),
+            String::from_utf8(output.into_owned()).unwrap(),
             "POST / HTTP/1.1\r\n\r\n{\"key\": \"real-secret\"}"
         );
     }
@@ -317,7 +341,7 @@ mod tests {
 
         let input = b"GET / HTTP/1.1\r\n\r\n";
         let output = handler.substitute(input).unwrap();
-        assert_eq!(output, input);
+        assert_eq!(&*output, input);
     }
 
     #[test]
@@ -329,7 +353,11 @@ mod tests {
         let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
         let output = handler.substitute(input).unwrap();
         // Placeholder should NOT be substituted.
-        assert!(String::from_utf8(output).unwrap().contains("$KEY"));
+        assert!(
+            String::from_utf8(output.into_owned())
+                .unwrap()
+                .contains("$KEY")
+        );
     }
 
     #[test]
@@ -346,7 +374,7 @@ mod tests {
 
         let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nX-Custom: $KEY\r\n\r\n";
         let output = handler.substitute(input).unwrap();
-        let result = String::from_utf8(output).unwrap();
+        let result = String::from_utf8(output.into_owned()).unwrap();
         // Authorization header should be substituted.
         assert!(result.contains("Authorization: Bearer real-secret"));
         // Other headers should NOT be substituted.
@@ -367,7 +395,7 @@ mod tests {
 
         let input = b"GET /api?key=$KEY HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
         let output = handler.substitute(input).unwrap();
-        let result = String::from_utf8(output).unwrap();
+        let result = String::from_utf8(output.into_owned()).unwrap();
         // Request line should be substituted.
         assert!(result.contains("GET /api?key=real-secret HTTP/1.1"));
         // Other headers should NOT be substituted.

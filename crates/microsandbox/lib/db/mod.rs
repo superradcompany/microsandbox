@@ -172,12 +172,11 @@ mod tests {
             "layer",
             "manifest",
             "manifest_layer",
-            "microvm",
+            "run",
             "sandbox",
             "sandbox_image",
             "sandbox_metric",
             "snapshot",
-            "supervisor",
             "volume",
         ];
 

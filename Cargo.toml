@@ -69,6 +69,7 @@ serde_json = "1.0"
 sha2 = "0.10"
 smoltcp = { version = "0.13", default-features = false }
 tar = "0.4"
+time = "0.3"
 tempfile = "3.15"
 thiserror = "2.0"
 tokio = { version = "1.42", features = ["full"] }
@@ -94,3 +95,6 @@ rustls-pemfile = "2"
 rustls-native-certs = "0.8"
 rcgen = { version = "0.13", features = ["x509-parser"] }
 lru = "0.12"
+
+[patch.crates-io]
+msb_krun = { path = "../libkrun/src/krun" }

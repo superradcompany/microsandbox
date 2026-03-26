@@ -5,10 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-use microsandbox_runtime::{
-    logging::LogLevel,
-    policy::{ChildPolicies, SupervisorPolicy},
-};
+use microsandbox_runtime::{logging::LogLevel, policy::SandboxPolicy};
 use serde::{Deserialize, Serialize};
 
 use microsandbox_image::{ImageConfig, PullPolicy, RegistryAuth};
@@ -56,9 +53,9 @@ pub struct SandboxConfig {
     #[serde(default = "default_memory_mib")]
     pub memory_mib: u32,
 
-    /// Runtime log level for `msb supervisor` and `msb microvm`.
+    /// Runtime log level for the sandbox process.
     ///
-    /// `None` means sandbox runtime processes stay silent.
+    /// `None` means the sandbox process stays silent.
     #[serde(default = "default_log_level")]
     pub log_level: Option<LogLevel>,
 
@@ -127,13 +124,9 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub pull_policy: PullPolicy,
 
-    /// Supervisor lifecycle policy.
+    /// Sandbox lifecycle policy.
     #[serde(default)]
-    pub supervisor_policy: SupervisorPolicy,
-
-    /// Per-child process policies.
-    #[serde(default)]
-    pub child_policies: ChildPolicies,
+    pub policy: SandboxPolicy,
 
     /// Registry authentication for private OCI registries.
     ///
@@ -262,8 +255,7 @@ impl Default for SandboxConfig {
             labels: HashMap::new(),
             stop_signal: None,
             pull_policy: PullPolicy::default(),
-            supervisor_policy: SupervisorPolicy::default(),
-            child_policies: ChildPolicies::default(),
+            policy: SandboxPolicy::default(),
             registry_auth: None,
             replace_existing: false,
             resolved_rootfs_layers: Vec::new(),

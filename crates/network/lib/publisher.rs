@@ -55,6 +55,8 @@ pub struct PortPublisher {
     guest_ipv4: Ipv4Addr,
     /// Ephemeral port counter.
     ephemeral_port: Arc<AtomicU16>,
+    /// Maximum inbound connections (prevents resource exhaustion from host-side floods).
+    max_inbound: usize,
 }
 
 /// An accepted host-side connection waiting to be wired to the guest.
@@ -65,6 +67,10 @@ struct InboundConnection {
     guest_port: u16,
 }
 
+/// Maximum number of poll iterations to attempt flushing remaining data
+/// after the relay task has exited before force-aborting the socket.
+const DEFERRED_CLOSE_LIMIT: u16 = 64;
+
 /// A single inbound connection relay (host socket ↔ smoltcp socket).
 struct InboundRelay {
     handle: SocketHandle,
@@ -74,6 +80,8 @@ struct InboundRelay {
     from_host: mpsc::Receiver<Bytes>,
     /// Partial data that couldn't be fully written to smoltcp socket.
     write_buf: Option<(Bytes, usize)>,
+    /// Counter for deferred close attempts (prevents stalling forever).
+    close_attempts: u16,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -85,7 +93,6 @@ impl PortPublisher {
     pub fn new(
         ports: &[PublishedPort],
         guest_ipv4: Ipv4Addr,
-        shared: Arc<SharedState>,
         tokio_handle: &tokio::runtime::Handle,
     ) -> Self {
         let (inbound_tx, inbound_rx) = mpsc::channel(64);
@@ -96,10 +103,8 @@ impl PortPublisher {
                 let tx = inbound_tx.clone();
                 let bind_addr = SocketAddr::new(port.host_bind, port.host_port);
                 let guest_port = port.guest_port;
-                let shared = shared.clone();
-
                 tokio_handle.spawn(async move {
-                    if let Err(e) = tcp_listener_task(bind_addr, guest_port, tx, shared).await {
+                    if let Err(e) = tcp_listener_task(bind_addr, guest_port, tx).await {
                         tracing::error!(
                             bind = %bind_addr,
                             error = %e,
@@ -117,6 +122,7 @@ impl PortPublisher {
             connections: Vec::new(),
             guest_ipv4,
             ephemeral_port: Arc::new(AtomicU16::new(49152)),
+            max_inbound: 256,
         }
     }
 
@@ -132,6 +138,10 @@ impl PortPublisher {
         tokio_handle: &tokio::runtime::Handle,
     ) {
         while let Ok(conn) = self.inbound_rx.try_recv() {
+            if self.connections.len() >= self.max_inbound {
+                tracing::debug!("published port: max inbound connections reached, rejecting");
+                continue;
+            }
             // Create smoltcp TCP socket.
             let rx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_RX_BUF_SIZE]);
             let tx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_TX_BUF_SIZE]);
@@ -167,6 +177,7 @@ impl PortPublisher {
                 to_host: to_host_tx,
                 from_host: from_host_rx,
                 write_buf: None,
+                close_attempts: 0,
             });
         }
     }
@@ -183,6 +194,13 @@ impl PortPublisher {
                 write_host_data(socket, relay);
                 if relay.write_buf.is_none() {
                     socket.close();
+                } else {
+                    // Abort if we've been trying to flush for too long
+                    // (guest stopped reading, socket send buffer full).
+                    relay.close_attempts += 1;
+                    if relay.close_attempts >= DEFERRED_CLOSE_LIMIT {
+                        socket.abort();
+                    }
                 }
                 continue;
             }
@@ -206,10 +224,13 @@ impl PortPublisher {
     }
 
     /// Remove closed inbound connections.
+    ///
+    /// Only removes sockets in `Closed` state. Sockets in `TimeWait` are
+    /// left for smoltcp's 2*MSL timer to handle naturally.
     pub fn cleanup_closed(&mut self, sockets: &mut SocketSet<'_>) {
         self.connections.retain(|relay| {
             let socket = sockets.get::<tcp::Socket>(relay.handle);
-            let closed = matches!(socket.state(), tcp::State::Closed | tcp::State::TimeWait);
+            let closed = matches!(socket.state(), tcp::State::Closed);
             if closed {
                 sockets.remove(relay.handle);
             }
@@ -241,7 +262,6 @@ async fn tcp_listener_task(
     bind_addr: SocketAddr,
     guest_port: u16,
     inbound_tx: mpsc::Sender<InboundConnection>,
-    _shared: Arc<SharedState>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind_addr).await?;
     tracing::debug!(bind = %bind_addr, guest_port, "published port listener started");

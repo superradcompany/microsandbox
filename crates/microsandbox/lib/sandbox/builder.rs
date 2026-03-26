@@ -1,10 +1,8 @@
 //! Fluent builder for [`SandboxConfig`].
 
+use microsandbox_image::RegistryAuth;
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
-use microsandbox_runtime::policy::ShutdownMode;
-
-use microsandbox_image::RegistryAuth;
 
 use super::{
     config::SandboxConfig,
@@ -86,10 +84,9 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set the runtime log level for sandbox child processes.
+    /// Set the runtime log level for the sandbox process.
     ///
-    /// This controls the verbosity of `msb supervisor` and `msb microvm`
-    /// for this sandbox only.
+    /// This controls the verbosity of the `msb sandbox` process.
     pub fn log_level(mut self, level: LogLevel) -> Self {
         self.config.log_level = Some(level);
         self
@@ -235,30 +232,16 @@ impl SandboxBuilder {
         self
     }
 
-    /// How aggressively to shut down children when drain is triggered.
-    /// `Graceful` (default) waits, then SIGTERM, then SIGKILL.
-    /// `Terminate` sends SIGTERM immediately. `Kill` sends SIGKILL immediately.
-    pub fn shutdown_mode(mut self, mode: ShutdownMode) -> Self {
-        self.config.supervisor_policy.shutdown_mode = mode;
-        self
-    }
-
-    /// Set the grace period between escalation steps (in seconds).
-    pub fn grace_period(mut self, secs: u64) -> Self {
-        self.config.supervisor_policy.grace_secs = secs;
-        self
-    }
-
     /// Set a maximum sandbox lifetime in seconds.
     pub fn max_duration(mut self, secs: u64) -> Self {
-        self.config.supervisor_policy.max_duration_secs = Some(secs);
+        self.config.policy.max_duration_secs = Some(secs);
         self
     }
 
-    /// Auto-drain the sandbox after this many seconds of inactivity.
+    /// Auto-stop the sandbox after this many seconds of inactivity.
     /// Inactivity is detected via agentd heartbeat. Omit to disable (default).
     pub fn idle_timeout(mut self, secs: u64) -> Self {
-        self.config.supervisor_policy.idle_timeout_secs = Some(secs);
+        self.config.policy.idle_timeout_secs = Some(secs);
         self
     }
 

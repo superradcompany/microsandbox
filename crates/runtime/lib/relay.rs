@@ -1,29 +1,31 @@
-//! Agent relay for the supervisor process.
+//! Agent relay for the sandbox process.
 //!
-//! The [`AgentRelay`] creates a Unix socketpair for communicating with agentd
-//! in the guest VM, listens on a Unix domain socket (`agent.sock`) for SDK
-//! client connections, and transparently relays protocol frames between clients
-//! and the agent channel.
+//! The [`AgentRelay`] reads from the console backend's ring buffers (data
+//! written by agentd in the guest via virtio-console), listens on a Unix
+//! domain socket (`agent.sock`) for SDK client connections, and transparently
+//! relays protocol frames between clients and the guest agent.
 //!
 //! Each client is assigned a non-overlapping correlation ID range during
 //! handshake so that the relay can route agent responses back to the correct
 //! client without rewriting frame headers.
 
 use std::collections::{HashMap, HashSet};
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bytes::{Bytes, BytesMut};
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
 use microsandbox_protocol::exec::ExecSignal;
 use microsandbox_protocol::message::{
     FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message, MessageType,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, unix::AsyncFd};
+use tokio::net::UnixListener;
+use tokio::net::unix::OwnedReadHalf;
 use tokio::sync::{Mutex, mpsc, watch};
 
+use crate::console::ConsoleSharedState;
 use crate::{RuntimeError, RuntimeResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -47,19 +49,23 @@ const LEN_PREFIX_SIZE: usize = 4;
 struct ClientState {
     /// Active session IDs owned by this client (tracked for disconnect cleanup).
     active_sessions: HashSet<u32>,
-    /// Writer half for sending frames to this client.
-    writer: OwnedWriteHalf,
+    /// Channel for sending frames to this client's writer task.
+    /// Using a channel avoids holding the client mutex across async writes.
+    /// Uses `Bytes` for zero-copy frame forwarding from the ring buffer.
+    write_tx: mpsc::Sender<Bytes>,
 }
 
-/// The agent relay running in the supervisor.
+/// Capacity of the per-client write channel.
+const CLIENT_WRITE_CHANNEL_CAPACITY: usize = 64;
+
+/// The agent relay running in the sandbox process.
 ///
-/// Owns the agent socketpair host FD, listens for client connections on
-/// a Unix domain socket, and relays frames between clients and agentd.
+/// Reads agent frames from the console backend's ring buffers and listens
+/// for client connections on a Unix domain socket. Frames are routed between
+/// clients and the guest agent without decoding.
 pub struct AgentRelay {
-    /// Host-side FD of the agent socketpair.
-    host_fd: OwnedFd,
-    /// Guest-side FD (consumed when passed to the microvm child).
-    guest_fd: Option<OwnedFd>,
+    /// Shared ring buffers + wake pipes for console backend communication.
+    shared: Arc<ConsoleSharedState>,
     /// Unix domain socket listener for client connections.
     listener: UnixListener,
     /// Path to the Unix domain socket.
@@ -68,10 +74,12 @@ pub struct AgentRelay {
     ready_frame: Option<Vec<u8>>,
 }
 
-/// A frame read from the wire, kept as raw bytes for transparent forwarding.
+/// A frame extracted from the byte stream, kept as raw bytes for transparent
+/// forwarding.
 struct RawFrame {
     /// The complete frame bytes including the 4-byte length prefix.
-    data: Vec<u8>,
+    /// Uses `Bytes` for zero-copy extraction from the ring buffer.
+    data: Bytes,
     /// The correlation ID extracted from the frame header.
     id: u32,
     /// The flags byte extracted from the frame header.
@@ -85,12 +93,12 @@ struct RawFrame {
 impl AgentRelay {
     /// Create a new agent relay.
     ///
-    /// Creates a Unix socketpair for the agent channel and starts listening
-    /// on the given path for client connections.
-    pub async fn new(agent_sock_path: &Path) -> RuntimeResult<Self> {
-        // Create a SOCK_STREAM socketpair for host <-> guest agent communication.
-        let (host_fd, guest_fd) = create_socketpair()?;
-
+    /// Takes the shared console state (ring buffers) and a path where the
+    /// Unix domain socket will be bound for client connections.
+    pub async fn new(
+        agent_sock_path: &Path,
+        shared: Arc<ConsoleSharedState>,
+    ) -> RuntimeResult<Self> {
         // Remove stale socket file if it exists.
         if agent_sock_path.exists() {
             let _ = std::fs::remove_file(agent_sock_path);
@@ -105,69 +113,74 @@ impl AgentRelay {
         tracing::info!("agent relay listening on {}", agent_sock_path.display());
 
         Ok(Self {
-            host_fd,
-            guest_fd: Some(guest_fd),
+            shared,
             listener,
             sock_path: agent_sock_path.to_path_buf(),
             ready_frame: None,
         })
     }
 
-    /// Consume the guest-side FD for passing to the microvm child.
+    /// Read frames from the console ring buffer until `core.ready` is
+    /// received.
     ///
-    /// Returns the raw FD. The caller is responsible for ensuring the FD
-    /// survives across `fork+exec` (e.g., by clearing `FD_CLOEXEC`).
-    /// Can only be called once.
-    pub fn take_guest_fd(&mut self) -> Option<RawFd> {
-        self.guest_fd.take().map(IntoRawFd::into_raw_fd)
-    }
+    /// This is a **blocking** call (uses `libc::poll` on the wake pipe).
+    /// Must be called before [`run()`](Self::run). The ready frame is cached
+    /// so it can be sent to clients during handshake.
+    pub fn wait_ready(&mut self) -> RuntimeResult<()> {
+        const READY_TIMEOUT_SECS: i32 = 60;
 
-    /// Read frames from the agent host FD until `core.ready` is received.
-    ///
-    /// The ready frame is cached so it can be sent to clients during handshake.
-    pub async fn wait_ready(&mut self) -> RuntimeResult<()> {
-        // Dup the host FD so we can wrap it in an async reader without
-        // consuming the OwnedFd.
-        let dup_fd = duplicate_fd(self.host_fd.as_raw_fd())?;
-
-        // Safety: dup_fd is a valid fd we just created.
-        let std_stream =
-            unsafe { std::os::unix::net::UnixStream::from_raw_fd(dup_fd.into_raw_fd()) };
-        std_stream
-            .set_nonblocking(true)
-            .map_err(|e| RuntimeError::Custom(format!("set nonblocking: {e}")))?;
-        let mut reader = UnixStream::from_std(std_stream)?;
+        let mut buf = BytesMut::new();
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(READY_TIMEOUT_SECS as u64);
 
         loop {
-            let frame = read_raw_frame(&mut reader).await?;
-
-            // Check if this is a Ready message by decoding the CBOR body.
-            // We need the raw bytes if it's Ready, so clone before consuming.
-            let raw_data = frame.data.clone();
-            let msg = decode_frame(frame)?;
-
-            if msg.t == MessageType::Ready {
-                tracing::info!("agent relay: received core.ready from agentd");
-                self.ready_frame = Some(raw_data);
-                return Ok(());
+            // Drain the wake pipe and pop all available chunks.
+            self.shared.tx_wake.drain();
+            while let Some(chunk) = self.shared.tx_ring.pop() {
+                buf.extend_from_slice(&chunk);
             }
 
-            tracing::debug!(
-                "agent relay: discarding pre-ready frame type={:?} id={}",
-                msg.t,
-                msg.id
-            );
+            // Try to extract complete frames.
+            while let Some(frame) = try_extract_frame(&mut buf) {
+                let raw_data = frame.data.to_vec();
+                let msg = decode_frame(raw_data.clone())?;
+
+                if msg.t == MessageType::Ready {
+                    tracing::info!("agent relay: received core.ready from agentd");
+                    self.ready_frame = Some(raw_data);
+                    return Ok(());
+                }
+
+                tracing::debug!(
+                    "agent relay: discarding pre-ready frame type={:?} id={}",
+                    msg.t,
+                    msg.id
+                );
+            }
+
+            // Check timeout.
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(RuntimeError::Custom(
+                    "agent relay: timed out waiting for core.ready from agentd".into(),
+                ));
+            }
+
+            // Block until the wake pipe is readable or timeout expires.
+            let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+            poll_fd_readable_timeout(self.shared.tx_wake.as_raw_fd(), timeout_ms);
         }
     }
 
     /// Run the main relay loop.
     ///
-    /// Accepts client connections, relays frames between clients and the agent
-    /// host FD, and handles client disconnects with session cleanup.
+    /// Accepts client connections, relays frames between clients and the
+    /// console ring buffers, and handles client disconnects with session
+    /// cleanup.
     ///
     /// If a client sends a `core.shutdown` message (identified by
-    /// `FLAG_SHUTDOWN` in the frame header), the relay notifies the supervisor
-    /// via `drain_tx` so it can start drain escalation.
+    /// `FLAG_SHUTDOWN` in the frame header), the relay notifies the caller
+    /// via `drain_tx`.
     pub async fn run(
         self,
         mut shutdown: watch::Receiver<bool>,
@@ -177,30 +190,25 @@ impl AgentRelay {
             RuntimeError::Custom("agent relay: run() called before wait_ready()".into())
         })?;
 
-        // Convert the host FD into async read/write halves via a single dup.
-        let dup_fd = duplicate_fd(self.host_fd.as_raw_fd())?;
-        let std_stream =
-            unsafe { std::os::unix::net::UnixStream::from_raw_fd(dup_fd.into_raw_fd()) };
-        std_stream.set_nonblocking(true)?;
-        let agent_stream = UnixStream::from_std(std_stream)?;
-        let (agent_read_half, agent_write_half) = agent_stream.into_split();
-
         // Shared state: map from client slot index to client state.
         let clients: Arc<Mutex<HashMap<u32, ClientState>>> = Arc::new(Mutex::new(HashMap::new()));
 
-        // Channel for client reader tasks to send frames to the agent writer.
-        let (agent_tx, agent_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        // Bounded channel for client reader tasks to send frames to the ring writer.
+        // Backpressure prevents unbounded memory growth from client floods.
+        let (agent_tx, agent_rx) = mpsc::channel::<Vec<u8>>(256);
 
         // Track which client slots are in use.
         let used_slots: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
 
-        // Spawn the agent writer task.
-        let agent_writer_handle = tokio::spawn(agent_writer_task(agent_write_half, agent_rx));
+        // Spawn the ring writer task (client frames → rx_ring → guest).
+        let shared_for_writer = Arc::clone(&self.shared);
+        let ring_writer_handle = tokio::spawn(ring_writer_task(shared_for_writer, agent_rx));
 
-        // Spawn the agent reader task (routes agent responses to clients).
+        // Spawn the ring reader task (tx_ring → guest frames → clients).
         let clients_for_reader = Arc::clone(&clients);
-        let agent_reader_handle =
-            tokio::spawn(agent_reader_task(agent_read_half, clients_for_reader));
+        let shared_for_reader = Arc::clone(&self.shared);
+        let ring_reader_handle =
+            tokio::spawn(ring_reader_task(shared_for_reader, clients_for_reader));
 
         // Accept loop.
         loop {
@@ -251,12 +259,27 @@ impl AgentRelay {
                                 continue;
                             }
 
+                            // Spawn a per-client writer task so the ring reader
+                            // never holds the mutex across async writes.
+                            let (write_tx, mut write_rx) =
+                                mpsc::channel::<Bytes>(CLIENT_WRITE_CHANNEL_CAPACITY);
+                            tokio::spawn(async move {
+                                while let Some(data) = write_rx.recv().await {
+                                    if let Err(e) = writer_half.write_all(&data).await {
+                                        tracing::error!(
+                                            "agent relay: client writer slot={slot} failed: {e}"
+                                        );
+                                        break;
+                                    }
+                                }
+                            });
+
                             // Register the client.
                             {
                                 let mut map = clients.lock().await;
                                 map.insert(slot, ClientState {
                                     active_sessions: HashSet::new(),
-                                    writer: writer_half,
+                                    write_tx,
                                 });
                             }
 
@@ -293,8 +316,8 @@ impl AgentRelay {
         let _ = std::fs::remove_file(&self.sock_path);
 
         // Abort background tasks.
-        agent_writer_handle.abort();
-        agent_reader_handle.abort();
+        ring_writer_handle.abort();
+        ring_reader_handle.abort();
 
         Ok(())
     }
@@ -304,69 +327,187 @@ impl AgentRelay {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Create a Unix SOCK_STREAM socketpair.
+/// Block until a file descriptor becomes readable or timeout expires.
 ///
-/// Returns `(host_fd, guest_fd)` as owned file descriptors.
-/// Uses libc directly for macOS compatibility (nix's `SOCK_CLOEXEC` is not
-/// available on Darwin).
-fn create_socketpair() -> RuntimeResult<(OwnedFd, OwnedFd)> {
-    let mut fds = [0i32; 2];
-    let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
-    if ret != 0 {
-        return Err(RuntimeError::Io(std::io::Error::last_os_error()));
+/// `timeout_ms` is in milliseconds. Use `-1` for infinite.
+fn poll_fd_readable_timeout(fd: RawFd, timeout_ms: i32) {
+    loop {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: pfd is a valid stack-allocated pollfd.
+        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if ret >= 0 {
+            return; // Success — fd is readable, or timeout expired (ret == 0).
+        }
+        // ret == -1: error. Retry on EINTR, give up on other errors.
+        let errno = std::io::Error::last_os_error();
+        if errno.raw_os_error() != Some(libc::EINTR) {
+            tracing::error!("agent relay: poll() failed: {errno}");
+            return;
+        }
+        // EINTR — retry.
     }
-
-    let fd1 = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-    let fd2 = unsafe { OwnedFd::from_raw_fd(fds[1]) };
-
-    set_cloexec(fd1.as_raw_fd())?;
-    set_cloexec(fd2.as_raw_fd())?;
-    set_nonblock(fd1.as_raw_fd())?;
-    set_nonblock(fd2.as_raw_fd())?;
-
-    Ok((fd1, fd2))
 }
 
-/// Duplicate a file descriptor.
-fn duplicate_fd(fd: RawFd) -> RuntimeResult<OwnedFd> {
-    let duplicated = unsafe { libc::dup(fd) };
-    if duplicated == -1 {
-        return Err(RuntimeError::Io(std::io::Error::last_os_error()));
-    }
-
-    let owned_fd = unsafe { OwnedFd::from_raw_fd(duplicated) };
-    set_cloexec(owned_fd.as_raw_fd())?;
-    Ok(owned_fd)
-}
-
-/// Set non-blocking mode on a file descriptor.
-fn set_nonblock(fd: RawFd) -> RuntimeResult<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags == -1 {
-        return Err(RuntimeError::Io(std::io::Error::last_os_error()));
-    }
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
-        return Err(RuntimeError::Io(std::io::Error::last_os_error()));
-    }
-    Ok(())
-}
-
-/// Set the close-on-exec flag on a file descriptor.
-fn set_cloexec(fd: RawFd) -> RuntimeResult<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags == -1 {
-        return Err(RuntimeError::Io(std::io::Error::last_os_error()));
-    }
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } == -1 {
-        return Err(RuntimeError::Io(std::io::Error::last_os_error()));
-    }
-    Ok(())
-}
-
-/// Read a single raw frame from an async reader.
+/// Try to extract a complete frame from a byte buffer.
 ///
-/// Returns the complete frame bytes (including the 4-byte length prefix)
-/// along with the extracted correlation ID and flags.
+/// Returns `None` if the buffer doesn't contain a full frame yet. On
+/// success, the consumed bytes are removed from `buf`.
+fn try_extract_frame(buf: &mut BytesMut) -> Option<RawFrame> {
+    if buf.len() < LEN_PREFIX_SIZE {
+        return None;
+    }
+
+    let frame_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+
+    // Sanity checks.
+    if frame_len > MAX_FRAME_SIZE as usize {
+        // Corrupt data — clear the entire buffer. Nibbling just 4 bytes would
+        // re-interpret frame body bytes as a new length, cascading failures.
+        tracing::error!(
+            "agent relay: frame too large ({frame_len} bytes), clearing {} bytes of buffer",
+            buf.len()
+        );
+        buf.clear();
+        return None;
+    }
+
+    if buf.len() < LEN_PREFIX_SIZE + frame_len {
+        return None; // Need more data.
+    }
+
+    if frame_len < FRAME_HEADER_SIZE {
+        // Corrupt frame — discard.
+        tracing::error!("agent relay: frame too short ({frame_len} bytes), discarding");
+        let _ = buf.split_to(LEN_PREFIX_SIZE + frame_len);
+        return None;
+    }
+
+    // Split off the complete frame — zero-copy via freeze().
+    let data = buf.split_to(LEN_PREFIX_SIZE + frame_len).freeze();
+
+    let id = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+    let flags = data[8];
+
+    Some(RawFrame { data, id, flags })
+}
+
+/// Decode raw frame bytes into a protocol `Message`.
+fn decode_frame(mut buf: Vec<u8>) -> RuntimeResult<Message> {
+    codec::try_decode_from_buf(&mut buf)
+        .map_err(|e| RuntimeError::Custom(format!("decode frame: {e}")))?
+        .ok_or_else(|| RuntimeError::Custom("decode frame: incomplete frame".into()))
+}
+
+/// Background task that pushes client frames into the rx_ring for the guest.
+/// Retries on full ring with backoff to avoid dropping frames.
+async fn ring_writer_task(shared: Arc<ConsoleSharedState>, mut rx: mpsc::Receiver<Vec<u8>>) {
+    while let Some(frame_bytes) = rx.recv().await {
+        let mut data = frame_bytes;
+        for attempt in 0..50 {
+            match shared.rx_ring.push(data) {
+                Ok(()) => {
+                    shared.rx_wake.wake();
+                    break;
+                }
+                Err(returned) => {
+                    if attempt == 49 {
+                        tracing::error!("agent relay: rx_ring full after retries, dropping frame");
+                        break;
+                    }
+                    data = returned;
+                    // Brief yield to let the guest drain the ring.
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            }
+        }
+    }
+    tracing::debug!("agent relay: ring writer task exiting");
+}
+
+/// Background task that reads frames from the tx_ring (written by the guest
+/// agent) and routes them to the correct client based on correlation ID range.
+async fn ring_reader_task(
+    shared: Arc<ConsoleSharedState>,
+    clients: Arc<Mutex<HashMap<u32, ClientState>>>,
+) {
+    // Wrap the tx_wake read fd in AsyncFd for tokio-driven notification.
+    let wake_fd = shared.tx_wake.as_raw_fd();
+    let async_fd = match AsyncFd::new(wake_fd) {
+        Ok(fd) => fd,
+        Err(e) => {
+            tracing::error!("agent relay: failed to create AsyncFd for tx_wake: {e}");
+            return;
+        }
+    };
+
+    let mut buf = BytesMut::new();
+    let mut frames = Vec::new();
+
+    loop {
+        // Wait for the wake pipe to become readable.
+        let mut guard = match async_fd.readable().await {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("agent relay: AsyncFd readable error: {e}");
+                break;
+            }
+        };
+        guard.clear_ready();
+
+        // Drain the wake pipe and pop all available chunks.
+        shared.tx_wake.drain();
+        while let Some(chunk) = shared.tx_ring.pop() {
+            buf.extend_from_slice(&chunk);
+        }
+
+        // Extract all complete frames first, then route them.
+        // This avoids holding the client mutex across async writes.
+        while let Some(frame) = try_extract_frame(&mut buf) {
+            frames.push(frame);
+        }
+
+        for frame in frames.drain(..) {
+            let client_slot = frame.id / ID_RANGE_STEP;
+            let client_slot = client_slot.min(MAX_CLIENTS - 1);
+
+            let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
+
+            // Acquire lock briefly to get session bookkeeping + clone writer.
+            // Then release before the async write to avoid blocking other clients.
+            let writer_result = {
+                let mut map = clients.lock().await;
+                if let Some(client) = map.get_mut(&client_slot) {
+                    if is_terminal {
+                        client.active_sessions.remove(&frame.id);
+                    }
+                    Ok(client.write_tx.clone())
+                } else {
+                    Err(frame.id)
+                }
+            };
+
+            match writer_result {
+                Ok(write_tx) => {
+                    if write_tx.send(frame.data).await.is_err() {
+                        tracing::error!("agent relay: write channel closed for slot={client_slot}");
+                    }
+                }
+                Err(id) => {
+                    tracing::debug!(
+                        "agent relay: no client for slot={client_slot} id={id} (frame dropped)"
+                    );
+                }
+            }
+        }
+    }
+    tracing::debug!("agent relay: ring reader task exiting");
+}
+
+/// Read a single raw frame from an async reader (used for client connections).
 async fn read_raw_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> RuntimeResult<RawFrame> {
     // Read the 4-byte length prefix.
     let mut len_buf = [0u8; LEN_PREFIX_SIZE];
@@ -380,7 +521,6 @@ async fn read_raw_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> RuntimeResul
 
     let frame_len = u32::from_be_bytes(len_buf);
 
-    // Enforce the same size limit as the protocol codec.
     if frame_len > MAX_FRAME_SIZE {
         return Err(RuntimeError::Custom(format!(
             "agent relay: frame too large: {frame_len} bytes (max {MAX_FRAME_SIZE})"
@@ -395,100 +535,33 @@ async fn read_raw_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> RuntimeResul
         )));
     }
 
-    // Read the full frame payload.
-    let mut payload = vec![0u8; frame_len];
-    reader.read_exact(&mut payload).await?;
-
-    // Extract header fields from the payload.
-    let id = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
-    let flags = payload[4];
-
-    // Assemble the complete frame (length prefix + payload).
+    // Single allocation: length prefix + payload in one Vec.
     let mut data = Vec::with_capacity(LEN_PREFIX_SIZE + frame_len);
     data.extend_from_slice(&len_buf);
-    data.extend_from_slice(&payload);
+    data.resize(LEN_PREFIX_SIZE + frame_len, 0);
+    reader.read_exact(&mut data[LEN_PREFIX_SIZE..]).await?;
 
-    Ok(RawFrame { data, id, flags })
-}
+    let id = u32::from_be_bytes([
+        data[LEN_PREFIX_SIZE],
+        data[LEN_PREFIX_SIZE + 1],
+        data[LEN_PREFIX_SIZE + 2],
+        data[LEN_PREFIX_SIZE + 3],
+    ]);
+    let flags = data[LEN_PREFIX_SIZE + 4];
 
-/// Decode a `RawFrame` into a protocol `Message`.
-///
-/// Uses `try_decode_from_buf` on the frame data. The frame is consumed
-/// (only called in `wait_ready` which doesn't need the raw bytes afterward).
-fn decode_frame(frame: RawFrame) -> RuntimeResult<Message> {
-    let mut buf = frame.data;
-    codec::try_decode_from_buf(&mut buf)
-        .map_err(|e| RuntimeError::Custom(format!("decode frame: {e}")))?
-        .ok_or_else(|| RuntimeError::Custom("decode frame: incomplete frame".into()))
-}
-
-/// Background task that writes frames from clients to the agent host FD.
-async fn agent_writer_task(mut writer: OwnedWriteHalf, mut rx: mpsc::UnboundedReceiver<Vec<u8>>) {
-    while let Some(frame_bytes) = rx.recv().await {
-        if let Err(e) = writer.write_all(&frame_bytes).await {
-            tracing::error!("agent relay: write to agent failed: {e}");
-            break;
-        }
-    }
-    tracing::debug!("agent relay: agent writer task exiting");
-}
-
-/// Background task that reads frames from the agent host FD and routes them
-/// to the correct client based on correlation ID range.
-async fn agent_reader_task(
-    mut reader: OwnedReadHalf,
-    clients: Arc<Mutex<HashMap<u32, ClientState>>>,
-) {
-    loop {
-        let frame = match read_raw_frame(&mut reader).await {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::error!("agent relay: read from agent failed: {e}");
-                break;
-            }
-        };
-
-        // Determine which client this frame belongs to by ID range.
-        let client_slot = frame.id / ID_RANGE_STEP;
-        let client_slot = client_slot.min(MAX_CLIENTS - 1);
-
-        // Track terminal flags for session cleanup.
-        let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
-
-        // Look up client and write outside the lock to avoid head-of-line blocking.
-        let mut map = clients.lock().await;
-        if let Some(client) = map.get_mut(&client_slot) {
-            if is_terminal {
-                client.active_sessions.remove(&frame.id);
-            }
-
-            // Take a mutable reference to the writer, then drop the map lock
-            // before performing I/O. This requires unsafe trickery or restructuring.
-            // Instead, we use a simpler approach: since write_all on a Unix socket
-            // is typically non-blocking for small frames, the lock contention is
-            // minimal in practice. For large frames (file streaming), the kernel
-            // buffer absorbs the write. If this becomes a bottleneck, switch to
-            // per-client mpsc channels.
-            if let Err(e) = client.writer.write_all(&frame.data).await {
-                tracing::error!("agent relay: write to client slot={client_slot} failed: {e}");
-                // Client is gone; cleanup will happen in client_reader_task.
-            }
-        } else {
-            tracing::debug!(
-                "agent relay: no client for slot={client_slot} id={} (frame dropped)",
-                frame.id
-            );
-        }
-    }
-    tracing::debug!("agent relay: agent reader task exiting");
+    Ok(RawFrame {
+        data: Bytes::from(data),
+        id,
+        flags,
+    })
 }
 
 /// Background task that reads frames from a client and forwards them to the
-/// agent writer channel. Handles client disconnect with session cleanup.
+/// ring writer channel. Handles client disconnect with session cleanup.
 async fn client_reader_task(
     slot: u32,
     mut reader: OwnedReadHalf,
-    agent_tx: mpsc::UnboundedSender<Vec<u8>>,
+    agent_tx: mpsc::Sender<Vec<u8>>,
     clients: Arc<Mutex<HashMap<u32, ClientState>>>,
     used_slots: Arc<Mutex<HashSet<u32>>>,
     drain_tx: mpsc::Sender<()>,
@@ -507,15 +580,15 @@ async fn client_reader_task(
         let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
         let is_shutdown = (frame.flags & FLAG_SHUTDOWN) != 0;
 
-        // Notify the supervisor to start drain escalation.
+        // Notify the caller to start drain escalation.
         if is_shutdown {
-            tracing::info!(
-                "agent relay: client slot={slot} sent core.shutdown, notifying supervisor"
-            );
+            tracing::info!("agent relay: client slot={slot} sent core.shutdown, notifying drain");
             let _ = drain_tx.try_send(());
         }
 
-        {
+        // Only acquire the lock when session bookkeeping is needed.
+        // Data frames (the vast majority) skip the lock entirely.
+        if is_session_start || is_terminal {
             let mut map = clients.lock().await;
             if let Some(client) = map.get_mut(&slot) {
                 if is_session_start {
@@ -527,9 +600,9 @@ async fn client_reader_task(
             }
         }
 
-        // Forward frame to agent writer.
-        if agent_tx.send(frame.data).is_err() {
-            tracing::error!("agent relay: agent writer channel closed");
+        // Forward frame to ring writer (bounded — applies backpressure).
+        if agent_tx.send(frame.data.to_vec()).await.is_err() {
+            tracing::error!("agent relay: ring writer channel closed");
             break;
         }
     }
@@ -573,8 +646,8 @@ async fn client_reader_task(
                 continue;
             }
 
-            if agent_tx.send(buf).is_err() {
-                tracing::error!("agent relay: agent writer channel closed during cleanup");
+            if agent_tx.send(buf).await.is_err() {
+                tracing::error!("agent relay: ring writer channel closed during cleanup");
                 break;
             }
         }

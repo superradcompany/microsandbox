@@ -1,6 +1,6 @@
-//! SDK-side client for connecting to the supervisor's agent relay socket.
+//! SDK-side client for connecting to the sandbox agent relay.
 //!
-//! [`AgentClient`] communicates over a Unix domain socket to the supervisor's
+//! [`AgentClient`] communicates over a Unix domain socket to the sandbox's
 //! relay. During connection, the relay assigns a non-overlapping correlation ID
 //! range and sends the cached `core.ready` payload so the client can begin
 //! issuing commands immediately.
@@ -28,7 +28,7 @@ use crate::MicrosandboxResult;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Client for communicating with agentd through the supervisor relay.
+/// Client for communicating with agentd through the agent relay.
 ///
 /// Connects over a Unix domain socket to the supervisor's agent relay.
 /// Correlation IDs are allocated from the range assigned during the relay
@@ -53,7 +53,7 @@ pub struct AgentClient {
 //--------------------------------------------------------------------------------------------------
 
 impl AgentClient {
-    /// Connect to the supervisor's agent relay socket.
+    /// Connect to the sandbox's agent relay socket.
     ///
     /// Performs the relay handshake to receive the assigned ID offset and
     /// the cached `core.ready` payload, then spawns a background reader task.

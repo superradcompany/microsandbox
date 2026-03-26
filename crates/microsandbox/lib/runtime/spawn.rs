@@ -1,9 +1,9 @@
-//! Spawning the supervisor process.
+//! Spawning the sandbox process.
 //!
-//! [`spawn_supervisor`] assembles CLI arguments from [`SandboxConfig`],
-//! fork+execs `msb supervisor`, and reads the startup JSON to obtain child PIDs.
-//! The supervisor creates the agent socketpair internally and exposes a Unix
-//! domain socket relay for client connections.
+//! [`spawn_sandbox`] assembles CLI arguments from [`SandboxConfig`],
+//! fork+execs `msb sandbox`, and reads the startup JSON to obtain the
+//! sandbox process PID. The sandbox process runs the VMM and agent relay
+//! internally.
 
 use std::{ffi::OsString, path::Path, process::Stdio};
 
@@ -12,7 +12,7 @@ use tokio::{io::AsyncBufReadExt, process::Command};
 
 use crate::{
     MicrosandboxResult, config,
-    runtime::handle::SupervisorHandle,
+    runtime::handle::ProcessHandle,
     sandbox::{RootfsSource, SandboxConfig, VolumeMount},
 };
 
@@ -20,15 +20,15 @@ use crate::{
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// JSON structure read from supervisor stdout on startup.
+/// JSON structure read from the sandbox process stdout on startup.
 #[derive(Debug, Deserialize)]
 struct StartupInfo {
-    vm_pid: u32,
+    pid: u32,
 }
 
 /// How the supervisor should behave relative to the creating process.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SupervisorSpawnMode {
+pub enum SpawnMode {
     /// The creating process keeps the sandbox handle and agent bridge alive.
     Attached,
 
@@ -42,7 +42,7 @@ pub enum SupervisorSpawnMode {
 
 /// Spawn the supervisor process for a sandbox.
 ///
-/// Returns a [`SupervisorHandle`] and the path to the agent relay socket.
+/// Returns a [`ProcessHandle`] and the path to the agent relay socket.
 ///
 /// The function:
 /// 1. Resolves the `msb` binary path
@@ -50,11 +50,11 @@ pub enum SupervisorSpawnMode {
 /// 3. Builds CLI arguments from the config
 /// 4. Spawns `msb supervisor` with `--agent-sock` for the relay
 /// 5. Reads startup JSON from stdout to get child PIDs
-pub async fn spawn_supervisor(
+pub async fn spawn_sandbox(
     config: &SandboxConfig,
     sandbox_id: i32,
-    mode: SupervisorSpawnMode,
-) -> MicrosandboxResult<(SupervisorHandle, std::path::PathBuf)> {
+    mode: SpawnMode,
+) -> MicrosandboxResult<(ProcessHandle, std::path::PathBuf)> {
     // Resolve paths.
     let msb_path = config::resolve_msb_path()?;
     let libkrunfw_path = config::resolve_libkrunfw_path()?;
@@ -93,7 +93,7 @@ pub async fn spawn_supervisor(
 
     // Build the command.
     let mut cmd = Command::new(&msb_path);
-    cmd.args(supervisor_cli_args(
+    cmd.args(sandbox_cli_args(
         config,
         sandbox_id,
         &db_path,
@@ -106,7 +106,7 @@ pub async fn spawn_supervisor(
         &libkrunfw_path,
     ));
 
-    if mode == SupervisorSpawnMode::Detached {
+    if mode == SpawnMode::Detached {
         // Detached sandboxes outlive the creating CLI process, so the
         // supervisor must not stay coupled to the foreground job or terminal.
         cmd.process_group(0);
@@ -117,15 +117,15 @@ pub async fn spawn_supervisor(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::inherit());
 
-    // Spawn the supervisor.
+    // Spawn the sandbox process.
     let mut child = cmd.spawn()?;
-    let supervisor_pid = child.id().ok_or_else(|| {
-        crate::MicrosandboxError::Runtime("supervisor process exited immediately".into())
+    let _pid = child.id().ok_or_else(|| {
+        crate::MicrosandboxError::Runtime("sandbox process exited immediately".into())
     })?;
 
-    // Read the startup JSON from the supervisor's stdout.
+    // Read the startup JSON from stdout.
     let stdout = child.stdout.take().ok_or_else(|| {
-        crate::MicrosandboxError::Runtime("failed to capture supervisor stdout".into())
+        crate::MicrosandboxError::Runtime("failed to capture sandbox stdout".into())
     })?;
 
     let mut reader = tokio::io::BufReader::new(stdout);
@@ -138,13 +138,13 @@ pub async fn spawn_supervisor(
     {
         Ok(Ok(_)) => {}
         Ok(Err(err)) => {
-            terminate_startup_supervisor(&mut child).await;
+            terminate_startup_process(&mut child).await;
             return Err(err.into());
         }
         Err(_) => {
-            terminate_startup_supervisor(&mut child).await;
+            terminate_startup_process(&mut child).await;
             return Err(crate::MicrosandboxError::Runtime(
-                "supervisor startup timeout: no JSON received within 30 seconds".into(),
+                "sandbox startup timeout: no JSON received within 30 seconds".into(),
             ));
         }
     }
@@ -152,15 +152,15 @@ pub async fn spawn_supervisor(
     let startup: StartupInfo = match serde_json::from_str(line.trim()) {
         Ok(info) => info,
         Err(_) => {
-            let status = terminate_startup_supervisor(&mut child).await;
+            let status = terminate_startup_process(&mut child).await;
             return Err(crate::MicrosandboxError::Runtime(format!(
-                "supervisor exited ({status:?}) before sending startup info \
+                "sandbox process exited ({status:?}) before sending startup info \
                  (line: {line:?}, check stderr above for details)"
             )));
         }
     };
 
-    let handle = SupervisorHandle::new(supervisor_pid, startup.vm_pid, config.name.clone(), child);
+    let handle = ProcessHandle::new(startup.pid, config.name.clone(), child);
 
     Ok((handle, agent_sock_path))
 }
@@ -169,21 +169,11 @@ pub async fn spawn_supervisor(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-async fn terminate_startup_supervisor(
+async fn terminate_startup_process(
     child: &mut tokio::process::Child,
 ) -> Option<std::process::ExitStatus> {
     let _ = child.start_kill();
     child.wait().await.ok()
-}
-
-/// Convert ShutdownMode to CLI arg string.
-fn shutdown_mode_str(mode: &microsandbox_runtime::policy::ShutdownMode) -> &'static str {
-    use microsandbox_runtime::policy::ShutdownMode;
-    match mode {
-        ShutdownMode::Graceful => "graceful",
-        ShutdownMode::Terminate => "terminate",
-        ShutdownMode::Kill => "kill",
-    }
 }
 
 /// Push a `--mount tag:host_path[:ro]` arg pair.
@@ -227,19 +217,9 @@ fn guest_mount_tag(guest_path: &str) -> String {
         .to_string()
 }
 
-/// Convert ExitAction to CLI arg string.
-fn exit_action_str(action: &microsandbox_runtime::policy::ExitAction) -> &'static str {
-    use microsandbox_runtime::policy::ExitAction;
-    match action {
-        ExitAction::ShutdownAll => "shutdown-all",
-        ExitAction::Restart => "restart",
-        ExitAction::Ignore => "ignore",
-    }
-}
-
-/// Build the `msb supervisor` CLI args for a sandbox.
+/// Build the `msb sandbox` CLI args for a sandbox.
 #[allow(clippy::too_many_arguments)]
-fn supervisor_cli_args(
+fn sandbox_cli_args(
     config: &SandboxConfig,
     sandbox_id: i32,
     db_path: &Path,
@@ -251,7 +231,7 @@ fn supervisor_cli_args(
     agent_sock_path: &Path,
     libkrunfw_path: &Path,
 ) -> Vec<OsString> {
-    let mut args = vec![OsString::from("supervisor")];
+    let mut args = vec![OsString::from("sandbox")];
 
     if let Some(log_level) = config.log_level {
         args.push(OsString::from(log_level.as_cli_flag()));
@@ -270,11 +250,7 @@ fn supervisor_cli_args(
     args.push(OsString::from("--agent-sock"));
     args.push(agent_sock_path.as_os_str().to_os_string());
 
-    let sp = &config.supervisor_policy;
-    args.push(OsString::from("--shutdown-mode"));
-    args.push(OsString::from(shutdown_mode_str(&sp.shutdown_mode)));
-    args.push(OsString::from("--grace-secs"));
-    args.push(OsString::from(sp.grace_secs.to_string()));
+    let sp = &config.policy;
     if let Some(max_dur) = sp.max_duration_secs {
         args.push(OsString::from("--max-duration"));
         args.push(OsString::from(max_dur.to_string()));
@@ -283,18 +259,6 @@ fn supervisor_cli_args(
         args.push(OsString::from("--idle-timeout"));
         args.push(OsString::from(idle.to_string()));
     }
-
-    let vp = &config.child_policies.vm;
-    args.push(OsString::from("--vm-on-exit"));
-    args.push(OsString::from(exit_action_str(&vp.on_exit)));
-    args.push(OsString::from("--vm-max-restarts"));
-    args.push(OsString::from(vp.max_restarts.to_string()));
-    args.push(OsString::from("--vm-restart-delay-ms"));
-    args.push(OsString::from(vp.restart_delay_ms.to_string()));
-    args.push(OsString::from("--vm-restart-window"));
-    args.push(OsString::from(vp.restart_window_secs.to_string()));
-    args.push(OsString::from("--vm-shutdown-timeout-ms"));
-    args.push(OsString::from(vp.shutdown_timeout_ms.to_string()));
 
     args.push(OsString::from("--libkrunfw-path"));
     args.push(libkrunfw_path.as_os_str().to_os_string());
@@ -434,21 +398,21 @@ fn supervisor_cli_args(
 mod tests {
     use std::path::Path;
 
-    use super::supervisor_cli_args;
+    use super::sandbox_cli_args;
     use crate::{
         LogLevel,
         sandbox::{RootfsSource, SandboxBuilder},
     };
 
     #[test]
-    fn test_supervisor_cli_args_include_selected_log_level() {
+    fn test_sandbox_cli_args_include_selected_log_level() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .log_level(LogLevel::Debug)
             .build()
             .unwrap();
 
-        let args = supervisor_cli_args(
+        let args = sandbox_cli_args(
             &config,
             42,
             Path::new("/tmp/msb.db"),
@@ -465,13 +429,13 @@ mod tests {
     }
 
     #[test]
-    fn test_supervisor_cli_args_are_silent_by_default() {
+    fn test_sandbox_cli_args_are_silent_by_default() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
             .unwrap();
 
-        let args = supervisor_cli_args(
+        let args = sandbox_cli_args(
             &config,
             42,
             Path::new("/tmp/msb.db"),
@@ -493,13 +457,13 @@ mod tests {
     }
 
     #[test]
-    fn test_supervisor_cli_args_include_agent_sock_path() {
+    fn test_sandbox_cli_args_include_agent_sock_path() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
             .unwrap();
 
-        let args = supervisor_cli_args(
+        let args = sandbox_cli_args(
             &config,
             42,
             Path::new("/tmp/msb.db"),
@@ -524,13 +488,13 @@ mod tests {
     }
 
     #[test]
-    fn test_supervisor_cli_args_use_passthrough_for_bind_rootfs() {
+    fn test_sandbox_cli_args_use_passthrough_for_bind_rootfs() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
             .unwrap();
 
-        let args = supervisor_cli_args(
+        let args = sandbox_cli_args(
             &config,
             42,
             Path::new("/tmp/msb.db"),
@@ -555,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn test_supervisor_cli_args_use_overlay_for_oci_rootfs() {
+    fn test_sandbox_cli_args_use_overlay_for_oci_rootfs() {
         let mut config = SandboxBuilder::new("test")
             .image("alpine:latest")
             .build()
@@ -563,7 +527,7 @@ mod tests {
         assert!(matches!(config.image, RootfsSource::Oci(_)));
         config.resolved_rootfs_layers = vec!["/tmp/layer0".into(), "/tmp/layer1".into()];
 
-        let args = supervisor_cli_args(
+        let args = sandbox_cli_args(
             &config,
             42,
             Path::new("/tmp/msb.db"),
@@ -590,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn test_supervisor_cli_args_use_overlay_for_single_oci_lower_without_index_args() {
+    fn test_sandbox_cli_args_use_overlay_for_single_oci_lower_without_index_args() {
         let mut config = SandboxBuilder::new("test")
             .image("alpine:latest")
             .build()
@@ -598,7 +562,7 @@ mod tests {
         assert!(matches!(config.image, RootfsSource::Oci(_)));
         config.resolved_rootfs_layers = vec!["/tmp/layer0".into()];
 
-        let args = supervisor_cli_args(
+        let args = sandbox_cli_args(
             &config,
             42,
             Path::new("/tmp/msb.db"),
@@ -624,13 +588,13 @@ mod tests {
     }
 
     #[test]
-    fn test_supervisor_cli_args_use_synthetic_lower_for_zero_layer_oci_rootfs() {
+    fn test_sandbox_cli_args_use_synthetic_lower_for_zero_layer_oci_rootfs() {
         let config = SandboxBuilder::new("test")
             .image("scratch:latest")
             .build()
             .unwrap();
 
-        let args = supervisor_cli_args(
+        let args = sandbox_cli_args(
             &config,
             42,
             Path::new("/tmp/msb.db"),
@@ -653,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn test_supervisor_cli_args_inject_tmpfs_env_var() {
+    fn test_sandbox_cli_args_inject_tmpfs_env_var() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/tmp", |m| m.tmpfs().size(256u32))
@@ -661,7 +625,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let args = supervisor_cli_args(
+        let args = sandbox_cli_args(
             &config,
             42,
             Path::new("/tmp/msb.db"),
@@ -683,13 +647,13 @@ mod tests {
     }
 
     #[test]
-    fn test_supervisor_cli_args_omit_tmpfs_env_var_when_no_tmpfs() {
+    fn test_sandbox_cli_args_omit_tmpfs_env_var_when_no_tmpfs() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
             .unwrap();
 
-        let args = supervisor_cli_args(
+        let args = sandbox_cli_args(
             &config,
             42,
             Path::new("/tmp/msb.db"),
@@ -711,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn test_supervisor_cli_args_disk_image_with_fstype() {
+    fn test_sandbox_cli_args_disk_image_with_fstype() {
         let config = SandboxBuilder::new("test")
             .image(|i: crate::sandbox::ImageBuilder| i.disk("/tmp/ubuntu.qcow2").fstype("ext4"))
             .build()
@@ -719,7 +683,7 @@ mod tests {
 
         assert!(matches!(config.image, RootfsSource::DiskImage { .. }));
 
-        let args = supervisor_cli_args(
+        let args = sandbox_cli_args(
             &config,
             42,
             Path::new("/tmp/msb.db"),
@@ -751,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn test_supervisor_cli_args_disk_image_without_fstype() {
+    fn test_sandbox_cli_args_disk_image_without_fstype() {
         let config = SandboxBuilder::new("test")
             .image(|i: crate::sandbox::ImageBuilder| i.disk("/tmp/alpine.raw"))
             .build()
@@ -759,7 +723,7 @@ mod tests {
 
         assert!(matches!(config.image, RootfsSource::DiskImage { .. }));
 
-        let args = supervisor_cli_args(
+        let args = sandbox_cli_args(
             &config,
             42,
             Path::new("/tmp/msb.db"),

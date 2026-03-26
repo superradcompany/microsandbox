@@ -5,11 +5,11 @@
 //! per-domain certificate and re-originating a TLS connection to the real
 //! server.
 
-pub mod ca;
-pub mod certgen;
+pub(crate) mod ca;
+pub(crate) mod certgen;
 pub mod config;
-pub mod proxy;
-pub mod sni;
+pub(crate) mod proxy;
+pub(crate) mod sni;
 pub mod state;
 
 //--------------------------------------------------------------------------------------------------

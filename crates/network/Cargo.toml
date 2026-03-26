@@ -13,16 +13,19 @@ path = "lib/lib.rs"
 [dependencies]
 bytes = { workspace = true }
 crossbeam-queue = { workspace = true }
+dirs = { workspace = true }
 hickory-proto = { workspace = true }
 hickory-resolver = { workspace = true }
 ipnetwork = { workspace = true }
 libc = { workspace = true }
 lru = { workspace = true }
+microsandbox-utils = { version = "0.3.2", path = "../utils" }
 msb_krun = { version = "0.1.8", features = ["net"] }
 rcgen = { workspace = true }
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
 serde = { workspace = true }
+time = { workspace = true }
 smoltcp = { workspace = true, features = [
     "medium-ethernet",
     "proto-ipv4",

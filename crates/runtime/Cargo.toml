@@ -17,8 +17,10 @@ prebuilt = ["microsandbox-filesystem/prebuilt"]
 net = ["dep:microsandbox-network", "msb_krun/net"]
 
 [dependencies]
+bytes = { workspace = true }
 chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
+crossbeam-queue = { workspace = true }
 libc.workspace = true
 microsandbox-db = { version = "0.3.2", path = "../db" }
 microsandbox-filesystem = { version = "0.3.2", path = "../filesystem", default-features = false }

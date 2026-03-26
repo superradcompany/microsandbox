@@ -18,6 +18,16 @@ use crate::stack::{self, PollLoopConfig};
 use crate::tls::state::TlsState;
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Maximum sandbox slot value. Limited by MAC/IPv6 encoding (16 bits = 65535).
+/// The IPv4 pool (100.96.0.0/11 with /30 blocks) supports up to 524287 slots,
+/// but MAC and IPv6 derivation only encode the low 16 bits, so 65535 is the
+/// effective maximum.
+const MAX_SLOT: u64 = u16::MAX as u64;
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -52,7 +62,17 @@ pub struct SmoltcpNetwork {
 
 impl SmoltcpNetwork {
     /// Create from user config + sandbox slot (for IP/MAC derivation).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slot` exceeds the address pool capacity (65535 for MAC/IPv6,
+    /// 524287 for IPv4).
     pub fn new(config: NetworkConfig, slot: u64) -> Self {
+        assert!(
+            slot <= MAX_SLOT,
+            "sandbox slot {slot} exceeds address pool capacity (max {MAX_SLOT})"
+        );
+
         let guest_mac = config
             .interface
             .mac
@@ -72,7 +92,7 @@ impl SmoltcpNetwork {
 
         let queue_capacity = config
             .max_connections
-            .unwrap_or(256)
+            .unwrap_or(DEFAULT_QUEUE_CAPACITY)
             .max(DEFAULT_QUEUE_CAPACITY);
         let shared = Arc::new(SharedState::new(queue_capacity));
         let backend = SmoltcpBackend::new(shared.clone());
@@ -194,11 +214,6 @@ impl SmoltcpNetwork {
     /// Write to the runtime mount before VM boot so the guest can trust it.
     pub fn ca_cert_pem(&self) -> Option<Vec<u8>> {
         self.tls_state.as_ref().map(|s| s.ca_cert_pem())
-    }
-
-    /// Check if the poll thread is alive.
-    pub fn is_healthy(&self) -> bool {
-        self.poll_handle.as_ref().is_some_and(|h| !h.is_finished())
     }
 }
 

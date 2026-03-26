@@ -1,10 +1,6 @@
-//! `microsandbox-runtime` provides the runtime library for the supervisor
-//! and microVM entry points. This crate contains all logic that runs in the
-//! supervisor and VM child processes.
-//!
-//! The supervisor monitors child processes, handles signals, manages the
-//! drain lifecycle, and records termination data. The VM entry point
-//! configures and enters the microVM via msb_krun.
+//! `microsandbox-runtime` provides the runtime library for the sandbox
+//! process entry point. This crate contains the unified VM + relay logic
+//! that runs inside the single sandbox process.
 
 #![warn(missing_docs)]
 
@@ -14,14 +10,11 @@ mod error;
 // Exports
 //--------------------------------------------------------------------------------------------------
 
-pub mod drain;
+pub mod console;
 pub mod heartbeat;
 pub mod logging;
-pub mod monitor;
 pub mod policy;
 pub mod relay;
-pub mod supervisor;
-pub mod termination;
 pub mod vm;
 
 pub use error::*;
