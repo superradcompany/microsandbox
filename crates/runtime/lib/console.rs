@@ -110,6 +110,10 @@ impl ConsolePortBackend for AgentConsoleBackend {
     /// `WouldBlock` if both are empty. Never truncates — excess bytes are
     /// buffered for the next call.
     fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        // Reset the wake pipe before checking queues so future host->guest
+        // notifications are not lost if the VMM uses edge-triggered polling.
+        self.shared.rx_wake.drain();
+
         let mut pending = self.pending.lock().unwrap();
 
         // Serve from leftover bytes first (use memcpy via slices).
@@ -211,5 +215,31 @@ mod tests {
         // Second push fails — ring is full.
         let err = backend.write(b"b").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn backend_read_drains_rx_wake_pipe() {
+        let shared = Arc::new(ConsoleSharedState::new());
+        let backend = AgentConsoleBackend::new(Arc::clone(&shared));
+
+        shared.rx_ring.push(b"ping".to_vec()).unwrap();
+        shared.rx_wake.wake();
+
+        let mut pollfd = libc::pollfd {
+            fd: backend.read_wake_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ret = unsafe { libc::poll(&mut pollfd, 1, 0) };
+        assert_eq!(ret, 1, "wake pipe should be readable before read()");
+        assert_ne!(pollfd.revents & libc::POLLIN, 0);
+
+        let mut buf = [0u8; 8];
+        let n = backend.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"ping");
+
+        pollfd.revents = 0;
+        let ret = unsafe { libc::poll(&mut pollfd, 1, 0) };
+        assert_eq!(ret, 0, "wake pipe should be drained by read()");
     }
 }

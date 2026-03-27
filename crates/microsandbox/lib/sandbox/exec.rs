@@ -372,13 +372,17 @@ impl ExecHandle {
 
         while let Some(event) = self.events.recv().await {
             match event {
-                ExecEvent::Stdout(data) => stdout.extend_from_slice(&data),
-                ExecEvent::Stderr(data) => stderr.extend_from_slice(&data),
+                ExecEvent::Started { pid: _ } => {}
+                ExecEvent::Stdout(data) => {
+                    stdout.extend_from_slice(&data);
+                }
+                ExecEvent::Stderr(data) => {
+                    stderr.extend_from_slice(&data);
+                }
                 ExecEvent::Exited { code } => {
                     exit_code = Some(code);
                     break;
                 }
-                ExecEvent::Started { .. } => {}
             }
         }
 

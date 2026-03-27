@@ -13,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cpus(1)
         .memory(512)
         .network(|n| n.tls(|t| t.bypass("*.bypass-example.com")))
-        .overwrite()
+        .replace()
         .create()
         .await?;
 

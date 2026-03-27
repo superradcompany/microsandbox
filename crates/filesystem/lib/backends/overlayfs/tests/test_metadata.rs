@@ -21,6 +21,17 @@ fn test_getattr_lower_file() {
 }
 
 #[test]
+fn test_getattr_lower_symlink() {
+    let sb = OverlayTestSandbox::with_lower(|lower| {
+        std::os::unix::fs::symlink("../target", lower.join("lower-link")).unwrap();
+    });
+    let entry = sb.lookup_root("lower-link").unwrap();
+    let (st, _timeout) = sb.fs.getattr(sb.ctx(), entry.inode, None).unwrap();
+    let mode = st.st_mode as u32;
+    assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFLNK as u32);
+}
+
+#[test]
 fn test_getattr_root() {
     let sb = OverlayTestSandbox::new();
     let (st, _timeout) = sb.fs.getattr(sb.ctx(), ROOT_INODE, None).unwrap();

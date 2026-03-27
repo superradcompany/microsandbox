@@ -3,8 +3,8 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use microsandbox_cli::{
     commands::{
-        create, exec, image, inspect, install, list, ps, pull, remove, run, shell, start, stop,
-        uninstall, volume,
+        create, exec, image, inspect, install, list, ps, pull, remove, run, self_cmd, shell, start,
+        stop, uninstall, volume,
     },
     log_args::{self, LogArgs},
     sandbox_cmd::{self, SandboxArgs},
@@ -91,6 +91,10 @@ enum Commands {
 
     /// Remove an installed sandbox alias.
     Uninstall(uninstall::UninstallArgs),
+
+    /// Manage the msb installation itself.
+    #[command(name = "self")]
+    Self_(self_cmd::SelfArgs),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -138,7 +142,9 @@ fn run_async_command(
     command: Commands,
     _log_level: Option<microsandbox::LogLevel>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    // CLI commands are foreground and short-lived, so a current-thread
+    // runtime avoids worker startup overhead on each invocation.
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
 
@@ -163,6 +169,7 @@ fn run_async_command(
             Commands::Volume(args) => volume::run(args).await.map_err(Into::into),
             Commands::Install(args) => install::run(args).await.map_err(Into::into),
             Commands::Uninstall(args) => uninstall::run(args).await.map_err(Into::into),
+            Commands::Self_(args) => self_cmd::run(args).await.map_err(Into::into),
         }
     })
 }

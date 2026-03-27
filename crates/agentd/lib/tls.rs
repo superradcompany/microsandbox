@@ -1,6 +1,6 @@
 //! Guest-side CA certificate installation for TLS interception.
 //!
-//! When the supervisor places a CA certificate at `/.msb/tls/ca.pem` via the
+//! When the sandbox process places a CA certificate at `/.msb/tls/ca.pem` via the
 //! runtime virtiofs mount, this module detects it during init and:
 //!
 //! 1. Copies the CA PEM to distro-specific trust directories (if they exist).

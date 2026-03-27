@@ -262,6 +262,12 @@ checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
 
 [[package]]
 name = "base64"
+version = "0.21.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
+
+[[package]]
+name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
@@ -1020,6 +1026,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "docker_credential"
+version = "1.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d89dfcba45b4afad7450a99b39e751590463e45c04728cf555d36bb66940de8"
+dependencies = [
+ "base64 0.21.7",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1169,12 +1186,6 @@ name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
-
-[[package]]
-name = "foldhash"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "foreign-types"
@@ -1435,7 +1446,7 @@ checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
  "allocator-api2",
  "equivalent",
- "foldhash 0.1.5",
+ "foldhash",
 ]
 
 [[package]]
@@ -1443,11 +1454,6 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
-dependencies = [
- "allocator-api2",
- "equivalent",
- "foldhash 0.2.0",
-]
 
 [[package]]
 name = "hashlink"
@@ -2142,15 +2148,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lru"
-version = "0.16.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1dc47f592c06f33f8e3aea9591776ec7c9f9e4124778ff8a3c3b87159f7e593"
-dependencies = [
- "hashbrown 0.16.1",
-]
-
-[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2204,6 +2201,7 @@ dependencies = [
  "chrono",
  "crossterm",
  "dirs",
+ "docker_credential",
  "flate2",
  "futures",
  "libc",
@@ -2238,13 +2236,16 @@ dependencies = [
  "chrono",
  "clap",
  "console",
+ "dirs",
  "indicatif",
  "libc",
  "microsandbox",
  "microsandbox-image",
  "microsandbox-network",
  "microsandbox-runtime",
+ "microsandbox-utils",
  "rand 0.9.2",
+ "reqwest 0.13.2",
  "serde_json",
  "tokio",
  "tracing",
@@ -2314,7 +2315,7 @@ dependencies = [
  "hickory-resolver",
  "ipnetwork",
  "libc",
- "lru 0.12.5",
+ "lru",
  "microsandbox-utils",
  "msb_krun",
  "rcgen",
@@ -2495,7 +2496,7 @@ dependencies = [
  "libc",
  "libloading",
  "log",
- "lru 0.16.3",
+ "lru",
  "msb_krun_arch",
  "msb_krun_hvf",
  "msb_krun_polly",
@@ -2629,6 +2630,15 @@ name = "net-policy"
 version = "0.1.0"
 dependencies = [
  "microsandbox",
+ "tokio",
+]
+
+[[package]]
+name = "net-ports"
+version = "0.1.0"
+dependencies = [
+ "microsandbox",
+ "reqwest 0.13.2",
  "tokio",
 ]
 
@@ -3508,6 +3518,14 @@ dependencies = [
 
 [[package]]
 name = "root-oci"
+version = "0.1.0"
+dependencies = [
+ "microsandbox",
+ "tokio",
+]
+
+[[package]]
+name = "rootfs-patch"
 version = "0.1.0"
 dependencies = [
  "microsandbox",

@@ -1,6 +1,6 @@
 [package]
 name = "microsandbox-runtime"
-description = "Runtime library for the microsandbox supervisor and microVM entry points."
+description = "Runtime library for the microsandbox sandbox process and microVM entry points."
 version.workspace = true
 authors.workspace = true
 repository.workspace = true

@@ -30,7 +30,7 @@ use crate::MicrosandboxResult;
 
 /// Client for communicating with agentd through the agent relay.
 ///
-/// Connects over a Unix domain socket to the supervisor's agent relay.
+/// Connects over a Unix domain socket to the sandbox process's agent relay.
 /// Correlation IDs are allocated from the range assigned during the relay
 /// handshake.
 pub struct AgentClient {

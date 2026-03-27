@@ -47,7 +47,6 @@ const LINUX_EBADF: i32 = 9;
 const LINUX_EACCES: i32 = 13;
 const LINUX_EEXIST: i32 = 17;
 const LINUX_EINVAL: i32 = 22;
-#[cfg(target_os = "linux")]
 const LINUX_ELOOP: i32 = 40;
 const LINUX_ENOTEMPTY: i32 = 39;
 const LINUX_EROFS: i32 = 30;

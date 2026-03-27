@@ -11,6 +11,7 @@ mod config;
 pub mod exec;
 pub mod fs;
 mod handle;
+mod patch;
 mod types;
 
 use std::{path::Path, process::ExitStatus, sync::Arc};
@@ -21,8 +22,8 @@ use microsandbox_protocol::{
     message::{Message, MessageType},
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, Set, TransactionTrait, sea_query::Expr,
+    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    sea_query::Expr,
 };
 use tokio::sync::{Mutex, mpsc};
 
@@ -57,8 +58,8 @@ pub use microsandbox_network::config::NetworkConfig;
 pub use microsandbox_network::policy::NetworkPolicy;
 pub use microsandbox_runtime::logging::LogLevel;
 pub use types::{
-    DiskImageFormat, ImageBuilder, ImageSource, IntoImage, MountBuilder, Patch, RootfsSource,
-    SecretsConfig, SshConfig, VolumeMount,
+    DiskImageFormat, ImageBuilder, ImageSource, IntoImage, MountBuilder, Patch, PatchBuilder,
+    RootfsSource, SecretsConfig, SshConfig, VolumeMount,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -70,22 +71,10 @@ pub use types::{
 /// Created via [`Sandbox::builder`] or [`Sandbox::create`]. Provides
 /// lifecycle management and access to the agent bridge for guest communication.
 pub struct Sandbox {
+    db_id: i32,
     config: SandboxConfig,
     handle: Option<Arc<Mutex<ProcessHandle>>>,
     client: Arc<AgentClient>,
-}
-
-/// Wrapper for using a raw stdin fd with [`tokio::io::unix::AsyncFd`].
-///
-/// `AsyncFd` requires `AsRawFd`. This wraps the raw fd without taking
-/// ownership — the fd is managed by the process's stdin and must not
-/// be closed by this wrapper.
-struct StdinRawFd(std::os::fd::RawFd);
-
-impl std::os::fd::AsRawFd for StdinRawFd {
-    fn as_raw_fd(&self) -> std::os::fd::RawFd {
-        self.0
-    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -131,7 +120,7 @@ impl Sandbox {
 
     /// Create a detached sandbox with pull progress reporting.
     ///
-    /// Like `create_with_pull_progress` but spawns the supervisor in detached
+    /// Like `create_with_pull_progress` but spawns the sandbox process in detached
     /// mode so the sandbox survives after the creating process exits.
     pub fn create_detached_with_pull_progress(
         config: SandboxConfig,
@@ -185,7 +174,7 @@ impl Sandbox {
         let sandbox_dir = crate::config::config().sandboxes_dir().join(&config.name);
         prepare_create_target(db, &config, &sandbox_dir).await?;
 
-        // Resolve OCI images before spawning the supervisor.
+        // Resolve OCI images before spawning the sandbox process.
         if let RootfsSource::Oci(reference) = config.image.clone() {
             let pull_result =
                 pull_oci_image(&reference, config.registry_auth.take(), progress).await?;
@@ -209,10 +198,21 @@ impl Sandbox {
             }
         }
 
+        // Apply rootfs patches before VM start.
+        if !config.patches.is_empty() {
+            patch::apply_patches(
+                &config.image,
+                &config.patches,
+                &sandbox_dir,
+                &config.resolved_rootfs_layers,
+            )
+            .await?;
+        }
+
         // Insert the sandbox record and keep its stable database ID.
         let sandbox_id = insert_sandbox_record(db, &config).await?;
 
-        // Spawn supervisor + create bridge. On failure, mark the sandbox
+        // Spawn the sandbox process and create the bridge. On failure, mark the sandbox
         // as stopped so it doesn't appear as a phantom "Running" entry.
         let sandbox = match Self::create_inner(config, sandbox_id, mode).await {
             Ok(sandbox) => sandbox,
@@ -292,8 +292,8 @@ impl Sandbox {
             ready_time_ms = ready.ready_time_ns / 1_000_000,
             "sandbox ready",
         );
-
         Ok(Self {
+            db_id: sandbox_id,
             config,
             handle: Some(Arc::new(Mutex::new(handle))),
             client: Arc::new(client),
@@ -347,6 +347,23 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 
 impl Sandbox {
+    /// Remove this sandbox's persisted state after it has fully stopped.
+    pub async fn remove_persisted(self) -> MicrosandboxResult<()> {
+        let db =
+            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+
+        remove_dir_if_exists(
+            &crate::config::config()
+                .sandboxes_dir()
+                .join(&self.config.name),
+        )?;
+        sandbox_entity::Entity::delete_by_id(self.db_id)
+            .exec(db)
+            .await?;
+
+        Ok(())
+    }
+
     /// Unique name identifying this sandbox.
     pub fn name(&self) -> &str {
         &self.config.name
@@ -390,7 +407,7 @@ impl Sandbox {
     ///
     /// If this handle does not own the lifecycle (connected to an existing
     /// sandbox), only the stop signal is sent — wait is skipped since we
-    /// don't have a supervisor handle to wait on.
+    /// don't have a process handle to wait on.
     pub async fn stop_and_wait(&self) -> MicrosandboxResult<ExitStatus> {
         let stop_result = self.stop().await;
         if self.handle.is_none() {
@@ -649,35 +666,16 @@ impl Sandbox {
             let _ = crossterm::terminal::disable_raw_mode();
         });
 
-        // Set stdin to non-blocking so the async read can be cleanly cancelled.
-        // tokio::io::stdin() uses a blocking thread that can't be cancelled,
-        // causing the first keystroke after exit to be swallowed.
-        let stdin_fd = std::io::stdin().as_raw_fd();
-        let old_stdin_flags = unsafe { libc::fcntl(stdin_fd, libc::F_GETFL) };
-        if old_stdin_flags == -1 {
-            return Err(crate::MicrosandboxError::Terminal(format!(
-                "failed to get stdin flags: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        if unsafe { libc::fcntl(stdin_fd, libc::F_SETFL, old_stdin_flags | libc::O_NONBLOCK) } == -1
-        {
-            return Err(crate::MicrosandboxError::Terminal(format!(
-                "failed to set stdin non-blocking: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        let _nonblock_guard = scopeguard::guard((), |_| {
-            if unsafe { libc::fcntl(stdin_fd, libc::F_SETFL, old_stdin_flags) } == -1 {
-                tracing::warn!(
-                    error = %std::io::Error::last_os_error(),
-                    "failed to restore stdin blocking mode"
-                );
-            }
-        });
-
-        let stdin_async = AsyncFd::new(StdinRawFd(stdin_fd))
-            .map_err(|e| crate::MicrosandboxError::Terminal(format!("async stdin: {e}")))?;
+        // Re-open the controlling terminal for input and set only that fresh
+        // fd non-blocking. Toggling O_NONBLOCK on fd 0 would also affect
+        // stdout/stderr when all three stdio fds share the same TTY open file
+        // description, which truncates large terminal writes.
+        let tty_input_path = terminal_path_for_fd(std::io::stdin().as_raw_fd())
+            .map_err(|e| crate::MicrosandboxError::Terminal(format!("resolve tty path: {e}")))?;
+        let tty_input = open_nonblocking_terminal_input(&tty_input_path)
+            .map_err(|e| crate::MicrosandboxError::Terminal(format!("open tty input: {e}")))?;
+        let stdin_async = AsyncFd::new(tty_input)
+            .map_err(|e| crate::MicrosandboxError::Terminal(format!("async tty input: {e}")))?;
 
         // Set up async I/O.
         let mut stdout = tokio::io::stdout();
@@ -699,71 +697,102 @@ impl Sandbox {
                     };
 
                     let mut input_buf = [0u8; 1024];
-                    let n = unsafe {
-                        libc::read(
-                            stdin_fd,
-                            input_buf.as_mut_ptr() as *mut libc::c_void,
-                            input_buf.len(),
-                        )
-                    };
+                    match guard.try_io(|inner| {
+                        read_from_fd(inner.get_ref().as_raw_fd(), &mut input_buf)
+                    }) {
+                        Ok(Ok(0)) => break, // EOF
+                        Ok(Ok(n)) => {
+                            let data = &input_buf[..n];
 
-                    if n > 0 {
-                        let data = &input_buf[..n as usize];
-
-                        // Check for detach key sequence.
-                        let mut detached = false;
-                        for &b in data {
-                            if b == detach_seq[match_pos] {
-                                match_pos += 1;
-                                if match_pos == detach_seq.len() {
-                                    detached = true;
-                                    break;
-                                }
-                            } else {
-                                match_pos = 0;
-                                if b == detach_seq[0] {
-                                    match_pos = 1;
+                            // Check for detach key sequence.
+                            let mut detached = false;
+                            for &b in data {
+                                if b == detach_seq[match_pos] {
+                                    match_pos += 1;
+                                    if match_pos == detach_seq.len() {
+                                        detached = true;
+                                        break;
+                                    }
+                                } else {
+                                    match_pos = 0;
+                                    if b == detach_seq[0] {
+                                        match_pos = 1;
+                                    }
                                 }
                             }
-                        }
 
-                        if detached {
-                            break;
-                        }
+                            if detached {
+                                break;
+                            }
 
-                        // Forward to guest.
-                        let payload = ExecStdin { data: data.to_vec() };
-                        if let Ok(msg) = Message::with_payload(MessageType::ExecStdin, id, &payload) {
-                            let _ = self.client.send(&msg).await;
+                            // Forward to guest.
+                            let payload = ExecStdin { data: data.to_vec() };
+                            if let Ok(msg) = Message::with_payload(MessageType::ExecStdin, id, &payload) {
+                                let _ = self.client.send(&msg).await;
+                            }
                         }
-                    } else if n == 0 {
-                        break; // EOF
-                    } else {
-                        let err = std::io::Error::last_os_error();
-                        match err.kind() {
-                            std::io::ErrorKind::WouldBlock => guard.clear_ready(),
-                            std::io::ErrorKind::Interrupted => {} // EINTR — retry
-                            _ => break,
-                        }
+                        Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Ok(Err(_)) => break,
+                        Err(_would_block) => continue,
                     }
                 }
 
                 // Receive output from guest.
+                //
+                // TUI apps (e.g. Ink-based CLIs) write a full re-render as one
+                // write(), but the guest PTY reader chunks it into ~4 KB
+                // ExecStdout messages. Writing each chunk to the host terminal
+                // separately lets the terminal emulator render intermediate
+                // states — partial cursor movements, partially overwritten
+                // lines — producing visible afterimage artifacts.
+                //
+                // Fix: after receiving the first message, drain all immediately
+                // available ExecStdout messages and batch their data into a
+                // single write. This coalesces the output so the terminal
+                // processes each re-render atomically.
                 Some(msg) = rx.recv() => {
+                    let mut should_break = false;
+
                     match msg.t {
                         MessageType::ExecStdout => {
                             if let Ok(out) = msg.payload::<ExecStdout>() {
                                 let _ = stdout.write_all(&out.data).await;
-                                let _ = stdout.flush().await;
                             }
                         }
                         MessageType::ExecExited => {
                             if let Ok(exited) = msg.payload::<ExecExited>() {
                                 exit_code = exited.code;
                             }
-                            break;
+                            should_break = true;
                         }
                         _ => {}
+                    }
+
+                    // Drain all buffered messages before flushing.
+                    if !should_break {
+                        while let Ok(next) = rx.try_recv() {
+                            match next.t {
+                                MessageType::ExecStdout => {
+                                    if let Ok(out) = next.payload::<ExecStdout>() {
+                                        let _ = stdout.write_all(&out.data).await;
+                                    }
+                                }
+                                MessageType::ExecExited => {
+                                    if let Ok(exited) = next.payload::<ExecExited>() {
+                                        exit_code = exited.code;
+                                    }
+                                    should_break = true;
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    let _ = stdout.flush().await;
+
+                    if should_break {
+                        break;
                     }
                 }
 
@@ -799,17 +828,22 @@ impl Sandbox {
 
 /// Wait for the agent relay socket to become available and connect.
 ///
-/// The supervisor creates the relay socket asynchronously during startup.
+/// The sandbox process creates the relay socket asynchronously during startup.
 /// This function retries the connection with brief delays until it succeeds
 /// or a timeout is reached.
 async fn wait_for_relay(sock_path: &std::path::Path) -> MicrosandboxResult<AgentClient> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let max_backoff = std::time::Duration::from_millis(10);
+    let mut backoff = std::time::Duration::from_millis(1);
 
     loop {
         match AgentClient::connect(sock_path).await {
             Ok(client) => return Ok(client),
             Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                // Keep early retries tight so relay readiness doesn't inherit a
+                // coarse fixed delay on warm starts.
+                tokio::time::sleep(backoff).await;
+                backoff = std::cmp::min(backoff.saturating_mul(2), max_backoff);
             }
             Err(e) => return Err(e),
         }
@@ -847,9 +881,9 @@ fn build_exec_request(
         .map(|(k, v)| format!("{k}={v}"))
         .collect();
 
-    // Inject TERM for TTY sessions if not already set (mirrors Docker behavior).
+    // Inject TERM for TTY sessions if not already set.
     if tty && !env.iter().any(|e| e.starts_with("TERM=")) {
-        env.push("TERM=xterm-256color".to_string());
+        env.push(format!("TERM={}", default_tty_term()));
     }
 
     let rlimits: Vec<ExecRlimit> = rlimits
@@ -870,6 +904,63 @@ fn build_exec_request(
         rows,
         cols,
         rlimits,
+    }
+}
+
+fn default_tty_term() -> String {
+    select_tty_term(std::env::var("TERM").ok().as_deref())
+}
+
+fn select_tty_term(term: Option<&str>) -> String {
+    match term {
+        Some(term) if !term.trim().is_empty() && term != "dumb" => term.to_string(),
+        _ => "xterm".to_string(),
+    }
+}
+
+fn terminal_path_for_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::path::PathBuf> {
+    let mut buf = [0u8; 1024];
+    let rc = unsafe { libc::ttyname_r(fd, buf.as_mut_ptr().cast(), buf.len()) };
+    if rc != 0 {
+        return Err(std::io::Error::from_raw_os_error(rc));
+    }
+
+    let end = buf
+        .iter()
+        .position(|&byte| byte == 0)
+        .ok_or_else(|| std::io::Error::other("ttyname_r did not NUL-terminate"))?;
+
+    let path = std::str::from_utf8(&buf[..end]).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "tty path is not valid UTF-8",
+        )
+    })?;
+
+    Ok(std::path::PathBuf::from(path))
+}
+
+fn open_nonblocking_terminal_input(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+
+    let file = std::fs::File::open(path)?;
+    let fd = file.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+fn read_from_fd(fd: std::os::fd::RawFd, buf: &mut [u8]) -> std::io::Result<usize> {
+    let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+    if n < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(n as usize)
     }
 }
 
@@ -1064,6 +1155,37 @@ async fn pull_oci_image(
     let image_ref: microsandbox_image::Reference = reference.parse().map_err(|e| {
         crate::MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
     })?;
+    let options = microsandbox_image::PullOptions::default();
+
+    // Warm runs spend most of their time outside the guest, so avoid
+    // constructing the registry client when the image is already complete
+    // in the local cache.
+    if let Some((result, metadata)) =
+        microsandbox_image::Registry::pull_cached(&cache, &image_ref, &options)?
+    {
+        if let Some(sender) = progress {
+            let reference: std::sync::Arc<str> = reference.to_string().into();
+            sender.send(microsandbox_image::PullProgress::Resolving {
+                reference: reference.clone(),
+            });
+            sender.send(microsandbox_image::PullProgress::Resolved {
+                reference: reference.clone(),
+                manifest_digest: metadata.manifest_digest.clone().into(),
+                layer_count: metadata.layers.len(),
+                total_download_bytes: metadata
+                    .layers
+                    .iter()
+                    .filter_map(|layer| layer.size_bytes)
+                    .reduce(|a, b| a + b),
+            });
+            sender.send(microsandbox_image::PullProgress::Complete {
+                reference,
+                layer_count: metadata.layers.len(),
+            });
+        }
+
+        return Ok(result);
+    }
 
     let auth = match explicit_auth {
         Some(auth) => auth,
@@ -1071,7 +1193,6 @@ async fn pull_oci_image(
     };
 
     let registry = microsandbox_image::Registry::with_auth(platform, cache, auth)?;
-    let options = microsandbox_image::PullOptions::default();
 
     if let Some(sender) = progress {
         let task = registry.pull_with_sender(&image_ref, &options, sender);
@@ -1159,7 +1280,7 @@ async fn prepare_create_target(
     if !config.replace_existing {
         if existing.is_some() || dir_exists {
             return Err(crate::MicrosandboxError::Custom(format!(
-                "sandbox '{}' already exists; remove it, start the stopped sandbox, or recreate with .overwrite()",
+                "sandbox '{}' already exists; remove it, start the stopped sandbox, or recreate with .replace()",
                 config.name
             )));
         }
@@ -1173,17 +1294,102 @@ async fn prepare_create_target(
             model.status,
             SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
         ) {
-            return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
-                "cannot replace sandbox '{}': existing sandbox is still active",
-                config.name
-            )));
+            stop_sandbox_for_replacement(db, &model).await?;
         }
 
-        model.into_active_model().delete(db).await?;
+        sandbox_entity::Entity::delete_by_id(model.id)
+            .exec(db)
+            .await?;
     }
 
     remove_dir_if_exists(sandbox_dir)?;
     Ok(())
+}
+
+async fn stop_sandbox_for_replacement(
+    db: &sea_orm::DatabaseConnection,
+    sandbox: &sandbox_entity::Model,
+) -> MicrosandboxResult<()> {
+    let run = load_active_run(db, sandbox.id).await?;
+    let pids: Vec<i32> = run
+        .as_ref()
+        .and_then(|model| model.pid)
+        .filter(|pid| pid_is_alive(*pid))
+        .into_iter()
+        .collect();
+
+    for pid in &pids {
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(*pid),
+            nix::sys::signal::Signal::SIGTERM,
+        )?;
+    }
+
+    wait_for_pids_to_exit(&pids, std::time::Duration::from_secs(30)).await;
+
+    if pids.iter().any(|pid| pid_is_alive(*pid)) {
+        return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+            "cannot replace sandbox '{}': existing sandbox did not stop in time",
+            sandbox.name
+        )));
+    }
+
+    mark_sandbox_stopped_for_replacement(db, sandbox.id, run.as_ref().map(|model| model.id)).await
+}
+
+async fn mark_sandbox_stopped_for_replacement(
+    db: &sea_orm::DatabaseConnection,
+    sandbox_id: i32,
+    run_id: Option<i32>,
+) -> MicrosandboxResult<()> {
+    let txn = db.begin().await?;
+    let now = chrono::Utc::now().naive_utc();
+
+    if let Some(run_id) = run_id {
+        run_entity::Entity::update_many()
+            .col_expr(
+                run_entity::Column::Status,
+                Expr::value(run_entity::RunStatus::Terminated),
+            )
+            .col_expr(
+                run_entity::Column::TerminationReason,
+                Expr::value(run_entity::TerminationReason::Signal),
+            )
+            .col_expr(run_entity::Column::TerminatedAt, Expr::value(now))
+            .filter(run_entity::Column::Id.eq(run_id))
+            .exec(&txn)
+            .await?;
+    }
+
+    sandbox_entity::Entity::update_many()
+        .col_expr(
+            sandbox_entity::Column::Status,
+            Expr::value(SandboxStatus::Stopped),
+        )
+        .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
+        .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+        .exec(&txn)
+        .await?;
+
+    txn.commit().await?;
+    Ok(())
+}
+
+async fn wait_for_pids_to_exit(pids: &[i32], timeout: std::time::Duration) {
+    let start = std::time::Instant::now();
+    let poll_interval = std::time::Duration::from_millis(50);
+
+    loop {
+        if pids.iter().all(|pid| !pid_is_alive(*pid)) {
+            return;
+        }
+
+        if start.elapsed() >= timeout {
+            return;
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
 }
 
 fn validate_start_state(config: &SandboxConfig, sandbox_dir: &Path) -> MicrosandboxResult<()> {
@@ -1287,7 +1493,9 @@ async fn replace_oci_manifest_pin<C: ConnectionTrait>(
 mod tests {
     use std::{
         fs,
+        os::fd::{AsRawFd, FromRawFd, OwnedFd},
         path::PathBuf,
+        process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -1318,6 +1526,75 @@ mod tests {
             pid += 1;
         }
         pid
+    }
+
+    #[test]
+    fn test_default_tty_term_prefers_host_term() {
+        assert_eq!(super::select_tty_term(Some("wezterm")), "wezterm");
+    }
+
+    #[test]
+    fn test_default_tty_term_falls_back_from_dumb() {
+        assert_eq!(super::select_tty_term(Some("dumb")), "xterm");
+    }
+
+    #[test]
+    fn test_shared_tty_fd_flags_are_shared_across_dups() {
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let shared_a = unsafe { OwnedFd::from_raw_fd(libc::dup(pty.slave.as_raw_fd())) };
+        let shared_b = unsafe { OwnedFd::from_raw_fd(libc::dup(shared_a.as_raw_fd())) };
+
+        let flags = unsafe { libc::fcntl(shared_a.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(flags, -1);
+        let ret = unsafe {
+            libc::fcntl(
+                shared_a.as_raw_fd(),
+                libc::F_SETFL,
+                flags | libc::O_NONBLOCK,
+            )
+        };
+        assert_ne!(ret, -1);
+
+        let other_flags = unsafe { libc::fcntl(shared_b.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(other_flags, -1);
+        assert_ne!(
+            other_flags & libc::O_NONBLOCK,
+            0,
+            "dup'd tty fds should share O_NONBLOCK state"
+        );
+    }
+
+    #[test]
+    fn test_open_nonblocking_terminal_input_keeps_existing_tty_fds_blocking() {
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let shared_a = unsafe { OwnedFd::from_raw_fd(libc::dup(pty.slave.as_raw_fd())) };
+        let shared_b = unsafe { OwnedFd::from_raw_fd(libc::dup(shared_a.as_raw_fd())) };
+        let tty_path = super::terminal_path_for_fd(pty.slave.as_raw_fd()).unwrap();
+
+        let input = super::open_nonblocking_terminal_input(&tty_path).unwrap();
+
+        let input_flags = unsafe { libc::fcntl(input.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(input_flags, -1);
+        assert_ne!(
+            input_flags & libc::O_NONBLOCK,
+            0,
+            "re-opened tty input fd should be non-blocking"
+        );
+
+        let flags_a = unsafe { libc::fcntl(shared_a.as_raw_fd(), libc::F_GETFL) };
+        let flags_b = unsafe { libc::fcntl(shared_b.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(flags_a, -1);
+        assert_ne!(flags_b, -1);
+        assert_eq!(
+            flags_a & libc::O_NONBLOCK,
+            0,
+            "existing tty fd should remain blocking"
+        );
+        assert_eq!(
+            flags_b & libc::O_NONBLOCK,
+            0,
+            "dup'd tty fd should remain blocking"
+        );
     }
 
     #[test]
@@ -1689,7 +1966,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prepare_create_target_force_rejects_running_sandbox() {
+    async fn test_prepare_create_target_force_replaces_running_sandbox() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
         let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
@@ -1706,9 +1983,12 @@ mod tests {
         };
         let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
 
-        // Insert a run with the current process PID so reconciliation
-        // considers the sandbox genuinely alive.
-        let live_pid = std::process::id() as i32;
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let live_pid = child.id() as i32;
+        let waiter = std::thread::spawn(move || {
+            let mut child = child;
+            child.wait().unwrap()
+        });
         let run = run_entity::ActiveModel {
             sandbox_id: Set(sandbox_id),
             pid: Set(Some(live_pid)),
@@ -1723,14 +2003,21 @@ mod tests {
         };
         forced.replace_existing = true;
 
-        let err = prepare_create_target(&conn, &forced, &sandbox_dir)
+        prepare_create_target(&conn, &forced, &sandbox_dir)
             .await
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            crate::MicrosandboxError::SandboxStillRunning(_)
-        ));
-        assert!(sandbox_dir.exists());
+            .unwrap();
+
+        waiter.join().unwrap();
+
+        assert!(!super::pid_is_alive(live_pid));
+        assert!(!sandbox_dir.exists());
+        assert!(
+            super::sandbox_entity::Entity::find_by_id(sandbox_id)
+                .one(&conn)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

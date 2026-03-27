@@ -132,11 +132,100 @@ enum MountKind {
     Unset,
 }
 
-/// A rootfs patch applied as an overlay layer before VM start.
+/// Rootfs patch applied before VM startup.
 ///
-/// Fully implemented in Phase 13 (Patches).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Patch {}
+/// How patches are applied depends on the root filesystem type:
+/// - **OCI images (OverlayFs):** Patches are written directly to the `rw/` upper layer
+///   (`sandboxes/<name>/rw/`). The extracted image layers remain shared and untouched.
+/// - **Bind/Passthrough roots:** Patches are applied directly to the host directory.
+/// - **Block device roots (Qcow2, Raw):** Patches are not supported. Returns an error at
+///   create time.
+///
+/// By default, patches that target a path already present in the rootfs (lower layers for
+/// OverlayFs, existing files for bind roots) will return an error. Set `overwrite: true` on
+/// the relevant variant to allow shadowing existing files.
+///
+/// For `Append` patches targeting a file in a lower layer, the file is first copied up to
+/// `rw/` before appending.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Patch {
+    /// Write text content to a file.
+    Text {
+        /// Absolute guest path (e.g., `/etc/app.conf`).
+        path: String,
+        /// Text content to write.
+        content: String,
+        /// File permissions (e.g., `0o644`). `None` uses the default.
+        mode: Option<u32>,
+        /// Allow overwriting a file that already exists in the rootfs.
+        overwrite: bool,
+    },
+    /// Write raw bytes to a file.
+    File {
+        /// Absolute guest path.
+        path: String,
+        /// Raw byte content to write.
+        content: Vec<u8>,
+        /// File permissions (e.g., `0o644`). `None` uses the default.
+        mode: Option<u32>,
+        /// Allow overwriting a file that already exists in the rootfs.
+        overwrite: bool,
+    },
+    /// Copy a file from host into the rootfs.
+    CopyFile {
+        /// Host path to copy from.
+        src: PathBuf,
+        /// Absolute guest destination path.
+        dst: String,
+        /// File permissions. `None` preserves source permissions.
+        mode: Option<u32>,
+        /// Allow overwriting a file that already exists in the rootfs.
+        overwrite: bool,
+    },
+    /// Copy a directory from host into the rootfs.
+    CopyDir {
+        /// Host directory to copy from.
+        src: PathBuf,
+        /// Absolute guest destination path.
+        dst: String,
+        /// Allow overwriting files that already exist in the rootfs.
+        overwrite: bool,
+    },
+    /// Create a symlink.
+    Symlink {
+        /// Symlink target path.
+        target: String,
+        /// Absolute guest path where the symlink is created.
+        link: String,
+        /// Allow overwriting a path that already exists in the rootfs.
+        overwrite: bool,
+    },
+    /// Create a directory (idempotent — does not error if the directory already exists).
+    Mkdir {
+        /// Absolute guest path.
+        path: String,
+        /// Directory permissions (e.g., `0o755`). `None` uses the default.
+        mode: Option<u32>,
+    },
+    /// Remove a file or directory (idempotent — does not error if the path does not exist).
+    Remove {
+        /// Absolute guest path to remove.
+        path: String,
+    },
+    /// Append content to an existing file. If the file lives in a lower layer,
+    /// it is copied up to `rw/` first, then the content is appended.
+    Append {
+        /// Absolute guest path of the file to append to.
+        path: String,
+        /// Content to append.
+        content: String,
+    },
+}
+
+/// Builder for constructing a list of [`Patch`] operations.
+pub struct PatchBuilder {
+    patches: Vec<Patch>,
+}
 
 /// Secrets configuration for a sandbox.
 ///
@@ -244,6 +333,131 @@ impl MountBuilder {
                 "MountBuilder: no mount type set (call .bind(), .named(), or .tmpfs())".into(),
             )),
         }
+    }
+}
+
+impl Default for PatchBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PatchBuilder {
+    /// Create a new patch builder.
+    pub fn new() -> Self {
+        Self {
+            patches: Vec::new(),
+        }
+    }
+
+    /// Write text content to a file.
+    pub fn text(
+        mut self,
+        path: impl Into<String>,
+        content: impl Into<String>,
+        mode: Option<u32>,
+        overwrite: bool,
+    ) -> Self {
+        self.patches.push(Patch::Text {
+            path: path.into(),
+            content: content.into(),
+            mode,
+            overwrite,
+        });
+        self
+    }
+
+    /// Write raw bytes to a file.
+    pub fn file(
+        mut self,
+        path: impl Into<String>,
+        content: impl Into<Vec<u8>>,
+        mode: Option<u32>,
+        overwrite: bool,
+    ) -> Self {
+        self.patches.push(Patch::File {
+            path: path.into(),
+            content: content.into(),
+            mode,
+            overwrite,
+        });
+        self
+    }
+
+    /// Copy a file from host into the rootfs.
+    pub fn copy_file(
+        mut self,
+        src: impl Into<PathBuf>,
+        dst: impl Into<String>,
+        mode: Option<u32>,
+        overwrite: bool,
+    ) -> Self {
+        self.patches.push(Patch::CopyFile {
+            src: src.into(),
+            dst: dst.into(),
+            mode,
+            overwrite,
+        });
+        self
+    }
+
+    /// Copy a directory from host into the rootfs.
+    pub fn copy_dir(
+        mut self,
+        src: impl Into<PathBuf>,
+        dst: impl Into<String>,
+        overwrite: bool,
+    ) -> Self {
+        self.patches.push(Patch::CopyDir {
+            src: src.into(),
+            dst: dst.into(),
+            overwrite,
+        });
+        self
+    }
+
+    /// Create a symlink.
+    pub fn symlink(
+        mut self,
+        target: impl Into<String>,
+        link: impl Into<String>,
+        overwrite: bool,
+    ) -> Self {
+        self.patches.push(Patch::Symlink {
+            target: target.into(),
+            link: link.into(),
+            overwrite,
+        });
+        self
+    }
+
+    /// Create a directory (idempotent).
+    pub fn mkdir(mut self, path: impl Into<String>, mode: Option<u32>) -> Self {
+        self.patches.push(Patch::Mkdir {
+            path: path.into(),
+            mode,
+        });
+        self
+    }
+
+    /// Remove a file or directory (idempotent).
+    pub fn remove(mut self, path: impl Into<String>) -> Self {
+        self.patches.push(Patch::Remove { path: path.into() });
+        self
+    }
+
+    /// Append content to an existing file. Copies up from lower layer if needed.
+    pub fn append(mut self, path: impl Into<String>, content: impl Into<String>) -> Self {
+        self.patches.push(Patch::Append {
+            path: path.into(),
+            content: content.into(),
+        });
+        self
+    }
+
+    /// Build the list of patches.
+    pub fn build(self) -> Vec<Patch> {
+        self.patches
     }
 }
 

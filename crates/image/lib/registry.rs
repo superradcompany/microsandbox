@@ -89,6 +89,16 @@ impl Registry {
         })
     }
 
+    /// Resolve a pull directly from the on-disk cache without building a registry client.
+    pub fn pull_cached(
+        cache: &GlobalCache,
+        reference: &oci_client::Reference,
+        options: &PullOptions,
+    ) -> ImageResult<Option<(PullResult, CachedImageMetadata)>> {
+        Ok(resolve_cached_pull_result(cache, reference, options)?
+            .map(|cached| (cached.result, cached.metadata)))
+    }
+
     /// Pull an image. Downloads, extracts, and indexes layers concurrently.
     pub async fn pull(
         &self,
@@ -807,6 +817,33 @@ mod tests {
 
         assert!(cached.is_some());
         assert!(cached.unwrap().result.cached);
+    }
+
+    #[test]
+    fn test_pull_cached_uses_complete_cache() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let reference: oci_client::Reference = "docker.io/library/alpine:latest".parse().unwrap();
+        let metadata = write_cached_image_fixture(&cache, &reference, &[true]);
+
+        let cached = super::Registry::pull_cached(
+            &cache,
+            &reference,
+            &PullOptions {
+                pull_policy: PullPolicy::IfMissing,
+                force: false,
+                build_index: true,
+            },
+        )
+        .unwrap()
+        .expect("expected cached pull result");
+
+        assert!(cached.0.cached);
+        assert_eq!(
+            cached.0.manifest_digest.to_string(),
+            metadata.manifest_digest
+        );
+        assert_eq!(cached.1.manifest_digest, metadata.manifest_digest);
     }
 
     #[tokio::test]

@@ -23,7 +23,7 @@ pub const FLAG_SESSION_START: u8 = 0b0000_0010;
 
 /// Frame flag: this message requests sandbox shutdown.
 ///
-/// Set on `Shutdown` messages. The supervisor relay uses this to trigger
+/// Set on `Shutdown` messages. The sandbox-process relay uses this to trigger
 /// drain escalation (SIGTERM → SIGKILL) if the guest doesn't exit voluntarily.
 pub const FLAG_SHUTDOWN: u8 = 0b0000_0100;
 

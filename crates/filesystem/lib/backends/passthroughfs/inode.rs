@@ -428,16 +428,10 @@ fn open_and_patch_stat_macos(
 ) -> io::Result<stat64> {
     let path = vol_path(dev, ino);
 
-    // Try regular file open.
-    if let Ok(fd) = open_macos_path_hardened(path.as_ptr(), libc::O_RDONLY) {
-        let result =
-            crate::backends::shared::stat_override::patched_stat(fd, st, xattr_enabled, strict);
-        unsafe { libc::close(fd) };
-        return result;
-    }
-
-    // Try directory open.
-    if let Ok(fd) = open_macos_path_hardened(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) {
+    // Try regular file open first. If the inode is a symlink, fall back to
+    // O_SYMLINK so we can read override metadata from the link itself without
+    // following it.
+    if let Ok(fd) = open_macos_path_for_stat(path.as_ptr()) {
         let result =
             crate::backends::shared::stat_override::patched_stat(fd, st, xattr_enabled, strict);
         unsafe { libc::close(fd) };
@@ -446,6 +440,24 @@ fn open_and_patch_stat_macos(
 
     // Can't open — return unpatched stat.
     Ok(st)
+}
+
+#[cfg(target_os = "macos")]
+fn open_macos_path_for_stat(path: *const libc::c_char) -> io::Result<i32> {
+    match open_macos_path_hardened(path, libc::O_RDONLY) {
+        Ok(fd) => return Ok(fd),
+        Err(err) if err.raw_os_error() == platform::eloop().raw_os_error() => {
+            let fd =
+                unsafe { libc::open(path, libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK) };
+            if fd < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
+            return Ok(fd);
+        }
+        Err(_) => {}
+    }
+
+    open_macos_path_hardened(path, libc::O_RDONLY | libc::O_DIRECTORY)
 }
 
 /// Decrement the reference count for an inode. Remove it from the table

@@ -247,7 +247,7 @@ progress_bar() {
     _current_mb=$(( _current / 1048576 ))
     _total_mb=$(( _total / 1048576 ))
 
-    printf "\r    ${DIM}[${RESET}${GREEN}%s${RESET}${DIM}%s${RESET}${DIM}]${RESET} %3d%%  %dMB/%dMB  %s" \
+    printf "\r${DIM}[${RESET}${GREEN}%s${RESET}${DIM}%s${RESET}${DIM}]${RESET} %3d%%  %dMB/%dMB  %s" \
         "$_filled_bar" "$_empty_bar" \
         "$_percent" "$_current_mb" "$_total_mb" "$_label"
 }
@@ -435,7 +435,7 @@ main() {
         printf "\n"
     fi
 
-    success "Installation complete! Run 'msb --help' to get started."
+    success "Installation complete! Run 'msb --tree' to get started."
     printf "\n"
 }
 

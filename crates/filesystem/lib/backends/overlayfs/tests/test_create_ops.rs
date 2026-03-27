@@ -94,7 +94,6 @@ fn test_symlink() {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
 fn test_lower_host_symlink_open_rejected_but_readlink_allowed() {
     let sb = OverlayTestSandbox::with_lower(|lower| {
         std::os::unix::fs::symlink("/host/target", lower.join("host-link")).unwrap();

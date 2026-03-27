@@ -137,7 +137,7 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
         builder = builder.shell(shell);
     }
     if args.replace {
-        builder = builder.overwrite();
+        builder = builder.replace();
     }
     for env_str in &args.env {
         let (k, v) = ui::parse_env(env_str).map_err(anyhow::Error::msg)?;
@@ -188,7 +188,7 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
                 ui::warn(&format!("failed to stop sandbox: {e}"));
             }
             if !is_named {
-                let _ = Sandbox::remove(&name).await;
+                let _ = sandbox.remove_persisted().await;
             }
             return Ok(());
         }
@@ -203,7 +203,7 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
 
     // Remove unnamed (ephemeral) sandboxes.
     if !is_named {
-        let _ = Sandbox::remove(&name).await;
+        let _ = sandbox.remove_persisted().await;
     }
 
     handle_exit(result?)

@@ -13,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let writer = Sandbox::builder("writer")
         .image("alpine:latest")
         .volume("/data", |v| v.named(data.name()))
-        .overwrite()
+        .replace()
         .create()
         .await?;
 
@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reader = Sandbox::builder("reader")
         .image("alpine:latest")
         .volume("/data", |v| v.named(data.name()).readonly())
-        .overwrite()
+        .replace()
         .create()
         .await?;
 

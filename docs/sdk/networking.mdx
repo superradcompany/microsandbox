@@ -198,6 +198,9 @@ sb = await Sandbox.create(
 ## Port mapping
 
 Expose ports from the sandbox to the host to make services accessible.
+For simple Rust cases, use top-level `SandboxBuilder::port()` and `port_udp()`.
+They are repeatable, and they compose with `.network(...)` when you also need
+policy, DNS, or TLS settings.
 
 <CodeGroup>
 ```rust Rust
@@ -205,10 +208,9 @@ use microsandbox::{Sandbox, NetworkPolicy};
 
 let sb = Sandbox::builder("api")
     .image("python:3.12")
-    .network(|n| n
-        .policy(NetworkPolicy::public_only())
-        .port(8080, 80)
-    )
+    .port(8080, 80)
+    .port_udp(5353, 5353)
+    .network(|n| n.policy(NetworkPolicy::public_only()))
     .create()
     .await?;
 ```

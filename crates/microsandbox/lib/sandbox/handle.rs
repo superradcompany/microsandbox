@@ -124,6 +124,7 @@ impl SandboxHandle {
         let config: SandboxConfig = serde_json::from_str(&self.config_json)?;
 
         Ok(Sandbox {
+            db_id: self.db_id,
             config,
             handle: None,
             client: Arc::new(client),

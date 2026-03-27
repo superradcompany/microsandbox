@@ -1194,19 +1194,12 @@ pub(crate) fn open_node_fd(fs: &OverlayFs, inode: u64, flags: i32) -> io::Result
             if fd >= 0 {
                 return Ok(fd);
             }
-            // Only fall back to O_SYMLINK for ELOOP (symlink with O_NOFOLLOW).
-            // Other errors (EACCES, ENOENT, etc.) should propagate immediately.
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() != Some(libc::ELOOP) {
-                return Err(platform::linux_error(err));
-            }
-            // O_SYMLINK opens the symlink itself (not its target) on macOS.
-            let fd =
-                unsafe { libc::open(path.as_ptr(), flags | libc::O_CLOEXEC | libc::O_SYMLINK) };
-            if fd < 0 {
-                return Err(platform::linux_error(io::Error::last_os_error()));
-            }
-            Ok(fd)
+
+            // Match Linux and PassthroughFs semantics: opening a symlink inode for
+            // regular file I/O must fail with ELOOP instead of returning an fd to
+            // the link itself. readlink/stat use dedicated paths that can still
+            // access symlink metadata safely on macOS.
+            Err(platform::linux_error(io::Error::last_os_error()))
         }
     }
 }
@@ -1511,6 +1504,21 @@ fn open_lower_child_fd(
         if fd >= 0 {
             return Ok(fd);
         }
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ELOOP) {
+            // O_SYMLINK opens the symlink itself (not its target) on macOS.
+            let fd = unsafe {
+                libc::openat(
+                    parent_fd_node.raw(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK,
+                )
+            };
+            if fd < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
+            return Ok(fd);
+        }
         // Try as directory.
         let fd = unsafe {
             libc::openat(
@@ -1522,23 +1530,7 @@ fn open_lower_child_fd(
         if fd >= 0 {
             return Ok(fd);
         }
-        // Only fall back to O_SYMLINK for ELOOP (symlink with O_NOFOLLOW).
-        let err = io::Error::last_os_error();
-        if err.raw_os_error() != Some(libc::ELOOP) {
-            return Err(platform::linux_error(err));
-        }
-        // O_SYMLINK opens the symlink itself (not its target) on macOS.
-        let fd = unsafe {
-            libc::openat(
-                parent_fd_node.raw(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK,
-            )
-        };
-        if fd < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
-        Ok(fd)
+        Err(platform::linux_error(io::Error::last_os_error()))
     }
 }
 
@@ -1631,25 +1623,23 @@ fn open_macos_vol(path: &CStr) -> io::Result<RawFd> {
     if fd >= 0 {
         return Ok(fd);
     }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ELOOP) {
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK,
+            )
+        };
+        if fd < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
+        }
+        return Ok(fd);
+    }
     let fd = unsafe {
         libc::open(
             path.as_ptr(),
             libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-        )
-    };
-    if fd >= 0 {
-        return Ok(fd);
-    }
-    // Only fall back to O_SYMLINK for ELOOP (symlink with O_NOFOLLOW).
-    let err = io::Error::last_os_error();
-    if err.raw_os_error() != Some(libc::ELOOP) {
-        return Err(platform::linux_error(err));
-    }
-    // O_SYMLINK opens the symlink itself (not its target) on macOS.
-    let fd = unsafe {
-        libc::open(
-            path.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK,
         )
     };
     if fd >= 0 {

@@ -26,6 +26,16 @@ submodule.
 cargo run -p block-root
 ```
 
+## net-ports
+
+Publishes one TCP port and one UDP port from the guest to the host using the
+top-level `SandboxBuilder::port()` and `port_udp()` helpers, then exercises
+both mappings from the host.
+
+```sh
+cargo run -p net-ports
+```
+
 ## named-volume
 
 Creates a named volume, mounts it into two sandboxes (writer and reader),

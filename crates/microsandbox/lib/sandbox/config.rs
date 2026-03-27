@@ -135,7 +135,10 @@ pub struct SandboxConfig {
     #[serde(default, skip_serializing)]
     pub registry_auth: Option<RegistryAuth>,
 
-    /// Replace an existing stopped sandbox with the same name during create.
+    /// Replace an existing sandbox with the same name during create.
+    ///
+    /// If the existing sandbox is still active, microsandbox stops it and
+    /// waits for it to exit before recreating it.
     ///
     /// This is an operation flag, not persisted sandbox state.
     #[serde(skip)]

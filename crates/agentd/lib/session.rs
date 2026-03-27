@@ -12,7 +12,7 @@ use nix::{
     unistd::Pid,
 };
 use tokio::{
-    io::{AsyncReadExt, unix::AsyncFd},
+    io::AsyncReadExt,
     process::{Child, Command},
     sync::mpsc,
 };
@@ -420,45 +420,46 @@ async fn pty_reader_task(
     master_fd: OwnedFd,
     tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
 ) {
-    // Set non-blocking for async I/O.
-    let raw = master_fd.as_raw_fd();
-    let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
-    if flags >= 0 {
-        unsafe { libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-    }
+    let tx_output = tx.clone();
+    let read_result = tokio::task::spawn_blocking(move || {
+        // PTY masters are safer with a dedicated blocking read loop than with
+        // edge-driven readiness. Fast writers followed by process exit can
+        // strand the tail behind a missed wakeup/HUP transition.
+        let raw = master_fd.as_raw_fd();
+        let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
+        if flags >= 0 {
+            unsafe { libc::fcntl(raw, libc::F_SETFL, flags & !libc::O_NONBLOCK) };
+        }
 
-    let Ok(async_fd) = AsyncFd::new(master_fd) else {
-        let code = wait_for_pid(pid).await;
-        let _ = tx.send((id, SessionOutput::Exited(code)));
-        return;
-    };
+        loop {
+            let mut buf = [0u8; 4096];
+            let n = unsafe { libc::read(raw, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
 
-    loop {
-        let Ok(mut guard) = async_fd.readable().await else {
-            break;
-        };
-
-        let fd = async_fd.as_raw_fd();
-        let mut buf = [0u8; 4096];
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-
-        if n > 0 {
-            let _ = tx.send((id, SessionOutput::Stdout(buf[..n as usize].to_vec())));
-            guard.clear_ready();
-        } else if n == 0 {
-            break;
-        } else {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EAGAIN)
-                || err.raw_os_error() == Some(libc::EWOULDBLOCK)
-            {
-                guard.clear_ready();
+            if n > 0 {
+                if tx_output
+                    .send((id, SessionOutput::Stdout(buf[..n as usize].to_vec())))
+                    .is_err()
+                {
+                    break;
+                }
                 continue;
             }
-            // EIO or other error — PTY slave closed.
-            break;
+
+            if n == 0 {
+                break;
+            }
+
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::EIO) => break,
+                _ => break,
+            }
         }
-    }
+    })
+    .await;
+
+    let _ = read_result;
 
     let code = wait_for_pid(pid).await;
     let _ = tx.send((id, SessionOutput::Exited(code)));
@@ -541,4 +542,77 @@ async fn wait_for_pid(pid: i32) -> i32 {
     })
     .await
     .unwrap_or(-1)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
+    use microsandbox_protocol::exec::ExecRequest;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_pty_reader_drains_ready_fd() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let req = ExecRequest {
+            cmd: "/bin/sh".to_string(),
+            args: vec![
+                "-lc".to_string(),
+                "i=0; while [ $i -lt 1024 ]; do printf AAAA; i=$((i+1)); done; printf SECOND; sleep 1; printf '<END>\\n'; sleep 1"
+                    .to_string(),
+            ],
+            env: vec!["PATH=/usr/local/bin:/usr/bin:/bin".to_string()],
+            cwd: None,
+            tty: true,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        };
+
+        let session = ExecSession::spawn(7, &req, tx).expect("spawn pty session");
+        let mut stdout = Vec::new();
+        let mut exit = None;
+
+        let recv_result = timeout(Duration::from_secs(5), async {
+            while let Some((id, output)) = rx.recv().await {
+                assert_eq!(id, 7);
+                match output {
+                    SessionOutput::Stdout(data) => stdout.extend_from_slice(&data),
+                    SessionOutput::Exited(code) => {
+                        exit = Some(code);
+                        break;
+                    }
+                    SessionOutput::Stderr(_) | SessionOutput::Raw(_) => {}
+                }
+            }
+        })
+        .await;
+
+        if recv_result.is_err() {
+            let _ = session.send_signal(libc::SIGKILL);
+            panic!("timed out waiting for PTY output");
+        }
+
+        assert_eq!(exit, Some(0));
+
+        let second = stdout
+            .windows(b"SECOND".len())
+            .position(|window| window == b"SECOND");
+        let end = stdout
+            .windows(b"<END>".len())
+            .position(|window| window == b"<END>");
+
+        assert!(
+            matches!((second, end), (Some(second), Some(end)) if second < end),
+            "expected immediate PTY write to arrive before later output; got {:?}",
+            String::from_utf8_lossy(&stdout),
+        );
+    }
 }

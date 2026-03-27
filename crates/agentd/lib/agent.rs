@@ -102,13 +102,21 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
     flush_write_buf(&async_port, &mut serial_out_buf).await?;
 
     // Main loop.
-    loop {
+    'agent: loop {
         tokio::select! {
             // Read from serial port.
-            result = async_read_ready(&async_port) => {
-                if result.is_ok() {
-                    match read_from_fd(port_fd, &mut read_buf) {
-                        Ok(n) if n > 0 => {
+            result = async_port.readable() => {
+                let Ok(mut guard) = result else {
+                    break;
+                };
+
+                loop {
+                    match guard.try_io(|inner| read_from_fd(inner.get_ref().as_raw_fd(), &mut read_buf)) {
+                        Ok(Ok(0)) => {
+                            // EOF on serial — host disconnected.
+                            break 'agent;
+                        }
+                        Ok(Ok(n)) => {
                             serial_in_buf.extend_from_slice(&read_buf[..n]);
                             last_activity = Utc::now();
 
@@ -137,14 +145,9 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
                                 flush_write_buf(&async_port, &mut serial_out_buf).await?;
                             }
                         }
-                        Ok(_) => {
-                            // EOF on serial — host disconnected.
-                            break;
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            // No data available, continue.
-                        }
-                        Err(e) => return Err(e.into()),
+                        Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Ok(Err(e)) => return Err(e.into()),
+                        Err(_would_block) => break,
                     }
                 }
             }
@@ -377,13 +380,6 @@ fn set_nonblocking(fd: i32) -> AgentdResult<()> {
     Ok(())
 }
 
-/// Waits for the async fd to be readable.
-async fn async_read_ready(fd: &AsyncFd<std::fs::File>) -> std::io::Result<()> {
-    let mut guard = fd.readable().await?;
-    guard.clear_ready();
-    Ok(())
-}
-
 /// Reads from a raw fd (non-blocking).
 fn read_from_fd(fd: i32, buf: &mut [u8]) -> std::io::Result<usize> {
     let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
@@ -398,18 +394,14 @@ fn read_from_fd(fd: i32, buf: &mut [u8]) -> std::io::Result<usize> {
 async fn flush_write_buf(fd: &AsyncFd<std::fs::File>, buf: &mut Vec<u8>) -> AgentdResult<()> {
     while !buf.is_empty() {
         let mut guard = fd.writable().await?;
-        let raw_fd = fd.as_raw_fd();
-        match write_to_fd(raw_fd, buf) {
-            Ok(n) => {
+        match guard.try_io(|inner| write_to_fd(inner.get_ref().as_raw_fd(), buf)) {
+            Ok(Ok(n)) => {
                 buf.drain(..n);
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                guard.clear_ready();
-                continue;
-            }
-            Err(e) => return Err(e.into()),
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_would_block) => continue,
         }
-        guard.clear_ready();
     }
     Ok(())
 }

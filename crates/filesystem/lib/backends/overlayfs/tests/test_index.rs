@@ -5,10 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use microsandbox_utils::index::{
-    DIR_FLAG_OPAQUE, DIR_RECORD_IDX_NONE, ENTRY_FLAG_WHITEOUT, INDEX_MAGIC, INDEX_VERSION,
-    IndexBuilder, MmapIndex,
-};
+use microsandbox_utils::index::{DIR_RECORD_IDX_NONE, IndexBuilder, MmapIndex};
 
 use super::*;
 use crate::backends::overlayfs::inode;
@@ -112,6 +109,23 @@ fn mount_plain(lower: &Path, upper: &Path, staging: &Path) -> OverlayFs {
     fs
 }
 
+/// Mount an overlay with multiple lower layers, optionally using sidecar indexes.
+fn mount_layers(layers: &[PathBuf], use_index: bool, upper: &Path, staging: &Path) -> OverlayFs {
+    let mut builder = OverlayFs::builder();
+    for layer in layers {
+        let index_path = layer.with_extension("index");
+        if use_index && index_path.exists() {
+            builder = builder.layer_with_index(layer, &index_path);
+        } else {
+            builder = builder.layer(layer);
+        }
+    }
+
+    let fs = builder.writable(upper).staging(staging).build().unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+    fs
+}
+
 /// Collect readdir entry names from a directory inode.
 fn readdir_names(fs: &OverlayFs, ino: u64) -> Vec<Vec<u8>> {
     let (handle, _) = fs.opendir(ctx(), ino, 0).unwrap();
@@ -130,6 +144,77 @@ fn readdir_entries(fs: &OverlayFs, ino: u64) -> Vec<(Vec<u8>, u32)> {
     let result: Vec<(Vec<u8>, u32)> = entries.iter().map(|e| (e.name.to_vec(), e.type_)).collect();
     fs.releasedir(ctx(), ino, 0, handle).unwrap();
     result
+}
+
+/// Walk an absolute overlay path component-by-component starting from root.
+fn lookup_path(fs: &OverlayFs, path: &str) -> Entry {
+    let mut parent = ROOT_INODE;
+    let mut last = None;
+    for component in path.split('/').filter(|component| !component.is_empty()) {
+        let entry = fs
+            .lookup(ctx(), parent, &cstr(component))
+            .unwrap_or_else(|err| {
+                panic!("failed to lookup component '{component}' in '{path}': {err}")
+            });
+        parent = entry.inode;
+        last = Some(entry);
+    }
+
+    last.unwrap_or_else(|| panic!("path must contain at least one component: {path}"))
+}
+
+/// Assert that the `claude` symlink path resolves correctly on a mounted overlay.
+fn assert_claude_layout(fs: &OverlayFs) {
+    let usr_local_bin = lookup_path(fs, "/usr/local/bin");
+    assert_eq!(
+        usr_local_bin.attr.st_mode as u32 & libc::S_IFMT as u32,
+        libc::S_IFDIR as u32
+    );
+
+    let claude = lookup_path(fs, "/usr/local/bin/claude");
+    assert_eq!(
+        claude.attr.st_mode as u32 & libc::S_IFMT as u32,
+        libc::S_IFLNK as u32
+    );
+    let (claude_st, _timeout) = fs.getattr(ctx(), claude.inode, None).unwrap();
+    assert_eq!(
+        claude_st.st_mode as u32 & libc::S_IFMT as u32,
+        libc::S_IFLNK as u32
+    );
+
+    let target = fs.readlink(ctx(), claude.inode).unwrap();
+    assert_eq!(
+        target,
+        b"../lib/node_modules/@anthropic-ai/claude-code/cli.js"
+    );
+
+    let cli = lookup_path(
+        fs,
+        "/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+    );
+    assert_eq!(
+        cli.attr.st_mode as u32 & libc::S_IFMT as u32,
+        libc::S_IFREG as u32
+    );
+
+    let (handle, _) = fs
+        .open(ctx(), cli.inode, false, libc::O_RDONLY as u32)
+        .unwrap();
+    let handle = handle.expect("regular file open should return a handle");
+    let mut writer = crate::backends::overlayfs::tests::MockZeroCopyWriter::new();
+    let n = fs
+        .read(ctx(), cli.inode, handle, &mut writer, 64, 0, None, 0)
+        .unwrap();
+    fs.release(ctx(), cli.inode, 0, handle, false, false, None)
+        .unwrap();
+
+    let data = writer.into_data();
+    assert!(n > 0, "cli.js should be readable");
+    assert!(
+        data.starts_with(b"#!/usr/bin/env node"),
+        "unexpected cli.js header: {:?}",
+        &data[..n.min(data.len())]
+    );
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1266,6 +1351,35 @@ fn test_index_readdir_d_type_from_mode() {
     assert_eq!(find(b"subdir"), Some(libc::DT_DIR as u32));
     #[cfg(unix)]
     assert_eq!(find(b"link"), Some(libc::DT_LNK as u32));
+}
+
+#[test]
+#[ignore = "debug probe for real pulled layer stacks"]
+fn test_probe_real_layers_claude_layout() {
+    let layers = std::env::var("MSB_REAL_LAYER_STACK")
+        .expect("MSB_REAL_LAYER_STACK must be set to a ':'-separated layer list");
+    let layers: Vec<PathBuf> = layers
+        .split(':')
+        .filter(|part| !part.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    assert!(!layers.is_empty(), "MSB_REAL_LAYER_STACK must not be empty");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let indexed_upper = tmp.path().join("indexed-upper");
+    let indexed_staging = tmp.path().join("indexed-staging");
+    let plain_upper = tmp.path().join("plain-upper");
+    let plain_staging = tmp.path().join("plain-staging");
+    std::fs::create_dir(&indexed_upper).unwrap();
+    std::fs::create_dir(&indexed_staging).unwrap();
+    std::fs::create_dir(&plain_upper).unwrap();
+    std::fs::create_dir(&plain_staging).unwrap();
+
+    let fs_indexed = mount_layers(&layers, true, &indexed_upper, &indexed_staging);
+    let fs_plain = mount_layers(&layers, false, &plain_upper, &plain_staging);
+
+    assert_claude_layout(&fs_indexed);
+    assert_claude_layout(&fs_plain);
 }
 
 //--------------------------------------------------------------------------------------------------

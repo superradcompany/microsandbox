@@ -26,7 +26,7 @@ struct StartupInfo {
     pid: u32,
 }
 
-/// How the supervisor should behave relative to the creating process.
+/// How the sandbox process should behave relative to the creating process.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpawnMode {
     /// The creating process keeps the sandbox handle and agent bridge alive.
@@ -40,7 +40,7 @@ pub enum SpawnMode {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Spawn the supervisor process for a sandbox.
+/// Spawn the sandbox process for a sandbox.
 ///
 /// Returns a [`ProcessHandle`] and the path to the agent relay socket.
 ///
@@ -48,7 +48,7 @@ pub enum SpawnMode {
 /// 1. Resolves the `msb` binary path
 /// 2. Creates sandbox directories (logs, runtime, scripts)
 /// 3. Builds CLI arguments from the config
-/// 4. Spawns `msb supervisor` with `--agent-sock` for the relay
+/// 4. Spawns the hidden `msb sandbox` process with `--agent-sock` for the relay
 /// 5. Reads startup JSON from stdout to get child PIDs
 pub async fn spawn_sandbox(
     config: &SandboxConfig,
@@ -123,6 +123,7 @@ pub async fn spawn_sandbox(
 
     // Spawn the sandbox process.
     let mut child = cmd.spawn()?;
+
     let _pid = child.id().ok_or_else(|| {
         crate::MicrosandboxError::Runtime("sandbox process exited immediately".into())
     })?;

@@ -18,6 +18,7 @@ pub mod ps;
 pub mod pull;
 pub mod remove;
 pub mod run;
+pub mod self_cmd;
 pub mod shell;
 pub mod start;
 pub mod stop;
@@ -41,14 +42,14 @@ pub async fn maybe_stop(sandbox: &Sandbox) {
 
 /// Resolve an existing sandbox by name and ensure it is accessible.
 ///
-/// If the sandbox is already running, connects to the existing supervisor
+/// If the sandbox is already running, connects to the existing sandbox process
 /// via the agent relay socket. If stopped or crashed, starts it with a spinner.
 pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbox> {
     let handle = Sandbox::get(name).await?;
 
     match handle.status() {
         SandboxStatus::Running | SandboxStatus::Draining => {
-            // Connect to the running supervisor via the agent relay.
+            // Connect to the running sandbox process via the agent relay.
             Ok(handle.connect().await?)
         }
         SandboxStatus::Stopped | SandboxStatus::Crashed => {

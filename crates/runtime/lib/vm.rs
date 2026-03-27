@@ -525,6 +525,8 @@ fn build_vm(
     });
 
     // Console — ring-buffer-based custom backend.
+    // NOTE: The implicit console must remain enabled (do not call
+    // `disable_implicit()`) because disk image rootfs boots depend on it.
     builder = builder.console(|c| {
         c.custom(
             microsandbox_protocol::AGENT_PORT_NAME,

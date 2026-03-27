@@ -86,6 +86,10 @@ pub enum MicrosandboxError {
     #[error("image error: {0}")]
     Image(#[from] microsandbox_image::ImageError),
 
+    /// A rootfs patch operation failed.
+    #[error("patch failed: {0}")]
+    PatchFailed(String),
+
     /// A custom error message.
     #[error("{0}")]
     Custom(String),

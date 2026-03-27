@@ -105,7 +105,7 @@ pub const ENV_MOUNTS: &str = "MSB_MOUNTS";
 
 /// Guest-side path to the CA certificate for TLS interception.
 ///
-/// Placed by the supervisor via the runtime virtiofs mount.
+/// Placed by the sandbox process via the runtime virtiofs mount.
 /// agentd checks for this file during init and installs it into the guest
 /// trust store.
 pub const GUEST_TLS_CA_PATH: &str = "/.msb/tls/ca.pem";

@@ -53,6 +53,11 @@ impl NetworkBuilder {
         }
     }
 
+    /// Start building from an existing network configuration.
+    pub fn from_config(config: NetworkConfig) -> Self {
+        Self { config }
+    }
+
     /// Enable or disable networking.
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.config.enabled = enabled;

@@ -25,13 +25,16 @@ anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
 console.workspace = true
+dirs.workspace = true
 indicatif.workspace = true
 libc.workspace = true
 microsandbox = { version = "0.3.2", path = "../microsandbox", default-features = false }
 microsandbox-image = { version = "0.3.2", path = "../image" }
 microsandbox-network = { version = "0.3.2", path = "../network", optional = true }
 microsandbox-runtime = { version = "0.3.2", path = "../runtime", default-features = false }
+microsandbox-utils = { version = "0.3.2", path = "../utils" }
 rand.workspace = true
+reqwest.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

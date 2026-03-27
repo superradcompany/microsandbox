@@ -211,42 +211,39 @@ When you create a sandbox, a few things start running behind the scenes. Here's 
 graph TD
     subgraph Host["Host"]
         A["Your Application<br/><small>microsandbox library, AgentBridge</small>"]
-        B["Supervisor<br/><small>msb supervisor</small>"]
-        D["MicroVM Process<br/><small>msb microvm + in-process networking</small>"]
+        B["Sandbox Process<br/><small>msb sandbox<br/>VMM + relay + lifecycle</small>"]
     end
 
     subgraph Guest["Guest VM"]
         F["agentd (PID 1)<br/><small>exec, fs, events</small>"]
     end
 
-    A -- "fork+exec" --> B
-    B -- "fork+exec" --> D
-    D -- "Vm::enter()" --> F
-    A -. "virtio-console (CBOR)" .-> F
+    A -- "spawn" --> B
+    B -- "Vm::enter()" --> F
+    A -. "Unix socket -> relay -> virtio-console (CBOR)" .-> F
 
     style Host fill:#f5f0ff,stroke:#a770ef,color:#333
     style Guest fill:#fef4e8,stroke:#e8a838,color:#333
     style A fill:#d4bfff,stroke:#8b5cf6,color:#1a1a1a
     style B fill:#d4bfff,stroke:#8b5cf6,color:#1a1a1a
-    style D fill:#d4bfff,stroke:#8b5cf6,color:#1a1a1a
     style F fill:#fdd49e,stroke:#d97706,color:#1a1a1a
 ```
 
-There are two separate communication paths here. Your application talks to the guest agent (`agentd`) directly over a virtio-console channel using CBOR-encoded messages. This is how `exec`, `attach`, `fs`, and `emit` calls work. The supervisor is not involved in this path at all.
+There are two separate layers here. Your application talks to the host-side sandbox process over the agent relay socket, and the sandbox process forwards CBOR-encoded messages to the guest agent (`agentd`) over virtio-console. This is how `exec`, `attach`, `fs`, and `emit` calls work.
 
-The **supervisor** is a separate host process that watches over the MicroVM process. It handles:
+The **sandbox process** is the host-side runtime process created by `msb sandbox`. It hosts the VMM and handles:
 
 - Forwarding signals (SIGTERM for graceful stop, SIGUSR1 for drain)
-- Detecting child exits and applying restart/shutdown policies
+- Driving VM exit and shutdown policies
 - Monitoring idle state via the agentd heartbeat
 - Enforcing maximum sandbox lifetime
 - Writing logs and updating sandbox status in the database
 
-The supervisor does *not* handle command execution or the agent protocol. That's all between your application and `agentd`.
+The sandbox process does *not* execute guest commands itself. It relays agent protocol traffic between your application and `agentd`.
 
-## Supervisor policies
+## Sandbox Process Policies
 
-For production workloads, you can configure how the supervisor handles shutdown, idle detection, and maximum lifetime.
+For production workloads, you can configure how the sandbox process handles shutdown, idle detection, and maximum lifetime.
 
 <CodeGroup>
 ```rust Rust

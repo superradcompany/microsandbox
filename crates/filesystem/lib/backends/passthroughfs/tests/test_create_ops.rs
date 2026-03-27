@@ -231,7 +231,26 @@ fn test_symlink_stat_shows_link() {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
+fn test_symlink_stat_uses_guest_ownership() {
+    let sb = TestSandbox::new();
+    let entry = sb
+        .fs
+        .symlink(
+            sb.ctx_as(1234, 2345),
+            &TestSandbox::cstr("/owned/target"),
+            ROOT_INODE,
+            &TestSandbox::cstr("owned-link"),
+            Extensions::default(),
+        )
+        .unwrap();
+    let (st, _timeout) = sb.fs.getattr(sb.ctx(), entry.inode, None).unwrap();
+    assert_eq!(st.st_uid, 1234);
+    assert_eq!(st.st_gid, 2345);
+    let mode = st.st_mode as u32;
+    assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFLNK as u32);
+}
+
+#[test]
 fn test_host_symlink_open_rejected_but_readlink_allowed() {
     let sb = TestSandbox::new();
     std::os::unix::fs::symlink("/host/target", sb.root.join("host-link")).unwrap();

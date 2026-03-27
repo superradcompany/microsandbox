@@ -14,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .image(|image: ImageBuilder| image.disk(image_path).fstype("ext4"))
         .cpus(1)
         .memory(512)
-        .overwrite()
+        .replace()
         .create()
         .await?;
 

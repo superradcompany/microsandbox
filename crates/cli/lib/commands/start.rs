@@ -36,7 +36,7 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
         Ok(sandbox) => {
             sandbox.detach().await;
             spinner.finish_success("Started");
-            // Sandbox stays running — supervisor continues as background process.
+            // Sandbox stays running — the sandbox process continues in the background.
         }
         Err(e) => {
             spinner.finish_error();

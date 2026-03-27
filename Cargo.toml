@@ -14,11 +14,13 @@ members = [
     "examples/net-basic",
     "examples/net-dns",
     "examples/net-policy",
+    "examples/net-ports",
     "examples/net-secrets",
     "examples/net-tls",
     "examples/root-bind",
     "examples/root-block",
     "examples/root-oci",
+    "examples/rootfs-patch",
     "examples/volume-named",
 ]
 

@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cpus(1)
         .memory(512)
         .secret_env("API_KEY", "sk-real-secret-123", "example.com")
-        .overwrite()
+        .replace()
         .create()
         .await?;
 

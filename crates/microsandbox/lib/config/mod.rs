@@ -9,6 +9,7 @@ use std::{
     sync::OnceLock,
 };
 
+use docker_credential::{CredentialRetrievalError, DockerCredential};
 use microsandbox_image::RegistryAuth;
 use microsandbox_runtime::logging::LogLevel;
 use serde::{Deserialize, Serialize};
@@ -205,13 +206,29 @@ impl GlobalConfig {
     ///
     /// Looks up `registries.auth` in global config, resolving credentials from
     /// either `password_env` (environment variable) or `secret_name` (file-backed
-    /// secret in `{home}/secrets/registries/<name>`).
+    /// secret in `{home}/secrets/registries/<name>`). If there is no explicit
+    /// Microsandbox config entry, falls back to Docker's credential store/config.
     ///
     /// Returns `Anonymous` if no entry matches.
     pub fn resolve_registry_auth(&self, hostname: &str) -> MicrosandboxResult<RegistryAuth> {
+        if let Some(auth) = self.resolve_configured_registry_auth(hostname)? {
+            return Ok(auth);
+        }
+
+        if let Some(auth) = resolve_docker_registry_auth(hostname) {
+            return Ok(auth);
+        }
+
+        Ok(RegistryAuth::Anonymous)
+    }
+
+    fn resolve_configured_registry_auth(
+        &self,
+        hostname: &str,
+    ) -> MicrosandboxResult<Option<RegistryAuth>> {
         let entry = match self.registries.auth.get(hostname) {
             Some(entry) => entry,
-            None => return Ok(RegistryAuth::Anonymous),
+            None => return Ok(None),
         };
 
         let password = if let Some(ref env_var) = entry.password_env {
@@ -237,10 +254,10 @@ impl GlobalConfig {
             )));
         };
 
-        Ok(RegistryAuth::Basic {
+        Ok(Some(RegistryAuth::Basic {
             username: entry.username.clone(),
             password,
-        })
+        }))
     }
 }
 
@@ -271,6 +288,55 @@ impl Default for SandboxDefaults {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn resolve_docker_registry_auth(hostname: &str) -> Option<RegistryAuth> {
+    resolve_registry_auth_with_lookup(hostname, docker_credential::get_credential)
+}
+
+fn resolve_registry_auth_with_lookup<F>(hostname: &str, mut lookup: F) -> Option<RegistryAuth>
+where
+    F: FnMut(&str) -> Result<DockerCredential, CredentialRetrievalError>,
+{
+    for server in docker_credential_servers(hostname) {
+        match lookup(&server) {
+            Ok(DockerCredential::UsernamePassword(username, password)) => {
+                tracing::debug!(registry = hostname, server = %server, "resolved registry auth from Docker credentials");
+                return Some(RegistryAuth::Basic { username, password });
+            }
+            Ok(DockerCredential::IdentityToken(_)) => {
+                tracing::debug!(registry = hostname, server = %server, "ignoring Docker identity token for registry auth");
+            }
+            Err(CredentialRetrievalError::NoCredentialConfigured)
+            | Err(CredentialRetrievalError::ConfigNotFound)
+            | Err(CredentialRetrievalError::ConfigReadError) => {}
+            Err(error) => {
+                tracing::debug!(registry = hostname, server = %server, ?error, "failed to resolve Docker registry credentials");
+            }
+        }
+    }
+
+    None
+}
+
+fn docker_credential_servers(hostname: &str) -> Vec<String> {
+    let mut servers = vec![hostname.to_string(), format!("https://{hostname}")];
+
+    if matches!(
+        hostname,
+        "docker.io" | "index.docker.io" | "registry-1.docker.io"
+    ) {
+        servers.extend([
+            "index.docker.io".to_string(),
+            "https://index.docker.io".to_string(),
+            "https://index.docker.io/v1/".to_string(),
+            "registry-1.docker.io".to_string(),
+            "https://registry-1.docker.io".to_string(),
+        ]);
+    }
+
+    dedupe_strings(&mut servers);
+    servers
+}
 
 /// Get the global configuration (lazy-loaded from disk on first call).
 pub fn config() -> &'static GlobalConfig {
@@ -447,6 +513,16 @@ fn dedupe_paths(paths: &mut Vec<PathBuf>) {
     *paths = deduped;
 }
 
+fn dedupe_strings(values: &mut Vec<String>) {
+    let mut deduped = Vec::new();
+    for value in values.drain(..) {
+        if !deduped.iter().any(|existing| existing == &value) {
+            deduped.push(value);
+        }
+    }
+    *values = deduped;
+}
+
 /// Resolve the default home directory (`~/.microsandbox`).
 fn resolve_default_home() -> PathBuf {
     dirs::home_dir()
@@ -473,6 +549,8 @@ fn load_config_from(path: &Path) -> Option<GlobalConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::VecDeque;
 
     #[test]
     fn test_default_config() {
@@ -568,5 +646,106 @@ mod tests {
             temp.path().join("target").join("debug").join("msb")
         );
         assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_configured_registry_auth_reads_secret_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret_dir = temp.path().join("registries");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("ghcr-token"), "secret-token\n").unwrap();
+
+        let cfg = GlobalConfig {
+            home: Some(temp.path().to_path_buf()),
+            paths: PathsConfig {
+                secrets: Some(temp.path().to_path_buf()),
+                ..Default::default()
+            },
+            registries: RegistriesConfig {
+                auth: HashMap::from([(
+                    "ghcr.io".to_string(),
+                    RegistryAuthEntry {
+                        username: "user".to_string(),
+                        password_env: None,
+                        secret_name: Some("ghcr-token".to_string()),
+                    },
+                )]),
+            },
+            ..Default::default()
+        };
+
+        let auth = cfg.resolve_configured_registry_auth("ghcr.io").unwrap();
+        match auth {
+            Some(RegistryAuth::Basic { username, password }) => {
+                assert_eq!(username, "user");
+                assert_eq!(password, "secret-token");
+            }
+            other => panic!("expected basic auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_registry_auth_with_lookup_prefers_exact_hostname() {
+        let auth = resolve_registry_auth_with_lookup("ghcr.io", |server| match server {
+            "ghcr.io" => Ok(DockerCredential::UsernamePassword(
+                "user".to_string(),
+                "token".to_string(),
+            )),
+            other => panic!("unexpected server lookup: {other}"),
+        });
+
+        match auth {
+            Some(RegistryAuth::Basic { username, password }) => {
+                assert_eq!(username, "user");
+                assert_eq!(password, "token");
+            }
+            other => panic!("expected basic auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_registry_auth_with_lookup_tries_docker_hub_aliases() {
+        let auth = resolve_registry_auth_with_lookup("docker.io", |server| match server {
+            "https://index.docker.io/v1/" => Ok(DockerCredential::UsernamePassword(
+                "docker-user".to_string(),
+                "docker-pass".to_string(),
+            )),
+            _ => Err(CredentialRetrievalError::NoCredentialConfigured),
+        });
+
+        match auth {
+            Some(RegistryAuth::Basic { username, password }) => {
+                assert_eq!(username, "docker-user");
+                assert_eq!(password, "docker-pass");
+            }
+            other => panic!("expected basic auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_registry_auth_with_lookup_skips_identity_tokens() {
+        let mut responses = VecDeque::from([
+            Ok(DockerCredential::IdentityToken(
+                "identity-token".to_string(),
+            )),
+            Ok(DockerCredential::UsernamePassword(
+                "fallback-user".to_string(),
+                "fallback-pass".to_string(),
+            )),
+        ]);
+
+        let auth = resolve_registry_auth_with_lookup("ghcr.io", |_server| {
+            responses
+                .pop_front()
+                .unwrap_or(Err(CredentialRetrievalError::NoCredentialConfigured))
+        });
+
+        match auth {
+            Some(RegistryAuth::Basic { username, password }) => {
+                assert_eq!(username, "fallback-user");
+                assert_eq!(password, "fallback-pass");
+            }
+            other => panic!("expected basic auth, got {other:?}"),
+        }
     }
 }

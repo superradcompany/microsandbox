@@ -3,10 +3,14 @@
 use microsandbox_image::RegistryAuth;
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
+#[cfg(feature = "net")]
+use microsandbox_network::config::{PortProtocol, PublishedPort};
+#[cfg(feature = "net")]
+use std::net::{IpAddr, Ipv4Addr};
 
 use super::{
     config::SandboxConfig,
-    types::{IntoImage, MountBuilder, RootfsSource},
+    types::{IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource},
 };
 use crate::{LogLevel, MicrosandboxResult, size::Mebibytes};
 
@@ -26,7 +30,7 @@ pub struct SandboxBuilder {
 
 impl SandboxBuilder {
     /// Start building a sandbox configuration. The name must be unique
-    /// among existing sandboxes (unless [`overwrite`](Self::overwrite) is set).
+    /// among existing sandboxes (unless [`replace`](Self::replace) is set).
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             config: SandboxConfig {
@@ -120,8 +124,11 @@ impl SandboxBuilder {
         self
     }
 
-    /// Replace an existing stopped sandbox with the same name during create.
-    pub fn overwrite(mut self) -> Self {
+    /// Replace an existing sandbox with the same name during create.
+    ///
+    /// If the existing sandbox is still active, microsandbox stops it and
+    /// waits for it to exit before recreating it.
+    pub fn replace(mut self) -> Self {
         self.config.replace_existing = true;
         self
     }
@@ -144,7 +151,46 @@ impl SandboxBuilder {
     /// ```
     #[cfg(feature = "net")]
     pub fn network(mut self, f: impl FnOnce(NetworkBuilder) -> NetworkBuilder) -> Self {
-        self.config.network = f(NetworkBuilder::new()).build();
+        let network = std::mem::take(&mut self.config.network);
+        self.config.network = f(NetworkBuilder::from_config(network)).build();
+        self
+    }
+
+    /// Publish a TCP port directly on the sandbox builder.
+    ///
+    /// Repeatable: call multiple times to expose multiple ports.
+    ///
+    /// ```ignore
+    /// .port(8080, 80)
+    /// .port(3000, 3000)
+    /// ```
+    #[cfg(feature = "net")]
+    pub fn port(mut self, host_port: u16, guest_port: u16) -> Self {
+        self.config.network.ports.push(PublishedPort {
+            host_port,
+            guest_port,
+            protocol: PortProtocol::Tcp,
+            host_bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        });
+        self
+    }
+
+    /// Publish a UDP port directly on the sandbox builder.
+    ///
+    /// Repeatable: call multiple times to expose multiple ports.
+    ///
+    /// ```ignore
+    /// .port_udp(5353, 53)
+    /// .port_udp(8125, 8125)
+    /// ```
+    #[cfg(feature = "net")]
+    pub fn port_udp(mut self, host_port: u16, guest_port: u16) -> Self {
+        self.config.network.ports.push(PublishedPort {
+            host_port,
+            guest_port,
+            protocol: PortProtocol::Udp,
+            host_bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        });
         self
     }
 
@@ -269,6 +315,30 @@ impl SandboxBuilder {
         self
     }
 
+    /// Apply rootfs patches using a builder closure.
+    ///
+    /// Patches are applied before VM start. Only works with OverlayFs and
+    /// PassthroughFs roots. Returns an error at create time if used with
+    /// block device roots (Qcow2, Raw).
+    ///
+    /// ```ignore
+    /// .patch(|p| p
+    ///     .text("/etc/app.conf", config_str, None, false)
+    ///     .copy_file("./cert.pem", "/etc/ssl/cert.pem", None, false)
+    ///     .mkdir("/var/cache/app", None)
+    /// )
+    /// ```
+    pub fn patch(mut self, f: impl FnOnce(PatchBuilder) -> PatchBuilder) -> Self {
+        self.config.patches.extend(f(PatchBuilder::new()).build());
+        self
+    }
+
+    /// Add a single patch directly.
+    pub fn add_patch(mut self, patch: Patch) -> Self {
+        self.config.patches.push(patch);
+        self
+    }
+
     /// Build the configuration without creating the sandbox.
     pub fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
         self.validate()?;
@@ -304,7 +374,7 @@ impl SandboxBuilder {
 
     /// Create a detached sandbox with pull progress reporting.
     ///
-    /// Like `create_with_pull_progress` but spawns the supervisor in detached
+    /// Like `create_with_pull_progress` but spawns the sandbox process in detached
     /// mode so the sandbox survives after the creating process exits.
     pub fn create_detached_with_pull_progress(
         self,
@@ -370,6 +440,8 @@ impl From<SandboxConfig> for SandboxBuilder {
 mod tests {
     use super::SandboxBuilder;
     use crate::LogLevel;
+    #[cfg(feature = "net")]
+    use microsandbox_network::config::PortProtocol;
 
     #[test]
     fn test_builder_sets_runtime_log_level() {
@@ -395,13 +467,55 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_overwrite_sets_replace_existing() {
+    fn test_builder_replace_sets_replace_existing() {
         let config = SandboxBuilder::new("test")
             .image("alpine:3.23")
-            .overwrite()
+            .replace()
             .build()
             .unwrap();
 
         assert!(config.replace_existing);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn test_builder_ports_are_repeatable() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine:3.23")
+            .port(8080, 80)
+            .port(3000, 3000)
+            .port_udp(5353, 53)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.network.ports.len(), 3);
+        assert_eq!(config.network.ports[0].host_port, 8080);
+        assert_eq!(config.network.ports[0].guest_port, 80);
+        assert_eq!(config.network.ports[0].protocol, PortProtocol::Tcp);
+        assert_eq!(config.network.ports[1].host_port, 3000);
+        assert_eq!(config.network.ports[1].guest_port, 3000);
+        assert_eq!(config.network.ports[1].protocol, PortProtocol::Tcp);
+        assert_eq!(config.network.ports[2].host_port, 5353);
+        assert_eq!(config.network.ports[2].guest_port, 53);
+        assert_eq!(config.network.ports[2].protocol, PortProtocol::Udp);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn test_builder_network_preserves_top_level_settings() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine:3.23")
+            .port(8080, 80)
+            .secret_env("OPENAI_API_KEY", "secret", "api.openai.com")
+            .network(|n| n.max_connections(128))
+            .build()
+            .unwrap();
+
+        assert_eq!(config.network.ports.len(), 1);
+        assert_eq!(config.network.ports[0].host_port, 8080);
+        assert_eq!(config.network.ports[0].guest_port, 80);
+        assert_eq!(config.network.ports[0].protocol, PortProtocol::Tcp);
+        assert_eq!(config.network.secrets.secrets.len(), 1);
+        assert_eq!(config.network.max_connections, Some(128));
     }
 }

@@ -80,15 +80,16 @@ sb4 = await Sandbox.create("scoped-agent", image="python:3.12",
 ## Port mapping
 
 Expose ports from the sandbox to the host to make services accessible.
+In Rust, `SandboxBuilder::port()` and `port_udp()` are top-level shorthands,
+so you can publish ports without nesting everything inside `.network(...)`.
 
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("api")
     .image("python:3.12")
-    .network(|n| n
-        .policy(NetworkPolicy::public_only())
-        .port(8080, 80)
-    )
+    .port(8080, 80)
+    .port_udp(5353, 5353)
+    .network(|n| n.policy(NetworkPolicy::public_only()))
     .create()
     .await?;
 ```

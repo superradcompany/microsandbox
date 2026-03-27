@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             n.block_domain("blocked.example.com")
                 .block_domain_suffix(".evil.com")
         })
-        .overwrite()
+        .replace()
         .create()
         .await?;
 

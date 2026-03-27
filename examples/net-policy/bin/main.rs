@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .image("alpine:latest")
         .cpus(1)
         .memory(512)
-        .overwrite()
+        .replace()
         .create()
         .await?;
 
@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cpus(1)
         .memory(512)
         .network(|n| n.policy(NetworkPolicy::allow_all()))
-        .overwrite()
+        .replace()
         .create()
         .await?;
 
@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cpus(1)
         .memory(512)
         .network(|n| n.policy(NetworkPolicy::none()))
-        .overwrite()
+        .replace()
         .create()
         .await?;
 
