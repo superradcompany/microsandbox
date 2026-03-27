@@ -149,6 +149,11 @@ fn run_async_command(
         .build()?;
 
     runtime.block_on(async move {
+        // Fire-and-forget: reap sandboxes whose process crashed (SIGSEGV,
+        // SIGKILL, etc.) without updating the database. Runs in the
+        // background so it never delays the requested command.
+        microsandbox::sandbox::spawn_reaper();
+
         match command {
             Commands::Sandbox(_) => unreachable!("handled before Tokio starts"),
 
