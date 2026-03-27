@@ -5,7 +5,7 @@
 //!
 //! This module only performs real work on Linux. On other platforms, it is a no-op.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 #[cfg(target_os = "linux")]
@@ -51,13 +51,20 @@ struct NetIpv6Spec {
 
 /// Applies network configuration from `MSB_NET*` environment variables.
 ///
-/// Missing `MSB_NET` is not an error (no networking requested).
-/// Parse failures and configuration failures are hard errors.
+/// Always provisions loopback and a runtime `/etc/hosts`, even when no
+/// external network interface is requested. Missing `MSB_NET` is not an error
+/// (no networking requested). Parse failures and configuration failures are
+/// hard errors.
 #[cfg(target_os = "linux")]
 pub fn apply_network_config() -> AgentdResult<()> {
+    linux::configure_loopback()?;
+
     let val = match std::env::var(microsandbox_protocol::ENV_NET) {
         Ok(v) if !v.is_empty() => v,
-        _ => return Ok(()),
+        _ => {
+            linux::write_hosts_file()?;
+            return Ok(());
+        }
     };
 
     let net = parse_net(&val)?;
@@ -74,6 +81,7 @@ pub fn apply_network_config() -> AgentdResult<()> {
         _ => None,
     };
 
+    linux::write_hosts_file()?;
     linux::configure_interface(&net, ipv4.as_ref(), ipv6.as_ref())
 }
 
@@ -81,6 +89,19 @@ pub fn apply_network_config() -> AgentdResult<()> {
 #[cfg(not(target_os = "linux"))]
 pub fn apply_network_config() -> AgentdResult<()> {
     Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn default_hosts_file_contents() -> String {
+    concat!(
+        "127.0.0.1\tlocalhost\n",
+        "::1\tlocalhost ip6-localhost ip6-loopback\n",
+        "fe00::\tip6-localnet\n",
+        "ff00::\tip6-mcastprefix\n",
+        "ff02::1\tip6-allnodes\n",
+        "ff02::2\tip6-allrouters\n",
+    )
+    .into()
 }
 
 #[cfg(target_os = "linux")]
@@ -338,6 +359,17 @@ mod linux {
         Ok(())
     }
 
+    /// Brings up the loopback interface and makes sure localhost addresses exist.
+    pub fn configure_loopback() -> AgentdResult<()> {
+        let ifindex = get_ifindex("lo")?;
+
+        bring_interface_up("lo")?;
+        add_address_v4_if_missing(ifindex, Ipv4Addr::LOCALHOST, 8)?;
+        add_address_v6_if_missing(ifindex, Ipv6Addr::LOCALHOST, 128)?;
+
+        Ok(())
+    }
+
     // ── ioctl helpers ──────────────────────────────────────────────────
 
     /// Gets the interface index for a given interface name.
@@ -454,6 +486,30 @@ mod linux {
                 "failed to add IPv6 address {addr}/{prefix_len}: {e}"
             ))
         })
+    }
+
+    /// Adds an IPv4 address unless it already exists.
+    fn add_address_v4_if_missing(ifindex: u32, addr: Ipv4Addr, prefix_len: u8) -> AgentdResult<()> {
+        let addr_bytes = addr.octets();
+        match netlink_newaddr(ifindex, libc::AF_INET as u8, prefix_len, &addr_bytes) {
+            Ok(()) => Ok(()),
+            Err(e) if e.raw_os_error() == Some(libc::EEXIST) => Ok(()),
+            Err(e) => Err(AgentdError::Init(format!(
+                "failed to add IPv4 address {addr}/{prefix_len}: {e}"
+            ))),
+        }
+    }
+
+    /// Adds an IPv6 address unless it already exists.
+    fn add_address_v6_if_missing(ifindex: u32, addr: Ipv6Addr, prefix_len: u8) -> AgentdResult<()> {
+        let addr_bytes = addr.octets();
+        match netlink_newaddr(ifindex, libc::AF_INET6 as u8, prefix_len, &addr_bytes) {
+            Ok(()) => Ok(()),
+            Err(e) if e.raw_os_error() == Some(libc::EEXIST) => Ok(()),
+            Err(e) => Err(AgentdError::Init(format!(
+                "failed to add IPv6 address {addr}/{prefix_len}: {e}"
+            ))),
+        }
     }
 
     /// Adds an IPv4 default route via netlink RTM_NEWROUTE.
@@ -623,7 +679,16 @@ mod linux {
         }
     }
 
-    // ── resolv.conf ────────────────────────────────────────────────────
+    // ── hosts + resolv.conf ────────────────────────────────────────────
+
+    /// Writes a deterministic runtime `/etc/hosts` with localhost aliases.
+    pub fn write_hosts_file() -> AgentdResult<()> {
+        std::fs::create_dir_all("/etc")
+            .map_err(|e| AgentdError::Init(format!("failed to create /etc: {e}")))?;
+        std::fs::write("/etc/hosts", super::default_hosts_file_contents())
+            .map_err(|e| AgentdError::Init(format!("failed to write /etc/hosts: {e}")))?;
+        Ok(())
+    }
 
     /// Writes `/etc/resolv.conf` with the configured DNS servers.
     fn write_resolv_conf(dns_v4: Option<Ipv4Addr>, dns_v6: Option<Ipv6Addr>) -> AgentdResult<()> {
@@ -805,5 +870,20 @@ mod tests {
         let (addr, prefix) = parse_cidr_v6("fd42:6d73:62:2a::2/64").unwrap();
         assert_eq!(addr, "fd42:6d73:62:2a::2".parse::<Ipv6Addr>().unwrap());
         assert_eq!(prefix, 64);
+    }
+
+    #[test]
+    fn test_default_hosts_file_contents_matches_localhost_baseline() {
+        assert_eq!(
+            default_hosts_file_contents(),
+            concat!(
+                "127.0.0.1\tlocalhost\n",
+                "::1\tlocalhost ip6-localhost ip6-loopback\n",
+                "fe00::\tip6-localnet\n",
+                "ff00::\tip6-mcastprefix\n",
+                "ff02::1\tip6-allnodes\n",
+                "ff02::2\tip6-allrouters\n",
+            )
+        );
     }
 }
