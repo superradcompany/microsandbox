@@ -4,11 +4,13 @@ description: Persist and share data across sandboxes
 icon: "hard-drive"
 ---
 
-Volumes let you persist data across sandbox restarts, share data between sandboxes, and mount host directories into the guest. microsandbox supports three types of mounts: bind mounts, named volumes, and tmpfs.
+Volumes give a sandbox direct filesystem access to host-side directories. They're useful for persisting data across restarts, sharing data between sandboxes, or mounting host directories into the guest. They're also significantly faster than the [filesystem API](/sandboxes/filesystem) (which transfers files individually), so for anything beyond ad-hoc reads and writes, volumes are the way to go.
+
+microsandbox supports three types of mounts: bind mounts, named volumes, and tmpfs.
 
 ## Bind mounts
 
-Mount a directory from the host machine directly into the sandbox. Changes made inside the sandbox are reflected on the host, and vice versa.
+Mount a directory from the host directly into the sandbox. Changes inside the sandbox are reflected on the host, and vice versa.
 
 <CodeGroup>
 ```rust Rust
@@ -45,7 +47,7 @@ sb = await Sandbox.create(
 
 ## Named volumes
 
-Named volumes are managed by microsandbox and stored at `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox and can be shared between multiple sandboxes.
+Named volumes are managed by microsandbox and stored at `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox, so you can create a volume, populate it, and mount it into different sandboxes over time.
 
 ### Create a volume
 
@@ -99,7 +101,7 @@ sb = await Sandbox.create(
 
 ### Share between sandboxes
 
-Named volumes are the simplest way to share data between sandboxes. One sandbox writes, another reads.
+Named volumes are the simplest way to share data between sandboxes. Mount the same volume into multiple sandboxes: one writes, another reads.
 
 <CodeGroup>
 ```rust Rust
@@ -158,9 +160,13 @@ output = await reader.exec("cat", ["/data/message.txt"])
 ```
 </CodeGroup>
 
+<Tip>
+  When sharing volumes between sandboxes, both sandboxes access the same underlying host directory. There's no built-in locking, so if two sandboxes write to the same file concurrently, you'll get the usual race conditions. Use the read-only flag on the reader side to make intent explicit.
+</Tip>
+
 ### Host-side access
 
-You can read and write files in a named volume from the host without a running sandbox.
+Named volumes are accessible from the host even without a running sandbox, which is handy for pre-populating data before any sandbox mounts it.
 
 <CodeGroup>
 ```rust Rust
@@ -201,7 +207,7 @@ await Volume.remove("old-cache")
 
 ## Tmpfs
 
-An in-memory filesystem that disappears when the sandbox stops. Useful for scratch space that doesn't need to persist.
+An in-memory filesystem that disappears when the sandbox stops. Useful for scratch space, build artifacts, or anything that doesn't need to outlive the sandbox.
 
 <CodeGroup>
 ```rust Rust

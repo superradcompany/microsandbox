@@ -4,13 +4,13 @@ description: Control network access and isolation
 icon: "network-wired"
 ---
 
-By default, sandboxes use a `public` network policy, which means they can reach the public internet but not private address ranges. You can change this to fully isolate a sandbox, restrict it to specific hosts, or allow unrestricted access. This is critical for AI agent workflows where you need to allow API calls to specific services while blocking everything else.
+All network traffic from a sandbox flows through a host-controlled networking stack. From inside, the sandbox sees a normal network interface, but on the host side every packet is subject to policy before it goes anywhere.
 
-microsandbox enforces network policies using an in-process networking stack that handles packet filtering, port forwarding, and DNS interception.
+The sandbox's only path to the outside world is through this stack, so blocked traffic never leaves the VM.
 
 ## Network presets
 
-The simplest way to configure networking is with presets that cover common scenarios.
+The simplest way to configure networking. `public_only` is the default.
 
 <CodeGroup>
 ```rust Rust
@@ -79,9 +79,9 @@ sb4 = await Sandbox.create("scoped-agent", image="python:3.12",
 
 ## Port mapping
 
-Expose ports from the sandbox to the host to make services accessible.
-In Rust, `SandboxBuilder::port()` and `port_udp()` are top-level shorthands,
-so you can publish ports without nesting everything inside `.network(...)`.
+Expose ports from the sandbox to the host so services running inside the VM are accessible from your machine.
+
+In Rust, `SandboxBuilder::port()` and `port_udp()` are top-level shorthands, so you can publish ports without nesting everything inside `.network(...)`.
 
 <CodeGroup>
 ```rust Rust
@@ -121,7 +121,11 @@ sb = await Sandbox.create(
 
 ## DNS interception
 
-microsandbox can intercept DNS queries from sandboxes to block specific domains or prevent DNS rebinding attacks.
+DNS queries from the guest are intercepted and resolved on the host side, which opens up a few useful controls:
+
+- **Domain blocking** by exact match or suffix (e.g. `*.tracking.com`).
+- **Rebinding protection**: if a DNS response resolves to a private IP (`10.x`, `172.16.x`, `192.168.x`, `127.x`, link-local), the query is blocked. This prevents the trick where an attacker registers a public domain that points to an internal service.
+- **DNS-to-IP binding**: when secrets are configured, domains can be pinned to the IPs they resolved to, preventing TOCTOU attacks where DNS changes between the policy check and the actual connection.
 
 <CodeGroup>
 ```rust Rust
@@ -166,15 +170,11 @@ sb = await Sandbox.create(
 ```
 </CodeGroup>
 
-<Note>
-  DNS interception is handled by the in-process networking stack that runs alongside the sandbox's microVM. It handles both DNS queries and packet-level policy enforcement.
-</Note>
-
 ## How it works
 
-When networking is enabled, microsandbox runs an in-process networking stack alongside each sandbox's microVM. Network traffic from the sandbox passes through this stack, which enforces packet filtering rules based on the configured policy:
+Policy rules are evaluated first-match-wins. Allowed traffic goes to the real network; everything else is dropped.
 
-- **`none`:** No network interfaces are created. The sandbox is completely isolated.
-- **`public_only`:** Traffic to private address ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`) is blocked. Only public internet is accessible. This is the default.
-- **`allow_all`:** No filtering. The sandbox can reach any address.
-- **`allowlist`** / **`denylist`:** Fine-grained control over which hosts the sandbox can communicate with.
+- **`none`**: no network interface at all. The guest is fully offline, though `exec` and `fs` still work since they don't use the network.
+- **`public_only`**: blocks private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`) and only allows routable public addresses. This is the default.
+- **`allow_all`**: no filtering, including access to the host machine and local network.
+- **`allowlist`** / **`denylist`**: fine-grained per-host control.

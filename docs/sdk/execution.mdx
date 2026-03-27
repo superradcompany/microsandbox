@@ -4,6 +4,8 @@ description: Run commands, stream output, and interact with sandboxes
 icon: "terminal"
 ---
 
+Command execution goes through a dedicated channel between the host and the guest agent, not the network. So `exec` works even when a sandbox has networking fully disabled.
+
 ## exec
 
 Run a command and collect stdout, stderr, and the exit code once it completes.
@@ -30,7 +32,7 @@ print(output.status.code)      # 0
 
 ## shell
 
-Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Useful for pipelines, redirects, and other shell syntax.
+Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Useful for pipelines, redirects, and other shell syntax that `exec` doesn't interpret.
 
 <CodeGroup>
 ```rust Rust
@@ -51,7 +53,7 @@ print(output.stdout.decode())
 
 ## Execution options
 
-Override the working directory, environment variables, resource limits, and timeout on a per-command basis.
+Per-execution overrides for working directory, environment variables, resource limits, and timeout. These don't change the sandbox's defaults.
 
 <CodeGroup>
 ```rust Rust
@@ -92,7 +94,7 @@ output = await sb.exec(
 
 ## Streaming
 
-Use `exec_stream` to receive stdout, stderr, and exit events as they happen instead of waiting for the command to finish.
+`exec_stream` returns a handle that emits stdout, stderr, and exit events as they happen. Output shows up the moment the guest agent reads it from the process.
 
 <CodeGroup>
 ```rust Rust
@@ -141,7 +143,7 @@ async for event in handle.events():
 
 ## Interactive stdin
 
-Pipe data into a running process by opening a streaming handle with `stdin_pipe` enabled.
+Pipe data into a running process by opening a streaming handle with `stdin_pipe` enabled. Combined with `tty: true`, this lets you drive interactive processes (REPLs, shells) programmatically.
 
 <CodeGroup>
 ```rust Rust
@@ -169,7 +171,7 @@ await handle.wait()
 
 ## Attach
 
-Bridge your terminal to a fully interactive PTY session inside the sandbox. Press the detach keys (default `Ctrl+]`) to disconnect without stopping the process.
+Bridge your terminal to a fully interactive PTY session inside the sandbox. Press the detach keys (default `Ctrl+]`) to disconnect without stopping the process. The process keeps running and can be reattached via its session ID.
 
 <CodeGroup>
 ```rust Rust
@@ -203,7 +205,7 @@ await sb.attach("bash", env={"DEBUG": "1"}, cwd="/app", detach_keys="ctrl-q")
 
 ## Sessions
 
-List background processes and reattach to them by session ID.
+Each streaming exec or attach creates a session. You can list active sessions and reattach to them by ID. Up to 16 simultaneous client connections are supported, so multiple sessions can run concurrently without interfering with each other.
 
 <CodeGroup>
 ```rust Rust

@@ -42,7 +42,7 @@ msb volume rm --force my-data   # Remove even if in use
 
 ## Using volumes with sandboxes
 
-Mount a named volume when creating or running a sandbox:
+Mount a named volume when creating or running a sandbox. The volume name goes before the colon, the guest path after.
 
 ```bash
 # Create a volume, then mount it
@@ -53,3 +53,7 @@ msb run --name worker -v app-data:/data python:3.11
 msb run --name writer -v shared:/data alpine -- sh -c "echo hello > /data/msg.txt"
 msb run --name reader -v shared:/data alpine -- cat /data/msg.txt
 ```
+
+<Tip>
+  The CLI distinguishes bind mounts from named volumes by looking for a `/` or `.` prefix. `./src:/app` is a bind mount (host path). `myvolume:/data` is a named volume. This matches Docker's convention.
+</Tip>

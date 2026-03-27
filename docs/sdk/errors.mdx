@@ -4,7 +4,7 @@ description: Typed errors and resource cleanup patterns
 icon: "triangle-exclamation"
 ---
 
-Each SDK surfaces typed errors so you can match on specific failure modes. Rust uses an `Error` enum, TypeScript uses a `MicrosandboxError` class with a `type` discriminant, and Python uses an exception hierarchy.
+All three SDKs surface typed errors so you can match on specific failure modes instead of parsing strings. Rust has an `Error` enum, TypeScript has `MicrosandboxError` with a `type` discriminant, and Python uses an exception hierarchy.
 
 ## Matching errors
 
@@ -92,7 +92,7 @@ except MicrosandboxError as e:
 
 ## Resource cleanup
 
-Sandboxes hold compute resources that should be released when no longer needed. In Rust, the `Drop` trait handles cleanup automatically. In TypeScript and Python, use `try`/`finally` or context managers.
+Sandboxes hold compute resources, so release them when done. In Rust, `Drop` handles cleanup when the sandbox goes out of scope. In TypeScript and Python, use `try`/`finally` or context managers.
 
 <CodeGroup>
 ```rust Rust

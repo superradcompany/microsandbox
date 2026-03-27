@@ -4,6 +4,8 @@ description: Install the SDK and create your first sandbox
 icon: "play"
 ---
 
+The SDK embeds the microsandbox runtime directly into whatever application uses it. `Sandbox.create` spawns the VM as a child process. No daemon to install, no server to connect to.
+
 ## Installation
 
 <CodeGroup>
@@ -95,3 +97,5 @@ async def main():
 asyncio.run(main())
 ```
 </CodeGroup>
+
+The rest of the SDK reference covers each area in detail: [sandbox configuration](/sdk/sandbox), [execution](/sdk/execution), [filesystem](/sdk/filesystem), [networking](/sdk/networking), [volumes](/sdk/volumes), [snapshots](/sdk/snapshots), [scripts](/sdk/scripts), [events](/sdk/events), [errors](/sdk/errors), and [metrics](/sdk/metrics).

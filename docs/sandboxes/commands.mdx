@@ -4,7 +4,9 @@ description: Execute commands, stream output, and interact with sandboxes
 icon: "terminal"
 ---
 
-Once a sandbox is running, you can execute commands inside it, stream their output in real time, or attach an interactive terminal session. All communication happens over a virtio-console channel between the host and the guest agent, with no SSH or network overhead.
+Command execution doesn't use SSH or the network. There's a dedicated channel between the host and a guest agent running inside the VM, completely separate from the sandbox's network stack. The agent spawns processes, streams output back, and reports exit codes.
+
+One nice consequence: `exec` works even when a sandbox has networking fully disabled.
 
 ## Execute a command
 
@@ -34,7 +36,7 @@ print(output.status.success)   # True
 
 ## Execution options
 
-You can override the working directory, set environment variables, apply resource limits, and set a timeout, all on a per-command basis.
+These options apply to a single execution and don't change the sandbox's defaults.
 
 <CodeGroup>
 ```rust Rust
@@ -71,7 +73,7 @@ output = await sb.exec(
 
 ## Shell commands
 
-Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Useful for pipelines and shell syntax.
+Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Useful for pipelines, redirects, and other shell syntax that `exec` doesn't interpret.
 
 <CodeGroup>
 ```rust Rust
@@ -89,7 +91,7 @@ output = await sb.shell("ls -la /app && echo done")
 
 ## Stream output
 
-For long-running processes or large output, use streaming to get events as they happen instead of waiting for the command to finish.
+For long-running processes or large output, streaming gives you stdout, stderr, and exit events as they happen instead of buffering everything until the command finishes.
 
 <CodeGroup>
 ```rust Rust
@@ -133,7 +135,7 @@ async for event in handle.events():
 
 ## Interactive attach
 
-Bridge your terminal directly to a process running inside the sandbox. This gives you a fully interactive PTY session, useful for debugging or running interactive tools like shells, REPLs, or editors.
+Bridges your terminal directly to a process inside the sandbox for a fully interactive PTY session. Useful for debugging, running REPLs, or anything that expects a real terminal.
 
 <CodeGroup>
 ```rust Rust
@@ -162,12 +164,12 @@ await sb.attach("bash", env={"DEBUG": "1"}, cwd="/app", detach_keys="ctrl-q")
 </CodeGroup>
 
 <Tip>
-  Press `Ctrl+]` (or your configured detach keys) to detach from the session without stopping the process.
+  Press `Ctrl+]` (or your configured detach keys) to detach from the session without stopping the process. The process keeps running inside the VM and you can reattach later via its session ID.
 </Tip>
 
 ## Write stdin
 
-When streaming, you can pipe data into the process's stdin.
+Streaming handles can also accept stdin. Enable `stdin_pipe` and write bytes to it. Combined with `tty: true`, this lets you drive interactive processes programmatically.
 
 <CodeGroup>
 ```rust Rust

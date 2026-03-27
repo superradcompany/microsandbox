@@ -1,14 +1,12 @@
 ---
 title: Introduction
-description: Every agent deserves its own machine
+description: Every agent deserves its own computer
 icon: "house"
 ---
 
-When AI agents run, they write code, pull packages from the internet, call tools, and sometimes do things they were never meant to do because of prompt injection. All of that happens with your API keys, on your network, touching your filesystem. Containers can isolate the compute, but they share the host kernel, they can't prevent a secret from leaking over a DNS query, and they don't give you any way to see or control what's happening at the network or filesystem level.
+AI agents run with whatever privileges you give them, and most of the time that's too many. They can see API keys sitting in the environment, reach the network freely (including cloud metadata at `169.254.169.254`), and nothing stops a prompt injection from running `rm -rf /` on the host filesystem. Containers help with some of this, but they share the host kernel, and namespace escapes are a well-documented class of vulnerability.
 
-microsandbox takes a different approach. Every sandbox is a real microVM with its own kernel. The networking and filesystem are programmable from the host, and secrets are protected at the network layer so they can't be exfiltrated even if the guest is compromised.
-
-You can put the agent itself inside a sandbox, give an agent a sandbox it controls through the SDK, or just run the code and tools it uses in isolation.
+microsandbox takes a different approach: every sandbox is a real microVM with its own Linux kernel. But isolation alone isn't the interesting part. What matters is that the networking, filesystem, and secrets are all **programmable from the host side**, so instead of just walling off an agent, you actually get to see and control what it does.
 
 <CodeGroup>
 ```rust Rust
@@ -63,11 +61,19 @@ sb = await Sandbox.create(
 ```
 </CodeGroup>
 
+<Callout icon="bolt" color="#7C3AED">
+  microsandbox spins up lightweight VMs in **under a second**, right from your code on your machine. **No servers, no daemons**, no infrastructure to manage.
+</Callout>
+
 ## What makes it different
 
 ### Secrets that can't leak
 
-The guest never sees real credentials. microsandbox injects random placeholders into environment variables, and only substitutes the real values at the network layer when the request goes to a verified TLS connection on an allowed host. DNS rebinding protection, cloud metadata blocking, and DNS-to-IP binding activate automatically when secrets are configured.
+Most sandboxes protect secrets by restricting what the guest can do. microsandbox goes further: **the guest never has the secret at all**.
+
+Instead of injecting real credentials into the sandbox, microsandbox generates random placeholders. The actual value never enters the VM. The only way it reaches the outside world is when a request goes to an allowed host, at which point microsandbox swaps the placeholder for the real value. Everywhere else, the placeholder is just a meaningless string.
+
+So even with full code execution inside the sandbox, there's nothing to exfiltrate. The credential was never there. DNS rebinding protection and cloud metadata blocking kick in automatically when secrets are configured, closing the remaining side channels.
 
 <CodeGroup>
 ```rust Rust
@@ -104,7 +110,9 @@ sb = await Sandbox.create(
 
 ### Programmable network layer
 
-Every packet leaving a sandbox passes through an in-process networking stack that enforces network policies. You can inspect DNS queries, analyze HTTP traffic, drop packets at the IP level, or build custom data loss prevention. The guest sees a normal network stack. For full control, implement the `NetBackend` trait to handle raw ethernet frames.
+Every packet leaving a sandbox passes through a networking stack controlled entirely from the host side, where policy is enforced at the IP, DNS, or HTTP level. From inside the sandbox it looks like a normal network interface, but on the host side you decide what gets through.
+
+There's no underlying host network to bridge to, no rules to circumvent, and no way for the guest to reach around the filter.
 
 <CodeGroup>
 ```rust Rust
@@ -136,7 +144,7 @@ sb = await Sandbox.create(
 
 ### Extensible filesystem backends
 
-Mount custom filesystem implementations into any sandbox. Intercept reads and writes with hooks, build virtual filesystems, or proxy to remote storage. microsandbox provides a POSIX-compatible `DynFileSystem` trait and built-in backends for passthrough, overlay, in-memory, and proxy filesystems. All with zero-copy I/O.
+The host controls what the guest sees at the filesystem level. Mount host directories, use managed volumes, or attach custom filesystem backends entirely. Hooks let you intercept reads and writes to do things like encrypt everything going to disk or proxy to remote storage, and the guest never knows the difference.
 
 <CodeGroup>
 ```rust Rust
@@ -180,9 +188,9 @@ sb = await Sandbox.create(
 ```
 </CodeGroup>
 
-### Snapshot, fork, restore
+### Snapshot, fork, restore <sup>coming soon</sup>
 
-Capture the full VM state (memory, CPU registers, filesystem) at any point. Then fork hundreds of identical sandboxes from that single baseline with sub-millisecond restore and no re-boot. Install your dependencies once, snapshot, and fork workers on demand. Each fork gets a copy-on-write filesystem overlay, and you can override memory, CPUs, or environment variables per fork.
+Take a snapshot of a running sandbox (full VM state, memory, filesystem, everything) and fork hundreds of identical copies from that single baseline. Install dependencies once, snapshot, then spin up workers that skip the entire setup phase. Each fork gets its own copy-on-write filesystem and can override memory, CPUs, or environment variables.
 
 <CodeGroup>
 ```rust Rust
@@ -234,7 +242,7 @@ Extend microsandbox with in-process Rust plugins or out-of-process plugins in an
 
 ### Bidirectional events
 
-Guest processes can emit typed events to the host via `/run/agent.sock`, and the host can send events back. No special libraries required in the guest since any language can write JSON to a Unix socket. This enables structured communication beyond stdin/stdout, like progress reporting, task completion signals, or custom RPC.
+Guest processes can emit typed events to the host, and the host can send events back. No special libraries required in the guest since any language can write JSON to a socket. This enables structured communication beyond stdin/stdout, like progress reporting, task completion signals, or custom RPC.
 
 <CodeGroup>
 ```rust Rust
@@ -279,14 +287,12 @@ await sb.emit("task.start", {
 
 ## The basics
 
-On top of all this, microsandbox handles the fundamentals well:
-
-- **Under 200ms boot.** libkrun microVMs, not QEMU. Pre-patched kernel loaded as a shared library. Zero-copy mmap.
-- **No daemon.** The runtime embeds directly into your application. No root process, no socket, no background service.
-- **Any OCI image.** Docker Hub, GHCR, ECR, GCR, or any OCI-compatible registry. Your existing images work.
-- **Cross-platform.** Native on macOS and Linux. Same CLI, same SDKs, same Sandboxfile.
-- **Multi-language SDKs.** Rust, TypeScript, and Python with consistent APIs across all of them.
-- **Declarative projects.** Define multi-sandbox environments in a `Sandboxfile` with per-sandbox secrets, network policies, dependency ordering, and scripts. Think Compose, but for microVMs.
+- **Under 100ms boot.** Sandboxes share the same kernel in memory. No QEMU, no disk images to load.
+- **No daemon.** The runtime spawns directly as a child process of whatever application creates the sandbox. No root process, no socket, no background service.
+- **Any OCI image.** Docker Hub, GHCR, ECR, GCR, or any OCI-compatible registry. Shared layers are deduplicated and only stored once.
+- **Cross-platform.** Native on macOS (Apple Silicon) and Linux (KVM). Same CLI, same SDKs.
+- **Multi-language SDKs.** Rust, TypeScript, and Python, all with consistent APIs.
+- **Programmable.** Network policies, filesystem hooks, secret bindings, and TLS interception are all configured from the host side through the SDK.
 
 ## Next steps
 

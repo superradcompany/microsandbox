@@ -4,9 +4,11 @@ description: Network policies, secrets, and TLS interception
 icon: "network-wired"
 ---
 
+All sandbox network traffic passes through a host-controlled networking stack where policies are enforced at the packet level. There's no underlying host network to bypass. See [Networking concepts](/sandboxes/networking) for more on how this works.
+
 ## Preset policies
 
-microsandbox ships with preset policies that cover common scenarios. `public_only` is the default and blocks private address ranges while allowing public internet access.
+`public_only` is the default. It blocks private address ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`) while allowing public internet access.
 
 <CodeGroup>
 ```rust Rust
@@ -15,7 +17,7 @@ use microsandbox::{Sandbox, NetworkPolicy};
 // No network access
 let sb1 = Sandbox::builder("isolated")
     .image("python:3.12")
-    .network(|n| n.policy(NetworkPolicy::none()))
+    .disable_network()
     .create()
     .await?;
 
@@ -123,7 +125,7 @@ sb5 = await Sandbox.create("safe-agent", image="python:3.12",
 
 ## Custom policies
 
-Build a policy with explicit egress and ingress rules for fine-grained control.
+Build a policy with explicit egress and ingress rules. Rules are evaluated first-match-wins.
 
 <CodeGroup>
 ```rust Rust
@@ -197,10 +199,9 @@ sb = await Sandbox.create(
 
 ## Port mapping
 
-Expose ports from the sandbox to the host to make services accessible.
-For simple Rust cases, use top-level `SandboxBuilder::port()` and `port_udp()`.
-They are repeatable, and they compose with `.network(...)` when you also need
-policy, DNS, or TLS settings.
+Expose ports from the sandbox to the host so services running inside the VM are accessible from your machine.
+
+For Rust, `SandboxBuilder::port()` and `port_udp()` are top-level shorthands that compose with `.network(...)` when you also need policy, DNS, or TLS settings.
 
 <CodeGroup>
 ```rust Rust
@@ -244,7 +245,7 @@ sb = await Sandbox.create(
 
 ## DNS interception
 
-Intercept DNS queries from sandboxes to block specific domains or prevent DNS rebinding attacks.
+All DNS queries are intercepted and resolved on the host side. This enables domain blocking, suffix blocking, and rebinding protection.
 
 <CodeGroup>
 ```rust Rust
@@ -295,11 +296,11 @@ sb = await Sandbox.create(
 
 ## Secrets
 
-Bind secrets to allowed hosts so credentials are never sent to unauthorized destinations.
+Secrets use a **placeholder substitution** model. The guest VM never sees the real credential.
 
-<Note>
-  Secrets are future work and not yet available in the current SDK.
-</Note>
+When you bind a secret to an environment variable and one or more allowed hosts, microsandbox generates a random placeholder (e.g., `OPENAI_API_KEY=msb_ph_a8f3c2...`) and injects that into the guest instead. The real value never enters the VM. The only way it reaches the outside world is when a request goes to an allowed host, at which point microsandbox swaps the placeholder for the real value. Everywhere else, the placeholder is just a meaningless string.
+
+So even with full code execution inside the sandbox, there's nothing to steal. The credential was never there.
 
 <CodeGroup>
 ```rust Rust
@@ -363,11 +364,7 @@ sb = await Sandbox.create(
 
 ## TLS interception
 
-Inspect HTTPS traffic with an auto-generated CA. Cert-pinned domains can be bypassed.
-
-<Note>
-  TLS interception is future work and not yet available in the current SDK.
-</Note>
+Enable HTTPS traffic inspection with an auto-generated CA certificate. microsandbox generates a per-sandbox CA during creation, installs it in the guest's trust store, and generates per-domain certificates on first connection. Domains that use certificate pinning (or that you don't want to intercept) can be bypassed.
 
 <CodeGroup>
 ```rust Rust

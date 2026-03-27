@@ -4,7 +4,7 @@ description: Manage sandboxes from the terminal
 icon: "book"
 ---
 
-The `msb` CLI lets you create, manage, and interact with sandboxes directly from the terminal. It auto-detects TTY and interactivity, so no `-it` flags are needed.
+The `msb` CLI lets you create, manage, and interact with sandboxes from the terminal. It auto-detects TTY and interactivity, so no `-it` flags are needed. If your terminal is interactive, `msb` acts accordingly.
 
 ## Install
 
@@ -13,7 +13,7 @@ curl -fsSL https://get.microsandbox.dev | sh
 ```
 
 <Note>
-  microsandbox requires Linux with KVM enabled, or macOS with Apple Silicon (M-series chip).
+  microsandbox requires Linux with KVM enabled, or macOS with Apple Silicon (M-series chip). Both use hardware virtualization.
 </Note>
 
 ## Quick reference
@@ -51,6 +51,10 @@ msb volume ls
 msb volume rm data
 ```
 
+<Tip>
+  Unnamed sandboxes (no `--name` flag) are ephemeral. They're automatically removed when the command finishes. Named sandboxes persist and can be stopped, restarted, and inspected later.
+</Tip>
+
 ## Global options
 
 | Flag | Description |
@@ -70,7 +74,7 @@ Use `--tree` as an alternative to `--help` to see every command, subcommand, and
 msb --tree
 ```
 
-You can also scope it to a specific subcommand:
+You can scope it to a specific subcommand:
 
 ```bash
 msb image --tree    # Show only image commands

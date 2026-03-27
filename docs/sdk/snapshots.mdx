@@ -4,9 +4,17 @@ description: Capture VM state, fork workers, and restore
 icon: "camera"
 ---
 
+<Note>
+  Snapshots are coming soon and not yet available in the current SDK.
+</Note>
+
+Snapshots capture the full VM state: memory, CPU registers, filesystem, everything. From a single snapshot you can fork hundreds of sandboxes, each starting exactly where the original left off with no re-boot or dependency reinstall. Forks are cheap because each one gets its own copy-on-write filesystem.
+
+Particularly useful for agent workloads where every sandbox needs the same base environment (Python + packages, Node + node_modules, etc). Install once, snapshot, fork on demand.
+
 ## Create a snapshot
 
-Pause a running sandbox and capture its full VM state. The sandbox is paused during the snapshot and can be resumed afterward.
+Capturing a snapshot pauses the sandbox, saves its state, and returns a handle. You can resume the original sandbox afterward.
 
 <CodeGroup>
 ```rust Rust
@@ -46,7 +54,7 @@ await sb.resume()
 
 ## Save and load named snapshots
 
-Persist a snapshot under a name so it can be retrieved later without keeping the original sandbox around.
+Persist a snapshot under a name so it survives beyond the lifetime of the original sandbox. Load it later to fork workers without keeping the base sandbox around.
 
 <CodeGroup>
 ```rust Rust
@@ -85,7 +93,7 @@ saved = await Snapshot.get("after-pip-install")
 
 ## Fork workers
 
-Restore multiple sandboxes from a single snapshot to skip repeated setup work like dependency installation.
+Restore multiple sandboxes from a single snapshot. Each fork skips the entire setup phase and starts running immediately from the captured state.
 
 <CodeGroup>
 ```rust Rust
@@ -120,7 +128,7 @@ workers = await asyncio.gather(*(saved.restore(f"worker-{i}") for i in range(10)
 
 ## Restore with overrides
 
-Override memory, CPU count, or environment variables when restoring from a snapshot.
+Override memory, CPU count, or environment variables when restoring. The VM state is restored from the snapshot, but the overridden configuration takes effect on the new sandbox.
 
 <CodeGroup>
 ```rust Rust

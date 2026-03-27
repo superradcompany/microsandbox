@@ -4,9 +4,9 @@ description: Read and write files inside a running sandbox
 icon: "folder-open"
 ---
 
-You can read, write, and manage files inside a sandbox without mounting volumes or using SSH. The filesystem API communicates directly with the guest agent over a virtio-console channel, giving you programmatic access to the guest filesystem from the host.
+The filesystem API lets you read, write, and manage files inside a sandbox without mounting volumes or SSH. It uses the same channel as command execution, so it doesn't touch the sandbox's network.
 
-This is particularly useful for AI agent workflows where you need to write generated code into the sandbox, read back results, or inspect logs.
+Handy for pushing generated code into a sandbox, pulling back results, or inspecting logs without having to pre-mount a shared directory.
 
 ## Write a file
 
@@ -68,7 +68,7 @@ for entry in entries:
 
 ## Stream large files
 
-For files that are too large to read into memory at once, use streaming. Chunks are transferred at approximately 3 MiB granularity.
+For files too large to fit in memory, use streaming. Data is transferred in chunks of approximately 3 MiB each.
 
 <CodeGroup>
 ```rust Rust
@@ -108,3 +108,7 @@ await sb.fs.copyFromHost("./local-file.txt", "/app/remote-file.txt")
 await sb.fs.copy_from_host("./local-file.txt", "/app/remote-file.txt")
 ```
 </CodeGroup>
+
+<Tip>
+  If you need to transfer many files at once, consider using a [bind-mounted volume](/sandboxes/volumes) instead. Volumes give the guest direct filesystem access, whereas the filesystem API transfers each file individually. For bulk operations, volumes are significantly faster.
+</Tip>

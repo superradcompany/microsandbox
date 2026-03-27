@@ -4,6 +4,10 @@ description: Create, mount, and manage persistent storage
 icon: "hard-drive"
 ---
 
+Volumes give the guest direct filesystem access to host-side directories, which is much faster than the [filesystem API](/sdk/filesystem) since that transfers files individually. The guest handles caching and readahead natively, so performance is close to native disk I/O.
+
+See [Volume concepts](/sandboxes/volumes) for more on bind mounts, named volumes, and tmpfs.
+
 ## Create a named volume
 
 Named volumes are managed by microsandbox and stored at `~/.microsandbox/volumes/<name>/`. You can set a storage quota at creation time.
@@ -33,7 +37,7 @@ cache = await Volume.create("pip-cache", quota=1024)
 
 ## Mount volumes
 
-Sandboxes support three mount types: bind mounts from the host, named volumes for persistent shared storage, and tmpfs for ephemeral scratch space.
+Three mount types: bind mounts (host directory), named volumes (managed storage), and tmpfs (in-memory, ephemeral).
 
 <CodeGroup>
 ```rust Rust
@@ -88,7 +92,7 @@ sb = await Sandbox.create(
 
 ## Host-side file access
 
-You can read and write files in a named volume from the host without a running sandbox.
+Read and write files in a named volume from the host without a running sandbox. Useful for pre-populating data before creating a sandbox.
 
 <CodeGroup>
 ```rust Rust

@@ -6,7 +6,7 @@ icon: "cube"
 
 ## msb run
 
-Create a sandbox and optionally run a command. If no `--name` is given, the sandbox is ephemeral and removed after the command finishes.
+Create a sandbox and optionally run a command. Without `--name`, the sandbox is ephemeral and removed when the command finishes. With `--name`, it persists for later use.
 
 ```bash
 # Ephemeral: runs and cleans up
@@ -50,16 +50,16 @@ When no `--` command is given, the image's `entrypoint` and `cmd` are used as th
 
 ## msb create
 
-Create and boot a sandbox without running a command. Takes the same resource and configuration flags as `msb run`, plus:
-
-| Flag | Description |
-|------|-------------|
-| `--force` | Replace existing sandbox with same name |
+Create and boot a sandbox without running a command. Takes the same flags as `msb run`.
 
 ```bash
 msb create python:3.11 --name worker -c 2 -m 1G
 msb create --force python:3.11 --name worker   # Replace existing
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--force` | Replace existing sandbox with same name |
 
 ## msb start
 
@@ -72,8 +72,8 @@ msb start devbox
 ## msb stop
 
 ```bash
-msb stop devbox           # Graceful shutdown (SIGTERM)
-msb stop --force devbox   # Force kill (SIGKILL)
+msb stop devbox           # Graceful shutdown
+msb stop --force devbox   # Force kill
 ```
 
 ## msb exec
@@ -94,7 +94,7 @@ msb exec devbox -- ls -la /app
 
 ## msb shell
 
-Open an interactive shell session inside a sandbox.
+Open an interactive shell session.
 
 ```bash
 msb shell devbox
@@ -103,7 +103,7 @@ msb shell devbox --shell /bin/zsh
 
 ## msb attach
 
-Attach your terminal to the sandbox's main process. Press `Ctrl+]` to detach.
+Attach your terminal to the sandbox's main process. Press `Ctrl+]` to detach without stopping.
 
 ```bash
 msb attach devbox
@@ -120,7 +120,7 @@ msb ls --format json      # JSON output
 
 ## msb inspect
 
-Show detailed configuration and status for a sandbox.
+Show detailed configuration and status.
 
 ```bash
 msb inspect devbox

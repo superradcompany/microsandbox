@@ -4,7 +4,7 @@ description: Monitor sandbox resource usage
 icon: "chart-line"
 ---
 
-Retrieve a point-in-time snapshot of resource usage, or open a streaming subscription that delivers updates at a fixed interval.
+Query resource usage for a running sandbox: CPU, memory, and more. Get a single point-in-time snapshot, or open a streaming subscription that delivers updates at a fixed interval.
 
 ## Point-in-time
 
@@ -28,6 +28,8 @@ print(f"CPU: {m.cpu_percent:.1f}%, Mem: {m.memory_bytes // 1024 // 1024} MB")
 </CodeGroup>
 
 ## Streaming
+
+Subscribe to metric updates at a regular interval. Each update arrives as a separate event.
 
 <CodeGroup>
 ```rust Rust
@@ -55,7 +57,7 @@ async for m in sb.metrics_stream(interval=1.0):
 
 ## Fleet-wide metrics
 
-Get metrics for all running sandboxes at once.
+Get metrics for all running sandboxes at once. Useful for dashboards or capacity planning.
 
 <CodeGroup>
 ```rust Rust

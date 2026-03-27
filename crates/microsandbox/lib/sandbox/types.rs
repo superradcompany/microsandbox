@@ -142,7 +142,7 @@ enum MountKind {
 ///   create time.
 ///
 /// By default, patches that target a path already present in the rootfs (lower layers for
-/// OverlayFs, existing files for bind roots) will return an error. Set `overwrite: true` on
+/// OverlayFs, existing files for bind roots) will return an error. Set `replace: true` on
 /// the relevant variant to allow shadowing existing files.
 ///
 /// For `Append` patches targeting a file in a lower layer, the file is first copied up to
@@ -157,8 +157,8 @@ pub enum Patch {
         content: String,
         /// File permissions (e.g., `0o644`). `None` uses the default.
         mode: Option<u32>,
-        /// Allow overwriting a file that already exists in the rootfs.
-        overwrite: bool,
+        /// Allow replacing a file that already exists in the rootfs.
+        replace: bool,
     },
     /// Write raw bytes to a file.
     File {
@@ -168,8 +168,8 @@ pub enum Patch {
         content: Vec<u8>,
         /// File permissions (e.g., `0o644`). `None` uses the default.
         mode: Option<u32>,
-        /// Allow overwriting a file that already exists in the rootfs.
-        overwrite: bool,
+        /// Allow replacing a file that already exists in the rootfs.
+        replace: bool,
     },
     /// Copy a file from host into the rootfs.
     CopyFile {
@@ -179,8 +179,8 @@ pub enum Patch {
         dst: String,
         /// File permissions. `None` preserves source permissions.
         mode: Option<u32>,
-        /// Allow overwriting a file that already exists in the rootfs.
-        overwrite: bool,
+        /// Allow replacing a file that already exists in the rootfs.
+        replace: bool,
     },
     /// Copy a directory from host into the rootfs.
     CopyDir {
@@ -188,8 +188,8 @@ pub enum Patch {
         src: PathBuf,
         /// Absolute guest destination path.
         dst: String,
-        /// Allow overwriting files that already exist in the rootfs.
-        overwrite: bool,
+        /// Allow replacing files that already exist in the rootfs.
+        replace: bool,
     },
     /// Create a symlink.
     Symlink {
@@ -197,8 +197,8 @@ pub enum Patch {
         target: String,
         /// Absolute guest path where the symlink is created.
         link: String,
-        /// Allow overwriting a path that already exists in the rootfs.
-        overwrite: bool,
+        /// Allow replacing a path that already exists in the rootfs.
+        replace: bool,
     },
     /// Create a directory (idempotent — does not error if the directory already exists).
     Mkdir {
@@ -356,13 +356,13 @@ impl PatchBuilder {
         path: impl Into<String>,
         content: impl Into<String>,
         mode: Option<u32>,
-        overwrite: bool,
+        replace: bool,
     ) -> Self {
         self.patches.push(Patch::Text {
             path: path.into(),
             content: content.into(),
             mode,
-            overwrite,
+            replace,
         });
         self
     }
@@ -373,13 +373,13 @@ impl PatchBuilder {
         path: impl Into<String>,
         content: impl Into<Vec<u8>>,
         mode: Option<u32>,
-        overwrite: bool,
+        replace: bool,
     ) -> Self {
         self.patches.push(Patch::File {
             path: path.into(),
             content: content.into(),
             mode,
-            overwrite,
+            replace,
         });
         self
     }
@@ -390,13 +390,13 @@ impl PatchBuilder {
         src: impl Into<PathBuf>,
         dst: impl Into<String>,
         mode: Option<u32>,
-        overwrite: bool,
+        replace: bool,
     ) -> Self {
         self.patches.push(Patch::CopyFile {
             src: src.into(),
             dst: dst.into(),
             mode,
-            overwrite,
+            replace,
         });
         self
     }
@@ -406,12 +406,12 @@ impl PatchBuilder {
         mut self,
         src: impl Into<PathBuf>,
         dst: impl Into<String>,
-        overwrite: bool,
+        replace: bool,
     ) -> Self {
         self.patches.push(Patch::CopyDir {
             src: src.into(),
             dst: dst.into(),
-            overwrite,
+            replace,
         });
         self
     }
@@ -421,12 +421,12 @@ impl PatchBuilder {
         mut self,
         target: impl Into<String>,
         link: impl Into<String>,
-        overwrite: bool,
+        replace: bool,
     ) -> Self {
         self.patches.push(Patch::Symlink {
             target: target.into(),
             link: link.into(),
-            overwrite,
+            replace,
         });
         self
     }

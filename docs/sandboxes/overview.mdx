@@ -4,13 +4,13 @@ description: What sandboxes are and how to configure them
 icon: "circle-info"
 ---
 
-A sandbox is a lightweight microVM: a real virtual machine with its own Linux kernel, filesystem, and network stack. You create one from a container image, run code inside it, and tear it down when you're done. Each sandbox is fully isolated from the host and from other sandboxes.
+A sandbox is a microVM: a real virtual machine with its own Linux kernel, filesystem, and network stack, running as a child process of whatever application creates it.
 
-Unlike containers, which share the host kernel and rely on namespace isolation, microsandbox gives every sandbox its own kernel. This means an escape from a sandbox would require exploiting a KVM hypervisor vulnerability, which is a fundamentally harder attack than a container breakout.
+The security boundary here is hardware virtualization, not Linux namespaces. Container escapes are a well-documented class of vulnerability; breaking out of a microVM requires exploiting the hypervisor itself, which is a fundamentally harder problem.
 
 ## Creating a sandbox
 
-At minimum, a sandbox needs a name and an image. Everything else has sensible defaults.
+At minimum, a sandbox needs a name and an image. Everything else has sensible defaults: 1 vCPU, 512 MiB memory, public-only networking, `/bin/sh` as the shell.
 
 <CodeGroup>
 ```rust Rust
@@ -34,8 +34,6 @@ sb = await Sandbox.create("worker", image="python:3.12")
 </CodeGroup>
 
 ## Configuration options
-
-You can customize CPU, memory, environment variables, working directory, shell, and more.
 
 <CodeGroup>
 ```rust Rust
@@ -100,16 +98,16 @@ sb = await Sandbox.create(
 | `scripts` | `{}` | Named scripts stored at `/.msb/scripts/` |
 
 <Tip>
-  The `cpus` and `memory` values are limits, not reservations. A sandbox with `memory: 512` doesn't hold 512 MiB at all times. It only uses what it actually needs, up to that limit. This means you can run many sandboxes on a single host without overcommitting resources.
+  `cpus` and `memory` are **limits, not reservations**. Setting `memory: 512` doesn't allocate 512 MiB upfront. Physical pages are only allocated as the guest actually touches them, so you can comfortably run many sandboxes on a single host without worrying about overcommitting.
 </Tip>
 
 ## Rootfs sources
 
-microsandbox supports three ways to provide a root filesystem for a sandbox.
+microsandbox supports three ways to provide a root filesystem. The choice affects how the filesystem is assembled and what features are available.
 
 ### OCI images
 
-The most common option. Pull any image from any container registry.
+The most common option. microsandbox pulls the image and stacks its layers as a copy-on-write filesystem. Changes inside the sandbox don't modify the base image. If two sandboxes use the same image, they share the same cached layers on disk.
 
 <CodeGroup>
 ```rust Rust
@@ -127,7 +125,7 @@ await Sandbox.create("worker", image="python:3.12")
 
 ### Bind mounts
 
-Use a local directory on the host as the root filesystem directly.
+Use a local directory on the host as the root filesystem directly. The guest sees the directory contents as its `/`. This is useful for development when you have a pre-built rootfs, or for minimal environments where you've assembled the filesystem yourself.
 
 <CodeGroup>
 ```rust Rust
@@ -143,9 +141,13 @@ await Sandbox.create("worker", image="./my-rootfs")
 ```
 </CodeGroup>
 
+<Note>
+  The guest agent is automatically included in the rootfs during sandbox creation, regardless of rootfs source. You don't need to add anything to your image or directory.
+</Note>
+
 ### Disk images
 
-Boot from a QCOW2, Raw, or VMDK disk image via virtio-blk. See [Disk Images](/images/disk-images) for details.
+Boot from a QCOW2, Raw, or VMDK disk image. Unlike OCI images (which use a copy-on-write overlay), disk images give the guest raw block device access. See [Disk Images](/images/disk-images) for details.
 
 <CodeGroup>
 ```rust Rust

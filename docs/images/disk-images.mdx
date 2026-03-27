@@ -4,19 +4,23 @@ description: Boot from QCOW2, Raw, or VMDK disk images
 icon: "compact-disc"
 ---
 
-In addition to OCI container images, microsandbox can boot a sandbox directly from a disk image file using virtio-blk. This is useful when you need a pre-built VM template, a custom kernel configuration, or an OS that isn't available as a container image.
+In addition to OCI container images, microsandbox can boot a sandbox directly from a disk image file. The guest gets raw block device access, and its kernel mounts the filesystem from the device directly.
+
+This is a fundamentally different path from OCI images. With OCI, microsandbox stacks image layers as a copy-on-write filesystem. With disk images, the guest owns the block device. No overlay, no copy-on-write between sandboxes.
+
+Use disk images when you need a pre-built VM template, a custom kernel configuration, or an OS that isn't available as a container image.
 
 ## Supported formats
 
 | Format | Description |
 |--------|-------------|
-| **QCOW2** | QEMU Copy-On-Write v2, the most common format. Supports snapshots and thin provisioning |
-| **Raw** | Uncompressed raw disk image |
-| **VMDK** | VMware virtual disk format |
+| **QCOW2** | QEMU Copy-On-Write v2. Supports thin provisioning and backing files. The most common format. |
+| **Raw** | Uncompressed raw disk image. No overhead, but no thin provisioning. |
+| **VMDK** | VMware virtual disk format. |
 
 ## Usage
 
-When you pass a file path ending in `.qcow2`, `.raw`, or `.vmdk`, microsandbox auto-detects the format. For raw images or when the format can't be inferred, you can specify it explicitly along with the filesystem type.
+When you pass a file path ending in `.qcow2`, `.raw`, or `.vmdk`, microsandbox auto-detects the format. For ambiguous cases, specify the format and filesystem type explicitly.
 
 <CodeGroup>
 ```rust Rust
@@ -67,5 +71,5 @@ sb2 = await Sandbox.create("custom-vm",
 </CodeGroup>
 
 <Note>
-  Disk images are mounted via virtio-blk, which means the sandbox has raw block device access. The filesystem type must match what's on the disk image.
+  The filesystem type (`ext4`, `xfs`, etc.) must match what's actually on the disk image. The guest kernel mounts it using the specified filesystem driver.
 </Note>

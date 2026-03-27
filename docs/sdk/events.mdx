@@ -4,7 +4,9 @@ description: Bidirectional host-guest communication
 icon: "tower-broadcast"
 ---
 
-The events API lets the host and guest exchange typed messages over a Unix domain socket. The host subscribes to named events from the guest and emits events into the guest, all without polling or SSH.
+The events API is for structured communication between host and guest beyond stdin/stdout. The host can subscribe to named events from the guest and emit events back, all through the same channel used by `exec`.
+
+On the guest side, processes just write JSON to `/run/agent.sock`, which is a standard Unix domain socket. No special library needed. Any language that can open a socket and write a newline-delimited JSON message will work.
 
 ## Receive events from guest
 
@@ -85,14 +87,12 @@ await sb.emit("task.start", {
 ```
 </CodeGroup>
 
-## Guest socket
+## Guest-side emitting
 
-Guest processes communicate with the host by connecting to `/run/agent.sock` inside the sandbox. This is a standard Unix domain socket, so no special library is needed. Any language that can open a socket and write JSON can emit events.
-
-For example, a Python script running inside the guest can send a progress event:
+Inside the guest, any process can emit events by writing JSON to the Unix domain socket at `/run/agent.sock`. No SDK required.
 
 ```python
-# Inside the guest -- plain Python, no SDK required
+# Inside the guest, plain Python, no SDK
 import json, socket
 
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

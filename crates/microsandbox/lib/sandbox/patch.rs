@@ -57,10 +57,10 @@ async fn apply_one(
             path,
             content,
             mode,
-            overwrite,
+            replace,
         } => {
             let dest = resolve_guest_path(target_dir, path)?;
-            check_overwrite(&dest, lower_layers, path, *overwrite)?;
+            check_replace(&dest, lower_layers, path, *replace)?;
             ensure_parent(&dest).await?;
             fs::write(&dest, content.as_bytes()).await?;
             if let Some(mode) = mode {
@@ -71,10 +71,10 @@ async fn apply_one(
             path,
             content,
             mode,
-            overwrite,
+            replace,
         } => {
             let dest = resolve_guest_path(target_dir, path)?;
-            check_overwrite(&dest, lower_layers, path, *overwrite)?;
+            check_replace(&dest, lower_layers, path, *replace)?;
             ensure_parent(&dest).await?;
             fs::write(&dest, content).await?;
             if let Some(mode) = mode {
@@ -85,34 +85,30 @@ async fn apply_one(
             src,
             dst,
             mode,
-            overwrite,
+            replace,
         } => {
             let dest = resolve_guest_path(target_dir, dst)?;
-            check_overwrite(&dest, lower_layers, dst, *overwrite)?;
+            check_replace(&dest, lower_layers, dst, *replace)?;
             ensure_parent(&dest).await?;
             fs::copy(src, &dest).await?;
             if let Some(mode) = mode {
                 set_permissions(&dest, *mode).await?;
             }
         }
-        Patch::CopyDir {
-            src,
-            dst,
-            overwrite,
-        } => {
+        Patch::CopyDir { src, dst, replace } => {
             let dest = resolve_guest_path(target_dir, dst)?;
-            check_overwrite(&dest, lower_layers, dst, *overwrite)?;
+            check_replace(&dest, lower_layers, dst, *replace)?;
             copy_dir_recursive(src, &dest).await?;
         }
         Patch::Symlink {
             target,
             link,
-            overwrite,
+            replace,
         } => {
             let link_path = resolve_guest_path(target_dir, link)?;
-            check_overwrite(&link_path, lower_layers, link, *overwrite)?;
+            check_replace(&link_path, lower_layers, link, *replace)?;
             ensure_parent(&link_path).await?;
-            // Remove existing if overwrite was allowed and something exists.
+            // Remove existing if replace was allowed and something exists.
             if link_path.exists() {
                 fs::remove_file(&link_path).await.ok();
             }
@@ -180,28 +176,28 @@ fn resolve_guest_path(target_dir: &Path, guest_path: &str) -> MicrosandboxResult
 }
 
 /// Check if a path already exists in the target dir or lower layers.
-/// Returns an error if it exists and `overwrite` is false.
-fn check_overwrite(
+/// Returns an error if it exists and `replace` is false.
+fn check_replace(
     dest: &Path,
     lower_layers: &[PathBuf],
     guest_path: &str,
-    overwrite: bool,
+    replace: bool,
 ) -> MicrosandboxResult<()> {
-    if overwrite {
+    if replace {
         return Ok(());
     }
 
     // Check the target directory (rw layer for OCI, host dir for bind).
     if dest.exists() {
         return Err(crate::MicrosandboxError::PatchFailed(format!(
-            "path already exists in rootfs: '{guest_path}' (set overwrite to allow)"
+            "path already exists in rootfs: '{guest_path}' (set replace to allow)"
         )));
     }
 
     // Check lower layers (OCI image layers).
     if find_in_layers(lower_layers, guest_path).is_some() {
         return Err(crate::MicrosandboxError::PatchFailed(format!(
-            "path exists in image layer: '{guest_path}' (set overwrite to allow)"
+            "path exists in image layer: '{guest_path}' (set replace to allow)"
         )));
     }
 

@@ -6,7 +6,7 @@ icon: "cube"
 
 ## Create with options
 
-Configure memory, CPUs, working directory, shell, environment variables, volumes, and network when creating a sandbox.
+The builder/options pattern lets you configure everything about a sandbox before booting it.
 
 <CodeGroup>
 ```rust Rust
@@ -71,7 +71,7 @@ sb = await Sandbox.create(
 
 ## Detached creation
 
-Create a sandbox that keeps running after your process exits. Useful for long-running agents or background workers.
+By default, a sandbox is "attached" to your process: when your process exits, the sandbox is stopped and cleaned up. Detached sandboxes survive independently and you can reconnect to them later.
 
 <CodeGroup>
 ```rust Rust
@@ -96,7 +96,7 @@ sb = await Sandbox.create("worker", image="python:3.12", detached=True)
 
 ## Replace existing
 
-Replace a stopped sandbox with the same name instead of failing on conflict.
+Replace a stopped sandbox with the same name instead of failing on conflict. This stops the old sandbox (if still running), removes it, and creates a fresh one.
 
 <CodeGroup>
 ```rust Rust
@@ -122,7 +122,7 @@ sb = await Sandbox.create("worker", image="python:3.12", replace=True)
 
 ## Config inspection
 
-Build a sandbox configuration without booting the VM. Useful for serializing, storing, or modifying configs before creation.
+Build a sandbox configuration without booting the VM. Useful for serializing, storing, validating, or modifying configs before creation.
 
 <CodeGroup>
 ```rust Rust
@@ -131,7 +131,7 @@ use microsandbox::Sandbox;
 let config = Sandbox::builder("preview")
     .image("python:3.12")
     .memory(1024)
-    .build();
+    .build()?;
 
 println!("{}", serde_json::to_string_pretty(&config)?);
 let sb = Sandbox::create(config).await?;
@@ -164,7 +164,7 @@ sb = await Sandbox.create_from_config(config)
 
 ## Disk image rootfs
 
-Boot from a qcow2 or raw disk image instead of an OCI container image. The filesystem type is auto-detected by default.
+Boot from a QCOW2, Raw, or VMDK disk image instead of an OCI container image. The guest gets raw block device access. The format is auto-detected from the file extension, or you can specify it explicitly along with the filesystem type.
 
 <CodeGroup>
 ```rust Rust
@@ -227,6 +227,10 @@ sb = await Sandbox.create(
 )
 ```
 </CodeGroup>
+
+<Note>
+  With OCI images, microsandbox stacks layers and adds a copy-on-write overlay so sandboxes share the base. With disk images, the guest gets the block device directly, so there's no copy-on-write isolation between sandboxes using the same disk image. Each sandbox needs its own copy (or use QCOW2's built-in snapshot/backing file support).
+</Note>
 
 ## Private registry
 
@@ -303,11 +307,15 @@ Pull policies control whether the SDK fetches the image from the registry:
 | `IfMissing` | Pull only if the image is not already cached (default) |
 | `Never` | Never pull; fail if the image is not cached |
 
+<Tip>
+  Once an OCI image is resolved, microsandbox pins the exact layers. A `python:3.12` reference is resolved to an immutable set of layers at first pull. Subsequent `start()` calls use the pinned layers without re-resolving the mutable tag, so your sandbox is reproducible even if the upstream tag is updated.
+</Tip>
+
 ## Lifecycle
 
 ### Stop, start, kill
 
-Stop sends a graceful shutdown signal. Start reboots a stopped sandbox from persisted state. Kill sends SIGKILL for unresponsive sandboxes.
+Stop gracefully terminates guest processes. Start reboots a stopped sandbox from persisted state. Kill force-terminates when the guest is unresponsive.
 
 <CodeGroup>
 ```rust Rust
@@ -343,7 +351,7 @@ await sb.kill()
 
 ### Pause and resume
 
-Freeze all processes without shutting down. The VM stays in memory but uses no CPU. Resume is instant with no boot time.
+Freeze all guest processes. Zero CPU usage while paused. Resume is instant with no re-boot.
 
 <CodeGroup>
 ```rust Rust
@@ -364,7 +372,7 @@ await sb.resume()
 
 ### Drain
 
-Trigger a graceful shutdown that lets existing commands finish but rejects new ones. The sandbox transitions to `Draining` and eventually to `Stopped`.
+Graceful shutdown that lets existing commands finish but rejects new ones. Transitions to `Stopped` when all in-flight commands complete.
 
 <CodeGroup>
 ```rust Rust
@@ -382,7 +390,7 @@ await sb.drain()
 
 ### Detach
 
-Release the sandbox handle without stopping the sandbox. The sandbox continues running in the background.
+Release the sandbox handle without stopping it. The sandbox continues running as a background process.
 
 <CodeGroup>
 ```rust Rust
@@ -400,7 +408,7 @@ await sb.detach()
 
 ### Wait
 
-Wait for the sandbox to terminate without triggering a stop. Blocks until the sandbox exits on its own.
+Block until the sandbox exits on its own, without triggering a stop.
 
 <CodeGroup>
 ```rust Rust
@@ -417,8 +425,6 @@ exit_status = await sb.wait()
 </CodeGroup>
 
 ### List, get, remove
-
-Query sandbox inventory and clean up stopped sandboxes.
 
 <CodeGroup>
 ```rust Rust
@@ -462,7 +468,7 @@ await Sandbox.remove("old-sandbox")
 
 ### Graceful shutdown with timeout fallback
 
-Attempt a graceful stop, then force-kill if the sandbox does not shut down in time.
+Attempt a graceful stop, then force-kill if the sandbox doesn't shut down in time.
 
 <CodeGroup>
 ```rust Rust
@@ -505,16 +511,14 @@ except asyncio.TimeoutError:
 
 ## Sandbox Process Policies
 
-Configure how the sandbox process handles shutdown escalation, idle detection, and maximum sandbox lifetime.
+Configure how the sandbox handles shutdown escalation, idle detection, and maximum lifetime. These policies are enforced on the host side, so the guest can't override them.
 
 <CodeGroup>
 ```rust Rust
-use microsandbox::{Sandbox, ShutdownMode, LogLevel};
+use microsandbox::{Sandbox, LogLevel};
 
 let sb = Sandbox::builder("worker")
     .image("python:3.12")
-    .shutdown_mode(ShutdownMode::Terminate)
-    .grace_period(30)
     .max_duration(3600)
     .idle_timeout(300)
     .log_level(LogLevel::Debug)
@@ -523,13 +527,11 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-import { Sandbox, ShutdownMode, LogLevel } from 'microsandbox'
+import { Sandbox, LogLevel } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "worker",
     image: "python:3.12",
-    shutdownMode: ShutdownMode.Graceful,
-    gracePeriod: 30,
     maxDuration: 3600,
     idleTimeout: 300,
     logLevel: LogLevel.Debug,
@@ -537,13 +539,11 @@ const sb = await Sandbox.create({
 ```
 
 ```python Python
-from microsandbox import Sandbox, ShutdownMode, LogLevel
+from microsandbox import Sandbox, LogLevel
 
 sb = await Sandbox.create(
     "worker",
     image="python:3.12",
-    shutdown_mode=ShutdownMode.TERMINATE,
-    grace_period=30,
     max_duration=3600,
     idle_timeout=300,
     log_level=LogLevel.DEBUG,
@@ -553,38 +553,13 @@ sb = await Sandbox.create(
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `shutdown_mode` | `Terminate` | How the sandbox process escalates shutdown signals |
-| `grace_period` | `10` | Seconds between escalation steps |
 | `max_duration` | none | Maximum sandbox lifetime in seconds; triggers drain when exceeded |
 | `idle_timeout` | none | Auto-drain after this many seconds of inactivity |
 | `log_level` | none | Override sandbox-process log verbosity |
 
-## Custom init
+## Customizing the guest environment
 
-Replace the default init binary with your own. The custom init must exist in the guest filesystem (from the image or a volume). When set, the embedded init is not patched into the filesystem.
+If you need to run setup logic, install packages, or inject files before a sandbox starts doing real work, there are two ways to do it without building a custom image:
 
-<CodeGroup>
-```rust Rust
-let sb = Sandbox::builder("worker")
-    .image("ubuntu:22.04")
-    .init("/usr/local/bin/my-init")
-    .create()
-    .await?;
-```
-
-```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "ubuntu:22.04",
-    init: "/usr/local/bin/my-init",
-})
-```
-
-```python Python
-sb = await Sandbox.create(
-    "worker",
-    image="ubuntu:22.04",
-    init="/usr/local/bin/my-init",
-)
-```
-</CodeGroup>
+- **[Scripts](/sdk/scripts)** are files mounted into the sandbox at `/.msb/scripts/` and added to `PATH`. Define them at creation time and call them by name with `exec()` or `shell()`. Good for multi-step setup procedures or named entry points.
+- **[Patches](/sdk/scripts#patches)** modify the rootfs before the VM boots: write config files, copy directories from the host, create symlinks, append to existing files, etc. The base image stays untouched since patches go into the writable layer.

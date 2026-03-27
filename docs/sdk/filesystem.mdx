@@ -4,9 +4,11 @@ description: Read, write, and manage files inside sandboxes
 icon: "folder-open"
 ---
 
-## Write a file
+The filesystem API uses the same channel as command execution. No SSH, no network involved.
 
-Write string or binary content to a path inside the sandbox.
+For bulk operations or ongoing file access, [volumes](/sdk/volumes) are significantly faster since they give the guest direct filesystem access. The filesystem API is better suited for ad-hoc work: pushing generated code into a sandbox, pulling back results, checking logs.
+
+## Write a file
 
 <CodeGroup>
 ```rust Rust
@@ -24,8 +26,6 @@ await sb.fs.write("/app/config.json", '{"debug": true}')
 
 ## Read a file
 
-Read the entire contents of a file as a string.
-
 <CodeGroup>
 ```rust Rust
 let content = sb.fs().read_to_string("/app/config.json").await?;
@@ -41,8 +41,6 @@ content = await sb.fs.read_string("/app/config.json")
 </CodeGroup>
 
 ## List a directory
-
-Enumerate entries in a directory, returning each entry's path and kind (file, directory, symlink, etc.).
 
 <CodeGroup>
 ```rust Rust
@@ -68,7 +66,7 @@ for entry in entries:
 
 ## Stream large files
 
-For files too large to read into memory at once, stream them in chunks.
+For files too large to fit in memory, stream them in chunks (~3 MiB each).
 
 <CodeGroup>
 ```rust Rust
@@ -95,7 +93,7 @@ async for chunk in sb.fs.read_stream("/app/data.bin"):
 
 ## Copy from host
 
-Copy a file from the host machine into the sandbox in a single call.
+Copy a file from the host into the sandbox in a single call.
 
 <CodeGroup>
 ```rust Rust
@@ -113,11 +111,11 @@ await sb.fs.copy_from_host("./local-file.txt", "/app/remote-file.txt")
 
 ## Extensible backends
 
-The default filesystem backend handles most use cases automatically. For advanced scenarios, you can attach hooks to intercept reads and writes, or implement a full custom backend.
+The default filesystem backends handle most use cases. For advanced scenarios, you can attach hooks to intercept operations on a volume, or implement a full custom backend.
 
 ### Hooks
 
-Intercept file operations on a volume without replacing the entire backend. Hooks receive the path and data, and return transformed data.
+Intercept file reads and writes on a volume without replacing the entire backend. Hooks receive the path and data, and return transformed data. The underlying filesystem handles everything else (permissions, directories, metadata).
 
 <CodeGroup>
 ```rust Rust
@@ -171,7 +169,7 @@ sb = await Sandbox.create(
 
 ### Custom backend
 
-For full control, implement the `FsBackend` trait (Rust), class (TypeScript), or protocol (Python) and pass it as the volume backend.
+For full control, implement the `FsBackend` trait (Rust), class (TypeScript), or protocol (Python). This gives you access to every POSIX operation: `read`, `write`, `lookup`, `getattr`, `readdir`, etc. You can delegate to a built-in backend (like `PassthroughFs`) for operations you don't need to customize.
 
 <CodeGroup>
 ```rust Rust

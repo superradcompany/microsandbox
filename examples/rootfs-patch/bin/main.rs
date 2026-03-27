@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "/etc/motd",
                 "Welcome to a patched microsandbox.\n",
                 None,
-                true, // overwrite — /etc/motd exists in alpine
+                true, // replace — /etc/motd exists in alpine
             )
             .mkdir("/app", Some(0o755))
             .text(

@@ -1,12 +1,14 @@
 ---
 title: Scripts & Patches
-description: Inject scripts and overlay files into sandboxes
+description: Inject scripts and modify the rootfs before boot
 icon: "scroll"
 ---
 
 ## Scripts
 
-Scripts are files mounted at `/.msb/scripts/` inside the sandbox. The scripts directory is added to `PATH` by the guest agent during init, so each script is callable by name through `exec()` or `run()`.
+Scripts are files mounted at `/.msb/scripts/` inside the sandbox. The directory is on `PATH`, so each script is callable by name through `exec()` or `shell()`.
+
+It provides a clean way to bundle setup procedures or entry points with a sandbox without baking them into the image.
 
 <CodeGroup>
 ```rust Rust
@@ -72,24 +74,27 @@ output = await sb.run("run")
 
 ## Patches
 
-Patches overlay arbitrary files onto the rootfs before boot. You can copy directories, write text files, create directories, and add symlinks.
+Patches modify the rootfs **before the VM boots**. Write config files, copy directories from the host, create symlinks, append to existing files, remove things you don't need. The base image stays untouched since patches are written to the writable layer on top.
 
-<Note>
-  Patches are future work and not yet available.
-</Note>
+Patches are applied in order and work with OCI images and bind-mounted rootfs. They're not supported with disk image roots (QCOW2, Raw).
+
+<Tip>
+  By default, patching a path that already exists in the image will error. Pass `replace: true` on the operation to allow it. `Mkdir` and `Remove` are idempotent and won't error either way.
+</Tip>
 
 <CodeGroup>
 ```rust Rust
-use microsandbox::{Sandbox, Patch};
+use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("worker")
-    .image("ubuntu:22.04")
+    .image("alpine:latest")
     .patch(|p| p
-        .image("my-python-deps:v1")
-        .copy_dir("./src", "/app")
-        .text("/app/config.json", r#"{"env": "production"}"#)
-        .mkdir("/var/log/app")
-        .symlink("/usr/bin/python3", "/usr/bin/python")
+        .text("/etc/greeting.txt", "Hello from a patched rootfs!\n", None, false)
+        .text("/etc/motd", "Custom message of the day.\n", None, true) // replace existing
+        .mkdir("/app", Some(0o755))
+        .text("/app/config.json", r#"{"debug": true}"#, Some(0o644), false)
+        .copy_file("./cert.pem", "/etc/ssl/cert.pem", None, false)
+        .append("/etc/hosts", "127.0.0.1 myapp.local\n")
     )
     .create()
     .await?;
@@ -100,13 +105,14 @@ import { Patch, Sandbox } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "worker",
-    image: "ubuntu:22.04",
+    image: "alpine:latest",
     patches: [
-        Patch.image("my-python-deps:v1"),
-        Patch.copyDir("./src", "/app"),
-        Patch.text("/app/config.json", '{"env": "production"}'),
-        Patch.mkdir("/var/log/app"),
-        Patch.symlink("/usr/bin/python3", "/usr/bin/python"),
+        Patch.text("/etc/greeting.txt", "Hello from a patched rootfs!\n"),
+        Patch.text("/etc/motd", "Custom message of the day.\n", { replace: true }),
+        Patch.mkdir("/app"),
+        Patch.text("/app/config.json", '{"debug": true}'),
+        Patch.copyFile("./cert.pem", "/etc/ssl/cert.pem"),
+        Patch.append("/etc/hosts", "127.0.0.1 myapp.local\n"),
     ],
 })
 ```
@@ -116,13 +122,28 @@ from microsandbox import Sandbox, Patch
 
 sb = await Sandbox.create(
     "worker",
-    image="ubuntu:22.04",
-    patches=Patch(
-        image="my-python-deps:v1",
-        copy_files=[("./src", "/app")],
-        files={"/app/config.json": '{"env": "production"}'},
-        mkdir=["/var/log/app"],
-    ),
+    image="alpine:latest",
+    patches=[
+        Patch.text("/etc/greeting.txt", "Hello from a patched rootfs!\n"),
+        Patch.text("/etc/motd", "Custom message of the day.\n", replace=True),
+        Patch.mkdir("/app"),
+        Patch.text("/app/config.json", '{"debug": true}'),
+        Patch.copy_file("./cert.pem", "/etc/ssl/cert.pem"),
+        Patch.append("/etc/hosts", "127.0.0.1 myapp.local\n"),
+    ],
 )
 ```
 </CodeGroup>
+
+### Available operations
+
+| Operation | Description |
+|-----------|-------------|
+| `text` | Write text content to a file |
+| `file` | Write raw bytes to a file |
+| `copy_file` | Copy a file from the host into the rootfs |
+| `copy_dir` | Recursively copy a directory from the host |
+| `symlink` | Create a symlink |
+| `mkdir` | Create a directory (idempotent) |
+| `remove` | Delete a file or directory (idempotent) |
+| `append` | Append content to an existing file |

@@ -139,6 +139,20 @@ impl SandboxBuilder {
         self
     }
 
+    /// Disable all network access for this sandbox.
+    ///
+    /// Sets the policy to [`NetworkPolicy::none()`](microsandbox_network::policy::NetworkPolicy::none),
+    /// denying all inbound and outbound traffic.
+    ///
+    /// ```ignore
+    /// .disable_network()
+    /// ```
+    #[cfg(feature = "net")]
+    pub fn disable_network(mut self) -> Self {
+        self.config.network.policy = microsandbox_network::policy::NetworkPolicy::none();
+        self
+    }
+
     /// Configure networking via a closure.
     ///
     /// ```ignore
@@ -498,6 +512,21 @@ mod tests {
         assert_eq!(config.network.ports[2].host_port, 5353);
         assert_eq!(config.network.ports[2].guest_port, 53);
         assert_eq!(config.network.ports[2].protocol, PortProtocol::Udp);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn test_builder_disable_network_denies_all() {
+        use microsandbox_network::policy::Action;
+
+        let config = SandboxBuilder::new("test")
+            .image("alpine:3.23")
+            .disable_network()
+            .build()
+            .unwrap();
+
+        assert_eq!(config.network.policy.default_action, Action::Deny);
+        assert!(config.network.policy.rules.is_empty());
     }
 
     #[cfg(feature = "net")]
