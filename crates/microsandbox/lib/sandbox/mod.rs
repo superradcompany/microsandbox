@@ -1026,6 +1026,63 @@ pub(super) async fn update_sandbox_status(
 }
 
 //--------------------------------------------------------------------------------------------------
+// Functions: Reaper
+//--------------------------------------------------------------------------------------------------
+
+/// Reap all stale sandboxes in the global database.
+///
+/// Queries all sandboxes with status `Running` or `Draining`, checks whether
+/// their process is still alive via `kill(pid, 0)`, and marks dead ones as
+/// `Crashed`.
+///
+/// Designed to run once at startup as a fire-and-forget background task so
+/// that crashes (SIGSEGV, SIGKILL, etc.) that prevented the sandbox process
+/// from updating the database on exit are cleaned up without blocking the
+/// main path.
+pub async fn reap_stale_sandboxes() -> MicrosandboxResult<()> {
+    let db = crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+
+    let stale = sandbox_entity::Entity::find()
+        .filter(
+            sandbox_entity::Column::Status.is_in([SandboxStatus::Running, SandboxStatus::Draining]),
+        )
+        .all(db)
+        .await?;
+
+    for sandbox in stale {
+        // Best-effort: ignore per-sandbox errors so one bad record does not
+        // prevent the rest from being reaped.
+        let _ = reconcile_sandbox_runtime_state(db, sandbox).await;
+    }
+
+    Ok(())
+}
+
+/// Spawn a one-shot background reaper task.
+///
+/// The task queries the global database for sandboxes that claim to be
+/// `Running` or `Draining` but whose process has already exited, and marks
+/// them as `Crashed`. Errors are silently ignored so the caller's hot path
+/// is never affected.
+///
+/// Safe to call multiple times — only the first invocation spawns a task.
+pub fn spawn_reaper() {
+    static SPAWNED: std::sync::Once = std::sync::Once::new();
+    SPAWNED.call_once(|| {
+        // Guard: tokio::spawn requires an active runtime. If called outside
+        // one (e.g., from synchronous SDK setup code), silently skip rather
+        // than panicking and poisoning the Once.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async {
+                if let Err(e) = reap_stale_sandboxes().await {
+                    tracing::debug!(error = %e, "background reaper failed");
+                }
+            });
+        }
+    });
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions: State Reconciliation
 //--------------------------------------------------------------------------------------------------
 
@@ -1050,16 +1107,18 @@ pub(super) async fn reconcile_sandbox_runtime_state(
 
     let run = load_active_run(db, sandbox.id).await?;
 
-    let run_alive = run
-        .as_ref()
-        .and_then(|model| model.pid)
-        .is_some_and(pid_is_alive);
+    // No run record yet — the sandbox is still starting up (the child
+    // process has not inserted its PID). Skip reconciliation to avoid
+    // racing with create/start.
+    let Some(run) = run else {
+        return Ok(sandbox);
+    };
 
-    if run_alive {
+    if run.pid.is_some_and(pid_is_alive) {
         return Ok(sandbox);
     }
 
-    mark_sandbox_runtime_stale(db, sandbox.id, run.as_ref().map(|model| model.id)).await?;
+    mark_sandbox_runtime_stale(db, sandbox.id, Some(run.id)).await?;
 
     sandbox_entity::Entity::find_by_id(sandbox.id)
         .one(db)
@@ -1503,7 +1562,7 @@ mod tests {
         image as image_entity, run as run_entity, sandbox_image as sandbox_image_entity,
     };
     use microsandbox_migration::{Migrator, MigratorTrait};
-    use sea_orm::{ConnectOptions, Database, EntityTrait, Set};
+    use sea_orm::{ColumnTrait, ConnectOptions, Database, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
     use super::{
@@ -2048,5 +2107,133 @@ mod tests {
 
         let err = super::validate_start_state(&config, &sandbox_dir).unwrap_err();
         assert!(err.to_string().contains("pinned OCI lower is missing"));
+    }
+
+    /// Simulates the reaper sweep: queries all Running/Draining sandboxes and
+    /// reconciles each. Verifies that only stale entries are reaped while
+    /// live, stopped, crashed, and starting (no run record) sandboxes are
+    /// left untouched.
+    #[tokio::test]
+    async fn test_reap_marks_only_dead_running_and_draining_sandboxes() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let conn = Database::connect(ConnectOptions::new(&db_url))
+            .await
+            .unwrap();
+        Migrator::up(&conn, None).await.unwrap();
+
+        let dead = dead_pid();
+
+        // --- Sandbox A: Running + dead PID → should become Crashed ---
+        let cfg_a = SandboxConfig {
+            name: "running-dead".into(),
+            ..Default::default()
+        };
+        let id_a = insert_sandbox_record(&conn, &cfg_a).await.unwrap();
+        run_entity::Entity::insert(run_entity::ActiveModel {
+            sandbox_id: Set(id_a),
+            pid: Set(Some(dead)),
+            status: Set(run_entity::RunStatus::Running),
+            ..Default::default()
+        })
+        .exec(&conn)
+        .await
+        .unwrap();
+
+        // --- Sandbox B: Running + live PID → should stay Running ---
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let live_pid = child.id() as i32;
+        let waiter = std::thread::spawn(move || {
+            let mut child = child;
+            child.wait().unwrap()
+        });
+
+        let cfg_b = SandboxConfig {
+            name: "running-alive".into(),
+            ..Default::default()
+        };
+        let id_b = insert_sandbox_record(&conn, &cfg_b).await.unwrap();
+        run_entity::Entity::insert(run_entity::ActiveModel {
+            sandbox_id: Set(id_b),
+            pid: Set(Some(live_pid)),
+            status: Set(run_entity::RunStatus::Running),
+            ..Default::default()
+        })
+        .exec(&conn)
+        .await
+        .unwrap();
+
+        // --- Sandbox C: Draining + dead PID → should become Crashed ---
+        let cfg_c = SandboxConfig {
+            name: "draining-dead".into(),
+            ..Default::default()
+        };
+        let id_c = insert_sandbox_record(&conn, &cfg_c).await.unwrap();
+        super::update_sandbox_status(&conn, id_c, SandboxStatus::Draining)
+            .await
+            .unwrap();
+        run_entity::Entity::insert(run_entity::ActiveModel {
+            sandbox_id: Set(id_c),
+            pid: Set(Some(dead)),
+            status: Set(run_entity::RunStatus::Running),
+            ..Default::default()
+        })
+        .exec(&conn)
+        .await
+        .unwrap();
+
+        // --- Sandbox D: Stopped → should stay Stopped ---
+        let cfg_d = SandboxConfig {
+            name: "stopped".into(),
+            ..Default::default()
+        };
+        let id_d = insert_sandbox_record(&conn, &cfg_d).await.unwrap();
+        super::update_sandbox_status(&conn, id_d, SandboxStatus::Stopped)
+            .await
+            .unwrap();
+
+        // --- Sandbox E: Running + no run record (still starting) → should stay Running ---
+        let cfg_e = SandboxConfig {
+            name: "starting".into(),
+            ..Default::default()
+        };
+        let id_e = insert_sandbox_record(&conn, &cfg_e).await.unwrap();
+
+        // --- Reap: query all Running/Draining, reconcile each ---
+        let stale = super::sandbox_entity::Entity::find()
+            .filter(
+                super::sandbox_entity::Column::Status
+                    .is_in([SandboxStatus::Running, SandboxStatus::Draining]),
+            )
+            .all(&conn)
+            .await
+            .unwrap();
+
+        for sandbox in stale {
+            let _ = reconcile_sandbox_runtime_state(&conn, sandbox).await;
+        }
+
+        // --- Assertions ---
+        let load = |id| {
+            let conn = &conn;
+            async move {
+                super::sandbox_entity::Entity::find_by_id(id)
+                    .one(conn)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+
+        assert_eq!(load(id_a).await.status, SandboxStatus::Crashed);
+        assert_eq!(load(id_b).await.status, SandboxStatus::Running);
+        assert_eq!(load(id_c).await.status, SandboxStatus::Crashed);
+        assert_eq!(load(id_d).await.status, SandboxStatus::Stopped);
+        assert_eq!(load(id_e).await.status, SandboxStatus::Running);
+
+        // Cleanup the live process.
+        unsafe { libc::kill(live_pid, libc::SIGKILL) };
+        waiter.join().unwrap();
     }
 }
