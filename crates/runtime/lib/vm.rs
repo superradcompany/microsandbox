@@ -20,6 +20,7 @@ use serde::Serialize;
 use crate::console::{AgentConsoleBackend, ConsoleSharedState};
 use crate::heartbeat::HeartbeatReader;
 use crate::logging::LogLevel;
+use crate::metrics::run_metrics_sampler;
 use crate::relay::AgentRelay;
 use crate::{RuntimeError, RuntimeResult};
 
@@ -151,6 +152,12 @@ type NetworkTerminationHandle = microsandbox_network::network::TerminationHandle
 #[cfg(not(feature = "net"))]
 type NetworkTerminationHandle = ();
 
+#[cfg(feature = "net")]
+type NetworkMetricsHandle = microsandbox_network::network::MetricsHandle;
+
+#[cfg(not(feature = "net"))]
+type NetworkMetricsHandle = ();
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -241,7 +248,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_run_id = run_db_id;
     let exit_reason_for_observer = Arc::clone(&exit_reason);
     let exit_sock_path = config.agent_sock_path.clone();
-    let (vm, _network_termination_handle) = match build_vm(
+    let (vm, _network_termination_handle, network_metrics_handle) = match build_vm(
         &config,
         console_backend,
         move |exit_code: i32| {
@@ -311,6 +318,14 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             network_exit_handle.trigger();
         }));
     }
+
+    tokio_rt.spawn(run_metrics_sampler(
+        db.clone(),
+        config.sandbox_id,
+        pid,
+        network_metrics_handle
+            .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
+    ));
 
     // Spawn background tasks.
     let (_relay_shutdown_tx, relay_shutdown_rx) = tokio::sync::watch::channel(false);
@@ -412,7 +427,11 @@ fn build_vm(
     console_backend: AgentConsoleBackend,
     on_exit: impl Fn(i32) + Send + 'static,
     tokio_handle: tokio::runtime::Handle,
-) -> RuntimeResult<(msb_krun::Vm, Option<NetworkTerminationHandle>)> {
+) -> RuntimeResult<(
+    msb_krun::Vm,
+    Option<NetworkTerminationHandle>,
+    Option<NetworkMetricsHandle>,
+)> {
     let mut exec_env = config.vm.env.clone();
     let vm = &config.vm;
 
@@ -497,6 +516,7 @@ fn build_vm(
     }
 
     let mut network_termination_handle = None;
+    let mut network_metrics_handle = None;
 
     // Network.
     #[cfg(feature = "net")]
@@ -506,6 +526,7 @@ fn build_vm(
         let mut network =
             microsandbox_network::network::SmoltcpNetwork::new(vm.network.clone(), vm.sandbox_slot);
         network_termination_handle = Some(network.termination_handle());
+        network_metrics_handle = Some(network.metrics_handle());
 
         network.start(tokio_handle.clone());
 
@@ -562,7 +583,7 @@ fn build_vm(
         .build()
         .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))?;
 
-    Ok((vm, network_termination_handle))
+    Ok((vm, network_termination_handle, network_metrics_handle))
 }
 
 //--------------------------------------------------------------------------------------------------

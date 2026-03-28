@@ -61,6 +61,7 @@ impl NetBackend for SmoltcpBackend {
     /// the raw ethernet frame for smoltcp.
     fn write_frame(&mut self, hdr_len: usize, buf: &mut [u8]) -> Result<(), WriteError> {
         let ethernet_frame = buf[hdr_len..].to_vec();
+        self.shared.add_tx_bytes(ethernet_frame.len());
         self.shared
             .tx_ring
             .push(ethernet_frame)

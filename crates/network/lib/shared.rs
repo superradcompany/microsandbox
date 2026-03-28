@@ -6,7 +6,10 @@
 
 use crossbeam_queue::ArrayQueue;
 pub use microsandbox_utils::wake_pipe::WakePipe;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -55,6 +58,15 @@ pub struct SharedState {
 
     /// Optional host-side termination hook used for fatal policy violations.
     termination_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+
+    /// Aggregate network byte counters at the guest/runtime boundary.
+    metrics: NetworkMetrics,
+}
+
+/// Aggregate network byte counters shared with the runtime metrics sampler.
+pub struct NetworkMetrics {
+    tx_bytes: AtomicU64,
+    rx_bytes: AtomicU64,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -71,6 +83,7 @@ impl SharedState {
             tx_wake: WakePipe::new(),
             proxy_wake: WakePipe::new(),
             termination_hook: Mutex::new(None),
+            metrics: NetworkMetrics::default(),
         }
     }
 
@@ -84,6 +97,39 @@ impl SharedState {
         let hook = self.termination_hook.lock().unwrap().clone();
         if let Some(hook) = hook {
             hook();
+        }
+    }
+
+    /// Increment the guest -> runtime byte counter.
+    pub fn add_tx_bytes(&self, bytes: usize) {
+        self.metrics
+            .tx_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Increment the runtime -> guest byte counter.
+    pub fn add_rx_bytes(&self, bytes: usize) {
+        self.metrics
+            .rx_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Total bytes transmitted by the guest into the runtime.
+    pub fn tx_bytes(&self) -> u64 {
+        self.metrics.tx_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Total bytes delivered by the runtime to the guest.
+    pub fn rx_bytes(&self) -> u64 {
+        self.metrics.rx_bytes.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for NetworkMetrics {
+    fn default() -> Self {
+        Self {
+            tx_bytes: AtomicU64::new(0),
+            rx_bytes: AtomicU64::new(0),
         }
     }
 }

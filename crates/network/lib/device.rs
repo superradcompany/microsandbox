@@ -146,6 +146,7 @@ impl<'a> phy::TxToken for SmoltcpTxToken<'a> {
         let result = f(&mut buf);
         // Push the frame to rx_ring for the guest. Don't wake yet —
         // the poll loop will coalesce wakes after the egress loop.
+        self.device.shared.add_rx_bytes(buf.len());
         let _ = self.device.shared.rx_ring.push(buf);
         self.device.frames_emitted.store(true, Ordering::Relaxed);
         result

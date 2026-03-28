@@ -13,6 +13,7 @@ mod error;
 pub mod console;
 pub mod heartbeat;
 pub mod logging;
+pub mod metrics;
 pub mod policy;
 pub mod relay;
 pub mod vm;

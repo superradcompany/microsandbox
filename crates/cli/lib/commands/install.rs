@@ -56,7 +56,7 @@ pub struct InstallArgs {
     pub env: Vec<String>,
 
     /// Overwrite an existing alias with the same name.
-    #[arg(long)]
+    #[arg(short, long)]
     pub force: bool,
 
     /// Don't pull the image before installing.

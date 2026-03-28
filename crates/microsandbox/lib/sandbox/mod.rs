@@ -11,6 +11,7 @@ mod config;
 pub mod exec;
 pub mod fs;
 mod handle;
+mod metrics;
 mod patch;
 mod types;
 
@@ -49,6 +50,7 @@ pub use config::SandboxConfig;
 pub use exec::{ExecOptionsBuilder, ExecOutput, IntoExecOptions, Rlimit, RlimitResource};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
 pub use handle::SandboxHandle;
+pub use metrics::{SandboxMetrics, all_sandbox_metrics};
 pub use microsandbox_image::{PullPolicy, PullProgress, PullProgressHandle};
 #[cfg(feature = "net")]
 pub use microsandbox_network::builder::SecretBuilder;
