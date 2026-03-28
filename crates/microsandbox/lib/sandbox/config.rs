@@ -205,28 +205,38 @@ impl SandboxConfig {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Merge image env vars with user env vars.
-///
-/// Image entries are included first (preserving image order) unless the user
-/// overrides the same key, then all user entries follow.
-fn merge_env(image_env: &[String], user_env: &[(String, String)]) -> Vec<(String, String)> {
-    let user_keys: HashSet<&str> = user_env.iter().map(|(k, _)| k.as_str()).collect();
+/// Merge two sets of env-var pairs. Base entries are kept unless overridden by
+/// key, then all override entries are appended.
+pub(crate) fn merge_env_pairs(
+    base: &[(String, String)],
+    overrides: &[(String, String)],
+) -> Vec<(String, String)> {
+    let override_keys: HashSet<&str> = overrides.iter().map(|(k, _)| k.as_str()).collect();
 
-    let mut merged: Vec<(String, String)> = image_env
+    let mut merged: Vec<(String, String)> = base
+        .iter()
+        .filter(|(k, _)| !override_keys.contains(k.as_str()))
+        .cloned()
+        .collect();
+
+    merged.extend(overrides.iter().cloned());
+    merged
+}
+
+/// Merge image env vars (OCI `KEY=VALUE` strings) with user env var pairs.
+fn merge_env(image_env: &[String], user_env: &[(String, String)]) -> Vec<(String, String)> {
+    let base: Vec<(String, String)> = image_env
         .iter()
         .filter_map(|entry| match entry.split_once('=') {
-            Some(pair) => Some(pair),
+            Some((k, v)) => Some((k.to_string(), v.to_string())),
             None => {
                 tracing::warn!(entry = %entry, "skipping malformed image env var (expected KEY=VALUE)");
                 None
             }
         })
-        .filter(|(k, _)| !user_keys.contains(k))
-        .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
 
-    merged.extend(user_env.iter().cloned());
-    merged
+    merge_env_pairs(&base, user_env)
 }
 
 //--------------------------------------------------------------------------------------------------

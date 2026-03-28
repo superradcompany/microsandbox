@@ -895,12 +895,8 @@ fn build_exec_request(
     rows: u16,
     cols: u16,
 ) -> ExecRequest {
-    let mut env: Vec<String> = config
-        .env
-        .iter()
-        .chain(env.iter())
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
+    let merged = config::merge_env_pairs(&config.env, env);
+    let mut env: Vec<String> = merged.iter().map(|(k, v)| format!("{k}={v}")).collect();
 
     // Inject TERM for TTY sessions if not already set.
     if tty && !env.iter().any(|e| e.starts_with("TERM=")) {
