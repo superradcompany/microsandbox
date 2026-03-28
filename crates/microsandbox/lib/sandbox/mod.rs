@@ -921,7 +921,7 @@ fn build_exec_request(
         args,
         env,
         cwd: cwd.or_else(|| config.workdir.clone()),
-        user,
+        user: user.or_else(|| config.user.clone()),
         tty,
         rows,
         cols,

@@ -21,7 +21,7 @@
 
 use std::{io, os::fd::RawFd};
 
-use crate::stat64;
+use crate::{SetattrValid, stat64};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -189,6 +189,34 @@ pub(crate) const ACCESS_X_OK: u32 = libc::X_OK as u32;
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Build a utimens-compatible timespec array from a FUSE setattr request.
+pub(crate) fn build_timespecs(attr: stat64, valid: SetattrValid) -> [libc::timespec; 2] {
+    let mut times = [libc::timespec {
+        tv_sec: 0,
+        tv_nsec: libc::UTIME_OMIT,
+    }; 2];
+
+    if valid.contains(SetattrValid::ATIME) {
+        if valid.contains(SetattrValid::ATIME_NOW) {
+            times[0].tv_nsec = libc::UTIME_NOW;
+        } else {
+            times[0].tv_sec = attr.st_atime;
+            times[0].tv_nsec = attr.st_atime_nsec;
+        }
+    }
+
+    if valid.contains(SetattrValid::MTIME) {
+        if valid.contains(SetattrValid::MTIME_NOW) {
+            times[1].tv_nsec = libc::UTIME_NOW;
+        } else {
+            times[1].tv_sec = attr.st_mtime;
+            times[1].tv_nsec = attr.st_mtime_nsec;
+        }
+    }
+
+    times
+}
 
 /// Translate a native OS error to a Linux errno value.
 ///

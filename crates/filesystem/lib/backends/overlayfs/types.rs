@@ -138,6 +138,14 @@ pub(crate) enum NodeState {
         /// Host device number.
         #[cfg(target_os = "macos")]
         dev: u64,
+
+        /// Preserved fd for an upper inode after unlink on macOS.
+        ///
+        /// `/.vol/<dev>/<ino>` stops resolving once the directory entry is
+        /// removed, but an already-open fd remains valid. We keep one here so
+        /// open-handle lifetime semantics continue to work after unlink.
+        #[cfg(target_os = "macos")]
+        unlinked_fd: std::sync::atomic::AtomicI64,
     },
 }
 

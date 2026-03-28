@@ -66,6 +66,40 @@ fn test_setattr_mode() {
 }
 
 #[test]
+fn test_setattr_uid_gid_on_symlink() {
+    let sb = OverlayTestSandbox::new();
+    let entry = sb
+        .fs
+        .symlink(
+            sb.ctx(),
+            &OverlayTestSandbox::cstr("/owned/target"),
+            ROOT_INODE,
+            &OverlayTestSandbox::cstr("owned-link"),
+            Extensions::default(),
+        )
+        .unwrap();
+
+    let mut attr: crate::stat64 = unsafe { std::mem::zeroed() };
+    attr.st_uid = 1000;
+    attr.st_gid = 1001;
+    let (st, _) = sb
+        .fs
+        .setattr(
+            sb.ctx(),
+            entry.inode,
+            attr,
+            None,
+            SetattrValid::UID | SetattrValid::GID,
+        )
+        .unwrap();
+    let mode = st.st_mode as u32;
+
+    assert_eq!(st.st_uid, 1000);
+    assert_eq!(st.st_gid, 1001);
+    assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFLNK as u32);
+}
+
+#[test]
 fn test_setattr_size_truncate() {
     let sb = OverlayTestSandbox::new();
     let (entry, handle) = sb.fuse_create_root("trunc.txt").unwrap();
@@ -100,6 +134,42 @@ fn test_setattr_timestamps() {
         .unwrap();
     assert_eq!(st.st_atime, 1000);
     assert_eq!(st.st_mtime, 2000);
+}
+
+#[test]
+fn test_setattr_timestamps_on_symlink() {
+    let sb = OverlayTestSandbox::new();
+    let entry = sb
+        .fs
+        .symlink(
+            sb.ctx(),
+            &OverlayTestSandbox::cstr("/timed/target"),
+            ROOT_INODE,
+            &OverlayTestSandbox::cstr("timed-link"),
+            Extensions::default(),
+        )
+        .unwrap();
+
+    let mut attr: crate::stat64 = unsafe { std::mem::zeroed() };
+    attr.st_atime = 1000;
+    attr.st_atime_nsec = 0;
+    attr.st_mtime = 2000;
+    attr.st_mtime_nsec = 0;
+    let (st, _) = sb
+        .fs
+        .setattr(
+            sb.ctx(),
+            entry.inode,
+            attr,
+            None,
+            SetattrValid::ATIME | SetattrValid::MTIME,
+        )
+        .unwrap();
+    let mode = st.st_mode as u32;
+
+    assert_eq!(st.st_atime, 1000);
+    assert_eq!(st.st_mtime, 2000);
+    assert_eq!(mode & libc::S_IFMT as u32, libc::S_IFLNK as u32);
 }
 
 #[test]

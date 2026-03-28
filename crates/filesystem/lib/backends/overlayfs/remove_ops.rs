@@ -57,12 +57,15 @@ pub(crate) fn do_unlink(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr)
 
     // Resolve the target entry to check type before acting.
     let target = inode::do_lookup(fs, parent, name)?;
-    // Balance the internal lookup refcount — the FUSE kernel doesn't know about it.
-    inode::forget_one(fs, target.inode, 1);
+    let _forget_target = scopeguard::guard(target.inode, |ino| inode::forget_one(fs, ino, 1));
     let target_type = platform::mode_file_type(target.attr.st_mode);
     if target_type == platform::MODE_DIR {
         return Err(platform::eisdir());
     }
+    let target_node = {
+        let nodes = fs.nodes.read().unwrap();
+        nodes.get(&target.inode).cloned()
+    };
 
     copy_up::ensure_upper(fs, parent)?;
 
@@ -74,14 +77,39 @@ pub(crate) fn do_unlink(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr)
     // Check if name exists on lower layers (before unlinking upper).
     let needs_whiteout = whiteout::has_lower_entry(fs, parent, name.to_bytes())?;
 
+    #[cfg(target_os = "macos")]
+    let pre_unlink_fd = {
+        let fd = unsafe {
+            libc::openat(
+                upper_parent_fd,
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd >= 0 { Some(fd) } else { None }
+    };
+
     // Try to unlink from upper.
     let ret = unsafe { libc::unlinkat(upper_parent_fd, name.as_ptr(), 0) };
     if ret < 0 {
         let err = io::Error::last_os_error();
+        #[cfg(target_os = "macos")]
+        if let Some(fd) = pre_unlink_fd {
+            unsafe { libc::close(fd) };
+        }
         // If the entry doesn't exist on upper but does on lower,
         // we still need to create a whiteout.
         if err.raw_os_error() != Some(libc::ENOENT) || !needs_whiteout {
             return Err(platform::linux_error(err));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Some(fd) = pre_unlink_fd {
+        if let Some(node) = target_node {
+            inode::store_unlinked_upper_fd(&node, fd);
+        } else {
+            unsafe { libc::close(fd) };
         }
     }
 

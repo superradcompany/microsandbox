@@ -11,7 +11,7 @@
 //! (the host process lacks `CAP_CHOWN`). Size changes use real `ftruncate`, and timestamp
 //! changes use real `futimens`.
 
-use std::{io, time::Duration};
+use std::{io, os::fd::AsRawFd, time::Duration};
 
 use super::{PassthroughFs, inode};
 use crate::{
@@ -29,13 +29,16 @@ pub(crate) fn do_getattr(
     fs: &PassthroughFs,
     _ctx: Context,
     ino: u64,
-    _handle: Option<u64>,
+    handle: Option<u64>,
 ) -> io::Result<(stat64, Duration)> {
     if ino == init_binary::INIT_INODE {
         return Ok((init_binary::init_stat(), fs.cfg.attr_timeout));
     }
 
-    let st = inode::stat_inode(fs, ino)?;
+    let st = match handle {
+        Some(handle) => stat_handle(fs, handle)?,
+        None => inode::stat_inode(fs, ino)?,
+    };
     Ok((st, fs.cfg.attr_timeout))
 }
 
@@ -52,6 +55,14 @@ pub(crate) fn do_setattr(
         return Err(platform::eacces());
     }
 
+    #[cfg(target_os = "macos")]
+    let guest_file_type = platform::mode_file_type(inode::stat_inode(fs, ino)?.st_mode);
+
+    #[cfg(target_os = "macos")]
+    if guest_file_type == platform::MODE_LNK && valid.contains(SetattrValid::SIZE) {
+        return Err(platform::einval());
+    }
+
     // Open with O_RDWR when truncation is needed, O_RDONLY otherwise.
     // ftruncate(2) requires write permission on the fd; opening O_RDONLY
     // would cause EINVAL on Linux when SIZE is in the valid mask.
@@ -60,7 +71,16 @@ pub(crate) fn do_setattr(
     } else {
         libc::O_RDONLY
     };
+
+    #[cfg(target_os = "linux")]
     let fd = inode::open_inode_fd(fs, ino, open_flags)?;
+
+    #[cfg(target_os = "macos")]
+    let fd = if guest_file_type == platform::MODE_LNK {
+        open_symlink_inode_fd_macos(fs, ino)?
+    } else {
+        inode::open_inode_fd(fs, ino, open_flags)?
+    };
     let close_fd = scopeguard::guard(fd, |fd| unsafe {
         libc::close(fd);
     });
@@ -118,32 +138,24 @@ pub(crate) fn do_setattr(
 
     // Handle timestamp changes.
     if valid.intersects(SetattrValid::ATIME | SetattrValid::MTIME) {
-        let mut times = [libc::timespec {
-            tv_sec: 0,
-            tv_nsec: libc::UTIME_OMIT,
-        }; 2];
+        let times = platform::build_timespecs(attr, valid);
 
-        if valid.contains(SetattrValid::ATIME) {
-            if valid.contains(SetattrValid::ATIME_NOW) {
-                times[0].tv_nsec = libc::UTIME_NOW;
-            } else {
-                times[0].tv_sec = attr.st_atime;
-                times[0].tv_nsec = attr.st_atime_nsec;
+        #[cfg(target_os = "macos")]
+        if guest_file_type == platform::MODE_LNK {
+            set_symlink_times_macos(fs, ino, &times)?;
+        } else {
+            let ret = unsafe { libc::futimens(*close_fd, times.as_ptr()) };
+            if ret < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
             }
         }
 
-        if valid.contains(SetattrValid::MTIME) {
-            if valid.contains(SetattrValid::MTIME_NOW) {
-                times[1].tv_nsec = libc::UTIME_NOW;
-            } else {
-                times[1].tv_sec = attr.st_mtime;
-                times[1].tv_nsec = attr.st_mtime_nsec;
+        #[cfg(target_os = "linux")]
+        {
+            let ret = unsafe { libc::futimens(*close_fd, times.as_ptr()) };
+            if ret < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
             }
-        }
-
-        let ret = unsafe { libc::futimens(*close_fd, times.as_ptr()) };
-        if ret < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
         }
     }
 
@@ -198,6 +210,58 @@ pub(crate) fn do_access(fs: &PassthroughFs, ctx: Context, ino: u64, mask: u32) -
     }
     if mask & platform::ACCESS_X_OK != 0 && bits & 0o1 == 0 {
         return Err(platform::eacces());
+    }
+
+    Ok(())
+}
+
+fn stat_handle(fs: &PassthroughFs, handle: u64) -> io::Result<stat64> {
+    let handles = fs.handles.read().unwrap();
+    let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
+    let file = data.file.read().unwrap();
+    let fd = file.as_raw_fd();
+    let st = platform::fstat(fd)?;
+
+    stat_override::patched_stat(fd, st, fs.cfg.xattr, fs.cfg.strict)
+}
+
+#[cfg(target_os = "macos")]
+fn open_symlink_inode_fd_macos(fs: &PassthroughFs, ino: u64) -> io::Result<i32> {
+    let inodes = fs.inodes.read().unwrap();
+    let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
+    let path = inode::vol_path(data.dev, data.ino);
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK,
+        )
+    };
+    if fd < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+
+    Ok(fd)
+}
+
+#[cfg(target_os = "macos")]
+fn set_symlink_times_macos(
+    fs: &PassthroughFs,
+    ino: u64,
+    times: &[libc::timespec; 2],
+) -> io::Result<()> {
+    let inodes = fs.inodes.read().unwrap();
+    let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
+    let path = inode::vol_path(data.dev, data.ino);
+    let ret = unsafe {
+        libc::utimensat(
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            times.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if ret < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
     }
 
     Ok(())

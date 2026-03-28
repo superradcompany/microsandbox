@@ -137,3 +137,24 @@ fn test_unlink_readdir_hides() {
         "unlinked file should not appear in readdir"
     );
 }
+
+#[test]
+fn test_getattr_upper_file_after_unlink() {
+    let sb = OverlayTestSandbox::new();
+    let (entry, handle) = sb.fuse_create_root("open_then_unlink.txt").unwrap();
+    sb.fuse_write(entry.inode, handle, b"overlay", 0).unwrap();
+
+    sb.fs
+        .unlink(
+            sb.ctx(),
+            ROOT_INODE,
+            &OverlayTestSandbox::cstr("open_then_unlink.txt"),
+        )
+        .unwrap();
+
+    let (st, _) = sb.fs.getattr(sb.ctx(), entry.inode, None).unwrap();
+    assert_eq!(st.st_size, 7);
+
+    let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
+    assert_eq!(&data[..], b"overlay");
+}

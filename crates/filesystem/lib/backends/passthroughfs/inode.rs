@@ -148,6 +148,14 @@ pub(crate) fn translate_open_flags(linux_flags_val: i32) -> i32 {
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn store_unlinked_fd(data: &InodeData, fd: i32) {
+    let previous = data.unlinked_fd.swap(fd as i64, Ordering::AcqRel);
+    if previous >= 0 {
+        unsafe { libc::close(previous as i32) };
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn is_unsupported_macos_open_flag(err: &io::Error) -> bool {
     matches!(
         err.raw_os_error(),

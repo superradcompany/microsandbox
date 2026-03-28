@@ -145,3 +145,18 @@ fn test_open_invalid_handle() {
     let result = sb.fuse_read(entry.inode, 99999, 1024, 0);
     OverlayTestSandbox::assert_errno(result, LINUX_EBADF);
 }
+
+#[test]
+fn test_getattr_via_handle_after_forget() {
+    let sb = OverlayTestSandbox::new();
+    let (entry, handle) = sb.fuse_create_root("handle_stat.txt").unwrap();
+    sb.fuse_write(entry.inode, handle, b"overlay", 0).unwrap();
+
+    sb.fs.forget(sb.ctx(), entry.inode, 1);
+
+    let result = sb.fs.getattr(sb.ctx(), entry.inode, None);
+    OverlayTestSandbox::assert_errno(result, LINUX_ENOENT);
+
+    let (st, _) = sb.fs.getattr(sb.ctx(), entry.inode, Some(handle)).unwrap();
+    assert_eq!(st.st_size, 7);
+}

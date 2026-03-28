@@ -814,6 +814,7 @@ pub(crate) fn transition_to_upper(
             *state = NodeState::Upper {
                 ino: platform::stat_ino(&st),
                 dev: platform::stat_dev(&st),
+                unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
             };
         }
 

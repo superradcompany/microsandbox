@@ -525,6 +525,7 @@ fn hydrate_upper_entry(fs: &OverlayFs, parent_ino: u64, name: &CStr, fd: RawFd) 
             state: RwLock::new(NodeState::Upper {
                 ino: platform::stat_ino(&st),
                 dev: platform::stat_dev(&st),
+                unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
             }),
             opaque: std::sync::atomic::AtomicBool::new(false),
             copy_up_lock: Mutex::new(()),
@@ -787,6 +788,7 @@ fn resolve_upper(fs: &OverlayFs, parent: u64, name: &CStr, fd: RawFd) -> io::Res
         NodeState::Upper {
             ino: platform::stat_ino(&st),
             dev: platform::stat_dev(&st),
+            unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
         }
     };
 
@@ -1050,17 +1052,11 @@ pub(crate) fn forget_one_locked(
     };
 
     if should_remove {
-        // Extract origin and primary dentry key before removing the node.
-        let (origin, primary_parent, primary_name) = match nodes.get(&inode) {
-            Some(n) => (
-                n.origin,
-                n.primary_parent.load(Ordering::Acquire),
-                *n.primary_name.read().unwrap(),
-            ),
-            None => return None,
-        };
-
-        nodes.remove(&inode);
+        let removed = nodes.remove(&inode)?;
+        let origin = removed.origin;
+        let primary_parent = removed.primary_parent.load(Ordering::Acquire);
+        let primary_name = *removed.primary_name.read().unwrap();
+        close_node_resources(&removed);
 
         // Remove primary dentry in O(1).
         dentries.remove(&(primary_parent, primary_name));
@@ -1154,7 +1150,29 @@ pub(crate) fn stat_node(fs: &OverlayFs, inode: u64) -> io::Result<stat64> {
             stat_override::patched_stat(fd, st, true, fs.cfg.strict)
         }
         #[cfg(target_os = "macos")]
-        NodeState::Lower { ino, dev, .. } | NodeState::Upper { ino, dev, .. } => {
+        NodeState::Lower { ino, dev, .. } => {
+            let path = vol_path(*dev, *ino);
+            let fd = open_macos_vol(&path)?;
+            let _close = scopeguard::guard(fd, |fd| unsafe {
+                libc::close(fd);
+            });
+            let st = platform::fstat(fd)?;
+            stat_override::patched_stat(fd, st, true, fs.cfg.strict)
+        }
+        #[cfg(target_os = "macos")]
+        NodeState::Upper {
+            ino,
+            dev,
+            unlinked_fd,
+        } => {
+            if let Some(fd) = dup_unlinked_fd(unlinked_fd)? {
+                let _close = scopeguard::guard(fd, |fd| unsafe {
+                    libc::close(fd);
+                });
+                let st = platform::fstat(fd)?;
+                return stat_override::patched_stat(fd, st, true, fs.cfg.strict);
+            }
+
             let path = vol_path(*dev, *ino);
             let fd = open_macos_vol(&path)?;
             let _close = scopeguard::guard(fd, |fd| unsafe {
@@ -1187,7 +1205,7 @@ pub(crate) fn open_node_fd(fs: &OverlayFs, inode: u64, flags: i32) -> io::Result
             reopen_fd_linux(&fs.proc_self_fd, file.as_raw_fd(), flags)
         }
         #[cfg(target_os = "macos")]
-        NodeState::Lower { ino, dev, .. } | NodeState::Upper { ino, dev, .. } => {
+        NodeState::Lower { ino, dev, .. } => {
             let path = vol_path(*dev, *ino);
             let fd =
                 unsafe { libc::open(path.as_ptr(), flags | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
@@ -1199,6 +1217,27 @@ pub(crate) fn open_node_fd(fs: &OverlayFs, inode: u64, flags: i32) -> io::Result
             // regular file I/O must fail with ELOOP instead of returning an fd to
             // the link itself. readlink/stat use dedicated paths that can still
             // access symlink metadata safely on macOS.
+            Err(platform::linux_error(io::Error::last_os_error()))
+        }
+        #[cfg(target_os = "macos")]
+        NodeState::Upper {
+            ino,
+            dev,
+            unlinked_fd,
+        } => {
+            if can_reopen_unlinked_fd(flags)
+                && let Some(fd) = dup_unlinked_fd(unlinked_fd)?
+            {
+                return Ok(fd);
+            }
+
+            let path = vol_path(*dev, *ino);
+            let fd =
+                unsafe { libc::open(path.as_ptr(), flags | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
+            if fd >= 0 {
+                return Ok(fd);
+            }
+
             Err(platform::linux_error(io::Error::last_os_error()))
         }
     }
@@ -1265,6 +1304,14 @@ pub(crate) fn get_upper_dir_fd(fs: &OverlayFs, parent_node: &OverlayNode) -> Opt
             None
         }
         _ => None,
+    }
+}
+
+/// Close any node-owned host resources before dropping the node.
+pub(crate) fn close_node_resources(node: &OverlayNode) {
+    #[cfg(target_os = "macos")]
+    if let NodeState::Upper { unlinked_fd, .. } = &*node.state.read().unwrap() {
+        close_unlinked_fd(unlinked_fd);
     }
 }
 
@@ -1561,6 +1608,53 @@ pub(crate) fn dup_fd_raw(fd: RawFd) -> io::Result<RawFd> {
         return Err(platform::linux_error(io::Error::last_os_error()));
     }
     Ok(new_fd)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn store_unlinked_upper_fd(node: &OverlayNode, fd: RawFd) {
+    let state = node.state.read().unwrap();
+    if let NodeState::Upper { unlinked_fd, .. } = &*state {
+        let previous = unlinked_fd.swap(fd as i64, Ordering::AcqRel);
+        if previous >= 0 {
+            unsafe { libc::close(previous as RawFd) };
+        }
+        return;
+    }
+
+    unsafe { libc::close(fd) };
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Helpers (macOS)
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+fn can_reopen_unlinked_fd(flags: i32) -> bool {
+    let access_mode = flags & libc::O_ACCMODE;
+    access_mode == libc::O_RDONLY
+        && flags & (libc::O_CREAT | libc::O_TRUNC | libc::O_DIRECTORY) == 0
+}
+
+#[cfg(target_os = "macos")]
+fn close_unlinked_fd(unlinked_fd: &std::sync::atomic::AtomicI64) {
+    let fd = unlinked_fd.swap(-1, Ordering::AcqRel);
+    if fd >= 0 {
+        unsafe { libc::close(fd as RawFd) };
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn dup_unlinked_fd(unlinked_fd: &std::sync::atomic::AtomicI64) -> io::Result<Option<RawFd>> {
+    let fd = unlinked_fd.load(Ordering::Acquire);
+    if fd < 0 {
+        return Ok(None);
+    }
+
+    let dup_fd = unsafe { libc::fcntl(fd as RawFd, libc::F_DUPFD_CLOEXEC, 0) };
+    if dup_fd < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    Ok(Some(dup_fd))
 }
 
 /// Reopen an O_PATH fd for I/O via /proc/self/fd (Linux only).

@@ -70,8 +70,7 @@ pub(crate) fn do_unlink(
             );
             let inodes = fs.inodes.read().unwrap();
             if let Some(data) = inodes.get_alt(&alt_key) {
-                use std::sync::atomic::Ordering;
-                data.unlinked_fd.store(fd as i64, Ordering::Release);
+                inode::store_unlinked_fd(data, fd);
             } else {
                 // No tracked inode — close the fd.
                 unsafe { libc::close(fd) };

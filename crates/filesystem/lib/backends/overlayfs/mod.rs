@@ -177,7 +177,13 @@ impl DynFileSystem for OverlayFs {
     fn destroy(&self) {
         self.file_handles.write().unwrap().clear();
         self.dir_handles.write().unwrap().clear();
-        self.nodes.write().unwrap().clear();
+        {
+            let mut nodes = self.nodes.write().unwrap();
+            for node in nodes.values() {
+                inode::close_node_resources(node);
+            }
+            nodes.clear();
+        }
         self.dentries.write().unwrap().clear();
         self.upper_alt_keys.write().unwrap().clear();
         self.lower_origin_keys.write().unwrap().clear();

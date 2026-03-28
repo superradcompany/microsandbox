@@ -53,6 +53,7 @@ pub fn init() -> AgentdResult<()> {
     linux::apply_volume_mounts()?;
     crate::network::apply_hostname()?;
     linux::apply_tmpfs_mounts()?;
+    linux::ensure_standard_tmp_permissions()?;
     crate::network::apply_network_config()?;
     crate::tls::install_ca_cert()?;
     linux::ensure_scripts_path_in_profile()?;
@@ -205,7 +206,10 @@ fn ensure_scripts_profile_block(profile: &str) -> String {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::{os::unix::fs::symlink, path::Path};
+    use std::{
+        os::unix::fs::{PermissionsExt, symlink},
+        path::Path,
+    };
 
     use nix::{
         mount::{MsFlags, mount},
@@ -475,6 +479,13 @@ mod linux {
         Ok(())
     }
 
+    /// Ensure standard temporary directories are writable and sticky.
+    pub fn ensure_standard_tmp_permissions() -> AgentdResult<()> {
+        ensure_directory_mode("/tmp", 0o1777)?;
+        ensure_directory_mode("/var/tmp", 0o1777)?;
+        Ok(())
+    }
+
     /// Mounts a single tmpfs from a parsed spec.
     fn mount_tmpfs(spec: &TmpfsSpec<'_>) -> AgentdResult<()> {
         let path = spec.path;
@@ -562,6 +573,28 @@ mod linux {
             Err(nix::Error::EEXIST) => Ok(()),
             Err(e) => Err(e.into()),
         }
+    }
+
+    fn ensure_directory_mode(path: &str, mode: u32) -> AgentdResult<()> {
+        std::fs::create_dir_all(path)
+            .map_err(|e| AgentdError::Init(format!("failed to create directory {path}: {e}")))?;
+
+        let metadata = std::fs::metadata(path)
+            .map_err(|e| AgentdError::Init(format!("failed to stat {path}: {e}")))?;
+        if !metadata.is_dir() {
+            return Err(AgentdError::Init(format!(
+                "expected directory at {path}, found non-directory"
+            )));
+        }
+
+        let current_mode = metadata.permissions().mode() & 0o7777;
+        if current_mode != mode {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|e| {
+                AgentdError::Init(format!("failed to chmod {path} to {mode:o}: {e}"))
+            })?;
+        }
+
+        Ok(())
     }
 
     /// Mounts a filesystem, ignoring EBUSY errors (already mounted).

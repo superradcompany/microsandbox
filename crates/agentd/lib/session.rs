@@ -63,12 +63,14 @@ struct ResolvedUser {
     uid: libc::uid_t,
     gid: libc::gid_t,
     initgroups_user: Option<CString>,
+    home_dir: Option<CString>,
 }
 
 struct PasswdEntry {
     name: String,
     uid: libc::uid_t,
     gid: libc::gid_t,
+    home_dir: Option<String>,
 }
 
 struct GroupEntry {
@@ -208,6 +210,14 @@ impl ExecSession {
             .map_err(|e| AgentdError::ExecSession(format!("invalid cwd: {e}")))?;
 
         let resolved_user = resolve_requested_user(req)?;
+        let default_home = default_home_dir(req, resolved_user.as_ref()).map(CStr::to_owned);
+        let home_key = default_home
+            .as_ref()
+            .map(|_| {
+                CString::new("HOME")
+                    .map_err(|e| AgentdError::ExecSession(format!("invalid home env key: {e}")))
+            })
+            .transpose()?;
 
         // Pre-parse rlimits before fork (no allocations in child).
         let parsed_rlimits = parse_rlimits(req);
@@ -274,6 +284,12 @@ impl ExecSession {
                 unsafe { libc::_exit(1) };
             }
 
+            if let (Some(key), Some(home)) = (&home_key, &default_home) {
+                unsafe {
+                    libc::setenv(key.as_ptr(), home.as_ptr(), 1);
+                }
+            }
+
             // Apply resource limits.
             for (resource, limit) in &parsed_rlimits {
                 if unsafe { libc::setrlimit(*resource as _, limit) } != 0 {
@@ -333,6 +349,9 @@ impl ExecSession {
         }
 
         let resolved_user = resolve_requested_user(req)?;
+        if let Some(home) = default_home_dir(req, resolved_user.as_ref()) {
+            cmd.env("HOME", home.to_string_lossy().into_owned());
+        }
 
         // Apply resource limits in the child before exec.
         let parsed_rlimits = parse_rlimits(req);
@@ -485,6 +504,12 @@ fn resolve_user_spec(spec: &str) -> AgentdResult<ResolvedUser> {
         uid,
         gid,
         initgroups_user,
+        home_dir: passwd_entry
+            .as_ref()
+            .and_then(|entry| entry.home_dir.as_deref())
+            .map(CString::new)
+            .transpose()
+            .map_err(|e| AgentdError::ExecSession(format!("invalid guest home directory: {e}")))?,
     })
 }
 
@@ -542,10 +567,14 @@ fn lookup_passwd_by_name(name: &str) -> AgentdResult<Option<PasswdEntry>> {
     let name = unsafe { CStr::from_ptr(pwd.pw_name) }
         .to_string_lossy()
         .into_owned();
+    let home_dir = unsafe { CStr::from_ptr(pwd.pw_dir) }
+        .to_string_lossy()
+        .into_owned();
     Ok(Some(PasswdEntry {
         name,
         uid: pwd.pw_uid,
         gid: pwd.pw_gid,
+        home_dir: (!home_dir.is_empty()).then_some(home_dir),
     }))
 }
 
@@ -576,10 +605,14 @@ fn lookup_passwd_by_uid(uid: libc::uid_t) -> AgentdResult<ResolvedUserLookup> {
     let name = unsafe { CStr::from_ptr(pwd.pw_name) }
         .to_string_lossy()
         .into_owned();
+    let home_dir = unsafe { CStr::from_ptr(pwd.pw_dir) }
+        .to_string_lossy()
+        .into_owned();
     Ok(ResolvedUserLookup::Known(PasswdEntry {
         name,
         uid: pwd.pw_uid,
         gid: pwd.pw_gid,
+        home_dir: (!home_dir.is_empty()).then_some(home_dir),
     }))
 }
 
@@ -639,6 +672,23 @@ fn apply_resolved_user(user: &ResolvedUser) -> AgentdResult<()> {
     }
 
     Ok(())
+}
+
+fn default_home_dir<'a>(req: &ExecRequest, user: Option<&'a ResolvedUser>) -> Option<&'a CStr> {
+    if env_contains_key(&req.env, "HOME") {
+        return None;
+    }
+
+    user.and_then(|user| user.home_dir.as_deref())
+}
+
+fn env_contains_key(env: &[String], key: &str) -> bool {
+    env.iter().any(|entry| {
+        entry
+            .split_once('=')
+            .map(|(entry_key, _)| entry_key == key)
+            .unwrap_or(false)
+    })
 }
 
 fn agentd_to_io_error(err: AgentdError) -> std::io::Error {
@@ -901,5 +951,54 @@ mod tests {
         unsafe {
             std::env::remove_var(microsandbox_protocol::ENV_USER);
         }
+    }
+
+    #[test]
+    fn test_default_home_dir_uses_resolved_user_home() {
+        let req = ExecRequest {
+            cmd: "/bin/true".to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        };
+        let user = ResolvedUser {
+            uid: 1000,
+            gid: 1000,
+            initgroups_user: None,
+            home_dir: Some(CString::new("/home/tester").unwrap()),
+        };
+
+        assert_eq!(
+            default_home_dir(&req, Some(&user)).map(CStr::to_string_lossy),
+            Some("/home/tester".into()),
+        );
+    }
+
+    #[test]
+    fn test_default_home_dir_respects_explicit_home_env() {
+        let req = ExecRequest {
+            cmd: "/bin/true".to_string(),
+            args: Vec::new(),
+            env: vec!["HOME=/tmp/custom".to_string()],
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        };
+        let user = ResolvedUser {
+            uid: 1000,
+            gid: 1000,
+            initgroups_user: None,
+            home_dir: Some(CString::new("/home/tester").unwrap()),
+        };
+
+        assert!(default_home_dir(&req, Some(&user)).is_none());
     }
 }

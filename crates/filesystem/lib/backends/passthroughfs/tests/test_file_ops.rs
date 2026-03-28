@@ -168,3 +168,18 @@ fn test_open_host_file() {
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"host content");
 }
+
+#[test]
+fn test_getattr_via_handle_after_forget() {
+    let sb = TestSandbox::new();
+    let (entry, handle) = sb.fuse_create_root("handle_stat.txt").unwrap();
+    sb.fuse_write(entry.inode, handle, b"abcdef", 0).unwrap();
+
+    sb.fs.forget(sb.ctx(), entry.inode, 1);
+
+    let result = sb.fs.getattr(sb.ctx(), entry.inode, None);
+    TestSandbox::assert_errno(result, LINUX_EBADF);
+
+    let (st, _) = sb.fs.getattr(sb.ctx(), entry.inode, Some(handle)).unwrap();
+    assert_eq!(st.st_size, 6);
+}
