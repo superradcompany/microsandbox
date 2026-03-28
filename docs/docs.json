@@ -130,6 +130,6 @@
     }
   },
   "background": {
-    "decoration": "grid"
+    "decoration": "gradient"
   }
 }
