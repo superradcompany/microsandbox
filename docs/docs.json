@@ -3,15 +3,15 @@
   "theme": "almond",
   "name": "microsandbox",
   "logo": {
-    "light": "/images/microsandbox-banner-light.svg",
-    "dark": "/images/microsandbox-banner-dark.png",
+    "light": "/images/microsandbox-banner-light(2).svg",
+    "dark": "/images/microsandbox-banner-dark.svg",
     "href": "https://microsandbox.dev"
   },
   "favicon": "/logo/light.svg",
   "colors": {
-    "primary": "#f52b56",
-    "light": "#f52b56",
-    "dark": "#f52b56"
+    "primary": "#81b507",
+    "light": "#81b507",
+    "dark": "#81b507"
   },
   "navbar": {
     "primary": {
