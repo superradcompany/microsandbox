@@ -62,7 +62,7 @@ pub(crate) fn do_unlink(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr)
     if target_type == platform::MODE_DIR {
         return Err(platform::eisdir());
     }
-    let target_node = {
+    let _target_node = {
         let nodes = fs.nodes.read().unwrap();
         nodes.get(&target.inode).cloned()
     };
@@ -106,7 +106,7 @@ pub(crate) fn do_unlink(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr)
 
     #[cfg(target_os = "macos")]
     if let Some(fd) = pre_unlink_fd {
-        if let Some(node) = target_node {
+        if let Some(node) = _target_node {
             inode::store_unlinked_upper_fd(&node, fd);
         } else {
             unsafe { libc::close(fd) };

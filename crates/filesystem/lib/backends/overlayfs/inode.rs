@@ -1308,9 +1308,9 @@ pub(crate) fn get_upper_dir_fd(fs: &OverlayFs, parent_node: &OverlayNode) -> Opt
 }
 
 /// Close any node-owned host resources before dropping the node.
-pub(crate) fn close_node_resources(node: &OverlayNode) {
+pub(crate) fn close_node_resources(_node: &OverlayNode) {
     #[cfg(target_os = "macos")]
-    if let NodeState::Upper { unlinked_fd, .. } = &*node.state.read().unwrap() {
+    if let NodeState::Upper { unlinked_fd, .. } = &*_node.state.read().unwrap() {
         close_unlinked_fd(unlinked_fd);
     }
 }
