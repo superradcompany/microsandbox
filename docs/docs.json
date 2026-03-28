@@ -1,6 +1,6 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "luma",
+  "theme": "almond",
   "name": "microsandbox",
   "logo": {
     "light": "/images/microsandbox-banner-light.svg",
@@ -128,5 +128,8 @@
       "linkedin": "https://www.linkedin.com/company/super-rad-company",
       "x": "https://x.com/microsandbox"
     }
+  },
+  "background": {
+    "decoration": "grid"
   }
 }
