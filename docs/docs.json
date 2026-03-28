@@ -1,17 +1,17 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
+  "theme": "almond",
   "name": "microsandbox",
   "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg",
+    "light": "/images/microsandbox-banner-light.svg",
+    "dark": "/images/microsandbox-banner-dark.png",
     "href": "https://microsandbox.dev"
   },
   "favicon": "/logo/light.svg",
   "colors": {
-    "primary": "#BF84FE",
-    "light": "#BF84FE",
-    "dark": "#BF84FE"
+    "primary": "#e11d48",
+    "light": "#e11d48",
+    "dark": "#e11d48"
   },
   "navbar": {
     "primary": {
@@ -116,6 +116,29 @@
       "github": "https://github.com/zerocore-ai/microsandbox",
       "discord": "https://discord.gg/T95Y3XnEAK",
       "x": "https://x.com/microsandbox"
+    },
+    "links": [
+      {
+        "header": "Super",
+        "items": [
+          {
+            "label": "Super Rad Company, Inc",
+            "href": "https://google.com"
+          }
+        ]
+      }
+    ]
+  },
+  "integrations": {
+    "posthog": {
+      "apiKey": "phc_mMJPTEQbarHl4JMTdFBcgw5v612dmQrvKv5mcK3KJ3O",
+      "apiHost": "https://g.microsandbox.dev"
     }
+  },
+  "appearance": {
+    "default": "system"
+  },
+  "background": {
+    "decoration": "windows"
   }
 }
