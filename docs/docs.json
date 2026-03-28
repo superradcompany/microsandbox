@@ -111,24 +111,6 @@
       }
     ]
   },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/zerocore-ai/microsandbox",
-      "discord": "https://discord.gg/T95Y3XnEAK",
-      "x": "https://x.com/microsandbox"
-    },
-    "links": [
-      {
-        "header": "Super",
-        "items": [
-          {
-            "label": "Super Rad Company, Inc",
-            "href": "https://google.com"
-          }
-        ]
-      }
-    ]
-  },
   "integrations": {
     "posthog": {
       "apiKey": "phc_mMJPTEQbarHl4JMTdFBcgw5v612dmQrvKv5mcK3KJ3O",
