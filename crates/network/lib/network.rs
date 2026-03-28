@@ -56,6 +56,12 @@ pub struct SmoltcpNetwork {
     tls_state: Option<Arc<TlsState>>,
 }
 
+/// Handle for installing host-side termination behavior into the network stack.
+#[derive(Clone)]
+pub struct TerminationHandle {
+    shared: Arc<SharedState>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -214,6 +220,20 @@ impl SmoltcpNetwork {
     /// Write to the runtime mount before VM boot so the guest can trust it.
     pub fn ca_cert_pem(&self) -> Option<Vec<u8>> {
         self.tls_state.as_ref().map(|s| s.ca_cert_pem())
+    }
+
+    /// Create a handle for wiring runtime termination into the network stack.
+    pub fn termination_handle(&self) -> TerminationHandle {
+        TerminationHandle {
+            shared: self.shared.clone(),
+        }
+    }
+}
+
+impl TerminationHandle {
+    /// Install the termination hook.
+    pub fn set_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        self.shared.set_termination_hook(hook);
     }
 }
 

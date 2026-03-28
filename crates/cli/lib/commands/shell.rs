@@ -9,21 +9,25 @@ use microsandbox::sandbox::{AttachOptionsBuilder, ExecOptionsBuilder, ExecOutput
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Open an interactive shell or run a shell script in a sandbox.
+/// Open a shell in a running sandbox.
 #[derive(Debug, Args)]
 pub struct ShellArgs {
-    /// Name of the sandbox.
+    /// Sandbox to open a shell in.
     pub name: String,
 
-    /// Shell to use (overrides sandbox default).
+    /// Shell program to use (default: /bin/sh or sandbox config).
     #[arg(long)]
     pub shell: Option<String>,
+
+    /// Run the shell as the specified guest user.
+    #[arg(short = 'u', long)]
+    pub user: Option<String>,
 
     /// Suppress progress output.
     #[arg(short, long)]
     pub quiet: bool,
 
-    /// Script to execute (after --). Opens interactive shell if omitted.
+    /// Shell script to run (after --). Opens interactive shell if omitted.
     #[arg(last = true)]
     pub command: Vec<String>,
 }
@@ -63,11 +67,23 @@ pub async fn run(args: ShellArgs) -> anyhow::Result<()> {
         let exit_code = if let Some(ref script) = script {
             sandbox
                 .attach(shell, |a: AttachOptionsBuilder| {
-                    a.args(["-c", script.as_str()])
+                    let mut a = a.args(["-c", script.as_str()]);
+                    if let Some(ref user) = args.user {
+                        a = a.user(user);
+                    }
+                    a
                 })
                 .await?
         } else {
-            sandbox.attach(shell, |a: AttachOptionsBuilder| a).await?
+            sandbox
+                .attach(shell, |a: AttachOptionsBuilder| {
+                    let mut a = a;
+                    if let Some(ref user) = args.user {
+                        a = a.user(user);
+                    }
+                    a
+                })
+                .await?
         };
 
         super::maybe_stop(&sandbox).await;
@@ -102,7 +118,13 @@ pub async fn run(args: ShellArgs) -> anyhow::Result<()> {
         };
 
         let output: ExecOutput = sandbox
-            .exec(shell, |e: ExecOptionsBuilder| e.args(["-c", &script]))
+            .exec(shell, |e: ExecOptionsBuilder| {
+                let mut e = e.args(["-c", &script]);
+                if let Some(ref user) = args.user {
+                    e = e.user(user);
+                }
+                e
+            })
             .await?;
 
         std::io::stdout().write_all(output.stdout_bytes())?;

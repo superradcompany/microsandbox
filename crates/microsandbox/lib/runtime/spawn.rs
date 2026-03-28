@@ -5,6 +5,8 @@
 //! sandbox process PID. The sandbox process runs the VMM and agent relay
 //! internally.
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{ffi::OsString, path::Path, process::Stdio};
 
 use serde::Deserialize;
@@ -86,6 +88,8 @@ pub async fn spawn_sandbox(
         })?;
         let script_path = scripts_dir.join(safe_name);
         tokio::fs::write(&script_path, content).await?;
+        #[cfg(unix)]
+        tokio::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).await?;
     }
 
     // Compute the agent relay socket path.
@@ -385,6 +389,14 @@ fn sandbox_cli_args(
     for (key, value) in &config.env {
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!("{key}={value}")));
+    }
+
+    if let Some(ref user) = config.user {
+        args.push(OsString::from("--env"));
+        args.push(OsString::from(format!(
+            "{}={user}",
+            microsandbox_protocol::ENV_USER
+        )));
     }
 
     if let Some(ref workdir) = config.workdir {

@@ -67,10 +67,6 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub shell: Option<String>,
 
-    /// Custom init binary path. `None` uses the embedded init.
-    #[serde(default)]
-    pub init: Option<String>,
-
     /// Named scripts available at `/.msb/scripts/<name>` in the guest.
     #[serde(default)]
     pub scripts: HashMap<String, String>,
@@ -243,7 +239,6 @@ impl Default for SandboxConfig {
             log_level: default_log_level(),
             workdir: None,
             shell: None,
-            init: None,
             scripts: HashMap::new(),
             env: Vec::new(),
             mounts: Vec::new(),

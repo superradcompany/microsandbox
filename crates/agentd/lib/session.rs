@@ -1,7 +1,8 @@
 //! Exec session management: spawning processes with PTY or pipe I/O.
 
 use std::{
-    ffi::CString,
+    ffi::{CStr, CString},
+    mem::MaybeUninit,
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     process::Stdio,
 };
@@ -56,6 +57,22 @@ pub enum SessionOutput {
     /// Used by filesystem streaming operations that encode their own
     /// `FsData`/`FsResponse` messages.
     Raw(Vec<u8>),
+}
+
+struct ResolvedUser {
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    initgroups_user: Option<CString>,
+}
+
+struct PasswdEntry {
+    name: String,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+}
+
+struct GroupEntry {
+    gid: libc::gid_t,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -190,6 +207,8 @@ impl ExecSession {
             .transpose()
             .map_err(|e| AgentdError::ExecSession(format!("invalid cwd: {e}")))?;
 
+        let resolved_user = resolve_requested_user(req)?;
+
         // Pre-parse rlimits before fork (no allocations in child).
         let parsed_rlimits = parse_rlimits(req);
 
@@ -247,6 +266,12 @@ impl ExecSession {
                 unsafe {
                     libc::chdir(dir.as_ptr());
                 }
+            }
+
+            if let Some(ref user) = resolved_user
+                && apply_resolved_user(user).is_err()
+            {
+                unsafe { libc::_exit(1) };
             }
 
             // Apply resource limits.
@@ -307,11 +332,16 @@ impl ExecSession {
             cmd.current_dir(dir);
         }
 
+        let resolved_user = resolve_requested_user(req)?;
+
         // Apply resource limits in the child before exec.
         let parsed_rlimits = parse_rlimits(req);
-        if !parsed_rlimits.is_empty() {
+        if resolved_user.is_some() || !parsed_rlimits.is_empty() {
             unsafe {
                 cmd.pre_exec(move || {
+                    if let Some(ref user) = resolved_user {
+                        apply_resolved_user(user).map_err(agentd_to_io_error)?;
+                    }
                     for (resource, limit) in &parsed_rlimits {
                         if libc::setrlimit(*resource as _, limit) != 0 {
                             return Err(std::io::Error::last_os_error());
@@ -392,6 +422,227 @@ fn parse_rlimits(req: &ExecRequest) -> Vec<(libc::c_int, libc::rlimit)> {
             ))
         })
         .collect()
+}
+
+fn resolve_requested_user(req: &ExecRequest) -> AgentdResult<Option<ResolvedUser>> {
+    let requested = req
+        .user
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            std::env::var(microsandbox_protocol::ENV_USER)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
+
+    requested.as_deref().map(resolve_user_spec).transpose()
+}
+
+fn resolve_user_spec(spec: &str) -> AgentdResult<ResolvedUser> {
+    let (user_part, group_part) = match spec.split_once(':') {
+        Some((user, group)) => (user.trim(), Some(group.trim())),
+        None => (spec.trim(), None),
+    };
+
+    if user_part.is_empty() {
+        return Err(AgentdError::ExecSession("user spec has empty user".into()));
+    }
+
+    let passwd = if let Ok(uid) = parse_id(user_part) {
+        lookup_passwd_by_uid(uid)?
+    } else {
+        lookup_passwd_by_name(user_part)?
+            .ok_or_else(|| AgentdError::ExecSession(format!("guest user not found: {user_part}")))?
+            .into()
+    };
+
+    let (uid, passwd_entry) = match passwd {
+        ResolvedUserLookup::Known(entry) => (entry.uid, Some(entry)),
+        ResolvedUserLookup::Numeric(uid) => (uid, None),
+    };
+
+    let gid = match group_part {
+        Some("") => {
+            return Err(AgentdError::ExecSession("user spec has empty group".into()));
+        }
+        Some(group) => resolve_group_spec(group)?,
+        None => passwd_entry
+            .as_ref()
+            .map(|entry| entry.gid)
+            .unwrap_or_else(|| unsafe { libc::getgid() }),
+    };
+
+    let initgroups_user = passwd_entry
+        .as_ref()
+        .map(|entry| CString::new(entry.name.as_str()))
+        .transpose()
+        .map_err(|e| AgentdError::ExecSession(format!("invalid guest user name: {e}")))?;
+
+    Ok(ResolvedUser {
+        uid,
+        gid,
+        initgroups_user,
+    })
+}
+
+enum ResolvedUserLookup {
+    Known(PasswdEntry),
+    Numeric(libc::uid_t),
+}
+
+impl From<PasswdEntry> for ResolvedUserLookup {
+    fn from(value: PasswdEntry) -> Self {
+        Self::Known(value)
+    }
+}
+
+fn resolve_group_spec(spec: &str) -> AgentdResult<libc::gid_t> {
+    if let Ok(gid) = parse_id(spec) {
+        return Ok(gid);
+    }
+
+    lookup_group_by_name(spec)?
+        .map(|entry| entry.gid)
+        .ok_or_else(|| AgentdError::ExecSession(format!("guest group not found: {spec}")))
+}
+
+fn parse_id(value: &str) -> Result<u32, std::num::ParseIntError> {
+    value.parse::<u32>()
+}
+
+fn lookup_passwd_by_name(name: &str) -> AgentdResult<Option<PasswdEntry>> {
+    let name = CString::new(name)
+        .map_err(|e| AgentdError::ExecSession(format!("invalid guest user name: {e}")))?;
+    let mut pwd = MaybeUninit::<libc::passwd>::uninit();
+    let mut result = std::ptr::null_mut();
+    let mut buf = vec![0u8; lookup_buffer_len()];
+    let rc = unsafe {
+        libc::getpwnam_r(
+            name.as_ptr(),
+            pwd.as_mut_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 {
+        return Err(AgentdError::ExecSession(format!(
+            "failed to resolve guest user {name:?}: {}",
+            std::io::Error::from_raw_os_error(rc)
+        )));
+    }
+    if result.is_null() {
+        return Ok(None);
+    }
+
+    let pwd = unsafe { pwd.assume_init() };
+    let name = unsafe { CStr::from_ptr(pwd.pw_name) }
+        .to_string_lossy()
+        .into_owned();
+    Ok(Some(PasswdEntry {
+        name,
+        uid: pwd.pw_uid,
+        gid: pwd.pw_gid,
+    }))
+}
+
+fn lookup_passwd_by_uid(uid: libc::uid_t) -> AgentdResult<ResolvedUserLookup> {
+    let mut pwd = MaybeUninit::<libc::passwd>::uninit();
+    let mut result = std::ptr::null_mut();
+    let mut buf = vec![0u8; lookup_buffer_len()];
+    let rc = unsafe {
+        libc::getpwuid_r(
+            uid,
+            pwd.as_mut_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 {
+        return Err(AgentdError::ExecSession(format!(
+            "failed to resolve guest uid {uid}: {}",
+            std::io::Error::from_raw_os_error(rc)
+        )));
+    }
+    if result.is_null() {
+        return Ok(ResolvedUserLookup::Numeric(uid));
+    }
+
+    let pwd = unsafe { pwd.assume_init() };
+    let name = unsafe { CStr::from_ptr(pwd.pw_name) }
+        .to_string_lossy()
+        .into_owned();
+    Ok(ResolvedUserLookup::Known(PasswdEntry {
+        name,
+        uid: pwd.pw_uid,
+        gid: pwd.pw_gid,
+    }))
+}
+
+fn lookup_group_by_name(name: &str) -> AgentdResult<Option<GroupEntry>> {
+    let name = CString::new(name)
+        .map_err(|e| AgentdError::ExecSession(format!("invalid guest group name: {e}")))?;
+    let mut grp = MaybeUninit::<libc::group>::uninit();
+    let mut result = std::ptr::null_mut();
+    let mut buf = vec![0u8; lookup_buffer_len()];
+    let rc = unsafe {
+        libc::getgrnam_r(
+            name.as_ptr(),
+            grp.as_mut_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 {
+        return Err(AgentdError::ExecSession(format!(
+            "failed to resolve guest group {name:?}: {}",
+            std::io::Error::from_raw_os_error(rc)
+        )));
+    }
+    if result.is_null() {
+        return Ok(None);
+    }
+
+    let grp = unsafe { grp.assume_init() };
+    Ok(Some(GroupEntry { gid: grp.gr_gid }))
+}
+
+fn lookup_buffer_len() -> usize {
+    let size = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    if size > 0 { size as usize } else { 16 * 1024 }
+}
+
+fn apply_resolved_user(user: &ResolvedUser) -> AgentdResult<()> {
+    if let Some(ref name) = user.initgroups_user {
+        #[cfg(target_os = "macos")]
+        let base_group = user.gid as libc::c_int;
+        #[cfg(not(target_os = "macos"))]
+        let base_group = user.gid;
+
+        if unsafe { libc::initgroups(name.as_ptr(), base_group) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    } else if unsafe { libc::setgroups(0, std::ptr::null()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    if unsafe { libc::setgid(user.gid) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if unsafe { libc::setuid(user.uid) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    Ok(())
+}
+
+fn agentd_to_io_error(err: AgentdError) -> std::io::Error {
+    std::io::Error::other(err.to_string())
 }
 
 /// Writes data to a raw fd using a blocking task, handling short writes.
@@ -570,6 +821,7 @@ mod tests {
             ],
             env: vec!["PATH=/usr/local/bin:/usr/bin:/bin".to_string()],
             cwd: None,
+            user: None,
             tty: true,
             rows: 24,
             cols: 80,
@@ -614,5 +866,40 @@ mod tests {
             "expected immediate PTY write to arrive before later output; got {:?}",
             String::from_utf8_lossy(&stdout),
         );
+    }
+
+    #[test]
+    fn test_resolve_user_spec_for_current_uid_gid() {
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let resolved = resolve_user_spec(&format!("{uid}:{gid}")).expect("resolve numeric user");
+        assert_eq!(resolved.uid, uid);
+        assert_eq!(resolved.gid, gid);
+    }
+
+    #[test]
+    fn test_request_user_overrides_env_default() {
+        unsafe {
+            std::env::set_var(microsandbox_protocol::ENV_USER, "0:0");
+        }
+
+        let req = ExecRequest {
+            cmd: "/bin/true".to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            user: Some("1:1".to_string()),
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        };
+
+        let resolved = resolve_requested_user(&req).expect("resolve requested user");
+        assert_eq!(resolved.unwrap().uid, 1);
+
+        unsafe {
+            std::env::remove_var(microsandbox_protocol::ENV_USER);
+        }
     }
 }

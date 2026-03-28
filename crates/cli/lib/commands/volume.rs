@@ -20,7 +20,7 @@ pub struct VolumeArgs {
 /// Volume subcommands.
 #[derive(Debug, Subcommand)]
 pub enum VolumeCommands {
-    /// Create a new volume.
+    /// Create a new named volume.
     Create(VolumeCreateArgs),
 
     /// List all volumes.
@@ -30,7 +30,7 @@ pub enum VolumeCommands {
     /// Show detailed volume information.
     Inspect(VolumeInspectArgs),
 
-    /// Remove a volume.
+    /// Delete one or more volumes.
     #[command(visible_alias = "rm")]
     Remove(VolumeRemoveArgs),
 }
@@ -38,10 +38,10 @@ pub enum VolumeCommands {
 /// Arguments for `msb volume create`.
 #[derive(Debug, Args)]
 pub struct VolumeCreateArgs {
-    /// Volume name.
+    /// Name for the new volume.
     pub name: String,
 
-    /// Size quota (e.g., "10G", "512M").
+    /// Maximum size for the volume (e.g. 10G, 512M).
     #[arg(long)]
     pub size: Option<String>,
 
@@ -65,14 +65,14 @@ pub struct VolumeListArgs {
 /// Arguments for `msb volume inspect`.
 #[derive(Debug, Args)]
 pub struct VolumeInspectArgs {
-    /// Volume name.
+    /// Volume to inspect.
     pub name: String,
 }
 
 /// Arguments for `msb volume remove`.
 #[derive(Debug, Args)]
 pub struct VolumeRemoveArgs {
-    /// Name(s) of the volume(s) to remove.
+    /// Volume(s) to remove.
     #[arg(required = true)]
     pub names: Vec<String>,
 

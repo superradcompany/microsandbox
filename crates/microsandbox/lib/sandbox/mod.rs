@@ -176,8 +176,13 @@ impl Sandbox {
 
         // Resolve OCI images before spawning the sandbox process.
         if let RootfsSource::Oci(reference) = config.image.clone() {
-            let pull_result =
-                pull_oci_image(&reference, config.registry_auth.take(), progress).await?;
+            let pull_result = pull_oci_image(
+                &reference,
+                config.pull_policy,
+                config.registry_auth.take(),
+                progress,
+            )
+            .await?;
 
             // Merge image config defaults under user-provided config.
             config.merge_image_defaults(&pull_result.config);
@@ -492,6 +497,7 @@ impl Sandbox {
         let ExecOptions {
             args,
             cwd,
+            user,
             env,
             rlimits,
             tty,
@@ -503,7 +509,18 @@ impl Sandbox {
         let id = self.client.next_id();
         let rx = self.client.subscribe(id).await;
 
-        let req = build_exec_request(&self.config, cmd, args, cwd, &env, &rlimits, tty, 24, 80);
+        let req = build_exec_request(
+            &self.config,
+            cmd,
+            args,
+            cwd,
+            user,
+            &env,
+            &rlimits,
+            tty,
+            24,
+            80,
+        );
         let msg = Message::with_payload(MessageType::ExecRequest, id, &req)?;
         self.client.send(&msg).await?;
 
@@ -650,6 +667,7 @@ impl Sandbox {
             cmd,
             opts.args,
             opts.cwd,
+            opts.user,
             &opts.env,
             &opts.rlimits,
             true,
@@ -868,6 +886,7 @@ fn build_exec_request(
     cmd: String,
     args: Vec<String>,
     cwd: Option<String>,
+    user: Option<String>,
     env: &[(String, String)],
     rlimits: &[Rlimit],
     tty: bool,
@@ -900,6 +919,7 @@ fn build_exec_request(
         args,
         env,
         cwd: cwd.or_else(|| config.workdir.clone()),
+        user,
         tty,
         rows,
         cols,
@@ -1205,6 +1225,7 @@ pub(super) fn pid_is_alive(pid: i32) -> bool {
 /// progress events. The caller must consume the corresponding `PullProgressHandle`.
 async fn pull_oci_image(
     reference: &str,
+    pull_policy: microsandbox_image::PullPolicy,
     explicit_auth: Option<microsandbox_image::RegistryAuth>,
     progress: Option<microsandbox_image::PullProgressSender>,
 ) -> MicrosandboxResult<microsandbox_image::PullResult> {
@@ -1214,7 +1235,10 @@ async fn pull_oci_image(
     let image_ref: microsandbox_image::Reference = reference.parse().map_err(|e| {
         crate::MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
     })?;
-    let options = microsandbox_image::PullOptions::default();
+    let options = microsandbox_image::PullOptions {
+        pull_policy,
+        ..Default::default()
+    };
 
     // Warm runs spend most of their time outside the guest, so avoid
     // constructing the registry client when the image is already complete

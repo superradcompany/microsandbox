@@ -103,6 +103,22 @@ pub const ENV_NET_IPV6: &str = "MSB_NET_IPV6";
 /// - `MSB_MOUNTS=data:/data;cache:/cache:ro` — two mounts
 pub const ENV_MOUNTS: &str = "MSB_MOUNTS";
 
+/// Environment variable carrying the default guest user for agentd execs.
+///
+/// Format: `USER[:GROUP]` or `UID[:GID]`
+///
+/// - `USER`
+/// - `UID`
+/// - `USER:GROUP`
+/// - `UID:GID`
+///
+/// Example:
+/// - `MSB_USER=alice` — default to user `alice`
+/// - `MSB_USER=1000` — default to UID 1000
+/// - `MSB_USER=alice:developers` — default to user `alice` and group `developers`
+/// - `MSB_USER=1000:100` — default to UID 1000 and GID 100
+pub const ENV_USER: &str = "MSB_USER";
+
 /// Guest-side path to the CA certificate for TLS interception.
 ///
 /// Placed by the sandbox process via the runtime virtiofs mount.

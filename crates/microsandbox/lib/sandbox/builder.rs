@@ -133,22 +133,36 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set a custom init binary path.
-    pub fn init(mut self, path: impl Into<String>) -> Self {
-        self.config.init = Some(path.into());
+    /// Override the OCI image entrypoint.
+    pub fn entrypoint(mut self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.config.entrypoint = Some(cmd.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Set the user identity inside the sandbox (e.g., `"1000"`, `"appuser"`, `"1000:1000"`).
+    pub fn user(mut self, user: impl Into<String>) -> Self {
+        self.config.user = Some(user.into());
+        self
+    }
+
+    /// Set the pull policy for OCI images.
+    pub fn pull_policy(mut self, policy: microsandbox_image::PullPolicy) -> Self {
+        self.config.pull_policy = policy;
         self
     }
 
     /// Disable all network access for this sandbox.
     ///
-    /// Sets the policy to [`NetworkPolicy::none()`](microsandbox_network::policy::NetworkPolicy::none),
-    /// denying all inbound and outbound traffic.
+    /// Disables the network device entirely and sets the policy to
+    /// [`NetworkPolicy::none()`](microsandbox_network::policy::NetworkPolicy::none)
+    /// so the serialized config also reflects that networking is off.
     ///
     /// ```ignore
     /// .disable_network()
     /// ```
     #[cfg(feature = "net")]
     pub fn disable_network(mut self) -> Self {
+        self.config.network.enabled = false;
         self.config.network.policy = microsandbox_network::policy::NetworkPolicy::none();
         self
     }
@@ -525,6 +539,7 @@ mod tests {
             .build()
             .unwrap();
 
+        assert!(!config.network.enabled);
         assert_eq!(config.network.policy.default_action, Action::Deny);
         assert!(config.network.policy.rules.is_empty());
     }

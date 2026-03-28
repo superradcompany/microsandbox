@@ -8,6 +8,7 @@ use crate::ui;
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+pub mod common;
 pub mod create;
 pub mod exec;
 pub mod image;

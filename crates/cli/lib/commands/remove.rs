@@ -9,14 +9,14 @@ use crate::ui;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Remove a stopped sandbox.
+/// Remove one or more sandboxes.
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
-    /// Name(s) of the sandbox(es) to remove.
+    /// Sandbox(es) to remove.
     #[arg(required = true)]
     pub names: Vec<String>,
 
-    /// Force removal (stop running sandbox first).
+    /// Stop the sandbox if running, then remove it.
     #[arg(long)]
     pub force: bool,
 

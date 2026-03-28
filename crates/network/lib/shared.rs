@@ -6,6 +6,7 @@
 
 use crossbeam_queue::ArrayQueue;
 pub use microsandbox_utils::wake_pipe::WakePipe;
+use std::sync::{Arc, Mutex};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -51,6 +52,9 @@ pub struct SharedState {
     /// socket." Written by proxy tasks via channels. Read end polled by the
     /// poll loop.
     pub proxy_wake: WakePipe,
+
+    /// Optional host-side termination hook used for fatal policy violations.
+    termination_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -66,6 +70,20 @@ impl SharedState {
             rx_wake: WakePipe::new(),
             tx_wake: WakePipe::new(),
             proxy_wake: WakePipe::new(),
+            termination_hook: Mutex::new(None),
+        }
+    }
+
+    /// Install a host-side termination hook.
+    pub fn set_termination_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.termination_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Trigger host-side termination if a hook is installed.
+    pub fn trigger_termination(&self) {
+        let hook = self.termination_hook.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
         }
     }
 }

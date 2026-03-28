@@ -12,7 +12,7 @@ use crate::ui;
 /// Show running sandboxes.
 #[derive(Debug, Args)]
 pub struct PsArgs {
-    /// Show all sandboxes (including stopped).
+    /// Show all sandboxes, not just running ones.
     #[arg(short, long)]
     pub all: bool,
 

@@ -2,7 +2,13 @@
 //!
 //! Wraps `oci-client` with platform resolution, caching, and progress reporting.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    fs::{File, OpenOptions},
+    io,
+    os::fd::AsRawFd,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use oci_client::{Client, client::ClientConfig, manifest::ImageIndexEntry};
 use tokio::task::JoinHandle;
@@ -184,6 +190,14 @@ impl Registry {
     ) -> ImageResult<PullResult> {
         let ref_str: Arc<str> = reference.to_string().into();
         let oci_ref = reference;
+        let image_lock_path = self.cache.image_lock_path(reference);
+        let image_lock_file = open_lock_file(&image_lock_path)?;
+        flock_exclusive(&image_lock_file)?;
+        let _image_lock_guard = scopeguard::guard(image_lock_file, |file| {
+            let _ = flock_unlock(&file);
+            drop(file);
+            let _ = std::fs::remove_file(&image_lock_path);
+        });
 
         // Step 1: Early cache check using persisted image metadata.
         if let Some(cached) = resolve_cached_pull_result(&self.cache, reference, options)? {
@@ -703,6 +717,34 @@ fn resolve_cached_pull_result(
     };
 
     Ok(Some(CachedPullInfo { result, metadata }))
+}
+
+fn open_lock_file(path: &Path) -> ImageResult<File> {
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|e| ImageError::Cache {
+            path: path.to_path_buf(),
+            source: e,
+        })
+}
+
+fn flock_exclusive(file: &File) -> ImageResult<()> {
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if ret != 0 {
+        return Err(ImageError::Io(io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+fn flock_unlock(file: &File) -> ImageResult<()> {
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    if ret != 0 {
+        return Err(ImageError::Io(io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -9,13 +9,13 @@ use crate::ui;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Show detailed sandbox information.
+/// Show detailed sandbox configuration and status.
 #[derive(Debug, Args)]
 pub struct InspectArgs {
-    /// Name of the sandbox to inspect.
+    /// Sandbox to inspect.
     pub name: String,
 
-    /// Output format.
+    /// Output format (json).
     #[arg(long, value_name = "FORMAT")]
     pub format: Option<String>,
 }

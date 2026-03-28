@@ -9,10 +9,10 @@ use crate::ui;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Start/resume an existing stopped sandbox.
+/// Start a stopped sandbox.
 #[derive(Debug, Args)]
 pub struct StartArgs {
-    /// Name of the sandbox to start.
+    /// Sandbox to start.
     pub name: String,
 
     /// Suppress progress output.

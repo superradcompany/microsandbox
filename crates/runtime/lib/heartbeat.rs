@@ -1,6 +1,6 @@
 //! Host-side heartbeat reader for idle detection.
 //!
-//! The guest agent (agentd) writes `/.msb/heartbeat.json` every 5 seconds.
+//! The guest agent (agentd) writes `/.msb/heartbeat.json` every second.
 //! On the host, this file appears in the sandbox runtime directory via the
 //! virtiofs mount. The sandbox process reads it to detect idle sandboxes.
 

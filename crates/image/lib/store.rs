@@ -152,6 +152,12 @@ impl GlobalCache {
             .join(format!("{}.download.lock", digest.to_path_safe()))
     }
 
+    /// Path to the pull lock file for an image reference.
+    pub fn image_lock_path(&self, reference: &Reference) -> PathBuf {
+        self.images_dir
+            .join(format!("{}.lock", image_cache_key(reference)))
+    }
+
     /// Check if a layer is fully extracted (`.complete` marker present).
     pub fn is_extracted(&self, digest: &Digest) -> bool {
         self.extracted_dir(digest).join(COMPLETE_MARKER).exists()
@@ -217,9 +223,17 @@ impl GlobalCache {
 
     /// Path to the cached metadata file for an image reference.
     fn image_metadata_path(&self, reference: &Reference) -> PathBuf {
-        let mut hasher = Sha256::new();
-        hasher.update(reference.to_string().as_bytes());
-        let key = hex::encode(hasher.finalize());
-        self.images_dir.join(format!("{key}.json"))
+        self.images_dir
+            .join(format!("{}.json", image_cache_key(reference)))
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn image_cache_key(reference: &Reference) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(reference.to_string().as_bytes());
+    hex::encode(hasher.finalize())
 }

@@ -1,6 +1,7 @@
 //! `msb exec` command — execute a command in a sandbox.
 
 use std::io::{IsTerminal, Write};
+use std::time::Duration;
 
 use clap::Args;
 use microsandbox::sandbox::{AttachOptionsBuilder, ExecOptionsBuilder, ExecOutput};
@@ -11,25 +12,41 @@ use crate::ui;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Execute a command in a sandbox.
+/// Run a command in a running sandbox.
 #[derive(Debug, Args)]
 pub struct ExecArgs {
-    /// Name of the sandbox.
+    /// Sandbox to run the command in.
     pub name: String,
 
-    /// Environment variable (KEY=value). Can be repeated.
+    /// Set an environment variable (KEY=value).
     #[arg(short, long)]
     pub env: Vec<String>,
 
-    /// Working directory inside sandbox.
+    /// Set the working directory for the command.
     #[arg(short, long)]
     pub workdir: Option<String>,
+
+    /// Run the command as the specified guest user.
+    #[arg(short = 'u', long)]
+    pub user: Option<String>,
+
+    /// Allocate a pseudo-terminal (enables colors, line editing).
+    #[arg(short = 't', long)]
+    pub tty: bool,
+
+    /// Kill the command after this duration (e.g. 30s, 5m, 1h).
+    #[arg(long)]
+    pub timeout: Option<String>,
+
+    /// Set a POSIX resource limit (e.g. nofile=1024, nproc=64, as=1073741824).
+    #[arg(long)]
+    pub rlimit: Vec<String>,
 
     /// Suppress progress output.
     #[arg(short, long)]
     pub quiet: bool,
 
-    /// Command to execute (after --).
+    /// Command to run inside the sandbox (after --).
     #[arg(last = true, required = true)]
     pub command: Vec<String>,
 }
@@ -56,6 +73,19 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
     let workdir = args.workdir;
     let interactive = std::io::stdin().is_terminal();
 
+    // Parse rlimits.
+    let rlimits: Vec<_> = args
+        .rlimit
+        .iter()
+        .map(|s| super::common::parse_rlimit(s))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // Parse timeout.
+    let timeout = match &args.timeout {
+        Some(t) => Some(Duration::from_secs(super::common::parse_duration_secs(t)?)),
+        None => None,
+    };
+
     if interactive {
         // Interactive mode with TTY — use attach.
         let exit_code = sandbox
@@ -66,6 +96,12 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
                 }
                 if let Some(ref cwd) = workdir {
                     a = a.cwd(cwd);
+                }
+                if let Some(ref user) = args.user {
+                    a = a.user(user);
+                }
+                for &(resource, soft, hard) in &rlimits {
+                    a = a.rlimit_range(resource, soft, hard);
                 }
                 a
             })
@@ -86,6 +122,18 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
                 }
                 if let Some(ref cwd) = workdir {
                     e = e.cwd(cwd);
+                }
+                if let Some(ref user) = args.user {
+                    e = e.user(user);
+                }
+                if args.tty {
+                    e = e.tty(true);
+                }
+                if let Some(t) = timeout {
+                    e = e.timeout(t);
+                }
+                for &(resource, soft, hard) in &rlimits {
+                    e = e.rlimit_range(resource, soft, hard);
                 }
                 e
             })

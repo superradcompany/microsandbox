@@ -19,7 +19,7 @@ const MARKER_END: &str = "# <<< microsandbox <<<";
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Manage the msb installation.
+/// Update or uninstall msb.
 #[derive(Debug, Args)]
 pub struct SelfArgs {
     /// Subcommand to run.
@@ -30,18 +30,18 @@ pub struct SelfArgs {
 /// `msb self` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum SelfCommand {
-    /// Update msb to the latest release.
+    /// Update msb and libkrunfw to the latest release.
     #[command(visible_alias = "upgrade")]
     Update(SelfUpdateArgs),
 
-    /// Uninstall msb and remove shell configuration.
+    /// Remove msb, libkrunfw, and shell configuration.
     Uninstall(SelfUninstallArgs),
 }
 
 /// Arguments for `msb self update`.
 #[derive(Debug, Args)]
 pub struct SelfUpdateArgs {
-    /// Force re-download even if already on the latest version.
+    /// Re-download even if already on the latest version.
     #[arg(long)]
     pub force: bool,
 }

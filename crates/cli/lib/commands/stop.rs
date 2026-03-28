@@ -12,12 +12,16 @@ use crate::ui;
 /// Stop a running sandbox.
 #[derive(Debug, Args)]
 pub struct StopArgs {
-    /// Name of the sandbox to stop.
+    /// Sandbox to stop.
     pub name: String,
 
-    /// Force kill (SIGKILL instead of graceful shutdown).
+    /// Immediately kill the sandbox without graceful shutdown.
     #[arg(long)]
     pub force: bool,
+
+    /// Seconds to wait for graceful shutdown before force-killing.
+    #[arg(short = 't', long)]
+    pub timeout: Option<u64>,
 
     /// Suppress progress output.
     #[arg(short, long)]
@@ -39,6 +43,13 @@ pub async fn run(args: StopArgs) -> anyhow::Result<()> {
     let mut handle = Sandbox::get(&args.name).await?;
     let result = if args.force {
         handle.kill().await
+    } else if let Some(timeout_secs) = args.timeout {
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), handle.stop())
+            .await
+        {
+            Ok(stop_result) => stop_result,
+            Err(_) => handle.kill().await,
+        }
     } else {
         handle.stop().await
     };

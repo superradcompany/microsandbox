@@ -3,6 +3,7 @@
 //! Used by `SandboxBuilder::network(|n| n.port(8080, 80).policy(...))`.
 
 use std::net::IpAddr;
+use std::path::PathBuf;
 
 use crate::config::{InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort};
 use crate::policy::NetworkPolicy;
@@ -206,6 +207,18 @@ impl TlsBuilder {
     /// Enable or disable QUIC blocking on intercepted ports.
     pub fn block_quic(mut self, block: bool) -> Self {
         self.config.block_quic_on_intercept = block;
+        self
+    }
+
+    /// Set a custom CA certificate PEM file path.
+    pub fn ca_cert(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.ca.cert_path = Some(path.into());
+        self
+    }
+
+    /// Set a custom CA private key PEM file path.
+    pub fn ca_key(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.ca.key_path = Some(path.into());
         self
     }
 

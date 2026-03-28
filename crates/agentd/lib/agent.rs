@@ -33,7 +33,10 @@ use crate::{
 //--------------------------------------------------------------------------------------------------
 
 /// Heartbeat interval in seconds.
-const HEARTBEAT_INTERVAL_SECS: u64 = 5;
+///
+/// Keep this short so small idle timeouts (for example `--idle-timeout 1`)
+/// can be enforced without multi-second scheduling drift.
+const HEARTBEAT_INTERVAL_SECS: u64 = 1;
 
 /// Read buffer size for the serial port.
 const SERIAL_READ_BUF_SIZE: usize = 64 * 1024;

@@ -9,13 +9,13 @@ use clap::Args;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Pull an image from a registry.
+/// Download an image from a container registry.
 #[derive(Debug, Args)]
 pub struct PullArgs {
-    /// Image reference (e.g., python:3.11, ubuntu:22.04).
+    /// Image to pull (e.g. python:3.12, ubuntu:22.04).
     pub reference: String,
 
-    /// Force re-download and re-extract even if cached.
+    /// Re-download even if the image is already cached.
     #[arg(short, long)]
     pub force: bool,
 

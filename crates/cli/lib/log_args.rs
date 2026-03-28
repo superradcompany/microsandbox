@@ -10,23 +10,23 @@ use microsandbox_runtime::logging::LogLevel;
 /// Mutually-exclusive tracing verbosity flags.
 #[derive(Debug, Clone, Default, Args)]
 pub struct LogArgs {
-    /// Show logs with error level.
+    /// Show error-level diagnostic logs.
     #[arg(long, global = true, conflicts_with_all = ["warn", "info", "debug", "trace"])]
     pub error: bool,
 
-    /// Show logs with warn level.
+    /// Show warning and error diagnostic logs.
     #[arg(long, global = true, conflicts_with_all = ["error", "info", "debug", "trace"])]
     pub warn: bool,
 
-    /// Show logs with info level.
+    /// Show info, warning, and error diagnostic logs.
     #[arg(long, global = true, conflicts_with_all = ["error", "warn", "debug", "trace"])]
     pub info: bool,
 
-    /// Show logs with debug level.
+    /// Show debug and higher diagnostic logs.
     #[arg(long, global = true, conflicts_with_all = ["error", "warn", "info", "trace"])]
     pub debug: bool,
 
-    /// Show logs with trace level.
+    /// Show all diagnostic logs (most verbose).
     #[arg(long, global = true, conflicts_with_all = ["error", "warn", "info", "debug"])]
     pub trace: bool,
 }

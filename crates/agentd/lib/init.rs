@@ -54,6 +54,7 @@ pub fn init() -> AgentdResult<()> {
     linux::apply_tmpfs_mounts()?;
     crate::network::apply_network_config()?;
     crate::tls::install_ca_cert()?;
+    linux::ensure_scripts_path_in_profile()?;
     linux::create_run_dir()?;
     Ok(())
 }
@@ -177,6 +178,24 @@ fn parse_volume_mount_entry(entry: &str) -> AgentdResult<VolumeMountSpec<'_>> {
         guest_path,
         readonly,
     })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn ensure_scripts_profile_block(profile: &str) -> String {
+    const START_MARKER: &str = "# >>> microsandbox scripts path >>>";
+    const END_MARKER: &str = "# <<< microsandbox scripts path <<<";
+    const BLOCK: &str = "# >>> microsandbox scripts path >>>\ncase \":$PATH:\" in\n  *:/.msb/scripts:*) ;;\n  *) export PATH=\"/.msb/scripts:$PATH\" ;;\nesac\n# <<< microsandbox scripts path <<<\n";
+
+    if profile.contains(START_MARKER) && profile.contains(END_MARKER) {
+        return profile.to_string();
+    }
+
+    let mut updated = profile.to_string();
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(BLOCK);
+    updated
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -506,6 +525,35 @@ mod linux {
         Ok(())
     }
 
+    /// Ensure login shells preserve `/.msb/scripts` on PATH.
+    pub fn ensure_scripts_path_in_profile() -> AgentdResult<()> {
+        let profile_path = Path::new("/etc/profile");
+        let existing = match std::fs::read_to_string(profile_path) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(err) => {
+                return Err(AgentdError::Init(format!(
+                    "failed to read {}: {err}",
+                    profile_path.display()
+                )));
+            }
+        };
+
+        let updated = super::ensure_scripts_profile_block(&existing);
+        if updated != existing {
+            if let Some(parent) = profile_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    AgentdError::Init(format!("failed to create {}: {err}", parent.display()))
+                })?;
+            }
+            std::fs::write(profile_path, updated).map_err(|err| {
+                AgentdError::Init(format!("failed to write {}: {err}", profile_path.display()))
+            })?;
+        }
+
+        Ok(())
+    }
+
     /// Creates a directory, ignoring EEXIST errors.
     fn mkdir_ignore_exists(path: &str) -> AgentdResult<()> {
         match mkdir(path, Mode::from_bits_truncate(0o755)) {
@@ -634,5 +682,25 @@ mod tests {
     fn test_parse_block_root_empty_fstype_errors() {
         let err = parse_block_root("/dev/vda,fstype=").unwrap_err();
         assert!(err.to_string().contains("empty fstype"));
+    }
+
+    #[test]
+    fn test_ensure_scripts_profile_block_appends_block() {
+        let updated = ensure_scripts_profile_block("export PATH=/usr/bin:/bin\n");
+        assert!(updated.contains("# >>> microsandbox scripts path >>>"));
+        assert!(updated.contains("export PATH=\"/.msb/scripts:$PATH\""));
+    }
+
+    #[test]
+    fn test_ensure_scripts_profile_block_adds_newline_when_missing() {
+        let updated = ensure_scripts_profile_block("export PATH=/usr/bin:/bin");
+        assert!(updated.contains("/usr/bin:/bin\n# >>> microsandbox scripts path >>>"));
+    }
+
+    #[test]
+    fn test_ensure_scripts_profile_block_is_idempotent() {
+        let profile = ensure_scripts_profile_block("");
+        let updated = ensure_scripts_profile_block(&profile);
+        assert_eq!(profile, updated);
     }
 }

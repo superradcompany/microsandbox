@@ -18,7 +18,7 @@ use microsandbox_cli::{
 #[derive(Parser)]
 #[command(name = "msb", version, about = "Microsandbox CLI", styles = microsandbox_cli::styles::styles())]
 struct Cli {
-    /// Display the complete command tree with descriptions.
+    /// Print the full command tree and exit.
     #[arg(long, global = true)]
     tree: bool,
 
@@ -36,13 +36,13 @@ enum Commands {
     #[command(hide = true)]
     Sandbox(Box<SandboxArgs>),
 
-    /// Create and start a new sandbox.
+    /// Create a sandbox from an image and run a command in it.
     Run(run::RunArgs),
 
-    /// Create and boot a fresh sandbox (no workload).
+    /// Create a sandbox and boot it in the background.
     Create(create::CreateArgs),
 
-    /// Start/resume an existing stopped sandbox.
+    /// Start a stopped sandbox.
     Start(start::StartArgs),
 
     /// Stop a running sandbox.
@@ -55,20 +55,20 @@ enum Commands {
     /// Show running sandboxes.
     Ps(ps::PsArgs),
 
-    /// Remove a stopped sandbox.
+    /// Remove one or more sandboxes.
     #[command(visible_alias = "rm")]
     Remove(remove::RemoveArgs),
 
-    /// Execute a command in a sandbox.
+    /// Run a command in a running sandbox.
     Exec(exec::ExecArgs),
 
-    /// Shell in a sandbox (interactive or scripted).
+    /// Open a shell in a running sandbox.
     Shell(shell::ShellArgs),
 
     /// Manage OCI images.
     Image(image::ImageArgs),
 
-    /// Pull an image from a registry (alias for `image pull`).
+    /// Download an image from a registry.
     Pull(pull::PullArgs),
 
     /// List cached images (alias for `image ls`).
@@ -79,20 +79,20 @@ enum Commands {
     #[command(hide = true)]
     Rmi(image::ImageRemoveArgs),
 
-    /// Show detailed sandbox information.
+    /// Show detailed sandbox configuration and status.
     Inspect(inspect::InspectArgs),
 
     /// Manage named volumes.
     #[command(visible_alias = "vol")]
     Volume(volume::VolumeArgs),
 
-    /// Install a sandbox alias as a command.
+    /// Install a sandbox as a system command.
     Install(install::InstallArgs),
 
-    /// Remove an installed sandbox alias.
+    /// Remove an installed sandbox command.
     Uninstall(uninstall::UninstallArgs),
 
-    /// Manage the msb installation itself.
+    /// Manage the msb installation.
     #[command(name = "self")]
     Self_(self_cmd::SelfArgs),
 }

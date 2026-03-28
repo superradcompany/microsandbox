@@ -179,6 +179,11 @@ impl SecretsHandler {
     pub fn is_empty(&self) -> bool {
         self.all_placeholders.is_empty()
     }
+
+    /// Returns true if a violation should terminate the sandbox.
+    pub fn terminates_on_violation(&self) -> bool {
+        matches!(self.on_violation, ViolationAction::BlockAndTerminate)
+    }
 }
 
 impl SecretsHandler {

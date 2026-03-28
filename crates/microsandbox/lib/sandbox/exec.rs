@@ -25,6 +25,9 @@ pub struct ExecOptions {
     /// Working directory (overrides sandbox default).
     pub cwd: Option<String>,
 
+    /// Guest user override for this command.
+    pub user: Option<String>,
+
     /// Environment variables (merged with sandbox env).
     pub env: Vec<(String, String)>,
 
@@ -208,6 +211,12 @@ impl ExecOptionsBuilder {
     /// sandbox default set via the builder's `workdir` method).
     pub fn cwd(mut self, cwd: impl Into<String>) -> Self {
         self.options.cwd = Some(cwd.into());
+        self
+    }
+
+    /// Override the guest user for this command.
+    pub fn user(mut self, user: impl Into<String>) -> Self {
+        self.options.user = Some(user.into());
         self
     }
 

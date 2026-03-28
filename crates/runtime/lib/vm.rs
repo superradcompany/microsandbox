@@ -145,6 +145,12 @@ struct StartupInfo {
     pid: u32,
 }
 
+#[cfg(feature = "net")]
+type NetworkTerminationHandle = microsandbox_network::network::TerminationHandle;
+
+#[cfg(not(feature = "net"))]
+type NetworkTerminationHandle = ();
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -235,7 +241,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_run_id = run_db_id;
     let exit_reason_for_observer = Arc::clone(&exit_reason);
     let exit_sock_path = config.agent_sock_path.clone();
-    let vm = match build_vm(
+    let (vm, network_termination_handle) = match build_vm(
         &config,
         console_backend,
         move |exit_code: i32| {
@@ -295,6 +301,17 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     };
     let exit_handle = vm.exit_handle();
 
+    #[cfg(feature = "net")]
+    if let Some(network_termination_handle) = network_termination_handle {
+        let network_exit_handle = exit_handle.clone();
+        let network_reason = Arc::clone(&exit_reason);
+        network_termination_handle.set_hook(Arc::new(move || {
+            tracing::warn!("secret violation requested sandbox termination");
+            network_reason.store(EXIT_REASON_SIGNAL, std::sync::atomic::Ordering::SeqCst);
+            network_exit_handle.trigger();
+        }));
+    }
+
     // Spawn background tasks.
     let (_relay_shutdown_tx, relay_shutdown_rx) = tokio::sync::watch::channel(false);
     let (relay_drain_tx, mut relay_drain_rx) = tokio::sync::mpsc::channel::<()>(1);
@@ -335,7 +352,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         let idle_exit_handle = exit_handle.clone();
         let idle_reason = Arc::clone(&exit_reason);
         tokio_rt.spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
                 if heartbeat_reader.is_idle(idle_secs) {
@@ -395,7 +412,7 @@ fn build_vm(
     console_backend: AgentConsoleBackend,
     on_exit: impl Fn(i32) + Send + 'static,
     tokio_handle: tokio::runtime::Handle,
-) -> RuntimeResult<msb_krun::Vm> {
+) -> RuntimeResult<(msb_krun::Vm, Option<NetworkTerminationHandle>)> {
     let mut exec_env = config.vm.env.clone();
     let vm = &config.vm;
 
@@ -479,6 +496,9 @@ fn build_vm(
         }
     }
 
+    #[cfg(feature = "net")]
+    let mut network_termination_handle = None;
+
     // Network.
     #[cfg(feature = "net")]
     if vm.network.enabled {
@@ -486,6 +506,7 @@ fn build_vm(
 
         let mut network =
             microsandbox_network::network::SmoltcpNetwork::new(vm.network.clone(), vm.sandbox_slot);
+        network_termination_handle = Some(network.termination_handle());
 
         network.start(tokio_handle.clone());
 
@@ -506,6 +527,7 @@ fn build_vm(
     }
 
     // Execution configuration.
+    prepend_scripts_path(&mut exec_env);
     builder = builder.exec(|mut e| {
         if let Some(ref path) = vm.exec_path {
             e = e.path(path);
@@ -537,9 +559,15 @@ fn build_vm(
     // Exit observer — runs synchronously before _exit() for DB cleanup.
     builder = builder.on_exit(on_exit);
 
-    builder
+    let vm = builder
         .build()
-        .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))
+        .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))?;
+
+    Ok((
+        vm,
+        #[cfg(feature = "net")]
+        network_termination_handle,
+    ))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -721,6 +749,23 @@ pub fn append_block_root_env(env: &mut Vec<String>) {
     env.push(format!("{prefix}/dev/vda"));
 }
 
+/// Prepend `/.msb/scripts` to PATH for the initial guest command.
+pub fn prepend_scripts_path(env: &mut Vec<String>) {
+    let scripts = microsandbox_protocol::SCRIPTS_PATH;
+    let prefix = "PATH=";
+
+    if let Some(entry) = env.iter_mut().find(|entry| entry.starts_with(prefix)) {
+        let existing = &entry[prefix.len()..];
+        if !existing.split(':').any(|segment| segment == scripts) {
+            *entry = format!("{prefix}{scripts}:{existing}");
+        }
+    } else {
+        env.push(format!(
+            "{prefix}{scripts}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ));
+    }
+}
+
 /// Extract the runtime directory host path from the mount specs.
 pub fn find_runtime_dir(mounts: &[String]) -> Option<PathBuf> {
     let tag = microsandbox_protocol::RUNTIME_FS_TAG;
@@ -788,7 +833,9 @@ mod tests {
     use microsandbox_utils::index::IndexBuilder;
     use tempfile::tempdir;
 
-    use super::{append_block_root_env, build_overlay_rootfs, validate_disk_format};
+    use super::{
+        append_block_root_env, build_overlay_rootfs, prepend_scripts_path, validate_disk_format,
+    };
 
     #[test]
     fn test_build_overlay_rootfs_rejects_mismatched_upper_staging() {
@@ -865,6 +912,32 @@ mod tests {
         let mut env = vec![existing.clone()];
         append_block_root_env(&mut env);
         assert_eq!(env, vec![existing]);
+    }
+
+    #[test]
+    fn test_prepend_scripts_path_updates_existing_path() {
+        let mut env = vec!["PATH=/usr/bin:/bin".to_string()];
+        prepend_scripts_path(&mut env);
+        assert_eq!(env, vec!["PATH=/.msb/scripts:/usr/bin:/bin".to_string()]);
+    }
+
+    #[test]
+    fn test_prepend_scripts_path_adds_default_path_when_missing() {
+        let mut env = vec!["LANG=C.UTF-8".to_string()];
+        prepend_scripts_path(&mut env);
+        assert!(
+            env.contains(
+                &"PATH=/.msb/scripts:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_prepend_scripts_path_avoids_duplicates() {
+        let mut env = vec!["PATH=/.msb/scripts:/usr/bin".to_string()];
+        prepend_scripts_path(&mut env);
+        assert_eq!(env, vec!["PATH=/.msb/scripts:/usr/bin".to_string()]);
     }
 
     #[test]

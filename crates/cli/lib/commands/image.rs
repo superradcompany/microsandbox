@@ -25,17 +25,17 @@ pub struct ImageArgs {
 /// Image subcommands.
 #[derive(Debug, Subcommand)]
 pub enum ImageCommands {
-    /// Pull an image from a registry.
+    /// Download an image from a container registry.
     Pull(pull::PullArgs),
 
-    /// List cached images.
+    /// List locally cached images.
     #[command(visible_alias = "ls")]
     List(ImageListArgs),
 
     /// Show detailed image information.
     Inspect(ImageInspectArgs),
 
-    /// Remove a cached image.
+    /// Delete one or more cached images.
     #[command(visible_alias = "rm")]
     Remove(ImageRemoveArgs),
 }
@@ -55,7 +55,7 @@ pub struct ImageListArgs {
 /// Arguments for `msb image inspect`.
 #[derive(Debug, Args)]
 pub struct ImageInspectArgs {
-    /// Image reference.
+    /// Image to inspect (e.g. python:3.12).
     pub reference: String,
 
     /// Output format (json).
@@ -66,11 +66,11 @@ pub struct ImageInspectArgs {
 /// Arguments for `msb image remove`.
 #[derive(Debug, Args)]
 pub struct ImageRemoveArgs {
-    /// Image reference(s) to remove.
+    /// Image(s) to remove.
     #[arg(required = true)]
     pub references: Vec<String>,
 
-    /// Force removal even if used by sandboxes.
+    /// Remove even if the image is used by existing sandboxes.
     #[arg(short, long)]
     pub force: bool,
 

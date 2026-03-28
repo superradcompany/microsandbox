@@ -1,6 +1,6 @@
 //! Per-domain certificate generation signed by the sandbox CA.
 
-use rcgen::CertificateParams;
+use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyUsagePurpose};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use time::{Duration, OffsetDateTime};
 
@@ -33,6 +33,13 @@ pub fn generate_domain_cert(domain: &str, ca: &CertAuthority, validity_hours: u6
     let mut dn = rcgen::DistinguishedName::new();
     dn.push(rcgen::DnType::CommonName, domain);
     params.distinguished_name = dn;
+    params.is_ca = IsCa::ExplicitNoCa;
+    params.use_authority_key_identifier_extension = true;
+    params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyEncipherment,
+    ];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
 
     // Set certificate validity period.
     let now = OffsetDateTime::now_utc();

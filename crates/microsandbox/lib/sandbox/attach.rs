@@ -24,6 +24,9 @@ pub struct AttachOptions {
     /// Working directory (default: sandbox's workdir).
     pub(crate) cwd: Option<String>,
 
+    /// Guest user override for the attached command.
+    pub(crate) user: Option<String>,
+
     /// Detach key sequence (default: `"ctrl-]"`).
     ///
     /// Uses Docker-style syntax: `"ctrl-<char>"` for control keys,
@@ -78,6 +81,12 @@ impl AttachOptionsBuilder {
     /// Override the working directory for the attached session.
     pub fn cwd(mut self, cwd: impl Into<String>) -> Self {
         self.options.cwd = Some(cwd.into());
+        self
+    }
+
+    /// Override the guest user for the attached session.
+    pub fn user(mut self, user: impl Into<String>) -> Self {
+        self.options.user = Some(user.into());
         self
     }
 

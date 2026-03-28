@@ -6,61 +6,30 @@ use clap::Args;
 use microsandbox::sandbox::Sandbox;
 use microsandbox::sandbox::{AttachOptionsBuilder, ExecOptionsBuilder, ExecOutput};
 
+use super::common::{SandboxOpts, apply_sandbox_opts};
 use crate::ui;
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Create and start a new sandbox.
+/// Create a sandbox from an image and run a command in it.
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// Image reference (OCI image, directory, or disk image).
+    /// Image to use (e.g. alpine, python:3.12, ./rootfs, ./disk.qcow2).
     pub image: String,
 
-    /// Sandbox name. Auto-generated if not provided.
-    #[arg(short, long)]
-    pub name: Option<String>,
-
-    /// Number of virtual CPUs.
-    #[arg(short = 'c', long)]
-    pub cpus: Option<u8>,
-
-    /// Memory limit (e.g., 512M, 1G).
-    #[arg(short, long)]
-    pub memory: Option<String>,
-
-    /// Volume mount (host:guest or name:guest). Can be repeated.
-    #[arg(short, long)]
-    pub volume: Vec<String>,
-
-    /// Working directory inside sandbox.
-    #[arg(short, long)]
-    pub workdir: Option<String>,
-
-    /// Default shell.
-    #[arg(long)]
-    pub shell: Option<String>,
-
-    /// Environment variable (KEY=value). Can be repeated.
-    #[arg(short, long)]
-    pub env: Vec<String>,
-
-    /// Destroy and recreate an existing sandbox with the same name.
-    #[arg(long)]
-    pub replace: bool,
-
-    /// Run in background (detach).
+    /// Start the sandbox in the background and print its name.
     #[arg(short, long)]
     pub detach: bool,
 
-    /// Suppress progress output.
-    #[arg(short, long)]
-    pub quiet: bool,
-
-    /// Command to execute (after --).
+    /// Command to run inside the sandbox (after --).
     #[arg(last = true)]
     pub command: Vec<String>,
+
+    /// Sandbox configuration options.
+    #[command(flatten)]
+    pub sandbox: SandboxOpts,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -69,11 +38,11 @@ pub struct RunArgs {
 
 /// Execute the `msb run` command.
 pub async fn run(args: RunArgs) -> anyhow::Result<()> {
-    let is_named = args.name.is_some();
-    let name = args.name.clone().unwrap_or_else(ui::generate_name);
+    let is_named = args.sandbox.name.is_some();
+    let name = args.sandbox.name.clone().unwrap_or_else(ui::generate_name);
 
     // Named sandboxes are reused if they already exist (unless --replace).
-    if is_named && !args.replace && Sandbox::get(&name).await.is_ok() {
+    if is_named && !args.sandbox.replace && Sandbox::get(&name).await.is_ok() {
         return run_existing(name, args).await;
     }
 
@@ -82,19 +51,13 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
 
 /// Run in an existing named sandbox — start if stopped, connect if running.
 async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
-    let has_resource_flags = args.cpus.is_some()
-        || args.memory.is_some()
-        || !args.volume.is_empty()
-        || args.workdir.is_some()
-        || args.shell.is_some()
-        || !args.env.is_empty();
-    if has_resource_flags {
+    if args.sandbox.has_creation_flags() {
         ui::warn(&format!(
             "sandbox '{name}' already exists; image and resource flags ignored (use --replace to recreate)"
         ));
     }
 
-    let sandbox = super::resolve_and_start(&name, args.quiet).await?;
+    let sandbox = super::resolve_and_start(&name, args.sandbox.quiet).await?;
 
     // Detach mode: ensure running and exit.
     if args.detach {
@@ -122,30 +85,8 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
 
 /// Create a new sandbox and run in it.
 async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<()> {
-    let mut builder = Sandbox::builder(&name).image(args.image.as_str());
-
-    if let Some(cpus) = args.cpus {
-        builder = builder.cpus(cpus);
-    }
-    if let Some(ref mem) = args.memory {
-        builder = builder.memory(ui::parse_size_mib(mem).map_err(anyhow::Error::msg)?);
-    }
-    if let Some(ref workdir) = args.workdir {
-        builder = builder.workdir(workdir);
-    }
-    if let Some(ref shell) = args.shell {
-        builder = builder.shell(shell);
-    }
-    if args.replace {
-        builder = builder.replace();
-    }
-    for env_str in &args.env {
-        let (k, v) = ui::parse_env(env_str).map_err(anyhow::Error::msg)?;
-        builder = builder.env(k, v);
-    }
-    for vol_str in &args.volume {
-        builder = super::create::apply_volume(builder, vol_str)?;
-    }
+    let builder = Sandbox::builder(&name).image(args.image.as_str());
+    let builder = apply_sandbox_opts(builder, &args.sandbox)?;
 
     // Create sandbox with pull progress — select attached vs detached mode.
     let (mut progress, task) = if args.detach {
@@ -154,7 +95,7 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
         builder.create_with_pull_progress()?
     };
 
-    let mut display = if args.quiet {
+    let mut display = if args.sandbox.quiet {
         ui::PullProgressDisplay::quiet(&args.image)
     } else {
         ui::PullProgressDisplay::new(&args.image)

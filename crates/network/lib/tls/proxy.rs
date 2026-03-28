@@ -220,6 +220,9 @@ async fn intercept_relay(
                                     }
                                     None => {
                                         // Violation: placeholder going to disallowed host.
+                                        if secrets_handler.terminates_on_violation() {
+                                            shared.trigger_termination();
+                                        }
                                         // Drop the connection.
                                         return Err(io::Error::new(
                                             io::ErrorKind::PermissionDenied,

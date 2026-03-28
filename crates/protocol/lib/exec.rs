@@ -24,6 +24,10 @@ pub struct ExecRequest {
     #[serde(default)]
     pub cwd: Option<String>,
 
+    /// Optional guest user override for the command.
+    #[serde(default)]
+    pub user: Option<String>,
+
     /// Whether to allocate a PTY for the command.
     #[serde(default)]
     pub tty: bool,

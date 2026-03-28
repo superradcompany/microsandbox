@@ -20,7 +20,7 @@ pub struct ListArgs {
     #[arg(long)]
     pub stopped: bool,
 
-    /// Output format.
+    /// Output format (json).
     #[arg(long, value_name = "FORMAT")]
     pub format: Option<String>,
 

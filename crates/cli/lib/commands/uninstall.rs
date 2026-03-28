@@ -12,10 +12,10 @@ use crate::ui;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Remove an installed sandbox alias.
+/// Remove an installed sandbox command.
 #[derive(Debug, Args)]
 pub struct UninstallArgs {
-    /// Name(s) of the alias(es) to remove.
+    /// Command(s) to remove.
     #[arg(required = true)]
     pub names: Vec<String>,
 }
