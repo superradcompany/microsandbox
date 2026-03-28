@@ -21,7 +21,7 @@ pub struct ListArgs {
     pub stopped: bool,
 
     /// Output format (json).
-    #[arg(long, value_name = "FORMAT")]
+    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
     pub format: Option<String>,
 
     /// Show only sandbox names.

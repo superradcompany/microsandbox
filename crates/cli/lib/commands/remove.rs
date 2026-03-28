@@ -17,7 +17,7 @@ pub struct RemoveArgs {
     pub names: Vec<String>,
 
     /// Stop the sandbox if running, then remove it.
-    #[arg(long)]
+    #[arg(short, long)]
     pub force: bool,
 
     /// Suppress progress output.

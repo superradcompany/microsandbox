@@ -3,8 +3,8 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use microsandbox_cli::{
     commands::{
-        create, exec, image, inspect, install, list, ps, pull, remove, run, self_cmd, shell, start,
-        stop, uninstall, volume,
+        create, exec, image, inspect, install, list, metrics, ps, pull, remove, run, self_cmd,
+        shell, start, stop, uninstall, volume,
     },
     log_args::{self, LogArgs},
     sandbox_cmd::{self, SandboxArgs},
@@ -52,8 +52,12 @@ enum Commands {
     #[command(visible_alias = "ls")]
     List(list::ListArgs),
 
-    /// Show running sandboxes.
-    Ps(ps::PsArgs),
+    /// Show sandbox status.
+    #[command(name = "status", visible_alias = "ps")]
+    Status(ps::PsArgs),
+
+    /// Show live metrics for a running sandbox.
+    Metrics(metrics::MetricsArgs),
 
     /// Remove one or more sandboxes.
     #[command(visible_alias = "rm")]
@@ -162,7 +166,8 @@ fn run_async_command(
             Commands::Start(args) => start::run(args).await.map_err(Into::into),
             Commands::Stop(args) => stop::run(args).await.map_err(Into::into),
             Commands::List(args) => list::run(args).await.map_err(Into::into),
-            Commands::Ps(args) => ps::run(args).await.map_err(Into::into),
+            Commands::Status(args) => ps::run(args).await.map_err(Into::into),
+            Commands::Metrics(args) => metrics::run(args).await.map_err(Into::into),
             Commands::Remove(args) => remove::run(args).await.map_err(Into::into),
             Commands::Exec(args) => exec::run(args).await.map_err(Into::into),
             Commands::Shell(args) => shell::run(args).await.map_err(Into::into),

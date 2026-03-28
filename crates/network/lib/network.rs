@@ -62,6 +62,12 @@ pub struct TerminationHandle {
     shared: Arc<SharedState>,
 }
 
+/// Read-only view of aggregate network byte counters.
+#[derive(Clone)]
+pub struct MetricsHandle {
+    shared: Arc<SharedState>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -228,12 +234,31 @@ impl SmoltcpNetwork {
             shared: self.shared.clone(),
         }
     }
+
+    /// Create a handle for reading aggregate network byte counters.
+    pub fn metrics_handle(&self) -> MetricsHandle {
+        MetricsHandle {
+            shared: self.shared.clone(),
+        }
+    }
 }
 
 impl TerminationHandle {
     /// Install the termination hook.
     pub fn set_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
         self.shared.set_termination_hook(hook);
+    }
+}
+
+impl MetricsHandle {
+    /// Total guest -> runtime bytes observed at the virtio-net boundary.
+    pub fn tx_bytes(&self) -> u64 {
+        self.shared.tx_bytes()
+    }
+
+    /// Total runtime -> guest bytes observed at the virtio-net boundary.
+    pub fn rx_bytes(&self) -> u64 {
+        self.shared.rx_bytes()
     }
 }
 

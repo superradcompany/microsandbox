@@ -85,6 +85,25 @@ impl SandboxHandle {
         self.updated_at
     }
 
+    /// Get the latest metrics snapshot for this sandbox.
+    pub async fn metrics(&self) -> MicrosandboxResult<super::SandboxMetrics> {
+        if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
+            return Err(crate::MicrosandboxError::Custom(format!(
+                "sandbox '{}' is not running (status: {:?})",
+                self.name, self.status
+            )));
+        }
+
+        let db =
+            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        super::metrics::metrics_for_sandbox(
+            db,
+            self.db_id,
+            u64::from(self.config()?.memory_mib) * 1024 * 1024,
+        )
+        .await
+    }
+
     /// Start this sandbox and return a live handle.
     ///
     /// Boots the VM using the persisted configuration and pinned rootfs state.

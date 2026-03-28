@@ -16,7 +16,7 @@ pub struct InspectArgs {
     pub name: String,
 
     /// Output format (json).
-    #[arg(long, value_name = "FORMAT")]
+    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
     pub format: Option<String>,
 }
 

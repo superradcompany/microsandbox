@@ -16,7 +16,7 @@ pub struct StopArgs {
     pub name: String,
 
     /// Immediately kill the sandbox without graceful shutdown.
-    #[arg(long)]
+    #[arg(short, long)]
     pub force: bool,
 
     /// Seconds to wait for graceful shutdown before force-killing.

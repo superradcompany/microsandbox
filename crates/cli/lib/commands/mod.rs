@@ -15,6 +15,7 @@ pub mod image;
 pub mod inspect;
 pub mod install;
 pub mod list;
+pub mod metrics;
 pub mod ps;
 pub mod pull;
 pub mod remove;

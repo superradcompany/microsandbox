@@ -42,7 +42,7 @@ pub enum SelfCommand {
 #[derive(Debug, Args)]
 pub struct SelfUpdateArgs {
     /// Re-download even if already on the latest version.
-    #[arg(long)]
+    #[arg(short, long)]
     pub force: bool,
 }
 
