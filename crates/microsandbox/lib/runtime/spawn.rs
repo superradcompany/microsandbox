@@ -399,6 +399,16 @@ fn sandbox_cli_args(
         )));
     }
 
+    // Hostname: explicit value or fall back to sandbox name.
+    {
+        let hostname = config.hostname.as_deref().unwrap_or(&config.name);
+        args.push(OsString::from("--env"));
+        args.push(OsString::from(format!(
+            "{}={hostname}",
+            microsandbox_protocol::ENV_HOSTNAME
+        )));
+    }
+
     if let Some(ref workdir) = config.workdir {
         args.push(OsString::from("--workdir"));
         args.push(OsString::from(workdir));

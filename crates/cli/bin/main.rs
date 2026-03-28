@@ -3,8 +3,8 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use microsandbox_cli::{
     commands::{
-        create, exec, image, inspect, install, list, metrics, ps, pull, remove, run, self_cmd,
-        shell, start, stop, uninstall, volume,
+        create, exec, image, inspect, install, list, metrics, ps, pull, registry, remove, run,
+        self_cmd, shell, start, stop, uninstall, volume,
     },
     log_args::{self, LogArgs},
     sandbox_cmd::{self, SandboxArgs},
@@ -74,6 +74,9 @@ enum Commands {
 
     /// Download an image from a registry.
     Pull(pull::PullArgs),
+
+    /// Manage registry credentials.
+    Registry(registry::RegistryArgs),
 
     /// List cached images (alias for `image ls`).
     #[command(hide = true)]
@@ -173,6 +176,7 @@ fn run_async_command(
             Commands::Shell(args) => shell::run(args).await.map_err(Into::into),
             Commands::Image(args) => image::run(args).await.map_err(Into::into),
             Commands::Pull(args) => image::run_pull(args).await.map_err(Into::into),
+            Commands::Registry(args) => registry::run(args).await.map_err(Into::into),
             Commands::Images(args) => image::run_list(args).await.map_err(Into::into),
             Commands::Rmi(args) => image::run_remove(args).await.map_err(Into::into),
             Commands::Inspect(args) => inspect::run(args).await.map_err(Into::into),

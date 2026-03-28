@@ -1220,8 +1220,10 @@ pub(super) fn pid_is_alive(pid: i32) -> bool {
 ///
 /// Auth resolution:
 /// 1. Explicit `RegistryAuth` from `SandboxBuilder::registry_auth()` (if provided)
-/// 2. Global config `registries.auth` matched by registry hostname
-/// 3. Anonymous fallback
+/// 2. OS keyring / credential store
+/// 3. Global config `registries.auth` matched by registry hostname
+/// 4. Docker credential store/config fallback
+/// 5. Anonymous fallback
 ///
 /// When `progress` is `Some`, uses `pull_with_sender()` to emit per-layer
 /// progress events. The caller must consume the corresponding `PullProgressHandle`.

@@ -52,7 +52,20 @@ msb rmi python:3.11
 Manage registry authentication.
 
 ```bash
-msb registry login ghcr.io
+msb registry login ghcr.io --username octocat
+printf '%s\n' "$GHCR_TOKEN" | msb registry login ghcr.io --username octocat --password-stdin
 msb registry logout ghcr.io
 msb registry ls
 ```
+
+`msb registry login` stores the secret in the OS credential store (for example Keychain, Credential Manager, or Secret Service) and writes only metadata to `~/.microsandbox/config.json`.
+
+For CI or other headless environments, configure `registries.auth` in `~/.microsandbox/config.json` with `password_env`. Advanced host setups can also use `secret_name` to point at a file-backed secret under `~/.microsandbox/secrets/registries/`.
+
+When pulling from a registry, microsandbox resolves auth in this order:
+
+1. Explicit SDK auth (`.registry_auth(...)`)
+2. OS credential store
+3. `registries.auth` config
+4. Docker credential store/config
+5. Anonymous

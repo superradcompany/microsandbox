@@ -139,6 +139,12 @@ impl SandboxBuilder {
         self
     }
 
+    /// Set the guest hostname. Defaults to the sandbox name.
+    pub fn hostname(mut self, hostname: impl Into<String>) -> Self {
+        self.config.hostname = Some(hostname.into());
+        self
+    }
+
     /// Set the user identity inside the sandbox (e.g., `"1000"`, `"appuser"`, `"1000:1000"`).
     pub fn user(mut self, user: impl Into<String>) -> Self {
         self.config.user = Some(user.into());

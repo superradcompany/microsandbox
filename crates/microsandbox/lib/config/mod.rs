@@ -29,6 +29,9 @@ const DEFAULT_MEMORY_MIB: u32 = 512;
 /// Default database max connections.
 pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 5;
 
+/// Service name for microsandbox-managed registry credentials in the OS keyring.
+const REGISTRY_KEYRING_SERVICE: &str = "dev.microsandbox.registry";
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -128,7 +131,8 @@ pub struct RegistriesConfig {
     /// {
     ///   "registries": {
     ///     "auth": {
-    ///       "ghcr.io": { "username": "user", "password_env": "GHCR_TOKEN" },
+    ///       "ghcr.io": { "username": "user", "store": "keyring" },
+    ///       "registry.example.com": { "username": "deploy", "password_env": "REGISTRY_TOKEN" },
     ///       "docker.io": { "username": "user", "secret_name": "dockerhub" }
     ///     }
     ///   }
@@ -143,11 +147,28 @@ pub struct RegistryAuthEntry {
     /// Registry username.
     pub username: String,
 
+    /// Credential source metadata for interactive local auth.
+    pub store: Option<RegistryCredentialStore>,
+
     /// Environment variable containing the password/token.
     pub password_env: Option<String>,
 
     /// Secret name — password is read from `{home}/secrets/registries/<secret_name>`.
     pub secret_name: Option<String>,
+}
+
+/// Credential source metadata for registry auth entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryCredentialStore {
+    /// Credential is stored in the OS keyring.
+    Keyring,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KeyringRegistryCredential {
+    username: String,
+    password: String,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -204,13 +225,22 @@ impl GlobalConfig {
 
     /// Resolve registry authentication for a given hostname.
     ///
-    /// Looks up `registries.auth` in global config, resolving credentials from
-    /// either `password_env` (environment variable) or `secret_name` (file-backed
-    /// secret in `{home}/secrets/registries/<name>`). If there is no explicit
-    /// Microsandbox config entry, falls back to Docker's credential store/config.
+    /// Resolution order:
+    /// 1. OS keyring (interactive CLI login)
+    /// 2. `registries.auth` in global config
+    /// 3. Docker credential store/config
+    /// 4. Anonymous
     ///
     /// Returns `Anonymous` if no entry matches.
     pub fn resolve_registry_auth(&self, hostname: &str) -> MicrosandboxResult<RegistryAuth> {
+        match lookup_registry_keyring_auth(hostname) {
+            Ok(Some(auth)) => return Ok(auth),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::debug!(registry = hostname, error = %error, "failed to resolve registry auth from OS keyring");
+            }
+        }
+
         if let Some(auth) = self.resolve_configured_registry_auth(hostname)? {
             return Ok(auth);
         }
@@ -231,6 +261,34 @@ impl GlobalConfig {
             None => return Ok(None),
         };
 
+        let source_count = usize::from(entry.store.is_some())
+            + usize::from(entry.password_env.is_some())
+            + usize::from(entry.secret_name.is_some());
+
+        if source_count == 0 {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "registry auth for {hostname}: entry has no credential source"
+            )));
+        }
+
+        if source_count > 1 {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "registry auth for {hostname}: entry defines multiple credential sources"
+            )));
+        }
+
+        if entry.store == Some(RegistryCredentialStore::Keyring) {
+            return match lookup_registry_keyring_auth(hostname) {
+                Ok(Some(auth)) => Ok(Some(auth)),
+                Ok(None) => Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "registry auth for {hostname}: OS keyring entry is missing"
+                ))),
+                Err(error) => Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "registry auth for {hostname}: failed to read OS keyring entry: {error}"
+                ))),
+            };
+        }
+
         let password = if let Some(ref env_var) = entry.password_env {
             std::env::var(env_var).map_err(|_| {
                 crate::MicrosandboxError::InvalidConfig(format!(
@@ -250,7 +308,7 @@ impl GlobalConfig {
                 .to_string()
         } else {
             return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                "registry auth for {hostname}: entry has neither `password_env` nor `secret_name`"
+                "registry auth for {hostname}: entry has no usable credential source"
             )));
         };
 
@@ -291,6 +349,18 @@ impl Default for SandboxDefaults {
 
 fn resolve_docker_registry_auth(hostname: &str) -> Option<RegistryAuth> {
     resolve_registry_auth_with_lookup(hostname, docker_credential::get_credential)
+}
+
+fn lookup_registry_keyring_auth(hostname: &str) -> Result<Option<RegistryAuth>, String> {
+    let payload = match load_keyring_registry_credential(hostname)? {
+        Some(payload) => payload,
+        None => return Ok(None),
+    };
+
+    Ok(Some(RegistryAuth::Basic {
+        username: payload.username,
+        password: payload.password,
+    }))
 }
 
 fn resolve_registry_auth_with_lookup<F>(hostname: &str, mut lookup: F) -> Option<RegistryAuth>
@@ -341,6 +411,66 @@ fn docker_credential_servers(hostname: &str) -> Vec<String> {
 /// Get the global configuration (lazy-loaded from disk on first call).
 pub fn config() -> &'static GlobalConfig {
     CONFIG.get_or_init(|| load_config().unwrap_or_default())
+}
+
+/// Resolve the path to the persisted global config file.
+pub fn config_path() -> PathBuf {
+    resolve_default_home().join(microsandbox_utils::CONFIG_FILENAME)
+}
+
+/// Load the persisted config file or return the default config if it does not exist.
+pub fn load_persisted_config_or_default() -> MicrosandboxResult<GlobalConfig> {
+    let path = config_path();
+    if !path.exists() {
+        return Ok(GlobalConfig::default());
+    }
+
+    read_config_from(&path)
+}
+
+/// Persist the provided global config to disk as pretty JSON.
+pub fn save_persisted_config(config: &GlobalConfig) -> MicrosandboxResult<()> {
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            crate::MicrosandboxError::Custom(format!(
+                "failed to create config directory `{}`: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    let content = serde_json::to_string_pretty(config).map_err(|e| {
+        crate::MicrosandboxError::Custom(format!("failed to serialize config: {e}"))
+    })?;
+
+    std::fs::write(&path, format!("{content}\n")).map_err(|e| {
+        crate::MicrosandboxError::Custom(format!(
+            "failed to write config `{}`: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(())
+}
+
+/// Store registry credentials in the OS keyring for interactive local use.
+pub fn set_registry_keyring_auth(
+    hostname: &str,
+    username: &str,
+    password: &str,
+) -> MicrosandboxResult<()> {
+    store_registry_keyring_auth(hostname, username, password)
+        .map_err(crate::MicrosandboxError::Custom)
+}
+
+/// Load registry credentials from the OS keyring, if present.
+pub fn get_registry_keyring_auth(hostname: &str) -> MicrosandboxResult<Option<RegistryAuth>> {
+    lookup_registry_keyring_auth(hostname).map_err(crate::MicrosandboxError::Custom)
+}
+
+/// Delete registry credentials from the OS keyring if they exist.
+pub fn delete_registry_keyring_auth(hostname: &str) -> MicrosandboxResult<()> {
+    remove_registry_keyring_auth(hostname).map_err(crate::MicrosandboxError::Custom)
 }
 
 /// Override the global configuration programmatically.
@@ -523,6 +653,19 @@ fn dedupe_strings(values: &mut Vec<String>) {
     *values = deduped;
 }
 
+fn read_config_from(path: &Path) -> MicrosandboxResult<GlobalConfig> {
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        crate::MicrosandboxError::Custom(format!("failed to read config `{}`: {e}", path.display()))
+    })?;
+
+    serde_json::from_str(&content).map_err(|e| {
+        crate::MicrosandboxError::InvalidConfig(format!(
+            "failed to parse config `{}`: {e}",
+            path.display()
+        ))
+    })
+}
+
 /// Resolve the default home directory (`~/.microsandbox`).
 fn resolve_default_home() -> PathBuf {
     dirs::home_dir()
@@ -532,7 +675,7 @@ fn resolve_default_home() -> PathBuf {
 
 /// Load config from the default config file path.
 fn load_config() -> Option<GlobalConfig> {
-    let path = resolve_default_home().join(microsandbox_utils::CONFIG_FILENAME);
+    let path = config_path();
     load_config_from(&path)
 }
 
@@ -540,6 +683,88 @@ fn load_config() -> Option<GlobalConfig> {
 fn load_config_from(path: &Path) -> Option<GlobalConfig> {
     let content = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn store_registry_keyring_auth(
+    hostname: &str,
+    username: &str,
+    password: &str,
+) -> Result<(), String> {
+    let entry = keyring::Entry::new(REGISTRY_KEYRING_SERVICE, hostname)
+        .map_err(|e| format!("failed to open OS credential store entry for `{hostname}`: {e}"))?;
+
+    let payload = serde_json::to_vec(&KeyringRegistryCredential {
+        username: username.to_string(),
+        password: password.to_string(),
+    })
+    .map_err(|e| format!("failed to serialize keyring credential for `{hostname}`: {e}"))?;
+
+    entry
+        .set_secret(&payload)
+        .map_err(|e| format!("failed to store OS credential for `{hostname}`: {e}"))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn store_registry_keyring_auth(
+    hostname: &str,
+    _username: &str,
+    _password: &str,
+) -> Result<(), String> {
+    Err(format!(
+        "secure OS credential storage is not supported on this platform for `{hostname}`"
+    ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn load_keyring_registry_credential(
+    hostname: &str,
+) -> Result<Option<KeyringRegistryCredential>, String> {
+    let entry = keyring::Entry::new(REGISTRY_KEYRING_SERVICE, hostname)
+        .map_err(|e| format!("failed to open OS credential store entry for `{hostname}`: {e}"))?;
+
+    let payload = match entry.get_secret() {
+        Ok(payload) => payload,
+        Err(keyring::Error::NoEntry) => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "failed to read OS credential for `{hostname}`: {error}"
+            ));
+        }
+    };
+
+    serde_json::from_slice(&payload)
+        .map(Some)
+        .map_err(|e| format!("failed to decode OS credential for `{hostname}`: {e}"))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn load_keyring_registry_credential(
+    hostname: &str,
+) -> Result<Option<KeyringRegistryCredential>, String> {
+    Err(format!(
+        "secure OS credential storage is not supported on this platform for `{hostname}`"
+    ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn remove_registry_keyring_auth(hostname: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(REGISTRY_KEYRING_SERVICE, hostname)
+        .map_err(|e| format!("failed to open OS credential store entry for `{hostname}`: {e}"))?;
+
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(format!(
+            "failed to delete OS credential for `{hostname}`: {error}"
+        )),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn remove_registry_keyring_auth(hostname: &str) -> Result<(), String> {
+    Err(format!(
+        "secure OS credential storage is not supported on this platform for `{hostname}`"
+    ))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -612,6 +837,56 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_registry_keyring_store() {
+        let json = r#"{
+            "registries": {
+                "auth": {
+                    "ghcr.io": {
+                        "username": "octocat",
+                        "store": "keyring"
+                    }
+                }
+            }
+        }"#;
+
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let entry = cfg.registries.auth.get("ghcr.io").unwrap();
+        assert_eq!(entry.username, "octocat");
+        assert_eq!(entry.store, Some(RegistryCredentialStore::Keyring));
+        assert!(entry.password_env.is_none());
+        assert!(entry.secret_name.is_none());
+    }
+
+    #[test]
+    fn test_save_and_read_persisted_config_roundtrip() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+
+        let cfg = GlobalConfig {
+            registries: RegistriesConfig {
+                auth: HashMap::from([(
+                    "ghcr.io".to_string(),
+                    RegistryAuthEntry {
+                        username: "octocat".to_string(),
+                        store: Some(RegistryCredentialStore::Keyring),
+                        password_env: None,
+                        secret_name: None,
+                    },
+                )]),
+            },
+            ..Default::default()
+        };
+
+        let content = serde_json::to_string_pretty(&cfg).unwrap();
+        std::fs::write(&path, content).unwrap();
+
+        let loaded = read_config_from(&path).unwrap();
+        let entry = loaded.registries.auth.get("ghcr.io").unwrap();
+        assert_eq!(entry.username, "octocat");
+        assert_eq!(entry.store, Some(RegistryCredentialStore::Keyring));
+    }
+
+    #[test]
     fn test_libkrunfw_candidates_for_build_msb() {
         let msb = PathBuf::from("/repo/build/msb");
         let paths = libkrunfw_candidates_from_msb(&msb, "libkrunfw.5.dylib");
@@ -666,6 +941,7 @@ mod tests {
                     "ghcr.io".to_string(),
                     RegistryAuthEntry {
                         username: "user".to_string(),
+                        store: None,
                         password_env: None,
                         secret_name: Some("ghcr-token".to_string()),
                     },
@@ -682,6 +958,31 @@ mod tests {
             }
             other => panic!("expected basic auth, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_resolve_configured_registry_auth_rejects_multiple_sources() {
+        let cfg = GlobalConfig {
+            registries: RegistriesConfig {
+                auth: HashMap::from([(
+                    "ghcr.io".to_string(),
+                    RegistryAuthEntry {
+                        username: "user".to_string(),
+                        store: Some(RegistryCredentialStore::Keyring),
+                        password_env: Some("GHCR_TOKEN".to_string()),
+                        secret_name: None,
+                    },
+                )]),
+            },
+            ..Default::default()
+        };
+
+        let error = cfg.resolve_configured_registry_auth("ghcr.io").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("entry defines multiple credential sources")
+        );
     }
 
     #[test]

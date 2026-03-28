@@ -49,22 +49,44 @@ struct NetIpv6Spec {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Sets the guest hostname from `MSB_HOSTNAME`.
+///
+/// Calls `sethostname()`, writes `/etc/hostname`, and provisions
+/// `/etc/hosts` with localhost aliases and the hostname entry.
+#[cfg(target_os = "linux")]
+pub fn apply_hostname() -> AgentdResult<()> {
+    let hostname = match std::env::var(microsandbox_protocol::ENV_HOSTNAME) {
+        Ok(v) if !v.is_empty() => Some(v),
+        _ => None,
+    };
+
+    linux::write_hosts_file(hostname.as_deref())?;
+
+    if let Some(ref name) = hostname {
+        linux::set_hostname(name)?;
+    }
+
+    Ok(())
+}
+
+/// No-op on non-Linux platforms.
+#[cfg(not(target_os = "linux"))]
+pub fn apply_hostname() -> AgentdResult<()> {
+    Ok(())
+}
+
 /// Applies network configuration from `MSB_NET*` environment variables.
 ///
-/// Always provisions loopback and a runtime `/etc/hosts`, even when no
-/// external network interface is requested. Missing `MSB_NET` is not an error
-/// (no networking requested). Parse failures and configuration failures are
-/// hard errors.
+/// Always provisions loopback, even when no external network interface is
+/// requested. Missing `MSB_NET` is not an error (no networking requested).
+/// Parse failures and configuration failures are hard errors.
 #[cfg(target_os = "linux")]
 pub fn apply_network_config() -> AgentdResult<()> {
     linux::configure_loopback()?;
 
     let val = match std::env::var(microsandbox_protocol::ENV_NET) {
         Ok(v) if !v.is_empty() => v,
-        _ => {
-            linux::write_hosts_file()?;
-            return Ok(());
-        }
+        _ => return Ok(()),
     };
 
     let net = parse_net(&val)?;
@@ -81,7 +103,6 @@ pub fn apply_network_config() -> AgentdResult<()> {
         _ => None,
     };
 
-    linux::write_hosts_file()?;
     linux::configure_interface(&net, ipv4.as_ref(), ipv6.as_ref())
 }
 
@@ -92,16 +113,26 @@ pub fn apply_network_config() -> AgentdResult<()> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn default_hosts_file_contents() -> String {
-    concat!(
-        "127.0.0.1\tlocalhost\n",
-        "::1\tlocalhost ip6-localhost ip6-loopback\n",
-        "fe00::\tip6-localnet\n",
-        "ff00::\tip6-mcastprefix\n",
-        "ff02::1\tip6-allnodes\n",
-        "ff02::2\tip6-allrouters\n",
-    )
-    .into()
+fn hosts_file_contents(hostname: Option<&str>) -> String {
+    let mut s = String::new();
+
+    // Localhost entries — always include hostname aliases when set.
+    if let Some(name) = hostname {
+        s.push_str(&format!("127.0.0.1\tlocalhost {name}\n"));
+        s.push_str(&format!(
+            "::1\tlocalhost ip6-localhost ip6-loopback {name}\n"
+        ));
+    } else {
+        s.push_str("127.0.0.1\tlocalhost\n");
+        s.push_str("::1\tlocalhost ip6-localhost ip6-loopback\n");
+    }
+
+    s.push_str("fe00::\tip6-localnet\n");
+    s.push_str("ff00::\tip6-mcastprefix\n");
+    s.push_str("ff02::1\tip6-allnodes\n");
+    s.push_str("ff02::2\tip6-allrouters\n");
+
+    s
 }
 
 #[cfg(target_os = "linux")]
@@ -679,13 +710,26 @@ mod linux {
         }
     }
 
-    // ── hosts + resolv.conf ────────────────────────────────────────────
+    // ── hostname + hosts + resolv.conf ──────────────────────────────────
 
-    /// Writes a deterministic runtime `/etc/hosts` with localhost aliases.
-    pub fn write_hosts_file() -> AgentdResult<()> {
+    /// Sets the kernel hostname via `sethostname()` and writes `/etc/hostname`.
+    pub fn set_hostname(name: &str) -> AgentdResult<()> {
+        nix::unistd::sethostname(name)
+            .map_err(|e| AgentdError::Init(format!("sethostname({name}): {e}")))?;
+
         std::fs::create_dir_all("/etc")
             .map_err(|e| AgentdError::Init(format!("failed to create /etc: {e}")))?;
-        std::fs::write("/etc/hosts", super::default_hosts_file_contents())
+        std::fs::write("/etc/hostname", format!("{name}\n"))
+            .map_err(|e| AgentdError::Init(format!("failed to write /etc/hostname: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Writes `/etc/hosts` with localhost aliases and an optional hostname entry.
+    pub fn write_hosts_file(hostname: Option<&str>) -> AgentdResult<()> {
+        std::fs::create_dir_all("/etc")
+            .map_err(|e| AgentdError::Init(format!("failed to create /etc: {e}")))?;
+        std::fs::write("/etc/hosts", super::hosts_file_contents(hostname))
             .map_err(|e| AgentdError::Init(format!("failed to write /etc/hosts: {e}")))?;
         Ok(())
     }
@@ -873,12 +917,27 @@ mod tests {
     }
 
     #[test]
-    fn test_default_hosts_file_contents_matches_localhost_baseline() {
+    fn test_hosts_file_without_hostname() {
         assert_eq!(
-            default_hosts_file_contents(),
+            hosts_file_contents(None),
             concat!(
                 "127.0.0.1\tlocalhost\n",
                 "::1\tlocalhost ip6-localhost ip6-loopback\n",
+                "fe00::\tip6-localnet\n",
+                "ff00::\tip6-mcastprefix\n",
+                "ff02::1\tip6-allnodes\n",
+                "ff02::2\tip6-allrouters\n",
+            )
+        );
+    }
+
+    #[test]
+    fn test_hosts_file_with_hostname() {
+        assert_eq!(
+            hosts_file_contents(Some("worker-01")),
+            concat!(
+                "127.0.0.1\tlocalhost worker-01\n",
+                "::1\tlocalhost ip6-localhost ip6-loopback worker-01\n",
                 "fe00::\tip6-localnet\n",
                 "ff00::\tip6-mcastprefix\n",
                 "ff02::1\tip6-allnodes\n",

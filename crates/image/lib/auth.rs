@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// Resolution chain (in [`Registry`](crate::Registry)):
 /// 1. Explicit [`RegistryAuth`] via [`Registry::with_auth()`](crate::Registry::with_auth)
-/// 2. Global config `registries.auth` (`password_env` or `secret_name`)
-/// 3. [`Anonymous`](Self::Anonymous) fallback
+/// 2. OS keyring / credential store (when configured by the caller)
+/// 3. Global config `registries.auth` (`store`, `password_env`, or `secret_name`)
+/// 4. Docker credential store/config fallback (when enabled by the caller)
+/// 5. [`Anonymous`](Self::Anonymous) fallback
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum RegistryAuth {
     /// No authentication. Works for public registries.

@@ -18,6 +18,7 @@ pub mod list;
 pub mod metrics;
 pub mod ps;
 pub mod pull;
+pub mod registry;
 pub mod remove;
 pub mod run;
 pub mod self_cmd;

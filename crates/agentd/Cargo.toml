@@ -49,6 +49,7 @@ libc.workspace = true
 microsandbox-protocol = { version = "0.3.2", path = "../protocol" }
 nix = { workspace = true, features = [
     "fs",
+    "hostname",
     "mount",
     "process",
     "signal",

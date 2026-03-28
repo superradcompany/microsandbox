@@ -104,6 +104,10 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub cmd: Option<Vec<String>>,
 
+    /// Guest hostname. Defaults to the sandbox name.
+    #[serde(default)]
+    pub hostname: Option<String>,
+
     /// User identity inside sandbox (inherited from image config, overridable).
     #[serde(default)]
     pub user: Option<String>,
@@ -247,6 +251,7 @@ impl Default for SandboxConfig {
             network: microsandbox_network::config::NetworkConfig::default(),
             secrets: SecretsConfig::default(),
             ssh: SshConfig::default(),
+            hostname: None,
             entrypoint: None,
             cmd: None,
             user: None,

@@ -35,6 +35,7 @@ microsandbox-runtime = { version = "0.3.2", path = "../runtime", default-feature
 microsandbox-utils = { version = "0.3.2", path = "../utils" }
 rand.workspace = true
 reqwest.workspace = true
+rpassword.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -119,6 +119,17 @@ pub const ENV_MOUNTS: &str = "MSB_MOUNTS";
 /// - `MSB_USER=1000:100` — default to UID 1000 and GID 100
 pub const ENV_USER: &str = "MSB_USER";
 
+/// Environment variable carrying the guest hostname for agentd.
+///
+/// Format: bare string
+///
+/// Example:
+/// - `MSB_HOSTNAME=worker-01`
+///
+/// agentd calls `sethostname()` and adds the name to `/etc/hosts`.
+/// Defaults to the sandbox name when not explicitly set.
+pub const ENV_HOSTNAME: &str = "MSB_HOSTNAME";
+
 /// Guest-side path to the CA certificate for TLS interception.
 ///
 /// Placed by the sandbox process via the runtime virtiofs mount.

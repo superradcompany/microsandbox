@@ -64,6 +64,10 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub entrypoint: Option<String>,
 
+    /// Set the guest hostname (defaults to sandbox name).
+    #[arg(short = 'H', long)]
+    pub hostname: Option<String>,
+
     /// Run commands as the specified user (e.g. nobody, 1000, 1000:1000).
     #[arg(short = 'u', long)]
     pub user: Option<String>,
@@ -175,6 +179,7 @@ impl SandboxOpts {
             || !self.tmpfs.is_empty()
             || !self.script.is_empty()
             || self.entrypoint.is_some()
+            || self.hostname.is_some()
             || self.user.is_some()
             || self.pull.is_some()
             || self.log_level.is_some()
@@ -260,6 +265,9 @@ pub fn apply_sandbox_opts(
     // --- Image/Runtime overrides ---
     if let Some(ref ep) = opts.entrypoint {
         builder = builder.entrypoint(vec![ep.clone()]);
+    }
+    if let Some(ref hostname) = opts.hostname {
+        builder = builder.hostname(hostname);
     }
     if let Some(ref user) = opts.user {
         builder = builder.user(user);
