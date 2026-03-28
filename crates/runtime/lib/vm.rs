@@ -241,7 +241,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_run_id = run_db_id;
     let exit_reason_for_observer = Arc::clone(&exit_reason);
     let exit_sock_path = config.agent_sock_path.clone();
-    let (vm, network_termination_handle) = match build_vm(
+    let (vm, _network_termination_handle) = match build_vm(
         &config,
         console_backend,
         move |exit_code: i32| {
@@ -302,7 +302,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_handle = vm.exit_handle();
 
     #[cfg(feature = "net")]
-    if let Some(network_termination_handle) = network_termination_handle {
+    if let Some(network_termination_handle) = _network_termination_handle {
         let network_exit_handle = exit_handle.clone();
         let network_reason = Arc::clone(&exit_reason);
         network_termination_handle.set_hook(Arc::new(move || {
@@ -496,7 +496,6 @@ fn build_vm(
         }
     }
 
-    #[cfg(feature = "net")]
     let mut network_termination_handle = None;
 
     // Network.
@@ -563,11 +562,7 @@ fn build_vm(
         .build()
         .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))?;
 
-    Ok((
-        vm,
-        #[cfg(feature = "net")]
-        network_termination_handle,
-    ))
+    Ok((vm, network_termination_handle))
 }
 
 //--------------------------------------------------------------------------------------------------
