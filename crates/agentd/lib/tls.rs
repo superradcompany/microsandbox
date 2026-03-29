@@ -8,7 +8,6 @@
 //! 3. Sets environment variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, etc.)
 //!    so that common runtimes trust the microsandbox CA.
 
-#[cfg(target_os = "linux")]
 use std::path::Path;
 
 use crate::AgentdResult;
@@ -20,7 +19,6 @@ use crate::AgentdResult;
 /// Distro-specific CA trust directories. If the directory exists, the CA cert
 /// is copied into it. This covers programs that scan the directory rather than
 /// reading the bundle file directly.
-#[cfg(target_os = "linux")]
 const CA_TRUST_DIRS: &[&str] = &[
     "/usr/local/share/ca-certificates", // Debian, Ubuntu, Alpine
     "/etc/pki/ca-trust/source/anchors", // RHEL, Fedora, CentOS
@@ -28,7 +26,6 @@ const CA_TRUST_DIRS: &[&str] = &[
 
 /// Known CA bundle files, tried in order. The CA PEM is appended to the first
 /// existing bundle.
-#[cfg(target_os = "linux")]
 const CA_BUNDLE_PATHS: &[&str] = &[
     "/etc/ssl/certs/ca-certificates.crt", // Debian, Ubuntu, Alpine
     "/etc/pki/tls/certs/ca-bundle.crt",   // RHEL, Fedora, CentOS
@@ -36,11 +33,9 @@ const CA_BUNDLE_PATHS: &[&str] = &[
 ];
 
 /// Fallback path to create if no existing bundle is found.
-#[cfg(target_os = "linux")]
 const FALLBACK_BUNDLE_PATH: &str = "/etc/ssl/certs/ca-certificates.crt";
 
 /// Filename for the CA cert when copied to distro trust directories.
-#[cfg(target_os = "linux")]
 const CA_CERT_FILENAME: &str = "microsandbox-ca.pem";
 
 //--------------------------------------------------------------------------------------------------
@@ -50,7 +45,6 @@ const CA_CERT_FILENAME: &str = "microsandbox-ca.pem";
 /// Installs the microsandbox CA certificate into the guest trust store.
 ///
 /// No-op if `/.msb/tls/ca.pem` does not exist (TLS interception disabled).
-#[cfg(target_os = "linux")]
 pub fn install_ca_cert() -> AgentdResult<()> {
     let ca_path = Path::new(microsandbox_protocol::GUEST_TLS_CA_PATH);
     if !ca_path.exists() {
@@ -86,16 +80,9 @@ pub fn install_ca_cert() -> AgentdResult<()> {
     Ok(())
 }
 
-/// No-op on non-Linux platforms.
-#[cfg(not(target_os = "linux"))]
-pub fn install_ca_cert() -> AgentdResult<()> {
-    Ok(())
-}
-
 /// Copies the CA PEM to distro-specific trust directories that exist.
 ///
 /// Best-effort: logs warnings on failure but does not abort.
-#[cfg(target_os = "linux")]
 fn copy_to_trust_dirs(ca_pem: &str) {
     for &dir in CA_TRUST_DIRS {
         let dir_path = Path::new(dir);
@@ -112,7 +99,6 @@ fn copy_to_trust_dirs(ca_pem: &str) {
 /// Appends the CA PEM to the first found CA bundle, or creates a fallback.
 ///
 /// Returns the path to the bundle that was modified.
-#[cfg(target_os = "linux")]
 fn append_to_bundle(ca_pem: &str) -> AgentdResult<String> {
     for &path in CA_BUNDLE_PATHS {
         if Path::new(path).exists() {

@@ -13,14 +13,16 @@ use smoltcp::time::Instant;
 use std::sync::atomic::Ordering;
 
 use smoltcp::wire::{
-    EthernetAddress, EthernetFrame, EthernetProtocol, HardwareAddress, IpAddress, IpCidr,
-    IpProtocol, Ipv4Packet, Ipv6Packet, TcpPacket, UdpPacket,
+    EthernetAddress, EthernetFrame, EthernetProtocol, HardwareAddress, Icmpv4Packet, Icmpv4Repr,
+    Icmpv6Packet, Icmpv6Repr, IpAddress, IpCidr, IpProtocol, Ipv4Packet, Ipv4Repr, Ipv6Packet,
+    Ipv6Repr, TcpPacket, UdpPacket,
 };
 
 use crate::config::{DnsConfig, PublishedPort};
 use crate::conn::ConnectionTracker;
 use crate::device::SmoltcpDevice;
 use crate::dns::interceptor::DnsInterceptor;
+use crate::icmp_relay::IcmpRelay;
 use crate::policy::{NetworkPolicy, Protocol};
 use crate::proxy;
 use crate::publisher::PortPublisher;
@@ -172,6 +174,12 @@ pub fn smoltcp_poll_loop(
         config.guest_mac,
         tokio_handle.clone(),
     );
+    let icmp_relay = IcmpRelay::new(
+        shared.clone(),
+        config.gateway_mac,
+        config.guest_mac,
+        tokio_handle.clone(),
+    );
 
     // Rate-limit cleanup operations: run at most once per second.
     let mut last_cleanup = std::time::Instant::now();
@@ -195,6 +203,16 @@ pub fn smoltcp_poll_loop(
 
         // ── Phase 1: Drain all guest frames with pre-inspection ──────────
         while let Some(frame) = device.stage_next_frame() {
+            if handle_gateway_icmp_echo(frame, &config, &shared) {
+                device.drop_staged_frame();
+                continue;
+            }
+
+            if icmp_relay.relay_outbound_if_echo(frame, &config, &network_policy) {
+                device.drop_staged_frame();
+                continue;
+            }
+
             match classify_frame(frame) {
                 FrameAction::TcpSyn { src, dst } => {
                     // Policy check before socket creation.
@@ -359,6 +377,152 @@ fn smoltcp_now() -> Instant {
     Instant::from_millis(elapsed.as_millis() as i64)
 }
 
+/// Reply locally to ICMP echo requests aimed at the sandbox gateway.
+///
+/// `any_ip` is required so smoltcp accepts guest traffic for arbitrary remote
+/// destinations, but that would make smoltcp's automatic ICMP echo replies
+/// spoof remote hosts. Handle only the real gateway IPs here and leave all
+/// other ICMP traffic untouched.
+fn handle_gateway_icmp_echo(frame: &[u8], config: &PollLoopConfig, shared: &SharedState) -> bool {
+    let Ok(eth) = EthernetFrame::new_checked(frame) else {
+        return false;
+    };
+
+    let reply = match eth.ethertype() {
+        EthernetProtocol::Ipv4 => gateway_icmpv4_echo_reply(&eth, config),
+        EthernetProtocol::Ipv6 => gateway_icmpv6_echo_reply(&eth, config),
+        _ => None,
+    };
+    let Some(reply) = reply else {
+        return false;
+    };
+
+    let reply_len = reply.len();
+    if shared.rx_ring.push(reply).is_ok() {
+        shared.add_rx_bytes(reply_len);
+        shared.rx_wake.wake();
+    }
+
+    true
+}
+
+/// Build an IPv4 ICMP echo reply when the guest pings the gateway IPv4.
+fn gateway_icmpv4_echo_reply(
+    eth: &EthernetFrame<&[u8]>,
+    config: &PollLoopConfig,
+) -> Option<Vec<u8>> {
+    let ipv4 = Ipv4Packet::new_checked(eth.payload()).ok()?;
+    if ipv4.dst_addr() != config.gateway_ipv4 || ipv4.next_header() != IpProtocol::Icmp {
+        return None;
+    }
+
+    let icmp = Icmpv4Packet::new_checked(ipv4.payload()).ok()?;
+    let Icmpv4Repr::EchoRequest {
+        ident,
+        seq_no,
+        data,
+    } = Icmpv4Repr::parse(&icmp, &smoltcp::phy::ChecksumCapabilities::default()).ok()?
+    else {
+        return None;
+    };
+
+    let ipv4_repr = Ipv4Repr {
+        src_addr: config.gateway_ipv4,
+        dst_addr: ipv4.src_addr(),
+        next_header: IpProtocol::Icmp,
+        payload_len: 8 + data.len(),
+        hop_limit: 64,
+    };
+    let icmp_repr = Icmpv4Repr::EchoReply {
+        ident,
+        seq_no,
+        data,
+    };
+    let mut reply = vec![0u8; 14 + ipv4_repr.buffer_len() + icmp_repr.buffer_len()];
+
+    let mut reply_eth = EthernetFrame::new_unchecked(&mut reply);
+    reply_eth.set_src_addr(EthernetAddress(config.gateway_mac));
+    reply_eth.set_dst_addr(eth.src_addr());
+    reply_eth.set_ethertype(EthernetProtocol::Ipv4);
+
+    ipv4_repr.emit(
+        &mut Ipv4Packet::new_unchecked(&mut reply[14..34]),
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    );
+    icmp_repr.emit(
+        &mut Icmpv4Packet::new_unchecked(&mut reply[34..]),
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    );
+
+    Some(reply)
+}
+
+/// Build an IPv6 ICMP echo reply when the guest pings the gateway IPv6.
+fn gateway_icmpv6_echo_reply(
+    eth: &EthernetFrame<&[u8]>,
+    config: &PollLoopConfig,
+) -> Option<Vec<u8>> {
+    let ipv6 = Ipv6Packet::new_checked(eth.payload()).ok()?;
+    if ipv6.dst_addr() != config.gateway_ipv6 || ipv6.next_header() != IpProtocol::Icmpv6 {
+        return None;
+    }
+
+    let icmp = Icmpv6Packet::new_checked(ipv6.payload()).ok()?;
+    let Icmpv6Repr::EchoRequest {
+        ident,
+        seq_no,
+        data,
+    } = Icmpv6Repr::parse(
+        &ipv6.src_addr(),
+        &ipv6.dst_addr(),
+        &icmp,
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    )
+    .ok()?
+    else {
+        return None;
+    };
+
+    let ipv6_repr = Ipv6Repr {
+        src_addr: config.gateway_ipv6,
+        dst_addr: ipv6.src_addr(),
+        next_header: IpProtocol::Icmpv6,
+        payload_len: icmp_repr_buffer_len_v6(data),
+        hop_limit: 64,
+    };
+    let icmp_repr = Icmpv6Repr::EchoReply {
+        ident,
+        seq_no,
+        data,
+    };
+    let ipv6_hdr_len = 40;
+    let mut reply = vec![0u8; 14 + ipv6_hdr_len + icmp_repr.buffer_len()];
+
+    let mut reply_eth = EthernetFrame::new_unchecked(&mut reply);
+    reply_eth.set_src_addr(EthernetAddress(config.gateway_mac));
+    reply_eth.set_dst_addr(eth.src_addr());
+    reply_eth.set_ethertype(EthernetProtocol::Ipv6);
+
+    ipv6_repr.emit(&mut Ipv6Packet::new_unchecked(&mut reply[14..54]));
+    icmp_repr.emit(
+        &config.gateway_ipv6,
+        &ipv6.src_addr(),
+        &mut Icmpv6Packet::new_unchecked(&mut reply[54..]),
+        &smoltcp::phy::ChecksumCapabilities::default(),
+    );
+
+    Some(reply)
+}
+
+fn icmp_repr_buffer_len_v6(data: &[u8]) -> usize {
+    Icmpv6Repr::EchoReply {
+        ident: 0,
+        seq_no: 0,
+        data,
+    }
+    .buffer_len()
+}
+
 /// Classify an IPv4 packet payload (after stripping the Ethernet header).
 fn classify_ipv4(payload: &[u8]) -> FrameAction {
     let Ok(ipv4) = Ipv4Packet::new_checked(payload) else {
@@ -430,6 +594,15 @@ fn classify_transport(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use smoltcp::phy::ChecksumCapabilities;
+    use smoltcp::wire::{
+        ArpOperation, ArpPacket, ArpRepr, EthernetRepr, Icmpv4Packet, Icmpv4Repr, Ipv4Repr,
+    };
+
+    use crate::device::SmoltcpDevice;
+    use crate::shared::SharedState;
 
     /// Build a minimal Ethernet + IPv4 + TCP SYN frame.
     fn build_tcp_syn_frame(
@@ -493,6 +666,75 @@ mod tests {
         frame
     }
 
+    /// Build a minimal Ethernet + IPv4 + ICMP echo request frame.
+    fn build_icmpv4_echo_frame(
+        src_mac: [u8; 6],
+        dst_mac: [u8; 6],
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        ident: u16,
+        seq_no: u16,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let ipv4_repr = Ipv4Repr {
+            src_addr: Ipv4Addr::from(src_ip).into(),
+            dst_addr: Ipv4Addr::from(dst_ip).into(),
+            next_header: IpProtocol::Icmp,
+            payload_len: 8 + data.len(),
+            hop_limit: 64,
+        };
+        let icmp_repr = Icmpv4Repr::EchoRequest {
+            ident,
+            seq_no,
+            data,
+        };
+        let frame_len = 14 + ipv4_repr.buffer_len() + icmp_repr.buffer_len();
+        let mut frame = vec![0u8; frame_len];
+
+        let mut eth_frame = EthernetFrame::new_unchecked(&mut frame);
+        EthernetRepr {
+            src_addr: EthernetAddress(src_mac),
+            dst_addr: EthernetAddress(dst_mac),
+            ethertype: EthernetProtocol::Ipv4,
+        }
+        .emit(&mut eth_frame);
+
+        ipv4_repr.emit(
+            &mut Ipv4Packet::new_unchecked(&mut frame[14..34]),
+            &ChecksumCapabilities::default(),
+        );
+        icmp_repr.emit(
+            &mut Icmpv4Packet::new_unchecked(&mut frame[34..]),
+            &ChecksumCapabilities::default(),
+        );
+
+        frame
+    }
+
+    /// Build a minimal Ethernet + ARP request frame.
+    fn build_arp_request_frame(src_mac: [u8; 6], src_ip: [u8; 4], target_ip: [u8; 4]) -> Vec<u8> {
+        let mut frame = vec![0u8; 14 + 28];
+
+        let mut eth_frame = EthernetFrame::new_unchecked(&mut frame);
+        EthernetRepr {
+            src_addr: EthernetAddress(src_mac),
+            dst_addr: EthernetAddress([0xff; 6]),
+            ethertype: EthernetProtocol::Arp,
+        }
+        .emit(&mut eth_frame);
+
+        ArpRepr::EthernetIpv4 {
+            operation: ArpOperation::Request,
+            source_hardware_addr: EthernetAddress(src_mac),
+            source_protocol_addr: Ipv4Addr::from(src_ip).into(),
+            target_hardware_addr: EthernetAddress([0x00; 6]),
+            target_protocol_addr: Ipv4Addr::from(target_ip).into(),
+        }
+        .emit(&mut ArpPacket::new_unchecked(&mut frame[14..]));
+
+        frame
+    }
+
     #[test]
     fn classify_tcp_syn() {
         let frame = build_tcp_syn_frame([10, 0, 0, 2], [93, 184, 216, 34], 54321, 443);
@@ -549,5 +791,182 @@ mod tests {
     fn classify_garbage_is_passthrough() {
         assert!(matches!(classify_frame(&[]), FrameAction::Passthrough));
         assert!(matches!(classify_frame(&[0; 5]), FrameAction::Passthrough));
+    }
+
+    #[test]
+    fn gateway_replies_to_icmp_echo_requests() {
+        fn drive_one_frame(
+            device: &mut SmoltcpDevice,
+            iface: &mut Interface,
+            sockets: &mut SocketSet<'_>,
+            shared: &Arc<SharedState>,
+            poll_config: &PollLoopConfig,
+            now: Instant,
+        ) {
+            let frame = device.stage_next_frame().expect("expected staged frame");
+            if handle_gateway_icmp_echo(frame, poll_config, shared) {
+                device.drop_staged_frame();
+                return;
+            }
+            let _ = iface.poll_ingress_single(now, device, sockets);
+            let _ = iface.poll_egress(now, device, sockets);
+        }
+
+        let shared = Arc::new(SharedState::new(4));
+        let poll_config = PollLoopConfig {
+            gateway_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+            guest_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
+            gateway_ipv4: Ipv4Addr::new(100, 96, 0, 1),
+            guest_ipv4: Ipv4Addr::new(100, 96, 0, 2),
+            gateway_ipv6: Ipv6Addr::LOCALHOST,
+            mtu: 1500,
+        };
+        let mut device = SmoltcpDevice::new(shared.clone(), poll_config.mtu);
+        let mut iface = create_interface(&mut device, &poll_config);
+        let mut sockets = SocketSet::new(vec![]);
+        let now = smoltcp_now();
+
+        // Mirror the real guest flow: resolve the gateway MAC before sending
+        // the ICMP echo request.
+        shared
+            .tx_ring
+            .push(build_arp_request_frame(
+                poll_config.guest_mac,
+                poll_config.guest_ipv4.octets(),
+                poll_config.gateway_ipv4.octets(),
+            ))
+            .unwrap();
+        shared
+            .tx_ring
+            .push(build_icmpv4_echo_frame(
+                poll_config.guest_mac,
+                poll_config.gateway_mac,
+                poll_config.guest_ipv4.octets(),
+                poll_config.gateway_ipv4.octets(),
+                0x1234,
+                0xABCD,
+                b"ping",
+            ))
+            .unwrap();
+
+        drive_one_frame(
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            &poll_config,
+            now,
+        );
+        let _ = shared.rx_ring.pop().expect("expected ARP reply");
+
+        drive_one_frame(
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            &poll_config,
+            now,
+        );
+
+        let reply = shared.rx_ring.pop().expect("expected ICMP echo reply");
+        let eth = EthernetFrame::new_checked(&reply).expect("valid ethernet frame");
+        assert_eq!(eth.src_addr(), EthernetAddress(poll_config.gateway_mac));
+        assert_eq!(eth.dst_addr(), EthernetAddress(poll_config.guest_mac));
+        assert_eq!(eth.ethertype(), EthernetProtocol::Ipv4);
+
+        let ipv4 = Ipv4Packet::new_checked(eth.payload()).expect("valid IPv4 packet");
+        assert_eq!(Ipv4Addr::from(ipv4.src_addr()), poll_config.gateway_ipv4);
+        assert_eq!(Ipv4Addr::from(ipv4.dst_addr()), poll_config.guest_ipv4);
+        assert_eq!(ipv4.next_header(), IpProtocol::Icmp);
+
+        let icmp = Icmpv4Packet::new_checked(ipv4.payload()).expect("valid ICMP packet");
+        let icmp_repr = Icmpv4Repr::parse(&icmp, &ChecksumCapabilities::default())
+            .expect("valid ICMP echo reply");
+        assert_eq!(
+            icmp_repr,
+            Icmpv4Repr::EchoReply {
+                ident: 0x1234,
+                seq_no: 0xABCD,
+                data: b"ping",
+            }
+        );
+    }
+
+    #[test]
+    fn external_icmp_echo_requests_are_not_answered_locally() {
+        fn drive_one_frame(
+            device: &mut SmoltcpDevice,
+            iface: &mut Interface,
+            sockets: &mut SocketSet<'_>,
+            shared: &Arc<SharedState>,
+            poll_config: &PollLoopConfig,
+            now: Instant,
+        ) {
+            let frame = device.stage_next_frame().expect("expected staged frame");
+            if handle_gateway_icmp_echo(frame, poll_config, shared) {
+                device.drop_staged_frame();
+                return;
+            }
+            let _ = iface.poll_ingress_single(now, device, sockets);
+            let _ = iface.poll_egress(now, device, sockets);
+        }
+
+        let shared = Arc::new(SharedState::new(4));
+        let poll_config = PollLoopConfig {
+            gateway_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+            guest_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
+            gateway_ipv4: Ipv4Addr::new(100, 96, 0, 1),
+            guest_ipv4: Ipv4Addr::new(100, 96, 0, 2),
+            gateway_ipv6: Ipv6Addr::LOCALHOST,
+            mtu: 1500,
+        };
+        let mut device = SmoltcpDevice::new(shared.clone(), poll_config.mtu);
+        let mut iface = create_interface(&mut device, &poll_config);
+        let mut sockets = SocketSet::new(vec![]);
+        let now = smoltcp_now();
+
+        shared
+            .tx_ring
+            .push(build_arp_request_frame(
+                poll_config.guest_mac,
+                poll_config.guest_ipv4.octets(),
+                poll_config.gateway_ipv4.octets(),
+            ))
+            .unwrap();
+        shared
+            .tx_ring
+            .push(build_icmpv4_echo_frame(
+                poll_config.guest_mac,
+                poll_config.gateway_mac,
+                poll_config.guest_ipv4.octets(),
+                [142, 251, 216, 46],
+                0x1234,
+                0xABCD,
+                b"ping",
+            ))
+            .unwrap();
+
+        drive_one_frame(
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            &poll_config,
+            now,
+        );
+        let _ = shared.rx_ring.pop().expect("expected ARP reply");
+
+        drive_one_frame(
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &shared,
+            &poll_config,
+            now,
+        );
+        assert!(
+            shared.rx_ring.pop().is_none(),
+            "external ICMP should not be answered locally"
+        );
     }
 }

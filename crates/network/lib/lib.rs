@@ -7,6 +7,7 @@ pub mod config;
 pub mod conn;
 pub mod device;
 pub mod dns;
+pub mod icmp_relay;
 pub mod network;
 pub mod policy;
 pub mod proxy;

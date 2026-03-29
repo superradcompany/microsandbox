@@ -1,7 +1,4 @@
 //! PID 1 init: mount filesystems, apply tmpfs mounts, prepare runtime directories.
-//!
-//! This module only performs real work on Linux. On other platforms, `init()` is a no-op
-//! to allow the crate to compile for development purposes.
 
 use crate::error::{AgentdError, AgentdResult};
 
@@ -11,7 +8,6 @@ use crate::error::{AgentdError, AgentdResult};
 
 /// Parsed tmpfs mount specification.
 #[derive(Debug)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct TmpfsSpec<'a> {
     path: &'a str,
     size_mib: Option<u32>,
@@ -21,7 +17,6 @@ struct TmpfsSpec<'a> {
 
 /// Parsed block-device root specification.
 #[derive(Debug)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct BlockRootSpec<'a> {
     device: &'a str,
     fstype: Option<&'a str>,
@@ -29,7 +24,6 @@ struct BlockRootSpec<'a> {
 
 /// Parsed virtiofs volume mount specification.
 #[derive(Debug)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct VolumeMountSpec<'a> {
     tag: &'a str,
     guest_path: &'a str,
@@ -45,7 +39,6 @@ struct VolumeMountSpec<'a> {
 /// Mounts essential filesystems, applies volume and tmpfs mounts from
 /// `MSB_MOUNTS` / `MSB_TMPFS` env vars, configures networking from
 /// `MSB_NET*` env vars, and prepares runtime directories.
-#[cfg(target_os = "linux")]
 pub fn init() -> AgentdResult<()> {
     linux::mount_filesystems()?;
     linux::mount_runtime()?;
@@ -61,16 +54,9 @@ pub fn init() -> AgentdResult<()> {
     Ok(())
 }
 
-/// No-op on non-Linux platforms.
-#[cfg(not(target_os = "linux"))]
-pub fn init() -> AgentdResult<()> {
-    Ok(())
-}
-
 /// Parses a single tmpfs entry: `path[,size=N][,mode=N][,noexec]`
 ///
 /// Mode is parsed as octal (e.g. `mode=1777`).
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec<'_>> {
     let mut parts = entry.split(',');
     let path = parts.next().unwrap(); // always at least one element
@@ -109,7 +95,6 @@ fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec<'_>> {
 }
 
 /// Parses a block-device root specification: `device[,fstype=TYPE]`
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec<'_>> {
     let mut parts = val.split(',');
     let device = parts.next().unwrap();
@@ -139,7 +124,6 @@ fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec<'_>> {
 }
 
 /// Parses a single virtiofs volume mount entry: `tag:guest_path[:ro]`
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_volume_mount_entry(entry: &str) -> AgentdResult<VolumeMountSpec<'_>> {
     let parts: Vec<&str> = entry.split(':').collect();
     if parts.len() < 2 {
@@ -182,7 +166,6 @@ fn parse_volume_mount_entry(entry: &str) -> AgentdResult<VolumeMountSpec<'_>> {
     })
 }
 
-#[cfg(any(target_os = "linux", test))]
 fn ensure_scripts_profile_block(profile: &str) -> String {
     const START_MARKER: &str = "# >>> microsandbox scripts path >>>";
     const END_MARKER: &str = "# <<< microsandbox scripts path <<<";
@@ -204,7 +187,6 @@ fn ensure_scripts_profile_block(profile: &str) -> String {
 // Modules
 //--------------------------------------------------------------------------------------------------
 
-#[cfg(target_os = "linux")]
 mod linux {
     use std::{
         os::unix::fs::{PermissionsExt, symlink},
