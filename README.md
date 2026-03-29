@@ -10,8 +10,11 @@
     </a>
 </div>
 
-<h3 align="center"><b>——&nbsp;&nbsp;&nbsp;Every Agent Deserves its Own Computer&nbsp;&nbsp;&nbsp;——</b></h3>
+<br />
 
+<div align="center"><b>——&nbsp;&nbsp;&nbsp;every agent deserves its own computer&nbsp;&nbsp;&nbsp;——</b></div>
+
+<br />
 <br />
 
 <div align='center'>
@@ -23,6 +26,8 @@
     <img src="https://img.shields.io/badge/follow on X-%2300acee.svg?color=000000&style=for-the-badge&logo=X&logoColor=white" alt=discourse style="margin-bottom: 5px;"/>
   </a>
 </div>
+
+<br />
 
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package/ffffff" alt="package-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package/000000" alt="package"></a>&nbsp;&nbsp;Microsandbox
 
@@ -286,6 +291,22 @@ msb rm my-app
 msb pull python:3.12           # Pull an image
 msb image ls                   # List cached images
 msb image rm python:3.12       # Remove an image
+```
+
+#### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install & Uninstall Sandboxes
+
+Install a sandbox as a regular command on your system. The sandbox persists across invocations, so installed packages and files carry over between sessions:
+
+```sh
+msb install python               # Install as 'python' command
+python                           # Opens Python REPL in a microVM
+```
+
+```sh
+msb install --name nodebox node  # Custom command name
+msb install --tmp alpine         # Ephemeral: fresh sandbox every run
+msb install --list               # List installed commands
+msb uninstall python             # Remove an installed command
 ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/database/A770EF">&nbsp;&nbsp;Volume Management
