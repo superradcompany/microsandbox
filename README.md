@@ -1,12 +1,12 @@
 <div align="center">
     <a href="./#gh-dark-mode-only" target="_blank" align="center">
-        <img width="35%" src="./assets/microsandbox-gh-banner-light.png" alt="microsandbox-banner-xl-dark">
+        <img width="35%" src="./assets/microsandbox-gh-banner-dark.png" alt="microsandbox-banner-xl-dark">
     </a>
 </div>
 
 <div align="center">
     <a href="./#gh-light-mode-only" target="_blank">
-        <img width="35%" src="./assets/microsandbox-gh-banner-dark.png" alt="microsandbox-banner-xl">
+        <img width="35%" src="./assets/microsandbox-gh-banner-light.png" alt="microsandbox-banner-xl">
     </a>
 </div>
 
