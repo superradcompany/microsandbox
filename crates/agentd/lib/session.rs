@@ -239,12 +239,7 @@ impl ExecSession {
             }
 
             // Set controlling terminal.
-            #[cfg(target_os = "linux")]
-            let tiocsctty = libc::TIOCSCTTY;
-            #[cfg(target_os = "macos")]
-            let tiocsctty: libc::c_ulong = libc::TIOCSCTTY.into();
-
-            if unsafe { libc::ioctl(slave_fd, tiocsctty, 0) } < 0 {
+            if unsafe { libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) } < 0 {
                 unsafe { libc::_exit(1) };
             }
 
@@ -652,12 +647,7 @@ fn lookup_buffer_len() -> usize {
 
 fn apply_resolved_user(user: &ResolvedUser) -> AgentdResult<()> {
     if let Some(ref name) = user.initgroups_user {
-        #[cfg(target_os = "macos")]
-        let base_group = user.gid as libc::c_int;
-        #[cfg(not(target_os = "macos"))]
-        let base_group = user.gid;
-
-        if unsafe { libc::initgroups(name.as_ptr(), base_group) } != 0 {
+        if unsafe { libc::initgroups(name.as_ptr(), user.gid) } != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
     } else if unsafe { libc::setgroups(0, std::ptr::null()) } != 0 {

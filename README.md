@@ -1,64 +1,52 @@
-<a href="./#gh-dark-mode-only" target="_blank">
+<!-- <a href="./#gh-dark-mode-only" target="_blank">
 <img width="100%" src="./assets/microsandbox-banner-xl-dark.png" alt="microsandbox-banner-xl-dark">
 </a>
 <a href="./#gh-light-mode-only" target="_blank">
 <img width="100%" src="./assets/microsandbox-banner-xl.png" alt="microsandbox-banner-xl">
-</a>
+</a> -->
 
-<div align="center"><b>———&nbsp;&nbsp;&nbsp;every agent deserves its own computer&nbsp;&nbsp;&nbsp;———</b></div>
+<h3 align="center"><b>——&nbsp;&nbsp;&nbsp;Every Agent Deserves its Own Computer&nbsp;&nbsp;&nbsp;——</b></h3>
+
 <br />
+
 <div align='center'>
-  <a href="https://docs2.microsandbox.dev" target="_blank">
-    <img src="https://img.shields.io/badge/documentation-%2300acee.svg?color=ff4500&style=for-the-badge&logo=gitbook&logoColor=white" alt=documentation style="margin-bottom: 5px;"/>
-  </a>
   <a href="https://discord.gg/T95Y3XnEAK" target="_blank">
-    <img src="https://img.shields.io/badge/discord -%2300acee.svg?color=mediumslateblue&style=for-the-badge&logo=discord&logoColor=white" alt=discord style="margin-bottom: 5px;"/>
+    <img src="https://img.shields.io/badge/join discord-%2300acee.svg?color=mediumslateblue&style=for-the-badge&logo=discord&logoColor=white" alt=discord style="margin-bottom: 5px;"/>
+  </a>
+
+  <a href="https://x.com/microsandbox" target="_blank">
+    <img src="https://img.shields.io/badge/follow on X-%2300acee.svg?color=000000&style=for-the-badge&logo=X&logoColor=white" alt=discourse style="margin-bottom: 5px;"/>
   </a>
 </div>
 
-<div align='center'>
-  <img src="https://img.shields.io/badge/macos-working-green?style=for-the-badge" alt=macos style="margin-bottom: 5px;"/>
-  <img src="https://img.shields.io/badge/linux-working-green?style=for-the-badge" alt=linux style="margin-bottom: 5px;"/>
-  <img src="https://img.shields.io/badge/windows-wip-red?style=for-the-badge" alt=windows style="margin-bottom: 5px;"/>
-</div>
-<br/>
+## <img height="18" src="https://octicons-col.vercel.app/package/000000">&nbsp;&nbsp;Microsandbox
+Microsandbox spins up lightweight microVMs in **under a second**, right from your code. No servers, no daemons, no infrastructure to manage.
 
-## <img height="20" src="https://octicons-col.vercel.app/package/A770EF">&nbsp;Microsandbox
+AI agents operate with whatever permissions you give them, and that's usually _too much_. They can see _API keys_ in the environment, reach the network without restriction, and a single prompt injection _can execute destructive commands_ on your host. Containers help, but they share the host kernel, making _namespace escapes_ a known risk. Microsandbox solves this with **hardware-level VM isolation** that's fast enough to use in every request.
 
-Microsandbox spins up lightweight microVMs in **under a second**, right from your code. No servers, no daemons, no infrastructure to manage. Just a library call that boots a real virtual machine with its own Linux kernel, filesystem, and network stack.
+## <img height="18" src="https://octicons-col.vercel.app/sparkle/000000">&nbsp;&nbsp;Key Features
 
-AI agents operate with whatever permissions you give them, and that's usually too much. They can see API keys in the environment, reach the network without restriction, and a single prompt injection can execute destructive commands on your host. Containers help, but they share the host kernel, making namespace escapes a known risk. Microsandbox solves this with **hardware-level VM isolation** that's fast enough to use in every request.
-
-> [!WARNING]
-> Microsandbox is still **experimental software**. Expect breaking changes, missing features, and rough edges.
-
-<br/>
-
-## <img height="18" src="https://octicons-col.vercel.app/sparkle/A770EF">&nbsp;&nbsp;Key Features
-
-- <img height="15" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Each sandbox is a real [microVM](https://docs2.microsandbox.dev/sandboxes/overview). Not a container, not a namespace. Hypervisor-level separation.
-- <img height="15" src="https://octicons-col.vercel.app/zap/A770EF"> **Sub-Second Boot**: Sandboxes start in under a second. Fast enough to spin one up per request.
-- <img height="15" src="https://octicons-col.vercel.app/plug/A770EF"> **Embeddable**: The SDK boots VMs as child processes. No daemon, no server, no socket. Just `cargo add microsandbox`.
-- <img height="15" src="https://octicons-col.vercel.app/globe/A770EF"> **Programmable Networking**: Every packet passes through a host-side [network stack](https://docs2.microsandbox.dev/sandboxes/networking) with policy enforcement, DNS interception, and TLS MITM. Guests can't bypass it.
-- <img height="15" src="https://octicons-col.vercel.app/lock/A770EF"> **Secrets That Can't Leak**: Secrets never enter the VM. The guest sees a [placeholder](https://docs2.microsandbox.dev/sdk/networking); the real value is only substituted when a request hits an allowed host.
-- <img height="15" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Run standard container images from Docker Hub, GHCR, ECR, or any OCI registry. Shared layers are deduplicated.
+- <img height="15" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Each sandbox is a real [microVM](https://docs2.microsandbox.dev/sandboxes/overview). No container. Hypervisor-level isolation.
+- <img height="15" src="https://octicons-col.vercel.app/zap/A770EF"> **Sub-Second Boot**: Sandboxes boot in under 100 milliseconds.
+- <img height="15" src="https://octicons-col.vercel.app/plug/A770EF"> **Embeddable**: The SDK boots VMs as child processes. No setup server. No long-running daemon.
+- <img height="15" src="https://octicons-col.vercel.app/globe/A770EF"> **Programmable Networking**: Flexible network policy enforcement guests can't bypass.
+- <img height="15" src="https://octicons-col.vercel.app/lock/A770EF"> **Secrets That Can't Leak**: Secrets never enter the VM. The guest sees a placeholder.
+- <img height="15" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Run standard container images from Docker Hub, GHCR, ECR, or any OCI registry.
 - <img height="15" src="https://octicons-col.vercel.app/file-directory/A770EF"> **Flexible Rootfs**: Boot from [OCI images](https://docs2.microsandbox.dev/images/overview), local directories, or [disk images](https://docs2.microsandbox.dev/images/disk-images) (QCOW2, Raw, VMDK).
-- <img height="15" src="https://octicons-col.vercel.app/database/A770EF"> **Persistent Volumes**: [Named volumes](https://docs2.microsandbox.dev/sandboxes/volumes) survive sandbox restarts and can be shared across multiple sandboxes.
+- <img height="15" src="https://octicons-col.vercel.app/database/A770EF"> **Long-Running**: Sandboxes can run as long-lived services with [named volumes](https://docs2.microsandbox.dev/sandboxes/volumes) that persist across restarts.
 - <img height="15" src="https://octicons-col.vercel.app/terminal/A770EF"> **Full CLI**: Manage sandboxes, images, and volumes from the terminal with `msb`.
 
-<br/>
+> Microsandbox is still **beta software**. Expect breaking changes, missing features, and rough edges.
 
-## <img height="13" src="https://octicons-col.vercel.app/north-star/A770EF">&nbsp;&nbsp;Getting Started
+## <img height="13" src="https://octicons-col.vercel.app/rocket/000000">&nbsp;&nbsp;Getting Started
 
-### <img height="14" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;Install the SDK
+#### <img height="14" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;Install the SDK
 
 ```sh
 cargo add microsandbox
 ```
 
-> The SDK embeds the runtime directly. No separate server or daemon needed.
-
-### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI (optional)
+#### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI (optional)
 
 The `msb` CLI is useful for managing images, volumes, and sandboxes from the terminal:
 
@@ -68,13 +56,12 @@ curl -fsSL https://install.microsandbox.dev | sh
 
 > **Requirements**: Linux with KVM enabled, or macOS with Apple Silicon.
 
-<br/>
 
-## <img height="18" src="https://octicons-col.vercel.app/package-dependencies/A770EF">&nbsp;&nbsp;SDK
+## <img height="18" src="https://octicons-col.vercel.app/package-dependencies/000000">&nbsp;&nbsp;SDK
 
 The SDK lets you create and control sandboxes directly from your application. `Sandbox::builder(...)` boots a microVM as a child process. No infrastructure required.
 
-##### <img height="14" src="https://octicons-col.vercel.app/play/A770EF">&nbsp;&nbsp;Run Code in a Sandbox
+#### <img height="14" src="https://octicons-col.vercel.app/play/A770EF">&nbsp;&nbsp;Run Code in a Sandbox
 
 ```rs
 use microsandbox::sandbox::Sandbox;
@@ -82,7 +69,7 @@ use microsandbox::sandbox::Sandbox;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sandbox = Sandbox::builder("my-sandbox")
-        .image("python:3.12")
+        .image("python")
         .cpus(1)
         .memory(512)
         .create()
@@ -98,13 +85,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Behind the scenes, `create()` pulls the image (if not cached), assembles the filesystem, boots a microVM, and opens a communication channel. All in under a second.
 
-##### <img height="14" src="https://octicons-col.vercel.app/lock/A770EF">&nbsp;&nbsp;Secrets That Never Enter the VM
+#### <img height="14" src="https://octicons-col.vercel.app/lock/A770EF">&nbsp;&nbsp;Secrets That Never Enter the VM
 
 Secrets are injected via placeholder substitution. The guest environment only ever sees a random placeholder. The real value is swapped in at the network level, and only for requests to hosts you allow.
 
 ```rs
 let sandbox = Sandbox::builder("api-client")
-    .image("python:3.12")
+    .image("python")
     .secret_env("OPENAI_API_KEY", "sk-real-secret-123", "api.openai.com")
     .create()
     .await?;
@@ -114,7 +101,7 @@ let sandbox = Sandbox::builder("api-client")
 // Requests to any other host: placeholder stays, secret never leaks
 ```
 
-##### <img height="14" src="https://octicons-col.vercel.app/globe/A770EF">&nbsp;&nbsp;Network Policy
+#### <img height="14" src="https://octicons-col.vercel.app/globe/A770EF">&nbsp;&nbsp;Network Policy
 
 Control exactly what the sandbox can reach. The in-process networking stack enforces policy at the IP, DNS, and HTTP level. There's no host network to bridge to, so guests can't bypass the filter.
 
@@ -122,7 +109,7 @@ Control exactly what the sandbox can reach. The in-process networking stack enfo
 use microsandbox::sandbox::{NetworkPolicy, Sandbox};
 
 let sandbox = Sandbox::builder("restricted")
-    .image("alpine:latest")
+    .image("alpine")
     .network(|n| {
         n.policy(NetworkPolicy::public_only())  // blocks private/loopback
          .block_domain_suffix(".evil.com")       // DNS-level blocking
@@ -133,19 +120,19 @@ let sandbox = Sandbox::builder("restricted")
 
 Three built-in policies: `NetworkPolicy::public_only()` (default, blocks private IPs), `NetworkPolicy::allow_all()`, and `NetworkPolicy::none()` (fully airgapped).
 
-##### <img height="14" src="https://octicons-col.vercel.app/upload/A770EF">&nbsp;&nbsp;Port Publishing
+#### <img height="14" src="https://octicons-col.vercel.app/upload/A770EF">&nbsp;&nbsp;Port Publishing
 
 Expose guest services on host ports:
 
 ```rs
 let sandbox = Sandbox::builder("web-server")
-    .image("alpine:latest")
+    .image("alpine")
     .port(8080, 80)  // host:8080 → guest:80
     .create()
     .await?;
 ```
 
-##### <img height="14" src="https://octicons-col.vercel.app/database/A770EF">&nbsp;&nbsp;Named Volumes
+#### <img height="14" src="https://octicons-col.vercel.app/database/A770EF">&nbsp;&nbsp;Named Volumes
 
 Persistent storage that survives sandbox restarts and can be shared across sandboxes:
 
@@ -157,7 +144,7 @@ let data = Volume::builder("shared-data").quota(100.mib()).create().await?;
 
 // Sandbox A writes to it.
 let writer = Sandbox::builder("writer")
-    .image("alpine:latest")
+    .image("alpine")
     .volume("/data", |v| v.named(data.name()))
     .create()
     .await?;
@@ -167,7 +154,7 @@ writer.stop_and_wait().await?;
 
 // Sandbox B reads from it.
 let reader = Sandbox::builder("reader")
-    .image("alpine:latest")
+    .image("alpine")
     .volume("/data", |v| v.named(data.name()).readonly())
     .create()
     .await?;
@@ -176,13 +163,27 @@ let output = reader.shell("cat /data/message.txt").await?;
 println!("{}", output.stdout()?); // hello
 ```
 
-##### <img height="14" src="https://octicons-col.vercel.app/pencil/A770EF">&nbsp;&nbsp;Rootfs Patches
+#### <img height="14" src="https://octicons-col.vercel.app/pencil/A770EF">&nbsp;&nbsp;Scripts & Patches
 
-Modify the filesystem before the VM boots. Inject config files, create directories, append to existing files:
+Register named scripts that get mounted at `/.msb/scripts/` and added to `PATH`, so you can invoke them by name:
+
+```rs
+let sandbox = Sandbox::builder("worker")
+    .image("ubuntu")
+    .script("setup", "#!/bin/bash\napt-get update && apt-get install -y python3 curl")
+    .script("start", "#!/bin/bash\nexec python3 /app/main.py")
+    .create()
+    .await?;
+
+sandbox.shell("setup").await?;
+let output = sandbox.shell("start").await?;
+```
+
+Patches modify the filesystem before the VM boots. Inject config files, create directories, append to existing files:
 
 ```rs
 let sandbox = Sandbox::builder("configured")
-    .image("alpine:latest")
+    .image("alpine")
     .patch(|p| {
         p.text("/etc/app.conf", "key=value\n", None, false)
          .mkdir("/app", Some(0o755))
@@ -192,7 +193,7 @@ let sandbox = Sandbox::builder("configured")
     .await?;
 ```
 
-##### <img height="14" src="https://octicons-col.vercel.app/file-binary/A770EF">&nbsp;&nbsp;Flexible Rootfs Sources
+#### <img height="14" src="https://octicons-col.vercel.app/file-binary/A770EF">&nbsp;&nbsp;Flexible Rootfs Sources
 
 Boot from an OCI image, a local directory, or a disk image:
 
@@ -208,7 +209,7 @@ use microsandbox::sandbox::ImageBuilder;
 Sandbox::builder("block").image(|img: ImageBuilder| img.disk("./disk.qcow2").fstype("ext4"))
 ```
 
-##### <img height="14" src="https://octicons-col.vercel.app/file/A770EF">&nbsp;&nbsp;Guest Filesystem Access
+#### <img height="14" src="https://octicons-col.vercel.app/file/A770EF">&nbsp;&nbsp;Guest Filesystem Access
 
 Read and write files inside the running sandbox from the host side:
 
@@ -223,7 +224,7 @@ let content = sandbox.fs().read_to_string("/tmp/output.txt").await?;
 let entries = sandbox.fs().list("/tmp").await?;
 ```
 
-##### <img height="14" src="https://octicons-col.vercel.app/meter/A770EF">&nbsp;&nbsp;Streaming Execution
+#### <img height="14" src="https://octicons-col.vercel.app/meter/A770EF">&nbsp;&nbsp;Streaming Execution
 
 For long-running commands, stream stdout/stderr events in real time:
 
@@ -244,19 +245,17 @@ while let Some(event) = handle.events().await {
 
 <a href="https://docs2.microsandbox.dev/sdk/overview"><img src="https://img.shields.io/badge/SDK_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="SDK Docs"></a>
 
-<br/>
-
-## <img height="18" src="https://octicons-col.vercel.app/terminal/A770EF">&nbsp;&nbsp;CLI
+## <img height="18" src="https://octicons-col.vercel.app/terminal/000000">&nbsp;&nbsp;CLI
 
 The `msb` CLI provides a complete interface for managing sandboxes, images, and volumes.
 
-##### <img height="14" src="https://octicons-col.vercel.app/play/A770EF">&nbsp;&nbsp;Run a Command
+#### <img height="14" src="https://octicons-col.vercel.app/play/A770EF">&nbsp;&nbsp;Run a Command
 
 ```sh
 msb run python:3.12 -- python3 -c "print('Hello from a microVM!')"
 ```
 
-##### <img height="14" src="https://octicons-col.vercel.app/stopwatch/A770EF">&nbsp;&nbsp;Named Sandboxes
+#### <img height="14" src="https://octicons-col.vercel.app/stopwatch/A770EF">&nbsp;&nbsp;Named Sandboxes
 
 Create a sandbox, exec into it, and manage its lifecycle:
 
@@ -277,7 +276,7 @@ msb start my-app
 msb rm my-app
 ```
 
-##### <img height="14" src="https://octicons-col.vercel.app/cache/A770EF">&nbsp;&nbsp;Image Management
+#### <img height="14" src="https://octicons-col.vercel.app/cache/A770EF">&nbsp;&nbsp;Image Management
 
 ```sh
 msb pull python:3.12           # Pull an image
@@ -285,7 +284,7 @@ msb image ls                   # List cached images
 msb image rm python:3.12       # Remove an image
 ```
 
-##### <img height="14" src="https://octicons-col.vercel.app/database/A770EF">&nbsp;&nbsp;Volume Management
+#### <img height="14" src="https://octicons-col.vercel.app/database/A770EF">&nbsp;&nbsp;Volume Management
 
 ```sh
 msb volume create my-data      # Create a volume
@@ -293,7 +292,7 @@ msb volume ls                  # List volumes
 msb volume rm my-data          # Remove a volume
 ```
 
-##### <img height="14" src="https://octicons-col.vercel.app/list-unordered/A770EF">&nbsp;&nbsp;Status & Inspection
+#### <img height="14" src="https://octicons-col.vercel.app/list-unordered/A770EF">&nbsp;&nbsp;Status & Inspection
 
 ```sh
 msb ls                         # List all sandboxes
@@ -304,30 +303,22 @@ msb metrics my-app             # Live CPU/memory/network stats
 
 > [!TIP]
 >
-> Run `msb <subcommand> --help` to see all available options for a subcommand.
+> Run `msb --tree` to see all available commands and their options.
 
 <a href="https://docs2.microsandbox.dev/cli/overview"><img src="https://img.shields.io/badge/CLI_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="CLI Docs"></a>
 
-<br/>
-
-## <img height="18" src="https://octicons-col.vercel.app/light-bulb/A770EF">&nbsp;&nbsp;Uninstall
+## <img height="18" src="https://octicons-col.vercel.app/light-bulb/000000">&nbsp;&nbsp;Uninstall
 
 To uninstall microsandbox, run: `msb self uninstall`.
 
-<br/>
-
-## <img height="18" src="https://octicons-col.vercel.app/gear/A770EF">&nbsp;&nbsp;Contributing
+## <img height="18" src="https://octicons-col.vercel.app/gear/000000">&nbsp;&nbsp;Contributing
 
 Interested in contributing to `microsandbox`? Check out our [Development Guide](./DEVELOPMENT.md) for instructions on setting up your development environment, building the project, running tests, and creating releases. For contribution guidelines, please refer to [CONTRIBUTING.md](./CONTRIBUTING.md).
 
-<br/>
-
-## <img height="18" src="https://octicons-col.vercel.app/law/A770EF">&nbsp;&nbsp;License
+## <img height="18" src="https://octicons-col.vercel.app/law/000000">&nbsp;&nbsp;License
 
 This project is licensed under the [Apache License 2.0](./LICENSE).
 
-<br/>
-
-## <img height="18" src="https://octicons-col.vercel.app/heart/A770EF">&nbsp;&nbsp;Acknowledgements
+## <img height="18" src="https://octicons-col.vercel.app/heart/000000">&nbsp;&nbsp;Acknowledgements
 
 Special thanks to all our contributors, testers, and community members who help make microsandbox better every day! We'd like to thank the following projects and communities that made `microsandbox` possible: [libkrun](https://github.com/containers/libkrun) and [smoltcp](https://github.com/smoltcp-rs/smoltcp)

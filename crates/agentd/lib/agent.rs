@@ -419,7 +419,6 @@ fn write_to_fd(fd: i32, buf: &[u8]) -> std::io::Result<usize> {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn request_guest_poweroff() -> AgentdResult<()> {
     unsafe {
         libc::sync();
@@ -439,12 +438,6 @@ fn request_guest_poweroff() -> AgentdResult<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
-fn request_guest_poweroff() -> AgentdResult<()> {
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
 fn remount_root_readonly() -> AgentdResult<()> {
     let target = std::ffi::CString::new("/").expect("static path contains no NUL");
     let ret = unsafe {

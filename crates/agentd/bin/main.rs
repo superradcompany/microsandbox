@@ -7,6 +7,13 @@
 // Functions: main
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("agentd is only supported on Linux");
+    std::process::exit(1);
+}
+
+#[cfg(target_os = "linux")]
 fn main() {
     // Capture CLOCK_BOOTTIME immediately — this represents kernel boot duration.
     let boot_time_ns = microsandbox_agentd::clock::boottime_ns();

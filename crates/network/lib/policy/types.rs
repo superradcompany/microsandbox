@@ -193,6 +193,33 @@ impl NetworkPolicy {
         }
         self.default_action
     }
+
+    /// Evaluate an outbound ICMP packet against the policy.
+    ///
+    /// Same first-match-wins logic as [`Self::evaluate_egress`] but without port
+    /// matching — ICMP has no ports. Rules with a `ports` filter are
+    /// skipped since applying a port range to a portless protocol would
+    /// be semantically incorrect.
+    pub fn evaluate_egress_ip(&self, dst: std::net::IpAddr, protocol: Protocol) -> Action {
+        for rule in &self.rules {
+            if rule.direction != Direction::Outbound {
+                continue;
+            }
+            if let Some(ref rule_proto) = rule.protocol
+                && *rule_proto != protocol
+            {
+                continue;
+            }
+            if rule.ports.is_some() {
+                continue;
+            }
+            if !matches_destination(&rule.destination, dst) {
+                continue;
+            }
+            return rule.action;
+        }
+        self.default_action
+    }
 }
 
 impl Action {
