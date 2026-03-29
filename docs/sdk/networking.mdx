@@ -412,3 +412,17 @@ sb = await Sandbox.create(
 )
 ```
 </CodeGroup>
+
+## Protocol support
+
+For most sandboxed workloads, networking behaves the way you'd expect:
+
+- Normal outbound **TCP** and **UDP** traffic works, including common tools and libraries like `curl`, `wget`, package managers, HTTP clients, database drivers, and DNS lookups.
+- **DNS** is intercepted on the host side, which is what enables domain blocking, rebinding protection, and secret-aware policy checks.
+- **ICMP echo** is supported: Pinging external hosts works on systems that support unprivileged ICMP echo sockets.
+
+<Note>
+**Raw sockets** and **full ICMP forwarding** are not supported because they require elevated privileges on the host. Tools that depend on richer ICMP behavior, such as `traceroute`, are outside the current scope.
+</Note>
+
+In practice, web requests, APIs, package installs, service-to-service calls, and published ports are the primary use case, and those work independently of these ICMP caveats.

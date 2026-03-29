@@ -1,9 +1,14 @@
-<!-- <a href="./#gh-dark-mode-only" target="_blank">
-<img width="100%" src="./assets/microsandbox-banner-xl-dark.png" alt="microsandbox-banner-xl-dark">
-</a>
-<a href="./#gh-light-mode-only" target="_blank">
-<img width="100%" src="./assets/microsandbox-banner-xl.png" alt="microsandbox-banner-xl">
-</a> -->
+<div align="center">
+    <a href="./#gh-dark-mode-only" target="_blank" align="center">
+        <img width="35%" src="./assets/microsandbox-gh-banner-light.png" alt="microsandbox-banner-xl-dark">
+    </a>
+</div>
+
+<div align="center">
+    <a href="./#gh-light-mode-only" target="_blank">
+        <img width="35%" src="./assets/microsandbox-gh-banner-dark.png" alt="microsandbox-banner-xl">
+    </a>
+</div>
 
 <h3 align="center"><b>——&nbsp;&nbsp;&nbsp;Every Agent Deserves its Own Computer&nbsp;&nbsp;&nbsp;——</b></h3>
 
@@ -19,26 +24,26 @@
   </a>
 </div>
 
-## <img height="18" src="https://octicons-col.vercel.app/package/000000">&nbsp;&nbsp;Microsandbox
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package/ffffff" alt="package-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package/000000" alt="package"></a>&nbsp;&nbsp;Microsandbox
+
 Microsandbox spins up lightweight microVMs in **under a second**, right from your code. No servers, no daemons, no infrastructure to manage.
 
 AI agents operate with whatever permissions you give them, and that's usually _too much_. They can see _API keys_ in the environment, reach the network without restriction, and a single prompt injection _can execute destructive commands_ on your host. Containers help, but they share the host kernel, making _namespace escapes_ a known risk. Microsandbox solves this with **hardware-level VM isolation** that's fast enough to use in every request.
 
-## <img height="18" src="https://octicons-col.vercel.app/sparkle/000000">&nbsp;&nbsp;Key Features
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/sparkle/ffffff" alt="sparkle-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/sparkle/000000" alt="sparkle"></a>&nbsp;&nbsp;Key Features
 
 - <img height="15" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Each sandbox is a real [microVM](https://docs2.microsandbox.dev/sandboxes/overview). No container. Hypervisor-level isolation.
 - <img height="15" src="https://octicons-col.vercel.app/zap/A770EF"> **Sub-Second Boot**: Sandboxes boot in under 100 milliseconds.
 - <img height="15" src="https://octicons-col.vercel.app/plug/A770EF"> **Embeddable**: The SDK boots VMs as child processes. No setup server. No long-running daemon.
-- <img height="15" src="https://octicons-col.vercel.app/globe/A770EF"> **Programmable Networking**: Flexible network policy enforcement guests can't bypass.
 - <img height="15" src="https://octicons-col.vercel.app/lock/A770EF"> **Secrets That Can't Leak**: Secrets never enter the VM. The guest sees a placeholder.
+- <img height="15" src="https://octicons-col.vercel.app/globe/A770EF"> **Programmable Filesystem & Networking**: Custom filesystem hooks and network policy enforcement guests can't bypass.
 - <img height="15" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Run standard container images from Docker Hub, GHCR, ECR, or any OCI registry.
-- <img height="15" src="https://octicons-col.vercel.app/file-directory/A770EF"> **Flexible Rootfs**: Boot from [OCI images](https://docs2.microsandbox.dev/images/overview), local directories, or [disk images](https://docs2.microsandbox.dev/images/disk-images) (QCOW2, Raw, VMDK).
 - <img height="15" src="https://octicons-col.vercel.app/database/A770EF"> **Long-Running**: Sandboxes can run as long-lived services with [named volumes](https://docs2.microsandbox.dev/sandboxes/volumes) that persist across restarts.
 - <img height="15" src="https://octicons-col.vercel.app/terminal/A770EF"> **Full CLI**: Manage sandboxes, images, and volumes from the terminal with `msb`.
 
 > Microsandbox is still **beta software**. Expect breaking changes, missing features, and rough edges.
 
-## <img height="13" src="https://octicons-col.vercel.app/rocket/000000">&nbsp;&nbsp;Getting Started
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="13" src="https://octicons-col.vercel.app/rocket/ffffff" alt="rocket-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="13" src="https://octicons-col.vercel.app/rocket/000000" alt="rocket"></a>&nbsp;&nbsp;Getting Started
 
 #### <img height="14" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;Install the SDK
 
@@ -56,8 +61,7 @@ curl -fsSL https://install.microsandbox.dev | sh
 
 > **Requirements**: Linux with KVM enabled, or macOS with Apple Silicon.
 
-
-## <img height="18" src="https://octicons-col.vercel.app/package-dependencies/000000">&nbsp;&nbsp;SDK
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package-dependencies/ffffff" alt="sdk-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package-dependencies/000000" alt="sdk"></a>&nbsp;&nbsp;SDK
 
 The SDK lets you create and control sandboxes directly from your application. `Sandbox::builder(...)` boots a microVM as a child process. No infrastructure required.
 
@@ -245,7 +249,7 @@ while let Some(event) = handle.events().await {
 
 <a href="https://docs2.microsandbox.dev/sdk/overview"><img src="https://img.shields.io/badge/SDK_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="SDK Docs"></a>
 
-## <img height="18" src="https://octicons-col.vercel.app/terminal/000000">&nbsp;&nbsp;CLI
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/terminal/ffffff" alt="cli-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/terminal/000000" alt="cli"></a>&nbsp;&nbsp;CLI
 
 The `msb` CLI provides a complete interface for managing sandboxes, images, and volumes.
 
@@ -307,18 +311,18 @@ msb metrics my-app             # Live CPU/memory/network stats
 
 <a href="https://docs2.microsandbox.dev/cli/overview"><img src="https://img.shields.io/badge/CLI_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="CLI Docs"></a>
 
-## <img height="18" src="https://octicons-col.vercel.app/light-bulb/000000">&nbsp;&nbsp;Uninstall
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/light-bulb/ffffff" alt="uninstall-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/light-bulb/000000" alt="uninstall"></a>&nbsp;&nbsp;Uninstall
 
 To uninstall microsandbox, run: `msb self uninstall`.
 
-## <img height="18" src="https://octicons-col.vercel.app/gear/000000">&nbsp;&nbsp;Contributing
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/gear/ffffff" alt="contributing-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/gear/000000" alt="contributing"></a>&nbsp;&nbsp;Contributing
 
 Interested in contributing to `microsandbox`? Check out our [Development Guide](./DEVELOPMENT.md) for instructions on setting up your development environment, building the project, running tests, and creating releases. For contribution guidelines, please refer to [CONTRIBUTING.md](./CONTRIBUTING.md).
 
-## <img height="18" src="https://octicons-col.vercel.app/law/000000">&nbsp;&nbsp;License
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/law/ffffff" alt="license-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/law/000000" alt="license"></a>&nbsp;&nbsp;License
 
 This project is licensed under the [Apache License 2.0](./LICENSE).
 
-## <img height="18" src="https://octicons-col.vercel.app/heart/000000">&nbsp;&nbsp;Acknowledgements
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/heart/ffffff" alt="acknowledgements-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/heart/000000" alt="acknowledgements"></a>&nbsp;&nbsp;Acknowledgements
 
 Special thanks to all our contributors, testers, and community members who help make microsandbox better every day! We'd like to thank the following projects and communities that made `microsandbox` possible: [libkrun](https://github.com/containers/libkrun) and [smoltcp](https://github.com/smoltcp-rs/smoltcp)
