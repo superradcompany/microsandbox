@@ -31,20 +31,18 @@
 
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package/ffffff" alt="package-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package/000000" alt="package"></a>&nbsp;&nbsp;Microsandbox
 
-Microsandbox spins up lightweight microVMs in **under a second**, right from your code. No servers, no daemons, no infrastructure to manage.
+Microsandbox spins up **lightweight VMs in milliseconds** from our SDKs. No server setup, no daemon management. It is all embedded and rootless!
 
-AI agents operate with whatever permissions you give them, and that's usually _too much_. They can see _API keys_ in the environment, reach the network without restriction, and a single prompt injection _can execute destructive commands_ on your host. Containers help, but they share the host kernel, making _namespace escapes_ a known risk. Microsandbox solves this with **hardware-level VM isolation** that's fast enough to use in every request.
+AI agents operate with whatever permissions you give them, and that's usually _too much_. They can see _API keys_ in the environment, reach the network without restriction, and a single prompt injection _can execute destructive commands_ on your host. Containers help, but they share the host kernel, making _namespace escapes_ a known risk. Microsandbox solves this with **hardware-level VM isolation** that boots in milliseconds.
 
-## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/sparkle/ffffff" alt="sparkle-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/sparkle/000000" alt="sparkle"></a>&nbsp;&nbsp;Key Features
-
-- <img height="15" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Each sandbox is a real [microVM](https://docs2.microsandbox.dev/sandboxes/overview). No container. Hypervisor-level isolation.
-- <img height="15" src="https://octicons-col.vercel.app/zap/A770EF"> **Sub-Second Boot**: Sandboxes boot in under 100 milliseconds.
+- <img height="15" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hypervisor-level isolation with microVM technology.
+- <img height="15" src="https://octicons-col.vercel.app/zap/A770EF"> **Instant Startup**: Boot times under 100 milliseconds.
 - <img height="15" src="https://octicons-col.vercel.app/plug/A770EF"> **Embeddable**: The SDK boots VMs as child processes. No setup server. No long-running daemon.
-- <img height="15" src="https://octicons-col.vercel.app/lock/A770EF"> **Secrets That Can't Leak**: Secrets never enter the VM. The guest sees a placeholder.
-- <img height="15" src="https://octicons-col.vercel.app/globe/A770EF"> **Programmable Filesystem & Networking**: Custom filesystem hooks and network policy enforcement guests can't bypass.
-- <img height="15" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Run standard container images from Docker Hub, GHCR, ECR, or any OCI registry.
-- <img height="15" src="https://octicons-col.vercel.app/database/A770EF"> **Long-Running**: Sandboxes can run as long-lived services with [named volumes](https://docs2.microsandbox.dev/sandboxes/volumes) that persist across restarts.
-- <img height="15" src="https://octicons-col.vercel.app/terminal/A770EF"> **Full CLI**: Manage sandboxes, images, and volumes from the terminal with `msb`.
+- <img height="15" src="https://octicons-col.vercel.app/lock/A770EF"> **Secrets That Can't Leak**: Secrets never enter the VM. The guest VM sees them as placeholders.
+- <img height="15" src="https://octicons-col.vercel.app/globe/A770EF"> **Programmable Filesystem & Network**: Custom filesystems and network policy enforcement.
+- <img height="15" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
+- <img height="15" src="https://octicons-col.vercel.app/database/A770EF"> **Long-Running**: Sandboxes can run as long-lived services with named volumes.
+- <img height="15" src="https://octicons-col.vercel.app/terminal/A770EF"> **Agent-Ready**: Your agents can control sandboxes with our [Agent Skills] and [MCP server].
 
 > Microsandbox is still **beta software**. Expect breaking changes, missing features, and rough edges.
 
@@ -100,7 +98,7 @@ Behind the scenes, `create()` pulls the image (if not cached), assembles the fil
 
 #### <img height="14" src="https://octicons-col.vercel.app/lock/A770EF">&nbsp;&nbsp;Secrets That Never Enter the VM
 
-Secrets are injected via placeholder substitution. The guest environment only ever sees a random placeholder. The real value is swapped in at the network level, and only for requests to hosts you allow.
+Secrets are injected via placeholder substitution. The guest environment only ever sees a random placeholder. The real value is swapped in at the network level.
 
 ```rs
 let sandbox = Sandbox::builder("api-client")
@@ -301,18 +299,16 @@ msb image rm python:3.12       # Remove an image
 
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install & Uninstall Sandboxes
 
-Install a sandbox as a regular command on your system. The sandbox persists across invocations, so installed packages and files carry over between sessions:
-
 ```sh
-msb install python               # Install as 'python' command
-python                           # Opens Python REPL in a microVM
+msb install ubuntu               # Install ubuntu sandbox as 'ubuntu' command
+ubuntu                           # Opens Ubuntu in a microVM
 ```
 
 ```sh
 msb install --name nodebox node  # Custom command name
 msb install --tmp alpine         # Ephemeral: fresh sandbox every run
 msb install --list               # List installed commands
-msb uninstall python             # Remove an installed command
+msb uninstall nodebox            # Remove an installed command
 ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/database/A770EF">&nbsp;&nbsp;Volume Management
