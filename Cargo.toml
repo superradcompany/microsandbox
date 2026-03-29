@@ -27,7 +27,7 @@ members = [
 [workspace.package]
 authors = ["Team MicroSandbox <team@microsandbox.dev>"]
 repository = "https://github.com/zerocore-ai/microsandbox"
-version = "0.3.3"
+version = "0.3.4"
 license = "Apache-2.0"
 edition = "2024"
 
