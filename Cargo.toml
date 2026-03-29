@@ -22,7 +22,6 @@ members = [
     "examples/root-oci",
     "examples/rootfs-patch",
     "examples/volume-named",
-    "sdk/node-ts",
 ]
 
 [workspace.package]
