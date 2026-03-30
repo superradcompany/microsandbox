@@ -23,3 +23,6 @@ pub use error::*;
 pub use microsandbox_image::RegistryAuth;
 pub use microsandbox_runtime::logging::LogLevel;
 pub use microsandbox_utils::size;
+pub use sandbox::exec::{ExecEvent, ExecHandle};
+pub use sandbox::{ExecOutput, NetworkPolicy, Sandbox, SandboxConfig};
+pub use volume::Volume;

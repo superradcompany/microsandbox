@@ -1,0 +1,12 @@
+{
+  "name": "@microsandbox/sdk-darwin-arm64",
+  "version": "0.3.4",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "main": "microsandbox.darwin-arm64.node",
+  "files": ["microsandbox.darwin-arm64.node"],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  }
+}

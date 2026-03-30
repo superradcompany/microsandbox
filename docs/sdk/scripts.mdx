@@ -48,28 +48,6 @@ await sb.run("setup")
 const output = await sb.run("run")
 ```
 
-```python Python
-import textwrap
-from microsandbox import Sandbox
-
-sb = await Sandbox.create(
-    "worker",
-    image="ubuntu:22.04",
-    scripts={
-        "setup": textwrap.dedent("""\
-            #!/bin/bash
-            apt-get update && apt-get install -y python3 curl
-        """),
-        "run": textwrap.dedent("""\
-            #!/bin/bash
-            exec python3 /app/main.py
-        """),
-    },
-)
-
-await sb.run("setup")
-output = await sb.run("run")
-```
 </CodeGroup>
 
 ## Patches
@@ -117,22 +95,6 @@ const sb = await Sandbox.create({
 })
 ```
 
-```python Python
-from microsandbox import Sandbox, Patch
-
-sb = await Sandbox.create(
-    "worker",
-    image="alpine:latest",
-    patches=[
-        Patch.text("/etc/greeting.txt", "Hello from a patched rootfs!\n"),
-        Patch.text("/etc/motd", "Custom message of the day.\n", replace=True),
-        Patch.mkdir("/app"),
-        Patch.text("/app/config.json", '{"debug": true}'),
-        Patch.copy_file("./cert.pem", "/etc/ssl/cert.pem"),
-        Patch.append("/etc/hosts", "127.0.0.1 myapp.local\n"),
-    ],
-)
-```
 </CodeGroup>
 
 ### Available operations

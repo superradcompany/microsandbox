@@ -64,6 +64,7 @@ impl Setup {
             && bin_dir.join(MSB_BINARY).exists()
             && lib_dir.join(&libkrunfw_name).exists()
         {
+            tracing::debug!("setup: binaries already present, skipping download");
             return Ok(());
         }
 
@@ -75,6 +76,7 @@ impl Setup {
 
         tracing::info!(
             version = PREBUILT_VERSION,
+            url = %url,
             "downloading microsandbox runtime dependencies"
         );
         let data = download_bytes(&url).await?;

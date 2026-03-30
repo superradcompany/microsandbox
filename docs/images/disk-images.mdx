@@ -47,26 +47,16 @@ const sb = await Sandbox.create({
     name: "custom-vm",
     image: "./ubuntu-22.04.qcow2",
     cpus: 2,
-    memoryMiB: 2048,
+    memoryMib: 2048,
 })
 
-// Explicit format and filesystem type
+// Explicit format — pass the disk image path directly
 const sb2 = await Sandbox.create({
     name: "custom-vm",
-    image: i => i.disk("./alpine.raw").fstype("ext4"),
+    image: "./alpine.raw",
     cpus: 1,
-    memoryMiB: 512,
+    memoryMib: 512,
 })
-```
-
-```python Python
-# Auto-detect
-sb = await Sandbox.create("custom-vm", image="./ubuntu-22.04.qcow2", cpus=2, memory=2048)
-
-# Explicit
-sb2 = await Sandbox.create("custom-vm",
-    image=lambda i: i.disk("./alpine.raw").fstype("ext4"),
-    cpus=1, memory=512)
 ```
 </CodeGroup>
 

@@ -97,6 +97,9 @@ jobs:
             agentd_target: x86_64-unknown-linux-musl
             libkrunfw_file: libkrunfw.so.5.2.1
             libkrunfw_asset: libkrunfw-linux-x86_64.so
+            napi_target: x86_64-unknown-linux-gnu
+            node_file: microsandbox.linux-x64-gnu.node
+            npm_dir: linux-x64-gnu
           - target: linux-aarch64
             runner: ubuntu-24.04-arm
             arch: aarch64
@@ -104,6 +107,9 @@ jobs:
             agentd_target: aarch64-unknown-linux-musl
             libkrunfw_file: libkrunfw.so.5.2.1
             libkrunfw_asset: libkrunfw-linux-aarch64.so
+            napi_target: aarch64-unknown-linux-gnu
+            node_file: microsandbox.linux-arm64-gnu.node
+            npm_dir: linux-arm64-gnu
           - target: darwin-aarch64
             runner: macos-14
             arch: aarch64
@@ -111,6 +117,9 @@ jobs:
             agentd_target: ""
             libkrunfw_file: libkrunfw.5.dylib
             libkrunfw_asset: libkrunfw-darwin-aarch64.dylib
+            napi_target: aarch64-apple-darwin
+            node_file: microsandbox.darwin-arm64.node
+            npm_dir: darwin-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -193,6 +202,26 @@ jobs:
         if: matrix.os == 'darwin'
         run: codesign --entitlements msb-entitlements.plist --force -s - build/msb
 
+      # -- Node SDK --
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build Node SDK
+        working-directory: sdk/node-ts
+        run: |
+          npm install
+          npm run build -- --target ${{ matrix.napi_target }}
+
+      - name: Upload Node SDK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-sdk-${{ matrix.npm_dir }}
+          path: |
+            sdk/node-ts/${{ matrix.node_file }}
+            sdk/node-ts/index.cjs
+            sdk/node-ts/index.d.cts
+
       # -- Stage release artifacts --
       - name: Stage artifacts
         run: |
@@ -252,3 +281,90 @@ jobs:
             --title "${{ github.ref_name }}" \
             --generate-notes \
             release-artifacts/*
+
+  # ---------------------------------------------------------------------------
+  # Publish Node SDK to npm
+  # ---------------------------------------------------------------------------
+  npm-publish:
+    name: Publish npm packages
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Download Node SDK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: node-artifacts
+          pattern: node-sdk-*
+
+      - name: Place binaries and update generated files
+        run: |
+          # Copy .node binaries into platform packages.
+          cp node-artifacts/node-sdk-darwin-arm64/microsandbox.darwin-arm64.node sdk/node-ts/npm/darwin-arm64/
+          cp node-artifacts/node-sdk-linux-x64-gnu/microsandbox.linux-x64-gnu.node sdk/node-ts/npm/linux-x64-gnu/
+          cp node-artifacts/node-sdk-linux-arm64-gnu/microsandbox.linux-arm64-gnu.node sdk/node-ts/npm/linux-arm64-gnu/
+
+          # Copy build-generated index.cjs and index.d.cts into root package
+          # (use darwin-arm64 — all platforms produce identical JS/types).
+          cp node-artifacts/node-sdk-darwin-arm64/index.cjs sdk/node-ts/index.cjs
+          cp node-artifacts/node-sdk-darwin-arm64/index.d.cts sdk/node-ts/index.d.cts
+
+      - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for dir in darwin-arm64 linux-x64-gnu linux-arm64-gnu; do
+            echo "Publishing @microsandbox/sdk-$dir..."
+            cd sdk/node-ts/npm/$dir
+            npm publish --access public
+            cd ../../../..
+          done
+
+      - name: Wait for npm to index platform packages
+        run: sleep 30
+
+      - name: Publish root package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: sdk/node-ts
+        run: npm publish --access public
+
+  # ---------------------------------------------------------------------------
+  # Publish Rust crates to crates.io
+  # ---------------------------------------------------------------------------
+  crates-publish:
+    name: Publish crates
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          for crate in \
+            microsandbox-utils \
+            microsandbox-protocol \
+            microsandbox-db \
+            microsandbox-migration \
+            microsandbox-image \
+            microsandbox-filesystem \
+            microsandbox-network \
+            microsandbox-runtime \
+            microsandbox \
+            microsandbox-cli; do
+            echo "Publishing $crate..."
+            cargo publish -p "$crate" --no-verify
+            sleep 60
+          done

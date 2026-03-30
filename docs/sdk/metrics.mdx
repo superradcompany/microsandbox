@@ -21,10 +21,6 @@ const metrics = await sb.metrics()
 console.log(`CPU: ${metrics.cpuPercent.toFixed(1)}%, Mem: ${Math.floor(metrics.memoryBytes / 1024 / 1024)} MB`)
 ```
 
-```python Python
-m = await sb.metrics()
-print(f"CPU: {m.cpu_percent:.1f}%, Mem: {m.memory_bytes // 1024 // 1024} MB")
-```
 </CodeGroup>
 
 ## Streaming
@@ -49,10 +45,6 @@ for await (const m of sb.metricsStream(1000)) {
 }
 ```
 
-```python Python
-async for m in sb.metrics_stream(interval=1.0):
-    print(f"[{m.timestamp}] CPU: {m.cpu_percent:.1f}%")
-```
 </CodeGroup>
 
 ## Fleet-wide metrics
@@ -72,9 +64,4 @@ import { allSandboxMetrics } from 'microsandbox'
 const all = await allSandboxMetrics()
 ```
 
-```python Python
-from microsandbox import all_sandbox_metrics
-
-all_metrics = await all_sandbox_metrics()
-```
 </CodeGroup>

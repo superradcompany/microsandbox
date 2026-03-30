@@ -17,7 +17,7 @@ members = ["crates/protocol"]
 
 [workspace.package]
 authors = ["Team MicroSandbox <team@microsandbox.dev>"]
-repository = "https://github.com/zerocore-ai/microsandbox"
+repository = "https://github.com/superradcompany/microsandbox"
 version = "0.3.4"
 license = "Apache-2.0"
 edition = "2024"

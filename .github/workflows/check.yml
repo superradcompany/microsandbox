@@ -195,3 +195,12 @@ jobs:
       - name: Clippy agentd
         if: matrix.os == 'linux'
         run: cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target ${{ matrix.agentd_target }} -- -D warnings
+
+      # -- Checks (Node SDK) --
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build Node SDK
+        working-directory: sdk/node-ts
+        run: npm install && npm run build

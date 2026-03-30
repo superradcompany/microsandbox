@@ -164,6 +164,15 @@ impl Sandbox {
         mode: SpawnMode,
         progress: Option<microsandbox_image::PullProgressSender>,
     ) -> MicrosandboxResult<Self> {
+        tracing::debug!(
+            sandbox = %config.name,
+            image = ?config.image,
+            mode = ?mode,
+            cpus = config.cpus,
+            memory_mib = config.memory_mib,
+            "create_with_mode: starting"
+        );
+
         let mut pinned_manifest_digest: Option<String> = None;
         let mut pinned_reference: Option<String> = None;
 
@@ -218,6 +227,7 @@ impl Sandbox {
 
         // Insert the sandbox record and keep its stable database ID.
         let sandbox_id = insert_sandbox_record(db, &config).await?;
+        tracing::debug!(sandbox_id, sandbox = %config.name, "create_with_mode: db record inserted");
 
         // Spawn the sandbox process and create the bridge. On failure, mark the sandbox
         // as stopped so it doesn't appear as a phantom "Running" entry.
@@ -244,9 +254,11 @@ impl Sandbox {
     }
 
     pub(super) async fn start_with_mode(name: &str, mode: SpawnMode) -> MicrosandboxResult<Self> {
+        tracing::debug!(sandbox = name, ?mode, "start_with_mode: loading record");
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
         let model = load_sandbox_record_reconciled(db, name).await?;
+        tracing::debug!(sandbox = name, status = ?model.status, "start_with_mode: current status");
 
         if model.status == SandboxStatus::Running || model.status == SandboxStatus::Draining {
             return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
@@ -281,16 +293,10 @@ impl Sandbox {
         sandbox_id: i32,
         mode: SpawnMode,
     ) -> MicrosandboxResult<Self> {
-        #[cfg(feature = "prebuilt")]
-        {
-            static SETUP_DONE: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-            SETUP_DONE.get_or_try_init(crate::setup::install).await?;
-        }
-
-        let (handle, agent_sock_path) = spawn_sandbox(&config, sandbox_id, mode).await?;
+        let (mut handle, agent_sock_path) = spawn_sandbox(&config, sandbox_id, mode).await?;
 
         // Wait for the relay socket to become available.
-        let client = wait_for_relay(&agent_sock_path).await?;
+        let client = wait_for_relay(&agent_sock_path, &mut handle).await?;
 
         let ready = client.ready();
         tracing::info!(
@@ -406,6 +412,7 @@ impl Sandbox {
 
     /// Stop the sandbox gracefully by sending `core.shutdown` to agentd.
     pub async fn stop(&self) -> MicrosandboxResult<()> {
+        tracing::debug!(sandbox = %self.config.name, "stop: sending shutdown");
         let msg = Message::new(MessageType::Shutdown, 0, Vec::new());
         self.client.send(&msg).await
     }
@@ -506,6 +513,15 @@ impl Sandbox {
             stdin: stdin_mode,
             timeout: _,
         } = opts;
+
+        tracing::debug!(
+            sandbox = %self.config.name,
+            cmd = %cmd,
+            args = ?args,
+            cwd = ?cwd,
+            tty,
+            "exec_stream"
+        );
 
         // Allocate correlation ID and subscribe BEFORE sending.
         let id = self.client.next_id();
@@ -851,21 +867,56 @@ impl Sandbox {
 /// The sandbox process creates the relay socket asynchronously during startup.
 /// This function retries the connection with brief delays until it succeeds
 /// or a timeout is reached.
-async fn wait_for_relay(sock_path: &std::path::Path) -> MicrosandboxResult<AgentClient> {
+async fn wait_for_relay(
+    sock_path: &std::path::Path,
+    handle: &mut ProcessHandle,
+) -> MicrosandboxResult<AgentClient> {
+    tracing::debug!(
+        sock = %sock_path.display(),
+        pid = handle.pid(),
+        "wait_for_relay: waiting for agent socket"
+    );
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     let max_backoff = std::time::Duration::from_millis(10);
     let mut backoff = std::time::Duration::from_millis(1);
+    let mut attempts = 0u32;
 
     loop {
+        attempts += 1;
         match AgentClient::connect(sock_path).await {
-            Ok(client) => return Ok(client),
+            Ok(client) => {
+                tracing::debug!(attempts, "wait_for_relay: connected");
+                return Ok(client);
+            }
             Err(_) if tokio::time::Instant::now() < deadline => {
+                // Check if the sandbox process is still alive before retrying.
+                // If it crashed, there's no point waiting for the socket.
+                if let Some(status) = handle.try_wait()? {
+                    tracing::debug!(attempts, ?status, "wait_for_relay: sandbox process exited");
+                    return Err(crate::MicrosandboxError::Runtime(format!(
+                        "sandbox process exited ({status}) before agent relay became available \
+                         (check logs at {})",
+                        sock_path
+                            .parent()
+                            .and_then(|p| p.parent())
+                            .map(|p| p.join("logs").display().to_string())
+                            .unwrap_or_default()
+                    )));
+                }
+
                 // Keep early retries tight so relay readiness doesn't inherit a
                 // coarse fixed delay on warm starts.
                 tokio::time::sleep(backoff).await;
                 backoff = std::cmp::min(backoff.saturating_mul(2), max_backoff);
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                tracing::debug!(
+                    attempts,
+                    error = %e,
+                    "wait_for_relay: timed out"
+                );
+                return Err(e);
+            }
         }
     }
 }

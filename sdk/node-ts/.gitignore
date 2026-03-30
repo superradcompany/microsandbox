@@ -1,0 +1,5 @@
+node_modules/
+target/
+*.node
+index.js
+npm/*/microsandbox.*.node

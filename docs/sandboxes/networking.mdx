@@ -25,7 +25,7 @@ let sb = Sandbox::builder("web-agent")
 ```
 
 ```typescript TypeScript
-import { Network, NetworkPolicy } from 'microsandbox'
+import { NetworkPolicy, Sandbox } from 'microsandbox'
 
 // No network access
 const sb1 = await Sandbox.create({
@@ -47,34 +47,8 @@ const sb3 = await Sandbox.create({
     image: "python:3.12",
     network: NetworkPolicy.allowAll(),
 })
-
-// Allow only specific hosts
-const sb4 = await Sandbox.create({
-    name: "scoped-agent",
-    image: "python:3.12",
-    network: NetworkPolicy.allowlist(["api.openai.com", "pypi.org"]),
-})
 ```
 
-```python Python
-from microsandbox import Sandbox, NetworkPolicy
-
-# No network
-sb1 = await Sandbox.create("isolated", image="python:3.12",
-    network=NetworkPolicy.none())
-
-# Public internet only (default)
-sb2 = await Sandbox.create("web-agent", image="python:3.12",
-    network=NetworkPolicy.public_only())
-
-# Unrestricted
-sb3 = await Sandbox.create("dev", image="python:3.12",
-    network=NetworkPolicy.allow_all())
-
-# Allowlist
-sb4 = await Sandbox.create("scoped-agent", image="python:3.12",
-    network=NetworkPolicy.allowlist(["api.openai.com", "pypi.org"]))
-```
 </CodeGroup>
 
 ## Port mapping
@@ -98,25 +72,11 @@ let sb = Sandbox::builder("api")
 const sb = await Sandbox.create({
     name: "api",
     image: "python:3.12",
-    network: Network.configure({
-        policy: NetworkPolicy.publicOnly(),
-        ports: [{ host: 8080, guest: 80 }],
-    }),
+    ports: { "8080": 80 },
+    network: NetworkPolicy.publicOnly(),
 })
 ```
 
-```python Python
-from microsandbox import Sandbox, Network, NetworkPolicy
-
-sb = await Sandbox.create(
-    "api",
-    image="python:3.12",
-    network=Network(
-        policy=NetworkPolicy.public_only(),
-        ports={8080: 80},
-    ),
-)
-```
 </CodeGroup>
 
 ## DNS interception
@@ -145,29 +105,14 @@ let sb = Sandbox::builder("safe-agent")
 const sb = await Sandbox.create({
     name: "safe-agent",
     image: "python:3.12",
-    network: Network.configure({
-        policy: NetworkPolicy.publicOnly(),
-        dns: {
-            mode: DnsMode.Intercepted,
-            blockDomains: ["malware.example.com", "*.tracking.com"],
-        },
-    }),
+    network: {
+        ...NetworkPolicy.publicOnly(),
+        blockDomains: ["malware.example.com"],
+        blockDomainSuffixes: ["*.tracking.com"],
+    },
 })
 ```
 
-```python Python
-from microsandbox import Sandbox, Network, NetworkPolicy, DnsMode
-
-sb = await Sandbox.create(
-    "safe-agent",
-    image="python:3.12",
-    network=Network(
-        policy=NetworkPolicy.public_only(),
-        dns=DnsMode.INTERCEPTED,
-        block_domains=["malware.example.com", "*.tracking.com"],
-    ),
-)
-```
 </CodeGroup>
 
 ## How it works
@@ -177,7 +122,7 @@ Policy rules are evaluated first-match-wins. Allowed traffic goes to the real ne
 - **`none`**: no network interface at all. The guest is fully offline, though `exec` and `fs` still work since they don't use the network.
 - **`public_only`**: blocks private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`) and only allows routable public addresses. This is the default.
 - **`allow_all`**: no filtering, including access to the host machine and local network.
-- **`allowlist`** / **`denylist`**: fine-grained per-host control.
+- **`allowlist`** / **`denylist`** (coming soon): fine-grained per-host control.
 
 ## Protocol support
 

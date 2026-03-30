@@ -4,7 +4,7 @@ description: Typed errors and resource cleanup patterns
 icon: "triangle-exclamation"
 ---
 
-All three SDKs surface typed errors so you can match on specific failure modes instead of parsing strings. Rust has an `Error` enum, TypeScript has `MicrosandboxError` with a `type` discriminant, and Python uses an exception hierarchy.
+Both SDKs surface typed errors so you can match on specific failure modes instead of parsing strings. Rust has an `Error` enum and TypeScript errors carry a type tag prefix (e.g. `[ExecTimeout]`, `[Runtime]`) in the error message.
 
 ## Matching errors
 
@@ -36,19 +36,22 @@ match sb.exec("python", ["script.py"]).await {
 ```
 
 ```typescript TypeScript
-import { Sandbox, MicrosandboxError } from 'microsandbox'
+import { Sandbox } from 'microsandbox'
 
 try {
     const output = await sb.exec("python", ["script.py"])
-    if (!output.status.success) {
-        console.error(`Failed (exit ${output.status.code}):`, output.stderr.toString())
+    if (!output.success) {
+        console.error(`Failed (exit ${output.code}):`, output.stderr())
     }
 } catch (e) {
-    if (e instanceof MicrosandboxError) {
-        switch (e.type) {
-            case 'ExecTimeout':       console.error("Timed out"); break
-            case 'SandboxNotRunning': console.error("Not running"); break
-            default: throw e
+    if (e instanceof Error) {
+        // Error messages are prefixed with a type tag, e.g. "[ExecTimeout] ..."
+        if (e.message.startsWith("[ExecTimeout]")) {
+            console.error("Timed out")
+        } else if (e.message.startsWith("[Runtime]")) {
+            console.error("Runtime:", e.message)
+        } else {
+            throw e
         }
     } else {
         throw e
@@ -56,43 +59,11 @@ try {
 }
 ```
 
-```python Python
-from microsandbox import (
-    Sandbox,
-    MicrosandboxError,
-    SandboxNotFoundError,
-    SandboxNotRunningError,
-    ExecTimeoutError,
-    ExecFailedError,
-)
-
-# MicrosandboxError (base)
-# ├── InvalidConfigError        ├── FilesystemError       ├── NetworkPolicyError
-# ├── SandboxNotFoundError      ├── PathNotFoundError     ├── SecretViolationError
-# ├── SandboxNotRunningError    ├── VolumeNotFoundError   ├── ImageNotFoundError
-# ├── SandboxAlreadyExistsError ├── ExecFailedError       ├── ImagePullFailedError
-# ├── ExecTimeoutError          ├── TlsError              └── IoError
-
-async def get_or_create(name: str) -> Sandbox:
-    try:
-        return await Sandbox.get(name)
-    except SandboxNotFoundError:
-        return await Sandbox.create(name, image="python:3.12")
-
-try:
-    output = await sb.exec("python", ["script.py"])
-except ExecTimeoutError:
-    await sb.exec("pkill", ["-f", "script.py"])
-except SandboxNotRunningError:
-    sb = await Sandbox.start(sb.name)
-except MicrosandboxError as e:
-    raise
-```
 </CodeGroup>
 
 ## Resource cleanup
 
-Sandboxes hold compute resources, so release them when done. In Rust, `Drop` handles cleanup when the sandbox goes out of scope. In TypeScript and Python, use `try`/`finally` or context managers.
+Sandboxes hold compute resources, so release them when done. In Rust, `Drop` handles cleanup when the sandbox goes out of scope. In TypeScript, use `try`/`finally`.
 
 <CodeGroup>
 ```rust Rust
@@ -115,7 +86,7 @@ async function runTemporary(): Promise<string> {
     const sb = await Sandbox.create({ name: "temp", image: "python:3.12" })
     try {
         const out = await sb.exec("python", ["-c", "print('hello')"])
-        return out.stdout.toString()
+        return out.stdout()
     } finally {
         await sb.kill().catch(() => {})
         await Sandbox.remove("temp").catch(() => {})
@@ -123,22 +94,4 @@ async function runTemporary(): Promise<string> {
 }
 ```
 
-```python Python
-from microsandbox import Sandbox, MicrosandboxError
-
-# Context manager for automatic cleanup
-async with await Sandbox.create("temp", image="python:3.12") as sb:
-    output = await sb.exec("python", ["-c", "print('hello')"])
-
-# Manual try/finally
-sb = await Sandbox.create("temp", image="python:3.12")
-try:
-    output = await sb.exec("python", ["-c", "print('hello')"])
-finally:
-    try:
-        await sb.kill()
-        await Sandbox.remove("temp")
-    except MicrosandboxError:
-        pass
-```
 </CodeGroup>

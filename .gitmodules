@@ -1,10 +1,16 @@
 [submodule "vendor/libkrunfw"]
 	path = vendor/libkrunfw
-	url = https://github.com/zerocore-ai/libkrunfw.git
+	url = https://github.com/superradcompany/libkrunfw.git
 	branch = krunfw
 [submodule "examples/root-bind/rootfs-alpine"]
-	path = examples/root-bind/rootfs-alpine
-	url = https://github.com/zerocore-ai/rootfs-alpine
+	path = examples/rust/root-bind/rootfs-alpine
+	url = https://github.com/superradcompany/rootfs-alpine
 [submodule "examples/root-block/qcow2-alpine"]
-	path = examples/root-block/qcow2-alpine
-	url = https://github.com/zerocore-ai/qcow2-alpine
+	path = examples/rust/root-block/qcow2-alpine
+	url = https://github.com/superradcompany/qcow2-alpine
+[submodule "examples/typescript/root-bind/rootfs-alpine"]
+	path = examples/typescript/root-bind/rootfs-alpine
+	url = https://github.com/superradcompany/rootfs-alpine
+[submodule "examples/typescript/root-block/qcow2-alpine"]
+	path = examples/typescript/root-block/qcow2-alpine
+	url = https://github.com/superradcompany/qcow2-alpine

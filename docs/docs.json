@@ -16,7 +16,7 @@
   "navbar": {
     "primary": {
       "type": "github",
-      "href": "https://github.com/zerocore-ai/microsandbox"
+      "href": "https://github.com/superradcompany/microsandbox"
     }
   },
   "navigation": {
@@ -123,7 +123,7 @@
   "description": "Every agent deserves its own machine",
   "footer": {
     "socials": {
-      "github": "https://github.com/zerocore-ai/microsandbox",
+      "github": "https://github.com/superradcompany/microsandbox",
       "discord": "https://discord.gg/NQMWDfp7",
       "linkedin": "https://www.linkedin.com/company/super-rad-company",
       "x": "https://x.com/microsandbox"

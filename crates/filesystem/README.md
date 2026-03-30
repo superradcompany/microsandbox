@@ -1,6 +1,6 @@
 # microsandbox-filesystem
 
-Filesystem backends for [microsandbox](https://github.com/zerocore-ai/microsandbox) virtual machines. This crate provides four pluggable backends that give each sandbox a complete, Linux-compatible filesystem — from bind-mounting a host directory to stacking OCI image layers with copy-on-write.
+Filesystem backends for [microsandbox](https://github.com/superradcompany/microsandbox) virtual machines. This crate provides four pluggable backends that give each sandbox a complete, Linux-compatible filesystem — from bind-mounting a host directory to stacking OCI image layers with copy-on-write.
 
 - **No root required** — runs unprivileged; guest-visible ownership and permissions are virtualized without touching the host filesystem
 - **Runs on macOS too** — the guest sees a full Linux filesystem even when the host is macOS

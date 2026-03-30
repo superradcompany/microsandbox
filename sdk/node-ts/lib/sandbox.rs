@@ -1,0 +1,649 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use microsandbox::sandbox::{
+    ExecOptionsBuilder, NetworkPolicy, PullPolicy, SandboxConfig as RustSandboxConfig,
+};
+use microsandbox::{LogLevel, RegistryAuth};
+use microsandbox_network::policy::{
+    Action, Destination, DestinationGroup, Direction, PortRange, Protocol, Rule,
+};
+use microsandbox_network::secrets::config::ViolationAction;
+use napi::bindgen_prelude::*;
+use napi_derive::napi;
+use tokio::sync::Mutex;
+
+use crate::error::to_napi_error;
+use crate::exec::{ExecOutput, JsExecHandle, convert_exec_config};
+use crate::fs::JsSandboxFs;
+use crate::sandbox_handle::JsSandboxHandle;
+use crate::types::*;
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+/// A running sandbox instance.
+///
+/// Created via `Sandbox.create()` or `Sandbox.start()`. Holds a live connection
+/// to the guest VM and can execute commands, access the filesystem, and query metrics.
+#[napi]
+pub struct Sandbox {
+    inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl Sandbox {
+    pub fn from_rust(inner: microsandbox::sandbox::Sandbox) -> Self {
+        Sandbox {
+            inner: Arc::new(Mutex::new(Some(inner))),
+        }
+    }
+}
+
+#[napi]
+impl Sandbox {
+    //----------------------------------------------------------------------------------------------
+    // Static Methods — Creation
+    //----------------------------------------------------------------------------------------------
+
+    /// Create a sandbox from configuration (attached mode — stops on GC/process exit).
+    #[napi(factory)]
+    pub async fn create(config: SandboxConfig) -> Result<Sandbox> {
+        let rust_config = convert_config(config)?;
+        let inner = microsandbox::sandbox::Sandbox::create(rust_config)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(Sandbox {
+            inner: Arc::new(Mutex::new(Some(inner))),
+        })
+    }
+
+    /// Create a sandbox that survives the parent process (detached mode).
+    #[napi(factory)]
+    pub async fn create_detached(config: SandboxConfig) -> Result<Sandbox> {
+        let rust_config = convert_config(config)?;
+        let inner = microsandbox::sandbox::Sandbox::create_detached(rust_config)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(Sandbox {
+            inner: Arc::new(Mutex::new(Some(inner))),
+        })
+    }
+
+    /// Start an existing stopped sandbox (attached mode).
+    #[napi(factory)]
+    pub async fn start(name: String) -> Result<Sandbox> {
+        let inner = microsandbox::sandbox::Sandbox::start(&name)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(Sandbox {
+            inner: Arc::new(Mutex::new(Some(inner))),
+        })
+    }
+
+    /// Start an existing stopped sandbox (detached mode).
+    #[napi(factory)]
+    pub async fn start_detached(name: String) -> Result<Sandbox> {
+        let inner = microsandbox::sandbox::Sandbox::start_detached(&name)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(Sandbox {
+            inner: Arc::new(Mutex::new(Some(inner))),
+        })
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Static Methods — Lookup
+    //----------------------------------------------------------------------------------------------
+
+    /// Get a lightweight handle to an existing sandbox.
+    #[napi]
+    pub async fn get(name: String) -> Result<JsSandboxHandle> {
+        let handle = microsandbox::sandbox::Sandbox::get(&name)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsSandboxHandle::from_rust(handle))
+    }
+
+    /// List all sandboxes.
+    #[napi]
+    pub async fn list() -> Result<Vec<SandboxInfo>> {
+        let handles = microsandbox::sandbox::Sandbox::list()
+            .await
+            .map_err(to_napi_error)?;
+        Ok(handles.iter().map(sandbox_handle_to_info).collect())
+    }
+
+    /// Remove a stopped sandbox from the database.
+    #[napi(js_name = "remove")]
+    pub async fn remove_static(name: String) -> Result<()> {
+        microsandbox::sandbox::Sandbox::remove(&name)
+            .await
+            .map_err(to_napi_error)
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Properties
+    //----------------------------------------------------------------------------------------------
+
+    /// Sandbox name.
+    #[napi(getter)]
+    pub async fn name(&self) -> Result<String> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        Ok(sb.name().to_string())
+    }
+
+    /// Whether this handle owns the sandbox lifecycle (attached mode).
+    #[napi(getter)]
+    pub async fn owns_lifecycle(&self) -> Result<bool> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        Ok(sb.owns_lifecycle())
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Execution
+    //----------------------------------------------------------------------------------------------
+
+    /// Execute a command and wait for completion.
+    #[napi]
+    pub async fn exec(&self, cmd: String, args: Option<Vec<String>>) -> Result<ExecOutput> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let args_owned = args.unwrap_or_default();
+        let output = sb
+            .exec(&cmd, |b: ExecOptionsBuilder| b.args(args_owned))
+            .await
+            .map_err(to_napi_error)?;
+        Ok(ExecOutput::from_rust(output))
+    }
+
+    /// Execute a command with full configuration and wait for completion.
+    #[napi(js_name = "execWithConfig")]
+    pub async fn exec_with_config(&self, config: ExecConfig) -> Result<ExecOutput> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let opts = convert_exec_config(&config);
+        let output = sb.exec(&config.cmd, opts).await.map_err(to_napi_error)?;
+        Ok(ExecOutput::from_rust(output))
+    }
+
+    /// Execute a command with streaming I/O.
+    #[napi]
+    pub async fn exec_stream(
+        &self,
+        cmd: String,
+        args: Option<Vec<String>>,
+    ) -> Result<JsExecHandle> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let args_owned = args.unwrap_or_default();
+        let handle = sb
+            .exec_stream(&cmd, |b: ExecOptionsBuilder| b.args(args_owned))
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsExecHandle::from_rust(handle))
+    }
+
+    /// Execute a shell command using the sandbox's configured shell.
+    #[napi]
+    pub async fn shell(&self, script: String) -> Result<ExecOutput> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let output = sb.shell(&script).await.map_err(to_napi_error)?;
+        Ok(ExecOutput::from_rust(output))
+    }
+
+    /// Execute a shell command with streaming I/O.
+    #[napi]
+    pub async fn shell_stream(&self, script: String) -> Result<JsExecHandle> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let handle = sb.shell_stream(&script).await.map_err(to_napi_error)?;
+        Ok(JsExecHandle::from_rust(handle))
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Filesystem
+    //----------------------------------------------------------------------------------------------
+
+    /// Get a filesystem handle for operations on the running sandbox.
+    #[napi]
+    pub fn fs(&self) -> JsSandboxFs {
+        JsSandboxFs::new(self.inner.clone())
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Metrics
+    //----------------------------------------------------------------------------------------------
+
+    /// Get point-in-time resource metrics.
+    #[napi]
+    pub async fn metrics(&self) -> Result<SandboxMetrics> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let m = sb.metrics().await.map_err(to_napi_error)?;
+        Ok(metrics_to_js(&m))
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Lifecycle
+    //----------------------------------------------------------------------------------------------
+
+    /// Stop the sandbox gracefully (SIGTERM).
+    #[napi]
+    pub async fn stop(&self) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.stop().await.map_err(to_napi_error)
+    }
+
+    /// Stop and wait for exit, returning the exit status.
+    #[napi]
+    pub async fn stop_and_wait(&self) -> Result<ExitStatus> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let status = sb.stop_and_wait().await.map_err(to_napi_error)?;
+        Ok(exit_status_to_js(status))
+    }
+
+    /// Kill the sandbox immediately (SIGKILL).
+    #[napi]
+    pub async fn kill(&self) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.kill().await.map_err(to_napi_error)
+    }
+
+    /// Graceful drain (SIGUSR1 — for load balancing).
+    #[napi]
+    pub async fn drain(&self) -> Result<()> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.drain().await.map_err(to_napi_error)
+    }
+
+    /// Wait for the sandbox process to exit.
+    #[napi(js_name = "wait")]
+    pub async fn wait_for_exit(&self) -> Result<ExitStatus> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let status = sb.wait().await.map_err(to_napi_error)?;
+        Ok(exit_status_to_js(status))
+    }
+
+    /// Detach from the sandbox — it will continue running after this handle is dropped.
+    #[napi]
+    pub async fn detach(&self) -> Result<()> {
+        let mut guard = self.inner.lock().await;
+        if let Some(sb) = guard.take() {
+            sb.detach().await;
+        }
+        Ok(())
+    }
+
+    /// Remove the persisted database record after stopping.
+    #[napi]
+    pub async fn remove_persisted(&self) -> Result<()> {
+        let mut guard = self.inner.lock().await;
+        let sb = guard.take().ok_or_else(consumed_error)?;
+        sb.remove_persisted().await.map_err(to_napi_error)
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Convert a JS `SandboxConfig` to the Rust `SandboxConfig` via the builder pattern.
+fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
+    let mut builder =
+        microsandbox::sandbox::Sandbox::builder(&config.name).image(config.image.as_str());
+
+    if let Some(mem) = config.memory_mib {
+        builder = builder.memory(mem);
+    }
+    if let Some(cpus) = config.cpus {
+        builder = builder.cpus(cpus);
+    }
+    if let Some(ref workdir) = config.workdir {
+        builder = builder.workdir(workdir);
+    }
+    if let Some(ref shell) = config.shell {
+        builder = builder.shell(shell);
+    }
+    if let Some(ref entrypoint) = config.entrypoint {
+        builder = builder.entrypoint(entrypoint.clone());
+    }
+    if let Some(ref hostname) = config.hostname {
+        builder = builder.hostname(hostname);
+    }
+    if let Some(ref user) = config.user {
+        builder = builder.user(user);
+    }
+    if let Some(ref env) = config.env {
+        for (k, v) in env {
+            builder = builder.env(k, v);
+        }
+    }
+    if let Some(ref scripts) = config.scripts {
+        for (k, v) in scripts {
+            builder = builder.script(k, v);
+        }
+    }
+    if let Some(ref volumes) = config.volumes {
+        for (guest_path, mount) in volumes {
+            builder = builder.volume(guest_path, |b| convert_mount(b, mount));
+        }
+    }
+    if let Some(ref patches) = config.patches {
+        for patch in patches {
+            let rust_patch = convert_patch(patch)?;
+            builder = builder.add_patch(rust_patch);
+        }
+    }
+    if let Some(ref pull_policy) = config.pull_policy {
+        let policy = match pull_policy.as_str() {
+            "always" => PullPolicy::Always,
+            "never" => PullPolicy::Never,
+            _ => PullPolicy::IfMissing,
+        };
+        builder = builder.pull_policy(policy);
+    }
+    if let Some(ref log_level) = config.log_level {
+        let level = match log_level.as_str() {
+            "trace" => LogLevel::Trace,
+            "debug" => LogLevel::Debug,
+            "warn" => LogLevel::Warn,
+            "error" => LogLevel::Error,
+            _ => LogLevel::Info,
+        };
+        builder = builder.log_level(level);
+    }
+    if config.replace.unwrap_or(false) {
+        builder = builder.replace();
+    }
+    if config.quiet_logs.unwrap_or(false) {
+        builder = builder.quiet_logs();
+    }
+    if let Some(ref auth) = config.registry_auth {
+        builder = builder.registry_auth(RegistryAuth::Basic {
+            username: auth.username.clone(),
+            password: auth.password.clone(),
+        });
+    }
+    if let Some(ref ports) = config.ports {
+        for (host_str, guest) in ports {
+            let host: u16 = host_str.parse().map_err(|_| {
+                napi::Error::from_reason(format!("invalid port number: {host_str}"))
+            })?;
+            builder = builder.port(host, *guest as u16);
+        }
+    }
+    if let Some(ref network) = config.network {
+        builder = builder.network(|mut n| {
+            // Policy: preset or custom rules
+            if let Some(ref rules) = network.rules {
+                let default_action = match network.default_action.as_deref() {
+                    Some("deny") => Action::Deny,
+                    _ => Action::Allow,
+                };
+                let rust_rules: Vec<_> = rules.iter().filter_map(convert_policy_rule).collect();
+                n = n.policy(NetworkPolicy {
+                    default_action,
+                    rules: rust_rules,
+                });
+            } else if let Some(ref policy) = network.policy {
+                n = n.policy(match policy.as_str() {
+                    "allow-all" => NetworkPolicy::allow_all(),
+                    "none" => NetworkPolicy::none(),
+                    _ => NetworkPolicy::public_only(),
+                });
+            }
+            // DNS
+            if let Some(ref domains) = network.block_domains {
+                for domain in domains {
+                    n = n.block_domain(domain);
+                }
+            }
+            if let Some(ref suffixes) = network.block_domain_suffixes {
+                for suffix in suffixes {
+                    n = n.block_domain_suffix(suffix);
+                }
+            }
+            if let Some(rebind) = network.dns_rebind_protection {
+                n = n.dns_rebind_protection(rebind);
+            }
+            // TLS
+            if let Some(ref tls) = network.tls {
+                n = n.tls(|mut t| {
+                    if let Some(ref bypass) = tls.bypass {
+                        for pattern in bypass {
+                            t = t.bypass(pattern);
+                        }
+                    }
+                    if let Some(verify) = tls.verify_upstream {
+                        t = t.verify_upstream(verify);
+                    }
+                    if let Some(ref ports) = tls.intercepted_ports {
+                        t = t.intercepted_ports(ports.iter().map(|&p| p as u16).collect());
+                    }
+                    if let Some(block) = tls.block_quic {
+                        t = t.block_quic(block);
+                    }
+                    if let Some(ref path) = tls.ca_cert {
+                        t = t.ca_cert(path);
+                    }
+                    if let Some(ref path) = tls.ca_key {
+                        t = t.ca_key(path);
+                    }
+                    t
+                });
+            }
+            // Max connections
+            if let Some(max) = network.max_connections {
+                n = n.max_connections(max as usize);
+            }
+            n
+        });
+    }
+    // Secrets — via Secret.env().
+    if let Some(ref secrets) = config.secrets {
+        for entry in secrets {
+            let env_var = entry.env_var.clone();
+            let value = entry.value.clone();
+            let allow_hosts = entry.allow_hosts.clone();
+            let allow_host_patterns = entry.allow_host_patterns.clone();
+            let placeholder = entry.placeholder.clone();
+            let require_tls = entry.require_tls;
+            builder = builder.secret(move |mut s| {
+                s = s.env(&env_var).value(value);
+                if let Some(hosts) = allow_hosts {
+                    for host in hosts {
+                        s = s.allow_host(host);
+                    }
+                }
+                if let Some(patterns) = allow_host_patterns {
+                    for pattern in patterns {
+                        s = s.allow_host_pattern(pattern);
+                    }
+                }
+                if let Some(p) = placeholder {
+                    s = s.placeholder(p);
+                }
+                if let Some(require) = require_tls {
+                    s = s.require_tls_identity(require);
+                }
+                s
+            });
+            if let Some(ref action_str) = entry.on_violation {
+                builder = builder.network(|n| {
+                    n.on_secret_violation(match action_str.as_str() {
+                        "block" => ViolationAction::Block,
+                        "block-and-terminate" => ViolationAction::BlockAndTerminate,
+                        _ => ViolationAction::BlockAndLog,
+                    })
+                });
+            }
+        }
+    }
+
+    builder.build().map_err(to_napi_error)
+}
+
+fn convert_mount(
+    builder: microsandbox::sandbox::MountBuilder,
+    mount: &MountConfig,
+) -> microsandbox::sandbox::MountBuilder {
+    let mut b = builder;
+    if let Some(ref bind_path) = mount.bind {
+        b = b.bind(PathBuf::from(bind_path));
+    } else if let Some(ref vol_name) = mount.named {
+        b = b.named(vol_name);
+    } else if mount.tmpfs.unwrap_or(false) {
+        b = b.tmpfs();
+    }
+    if mount.readonly.unwrap_or(false) {
+        b = b.readonly();
+    }
+    if let Some(size) = mount.size_mib {
+        b = b.size(size);
+    }
+    b
+}
+
+fn convert_patch(patch: &PatchConfig) -> Result<microsandbox::sandbox::Patch> {
+    use microsandbox::sandbox::Patch;
+    match patch.kind.as_str() {
+        "text" => Ok(Patch::Text {
+            path: patch.path.clone().unwrap_or_default(),
+            content: patch.content.clone().unwrap_or_default(),
+            mode: patch.mode,
+            replace: patch.replace.unwrap_or(false),
+        }),
+        "copyFile" => Ok(Patch::CopyFile {
+            src: PathBuf::from(patch.src.clone().unwrap_or_default()),
+            dst: patch.dst.clone().unwrap_or_default(),
+            mode: patch.mode,
+            replace: patch.replace.unwrap_or(false),
+        }),
+        "copyDir" => Ok(Patch::CopyDir {
+            src: PathBuf::from(patch.src.clone().unwrap_or_default()),
+            dst: patch.dst.clone().unwrap_or_default(),
+            replace: patch.replace.unwrap_or(false),
+        }),
+        "symlink" => Ok(Patch::Symlink {
+            target: patch.target.clone().unwrap_or_default(),
+            link: patch.link.clone().unwrap_or_default(),
+            replace: patch.replace.unwrap_or(false),
+        }),
+        "mkdir" => Ok(Patch::Mkdir {
+            path: patch.path.clone().unwrap_or_default(),
+            mode: patch.mode,
+        }),
+        "remove" => Ok(Patch::Remove {
+            path: patch.path.clone().unwrap_or_default(),
+        }),
+        "append" => Ok(Patch::Append {
+            path: patch.path.clone().unwrap_or_default(),
+            content: patch.content.clone().unwrap_or_default(),
+        }),
+        other => Err(napi::Error::from_reason(format!(
+            "unknown patch kind: {other}"
+        ))),
+    }
+}
+
+pub fn metrics_to_js(m: &microsandbox::sandbox::SandboxMetrics) -> SandboxMetrics {
+    SandboxMetrics {
+        cpu_percent: m.cpu_percent as f64,
+        memory_bytes: m.memory_bytes as f64,
+        memory_limit_bytes: m.memory_limit_bytes as f64,
+        disk_read_bytes: m.disk_read_bytes as f64,
+        disk_write_bytes: m.disk_write_bytes as f64,
+        net_rx_bytes: m.net_rx_bytes as f64,
+        net_tx_bytes: m.net_tx_bytes as f64,
+        uptime_ms: m.uptime.as_millis() as f64,
+        timestamp_ms: datetime_to_ms(&m.timestamp),
+    }
+}
+
+fn sandbox_handle_to_info(handle: &microsandbox::sandbox::SandboxHandle) -> SandboxInfo {
+    SandboxInfo {
+        name: handle.name().to_string(),
+        status: format!("{:?}", handle.status()).to_lowercase(),
+        config_json: handle.config_json().to_string(),
+        created_at: opt_datetime_to_ms(&handle.created_at()),
+        updated_at: opt_datetime_to_ms(&handle.updated_at()),
+    }
+}
+
+fn convert_policy_rule(rule: &PolicyRule) -> Option<Rule> {
+    let action = match rule.action.as_str() {
+        "deny" => Action::Deny,
+        _ => Action::Allow,
+    };
+    let direction = match rule.direction.as_deref() {
+        Some("inbound") => Direction::Inbound,
+        _ => Direction::Outbound,
+    };
+    let destination = match rule.destination.as_deref() {
+        Some("*") | None => Destination::Any,
+        Some("loopback") => Destination::Group(DestinationGroup::Loopback),
+        Some("private") => Destination::Group(DestinationGroup::Private),
+        Some("link-local") => Destination::Group(DestinationGroup::LinkLocal),
+        Some("metadata") => Destination::Group(DestinationGroup::Metadata),
+        Some("multicast") => Destination::Group(DestinationGroup::Multicast),
+        Some(s) if s.starts_with('.') => Destination::DomainSuffix(s.to_string()),
+        Some(s) if s.contains('/') => {
+            // CIDR notation
+            match s.parse() {
+                Ok(cidr) => Destination::Cidr(cidr),
+                Err(_) => return None,
+            }
+        }
+        Some(s) => Destination::Domain(s.to_string()),
+    };
+    let protocol = rule.protocol.as_deref().map(|p| match p {
+        "udp" => Protocol::Udp,
+        "icmpv4" => Protocol::Icmpv4,
+        "icmpv6" => Protocol::Icmpv6,
+        _ => Protocol::Tcp,
+    });
+    let ports = rule.port.as_deref().and_then(|p| {
+        if let Some((start, end)) = p.split_once('-') {
+            Some(PortRange::range(start.parse().ok()?, end.parse().ok()?))
+        } else {
+            Some(PortRange::single(p.parse().ok()?))
+        }
+    });
+
+    Some(Rule {
+        direction,
+        destination,
+        protocol,
+        ports,
+        action,
+    })
+}
+
+fn exit_status_to_js(status: std::process::ExitStatus) -> ExitStatus {
+    use std::os::unix::process::ExitStatusExt;
+    let code = status.code().unwrap_or_else(|| {
+        // If no code, the process was killed by a signal.
+        status.signal().map(|s| 128 + s).unwrap_or(-1)
+    });
+    ExitStatus {
+        code,
+        success: status.success(),
+    }
+}
+
+fn consumed_error() -> napi::Error {
+    napi::Error::from_reason("Sandbox handle has been consumed (detached or removed)")
+}

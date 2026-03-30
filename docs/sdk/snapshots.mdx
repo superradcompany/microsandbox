@@ -41,15 +41,6 @@ const snapshot = await sb.snapshot()
 await sb.resume()
 ```
 
-```python Python
-from microsandbox import Sandbox
-
-sb = await Sandbox.create("base", image="python:3.12")
-await sb.exec("pip", ["install", "-r", "requirements.txt"])
-
-snapshot = await sb.snapshot()
-await sb.resume()
-```
 </CodeGroup>
 
 ## Save and load named snapshots
@@ -79,16 +70,6 @@ await snapshot.saveNamed("after-pip-install")
 const saved = await Snapshot.get("after-pip-install")
 ```
 
-```python Python
-from microsandbox import Snapshot
-
-# Save
-snapshot = await sb.snapshot()
-await snapshot.save_named("after-pip-install")
-
-# Load by name
-saved = await Snapshot.get("after-pip-install")
-```
 </CodeGroup>
 
 ## Fork workers
@@ -116,14 +97,6 @@ const workers = await Promise.all(
 )
 ```
 
-```python Python
-import asyncio
-from microsandbox import Snapshot
-
-saved = await Snapshot.get("after-pip-install")
-
-workers = await asyncio.gather(*(saved.restore(f"worker-{i}") for i in range(10)))
-```
 </CodeGroup>
 
 ## Restore with overrides
@@ -149,18 +122,11 @@ import { Snapshot } from 'microsandbox'
 const saved = await Snapshot.get("after-pip-install")
 
 const custom = await saved.restore("custom", {
-    memoryMiB: 1024,
+    memoryMib: 1024,
     cpus: 4,
 })
 ```
 
-```python Python
-from microsandbox import Snapshot
-
-saved = await Snapshot.get("after-pip-install")
-
-custom = await saved.restore("custom", memory=1024, cpus=4, env={"WORKER_ID": "42"})
-```
 </CodeGroup>
 
 ## List and delete snapshots
@@ -180,10 +146,4 @@ const snapshots = await Snapshot.list()
 await Snapshot.delete("old-snapshot")
 ```
 
-```python Python
-from microsandbox import Snapshot
-
-snapshots = await Snapshot.list()
-await Snapshot.delete("old-snapshot")
-```
 </CodeGroup>

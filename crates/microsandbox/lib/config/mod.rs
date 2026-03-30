@@ -532,10 +532,12 @@ pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
         return Ok(home_bin);
     }
 
-    let path = which::which(microsandbox_utils::MSB_BINARY).map_err(|e| {
-        crate::MicrosandboxError::Custom(format!(
-            "msb binary not found: set MSB_PATH env var or add msb to PATH ({e})"
-        ))
+    let path = which::which(microsandbox_utils::MSB_BINARY).map_err(|_| {
+        crate::MicrosandboxError::Custom(
+            "msb binary not found. Run `cargo clean -p microsandbox && cargo build` to reinstall, \
+             or set MSB_PATH to the binary location"
+                .into(),
+        )
     })?;
     tracing::debug!(path = %path.display(), source = "PATH lookup", "resolved msb binary");
     Ok(path)
@@ -621,12 +623,6 @@ fn dev_msb_candidates_from(start: &Path) -> Vec<PathBuf> {
         }
 
         candidates.push(ancestor.join("build").join(microsandbox_utils::MSB_BINARY));
-        candidates.push(
-            ancestor
-                .join("target")
-                .join("debug")
-                .join(microsandbox_utils::MSB_BINARY),
-        );
     }
 
     dedupe_paths(&mut candidates);

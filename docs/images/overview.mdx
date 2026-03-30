@@ -36,12 +36,6 @@ const sb = await Sandbox.create({
     pullPolicy: PullPolicy.Always,
 })
 ```
-
-```python Python
-from microsandbox import Sandbox, PullPolicy
-
-sb = await Sandbox.create("worker", image="python:3.12", pull_policy=PullPolicy.ALWAYS)
-```
 </CodeGroup>
 
 <Tip>
@@ -72,15 +66,6 @@ const sb = await Sandbox.create({
     registryAuth: { username: "deploy", password: process.env.REGISTRY_TOKEN },
     pullPolicy: PullPolicy.Always,
 })
-```
-
-```python Python
-sb = await Sandbox.create(
-    "worker",
-    image="registry.corp.io/team/app:latest",
-    registry_auth={"username": "deploy", "password": os.environ["REGISTRY_TOKEN"]},
-    pull_policy=PullPolicy.ALWAYS,
-)
 ```
 </CodeGroup>
 

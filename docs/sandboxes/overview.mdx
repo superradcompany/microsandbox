@@ -27,10 +27,6 @@ const sb = await Sandbox.create({
 })
 ```
 
-```python Python
-sb = await Sandbox.create("worker", image="python:3.12")
-```
-
 </CodeGroup>
 
 ## Configuration options
@@ -52,35 +48,21 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
+import { Mount, Sandbox } from 'microsandbox'
+
 const sb = await Sandbox.create({
     name: "worker",
     image: "python:3.12",
-    memoryMiB: 1024,
+    memoryMib: 1024,
     cpus: 2,
     workdir: "/app",
     env: { DEBUG: "true", API_PORT: "8000" },
     volumes: {
         "/app/src": Mount.bind("./src", { readonly: true }),
         "/data": Mount.named("my-data"),
-        "/tmp/scratch": Mount.tmpfs({ sizeMiB: 100 }),
+        "/tmp/scratch": Mount.tmpfs({ sizeMib: 100 }),
     },
 })
-```
-
-```python Python
-sb = await Sandbox.create(
-    "worker",
-    image="python:3.12",
-    memory=1024,
-    cpus=2,
-    workdir="/app",
-    env={"DEBUG": "true", "API_PORT": "8000"},
-    volumes={
-        "/app/src": Volume.bind("./src", readonly=True),
-        "/data": Volume.named("my-data"),
-        "/tmp/scratch": Volume.tmpfs(size_mib=100),
-    },
-)
 ```
 
 </CodeGroup>
@@ -118,9 +100,6 @@ Sandbox::builder("worker").image("python:3.12").create().await?;
 await Sandbox.create({ name: "worker", image: "python:3.12" })
 ```
 
-```python Python
-await Sandbox.create("worker", image="python:3.12")
-```
 </CodeGroup>
 
 ### Bind mounts
@@ -136,9 +115,6 @@ Sandbox::builder("worker").image("./my-rootfs").create().await?;
 await Sandbox.create({ name: "worker", image: "./my-rootfs" })
 ```
 
-```python Python
-await Sandbox.create("worker", image="./my-rootfs")
-```
 </CodeGroup>
 
 <Note>
@@ -160,12 +136,8 @@ Sandbox::builder("worker")
 ```typescript TypeScript
 await Sandbox.create({
     name: "worker",
-    image: i => i.disk("./alpine.qcow2").fstype("ext4"),
+    image: "./alpine.qcow2",
 })
 ```
 
-```python Python
-await Sandbox.create("worker",
-    image=lambda i: i.disk("./alpine.qcow2").fstype("ext4"))
-```
 </CodeGroup>

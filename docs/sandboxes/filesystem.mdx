@@ -16,11 +16,7 @@ sb.fs().write("/app/config.json", r#"{"debug": true}"#).await?;
 ```
 
 ```typescript TypeScript
-await sb.fs.write("/app/config.json", '{"debug": true}')
-```
-
-```python Python
-await sb.fs.write("/app/config.json", '{"debug": true}')
+await sb.fs().write("/app/config.json", '{"debug": true}')
 ```
 
 </CodeGroup>
@@ -33,11 +29,7 @@ let content = sb.fs().read_to_string("/app/config.json").await?;
 ```
 
 ```typescript TypeScript
-const content = await sb.fs.readString("/app/config.json")
-```
-
-```python Python
-content = await sb.fs.read_string("/app/config.json")
+const content = await sb.fs().readString("/app/config.json")
 ```
 
 </CodeGroup>
@@ -53,20 +45,15 @@ for entry in entries {
 ```
 
 ```typescript TypeScript
-const entries = await sb.fs.list("/app")
+const entries = await sb.fs().list("/app")
 for (const entry of entries) {
     console.log(`${entry.path}: ${entry.kind}`)
 }
 ```
 
-```python Python
-entries = await sb.fs.list("/app")
-for entry in entries:
-    print(f"{entry.path}: {entry.kind}")
-```
 </CodeGroup>
 
-## Stream large files
+## Stream large files <sup><sup>coming soon</sup></sup>
 
 For files too large to fit in memory, use streaming. Data is transferred in chunks of approximately 3 MiB each.
 
@@ -79,16 +66,12 @@ while let Some(chunk) = stream.next().await {
 ```
 
 ```typescript TypeScript
-const stream = await sb.fs.readStream("/app/data.bin")
+const stream = await sb.fs().readStream("/app/data.bin")
 for await (const chunk of stream) {
     processChunk(chunk)
 }
 ```
 
-```python Python
-async for chunk in sb.fs.read_stream("/app/data.bin"):
-    process_chunk(chunk)
-```
 </CodeGroup>
 
 ## Copy from host
@@ -101,12 +84,9 @@ sb.fs().copy_from_host("./local-file.txt", "/app/remote-file.txt").await?;
 ```
 
 ```typescript TypeScript
-await sb.fs.copyFromHost("./local-file.txt", "/app/remote-file.txt")
+await sb.fs().copyFromHost("./local-file.txt", "/app/remote-file.txt")
 ```
 
-```python Python
-await sb.fs.copy_from_host("./local-file.txt", "/app/remote-file.txt")
-```
 </CodeGroup>
 
 <Tip>

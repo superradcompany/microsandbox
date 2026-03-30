@@ -23,6 +23,8 @@ let sb = Sandbox::builder("dev")
 ```
 
 ```typescript TypeScript
+import { Mount, Sandbox } from 'microsandbox'
+
 const sb = await Sandbox.create({
     name: "dev",
     image: "python:3.12",
@@ -33,16 +35,6 @@ const sb = await Sandbox.create({
 })
 ```
 
-```python Python
-sb = await Sandbox.create(
-    "dev",
-    image="python:3.12",
-    volumes={
-        "/app/src": Volume.bind("./src", readonly=True),
-        "/app/data": Volume.bind("./data"),
-    },
-)
-```
 </CodeGroup>
 
 ## Named volumes
@@ -61,10 +53,6 @@ let cache = Volume::builder("pip-cache")
 
 ```typescript TypeScript
 const cache = await Volume.create({ name: "pip-cache", quotaMib: 1024 })
-```
-
-```python Python
-cache = await Volume.create("pip-cache", quota=1024)
 ```
 
 </CodeGroup>
@@ -90,13 +78,6 @@ const sb = await Sandbox.create({
 })
 ```
 
-```python Python
-sb = await Sandbox.create(
-    "worker",
-    image="python:3.12",
-    volumes={"/root/.cache/pip": Volume.named(cache.name)},
-)
-```
 </CodeGroup>
 
 ### Share between sandboxes
@@ -142,22 +123,6 @@ const output = await reader.exec("cat", ["/data/message.txt"])
 // => "hello"
 ```
 
-```python Python
-# Writer
-writer = await Sandbox.create(
-    "writer", image="alpine:latest",
-    volumes={"/data": Volume.named("shared-data")},
-)
-await writer.exec("sh", ["-c", "echo 'hello' > /data/message.txt"])
-
-# Reader (read-only)
-reader = await Sandbox.create(
-    "reader", image="alpine:latest",
-    volumes={"/data": Volume.named("shared-data", readonly=True)},
-)
-output = await reader.exec("cat", ["/data/message.txt"])
-# => "hello"
-```
 </CodeGroup>
 
 <Tip>
@@ -175,15 +140,9 @@ vol.fs().write("/requirements.txt", "requests==2.28.0").await?;
 ```
 
 ```typescript TypeScript
-const vol = await Volume.get("pip-cache")
-await vol.fs.write("/requirements.txt", "requests==2.28.0")
-const data = await vol.fs.readString("/requirements.txt")
+// Coming soon — host-side filesystem access for volumes
 ```
 
-```python Python
-cache = await Volume.get("pip-cache")
-await cache.fs.write("/requirements.txt", "requests==2.28.0")
-```
 </CodeGroup>
 
 ### Manage volumes
@@ -199,10 +158,6 @@ const volumes = await Volume.list()
 await Volume.remove("old-cache")
 ```
 
-```python Python
-volumes = await Volume.list()
-await Volume.remove("old-cache")
-```
 </CodeGroup>
 
 ## Tmpfs
@@ -223,16 +178,9 @@ const sb = await Sandbox.create({
     name: "worker",
     image: "alpine:latest",
     volumes: {
-        "/tmp/scratch": Mount.tmpfs({ sizeMiB: 100 }),
+        "/tmp/scratch": Mount.tmpfs({ sizeMib: 100 }),
     },
 })
 ```
 
-```python Python
-sb = await Sandbox.create(
-    "worker",
-    image="alpine:latest",
-    volumes={"/tmp/scratch": Volume.tmpfs(size_mib=100)},
-)
-```
 </CodeGroup>

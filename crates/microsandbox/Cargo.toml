@@ -46,6 +46,11 @@ tracing.workspace = true
 typed-builder.workspace = true
 which.workspace = true
 
+[build-dependencies]
+flate2.workspace = true
+tar.workspace = true
+ureq.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

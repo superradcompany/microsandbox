@@ -59,6 +59,7 @@ impl ProcessHandle {
 
     /// Send SIGKILL to the sandbox process for immediate termination.
     pub fn kill(&self) -> MicrosandboxResult<()> {
+        tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "sending SIGKILL");
         signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGKILL)?;
         Ok(())
     }
@@ -68,14 +69,22 @@ impl ProcessHandle {
     /// The libkrun signal handler catches SIGUSR1, writes to the exit event
     /// fd, exit observers run, and the process terminates.
     pub fn drain(&self) -> MicrosandboxResult<()> {
+        tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "sending SIGUSR1 (drain)");
         signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGUSR1)?;
         Ok(())
     }
 
     /// Wait for the sandbox process to exit.
     pub async fn wait(&mut self) -> MicrosandboxResult<ExitStatus> {
+        tracing::debug!(pid = self.pid, sandbox = %self.sandbox_name, "waiting for exit");
         let status = self.child.wait().await?;
+        tracing::debug!(pid = self.pid, ?status, "process exited");
         Ok(status)
+    }
+
+    /// Check if the process has exited without blocking.
+    pub fn try_wait(&mut self) -> MicrosandboxResult<Option<ExitStatus>> {
+        Ok(self.child.try_wait()?)
     }
 
     /// Disarm the SIGTERM safety net so the sandbox keeps running after
@@ -100,6 +109,7 @@ impl Drop for ProcessHandle {
         if let Ok(None) = self.child.try_wait()
             && let Some(pid) = self.child.id()
         {
+            tracing::debug!(pid, sandbox = %self.sandbox_name, "drop: sending SIGTERM safety net");
             let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
         }
     }

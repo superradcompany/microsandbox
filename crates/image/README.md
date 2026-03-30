@@ -1,6 +1,6 @@
 # microsandbox-image
 
-Pull OCI container images, extract their layers, and cache everything locally. This crate handles the full image lifecycle for [microsandbox](https://github.com/zerocore-ai/microsandbox) — from resolving a multi-platform manifest to producing ready-to-mount layer directories.
+Pull OCI container images, extract their layers, and cache everything locally. This crate handles the full image lifecycle for [microsandbox](https://github.com/superradcompany/microsandbox) — from resolving a multi-platform manifest to producing ready-to-mount layer directories.
 
 - **Multi-platform resolution** — automatically picks the right manifest for your OS and architecture
 - **Parallel downloads** — all layers download and extract concurrently with SHA256 verification

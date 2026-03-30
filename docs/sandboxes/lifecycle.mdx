@@ -52,12 +52,9 @@ let sb = Sandbox::builder("worker").image("python:3.12").create_detached().await
 const sb = await Sandbox.create({ name: "worker", image: "python:3.12" })
 
 // Detached creation (sandbox survives after your process exits)
-const sb = await Sandbox.create({ name: "worker", image: "python:3.12", detached: true })
+const sb = await Sandbox.createDetached({ name: "worker", image: "python:3.12" })
 ```
 
-```python Python
-sb = await Sandbox.create("worker", image="python:3.12")
-```
 </CodeGroup>
 
 ## Stop and restart
@@ -78,11 +75,6 @@ await sb.stop()
 const sb = await Sandbox.start("worker")
 ```
 
-```python Python
-await sb.stop()
-
-sb = await Sandbox.start("worker")
-```
 </CodeGroup>
 
 ## Kill immediately
@@ -98,12 +90,9 @@ sb.kill().await?;
 await sb.kill()
 ```
 
-```python Python
-await sb.kill()
-```
 </CodeGroup>
 
-## Pause and resume
+## Pause and resume <sup><sup>coming soon</sup></sup>
 
 Freeze all guest processes without shutting down. The VM uses zero CPU while paused, and resume is instant. The guest continues exactly where it left off with no boot time and no re-init.
 
@@ -114,11 +103,6 @@ sb.resume().await?;
 ```
 
 ```typescript TypeScript
-await sb.pause()
-await sb.resume()
-```
-
-```python Python
 await sb.pause()
 await sb.resume()
 ```
@@ -138,9 +122,6 @@ sb.detach().await;
 await sb.detach()
 ```
 
-```python Python
-await sb.detach()
-```
 </CodeGroup>
 
 <Tip>
@@ -160,9 +141,6 @@ sb.drain().await?;
 await sb.drain()
 ```
 
-```python Python
-await sb.drain()
-```
 </CodeGroup>
 
 ## Remove
@@ -178,9 +156,6 @@ Sandbox::remove("worker").await?;
 await Sandbox.remove("worker")
 ```
 
-```python Python
-await Sandbox.remove("worker")
-```
 </CodeGroup>
 
 ## List and inspect
@@ -202,11 +177,6 @@ const handle = await Sandbox.get("worker")
 console.log(handle.status) // "Running" | "Stopped" | ...
 ```
 
-```python Python
-sandboxes = await Sandbox.list()
-for info in sandboxes:
-    print(f"{info.name}: {info.status}")
-```
 </CodeGroup>
 
 ## Runtime process architecture
@@ -264,19 +234,8 @@ let sb = Sandbox::builder("worker")
 const sb = await Sandbox.create({
     name: "worker",
     image: "python:3.12",
-    maxDuration: 3600,  // maximum sandbox lifetime in seconds
-    idleTimeout: 300,   // auto-drain after 5 minutes of inactivity
+    maxDurationSecs: 3600,  // maximum sandbox lifetime in seconds
 })
 ```
 
-```python Python
-from microsandbox import Sandbox
-
-sb = await Sandbox.create(
-    "worker",
-    image="python:3.12",
-    max_duration=3600,
-    idle_timeout=300,
-)
-```
 </CodeGroup>

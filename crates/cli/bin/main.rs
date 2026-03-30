@@ -16,7 +16,12 @@ use microsandbox_cli::{
 
 /// Microsandbox CLI.
 #[derive(Parser)]
-#[command(name = "msb", version, about = "Microsandbox CLI", styles = microsandbox_cli::styles::styles())]
+#[command(
+    name = "msb",
+    version,
+    about = format!("Microsandbox CLI v{}", env!("CARGO_PKG_VERSION")),
+    styles = microsandbox_cli::styles::styles()
+)]
 struct Cli {
     /// Print the full command tree and exit.
     #[arg(long, global = true)]

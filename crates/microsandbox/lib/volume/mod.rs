@@ -156,6 +156,7 @@ impl Volume {
     /// Fails with [`MicrosandboxError::VolumeAlreadyExists`] if a volume
     /// with the same name already exists.
     pub async fn create(config: VolumeConfig) -> MicrosandboxResult<Self> {
+        tracing::debug!(name = %config.name, quota_mib = ?config.quota_mib, "Volume::create");
         validate_volume_name(&config.name)?;
 
         let db =

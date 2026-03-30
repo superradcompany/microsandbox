@@ -28,11 +28,6 @@ import { Volume } from 'microsandbox'
 const cache = await Volume.create({ name: "pip-cache", quotaMib: 1024 })
 ```
 
-```python Python
-from microsandbox import Volume
-
-cache = await Volume.create("pip-cache", quota=1024)
-```
 </CodeGroup>
 
 ## Mount volumes
@@ -68,26 +63,11 @@ const sb = await Sandbox.create({
     volumes: {
         "/app/src": Mount.bind("./src", { readonly: true }),
         "/root/.cache/pip": Mount.named(cache.name),
-        "/tmp/scratch": Mount.tmpfs({ sizeMiB: 100 }),
+        "/tmp/scratch": Mount.tmpfs({ sizeMib: 100 }),
     },
 })
 ```
 
-```python Python
-from microsandbox import Sandbox, Volume
-
-cache = await Volume.create("pip-cache", quota=1024)
-
-sb = await Sandbox.create(
-    "worker",
-    image="python:3.12",
-    volumes={
-        "/app/src": Volume.bind("./src", readonly=True),
-        "/root/.cache/pip": Volume.named(cache.name),
-        "/tmp/scratch": Volume.tmpfs(size_mib=100),
-    },
-)
-```
 </CodeGroup>
 
 ## Host-side file access
@@ -103,21 +83,11 @@ vol.fs().write("/requirements.txt", "requests==2.28.0").await?;
 let content = vol.fs().read_to_string("/requirements.txt").await?;
 ```
 
-```typescript TypeScript
-import { Volume } from 'microsandbox'
-
-const vol = await Volume.get("pip-cache")
-await vol.fs.write("/requirements.txt", "requests==2.28.0")
-const data = await vol.fs.readString("/requirements.txt")
+```typescript TypeScript (coming soon)
+// Coming soon — host-side filesystem access for volumes
+// In the meantime, use a sandbox to read/write volume contents
 ```
 
-```python Python
-from microsandbox import Volume
-
-cache = await Volume.get("pip-cache")
-await cache.fs.write("/requirements.txt", "requests==2.28.0")
-content = await cache.fs.read_string("/requirements.txt")
-```
 </CodeGroup>
 
 ## List and remove volumes
@@ -137,10 +107,4 @@ const volumes = await Volume.list()
 await Volume.remove("old-cache")
 ```
 
-```python Python
-from microsandbox import Volume
-
-volumes = await Volume.list()
-await Volume.remove("old-cache")
-```
 </CodeGroup>

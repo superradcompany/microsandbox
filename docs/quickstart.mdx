@@ -15,10 +15,6 @@ icon: "bolt"
     npm install microsandbox
     ```
 
-    ```bash Python
-    pip install microsandbox
-    ```
-
     </CodeGroup>
 
     <Tip>
@@ -67,28 +63,13 @@ icon: "bolt"
     const sb = await Sandbox.create({
         name: "hello",
         image: "python:3.12",
-        memoryMiB: 512,
+        memoryMib: 512,
     })
 
     const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"])
-    console.log(output.stdout.toString()) // Hello from a microVM!
+    console.log(output.stdout()) // Hello from a microVM!
 
     await sb.stop()
-    ```
-
-    ```python Python
-    import asyncio
-    from microsandbox import Sandbox
-
-    async def main():
-        sb = await Sandbox.create("hello", image="python:3.12", memory=512)
-
-        output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"])
-        print(output.stdout.decode())  # Hello from a microVM!
-
-        await sb.stop()
-
-    asyncio.run(main())
     ```
 
     </CodeGroup>

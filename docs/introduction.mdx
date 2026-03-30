@@ -6,7 +6,7 @@ icon: "house"
 
 AI agents run with whatever privileges you give them, and most of the time that's too many. They can see API keys sitting in the environment, reach the network freely (including cloud metadata at `169.254.169.254`), and nothing stops a prompt injection from running `rm -rf /` on the host filesystem. Containers help with some of this, but they share the host kernel, and namespace escapes are a well-documented class of vulnerability.
 
-microsandbox takes a different approach: every sandbox is a real microVM with its own Linux kernel. But isolation alone isn't the interesting part. What matters is that the networking, filesystem, and secrets are all **programmable from the host side**, so instead of just walling off an agent, you actually get to see and control what it does.
+microsandbox takes a different approach: every sandbox is a real VM with its own Linux kernel. It provides security primitives for preventing exploits like secret exfiltration. And it **runs locally** on your machine.
 
 <CodeGroup>
 
@@ -33,7 +33,7 @@ import { NetworkPolicy, Sandbox, Secret } from 'microsandbox'
 const sb = await Sandbox.create({
     name: "sandbox",
     image: "python:3.12",
-    memoryMiB: 512,
+    memoryMib: 512,
     cpus: 2,
     secrets: [
         Secret.env("OPENAI_API_KEY", {
@@ -43,22 +43,6 @@ const sb = await Sandbox.create({
     ],
     network: NetworkPolicy.publicOnly(),
 })
-```
-
-```python Python
-import os
-from microsandbox import Sandbox, Secret, NetworkPolicy
-
-sb = await Sandbox.create(
-    "sandbox",
-    image="python:3.12",
-    memory=512,
-    cpus=2,
-    secrets=[
-        Secret.simple("OPENAI_API_KEY", os.environ["OPENAI_API_KEY"], "api.openai.com"),
-    ],
-    network=NetworkPolicy.public_only(),
-)
 ```
 
 </CodeGroup>
@@ -100,19 +84,9 @@ const sb = await Sandbox.create({
 })
 ```
 
-```python Python
-sb = await Sandbox.create(
-    "sandbox",
-    image="python:3.12",
-    secrets=[
-        Secret.simple("OPENAI_API_KEY", os.environ["OPENAI_API_KEY"], "api.openai.com"),
-    ],
-)
-```
-
 </CodeGroup>
 
-### Programmable network layer
+### Programmable network layer <sup><sup>coming soon</sup></sup>
 
 Every packet leaving a sandbox passes through a networking stack controlled entirely from the host side, where policy is enforced at the IP, DNS, or HTTP level. From inside the sandbox it looks like a normal network interface, but on the host side you decide what gets through.
 
@@ -138,17 +112,9 @@ const sb = await Sandbox.create({
 })
 ```
 
-```python Python
-sb = await Sandbox.create(
-    "sandbox",
-    image="python:3.12",
-    network=NetworkPolicy.allowlist(["api.openai.com", "pypi.org"]),
-)
-```
-
 </CodeGroup>
 
-### Extensible filesystem backends
+### Extensible filesystem backends <sup><sup>coming soon</sup></sup>
 
 The host controls what the guest sees at the filesystem level. Mount host directories, use managed volumes, or attach custom filesystem backends entirely. Hooks let you intercept reads and writes to do things like encrypt everything going to disk or proxy to remote storage, and the guest never knows the difference.
 
@@ -180,23 +146,9 @@ const sb = await Sandbox.create({
 })
 ```
 
-```python Python
-sb = await Sandbox.create(
-    "encrypted",
-    image="python:3.12",
-    volumes={
-        "/secrets": Volume.bind(
-            "/data/secrets",
-            on_read=lambda path, data: decrypt(data, key),
-            on_write=lambda path, data: encrypt(data, key),
-        ),
-    },
-)
-```
-
 </CodeGroup>
 
-### Snapshot, fork, restore <sup>coming soon</sup>
+### Snapshot, fork, restore <sup><sup>coming soon</sup></sup>
 
 Take a snapshot of a running sandbox (full VM state, memory, filesystem, everything) and fork hundreds of identical copies from that single baseline. Install dependencies once, snapshot, then spin up workers that skip the entire setup phase. Each fork gets its own copy-on-write filesystem and can override memory, CPUs, or environment variables.
 
@@ -230,19 +182,7 @@ const workers = await Promise.all(
 )
 ```
 
-```python Python
-sb = await Sandbox.create("base", image="python:3.12")
-await sb.exec("pip", ["install", "-r", "requirements.txt"])
-
-snapshot = await sb.snapshot()
-
-# Fork 10 workers (skips pip install entirely)
-workers = await asyncio.gather(*(snapshot.restore(f"worker-{i}") for i in range(10)))
-```
-
 </CodeGroup>
-
-/
 
 ### Spawn sandboxes from sandboxes
 
@@ -252,7 +192,7 @@ Code running inside a sandbox can spawn peer sandboxes alongside itself. This is
 
 Extend microsandbox with in-process Rust plugins or out-of-process plugins in any language. Plugins hook into lifecycle events, exec calls, filesystem operations, or network traffic. They compose naturally, so you can stack an audit logger, a rate limiter, and a network monitor without them knowing about each other.
 
-### Bidirectional events
+### Bidirectional events <sup><sup>coming soon</sup></sup>
 
 Guest processes can emit typed events to the host, and the host can send events back. No special libraries required in the guest since any language can write JSON to a socket. This enables structured communication beyond stdin/stdout, like progress reporting, task completion signals, or custom RPC.
 
@@ -282,19 +222,6 @@ const sub = sb.onEvent("task.progress", (event: EventData) => {
 
 // Send events to guest
 await sb.emit("task.start", { inputFile: "/data/input.txt", options: ["--verbose"] })
-```
-
-```python Python
-# Receive events from guest
-progress_sub = sb.on_event("task.progress", lambda event: (
-    print(f"[{event.data['percent']}%] {event.data['message']}")
-))
-
-# Send events to guest
-await sb.emit("task.start", {
-    "input_file": "/data/input.txt",
-    "output_dir": "/data/output",
-})
 ```
 
 </CodeGroup>

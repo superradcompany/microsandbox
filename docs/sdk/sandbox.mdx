@@ -29,12 +29,12 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-import { Mount, Network, Sandbox } from 'microsandbox'
+import { Mount, NetworkPolicy, Sandbox } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "worker",
     image: "python:3.12",
-    memoryMiB: 1024,
+    memoryMib: 1024,
     cpus: 2,
     workdir: "/app",
     shell: "/bin/bash",
@@ -42,31 +42,12 @@ const sb = await Sandbox.create({
     volumes: {
         "/app/src": Mount.bind("./src", { readonly: true }),
         "/data": Mount.named("my-data"),
-        "/tmp/scratch": Mount.tmpfs({ sizeMiB: 100 }),
+        "/tmp/scratch": Mount.tmpfs({ sizeMib: 100 }),
     },
-    network: Network.publicOnly(),
+    network: NetworkPolicy.publicOnly(),
 })
 ```
 
-```python Python
-from microsandbox import Sandbox, NetworkPolicy, Volume
-
-sb = await Sandbox.create(
-    "worker",
-    image="python:3.12",
-    memory=1024,
-    cpus=2,
-    workdir="/app",
-    shell="/bin/bash",
-    env={"DEBUG": "true", "API_PORT": "8000"},
-    volumes={
-        "/app/src": Volume.bind("./src", readonly=True),
-        "/data": Volume.named("my-data"),
-        "/tmp/scratch": Volume.tmpfs(size_mib=100),
-    },
-    network=NetworkPolicy.public_only(),
-)
-```
 </CodeGroup>
 
 ## Detached creation
@@ -82,16 +63,12 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
+const sb = await Sandbox.createDetached({
     name: "worker",
     image: "python:3.12",
-    detached: true,
 })
 ```
 
-```python Python
-sb = await Sandbox.create("worker", image="python:3.12", detached=True)
-```
 </CodeGroup>
 
 ## Replace existing
@@ -115,12 +92,9 @@ const sb = await Sandbox.create({
 })
 ```
 
-```python Python
-sb = await Sandbox.create("worker", image="python:3.12", replace=True)
-```
 </CodeGroup>
 
-## Config inspection
+## Config inspection <sup><sup>coming soon</sup></sup>
 
 Build a sandbox configuration without booting the VM. Useful for serializing, storing, validating, or modifying configs before creation.
 
@@ -143,23 +117,13 @@ import { Sandbox } from 'microsandbox'
 const config = Sandbox.buildConfig({
     name: "preview",
     image: "python:3.12",
-    memoryMiB: 1024,
+    memoryMib: 1024,
 })
 
 console.log(JSON.stringify(config, null, 2))
 const sb = await Sandbox.create(config)
 ```
 
-```python Python
-import json
-from microsandbox import SandboxConfig, Sandbox
-
-config = SandboxConfig("preview", image="python:3.12", memory=1024)
-print(json.dumps(config.to_dict(), indent=2))
-
-config.memory = 2048
-sb = await Sandbox.create_from_config(config)
-```
 </CodeGroup>
 
 ## Disk image rootfs
@@ -195,37 +159,18 @@ const sb = await Sandbox.create({
     name: "vm-sandbox",
     image: "./ubuntu-22.04.qcow2",
     cpus: 2,
-    memoryMiB: 2048,
+    memoryMib: 2048,
 })
 
 // Explicit filesystem type
 const sb2 = await Sandbox.create({
     name: "vm-sandbox",
-    image: i => i.disk("./alpine.raw").fstype("ext4"),
+    image: "./alpine.raw",
     cpus: 1,
-    memoryMiB: 512,
+    memoryMib: 512,
 })
 ```
 
-```python Python
-from microsandbox import Sandbox
-
-# Auto-detect filesystem
-sb = await Sandbox.create(
-    "vm-sandbox",
-    image="./ubuntu-22.04.qcow2",
-    cpus=2,
-    memory=2048,
-)
-
-# Explicit filesystem type
-sb = await Sandbox.create(
-    "vm-sandbox",
-    image=lambda i: i.disk("./alpine.raw").fstype("ext4"),
-    cpus=1,
-    memory=512,
-)
-```
 </CodeGroup>
 
 <Note>
@@ -278,25 +223,6 @@ const sb2 = await Sandbox.create({
 })
 ```
 
-```python Python
-import os
-from microsandbox import Sandbox, PullPolicy
-
-# Explicit auth with pull policy
-sb = await Sandbox.create(
-    "worker",
-    image="private.registry.io/org/app:v1",
-    registry_auth={"username": "deploy", "password": os.environ["REGISTRY_TOKEN"]},
-    pull_policy=PullPolicy.ALWAYS,
-)
-
-# Use cached image, never pull
-sb = await Sandbox.create(
-    "offline",
-    image="python:3.12",
-    pull_policy=PullPolicy.NEVER,
-)
-```
 </CodeGroup>
 
 Pull policies control whether the SDK fetches the image from the registry:
@@ -338,18 +264,9 @@ const sb = await Sandbox.start("worker")
 await sb.kill()
 ```
 
-```python Python
-from microsandbox import Sandbox
-
-await sb.stop()
-
-sb = await Sandbox.start("worker")
-
-await sb.kill()
-```
 </CodeGroup>
 
-### Pause and resume
+### Pause and resume <sup><sup>coming soon</sup></sup>
 
 Freeze all guest processes. Zero CPU usage while paused. Resume is instant with no re-boot.
 
@@ -364,10 +281,6 @@ await sb.pause()
 await sb.resume()
 ```
 
-```python Python
-await sb.pause()
-await sb.resume()
-```
 </CodeGroup>
 
 ### Drain
@@ -383,9 +296,6 @@ sb.drain().await?;
 await sb.drain()
 ```
 
-```python Python
-await sb.drain()
-```
 </CodeGroup>
 
 ### Detach
@@ -401,9 +311,6 @@ sb.detach().await;
 await sb.detach()
 ```
 
-```python Python
-await sb.detach()
-```
 </CodeGroup>
 
 ### Wait
@@ -419,9 +326,6 @@ let exit_status = sb.wait().await?;
 const exitStatus = await sb.wait()
 ```
 
-```python Python
-exit_status = await sb.wait()
-```
 </CodeGroup>
 
 ### List, get, remove
@@ -453,17 +357,6 @@ const existing = await Sandbox.get("my-sandbox")
 await Sandbox.remove("old-sandbox")
 ```
 
-```python Python
-from microsandbox import Sandbox
-
-sandboxes = await Sandbox.list()
-for info in sandboxes:
-    print(f"{info.name}: {info.status}")
-
-sb = await Sandbox.get("my-sandbox")
-
-await Sandbox.remove("old-sandbox")
-```
 </CodeGroup>
 
 ### Graceful shutdown with timeout fallback
@@ -497,16 +390,6 @@ try {
 }
 ```
 
-```python Python
-import asyncio
-from microsandbox import Sandbox
-
-sb = await Sandbox.get("worker")
-try:
-    await asyncio.wait_for(sb.stop(), timeout=30)
-except asyncio.TimeoutError:
-    await sb.kill()
-```
 </CodeGroup>
 
 ## Sandbox Process Policies
@@ -532,23 +415,11 @@ import { Sandbox, LogLevel } from 'microsandbox'
 const sb = await Sandbox.create({
     name: "worker",
     image: "python:3.12",
-    maxDuration: 3600,
-    idleTimeout: 300,
+    maxDurationSecs: 3600,
     logLevel: LogLevel.Debug,
 })
 ```
 
-```python Python
-from microsandbox import Sandbox, LogLevel
-
-sb = await Sandbox.create(
-    "worker",
-    image="python:3.12",
-    max_duration=3600,
-    idle_timeout=300,
-    log_level=LogLevel.DEBUG,
-)
-```
 </CodeGroup>
 
 | Option | Default | Description |

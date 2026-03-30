@@ -1,0 +1,38 @@
+{
+  "name": "microsandbox",
+  "version": "0.3.4",
+  "main": "index.cjs",
+  "module": "index.mjs",
+  "types": "index.d.cts",
+  "napi": {
+    "binaryName": "microsandbox",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu"
+    ]
+  },
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  },
+  "scripts": {
+    "build": "napi build --release --platform --js index.cjs --dts index.d.cts",
+    "build:debug": "napi build --platform --js index.cjs --dts index.d.cts",
+    "postinstall": "node postinstall.js"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3"
+  },
+  "optionalDependencies": {
+    "@microsandbox/sdk-darwin-arm64": "0.3.4",
+    "@microsandbox/sdk-linux-x64-gnu": "0.3.4",
+    "@microsandbox/sdk-linux-arm64-gnu": "0.3.4"
+  },
+  "files": [
+    "index.cjs",
+    "index.mjs",
+    "index.d.cts",
+    "postinstall.js"
+  ]
+}

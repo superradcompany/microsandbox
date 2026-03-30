@@ -1,0 +1,12 @@
+{
+  "name": "@microsandbox/sdk-linux-arm64-gnu",
+  "version": "0.3.4",
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "main": "microsandbox.linux-arm64-gnu.node",
+  "files": ["microsandbox.linux-arm64-gnu.node"],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  }
+}

@@ -7,7 +7,7 @@ set -eu
 # Constants
 # ---------------------------------------------------------------------------
 
-GITHUB_REPO="zerocore-ai/microsandbox"
+GITHUB_REPO="superradcompany/microsandbox"
 INSTALL_DIR="$HOME/.microsandbox"
 BIN_DIR="$INSTALL_DIR/bin"
 LIB_DIR="$INSTALL_DIR/lib"

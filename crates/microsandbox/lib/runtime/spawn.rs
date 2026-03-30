@@ -60,6 +60,16 @@ pub async fn spawn_sandbox(
     // Resolve paths.
     let msb_path = config::resolve_msb_path()?;
     let libkrunfw_path = config::resolve_libkrunfw_path()?;
+    tracing::debug!(
+        msb = %msb_path.display(),
+        libkrunfw = %libkrunfw_path.display(),
+        sandbox = %config.name,
+        cpus = config.cpus,
+        memory_mib = config.memory_mib,
+        mode = ?mode,
+        "spawn_sandbox: resolved paths"
+    );
+
     let global = config::config();
     let sandbox_dir = global.sandboxes_dir().join(&config.name);
     let log_dir = sandbox_dir.join("logs");
@@ -131,6 +141,7 @@ pub async fn spawn_sandbox(
     let _pid = child.id().ok_or_else(|| {
         crate::MicrosandboxError::Runtime("sandbox process exited immediately".into())
     })?;
+    tracing::debug!(pid = _pid, sandbox = %config.name, "spawn_sandbox: process started");
 
     // Read the startup JSON from stdout.
     let stdout = child.stdout.take().ok_or_else(|| {
@@ -162,12 +173,23 @@ pub async fn spawn_sandbox(
         Ok(info) => info,
         Err(_) => {
             let status = terminate_startup_process(&mut child).await;
+            tracing::debug!(
+                raw_line = ?line,
+                exit_status = ?status,
+                "spawn_sandbox: failed to parse startup JSON"
+            );
             return Err(crate::MicrosandboxError::Runtime(format!(
                 "sandbox process exited ({status:?}) before sending startup info \
                  (line: {line:?}, check stderr above for details)"
             )));
         }
     };
+
+    tracing::debug!(
+        vm_pid = startup.pid,
+        agent_sock = %agent_sock_path.display(),
+        "spawn_sandbox: startup JSON received"
+    );
 
     let handle = ProcessHandle::new(startup.pid, config.name.clone(), child);
 

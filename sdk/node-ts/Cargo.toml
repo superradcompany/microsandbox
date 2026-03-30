@@ -1,0 +1,28 @@
+[package]
+name = "microsandbox-node"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+path = "lib/lib.rs"
+
+[dependencies]
+microsandbox = { version = "0.3.4", path = "../../crates/microsandbox" }
+microsandbox-network = { version = "0.3.4", path = "../../crates/network" }
+napi = { version = "3", default-features = false, features = [
+    "async",
+    "tokio_rt",
+    "napi9",
+] }
+napi-derive = "3"
+tokio = { workspace = true }
+chrono = { workspace = true }
+bytes = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"
