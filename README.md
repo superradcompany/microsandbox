@@ -18,13 +18,9 @@
 <br />
 
 <div align='center'>
-  <a href="https://discord.gg/T95Y3XnEAK" target="_blank">
-    <img src="https://img.shields.io/badge/join discord-%2300acee.svg?color=mediumslateblue&style=for-the-badge&logo=discord&logoColor=white" alt=discord style="margin-bottom: 5px;"/>
-  </a>
-
-  <a href="https://x.com/microsandbox" target="_blank">
-    <img src="https://img.shields.io/badge/follow on X-%2300acee.svg?color=000000&style=for-the-badge&logo=X&logoColor=white" alt=discourse style="margin-bottom: 5px;"/>
-  </a>
+  <a href="https://github.com/superradcompany/microsandbox/releases"><img src="https://img.shields.io/github/v/release/superradcompany/microsandbox?include_prereleases&style=for-the-badge" alt="GitHub release"></a>
+  <a href="https://discord.gg/T95Y3XnEAK"><img src="https://img.shields.io/discord/1315784565562019870?label=Discord&logo=discord&logoColor=white&color=5865F2&style=for-the-badge" alt="Discord"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache 2.0-blue.svg?style=for-the-badge" alt="Apache 2.0 License"></a>
 </div>
 
 <br />
@@ -74,9 +70,6 @@ The SDK lets you create and control sandboxes directly from your application. `S
 
 #### <img height="14" src="https://octicons-col.vercel.app/play/A770EF">&nbsp;&nbsp;Run Code in a Sandbox
 
->  <details open>
->    <summary>&nbsp;Typescript</summary>
->
 > ```typescript
 > import { Sandbox } from "microsandbox";
 >
@@ -92,41 +85,16 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >
 > await sandbox.stopAndWait();
 > ```
->  </details>
 >
->  <details>
->    <summary>&nbsp;Rust</summary>
->
-> ```rs
-> use microsandbox::Sandbox;
->
-> #[tokio::main]
-> async fn main() -> Result<(), Box<dyn std::error::Error>> {
->     let sandbox = Sandbox::builder("my-sandbox")
->         .image("python")
->         .cpus(1)
->         .memory(512)
->         .create()
->         .await?;
->
->     let output = sandbox.shell("print('Hello from a microVM!')").await?;
->     println!("{}", output.stdout()?);
->
->     sandbox.stop_and_wait().await?;
->     Ok(())
-> }
-> ```
->  </details>
->
+> <div align="left">
+>   <a href="./rust_examples.md#run-code-in-a-sandbox"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+> </div>
 >
 > Behind the scenes, `create()` pulls the image (if not cached), assembles the filesystem, boots a microVM. All in under a second.
 
 #### <img height="14" src="https://octicons-col.vercel.app/lock/A770EF">&nbsp;&nbsp;Secrets That Never Enter the VM
 
 > Secrets are injected via placeholder substitution. The guest environment only ever sees a random placeholder. The real value is swapped in at the network level.
->
->  <details open>
->    <summary>&nbsp;Typescript</summary>
 >
 > ```typescript
 > const sandbox = await Sandbox.create({
@@ -139,30 +107,14 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > // Requests to api.openai.com: placeholder is replaced with the real key
 > // Requests to any other host: placeholder stays, secret never leaks
 > ```
->  </details>
 >
->  <details>
->    <summary>&nbsp;Rust</summary>
->
-> ```rs
-> let sandbox = Sandbox::builder("api-client")
->     .image("python")
->     .secret_env("OPENAI_API_KEY", "sk-real-secret-123", "api.openai.com")
->     .create()
->     .await?;
->
-> // Inside the VM: $OPENAI_API_KEY = "$MSB_OPENAI_API_KEY" (placeholder)
-> // Requests to api.openai.com: placeholder is replaced with the real key
-> // Requests to any other host: placeholder stays, secret never leaks
-> ```
->  </details>
+> <div align="left">
+>   <a href="./rust_examples.md#secrets-that-never-enter-the-vm"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+> </div>
 
 #### <img height="14" src="https://octicons-col.vercel.app/globe/A770EF">&nbsp;&nbsp;Network Policy
 
 > Control exactly what the sandbox can reach. The in-process networking stack enforces policy at the IP, DNS, and HTTP level. There's no host network to bridge to, so guests can't bypass the filter.
->
->  <details open>
->    <summary>&nbsp;Typescript</summary>
 >
 > ```typescript
 > import { Sandbox } from "microsandbox";
@@ -176,33 +128,16 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >   },
 > });
 > ```
->  </details>
 >
->  <details>
->    <summary>&nbsp;Rust</summary>
->
-> ```rs
-> use microsandbox::{NetworkPolicy, Sandbox};
->
-> let sandbox = Sandbox::builder("restricted")
->     .image("alpine")
->     .network(|n| {
->         n.policy(NetworkPolicy::public_only())  // blocks private/loopback
->          .block_domain_suffix(".evil.com")       // DNS-level blocking
->     })
->     .create()
->     .await?;
-> ```
->  </details>
+> <div align="left">
+>   <a href="./rust_examples.md#network-policy"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+> </div>
 >
 > Three built-in policies: `NetworkPolicy::public_only()` (default, blocks private IPs), `NetworkPolicy::allow_all()`, and `NetworkPolicy::none()` (fully airgapped).
 
 #### <img height="14" src="https://octicons-col.vercel.app/upload/A770EF">&nbsp;&nbsp;Port Publishing
 
 > Expose guest services on host ports:
->
->  <details open>
->    <summary>&nbsp;Typescript</summary>
 >
 > ```typescript
 > const sandbox = await Sandbox.create({
@@ -211,26 +146,14 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >   ports: { 8080: 80 }, // host:8080 → guest:80
 > });
 > ```
->  </details>
 >
->  <details>
->    <summary>&nbsp;Rust</summary>
->
-> ```rs
-> let sandbox = Sandbox::builder("web-server")
->     .image("alpine")
->     .port(8080, 80)  // host:8080 → guest:80
->     .create()
->     .await?;
-> ```
->  </details>
+> <div align="left">
+>   <a href="./rust_examples.md#port-publishing"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+> </div>
 
 #### <img height="14" src="https://octicons-col.vercel.app/database/A770EF">&nbsp;&nbsp;Named Volumes
 
 > Persistent storage that survives sandbox restarts and can be shared across sandboxes:
->
->  <details open>
->    <summary>&nbsp;Typescript</summary>
 >
 > ```typescript
 > import { Sandbox, Volume } from "microsandbox";
@@ -258,45 +181,14 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > const output = await reader.shell("cat /data/message.txt");
 > console.log(output.stdout()); // hello
 > ```
->  </details>
 >
->  <details>
->    <summary>&nbsp;Rust</summary>
->
-> ```rs
-> use microsandbox::{Sandbox, Volume, size::SizeExt};
->
-> // Create a volume with a quota.
-> let data = Volume::builder("shared-data").quota(100.mib()).create().await?;
->
-> // Sandbox A writes to it.
-> let writer = Sandbox::builder("writer")
->     .image("alpine")
->     .volume("/data", |v| v.named(data.name()))
->     .create()
->     .await?;
->
-> writer.shell("echo 'hello' > /data/message.txt").await?;
-> writer.stop_and_wait().await?;
->
-> // Sandbox B reads from it.
-> let reader = Sandbox::builder("reader")
->     .image("alpine")
->     .volume("/data", |v| v.named(data.name()).readonly())
->     .create()
->     .await?;
->
-> let output = reader.shell("cat /data/message.txt").await?;
-> println!("{}", output.stdout()?); // hello
-> ```
->  </details>
+> <div align="left">
+>   <a href="./rust_examples.md#named-volumes"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+> </div>
 
 #### <img height="14" src="https://octicons-col.vercel.app/pencil/A770EF">&nbsp;&nbsp;Scripts & Patches
 
 > Register named scripts that get mounted at `/.msb/scripts/` and added to `PATH`, so you can invoke them by name:
->
->  <details open>
->    <summary>&nbsp;Typescript</summary>
 >
 > ```typescript
 > const sandbox = await Sandbox.create({
@@ -311,28 +203,12 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > await sandbox.shell("setup");
 > const output = await sandbox.shell("start");
 > ```
->  </details>
 >
->  <details>
->    <summary>&nbsp;Rust</summary>
->
-> ```rs
-> let sandbox = Sandbox::builder("worker")
->     .image("ubuntu")
->     .script("setup", "#!/bin/bash\napt-get update && apt-get install -y python3 curl")
->     .script("start", "#!/bin/bash\nexec python3 /app/main.py")
->     .create()
->     .await?;
->
-> sandbox.shell("setup").await?;
-> let output = sandbox.shell("start").await?;
-> ```
->  </details>
+> <div align="left">
+>   <a href="./rust_examples.md#scripts"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+> </div>
 >
 > Patches modify the filesystem before the VM boots. Inject config files, create directories, append to existing files:
->
->  <details open>
->    <summary>&nbsp;Typescript</summary>
 >
 > ```typescript
 > const sandbox = await Sandbox.create({
@@ -345,30 +221,14 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >   ],
 > });
 > ```
->  </details>
 >
->  <details>
->    <summary>&nbsp;Rust</summary>
->
-> ```rs
-> let sandbox = Sandbox::builder("configured")
->     .image("alpine")
->     .patch(|p| {
->         p.text("/etc/app.conf", "key=value\n", None, false)
->          .mkdir("/app", Some(0o755))
->          .append("/etc/hosts", "127.0.0.1 myapp.local\n")
->     })
->     .create()
->     .await?;
-> ```
->  </details>
+> <div align="left">
+>   <a href="./rust_examples.md#patches"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+> </div>
 
 #### <img height="14" src="https://octicons-col.vercel.app/file-binary/A770EF">&nbsp;&nbsp;Flexible Rootfs Sources
 
 > Boot from an OCI image, a local directory, or a disk image:
->
->  <details open>
->    <summary>&nbsp;Typescript</summary>
 >
 > ```typescript
 > // OCI image (default)
@@ -377,30 +237,14 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > // Local directory
 > await Sandbox.create({ name: "bind", image: "./my-rootfs" });
 > ```
->  </details>
 >
->  <details>
->    <summary>&nbsp;Rust</summary>
->
-> ```rs
-> // OCI image (default)
-> Sandbox::builder("oci").image("python:3.12")
->
-> // Local directory
-> Sandbox::builder("bind").image("./my-rootfs")
->
-> // QCOW2 disk image
-> use microsandbox::sandbox::ImageBuilder;
-> Sandbox::builder("block").image(|img: ImageBuilder| img.disk("./disk.qcow2").fstype("ext4"))
-> ```
->  </details>
+> <div align="left">
+>   <a href="./rust_examples.md#flexible-rootfs-sources"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+> </div>
 
 #### <img height="14" src="https://octicons-col.vercel.app/file/A770EF">&nbsp;&nbsp;Guest Filesystem Access
 
 > Read and write files inside the running sandbox from the host side:
->
->  <details open>
->    <summary>&nbsp;Typescript</summary>
 >
 > ```typescript
 > // Write a file into the sandbox.
@@ -412,29 +256,14 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > // List directory contents.
 > const entries = await sandbox.fs().list("/tmp");
 > ```
->  </details>
 >
->  <details>
->    <summary>&nbsp;Rust</summary>
->
-> ```rs
-> // Write a file into the sandbox.
-> sandbox.fs().write("/tmp/input.txt", b"some data").await?;
->
-> // Read a file from the sandbox.
-> let content = sandbox.fs().read_to_string("/tmp/output.txt").await?;
->
-> // List directory contents.
-> let entries = sandbox.fs().list("/tmp").await?;
-> ```
->  </details>
+> <div align="left">
+>   <a href="./rust_examples.md#guest-filesystem-access"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+> </div>
 
 #### <img height="14" src="https://octicons-col.vercel.app/meter/A770EF">&nbsp;&nbsp;Streaming Execution
 
 > For long-running commands, stream stdout/stderr events in real time:
->
->  <details open>
->    <summary>&nbsp;Typescript</summary>
 >
 > ```typescript
 > const handle = await sandbox.shellStream("python train.py");
@@ -446,26 +275,12 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >   if (event.eventType === "exited") console.log(`Process exited: ${event.code}`);
 > }
 > ```
->  </details>
 >
->  <details>
->    <summary>&nbsp;Rust</summary>
->
-> ```rs
-> use microsandbox::ExecEvent;
->
-> let mut handle = sandbox.shell_stream("python train.py").await?;
->
-> while let Some(event) = handle.recv().await {
->     match event {
->         ExecEvent::Stdout(data) => print!("{}", String::from_utf8_lossy(&data)),
->         ExecEvent::Stderr(data) => eprint!("{}", String::from_utf8_lossy(&data)),
->         ExecEvent::Exited { code } => println!("Process exited: {code}"),
->         _ => {}
->     }
-> }
-> ```
->  </details>
+> <div align="left">
+>   <a href="./rust_examples.md#streaming-execution"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+> </div>
+
+<br />
 
 <a href="https://docs2.microsandbox.dev/sdk/overview"><img src="https://img.shields.io/badge/SDK_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="SDK Docs"></a>
 
@@ -542,6 +357,8 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 > [!TIP]
 >
 > Run `msb --tree` to see all available commands and their options.
+
+<br />
 
 <a href="https://docs2.microsandbox.dev/cli/overview"><img src="https://img.shields.io/badge/CLI_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="CLI Docs"></a>
 

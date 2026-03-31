@@ -521,13 +521,7 @@ export interface SandboxConfig {
   /** Network configuration. */
   network?: NetworkConfig
   /**
-   * Secret environment variables with placeholder-based protection.
-   *
-   * Low-level config-object API. Prefer the `secrets` array with `Secret.env()` for ergonomics.
-   */
-  secretEnv?: Record<string, SecretEnvConfig>
-  /**
-   * Secret entries (array-based API). Created with `Secret.env()`.
+   * Secret entries. Created with `Secret.env()`.
    *
    * ```js
    * import { Secret } from 'microsandbox'
@@ -583,22 +577,6 @@ export interface SecretEntry {
   /** Allowed host patterns (wildcard, e.g. `["*.openai.com"]`). */
   allowHostPatterns?: Array<string>
   /** Custom placeholder (auto-generated as `$MSB_<ENV_VAR>` if omitted). */
-  placeholder?: string
-  /** Require verified TLS identity before substitution (default: true). */
-  requireTls?: boolean
-  /** Violation action: "block", "block-and-log" (default), "block-and-terminate". */
-  onViolation?: string
-}
-
-/** Secret environment variable configuration. */
-export interface SecretEnvConfig {
-  /** The secret value (never enters the sandbox). */
-  value: string
-  /** Allowed host for this secret (exact match, e.g. "api.openai.com"). */
-  domain?: string
-  /** Allowed host pattern (wildcard, e.g. "*.openai.com"). */
-  domainPattern?: string
-  /** Custom placeholder (auto-generated as "$MSB_<ENV_VAR>" if omitted). */
   placeholder?: string
   /** Require verified TLS identity before substitution (default: true). */
   requireTls?: boolean
