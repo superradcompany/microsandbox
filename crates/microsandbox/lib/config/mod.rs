@@ -911,12 +911,8 @@ mod tests {
         std::fs::write(temp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
 
         let paths = dev_msb_candidates_from(temp.path());
+        assert_eq!(paths.len(), 1);
         assert_eq!(paths[0], temp.path().join("build").join("msb"));
-        assert_eq!(
-            paths[1],
-            temp.path().join("target").join("debug").join("msb")
-        );
-        assert_eq!(paths.len(), 2);
     }
 
     #[test]
