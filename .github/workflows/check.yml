@@ -175,6 +175,16 @@ jobs:
           cd build
           ln -sf libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib libkrunfw.dylib
 
+      - name: Build msb
+        run: |
+          cargo build --release --no-default-features --features net -p microsandbox-cli
+          mkdir -p build
+          cp target/release/msb build/msb
+
+      - name: Codesign msb (macOS)
+        if: matrix.os == 'darwin'
+        run: codesign --entitlements msb-entitlements.plist --force -s - build/msb
+
       # -- Checks (workspace) --
       - name: Format
         run: cargo +stable fmt --all -- --check

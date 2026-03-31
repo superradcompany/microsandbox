@@ -22,7 +22,7 @@ repos:
         files: \.(rs|toml)$
       - id: cargo-clippy-workspace
         name: cargo clippy (workspace)
-        entry: cargo clippy --workspace -- -D warnings
+        entry: bash -lc 'CI=true cargo clippy --workspace -- -D warnings'
         language: system
         pass_filenames: false
         files: \.(rs|toml)$
@@ -40,13 +40,13 @@ repos:
         files: \.(rs|toml)$
       - id: cargo-doc-workspace
         name: cargo doc (workspace)
-        entry: bash -lc 'RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps'
+        entry: bash -lc 'CI=true RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps'
         language: system
         pass_filenames: false
         files: \.(rs|toml)$
       - id: cargo-build-msb-release
         name: cargo build (msb release)
-        entry: cargo build --release -p microsandbox-cli
+        entry: bash -lc 'CI=true cargo build --release -p microsandbox-cli'
         language: system
         pass_filenames: false
         files: \.(rs|toml)$

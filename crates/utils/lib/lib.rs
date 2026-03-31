@@ -55,9 +55,11 @@ pub const MSB_BINARY: &str = "msb";
 // Constants: Versions
 //--------------------------------------------------------------------------------------------------
 
-/// Pinned version for downloading prebuilt release artifacts.
-/// Update this after publishing a new GitHub release.
-pub const PREBUILT_VERSION: &str = "0.3.5";
+/// Version for downloading prebuilt release artifacts.
+///
+/// This tracks the published crate/package version so the SDK and the
+/// downloaded runtime bundle stay aligned.
+pub const PREBUILT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// libkrunfw release version. Keep in sync with justfile.
 pub const LIBKRUNFW_VERSION: &str = "5.2.1";

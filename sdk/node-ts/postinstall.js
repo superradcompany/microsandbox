@@ -2,14 +2,14 @@
 
 // Downloads msb + libkrunfw binaries to ~/.microsandbox/{bin,lib}/ during npm install.
 
-const { execSync } = require("child_process");
+const { execFileSync, execSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const https = require("https");
 const http = require("http");
 
-const PREBUILT_VERSION = "0.3.5";
+const PREBUILT_VERSION = require("./package.json").version;
 const LIBKRUNFW_ABI = "5";
 const LIBKRUNFW_VERSION = "5.2.1";
 const GITHUB_ORG = "superradcompany";
@@ -101,16 +101,22 @@ async function main() {
   const arch = getArch();
   const libkrunfw = libkrunfwFilename(targetOS);
 
-  // Skip if already installed.
+  // Skip if already installed and the bundled msb version matches the
+  // current package version.
   if (
-    fs.existsSync(path.join(BIN_DIR, "msb")) &&
-    fs.existsSync(path.join(LIB_DIR, libkrunfw))
+    fs.existsSync(path.join(LIB_DIR, libkrunfw)) &&
+    installedMsbVersion(path.join(BIN_DIR, "msb")) === PREBUILT_VERSION
   ) {
     return;
   }
 
   fs.mkdirSync(BIN_DIR, { recursive: true });
   fs.mkdirSync(LIB_DIR, { recursive: true });
+
+  if (installCiLocalBundle(libkrunfw)) {
+    console.log("microsandbox: installed runtime dependencies from local CI build/");
+    return;
+  }
 
   const url = bundleUrl(PREBUILT_VERSION, arch, targetOS);
   console.log(`microsandbox: downloading runtime dependencies (v${PREBUILT_VERSION})...`);
@@ -134,6 +140,50 @@ async function main() {
   }
 
   console.log("microsandbox: runtime dependencies installed.");
+}
+
+function installedMsbVersion(msbPath) {
+  if (!fs.existsSync(msbPath)) {
+    return null;
+  }
+
+  try {
+    const stdout = execFileSync(msbPath, ["--version"], { encoding: "utf8" }).trim();
+    return stdout.startsWith("msb ") ? stdout.slice(4) : null;
+  } catch {
+    return null;
+  }
+}
+
+function installCiLocalBundle(libkrunfw) {
+  if (!process.env.CI) {
+    return false;
+  }
+
+  const repoRoot = path.resolve(__dirname, "..", "..");
+  const buildDir = path.join(repoRoot, "build");
+  if (!fs.existsSync(path.join(repoRoot, "Cargo.toml"))) {
+    return false;
+  }
+
+  const msbSrc = path.join(buildDir, "msb");
+  const libSrc = path.join(buildDir, libkrunfw);
+  if (!fs.existsSync(msbSrc) || !fs.existsSync(libSrc)) {
+    return false;
+  }
+
+  fs.copyFileSync(msbSrc, path.join(BIN_DIR, "msb"));
+  fs.copyFileSync(libSrc, path.join(LIB_DIR, libkrunfw));
+  fs.chmodSync(path.join(BIN_DIR, "msb"), 0o755);
+  fs.chmodSync(path.join(LIB_DIR, libkrunfw), 0o755);
+
+  for (const [linkName, target] of libkrunfwSymlinks(libkrunfw, getOS())) {
+    const linkPath = path.join(LIB_DIR, linkName);
+    try { fs.unlinkSync(linkPath); } catch {}
+    fs.symlinkSync(target, linkPath);
+  }
+
+  return true;
 }
 
 main().catch((err) => {

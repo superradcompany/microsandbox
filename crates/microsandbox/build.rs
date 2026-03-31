@@ -3,8 +3,9 @@
 use std::fs;
 use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-const PREBUILT_VERSION: &str = "0.3.5";
+const PREBUILT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const LIBKRUNFW_ABI: &str = "5";
 const LIBKRUNFW_VERSION: &str = "5.2.1";
 const GITHUB_ORG: &str = "superradcompany";
@@ -42,13 +43,22 @@ fn main() {
 
     let libkrunfw_name = libkrunfw_filename();
 
-    // Skip if both binaries already exist.
-    if bin_dir.join(MSB_BINARY).exists() && lib_dir.join(&libkrunfw_name).exists() {
+    // Skip if both binaries already exist and the installed msb version
+    // matches this package version.
+    if lib_dir.join(&libkrunfw_name).exists()
+        && installed_msb_version(&bin_dir.join(MSB_BINARY)).as_deref() == Some(PREBUILT_VERSION)
+    {
         return;
     }
 
     fs::create_dir_all(&bin_dir).expect("failed to create bin dir");
     fs::create_dir_all(&lib_dir).expect("failed to create lib dir");
+
+    if install_ci_local_bundle(&bin_dir, &lib_dir, &libkrunfw_name)
+        .expect("failed to install CI local microsandbox bundle")
+    {
+        return;
+    }
 
     let url = bundle_url();
     println!(
@@ -99,6 +109,69 @@ fn bundle_url() -> String {
     format!(
         "https://github.com/{GITHUB_ORG}/{REPO}/releases/download/v{PREBUILT_VERSION}/{REPO}-{target_os}-{arch}.tar.gz"
     )
+}
+
+fn installed_msb_version(path: &Path) -> Option<String> {
+    if !path.exists() {
+        return None;
+    }
+
+    let output = Command::new(path).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    stdout
+        .trim()
+        .strip_prefix("msb ")
+        .map(std::string::ToString::to_string)
+}
+
+fn install_ci_local_bundle(
+    bin_dir: &Path,
+    lib_dir: &Path,
+    libkrunfw_name: &str,
+) -> io::Result<bool> {
+    if std::env::var_os("CI").is_none() {
+        return Ok(false);
+    }
+
+    let Some(build_dir) = workspace_build_dir() else {
+        return Ok(false);
+    };
+
+    let msb_src = build_dir.join(MSB_BINARY);
+    let lib_src = build_dir.join(libkrunfw_name);
+    if !msb_src.is_file() || !lib_src.is_file() {
+        return Ok(false);
+    }
+
+    fs::copy(&msb_src, bin_dir.join(MSB_BINARY))?;
+    fs::copy(&lib_src, lib_dir.join(libkrunfw_name))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(bin_dir.join(MSB_BINARY), fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(
+            lib_dir.join(libkrunfw_name),
+            fs::Permissions::from_mode(0o755),
+        )?;
+    }
+
+    create_symlinks(lib_dir, libkrunfw_name);
+    println!("cargo:warning=installed microsandbox runtime dependencies from local CI build/");
+    Ok(true)
+}
+
+fn workspace_build_dir() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir.parent()?.parent()?;
+    if !workspace_root.join("Cargo.toml").is_file() {
+        return None;
+    }
+    Some(workspace_root.join("build"))
 }
 
 fn download(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

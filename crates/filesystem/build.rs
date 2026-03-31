@@ -24,12 +24,21 @@ fn main() {
 fn build_agentd(workspace_root: &Path, out_dir: &Path) {
     #[cfg(feature = "prebuilt")]
     {
-        let _ = workspace_root;
         let dest = out_dir.join(AGENTD_BINARY);
         if dest.exists() {
             return;
         }
 
+        // In CI, prefer the locally-built agentd from workspace build/.
+        if std::env::var_os("CI").is_some() {
+            let local = workspace_root.join("build").join(AGENTD_BINARY);
+            if local.is_file() {
+                std::fs::copy(&local, &dest).expect("failed to copy agentd from build/");
+                return;
+            }
+        }
+
+        let _ = workspace_root;
         let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
         let url = agentd_download_url(PREBUILT_VERSION, &arch);
 

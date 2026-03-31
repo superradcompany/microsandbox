@@ -1,6 +1,7 @@
 //! Download and installation of microsandbox runtime dependencies.
 
 use std::path::{Path, PathBuf};
+use tokio::process::Command;
 
 use flate2::read::GzDecoder;
 use futures::StreamExt;
@@ -59,12 +60,21 @@ impl Setup {
     async fn install_bundle(&self, bin_dir: &Path, lib_dir: &Path) -> MicrosandboxResult<()> {
         let libkrunfw_name = microsandbox_utils::libkrunfw_filename(std::env::consts::OS);
 
-        // Skip if all binaries are already present.
+        // Skip if all binaries are already present and the installed msb
+        // version matches this package version.
         if !self.force
-            && bin_dir.join(MSB_BINARY).exists()
             && lib_dir.join(&libkrunfw_name).exists()
+            && installed_msb_version(&bin_dir.join(MSB_BINARY))
+                .await
+                .as_deref()
+                == Some(PREBUILT_VERSION)
         {
             tracing::debug!("setup: binaries already present, skipping download");
+            return Ok(());
+        }
+
+        if install_ci_local_bundle(bin_dir, lib_dir, &libkrunfw_name).await? {
+            tracing::debug!("setup: installed runtime dependencies from local CI build/");
             return Ok(());
         }
 
@@ -192,4 +202,81 @@ async fn download_bytes(url: &str) -> MicrosandboxResult<Vec<u8>> {
     }
 
     Ok(data)
+}
+
+async fn installed_msb_version(path: &Path) -> Option<String> {
+    if !path.exists() {
+        return None;
+    }
+
+    let output = Command::new(path).arg("--version").output().await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    stdout
+        .trim()
+        .strip_prefix("msb ")
+        .map(std::string::ToString::to_string)
+}
+
+async fn install_ci_local_bundle(
+    bin_dir: &Path,
+    lib_dir: &Path,
+    libkrunfw_name: &str,
+) -> MicrosandboxResult<bool> {
+    if std::env::var_os("CI").is_none() {
+        return Ok(false);
+    }
+
+    let Some(build_dir) = workspace_build_dir() else {
+        return Ok(false);
+    };
+
+    let msb_src = build_dir.join(MSB_BINARY);
+    let lib_src = build_dir.join(libkrunfw_name);
+    if !msb_src.is_file() || !lib_src.is_file() {
+        return Ok(false);
+    }
+
+    tokio::fs::copy(&msb_src, bin_dir.join(MSB_BINARY)).await?;
+    tokio::fs::copy(&lib_src, lib_dir.join(libkrunfw_name)).await?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(
+            bin_dir.join(MSB_BINARY),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .await?;
+        tokio::fs::set_permissions(
+            lib_dir.join(libkrunfw_name),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .await?;
+    }
+
+    #[cfg(unix)]
+    {
+        for (link_name, target) in libkrunfw_symlinks(libkrunfw_name) {
+            let link_path = lib_dir.join(&link_name);
+            if link_path.exists() || link_path.is_symlink() {
+                std::fs::remove_file(&link_path)?;
+            }
+            std::os::unix::fs::symlink(&target, &link_path)?;
+        }
+    }
+
+    Ok(true)
+}
+
+fn workspace_build_dir() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir.parent()?.parent()?;
+    if !workspace_root.join("Cargo.toml").is_file() {
+        return None;
+    }
+    Some(workspace_root.join("build"))
 }

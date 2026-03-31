@@ -28,7 +28,7 @@ members = [
 [workspace.package]
 authors = ["Team MicroSandbox <team@microsandbox.dev>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.3.6"
+version = "0.3.7"
 license = "Apache-2.0"
 edition = "2024"
 
