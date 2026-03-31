@@ -417,27 +417,29 @@ console.log(result.stdout.toString().trim()); // "$MSB_OPENAI_API_KEY"
 ## Patches (Rootfs Customization)
 
 ```typescript
+import { Patch, Sandbox } from "microsandbox";
+
 const sandbox = await Sandbox.create({
   name: "patched",
   image: "alpine:latest",
   replace: true,
   patches: [
     // Write a config file
-    { kind: "text", path: "/etc/app.conf", content: "debug=true\nport=8080" },
+    Patch.text("/etc/app.conf", "debug=true\nport=8080"),
     // Create directories
-    { kind: "mkdir", path: "/app/logs" },
-    { kind: "mkdir", path: "/app/data", mode: 0o755 },
+    Patch.mkdir("/app/logs"),
+    Patch.mkdir("/app/data", { mode: 0o755 }),
     // Copy files from host
-    { kind: "copyFile", src: "./config/prod.json", dst: "/app/config.json" },
-    { kind: "copyDir", src: "./scripts", dst: "/app/scripts" },
+    Patch.copyFile("./config/prod.json", "/app/config.json"),
+    Patch.copyDir("./scripts", "/app/scripts"),
     // Create symlinks
-    { kind: "symlink", target: "/usr/bin/python3", link: "/usr/bin/python" },
+    Patch.symlink("/usr/bin/python3", "/usr/bin/python"),
     // Append to existing files
-    { kind: "append", path: "/etc/profile", content: "\nexport PATH=$PATH:/app/scripts" },
+    Patch.append("/etc/profile", "\nexport PATH=$PATH:/app/scripts"),
     // Remove files
-    { kind: "remove", path: "/etc/motd" },
+    Patch.remove("/etc/motd"),
     // Replace existing files
-    { kind: "text", path: "/etc/hostname", content: "my-sandbox", replace: true },
+    Patch.text("/etc/hostname", "my-sandbox", { replace: true }),
   ],
 });
 ```
@@ -803,9 +805,9 @@ const sandbox = await Sandbox.create({
 
   // Patches (rootfs modifications before boot)
   patches: [
-    { kind: "text", path: "/etc/app.conf", content: "key=value" },
-    { kind: "mkdir", path: "/app/logs" },
-    { kind: "copyDir", src: "./config", dst: "/app/config" },
+    Patch.text("/etc/app.conf", "key=value"),
+    Patch.mkdir("/app/logs"),
+    Patch.copyDir("./config", "/app/config"),
   ],
 
   // Networking

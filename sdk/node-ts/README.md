@@ -30,9 +30,9 @@ The `microsandbox` npm package provides native bindings to the [MicroSandbox](ht
 
 | Platform | Architecture | Package |
 |----------|-------------|---------|
-| macOS | ARM64 (Apple Silicon) | `@microsandbox/sdk-darwin-arm64` |
-| Linux | x86_64 | `@microsandbox/sdk-linux-x64-gnu` |
-| Linux | ARM64 | `@microsandbox/sdk-linux-arm64-gnu` |
+| macOS | ARM64 (Apple Silicon) | `@superradcompany/microsandbox-darwin-arm64` |
+| Linux | x86_64 | `@superradcompany/microsandbox-linux-x64-gnu` |
+| Linux | ARM64 | `@superradcompany/microsandbox-linux-arm64-gnu` |
 
 Platform-specific binaries are installed automatically via optional dependencies.
 
@@ -244,15 +244,17 @@ const sandbox = await Sandbox.create({
 Modify the filesystem before the VM boots:
 
 ```typescript
+import { Patch, Sandbox } from "microsandbox";
+
 const sandbox = await Sandbox.create({
   name: "patched",
   image: "alpine:latest",
   patches: [
-    { kind: "text", path: "/etc/greeting.txt", content: "Hello!\n" },
-    { kind: "mkdir", path: "/app", mode: 0o755 },
-    { kind: "text", path: "/app/config.json", content: '{"debug": true}', mode: 0o644 },
-    { kind: "copyDir", src: "./scripts", dst: "/app/scripts" },
-    { kind: "append", path: "/etc/hosts", content: "127.0.0.1 myapp.local\n" },
+    Patch.text("/etc/greeting.txt", "Hello!\n"),
+    Patch.mkdir("/app", { mode: 0o755 }),
+    Patch.text("/app/config.json", '{"debug": true}', { mode: 0o644 }),
+    Patch.copyDir("./scripts", "/app/scripts"),
+    Patch.append("/etc/hosts", "127.0.0.1 myapp.local\n"),
   ],
 });
 ```

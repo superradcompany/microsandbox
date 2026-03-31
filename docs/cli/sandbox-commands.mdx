@@ -30,36 +30,50 @@ msb run -d --name worker python:3.11 -- python worker.py
 
 | Flag | Description |
 |------|-------------|
-| `--name`, `-n` | Sandbox name (if omitted, sandbox is ephemeral) |
-| `-c`, `--cpus` | Number of vCPUs |
-| `-m`, `--memory` | Memory (e.g., `512`, `1G`, `2G`) |
-| `-v`, `--volume` | Volume mount (`host:guest` or `name:guest`) |
-| `-p`, `--port` | Port mapping (`host:guest`) |
-| `-e`, `--env` | Environment variable (`KEY=VALUE`) |
+| `-n`, `--name` | Sandbox name (if omitted, sandbox is ephemeral) |
+| `-c`, `--cpus` | Number of virtual CPUs to allocate |
+| `-m`, `--memory` | Amount of memory (e.g. `512M`, `1G`) |
+| `-v`, `--volume` | Mount a host path or named volume (`SOURCE:DEST`) |
+| `-p`, `--port` | Forward a host port to the sandbox (`HOST:GUEST` or `HOST:GUEST/udp`) |
+| `-e`, `--env` | Set an environment variable (`KEY=VALUE`) |
 | `-w`, `--workdir` | Working directory inside the sandbox |
-| `--shell` | Default shell |
-| `-d`, `--detach` | Run in background |
-| `--rm` | Remove sandbox on exit (default for unnamed) |
-| `--secret` | Bind a secret (`NAME` reads from env, or `NAME=VALUE`) |
-| `--network` | Network policy (`none`, `public`, `allowlist`, `denylist`) |
-| `--allow` | Allow egress to host (use with `--network`) |
-| `--deny` | Deny egress to host (use with `--network`) |
-| `-q`, `--quiet` | Suppress non-essential output |
+| `--shell` | Default shell for interactive sessions |
+| `-d`, `--detach` | Run in background and print the sandbox name |
+| `--replace` | Replace an existing sandbox with the same name |
+| `-q`, `--quiet` | Suppress progress output |
+| `--entrypoint` | Override the image's default entrypoint command |
+| `-H`, `--hostname` | Set the guest hostname (defaults to sandbox name) |
+| `-u`, `--user` | Run commands as the specified user (e.g. `nobody`, `1000`, `1000:1000`) |
+| `--pull` | When to pull the image: `always`, `if-missing` (default), `never` |
+| `--log-level` | Log verbosity for the sandbox runtime (`error`, `warn`, `info`, `debug`, `trace`) |
+| `--tmpfs` | Mount a temporary in-memory filesystem (`PATH` or `PATH:SIZE`) |
+| `--script` | Mount a host file as a named script (`NAME:PATH`) |
+| `--max-duration` | Kill the sandbox after this duration (e.g. `30s`, `5m`, `1h`) |
+| `--idle-timeout` | Stop the sandbox after this period of inactivity (e.g. `30s`, `5m`, `1h`) |
+| `--no-network` | Disable all network access |
+| `--dns-block-domain` | Block DNS lookups for a domain (returns NXDOMAIN) |
+| `--dns-block-suffix` | Block DNS lookups for all subdomains of a suffix (e.g. `.ads.com`) |
+| `--no-dns-rebind-protection` | Allow DNS responses pointing to private/internal IP addresses |
+| `--max-connections` | Limit the number of concurrent network connections |
+| `--secret` | Inject a secret that is only sent to an allowed host (`ENV=VALUE@HOST`) |
+| `--on-secret-violation` | Action when a secret is sent to a disallowed host (`block`, `block-and-log`, `block-and-terminate`) |
+| `--tls-intercept` | Intercept and inspect HTTPS traffic via a built-in TLS proxy |
+| `--tls-intercept-port` | TCP port to apply TLS interception on (default: 443) |
+| `--tls-bypass` | Skip TLS interception for a domain (e.g. `*.internal.com`) |
+| `--no-block-quic` | Allow QUIC/HTTP3 traffic (blocked by default when TLS interception is on) |
+| `--tls-ca-cert` | Use a custom CA certificate for TLS interception (PEM file) |
+| `--tls-ca-key` | Use a custom CA private key for TLS interception (PEM file) |
 
 When no `--` command is given, the image's `entrypoint` and `cmd` are used as the default process. If the image has neither, an interactive shell is started. When a command is given via `--`, it replaces the image `cmd` but the `entrypoint` is preserved. See [Image config inheritance](/images/overview#image-config-inheritance) for details.
 
 ## msb create
 
-Create and boot a sandbox without running a command. Takes the same flags as `msb run`.
+Create and boot a sandbox without running a command. Takes the same flags as `msb run` (except `--detach`).
 
 ```bash
 msb create python:3.11 --name worker -c 2 -m 1G
-msb create --force python:3.11 --name worker   # Replace existing
+msb create --replace python:3.11 --name worker   # Replace existing
 ```
-
-| Flag | Description |
-|------|-------------|
-| `--force` | Replace existing sandbox with same name |
 
 ## msb start
 
@@ -69,12 +83,23 @@ Resume a stopped sandbox.
 msb start devbox
 ```
 
+| Flag | Description |
+|------|-------------|
+| `-q`, `--quiet` | Suppress progress output |
+
 ## msb stop
 
 ```bash
-msb stop devbox           # Graceful shutdown
-msb stop --force devbox   # Force kill
+msb stop devbox                # Graceful shutdown
+msb stop --force devbox        # Force kill immediately
+msb stop -t 10 devbox          # Wait 10s then force kill
 ```
+
+| Flag | Description |
+|------|-------------|
+| `-f`, `--force` | Immediately kill the sandbox without graceful shutdown |
+| `-t`, `--timeout` | Seconds to wait for graceful shutdown before force-killing |
+| `-q`, `--quiet` | Suppress progress output |
 
 ## msb exec
 
@@ -87,36 +112,84 @@ msb exec devbox -- ls -la /app
 
 | Flag | Description |
 |------|-------------|
-| `-i`, `--interactive` | Keep stdin open |
-| `-t`, `--tty` | Allocate a pseudo-TTY |
-| `-e`, `--env` | Set environment variables |
-| `--workdir` | Override working directory |
+| `-t`, `--tty` | Allocate a pseudo-terminal (enables colors, line editing) |
+| `-e`, `--env` | Set an environment variable (`KEY=VALUE`) |
+| `-w`, `--workdir` | Override working directory |
+| `-u`, `--user` | Run the command as the specified guest user |
+| `--timeout` | Kill the command after this duration (e.g. `30s`, `5m`, `1h`) |
+| `--rlimit` | Set a POSIX resource limit (e.g. `nofile=1024`, `nproc=64`) |
+| `-q`, `--quiet` | Suppress progress output |
+
+<Tip>
+  The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it captures output. No `-i` flag is needed.
+</Tip>
 
 ## msb shell
 
-Open an interactive shell session.
+Open an interactive shell session or run a shell script.
 
 ```bash
 msb shell devbox
 msb shell devbox --shell /bin/zsh
+msb shell devbox -- echo "hello from shell"
+echo "ls -la" | msb shell devbox
 ```
 
-## msb attach
+| Flag | Description |
+|------|-------------|
+| `--shell` | Shell program to use (default: sandbox config or `/bin/sh`) |
+| `-u`, `--user` | Run the shell as the specified guest user |
+| `-q`, `--quiet` | Suppress progress output |
 
-Attach your terminal to the sandbox's main process. Press `Ctrl+]` to detach without stopping.
+## msb ls
 
-```bash
-msb attach devbox
-msb attach devbox --detach-keys ctrl-q
-```
-
-## msb ls / ps
+List all stored sandboxes.
 
 ```bash
 msb ls                    # All sandboxes (running and stopped)
-msb ps                    # Running sandboxes only
+msb ls --running          # Running sandboxes only
+msb ls --stopped          # Stopped sandboxes only
 msb ls --format json      # JSON output
+msb ls -q                 # Names only
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--running` | Show only running sandboxes |
+| `--stopped` | Show only stopped sandboxes |
+| `--format` | Output format (`json`) |
+| `-q`, `--quiet` | Show only sandbox names |
+
+## msb status / ps
+
+Show sandbox status with process details.
+
+```bash
+msb ps                    # Running sandboxes
+msb ps my-app             # Single sandbox
+msb ps -a                 # All sandboxes (including stopped)
+msb ps --format json      # JSON output
+```
+
+| Flag | Description |
+|------|-------------|
+| `-a`, `--all` | Show all sandboxes, not just running ones |
+| `--format` | Output format (`json`) |
+| `-q`, `--quiet` | Show only sandbox names |
+
+## msb metrics
+
+Show live CPU, memory, disk, and network metrics for running sandboxes.
+
+```bash
+msb metrics               # All running sandboxes
+msb metrics my-app        # Single sandbox
+msb metrics --format json # JSON output
+```
+
+| Flag | Description |
+|------|-------------|
+| `--format` | Output format (`json`) |
 
 ## msb inspect
 
@@ -127,12 +200,77 @@ msb inspect devbox
 msb inspect devbox --format json
 ```
 
+| Flag | Description |
+|------|-------------|
+| `--format` | Output format (`json`) |
+
 ## msb rm
 
-Remove a stopped sandbox and its associated state.
+Remove one or more sandboxes and their associated state.
 
 ```bash
 msb rm devbox
 msb rm --force devbox     # Stop and remove in one step
 msb rm worker-1 worker-2  # Remove multiple
 ```
+
+| Flag | Description |
+|------|-------------|
+| `-f`, `--force` | Stop the sandbox if running, then remove it |
+| `-q`, `--quiet` | Suppress progress output |
+
+## msb install
+
+Install a sandbox as a system command. Creates an executable in `~/.microsandbox/bin/` that launches `msb run` with the specified image and options.
+
+```bash
+msb install ubuntu                   # Install as 'ubuntu' command
+msb install --name nodebox node      # Custom command name
+msb install --tmp alpine             # Fresh sandbox every invocation
+msb install -c 2 -m 1G python:3.12  # With resource limits
+msb install --list                   # List installed commands
+```
+
+| Flag | Description |
+|------|-------------|
+| `-n`, `--name` | Command name for the alias (defaults to image name) |
+| `-c`, `--cpus` | Number of virtual CPUs to allocate |
+| `-m`, `--memory` | Amount of memory (e.g. `512M`, `1G`) |
+| `-v`, `--volume` | Mount a host path or named volume (`SOURCE:DEST`) |
+| `-w`, `--workdir` | Working directory inside the sandbox |
+| `--shell` | Shell for interactive sessions |
+| `-e`, `--env` | Set an environment variable (`KEY=VALUE`) |
+| `-f`, `--force` | Overwrite an existing alias with the same name |
+| `--no-pull` | Don't pull the image before installing |
+| `--tmp` | Create a fresh sandbox on every invocation (no persistent state) |
+| `-l`, `--list` | List all installed sandbox commands |
+
+## msb uninstall
+
+Remove an installed sandbox command.
+
+```bash
+msb uninstall nodebox
+msb uninstall ubuntu alpine   # Remove multiple
+```
+
+## msb self
+
+Manage the msb installation itself.
+
+```bash
+msb self update               # Update msb and libkrunfw to latest
+msb self update --force       # Re-download even if up to date
+msb self uninstall            # Remove msb (with confirmation prompt)
+msb self uninstall --yes      # Skip confirmation
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `update` (alias: `upgrade`) | Update msb and libkrunfw to the latest release |
+| `uninstall` | Remove msb, libkrunfw, and shell configuration |
+
+| Flag | Subcommand | Description |
+|------|------------|-------------|
+| `-f`, `--force` | `update` | Re-download even if already on the latest version |
+| `-y`, `--yes` | `uninstall` | Skip confirmation prompt |

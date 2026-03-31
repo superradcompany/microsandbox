@@ -49,10 +49,13 @@ Today, AI agents operate with whatever permissions you give them, and that's usu
 #### <img height="14" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;Install the SDK
 
 > ```sh
-> cargo add microsandbox
+> npm i microsandbox        # TypeScript
+> ```
+> ```sh
+> cargo add microsandbox    # Rust
 > ```
 
-#### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI (optional)
+#### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI
 
 The `msb` CLI is useful for managing images, volumes, and sandboxes from the terminal:
 
@@ -87,7 +90,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > ```
 >
 > <div align="left">
->   <a href="./rust_examples.md#run-code-in-a-sandbox"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+>   <a href="./rust_examples.md#run-code-in-a-sandbox"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
 > </div>
 >
 > Behind the scenes, `create()` pulls the image (if not cached), assembles the filesystem, boots a microVM. All in under a second.
@@ -109,7 +112,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > ```
 >
 > <div align="left">
->   <a href="./rust_examples.md#secrets-that-never-enter-the-vm"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+>   <a href="./rust_examples.md#secrets-that-never-enter-the-vm"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
 > </div>
 
 #### <img height="14" src="https://octicons-col.vercel.app/globe/A770EF">&nbsp;&nbsp;Network Policy
@@ -130,7 +133,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > ```
 >
 > <div align="left">
->   <a href="./rust_examples.md#network-policy"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+>   <a href="./rust_examples.md#network-policy"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
 > </div>
 >
 > Three built-in policies: `NetworkPolicy::public_only()` (default, blocks private IPs), `NetworkPolicy::allow_all()`, and `NetworkPolicy::none()` (fully airgapped).
@@ -148,7 +151,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > ```
 >
 > <div align="left">
->   <a href="./rust_examples.md#port-publishing"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+>   <a href="./rust_examples.md#port-publishing"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
 > </div>
 
 #### <img height="14" src="https://octicons-col.vercel.app/database/A770EF">&nbsp;&nbsp;Named Volumes
@@ -183,7 +186,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > ```
 >
 > <div align="left">
->   <a href="./rust_examples.md#named-volumes"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+>   <a href="./rust_examples.md#named-volumes"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
 > </div>
 
 #### <img height="14" src="https://octicons-col.vercel.app/pencil/A770EF">&nbsp;&nbsp;Scripts & Patches
@@ -205,25 +208,27 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > ```
 >
 > <div align="left">
->   <a href="./rust_examples.md#scripts"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+>   <a href="./rust_examples.md#scripts"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
 > </div>
 >
 > Patches modify the filesystem before the VM boots. Inject config files, create directories, append to existing files:
 >
 > ```typescript
+> import { Patch, Sandbox } from "microsandbox";
+>
 > const sandbox = await Sandbox.create({
 >   name: "configured",
 >   image: "alpine",
 >   patches: [
->     { kind: "text", path: "/etc/app.conf", content: "key=value\n" },
->     { kind: "mkdir", path: "/app", mode: 0o755 },
->     { kind: "append", path: "/etc/hosts", content: "127.0.0.1 myapp.local\n" },
+>     Patch.text("/etc/app.conf", "key=value\n"),
+>     Patch.mkdir("/app", { mode: 0o755 }),
+>     Patch.append("/etc/hosts", "127.0.0.1 myapp.local\n"),
 >   ],
 > });
 > ```
 >
 > <div align="left">
->   <a href="./rust_examples.md#patches"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+>   <a href="./rust_examples.md#patches"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
 > </div>
 
 #### <img height="14" src="https://octicons-col.vercel.app/file-binary/A770EF">&nbsp;&nbsp;Flexible Rootfs Sources
@@ -239,7 +244,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > ```
 >
 > <div align="left">
->   <a href="./rust_examples.md#flexible-rootfs-sources"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+>   <a href="./rust_examples.md#flexible-rootfs-sources"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
 > </div>
 
 #### <img height="14" src="https://octicons-col.vercel.app/file/A770EF">&nbsp;&nbsp;Guest Filesystem Access
@@ -258,7 +263,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > ```
 >
 > <div align="left">
->   <a href="./rust_examples.md#guest-filesystem-access"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+>   <a href="./rust_examples.md#guest-filesystem-access"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
 > </div>
 
 #### <img height="14" src="https://octicons-col.vercel.app/meter/A770EF">&nbsp;&nbsp;Streaming Execution
@@ -277,7 +282,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > ```
 >
 > <div align="left">
->   <a href="./rust_examples.md#streaming-execution"><img src="https://img.shields.io/badge/-→ Rust Example-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+>   <a href="./rust_examples.md#streaming-execution"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
 > </div>
 
 <br />

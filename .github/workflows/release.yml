@@ -320,7 +320,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for dir in darwin-arm64 linux-x64-gnu linux-arm64-gnu; do
-            echo "Publishing @microsandbox/sdk-$dir..."
+            echo "Publishing @superradcompany/microsandbox-$dir..."
             cd sdk/node-ts/npm/$dir
             npm publish --access public
             cd ../../../..
