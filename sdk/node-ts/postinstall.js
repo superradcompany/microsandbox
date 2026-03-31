@@ -188,7 +188,7 @@ function installCiLocalBundle(libkrunfw) {
 
 main().catch((err) => {
   console.error(`microsandbox: failed to install runtime dependencies: ${err.message}`);
-  console.error("You can install them manually: curl -fsSL https://get.microsandbox.dev | sh");
+  console.error("You can install them manually: curl -fsSL https://install.microsandbox.dev | sh");
   // Don't fail the npm install — the user can install manually.
   process.exit(0);
 });

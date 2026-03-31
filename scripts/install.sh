@@ -1,6 +1,6 @@
 #!/bin/sh
 # Microsandbox installer
-# Usage: curl -fsSL https://get.microsandbox.dev | sh
+# Usage: curl -fsSL https://install.microsandbox.dev | sh
 set -eu
 
 # ---------------------------------------------------------------------------
