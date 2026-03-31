@@ -1,6 +1,6 @@
 {
   "name": "@microsandbox/sdk-linux-x64-gnu",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "os": ["linux"],
   "cpu": ["x64"],
   "main": "microsandbox.linux-x64-gnu.node",
