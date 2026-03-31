@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
 
-const PREBUILT_VERSION: &str = "0.3.6";
+const PREBUILT_VERSION: &str = "0.3.5";
 const LIBKRUNFW_ABI: &str = "5";
 const LIBKRUNFW_VERSION: &str = "5.2.1";
 const GITHUB_ORG: &str = "superradcompany";

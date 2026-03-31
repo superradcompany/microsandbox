@@ -9,7 +9,7 @@ const path = require("path");
 const https = require("https");
 const http = require("http");
 
-const PREBUILT_VERSION = "0.3.4";
+const PREBUILT_VERSION = "0.3.5";
 const LIBKRUNFW_ABI = "5";
 const LIBKRUNFW_VERSION = "5.2.1";
 const GITHUB_ORG = "superradcompany";
