@@ -15,16 +15,21 @@ msb volume create my-data --size 10G
 
 | Flag | Description |
 |------|-------------|
-| `--size` | Storage quota (e.g., `100M`, `1G`, `10G`) |
-| `--from` | Initialize from a path |
-| `-q`, `--quiet` | Only print the volume name |
+| `--size` | Storage quota (e.g. `100M`, `1G`, `10G`) |
+| `-q`, `--quiet` | Suppress output (only print the volume name) |
 
 ## msb volume ls
 
 ```bash
 msb volume ls
 msb volume ls --format json
+msb volume ls -q               # Names only
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--format` | Output format (`json`) |
+| `-q`, `--quiet` | Show only volume names |
 
 ## msb volume inspect
 
@@ -37,8 +42,11 @@ msb volume inspect my-data
 ```bash
 msb volume rm my-data
 msb volume rm cache-1 cache-2   # Remove multiple
-msb volume rm --force my-data   # Remove even if in use
 ```
+
+| Flag | Description |
+|------|-------------|
+| `-q`, `--quiet` | Suppress output |
 
 ## Using volumes with sandboxes
 

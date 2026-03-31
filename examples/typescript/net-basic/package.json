@@ -7,7 +7,7 @@
     "start": "npx tsx main.ts"
   },
   "dependencies": {
-    "microsandbox": "file:../../../sdk/node-ts"
+    "microsandbox": "0.3.6"
   },
   "devDependencies": {
     "tsx": "^4"

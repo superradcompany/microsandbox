@@ -23,13 +23,24 @@ msb pull ghcr.io/my-org/my-image:v1
   Pre-pulling is useful when you want sandbox creation to be instant. Without a pre-pull, the first `Sandbox.create` with a new image will block on the download.
 </Tip>
 
-## msb images
+## msb image ls
 
 List images in the local cache.
 
 ```bash
-msb images
+msb image ls
+msb image ls --format json
+msb image ls -q               # References only
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--format` | Output format (`json`) |
+| `-q`, `--quiet` | Show only image references |
+
+<Tip>
+  `msb images` is a shorthand alias for `msb image ls`.
+</Tip>
 
 ## msb image inspect
 
@@ -37,15 +48,30 @@ Show detailed metadata for a cached image (manifest, layers, config).
 
 ```bash
 msb image inspect python:3.11
+msb image inspect python:3.11 --format json
 ```
 
-## msb rmi
+| Flag | Description |
+|------|-------------|
+| `--format` | Output format (`json`) |
 
-Remove a cached image and its layers (layers shared with other images are kept).
+## msb image rm
+
+Remove one or more cached images and their layers (layers shared with other images are kept).
 
 ```bash
-msb rmi python:3.11
+msb image rm python:3.11
+msb image rm alpine:latest ubuntu:22.04   # Remove multiple
 ```
+
+| Flag | Description |
+|------|-------------|
+| `-f`, `--force` | Remove even if the image is used by existing sandboxes |
+| `-q`, `--quiet` | Suppress output |
+
+<Tip>
+  `msb rmi` is a shorthand alias for `msb image rm`.
+</Tip>
 
 ## msb registry
 
@@ -57,6 +83,19 @@ printf '%s\n' "$GHCR_TOKEN" | msb registry login ghcr.io --username octocat --pa
 msb registry logout ghcr.io
 msb registry ls
 ```
+
+| Subcommand | Description |
+|------------|-------------|
+| `login` | Store credentials for a registry in the OS credential store |
+| `logout` | Remove stored credentials for a registry |
+| `list` (alias: `ls`) | List configured registries without printing secrets |
+
+**`msb registry login` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--username` | Registry username |
+| `--password-stdin` | Read password from stdin |
 
 `msb registry login` stores the secret in the OS credential store (for example Keychain, Credential Manager, or Secret Service) and writes only metadata to `~/.microsandbox/config.json`.
 

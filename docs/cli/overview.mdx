@@ -38,17 +38,28 @@ msb exec devbox -- ls -la /app
 # Manage
 msb ls                   # List all sandboxes
 msb ps                   # Running sandboxes only
+msb metrics              # Live CPU/memory/network stats
 msb inspect devbox       # Detailed info
 msb stop devbox          # Graceful shutdown
 msb rm devbox            # Remove stopped sandbox
 
 # Images
 msb pull python:3.11     # Pre-pull to cache
+msb image ls             # List cached images
+msb image rm python:3.11 # Remove a cached image
 
 # Volumes
 msb volume create data --size 10G
 msb volume ls
 msb volume rm data
+
+# Install as a system command
+msb install ubuntu       # Install as 'ubuntu' command
+msb uninstall ubuntu     # Remove installed command
+
+# Self-management
+msb self update          # Update msb to latest
+msb self uninstall       # Remove msb
 ```
 
 <Tip>
