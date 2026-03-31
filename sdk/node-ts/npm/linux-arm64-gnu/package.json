@@ -1,6 +1,6 @@
 {
-  "name": "@microsandbox/sdk-linux-arm64-gnu",
-  "version": "0.3.5",
+  "name": "@superradcompany/microsandbox-linux-arm64-gnu",
+  "version": "0.3.6",
   "os": ["linux"],
   "cpu": ["arm64"],
   "main": "microsandbox.linux-arm64-gnu.node",

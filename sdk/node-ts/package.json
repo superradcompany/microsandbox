@@ -1,11 +1,12 @@
 {
   "name": "microsandbox",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "main": "index.cjs",
   "module": "index.mjs",
   "types": "index.d.cts",
   "napi": {
     "binaryName": "microsandbox",
+    "packageName": "@superradcompany/microsandbox",
     "targets": [
       "aarch64-apple-darwin",
       "x86_64-unknown-linux-gnu",
@@ -25,9 +26,9 @@
     "@napi-rs/cli": "^3"
   },
   "optionalDependencies": {
-    "@microsandbox/sdk-darwin-arm64": "0.3.5",
-    "@microsandbox/sdk-linux-x64-gnu": "0.3.5",
-    "@microsandbox/sdk-linux-arm64-gnu": "0.3.5"
+    "@superradcompany/microsandbox-darwin-arm64": "0.3.6",
+    "@superradcompany/microsandbox-linux-x64-gnu": "0.3.6",
+    "@superradcompany/microsandbox-linux-arm64-gnu": "0.3.6"
   },
   "files": [
     "index.cjs",

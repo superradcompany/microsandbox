@@ -30,9 +30,9 @@ The `microsandbox` npm package provides native bindings to the [MicroSandbox](ht
 
 | Platform | Architecture | Package |
 |----------|-------------|---------|
-| macOS | ARM64 (Apple Silicon) | `@microsandbox/sdk-darwin-arm64` |
-| Linux | x86_64 | `@microsandbox/sdk-linux-x64-gnu` |
-| Linux | ARM64 | `@microsandbox/sdk-linux-arm64-gnu` |
+| macOS | ARM64 (Apple Silicon) | `@superradcompany/microsandbox-darwin-arm64` |
+| Linux | x86_64 | `@superradcompany/microsandbox-linux-x64-gnu` |
+| Linux | ARM64 | `@superradcompany/microsandbox-linux-arm64-gnu` |
 
 Platform-specific binaries are installed automatically via optional dependencies.
 
