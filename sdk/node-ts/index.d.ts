@@ -119,6 +119,46 @@ export declare class NetworkPolicy {
 export type JsNetworkPolicy = NetworkPolicy
 
 /**
+ * Factory for creating rootfs patch configurations.
+ *
+ * ```js
+ * import { Patch, Sandbox } from 'microsandbox'
+ *
+ * const sb = await Sandbox.create({
+ *     name: "worker",
+ *     image: "alpine",
+ *     patches: [
+ *         Patch.text("/etc/greeting.txt", "Hello!
+"),
+ *         Patch.mkdir("/app", { mode: 0o755 }),
+ *         Patch.append("/etc/hosts", "127.0.0.1 myapp.local
+"),
+ *         Patch.copyFile("./config.json", "/app/config.json"),
+ *         Patch.copyDir("./scripts", "/app/scripts"),
+ *         Patch.symlink("/usr/bin/python3", "/usr/bin/python"),
+ *         Patch.remove("/etc/motd"),
+ *     ],
+ * })
+ * ```
+ */
+export declare class Patch {
+  /** Write text content to a file in the guest filesystem. */
+  static text(path: string, content: string, opts?: PatchOptions | undefined | null): PatchConfig
+  /** Create a directory in the guest filesystem (idempotent). */
+  static mkdir(path: string, opts?: PatchOptions | undefined | null): PatchConfig
+  /** Append content to an existing file in the guest filesystem. */
+  static append(path: string, content: string): PatchConfig
+  /** Copy a file from the host into the guest filesystem. */
+  static copyFile(src: string, dst: string, opts?: PatchOptions | undefined | null): PatchConfig
+  /** Copy a directory from the host into the guest filesystem. */
+  static copyDir(src: string, dst: string, opts?: PatchReplaceOptions | undefined | null): PatchConfig
+  /** Create a symlink in the guest filesystem. */
+  static symlink(target: string, link: string, opts?: PatchReplaceOptions | undefined | null): PatchConfig
+  /** Remove a file or directory from the guest filesystem (idempotent). */
+  static remove(path: string): PatchConfig
+}
+
+/**
  * A running sandbox instance.
  *
  * Created via `Sandbox.create()` or `Sandbox.start()`. Holds a live connection
@@ -329,6 +369,14 @@ export interface ExecEvent {
   code?: number
 }
 
+/** Execution event type. */
+export declare const enum ExecEventType {
+  Started = 'started',
+  Stdout = 'stdout',
+  Stderr = 'stderr',
+  Exited = 'exited'
+}
+
 /** Process exit status. */
 export interface ExitStatus {
   code: number
@@ -343,6 +391,14 @@ export interface FsEntry {
   size: number
   mode: number
   modified?: number
+}
+
+/** Filesystem entry kind. */
+export declare const enum FsEntryKind {
+  File = 'file',
+  Directory = 'directory',
+  Symlink = 'symlink',
+  Other = 'other'
 }
 
 /** Filesystem metadata returned by `fs.stat()`. */
@@ -434,6 +490,40 @@ export interface PatchConfig {
   mode?: number
   /** Allow replacing existing files. */
   replace?: boolean
+}
+
+/** Options for `Patch.text()` and `Patch.copyFile()`. */
+export interface PatchOptions {
+  /** File permissions (e.g. 0o644). */
+  mode?: number
+  /** Allow replacing existing files. */
+  replace?: boolean
+}
+
+/** Options for `Patch.copyDir()` and `Patch.symlink()`. */
+export interface PatchReplaceOptions {
+  /** Allow replacing existing files/directories. */
+  replace?: boolean
+}
+
+/** Network policy rule action. */
+export declare const enum PolicyAction {
+  Allow = 'allow',
+  Deny = 'deny'
+}
+
+/** Network policy rule direction. */
+export declare const enum PolicyDirection {
+  Outbound = 'outbound',
+  Inbound = 'inbound'
+}
+
+/** Network policy rule protocol. */
+export declare const enum PolicyProtocol {
+  Tcp = 'tcp',
+  Udp = 'udp',
+  Icmpv4 = 'icmpv4',
+  Icmpv6 = 'icmpv6'
 }
 
 /** A network policy rule. */
@@ -558,6 +648,14 @@ export interface SandboxMetrics {
   timestampMs: number
 }
 
+/** Sandbox status. */
+export declare const enum SandboxStatus {
+  Running = 'running',
+  Stopped = 'stopped',
+  Crashed = 'crashed',
+  Draining = 'draining'
+}
+
 /**
  * A secret entry for the `secrets` array on `SandboxConfig`.
  *
@@ -622,6 +720,16 @@ export interface TmpfsOptions {
   sizeMib?: number
   /** Read-only mount. */
   readonly?: boolean
+}
+
+/** Action to take when a secret is sent to a disallowed host. */
+export declare const enum ViolationAction {
+  /** Silently block the request. */
+  Block = 'block',
+  /** Block the request and log the violation. */
+  BlockAndLog = 'block-and-log',
+  /** Block the request and terminate the sandbox. */
+  BlockAndTerminate = 'block-and-terminate'
 }
 
 /** Volume configuration for creation. */

@@ -99,13 +99,12 @@ const sb = await Sandbox.create({
 
 ### Available operations
 
-| Operation | Description |
-|-----------|-------------|
-| `text` | Write text content to a file |
-| `file` | Write raw bytes to a file |
-| `copy_file` | Copy a file from the host into the rootfs |
-| `copy_dir` | Recursively copy a directory from the host |
-| `symlink` | Create a symlink |
-| `mkdir` | Create a directory (idempotent) |
-| `remove` | Delete a file or directory (idempotent) |
-| `append` | Append content to an existing file |
+| Method | Description |
+|--------|-------------|
+| `Patch.text(path, content, opts?)` | Write text content to a file |
+| `Patch.mkdir(path, opts?)` | Create a directory (idempotent) |
+| `Patch.append(path, content)` | Append content to an existing file |
+| `Patch.copyFile(src, dst, opts?)` | Copy a file from the host into the rootfs |
+| `Patch.copyDir(src, dst, opts?)` | Recursively copy a directory from the host |
+| `Patch.symlink(target, link, opts?)` | Create a symlink |
+| `Patch.remove(path)` | Delete a file or directory (idempotent) |

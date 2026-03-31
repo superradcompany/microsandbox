@@ -32,6 +32,90 @@ pub enum LogLevel {
     Error,
 }
 
+/// Action to take when a secret is sent to a disallowed host.
+#[napi(string_enum)]
+pub enum ViolationAction {
+    /// Silently block the request.
+    #[napi(value = "block")]
+    Block,
+    /// Block the request and log the violation.
+    #[napi(value = "block-and-log")]
+    BlockAndLog,
+    /// Block the request and terminate the sandbox.
+    #[napi(value = "block-and-terminate")]
+    BlockAndTerminate,
+}
+
+/// Network policy rule action.
+#[napi(string_enum)]
+pub enum PolicyAction {
+    #[napi(value = "allow")]
+    Allow,
+    #[napi(value = "deny")]
+    Deny,
+}
+
+/// Network policy rule direction.
+#[napi(string_enum)]
+pub enum PolicyDirection {
+    #[napi(value = "outbound")]
+    Outbound,
+    #[napi(value = "inbound")]
+    Inbound,
+}
+
+/// Network policy rule protocol.
+#[napi(string_enum)]
+pub enum PolicyProtocol {
+    #[napi(value = "tcp")]
+    Tcp,
+    #[napi(value = "udp")]
+    Udp,
+    #[napi(value = "icmpv4")]
+    Icmpv4,
+    #[napi(value = "icmpv6")]
+    Icmpv6,
+}
+
+/// Sandbox status.
+#[napi(string_enum)]
+pub enum SandboxStatus {
+    #[napi(value = "running")]
+    Running,
+    #[napi(value = "stopped")]
+    Stopped,
+    #[napi(value = "crashed")]
+    Crashed,
+    #[napi(value = "draining")]
+    Draining,
+}
+
+/// Filesystem entry kind.
+#[napi(string_enum)]
+pub enum FsEntryKind {
+    #[napi(value = "file")]
+    File,
+    #[napi(value = "directory")]
+    Directory,
+    #[napi(value = "symlink")]
+    Symlink,
+    #[napi(value = "other")]
+    Other,
+}
+
+/// Execution event type.
+#[napi(string_enum)]
+pub enum ExecEventType {
+    #[napi(value = "started")]
+    Started,
+    #[napi(value = "stdout")]
+    Stdout,
+    #[napi(value = "stderr")]
+    Stderr,
+    #[napi(value = "exited")]
+    Exited,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Types: Helper Option Objects
 //--------------------------------------------------------------------------------------------------
@@ -67,6 +151,22 @@ pub struct SecretEnvOptions {
     pub require_tls: Option<bool>,
     /// Violation action: "block", "block-and-log" (default), "block-and-terminate".
     pub on_violation: Option<String>,
+}
+
+/// Options for `Patch.text()` and `Patch.copyFile()`.
+#[napi(object)]
+pub struct PatchOptions {
+    /// File permissions (e.g. 0o644).
+    pub mode: Option<u32>,
+    /// Allow replacing existing files.
+    pub replace: Option<bool>,
+}
+
+/// Options for `Patch.copyDir()` and `Patch.symlink()`.
+#[napi(object)]
+pub struct PatchReplaceOptions {
+    /// Allow replacing existing files/directories.
+    pub replace: Option<bool>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -123,6 +223,28 @@ pub struct JsNetworkPolicy;
 /// ```
 #[napi]
 pub struct Secret;
+
+/// Factory for creating rootfs patch configurations.
+///
+/// ```js
+/// import { Patch, Sandbox } from 'microsandbox'
+///
+/// const sb = await Sandbox.create({
+///     name: "worker",
+///     image: "alpine",
+///     patches: [
+///         Patch.text("/etc/greeting.txt", "Hello!\n"),
+///         Patch.mkdir("/app", { mode: 0o755 }),
+///         Patch.append("/etc/hosts", "127.0.0.1 myapp.local\n"),
+///         Patch.copyFile("./config.json", "/app/config.json"),
+///         Patch.copyDir("./scripts", "/app/scripts"),
+///         Patch.symlink("/usr/bin/python3", "/usr/bin/python"),
+///         Patch.remove("/etc/motd"),
+///     ],
+/// })
+/// ```
+#[napi]
+pub struct Patch;
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -233,6 +355,126 @@ impl Secret {
             placeholder: opts.placeholder,
             require_tls: opts.require_tls,
             on_violation: opts.on_violation,
+        }
+    }
+}
+
+#[napi]
+impl Patch {
+    /// Write text content to a file in the guest filesystem.
+    #[napi]
+    pub fn text(path: String, content: String, opts: Option<PatchOptions>) -> PatchConfig {
+        let (mode, replace) = opts.map(|o| (o.mode, o.replace)).unwrap_or((None, None));
+        PatchConfig {
+            kind: "text".to_string(),
+            path: Some(path),
+            content: Some(content),
+            src: None,
+            dst: None,
+            target: None,
+            link: None,
+            mode,
+            replace,
+        }
+    }
+
+    /// Create a directory in the guest filesystem (idempotent).
+    #[napi]
+    pub fn mkdir(path: String, opts: Option<PatchOptions>) -> PatchConfig {
+        let mode = opts.and_then(|o| o.mode);
+        PatchConfig {
+            kind: "mkdir".to_string(),
+            path: Some(path),
+            content: None,
+            src: None,
+            dst: None,
+            target: None,
+            link: None,
+            mode,
+            replace: None,
+        }
+    }
+
+    /// Append content to an existing file in the guest filesystem.
+    #[napi]
+    pub fn append(path: String, content: String) -> PatchConfig {
+        PatchConfig {
+            kind: "append".to_string(),
+            path: Some(path),
+            content: Some(content),
+            src: None,
+            dst: None,
+            target: None,
+            link: None,
+            mode: None,
+            replace: None,
+        }
+    }
+
+    /// Copy a file from the host into the guest filesystem.
+    #[napi]
+    pub fn copy_file(src: String, dst: String, opts: Option<PatchOptions>) -> PatchConfig {
+        let (mode, replace) = opts.map(|o| (o.mode, o.replace)).unwrap_or((None, None));
+        PatchConfig {
+            kind: "copyFile".to_string(),
+            path: None,
+            content: None,
+            src: Some(src),
+            dst: Some(dst),
+            target: None,
+            link: None,
+            mode,
+            replace,
+        }
+    }
+
+    /// Copy a directory from the host into the guest filesystem.
+    #[napi]
+    pub fn copy_dir(src: String, dst: String, opts: Option<PatchReplaceOptions>) -> PatchConfig {
+        let replace = opts.and_then(|o| o.replace);
+        PatchConfig {
+            kind: "copyDir".to_string(),
+            path: None,
+            content: None,
+            src: Some(src),
+            dst: Some(dst),
+            target: None,
+            link: None,
+            mode: None,
+            replace,
+        }
+    }
+
+    /// Create a symlink in the guest filesystem.
+    #[napi]
+    pub fn symlink(target: String, link: String, opts: Option<PatchReplaceOptions>) -> PatchConfig {
+        let replace = opts.and_then(|o| o.replace);
+        PatchConfig {
+            kind: "symlink".to_string(),
+            path: None,
+            content: None,
+            src: None,
+            dst: None,
+            target: Some(target),
+            link: Some(link),
+            mode: None,
+            replace,
+        }
+    }
+
+    /// Remove a file or directory from the guest filesystem (idempotent).
+    #[napi]
+    pub fn remove(path: String) -> PatchConfig {
+        PatchConfig {
+            kind: "remove".to_string(),
+            path: Some(path),
+            content: None,
+            src: None,
+            dst: None,
+            target: None,
+            link: None,
+            mode: None,
+            replace: None,
         }
     }
 }

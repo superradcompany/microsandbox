@@ -214,13 +214,15 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > Patches modify the filesystem before the VM boots. Inject config files, create directories, append to existing files:
 >
 > ```typescript
+> import { Patch, Sandbox } from "microsandbox";
+>
 > const sandbox = await Sandbox.create({
 >   name: "configured",
 >   image: "alpine",
 >   patches: [
->     { kind: "text", path: "/etc/app.conf", content: "key=value\n" },
->     { kind: "mkdir", path: "/app", mode: 0o755 },
->     { kind: "append", path: "/etc/hosts", content: "127.0.0.1 myapp.local\n" },
+>     Patch.text("/etc/app.conf", "key=value\n"),
+>     Patch.mkdir("/app", { mode: 0o755 }),
+>     Patch.append("/etc/hosts", "127.0.0.1 myapp.local\n"),
 >   ],
 > });
 > ```

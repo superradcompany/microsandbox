@@ -1,4 +1,4 @@
-import { Sandbox } from "microsandbox";
+import { Patch, Sandbox } from "microsandbox";
 
 async function main() {
   console.log("Creating sandbox with rootfs patches (image=alpine:latest)");
@@ -10,11 +10,11 @@ async function main() {
     memoryMib: 512,
     replace: true,
     patches: [
-      { kind: "text", path: "/etc/greeting.txt", content: "Hello from a patched rootfs!\n" },
-      { kind: "text", path: "/etc/motd", content: "Welcome to a patched microsandbox.\n", replace: true },
-      { kind: "mkdir", path: "/app", mode: 0o755 },
-      { kind: "text", path: "/app/config.json", content: '{"version": "1.0", "debug": true}', mode: 0o644 },
-      { kind: "append", path: "/etc/hosts", content: "127.0.0.1 myapp.local\n" },
+      Patch.text("/etc/greeting.txt", "Hello from a patched rootfs!\n"),
+      Patch.text("/etc/motd", "Welcome to a patched microsandbox.\n", { replace: true }),
+      Patch.mkdir("/app", { mode: 0o755 }),
+      Patch.text("/app/config.json", '{"version": "1.0", "debug": true}', { mode: 0o644 }),
+      Patch.append("/etc/hosts", "127.0.0.1 myapp.local\n"),
     ],
   });
 
