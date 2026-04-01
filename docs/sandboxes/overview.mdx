@@ -37,7 +37,7 @@ let sb = Sandbox::builder("worker")
     .image("python:3.12")
     .memory(1024)
     .cpus(2)
-    .workdir("/app")
+
     .env("DEBUG", "true")
     .env("API_PORT", "8000")
     .volume("/app/src", |v| v.bind("./src").readonly())
@@ -55,7 +55,7 @@ const sb = await Sandbox.create({
     image: "python:3.12",
     memoryMib: 1024,
     cpus: 2,
-    workdir: "/app",
+
     env: { DEBUG: "true", API_PORT: "8000" },
     volumes: {
         "/app/src": Mount.bind("./src", { readonly: true }),

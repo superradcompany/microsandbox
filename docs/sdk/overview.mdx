@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .memory(512)
         .cpus(2)
         .env("PYTHONDONTWRITEBYTECODE", "1")
-        .workdir("/app")
+
         .volume("/app/src", |v| v.bind("./src").readonly())
         .network(|n| n.policy(NetworkPolicy::public_only()))
         .create()
@@ -56,7 +56,7 @@ const sb = await Sandbox.create({
     memoryMib: 512,
     cpus: 2,
     env: { PYTHONDONTWRITEBYTECODE: "1" },
-    workdir: "/app",
+
     volumes: {
         "/app/src": Mount.bind("./src", { readonly: true }),
     },
