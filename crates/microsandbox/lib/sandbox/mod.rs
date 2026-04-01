@@ -610,15 +610,12 @@ impl Sandbox {
                     Err(_) => {
                         // Timed out — kill the process and drain remaining events.
                         let _ = handle.kill().await;
-                        match tokio::time::timeout(
+                        let _ = tokio::time::timeout(
                             std::time::Duration::from_secs(5),
                             handle.collect(),
                         )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(_) => Err(crate::MicrosandboxError::ExecTimeout(duration)),
-                        }
+                        .await;
+                        Err(crate::MicrosandboxError::ExecTimeout(duration))
                     }
                 }
             }
