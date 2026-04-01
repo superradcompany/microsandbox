@@ -250,6 +250,17 @@ impl Sandbox {
             return Err(err);
         }
 
+        // Validate that the configured workdir exists inside the guest.
+        if let Some(ref workdir) = sandbox.config.workdir
+            && !sandbox.fs().exists(workdir).await.unwrap_or(false)
+        {
+            let _ = sandbox.stop().await;
+            let _ = update_sandbox_status(db, sandbox_id, SandboxStatus::Stopped).await;
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "workdir does not exist in guest: {workdir}"
+            )));
+        }
+
         Ok(sandbox)
     }
 
@@ -967,7 +978,9 @@ fn build_exec_request(
         cmd,
         args,
         env,
-        cwd: cwd.or_else(|| config.workdir.clone()),
+        cwd: cwd
+            .or_else(|| config.workdir.clone())
+            .or_else(|| Some("/".to_string())),
         user: user.or_else(|| config.user.clone()),
         tty,
         rows,
