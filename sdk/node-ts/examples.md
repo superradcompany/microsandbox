@@ -12,7 +12,7 @@ if (!isInstalled()) {
 
 const sandbox = await Sandbox.create({
   name: "quickstart",
-  image: "python:3.12",
+  image: "python",
   memoryMib: 512,
   cpus: 2,
 });
@@ -33,7 +33,7 @@ await Sandbox.remove("quickstart");
 ```typescript
 const sandbox = await Sandbox.create({
   name: "exec-demo",
-  image: "alpine:latest",
+  image: "alpine",
   replace: true,
 });
 
@@ -140,7 +140,7 @@ console.log("Files found:", output.stdout.toString().trim().split("\n").length);
 ```typescript
 const sandbox = await Sandbox.create({
   name: "fs-demo",
-  image: "alpine:latest",
+  image: "alpine",
   replace: true,
 });
 
@@ -212,7 +212,7 @@ console.log("Created:", vol.name, "at", vol.path);
 // Use volume in a sandbox
 const sandbox = await Sandbox.create({
   name: "vol-demo",
-  image: "alpine:latest",
+  image: "alpine",
   replace: true,
   volumes: {
     "/data": { named: "app-data" },
@@ -227,7 +227,7 @@ await sandbox.stopAndWait();
 
 const sandbox2 = await Sandbox.create({
   name: "vol-demo-2",
-  image: "alpine:latest",
+  image: "alpine",
   replace: true,
   volumes: { "/data": { named: "app-data" } },
 });
@@ -260,7 +260,7 @@ await Volume.remove("app-data");
 // No network access (airgapped)
 const isolated = await Sandbox.create({
   name: "isolated",
-  image: "alpine:latest",
+  image: "alpine",
   replace: true,
   network: { policy: "none" },
 });
@@ -268,7 +268,7 @@ const isolated = await Sandbox.create({
 // Public internet only (blocks private IPs, cloud metadata)
 const publicOnly = await Sandbox.create({
   name: "public-only",
-  image: "alpine:latest",
+  image: "alpine",
   replace: true,
   network: { policy: "public-only" },
 });
@@ -276,7 +276,7 @@ const publicOnly = await Sandbox.create({
 // Allow everything
 const open = await Sandbox.create({
   name: "open",
-  image: "alpine:latest",
+  image: "alpine",
   replace: true,
   network: { policy: "allow-all" },
 });
@@ -287,7 +287,7 @@ const open = await Sandbox.create({
 ```typescript
 const sandbox = await Sandbox.create({
   name: "custom-policy",
-  image: "python:3.12",
+  image: "python",
   replace: true,
   network: {
     // Default: deny everything
@@ -317,7 +317,7 @@ const sandbox = await Sandbox.create({
 ```typescript
 const sandbox = await Sandbox.create({
   name: "dns-filtered",
-  image: "alpine:latest",
+  image: "alpine",
   replace: true,
   network: {
     policy: "public-only",
@@ -333,7 +333,7 @@ const sandbox = await Sandbox.create({
 ```typescript
 const sandbox = await Sandbox.create({
   name: "web-server",
-  image: "python:3.12",
+  image: "python",
   replace: true,
   ports: {
     "8080": 80,   // host:8080 → guest:80
@@ -355,7 +355,7 @@ await sandbox.shell("python -m http.server 80 &");
 ```typescript
 const sandbox = await Sandbox.create({
   name: "tls-inspect",
-  image: "python:3.12",
+  image: "python",
   replace: true,
   network: {
     policy: "public-only",
@@ -380,7 +380,7 @@ const sandbox = await Sandbox.create({
 ```typescript
 const sandbox = await Sandbox.create({
   name: "agent",
-  image: "python:3.12",
+  image: "python",
   replace: true,
   network: { policy: "public-only" },
   secretEnv: {
@@ -421,7 +421,7 @@ import { Patch, Sandbox } from "microsandbox";
 
 const sandbox = await Sandbox.create({
   name: "patched",
-  image: "alpine:latest",
+  image: "alpine",
   replace: true,
   patches: [
     // Write a config file
@@ -451,7 +451,7 @@ const sandbox = await Sandbox.create({
 ```typescript
 const sandbox = await Sandbox.create({
   name: "scripted",
-  image: "python:3.12",
+  image: "python",
   replace: true,
   workdir: "/app",
   scripts: {
@@ -474,7 +474,7 @@ console.log(testResult.success ? "Tests passed" : "Tests failed");
 ```typescript
 const sandbox = await Sandbox.create({
   name: "metrics-demo",
-  image: "python:3.12",
+  image: "python",
   replace: true,
 });
 
@@ -532,7 +532,7 @@ const started = await handle.start();
 // Create a sandbox that survives the Node process
 const sandbox = await Sandbox.createDetached({
   name: "background-worker",
-  image: "python:3.12",
+  image: "python",
   replace: true,
 });
 
@@ -551,7 +551,7 @@ console.log(status.stdout.toString());
 ```typescript
 const sandbox = await Sandbox.create({
   name: "lifecycle-demo",
-  image: "alpine:latest",
+  image: "alpine",
   replace: true,
 });
 
@@ -593,7 +593,7 @@ async function executeCode(code: string, language = "python"): Promise<{ success
 
   const sandbox = await Sandbox.create({
     name,
-    image: language === "python" ? "python:3.12" : "node:20-alpine",
+    image: language === "python" ? "python" : "node",
     memoryMib: 512,
     replace: true,
     network: { policy: "none" }, // airgapped
@@ -639,7 +639,7 @@ console.log(result.output);
 ```typescript
 const agent = await Sandbox.create({
   name: "tool-agent",
-  image: "python:3.12",
+  image: "python",
   replace: true,
   memoryMib: 1024,
   network: {
@@ -735,7 +735,7 @@ import { Sandbox } from "microsandbox";
 try {
   const sandbox = await Sandbox.create({
     name: "error-demo",
-    image: "alpine:latest",
+    image: "alpine",
     replace: true,
   });
 
@@ -770,7 +770,7 @@ try {
 const sandbox = await Sandbox.create({
   // Required
   name: "full-config",
-  image: "python:3.12",
+  image: "python",
 
   // Resources
   memoryMib: 1024,

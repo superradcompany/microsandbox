@@ -6,11 +6,11 @@ use microsandbox::Sandbox;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Creating sandbox with rootfs patches (image=alpine:latest)");
+    println!("Creating sandbox with rootfs patches (image=alpine)");
 
     // Create a sandbox with patches applied before the VM boots.
     let sandbox = Sandbox::builder("rootfs-patch")
-        .image("alpine:latest")
+        .image("alpine")
         .cpus(1)
         .memory(512)
         .replace()

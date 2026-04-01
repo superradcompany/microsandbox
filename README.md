@@ -69,7 +69,7 @@ The `msb` CLI is useful for managing images, volumes, and sandboxes from the ter
 
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package-dependencies/ffffff" alt="sdk-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package-dependencies/000000" alt="sdk"></a>&nbsp;&nbsp;SDK
 
-The SDK lets you create and control sandboxes directly from your application. `Sandbox::builder(...)` boots a microVM as a child process. No infrastructure required.
+The SDK lets you create and control sandboxes directly from your application. `Sandbox.create(...)` boots a microVM as a child process. No infrastructure required.
 
 #### <img height="14" src="https://octicons-col.vercel.app/play/A770EF">&nbsp;&nbsp;Run Code in a Sandbox
 
@@ -100,10 +100,14 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > Secrets are injected via placeholder substitution. The guest environment only ever sees a random placeholder. The real value is swapped in at the network level.
 >
 > ```typescript
+> import { Secret, Sandbox } from "microsandbox";
+>
 > const sandbox = await Sandbox.create({
 >   name: "api-client",
 >   image: "python",
->   secretEnv: { OPENAI_API_KEY: { value: "sk-real-secret-123", domain: "api.openai.com" } },
+>   secrets: [
+>     Secret.env("OPENAI_API_KEY", { value: "sk-real-secret-123", allowHosts: ["api.openai.com"] }),
+>   ],
 > });
 >
 > // Inside the VM: $OPENAI_API_KEY = "$MSB_OPENAI_API_KEY" (placeholder)
@@ -136,7 +140,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >   <a href="./rust_examples.md#network-policy"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
 > </div>
 >
-> Three built-in policies: `NetworkPolicy::public_only()` (default, blocks private IPs), `NetworkPolicy::allow_all()`, and `NetworkPolicy::none()` (fully airgapped).
+> Three built-in policies: `NetworkPolicy.publicOnly()` (default, blocks private IPs), `NetworkPolicy.allowAll()`, and `NetworkPolicy.none()` (fully airgapped).
 
 #### <img height="14" src="https://octicons-col.vercel.app/upload/A770EF">&nbsp;&nbsp;Port Publishing
 
@@ -237,7 +241,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >
 > ```typescript
 > // OCI image (default)
-> await Sandbox.create({ name: "oci", image: "python:3.12" });
+> await Sandbox.create({ name: "oci", image: "python" });
 >
 > // Local directory
 > await Sandbox.create({ name: "bind", image: "./my-rootfs" });
@@ -298,14 +302,14 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 #### <img height="14" src="https://octicons-col.vercel.app/play/A770EF">&nbsp;&nbsp;Run a Command
 
 > ```sh
-> msb run python:3.12 -- python3 -c "print('Hello from a microVM!')"
+> msb run python -- python3 -c "print('Hello from a microVM!')"
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/stopwatch/A770EF">&nbsp;&nbsp;Named Sandboxes
 
 > ```sh
 > # Create and run detached
-> msb run --name my-app -d python:3.12
+> msb run --name my-app -d python
 >
 > # Execute commands
 > msb exec my-app -- pip install requests
@@ -323,9 +327,9 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 #### <img height="14" src="https://octicons-col.vercel.app/cache/A770EF">&nbsp;&nbsp;Image Management
 
 > ```sh
-> msb pull python:3.12           # Pull an image
+> msb pull python           # Pull an image
 > msb image ls                   # List cached images
-> msb image rm python:3.12       # Remove an image
+> msb image rm python       # Remove an image
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install & Uninstall Sandboxes

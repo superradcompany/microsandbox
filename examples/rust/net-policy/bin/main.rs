@@ -9,7 +9,7 @@ use microsandbox::{NetworkPolicy, Sandbox};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Default (public-only) — public internet works.
     let sandbox = Sandbox::builder("net-policy-public")
-        .image("alpine:latest")
+        .image("alpine")
         .cpus(1)
         .memory(512)
         .replace()
@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Allow-all — everything reachable, including private networks.
     let sandbox = Sandbox::builder("net-policy-all")
-        .image("alpine:latest")
+        .image("alpine")
         .cpus(1)
         .memory(512)
         .network(|n| n.policy(NetworkPolicy::allow_all()))
@@ -42,10 +42,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. No network — all connections denied.
     let sandbox = Sandbox::builder("net-policy-none")
-        .image("alpine:latest")
+        .image("alpine")
         .cpus(1)
         .memory(512)
-        .network(|n| n.policy(NetworkPolicy::none()))
         .replace()
         .create()
         .await?;

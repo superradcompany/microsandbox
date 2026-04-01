@@ -56,7 +56,7 @@ use microsandbox::Sandbox;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a sandbox from an OCI image.
     let sandbox = Sandbox::builder("my-sandbox")
-        .image("alpine:latest")
+        .image("alpine")
         .cpus(1)
         .memory(512)
         .create()
@@ -124,7 +124,7 @@ let data = Volume::builder("my-data").quota(100.mib()).create().await?;
 
 // Mount it in a sandbox.
 let sandbox = Sandbox::builder("writer")
-    .image("alpine:latest")
+    .image("alpine")
     .volume("/data", |v| v.named(data.name()))
     .create()
     .await?;
@@ -134,7 +134,7 @@ sandbox.stop_and_wait().await?;
 
 // Mount the same volume in another sandbox (read-only).
 let reader = Sandbox::builder("reader")
-    .image("alpine:latest")
+    .image("alpine")
     .volume("/data", |v| v.named(data.name()).readonly())
     .create()
     .await?;
@@ -150,20 +150,20 @@ use microsandbox::{Sandbox, NetworkPolicy};
 
 // Default: public internet only (blocks private ranges).
 let sandbox = Sandbox::builder("public")
-    .image("alpine:latest")
+    .image("alpine")
     .create()
     .await?;
 
 // Fully airgapped.
 let sandbox = Sandbox::builder("isolated")
-    .image("alpine:latest")
+    .image("alpine")
     .network(|n| n.policy(NetworkPolicy::none()))
     .create()
     .await?;
 
 // DNS filtering.
 let sandbox = Sandbox::builder("filtered")
-    .image("alpine:latest")
+    .image("alpine")
     .network(|n| {
         n.block_domain("blocked.example.com")
          .block_domain_suffix(".evil.com")
@@ -176,7 +176,7 @@ let sandbox = Sandbox::builder("filtered")
 
 ```rust
 let sandbox = Sandbox::builder("web")
-    .image("python:3.12")
+    .image("python")
     .port(8080, 80) // host:8080 → guest:80
     .create()
     .await?;
@@ -188,7 +188,7 @@ Secrets use placeholder substitution — the real value never enters the VM. It 
 
 ```rust
 let sandbox = Sandbox::builder("agent")
-    .image("python:3.12")
+    .image("python")
     .secret_env("API_KEY", "sk-real-secret-123", "api.openai.com")
     .create()
     .await?;
@@ -204,7 +204,7 @@ Modify the filesystem before the VM boots:
 
 ```rust
 let sandbox = Sandbox::builder("patched")
-    .image("alpine:latest")
+    .image("alpine")
     .patch(|p| {
         p.text("/etc/greeting.txt", "Hello!\n", None, false)
          .mkdir("/app", Some(0o755))
@@ -221,7 +221,7 @@ Sandboxes in detached mode survive the parent process:
 ```rust
 // Create and detach.
 let sandbox = Sandbox::builder("background")
-    .image("python:3.12")
+    .image("python")
     .create_detached()
     .await?;
 
@@ -237,7 +237,7 @@ use microsandbox::Sandbox;
 use microsandbox::sandbox::ImageBuilder;
 
 // OCI image (most common).
-Sandbox::builder("a").image("python:3.12")
+Sandbox::builder("a").image("python")
 
 // Local bind-mounted rootfs.
 Sandbox::builder("b").image("/path/to/rootfs")

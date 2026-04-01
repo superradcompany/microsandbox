@@ -44,9 +44,9 @@ repos:
         language: system
         pass_filenames: false
         files: \.(rs|toml)$
-      - id: cargo-build-msb-release
-        name: cargo build (msb release)
-        entry: bash -lc 'CI=true cargo build --release -p microsandbox-cli'
+      - id: cargo-build-msb
+        name: cargo build (msb)
+        entry: bash -lc 'CI=true cargo build -p microsandbox-cli'
         language: system
         pass_filenames: false
         files: \.(rs|toml)$

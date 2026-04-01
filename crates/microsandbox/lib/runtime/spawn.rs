@@ -569,10 +569,7 @@ mod tests {
 
     #[test]
     fn test_sandbox_cli_args_use_overlay_for_oci_rootfs() {
-        let mut config = SandboxBuilder::new("test")
-            .image("alpine:latest")
-            .build()
-            .unwrap();
+        let mut config = SandboxBuilder::new("test").image("alpine").build().unwrap();
         assert!(matches!(config.image, RootfsSource::Oci(_)));
         config.resolved_rootfs_layers = vec!["/tmp/layer0".into(), "/tmp/layer1".into()];
 
@@ -604,10 +601,7 @@ mod tests {
 
     #[test]
     fn test_sandbox_cli_args_use_overlay_for_single_oci_lower_without_index_args() {
-        let mut config = SandboxBuilder::new("test")
-            .image("alpine:latest")
-            .build()
-            .unwrap();
+        let mut config = SandboxBuilder::new("test").image("alpine").build().unwrap();
         assert!(matches!(config.image, RootfsSource::Oci(_)));
         config.resolved_rootfs_layers = vec!["/tmp/layer0".into()];
 
@@ -639,7 +633,7 @@ mod tests {
     #[test]
     fn test_sandbox_cli_args_use_synthetic_lower_for_zero_layer_oci_rootfs() {
         let config = SandboxBuilder::new("test")
-            .image("scratch:latest")
+            .image("scratch")
             .build()
             .unwrap();
 

@@ -18,7 +18,7 @@ use microsandbox::NetworkPolicy;
 
 // Public internet only
 let sb = Sandbox::builder("web-agent")
-    .image("python:3.12")
+    .image("python")
     .network(|n| n.policy(NetworkPolicy::public_only()))
     .create()
     .await?;
@@ -30,21 +30,21 @@ import { NetworkPolicy, Sandbox } from 'microsandbox'
 // No network access
 const sb1 = await Sandbox.create({
     name: "isolated",
-    image: "python:3.12",
+    image: "python",
     network: NetworkPolicy.none(),
 })
 
 // Public internet only (default, blocks private ranges)
 const sb2 = await Sandbox.create({
     name: "web-agent",
-    image: "python:3.12",
+    image: "python",
     network: NetworkPolicy.publicOnly(),
 })
 
 // Unrestricted access
 const sb3 = await Sandbox.create({
     name: "dev",
-    image: "python:3.12",
+    image: "python",
     network: NetworkPolicy.allowAll(),
 })
 ```
@@ -60,7 +60,7 @@ In Rust, `SandboxBuilder::port()` and `port_udp()` are top-level shorthands, so 
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("api")
-    .image("python:3.12")
+    .image("python")
     .port(8080, 80)
     .port_udp(5353, 5353)
     .network(|n| n.policy(NetworkPolicy::public_only()))
@@ -71,7 +71,7 @@ let sb = Sandbox::builder("api")
 ```typescript TypeScript
 const sb = await Sandbox.create({
     name: "api",
-    image: "python:3.12",
+    image: "python",
     ports: { "8080": 80 },
     network: NetworkPolicy.publicOnly(),
 })
@@ -90,7 +90,7 @@ DNS queries from the guest are intercepted and resolved on the host side, which 
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("safe-agent")
-    .image("python:3.12")
+    .image("python")
     .network(|n| n
         .policy(NetworkPolicy::public_only())
         .dns(DnsMode::Intercepted)
@@ -104,7 +104,7 @@ let sb = Sandbox::builder("safe-agent")
 ```typescript TypeScript
 const sb = await Sandbox.create({
     name: "safe-agent",
-    image: "python:3.12",
+    image: "python",
     network: {
         ...NetworkPolicy.publicOnly(),
         blockDomains: ["malware.example.com"],

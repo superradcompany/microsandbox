@@ -10,7 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Creating sandbox with published port 8080 → 80");
 
     let sandbox = Sandbox::builder("net-ports")
-        .image("alpine:latest")
+        .image("alpine")
         .cpus(1)
         .memory(512)
         .port(8080, 80)

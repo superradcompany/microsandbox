@@ -8,7 +8,7 @@ use microsandbox::Sandbox;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sandbox = Sandbox::builder("net-dns")
-        .image("alpine:latest")
+        .image("alpine")
         .cpus(1)
         .memory(512)
         .network(|n| {

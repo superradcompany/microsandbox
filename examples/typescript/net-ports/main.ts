@@ -5,7 +5,7 @@ async function main() {
 
   const sandbox = await Sandbox.create({
     name: "net-ports",
-    image: "alpine:latest",
+    image: "alpine",
     cpus: 1,
     memoryMib: 512,
     ports: { "8080": 80 },

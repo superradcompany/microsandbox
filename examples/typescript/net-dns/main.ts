@@ -3,7 +3,7 @@ import { Sandbox } from "microsandbox";
 async function main() {
   const sandbox = await Sandbox.create({
     name: "net-dns",
-    image: "alpine:latest",
+    image: "alpine",
     cpus: 1,
     memoryMib: 512,
     network: {

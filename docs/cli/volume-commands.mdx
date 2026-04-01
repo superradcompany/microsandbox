@@ -55,7 +55,7 @@ Mount a named volume when creating or running a sandbox. The volume name goes be
 ```bash
 # Create a volume, then mount it
 msb volume create app-data --size 5G
-msb run --name worker -v app-data:/data python:3.11
+msb run --name worker -v app-data:/data python
 
 # Share between sandboxes
 msb run --name writer -v shared:/data alpine -- sh -c "echo hello > /data/msg.txt"

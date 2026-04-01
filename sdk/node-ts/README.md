@@ -52,7 +52,7 @@ import { Sandbox } from "microsandbox";
 // Create a sandbox from an OCI image.
 const sandbox = await Sandbox.create({
   name: "my-sandbox",
-  image: "alpine:latest",
+  image: "alpine",
   cpus: 1,
   memoryMib: 512,
 });
@@ -74,7 +74,7 @@ import { Sandbox } from "microsandbox";
 
 const sandbox = await Sandbox.create({
   name: "exec-demo",
-  image: "python:3.12",
+  image: "python",
   replace: true,
 });
 
@@ -143,7 +143,7 @@ const data = await Volume.create({ name: "my-data", quotaMib: 100 });
 // Mount it in a sandbox.
 const writer = await Sandbox.create({
   name: "writer",
-  image: "alpine:latest",
+  image: "alpine",
   volumes: { "/data": Mount.named(data.name) },
   replace: true,
 });
@@ -154,7 +154,7 @@ await writer.stopAndWait();
 // Mount the same volume in another sandbox (read-only).
 const reader = await Sandbox.create({
   name: "reader",
-  image: "alpine:latest",
+  image: "alpine",
   volumes: { "/data": Mount.named(data.name, { readonly: true }) },
   replace: true,
 });
@@ -178,27 +178,27 @@ import { Sandbox, NetworkPolicy } from "microsandbox";
 // Default: public internet only (blocks private ranges).
 const publicOnly = await Sandbox.create({
   name: "public",
-  image: "alpine:latest",
+  image: "alpine",
 });
 
 // Fully airgapped.
 const isolated = await Sandbox.create({
   name: "isolated",
-  image: "alpine:latest",
+  image: "alpine",
   network: NetworkPolicy.none(),
 });
 
 // Unrestricted.
 const open = await Sandbox.create({
   name: "open",
-  image: "alpine:latest",
+  image: "alpine",
   network: NetworkPolicy.allowAll(),
 });
 
 // DNS filtering.
 const filtered = await Sandbox.create({
   name: "filtered",
-  image: "alpine:latest",
+  image: "alpine",
   network: {
     blockDomains: ["blocked.example.com"],
     blockDomainSuffixes: [".evil.com"],
@@ -211,7 +211,7 @@ const filtered = await Sandbox.create({
 ```typescript
 const sandbox = await Sandbox.create({
   name: "web",
-  image: "python:3.12",
+  image: "python",
   ports: { "8080": 80 }, // host:8080 -> guest:80
 });
 ```
@@ -225,7 +225,7 @@ import { Sandbox, Secret } from "microsandbox";
 
 const sandbox = await Sandbox.create({
   name: "agent",
-  image: "python:3.12",
+  image: "python",
   secrets: [
     Secret.env("OPENAI_API_KEY", {
       value: process.env.OPENAI_API_KEY!,
@@ -248,7 +248,7 @@ import { Patch, Sandbox } from "microsandbox";
 
 const sandbox = await Sandbox.create({
   name: "patched",
-  image: "alpine:latest",
+  image: "alpine",
   patches: [
     Patch.text("/etc/greeting.txt", "Hello!\n"),
     Patch.mkdir("/app", { mode: 0o755 }),
@@ -267,7 +267,7 @@ Sandboxes in detached mode survive the Node.js process:
 // Create and detach.
 const sandbox = await Sandbox.createDetached({
   name: "background",
-  image: "python:3.12",
+  image: "python",
 });
 await sandbox.detach();
 
@@ -282,7 +282,7 @@ const output = await reconnected.shell("echo reconnected");
 ```typescript
 const sandbox = await Sandbox.create({
   name: "tls-inspect",
-  image: "python:3.12",
+  image: "python",
   network: {
     tls: {
       bypass: ["*.googleapis.com"],
@@ -300,7 +300,7 @@ import { Sandbox, allSandboxMetrics } from "microsandbox";
 
 const sandbox = await Sandbox.create({
   name: "metrics-demo",
-  image: "python:3.12",
+  image: "python",
 });
 
 // Per-sandbox metrics.

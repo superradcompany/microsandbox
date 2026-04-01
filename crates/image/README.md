@@ -17,7 +17,7 @@ let cache = GlobalCache::new("/path/to/cache")?;
 let platform = Platform::host_linux();
 let registry = Registry::new(platform, cache)?;
 
-let reference = "docker.io/library/alpine:latest".parse()?;
+let reference = "docker.io/library/alpine".parse()?;
 let result = registry.pull(&reference, &PullOptions::default()).await?;
 
 // Extracted layer directories, bottom-to-top

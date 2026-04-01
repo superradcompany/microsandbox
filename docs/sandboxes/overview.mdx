@@ -15,7 +15,7 @@ At minimum, a sandbox needs a name and an image. Everything else has sensible de
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("worker")
-    .image("python:3.12")
+    .image("python")
     .create()
     .await?;
 ```
@@ -23,7 +23,7 @@ let sb = Sandbox::builder("worker")
 ```typescript TypeScript
 const sb = await Sandbox.create({
     name: "worker",
-    image: "python:3.12",
+    image: "python",
 })
 ```
 
@@ -34,7 +34,7 @@ const sb = await Sandbox.create({
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("worker")
-    .image("python:3.12")
+    .image("python")
     .memory(1024)
     .cpus(2)
     .workdir("/app")
@@ -52,7 +52,7 @@ import { Mount, Sandbox } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "worker",
-    image: "python:3.12",
+    image: "python",
     memoryMib: 1024,
     cpus: 2,
     workdir: "/app",
@@ -93,11 +93,11 @@ The most common option. microsandbox pulls the image and stacks its layers as a 
 
 <CodeGroup>
 ```rust Rust
-Sandbox::builder("worker").image("python:3.12").create().await?;
+Sandbox::builder("worker").image("python").create().await?;
 ```
 
 ```typescript TypeScript
-await Sandbox.create({ name: "worker", image: "python:3.12" })
+await Sandbox.create({ name: "worker", image: "python" })
 ```
 
 </CodeGroup>

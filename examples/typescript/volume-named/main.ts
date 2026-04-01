@@ -7,7 +7,7 @@ async function main() {
   // Sandbox A writes to the volume.
   const writer = await Sandbox.create({
     name: "writer",
-    image: "alpine:latest",
+    image: "alpine",
     volumes: { "/data": { named: data.name } },
     replace: true,
   });
@@ -18,7 +18,7 @@ async function main() {
   // Sandbox B reads from the same volume.
   const reader = await Sandbox.create({
     name: "reader",
-    image: "alpine:latest",
+    image: "alpine",
     volumes: { "/data": { named: data.name, readonly: true } },
     replace: true,
   });

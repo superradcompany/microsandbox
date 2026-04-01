@@ -44,7 +44,7 @@ icon: "bolt"
     #[tokio::main]
     async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sb = Sandbox::builder("hello")
-            .image("python:3.12")
+            .image("python")
             .memory(512)
             .create()
             .await?;
@@ -62,7 +62,7 @@ icon: "bolt"
 
     const sb = await Sandbox.create({
         name: "hello",
-        image: "python:3.12",
+        image: "python",
         memoryMib: 512,
     })
 
