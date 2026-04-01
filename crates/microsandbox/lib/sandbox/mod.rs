@@ -1819,7 +1819,7 @@ mod tests {
 
         let mut config = SandboxConfig {
             name: "pinned".into(),
-            image: RootfsSource::Oci("docker.io/library/alpine:latest".into()),
+            image: RootfsSource::Oci("docker.io/library/alpine".into()),
             ..Default::default()
         };
         config.resolved_rootfs_layers = vec!["/tmp/layer0".into()];
@@ -1828,7 +1828,7 @@ mod tests {
         persist_oci_manifest_pin(
             &conn,
             sandbox_id,
-            "docker.io/library/alpine:latest",
+            "docker.io/library/alpine",
             "sha256:1111111111111111111111111111111111111111111111111111111111111111",
         )
         .await
@@ -1837,7 +1837,7 @@ mod tests {
         persist_oci_manifest_pin(
             &conn,
             sandbox_id,
-            "docker.io/library/alpine:latest",
+            "docker.io/library/alpine",
             "sha256:2222222222222222222222222222222222222222222222222222222222222222",
         )
         .await
@@ -1845,7 +1845,7 @@ mod tests {
 
         let images = image_entity::Entity::find().all(&conn).await.unwrap();
         assert_eq!(images.len(), 1);
-        assert_eq!(images[0].reference, "docker.io/library/alpine:latest");
+        assert_eq!(images[0].reference, "docker.io/library/alpine");
 
         let pins = sandbox_image_entity::Entity::find()
             .all(&conn)
@@ -1872,7 +1872,7 @@ mod tests {
 
         let mut config = SandboxConfig {
             name: "recreated".into(),
-            image: RootfsSource::Oci("docker.io/library/alpine:latest".into()),
+            image: RootfsSource::Oci("docker.io/library/alpine".into()),
             ..Default::default()
         };
         config.resolved_rootfs_layers = vec!["/tmp/layer0".into()];
@@ -1881,7 +1881,7 @@ mod tests {
         persist_oci_manifest_pin(
             &conn,
             sandbox_id,
-            "docker.io/library/alpine:latest",
+            "docker.io/library/alpine",
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
         .await
@@ -1930,7 +1930,7 @@ mod tests {
 
         let mut config = SandboxConfig {
             name: "persisted-lowers".into(),
-            image: RootfsSource::Oci("docker.io/library/alpine:latest".into()),
+            image: RootfsSource::Oci("docker.io/library/alpine".into()),
             ..Default::default()
         };
         config.resolved_rootfs_layers = vec!["/tmp/layer0".into(), "/tmp/layer1".into()];
@@ -2188,7 +2188,7 @@ mod tests {
 
         let mut config = SandboxConfig {
             name: "persisted".into(),
-            image: RootfsSource::Oci("docker.io/library/alpine:latest".into()),
+            image: RootfsSource::Oci("docker.io/library/alpine".into()),
             ..Default::default()
         };
         config.resolved_rootfs_layers = vec![temp.path().join("missing-lower")];

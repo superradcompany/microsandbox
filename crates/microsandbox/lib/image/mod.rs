@@ -99,7 +99,7 @@ pub struct ImageLayerDetail {
 //--------------------------------------------------------------------------------------------------
 
 impl ImageHandle {
-    /// Image reference (e.g. `docker.io/library/python:3.11`).
+    /// Image reference (e.g. `docker.io/library/python`).
     pub fn reference(&self) -> &str {
         &self.reference
     }

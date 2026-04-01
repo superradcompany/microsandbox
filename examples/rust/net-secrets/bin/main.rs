@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Secret configured via shorthand. TLS interception auto-enabled.
     // Placeholder auto-generated as $MSB_API_KEY.
     let sandbox = Sandbox::builder("net-secrets")
-        .image("alpine:latest")
+        .image("alpine")
         .cpus(1)
         .memory(512)
         .secret_env("API_KEY", "sk-real-secret-123", "example.com")

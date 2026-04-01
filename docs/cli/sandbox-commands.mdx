@@ -10,10 +10,10 @@ Create a sandbox and optionally run a command. Without `--name`, the sandbox is 
 
 ```bash
 # Ephemeral: runs and cleans up
-msb run python:3.11 -- python -c "print('hello')"
+msb run python -- python -c "print('hello')"
 
 # Named: persists after exit
-msb run --name devbox ubuntu:22.04 -- bash
+msb run --name devbox ubuntu -- bash
 
 # With volumes, ports, and environment
 msb run --name api \
@@ -22,10 +22,10 @@ msb run --name api \
   -p 8000:8000 \
   -e DEBUG=true \
   -w /app \
-  python:3.11
+  python
 
 # Detached (runs in background)
-msb run -d --name worker python:3.11 -- python worker.py
+msb run -d --name worker python -- python worker.py
 ```
 
 | Flag | Description |
@@ -71,8 +71,8 @@ When no `--` command is given, the image's `entrypoint` and `cmd` are used as th
 Create and boot a sandbox without running a command. Takes the same flags as `msb run` (except `--detach`).
 
 ```bash
-msb create python:3.11 --name worker -c 2 -m 1G
-msb create --replace python:3.11 --name worker   # Replace existing
+msb create python --name worker -c 2 -m 1G
+msb create --replace python --name worker   # Replace existing
 ```
 
 ## msb start
@@ -227,7 +227,7 @@ Install a sandbox as a system command. Creates an executable in `~/.microsandbox
 msb install ubuntu                   # Install as 'ubuntu' command
 msb install --name nodebox node      # Custom command name
 msb install --tmp alpine             # Fresh sandbox every invocation
-msb install -c 2 -m 1G python:3.12  # With resource limits
+msb install -c 2 -m 1G python  # With resource limits
 msb install --list                   # List installed commands
 ```
 

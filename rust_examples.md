@@ -132,7 +132,7 @@
 
 > ```rs
 > // OCI image (default)
-> Sandbox::builder("oci").image("python:3.12")
+> Sandbox::builder("oci").image("python")
 >
 > // Local directory
 > Sandbox::builder("bind").image("./my-rootfs")

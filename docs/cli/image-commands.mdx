@@ -9,8 +9,8 @@ icon: "layer-group"
 Pre-pull an image to the local cache. Layers are fetched in parallel with per-layer progress bars. Once cached, layers are content-addressable and deduplicated, so shared layers across images are only stored once.
 
 ```bash
-msb pull python:3.11
-msb pull alpine:latest
+msb pull python
+msb pull alpine
 msb pull ghcr.io/my-org/my-image:v1
 ```
 
@@ -47,8 +47,8 @@ msb image ls -q               # References only
 Show detailed metadata for a cached image (manifest, layers, config).
 
 ```bash
-msb image inspect python:3.11
-msb image inspect python:3.11 --format json
+msb image inspect python
+msb image inspect python --format json
 ```
 
 | Flag | Description |
@@ -60,8 +60,8 @@ msb image inspect python:3.11 --format json
 Remove one or more cached images and their layers (layers shared with other images are kept).
 
 ```bash
-msb image rm python:3.11
-msb image rm alpine:latest ubuntu:22.04   # Remove multiple
+msb image rm python
+msb image rm alpine ubuntu   # Remove multiple
 ```
 
 | Flag | Description |

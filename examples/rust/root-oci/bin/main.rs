@@ -6,11 +6,11 @@ use microsandbox::Sandbox;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Creating sandbox (image=alpine:latest)");
+    println!("Creating sandbox (image=alpine)");
 
     // Create a sandbox with an OCI image rootfs.
     let sandbox = Sandbox::builder("oci-root")
-        .image("alpine:latest")
+        .image("alpine")
         .cpus(1)
         .memory(512)
         .replace()

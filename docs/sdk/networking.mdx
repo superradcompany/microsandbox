@@ -16,21 +16,21 @@ use microsandbox::{Sandbox, NetworkPolicy};
 
 // No network access
 let sb1 = Sandbox::builder("isolated")
-    .image("python:3.12")
+    .image("python")
     .disable_network()
     .create()
     .await?;
 
 // Public internet only (default)
 let sb2 = Sandbox::builder("web-agent")
-    .image("python:3.12")
+    .image("python")
     .network(|n| n.policy(NetworkPolicy::public_only()))
     .create()
     .await?;
 
 // Unrestricted access
 let sb3 = Sandbox::builder("dev")
-    .image("python:3.12")
+    .image("python")
     .network(|n| n.policy(NetworkPolicy::allow_all()))
     .create()
     .await?;
@@ -42,21 +42,21 @@ import { NetworkPolicy, Sandbox } from 'microsandbox'
 // No network access
 const sb1 = await Sandbox.create({
     name: "isolated",
-    image: "python:3.12",
+    image: "python",
     network: NetworkPolicy.none(),
 })
 
 // Public internet only (default)
 const sb2 = await Sandbox.create({
     name: "web-agent",
-    image: "python:3.12",
+    image: "python",
     network: NetworkPolicy.publicOnly(),
 })
 
 // Unrestricted access
 const sb3 = await Sandbox.create({
     name: "dev",
-    image: "python:3.12",
+    image: "python",
     network: NetworkPolicy.allowAll(),
 })
 ```
@@ -95,7 +95,7 @@ let policy = NetworkPolicy {
 };
 
 let sb = Sandbox::builder("secure-agent")
-    .image("alpine:latest")
+    .image("alpine")
     .network(|n| n.policy(policy))
     .create()
     .await?;
@@ -106,7 +106,7 @@ import { Sandbox } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "secure-agent",
-    image: "alpine:latest",
+    image: "alpine",
     network: {
         rules: [
             { action: "allow", direction: "outbound", protocol: "tcp", port: "443" },
@@ -132,7 +132,7 @@ For Rust, `SandboxBuilder::port()` and `port_udp()` are top-level shorthands tha
 use microsandbox::{Sandbox, NetworkPolicy};
 
 let sb = Sandbox::builder("api")
-    .image("python:3.12")
+    .image("python")
     .port(8080, 80)
     .port_udp(5353, 5353)
     .network(|n| n.policy(NetworkPolicy::public_only()))
@@ -145,7 +145,7 @@ import { NetworkPolicy, Sandbox } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "api",
-    image: "python:3.12",
+    image: "python",
     ports: { "8080": 80 },
     network: NetworkPolicy.publicOnly(),
 })
@@ -162,7 +162,7 @@ All DNS queries are intercepted and resolved on the host side. This enables doma
 use microsandbox::{Sandbox, NetworkPolicy};
 
 let sb = Sandbox::builder("safe-agent")
-    .image("python:3.12")
+    .image("python")
     .network(|n| n
         .policy(NetworkPolicy::public_only())
         .block_domain("malware.example.com")
@@ -177,7 +177,7 @@ import { NetworkPolicy, Sandbox } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "safe-agent",
-    image: "python:3.12",
+    image: "python",
     network: {
         ...NetworkPolicy.publicOnly(),
         blockDomains: ["malware.example.com"],
@@ -201,7 +201,7 @@ So even with full code execution inside the sandbox, there's nothing to steal. T
 use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("agent")
-    .image("python:3.12")
+    .image("python")
     .secret(|s| s
         .env("GITHUB_TOKEN")
         .value(std::env::var("GITHUB_TOKEN")?)
@@ -218,7 +218,7 @@ import { Sandbox, Secret } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "agent",
-    image: "python:3.12",
+    image: "python",
     secrets: [
         Secret.env("GITHUB_TOKEN", {
             value: process.env.GITHUB_TOKEN!,
@@ -244,7 +244,7 @@ Enable HTTPS traffic inspection with an auto-generated CA certificate. microsand
 use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("agent")
-    .image("python:3.12")
+    .image("python")
     .network(|n| n
         .tls(|t| t
             .bypass("pinned-api.example.com")
@@ -260,7 +260,7 @@ import { Sandbox } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "agent",
-    image: "python:3.12",
+    image: "python",
     network: {
         tls: {
             bypass: ["pinned-api.example.com", "*.gov"],

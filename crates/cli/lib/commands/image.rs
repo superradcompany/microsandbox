@@ -55,7 +55,7 @@ pub struct ImageListArgs {
 /// Arguments for `msb image inspect`.
 #[derive(Debug, Args)]
 pub struct ImageInspectArgs {
-    /// Image to inspect (e.g. python:3.12).
+    /// Image to inspect (e.g. python).
     pub reference: String,
 
     /// Output format (json).

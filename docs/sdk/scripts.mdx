@@ -16,7 +16,7 @@ use indoc::indoc;
 use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("worker")
-    .image("ubuntu:22.04")
+    .image("ubuntu")
     .script("setup", indoc! {"
         #!/bin/bash
         apt-get update && apt-get install -y python3 curl
@@ -37,7 +37,7 @@ import { Sandbox } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "worker",
-    image: "ubuntu:22.04",
+    image: "ubuntu",
     scripts: {
         setup: "#!/bin/bash\napt-get update && apt-get install -y python3 curl",
         run: "#!/bin/bash\nexec python3 /app/main.py",
@@ -65,7 +65,7 @@ Patches are applied in order and work with OCI images and bind-mounted rootfs. T
 use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("worker")
-    .image("alpine:latest")
+    .image("alpine")
     .patch(|p| p
         .text("/etc/greeting.txt", "Hello from a patched rootfs!\n", None, false)
         .text("/etc/motd", "Custom message of the day.\n", None, true) // replace existing
@@ -83,7 +83,7 @@ import { Patch, Sandbox } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "worker",
-    image: "alpine:latest",
+    image: "alpine",
     patches: [
         Patch.text("/etc/greeting.txt", "Hello from a patched rootfs!\n"),
         Patch.text("/etc/motd", "Custom message of the day.\n", { replace: true }),

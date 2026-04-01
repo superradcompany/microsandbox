@@ -77,7 +77,7 @@ export type JsExecSink = ExecSink
  *
  * const sb = await Sandbox.create({
  *     name: "worker",
- *     image: "python:3.12",
+ *     image: "python",
  *     volumes: {
  *         "/app/src": Mount.bind("./src", { readonly: true }),
  *         "/data": Mount.named("my-data"),
@@ -103,7 +103,7 @@ export declare class Mount {
  *
  * const sb = await Sandbox.create({
  *     name: "worker",
- *     image: "python:3.12",
+ *     image: "python",
  *     network: NetworkPolicy.publicOnly(),
  * })
  * ```
@@ -285,7 +285,7 @@ export type JsSandboxHandle = SandboxHandle
  *
  * const sb = await Sandbox.create({
  *     name: "agent",
- *     image: "python:3.12",
+ *     image: "python",
  *     secrets: [
  *         Secret.env("OPENAI_API_KEY", {
  *             value: process.env.OPENAI_API_KEY,

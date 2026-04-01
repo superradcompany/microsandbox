@@ -29,7 +29,7 @@ use microsandbox::{Sandbox, NetworkPolicy};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sb = Sandbox::builder("my-sandbox")
-        .image("python:3.12")
+        .image("python")
         .memory(512)
         .cpus(2)
         .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -52,7 +52,7 @@ import { Mount, NetworkPolicy, Sandbox } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "my-sandbox",
-    image: "python:3.12",
+    image: "python",
     memoryMib: 512,
     cpus: 2,
     env: { PYTHONDONTWRITEBYTECODE: "1" },

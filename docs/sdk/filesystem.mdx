@@ -105,7 +105,7 @@ use microsandbox::Sandbox;
 
 let key = get_encryption_key();
 let sb = Sandbox::builder("encrypted")
-    .image("python:3.12")
+    .image("python")
     .volume("/secrets", |v| v
         .bind("/data/secrets")
         .on_read(move |_path, data| decrypt(data, &key))
@@ -119,7 +119,7 @@ import { Mount, Sandbox } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "encrypted",
-    image: "python:3.12",
+    image: "python",
     volumes: {
         "/secrets": Mount.bind("/data/secrets", {
             hooks: {

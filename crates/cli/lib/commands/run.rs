@@ -16,7 +16,7 @@ use crate::ui;
 /// Create a sandbox from an image and run a command in it.
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// Image to use (e.g. alpine, python:3.12, ./rootfs, ./disk.qcow2).
+    /// Image to use (e.g. alpine, python, ./rootfs, ./disk.qcow2).
     pub image: String,
 
     /// Start the sandbox in the background and print its name.
