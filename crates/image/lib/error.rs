@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use crate::platform::{Arch, Os};
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -19,9 +21,9 @@ pub enum ImageError {
         /// The image reference.
         reference: String,
         /// Requested OS.
-        os: String,
+        os: Os,
         /// Requested architecture.
-        arch: String,
+        arch: Arch,
     },
 
     /// OCI manifest or index parsing failed.

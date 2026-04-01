@@ -27,7 +27,7 @@ pub use config::ImageConfig;
 pub use digest::Digest;
 pub use error::{ImageError, ImageResult};
 pub use oci_client::Reference;
-pub use platform::Platform;
+pub use platform::{Arch, Os, Platform};
 pub use progress::{PullProgress, PullProgressHandle, PullProgressSender, progress_channel};
 pub use pull::{PullOptions, PullPolicy, PullResult};
 pub use registry::Registry;
