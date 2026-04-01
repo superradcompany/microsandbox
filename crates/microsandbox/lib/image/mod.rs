@@ -646,8 +646,8 @@ async fn upsert_config_record<C: ConnectionTrait>(
     config_entity::Entity::insert(config_entity::ActiveModel {
         manifest_id: Set(manifest_id),
         digest: Set(digest.to_string()),
-        architecture: Set(Some(platform.arch.clone())),
-        os: Set(Some(platform.os.clone())),
+        architecture: Set(Some(platform.arch.to_string())),
+        os: Set(Some(platform.os.to_string())),
         os_variant: Set(None),
         env: Set(env_json),
         cmd: Set(cmd_json),

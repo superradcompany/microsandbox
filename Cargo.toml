@@ -61,8 +61,8 @@ indicatif = "0.18"
 ipnetwork = { version = "0.21.0", features = ["serde"] }
 libc = "0.2"
 nix = "0.30"
-oci-client = "0.15"
-oci-spec = "0.8"
+oci-client = "0.16"
+oci-spec = "0.9.0"
 rand = "0.9"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 scopeguard = "1.2"
@@ -92,7 +92,12 @@ sea-orm-migration = { version = "1.1", features = [
     "sqlx-sqlite",
 ] }
 ureq = "3"
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = [
+    "logging",
+    "ring",
+    "std",
+    "tls12",
+] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
 rustls-native-certs = "0.8"

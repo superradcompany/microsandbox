@@ -498,16 +498,12 @@ impl Registry {
             };
 
             // OS must match.
-            if platform.os() != &oci_spec::image::Os::Other(self.platform.os.clone())
-                && format!("{}", platform.os()) != self.platform.os
-            {
+            if *platform.os() != self.platform.os {
                 continue;
             }
 
             // Architecture must match.
-            if platform.architecture() != &oci_spec::image::Arch::Other(self.platform.arch.clone())
-                && format!("{}", platform.architecture()) != self.platform.arch
-            {
+            if *platform.architecture() != self.platform.arch {
                 continue;
             }
 
