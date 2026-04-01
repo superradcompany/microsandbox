@@ -16,7 +16,7 @@ let sb = Sandbox::builder("worker")
     .image("python")
     .memory(1024)
     .cpus(2)
-    .workdir("/app")
+
     .shell("/bin/bash")
     .env("DEBUG", "true")
     .env("API_PORT", "8000")
@@ -36,7 +36,7 @@ const sb = await Sandbox.create({
     image: "python",
     memoryMib: 1024,
     cpus: 2,
-    workdir: "/app",
+
     shell: "/bin/bash",
     env: { DEBUG: "true", API_PORT: "8000" },
     volumes: {
