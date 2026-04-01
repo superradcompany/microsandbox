@@ -193,14 +193,19 @@ pub(crate) struct DirSnapshot {
     /// Merged entries across all layers.
     pub entries: Vec<MergedDirEntry>,
 
-    /// Whether guest-visible d_types have been corrected via stat override lookups.
-    /// Lazily set on first `do_readdir` call; skipped by `do_readdirplus` which
-    /// corrects d_types from its own lookup results.
-    pub dtypes_corrected: bool,
+    /// Whether guest-visible metadata has been resolved via lookups.
+    ///
+    /// Lazily set on first `do_readdir` call so plain `readdir` can return
+    /// stable synthetic inode numbers and corrected guest-visible d_types.
+    /// `do_readdirplus` resolves metadata from its own lookup results.
+    pub metadata_resolved: bool,
 }
 
 /// A single entry in a merged directory snapshot.
 pub(crate) struct MergedDirEntry {
+    /// Guest-visible synthetic inode number.
+    pub inode: u64,
+
     /// Entry name (owned bytes — snapshot is per-handle, short-lived).
     pub name: Vec<u8>,
 
