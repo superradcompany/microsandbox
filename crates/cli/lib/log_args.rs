@@ -2,6 +2,8 @@
 
 use clap::Args;
 use microsandbox_runtime::logging::LogLevel;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::Directive;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -40,9 +42,14 @@ pub struct LogArgs {
 /// If no level is selected, logging stays disabled.
 pub fn init_tracing(log_level: Option<LogLevel>) {
     if let Some(level) = log_level {
+        // Silence oci_client logs — the crate logs the auth token in debug mode
+        // See: https://github.com/oras-project/rust-oci-client/issues/254
+        let filter = EnvFilter::new(level.as_tracing_level().to_string())
+            .add_directive("oci_client=info".parse::<Directive>().unwrap());
+
         tracing_subscriber::fmt()
             .with_writer(std::io::stderr)
-            .with_max_level(level.as_tracing_level())
+            .with_env_filter(filter)
             .init();
     }
 }

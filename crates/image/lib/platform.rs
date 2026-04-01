@@ -4,15 +4,21 @@
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Re-export of [`oci_spec::image::Os`].
+pub type Os = oci_spec::image::Os;
+
+/// Re-export of [`oci_spec::image::Arch`].
+pub type Arch = oci_spec::image::Arch;
+
 /// Target platform for OCI image resolution.
 ///
 /// Used to select the correct manifest from a multi-platform OCI index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Platform {
     /// Operating system (always `linux` for microsandbox).
-    pub os: String,
+    pub os: Os,
     /// CPU architecture (e.g., `amd64`, `arm64`).
-    pub arch: String,
+    pub arch: Arch,
     /// Optional architecture variant (e.g., `v7` for armv7).
     pub variant: Option<String>,
 }
@@ -23,7 +29,7 @@ pub struct Platform {
 
 impl Platform {
     /// Create a new platform.
-    pub fn new(os: impl Into<String>, arch: impl Into<String>) -> Self {
+    pub fn new(os: impl Into<Os>, arch: impl Into<Arch>) -> Self {
         Self {
             os: os.into(),
             arch: arch.into(),
@@ -33,8 +39,8 @@ impl Platform {
 
     /// Create a new platform with variant.
     pub fn with_variant(
-        os: impl Into<String>,
-        arch: impl Into<String>,
+        os: impl Into<Os>,
+        arch: impl Into<Arch>,
         variant: impl Into<String>,
     ) -> Self {
         Self {
@@ -79,13 +85,13 @@ mod tests {
     #[test]
     fn test_host_linux() {
         let p = Platform::host_linux();
-        assert_eq!(p.os, "linux");
-        assert!(p.arch == "amd64" || p.arch == "arm64" || !p.arch.is_empty());
+        assert_eq!(p.os, Os::Linux);
+        assert!(p.arch == Arch::Amd64 || p.arch == Arch::ARM64);
     }
 
     #[test]
     fn test_default_is_host_linux() {
         let p = Platform::default();
-        assert_eq!(p.os, "linux");
+        assert_eq!(p.os, Os::Linux);
     }
 }

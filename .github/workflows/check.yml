@@ -2,9 +2,9 @@ name: Check
 
 on:
   push:
-    branches: [microsandbox]
+    branches: [main]
   pull_request:
-    branches: [microsandbox]
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
