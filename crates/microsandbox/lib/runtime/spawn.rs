@@ -720,7 +720,7 @@ mod tests {
     #[test]
     fn test_sandbox_cli_args_disk_image_with_fstype() {
         let config = SandboxBuilder::new("test")
-            .image(|i: crate::sandbox::ImageBuilder| i.disk("/tmp/ubuntu.qcow2").fstype("ext4"))
+            .image_with(|i| i.disk("/tmp/ubuntu.qcow2").fstype("ext4"))
             .build()
             .unwrap();
 
@@ -760,7 +760,7 @@ mod tests {
     #[test]
     fn test_sandbox_cli_args_disk_image_without_fstype() {
         let config = SandboxBuilder::new("test")
-            .image(|i: crate::sandbox::ImageBuilder| i.disk("/tmp/alpine.raw"))
+            .image_with(|i| i.disk("/tmp/alpine.raw"))
             .build()
             .unwrap();
 

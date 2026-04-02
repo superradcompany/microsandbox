@@ -64,10 +64,10 @@ pub enum ImageSource {
 
 /// Builder for configuring a disk image rootfs.
 ///
-/// Used with the closure form of [`crate::sandbox::SandboxBuilder::image`]:
+/// Used with [`crate::sandbox::SandboxBuilder::image_with`]:
 ///
 /// ```ignore
-/// .image(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
+/// .image_with(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
 /// ```
 #[derive(Default)]
 pub struct ImageBuilder {
@@ -549,8 +549,8 @@ impl ImageBuilder {
     /// `.qcow2`, `.raw`, `.vmdk`.
     ///
     /// ```ignore
-    /// .image(|i| i.disk("./ubuntu.qcow2"))
-    /// .image(|i| i.disk("./alpine.raw").fstype("ext4"))
+    /// .image_with(|i| i.disk("./ubuntu.qcow2"))
+    /// .image_with(|i| i.disk("./alpine.raw").fstype("ext4"))
     /// ```
     pub fn disk(mut self, path: impl Into<PathBuf>) -> Self {
         let path = path.into();
@@ -578,7 +578,7 @@ impl ImageBuilder {
     /// `/proc/filesystems`.
     ///
     /// ```ignore
-    /// .image(|i| i.disk("./ubuntu.raw").fstype("ext4"))
+    /// .image_with(|i| i.disk("./ubuntu.raw").fstype("ext4"))
     /// ```
     pub fn fstype(mut self, fstype: impl Into<String>) -> Self {
         let fstype = fstype.into();
@@ -635,15 +635,6 @@ impl IntoImage for String {
 impl IntoImage for PathBuf {
     fn into_rootfs_source(self) -> crate::MicrosandboxResult<RootfsSource> {
         ImageSource::from(self).into_rootfs_source()
-    }
-}
-
-impl<F> IntoImage for F
-where
-    F: FnOnce(ImageBuilder) -> ImageBuilder,
-{
-    fn into_rootfs_source(self) -> crate::MicrosandboxResult<RootfsSource> {
-        self(ImageBuilder::new()).build()
     }
 }
 
@@ -899,8 +890,10 @@ mod tests {
 
     #[test]
     fn test_image_builder_disk_with_fstype() {
-        let rootfs = (|i: ImageBuilder| i.disk("./test.qcow2").fstype("ext4"))
-            .into_rootfs_source()
+        let rootfs = ImageBuilder::new()
+            .disk("./test.qcow2")
+            .fstype("ext4")
+            .build()
             .unwrap();
         match rootfs {
             RootfsSource::DiskImage { format, fstype, .. } => {
@@ -913,9 +906,7 @@ mod tests {
 
     #[test]
     fn test_image_builder_disk_without_fstype() {
-        let rootfs = (|i: ImageBuilder| i.disk("./test.raw"))
-            .into_rootfs_source()
-            .unwrap();
+        let rootfs = ImageBuilder::new().disk("./test.raw").build().unwrap();
         match rootfs {
             RootfsSource::DiskImage { format, fstype, .. } => {
                 assert_eq!(format, DiskImageFormat::Raw);
@@ -927,27 +918,31 @@ mod tests {
 
     #[test]
     fn test_image_builder_bad_extension_errors() {
-        let result = (|i: ImageBuilder| i.disk("./test.txt")).into_rootfs_source();
+        let result = ImageBuilder::new().disk("./test.txt").build();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_image_builder_fstype_without_disk_errors() {
-        let result = (|i: ImageBuilder| i.fstype("ext4")).into_rootfs_source();
+        let result = ImageBuilder::new().fstype("ext4").build();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_image_builder_fstype_rejects_comma() {
-        let result =
-            (|i: ImageBuilder| i.disk("./test.qcow2").fstype("ext4,size=100")).into_rootfs_source();
+        let result = ImageBuilder::new()
+            .disk("./test.qcow2")
+            .fstype("ext4,size=100")
+            .build();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_image_builder_fstype_rejects_equals() {
-        let result =
-            (|i: ImageBuilder| i.disk("./test.qcow2").fstype("key=value")).into_rootfs_source();
+        let result = ImageBuilder::new()
+            .disk("./test.qcow2")
+            .fstype("key=value")
+            .build();
         assert!(result.is_err());
     }
 }

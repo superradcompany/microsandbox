@@ -3,7 +3,7 @@ resolver = "3"
 members = ["."]
 
 [workspace.package]
-authors = ["Team MicroSandbox <team@microsandbox.dev>"]
+authors = ["Super Rad Company <developemnt@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
 version = "0.3.8"
 license = "Apache-2.0"

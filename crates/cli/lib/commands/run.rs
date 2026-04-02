@@ -3,8 +3,8 @@
 use std::io::{IsTerminal, Write};
 
 use clap::Args;
+use microsandbox::sandbox::ExecOutput;
 use microsandbox::sandbox::Sandbox;
-use microsandbox::sandbox::{AttachOptionsBuilder, ExecOptionsBuilder, ExecOutput};
 
 use super::common::{SandboxOpts, apply_sandbox_opts};
 use crate::ui;
@@ -190,13 +190,9 @@ async fn exec_in_sandbox(
     interactive: bool,
 ) -> anyhow::Result<i32> {
     if interactive {
-        Ok(sandbox
-            .attach(cmd, |a: AttachOptionsBuilder| a.args(cmd_args))
-            .await?)
+        Ok(sandbox.attach(cmd, cmd_args).await?)
     } else {
-        let output: ExecOutput = sandbox
-            .exec(cmd, |e: ExecOptionsBuilder| e.args(cmd_args))
-            .await?;
+        let output: ExecOutput = sandbox.exec(cmd, cmd_args).await?;
 
         std::io::stdout().write_all(output.stdout_bytes())?;
         std::io::stderr().write_all(output.stderr_bytes())?;

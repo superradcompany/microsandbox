@@ -37,6 +37,7 @@ use crate::{
     runtime::{ProcessHandle, SpawnMode, spawn_sandbox},
 };
 
+use self::attach::AttachOptions;
 use self::exec::{ExecEvent, ExecHandle, ExecOptions, ExecSink, StdinMode};
 
 //--------------------------------------------------------------------------------------------------
@@ -44,10 +45,10 @@ use self::exec::{ExecEvent, ExecHandle, ExecOptions, ExecSink, StdinMode};
 //--------------------------------------------------------------------------------------------------
 
 pub use crate::db::entity::sandbox::SandboxStatus;
-pub use attach::{AttachOptionsBuilder, IntoAttachOptions};
+pub use attach::AttachOptionsBuilder;
 pub use builder::SandboxBuilder;
 pub use config::SandboxConfig;
-pub use exec::{ExecOptionsBuilder, ExecOutput, IntoExecOptions, Rlimit, RlimitResource};
+pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
 pub use handle::SandboxHandle;
 pub use metrics::{SandboxMetrics, all_sandbox_metrics};
@@ -496,16 +497,32 @@ impl Sandbox {
 impl Sandbox {
     /// Execute a command and return a streaming handle.
     ///
-    /// This is the foundational exec method. All other exec methods delegate to it.
-    ///
-    /// - `sandbox.exec_stream("tail", ["-f", "/var/log/app.log"])` — args array
-    /// - `sandbox.exec_stream("python", |e| e.args(["-c", "x"]).env("K", "V"))` — closure
+    /// ```ignore
+    /// let mut handle = sb.exec_stream("tail", ["-f", "/var/log/app.log"]).await?;
+    /// ```
     pub async fn exec_stream(
         &self,
         cmd: impl Into<String>,
-        opts: impl exec::IntoExecOptions,
+        args: impl IntoIterator<Item = impl Into<String>>,
     ) -> MicrosandboxResult<ExecHandle> {
-        let opts = opts.into_exec_options();
+        let opts = ExecOptions {
+            args: args.into_iter().map(Into::into).collect(),
+            ..Default::default()
+        };
+        self.exec_stream_inner(cmd.into(), opts).await
+    }
+
+    /// Execute a command with full options and return a streaming handle.
+    ///
+    /// ```ignore
+    /// let mut handle = sb.exec_stream_with("python", |e| e.stdin_pipe().tty(true)).await?;
+    /// ```
+    pub async fn exec_stream_with(
+        &self,
+        cmd: impl Into<String>,
+        f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
+    ) -> MicrosandboxResult<ExecHandle> {
+        let opts = f(ExecOptionsBuilder::default()).build();
         self.exec_stream_inner(cmd.into(), opts).await
     }
 
@@ -590,18 +607,43 @@ impl Sandbox {
 
     /// Execute a command and wait for completion.
     ///
-    /// Returns captured stdout/stderr.
-    ///
-    /// - `sandbox.exec("python", ["-c", "print('hi')"])` — args array
-    /// - `sandbox.exec("python", |e| e.args(["compute.py"]).env("HOME", "/root"))` — closure
+    /// ```ignore
+    /// let output = sb.exec("python", ["-c", "print('hi')"]).await?;
+    /// ```
     pub async fn exec(
         &self,
         cmd: impl Into<String>,
-        opts: impl exec::IntoExecOptions,
+        args: impl IntoIterator<Item = impl Into<String>>,
     ) -> MicrosandboxResult<ExecOutput> {
-        let opts = opts.into_exec_options();
+        let opts = ExecOptions {
+            args: args.into_iter().map(Into::into).collect(),
+            ..Default::default()
+        };
+        self.exec_with_opts(cmd.into(), opts).await
+    }
+
+    /// Execute a command with full options and wait for completion.
+    ///
+    /// ```ignore
+    /// let output = sb.exec_with("python", |e| e.args(["compute.py"]).cwd("/app")).await?;
+    /// ```
+    pub async fn exec_with(
+        &self,
+        cmd: impl Into<String>,
+        f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
+    ) -> MicrosandboxResult<ExecOutput> {
+        let opts = f(ExecOptionsBuilder::default()).build();
+        self.exec_with_opts(cmd.into(), opts).await
+    }
+
+    /// Shared implementation for exec and exec_with.
+    async fn exec_with_opts(
+        &self,
+        cmd: String,
+        opts: ExecOptions,
+    ) -> MicrosandboxResult<ExecOutput> {
         let timeout_duration = opts.timeout;
-        let mut handle = self.exec_stream_inner(cmd.into(), opts).await?;
+        let mut handle = self.exec_stream_inner(cmd, opts).await?;
 
         match timeout_duration {
             Some(duration) => {
@@ -656,29 +698,46 @@ impl Sandbox {
 impl Sandbox {
     /// Attach to the sandbox with an interactive terminal session.
     ///
-    /// Bridges the host terminal to a guest process running in a PTY.
-    /// Returns the exit code when the process exits or the user detaches.
-    ///
-    /// - `sandbox.attach("bash", ["-l"])` — command with args
-    /// - `sandbox.attach("/bin/sh", |a| a.detach_keys("ctrl-q"))` — with options
-    /// - `sandbox.attach("zsh", |a| a.env("TERM", "xterm"))` — command with options
+    /// ```ignore
+    /// let exit_code = sb.attach("bash", ["-l"]).await?;
+    /// ```
     pub async fn attach(
         &self,
         cmd: impl Into<String>,
-        opts: impl attach::IntoAttachOptions,
+        args: impl IntoIterator<Item = impl Into<String>>,
     ) -> MicrosandboxResult<i32> {
+        let opts = AttachOptions {
+            args: args.into_iter().map(Into::into).collect(),
+            ..Default::default()
+        };
+        self.attach_inner(cmd.into(), opts).await
+    }
+
+    /// Attach to the sandbox with full options.
+    ///
+    /// ```ignore
+    /// let exit_code = sb.attach_with("zsh", |a| a.env("TERM", "xterm").detach_keys("ctrl-q")).await?;
+    /// ```
+    pub async fn attach_with(
+        &self,
+        cmd: impl Into<String>,
+        f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
+    ) -> MicrosandboxResult<i32> {
+        let opts = f(AttachOptionsBuilder::default()).build();
+        self.attach_inner(cmd.into(), opts).await
+    }
+
+    /// Shared implementation for attach and attach_with.
+    async fn attach_inner(&self, cmd: String, opts: AttachOptions) -> MicrosandboxResult<i32> {
         use std::os::fd::AsRawFd;
 
         use microsandbox_protocol::exec::ExecResize;
         use tokio::io::{AsyncWriteExt, unix::AsyncFd};
 
-        let opts = opts.into_attach_options();
         let detach_keys = match &opts.detach_keys {
             Some(spec) => attach::DetachKeys::parse(spec)?,
             None => attach::DetachKeys::default_keys(),
         };
-
-        let cmd = cmd.into();
 
         // Get terminal size.
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
@@ -859,10 +918,10 @@ impl Sandbox {
     /// Attach to the sandbox's default shell.
     ///
     /// Uses the sandbox's configured shell (default: `/bin/sh`).
-    /// Equivalent to `attach(shell, |a| a)` with the configured shell.
     pub async fn attach_shell(&self) -> MicrosandboxResult<i32> {
         let shell = self.config.shell.as_deref().unwrap_or("/bin/sh");
-        self.attach(shell, |a| a).await
+        self.attach_inner(shell.into(), AttachOptions::default())
+            .await
     }
 }
 

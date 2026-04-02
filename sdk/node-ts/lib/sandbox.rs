@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use microsandbox::sandbox::{
-    ExecOptionsBuilder, NetworkPolicy, PullPolicy, SandboxConfig as RustSandboxConfig,
-};
+use microsandbox::sandbox::{NetworkPolicy, PullPolicy, SandboxConfig as RustSandboxConfig};
 use microsandbox::{LogLevel, RegistryAuth};
 use microsandbox_network::policy::{
     Action, Destination, DestinationGroup, Direction, PortRange, Protocol, Rule,
@@ -156,10 +154,7 @@ impl Sandbox {
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
         let args_owned = args.unwrap_or_default();
-        let output = sb
-            .exec(&cmd, |b: ExecOptionsBuilder| b.args(args_owned))
-            .await
-            .map_err(to_napi_error)?;
+        let output = sb.exec(&cmd, args_owned).await.map_err(to_napi_error)?;
         Ok(ExecOutput::from_rust(output))
     }
 
@@ -168,8 +163,8 @@ impl Sandbox {
     pub async fn exec_with_config(&self, config: ExecConfig) -> Result<ExecOutput> {
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
-        let opts = convert_exec_config(&config);
-        let output = sb.exec(&config.cmd, opts).await.map_err(to_napi_error)?;
+        let f = convert_exec_config(&config);
+        let output = sb.exec_with(&config.cmd, f).await.map_err(to_napi_error)?;
         Ok(ExecOutput::from_rust(output))
     }
 
@@ -184,7 +179,7 @@ impl Sandbox {
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
         let args_owned = args.unwrap_or_default();
         let handle = sb
-            .exec_stream(&cmd, |b: ExecOptionsBuilder| b.args(args_owned))
+            .exec_stream(&cmd, args_owned)
             .await
             .map_err(to_napi_error)?;
         Ok(JsExecHandle::from_rust(handle))

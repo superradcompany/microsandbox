@@ -3,7 +3,7 @@
 use std::io::{IsTerminal, Write};
 
 use clap::Args;
-use microsandbox::sandbox::{AttachOptionsBuilder, ExecOptionsBuilder, ExecOutput};
+use microsandbox::sandbox::ExecOutput;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -66,7 +66,7 @@ pub async fn run(args: ShellArgs) -> anyhow::Result<()> {
 
         let exit_code = if let Some(ref script) = script {
             sandbox
-                .attach(shell, |a: AttachOptionsBuilder| {
+                .attach_with(shell, |a| {
                     let mut a = a.args(["-c", script.as_str()]);
                     if let Some(ref user) = args.user {
                         a = a.user(user);
@@ -76,7 +76,7 @@ pub async fn run(args: ShellArgs) -> anyhow::Result<()> {
                 .await?
         } else {
             sandbox
-                .attach(shell, |a: AttachOptionsBuilder| {
+                .attach_with(shell, |a| {
                     let mut a = a;
                     if let Some(ref user) = args.user {
                         a = a.user(user);
@@ -118,7 +118,7 @@ pub async fn run(args: ShellArgs) -> anyhow::Result<()> {
         };
 
         let output: ExecOutput = sandbox
-            .exec(shell, |e: ExecOptionsBuilder| {
+            .exec_with(shell, |e| {
                 let mut e = e.args(["-c", &script]);
                 if let Some(ref user) = args.user {
                     e = e.user(user);

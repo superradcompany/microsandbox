@@ -2,7 +2,7 @@
 
 Lightweight VM sandboxes for running AI agents and untrusted code with hardware-level isolation.
 
-`microsandbox` is the core Rust library for the [MicroSandbox](https://github.com/superradcompany/microsandbox) project. It provides a high-level async API for creating, managing, and interacting with microVM sandboxes — real virtual machines that boot in under 100ms and run standard OCI (Docker) images.
+`microsandbox` is the core Rust library for the [microsandbox](https://github.com/superradcompany/microsandbox) project. It provides a high-level async API for creating, managing, and interacting with microVM sandboxes — real virtual machines that boot in under 100ms and run standard OCI (Docker) images.
 
 ## Features
 
@@ -234,7 +234,6 @@ let output = sandbox.shell("echo reconnected").await?;
 
 ```rust
 use microsandbox::Sandbox;
-use microsandbox::sandbox::ImageBuilder;
 
 // OCI image (most common).
 Sandbox::builder("a").image("python")
@@ -243,7 +242,7 @@ Sandbox::builder("a").image("python")
 Sandbox::builder("b").image("/path/to/rootfs")
 
 // QCOW2 disk image.
-Sandbox::builder("c").image(|img: ImageBuilder| img.disk("/path/to/disk.qcow2").fstype("ext4"))
+Sandbox::builder("c").image_with(|img| img.disk("/path/to/disk.qcow2").fstype("ext4"))
 ```
 
 ## API Overview
