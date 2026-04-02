@@ -2,6 +2,77 @@
 LIBKRUNFW_ABI := "5"
 LIBKRUNFW_VERSION := "5.2.1"
 
+# Set up the development environment, build, and install. Prerequisites: just, git.
+[linux]
+setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "==> Installing system dependencies..."
+    sudo apt install -y build-essential musl-tools flex bison libelf-dev \
+        python3-pyelftools pkg-config libdbus-1-dev libcap-ng-dev pre-commit
+
+    echo "==> Checking Rust toolchain..."
+    if ! command -v rustup &>/dev/null; then
+        echo "    Rust not found. Installing via rustup..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source "$HOME/.cargo/env"
+    fi
+
+    echo "==> Initializing submodules..."
+    git submodule update --init --recursive
+
+    echo "==> Building dependencies (kernel config prompts will appear — press Enter for defaults)..."
+    just build-deps
+
+    echo "==> Building microsandbox..."
+    just build
+
+    echo "==> Installing..."
+    just install
+
+    echo "==> Setting up pre-commit hooks..."
+    pre-commit install
+
+    echo ""
+    echo "Setup complete!"
+
+# Set up the development environment, build, and install. Prerequisites: just, git, Docker.
+[macos]
+setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "==> Checking prerequisites..."
+    command -v docker &>/dev/null || { echo "error: Docker is required on macOS. Install Docker Desktop."; exit 1; }
+    xcode-select -p &>/dev/null || { echo "==> Installing Xcode Command Line Tools..."; xcode-select --install; }
+
+    echo "==> Checking Rust toolchain..."
+    if ! command -v rustup &>/dev/null; then
+        echo "    Rust not found. Installing via rustup..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source "$HOME/.cargo/env"
+    fi
+
+    echo "==> Initializing submodules..."
+    git submodule update --init --recursive
+
+    echo "==> Building dependencies..."
+    just build-deps
+
+    echo "==> Building microsandbox..."
+    just build
+
+    echo "==> Installing..."
+    just install
+
+    echo "==> Setting up pre-commit hooks..."
+    command -v pre-commit &>/dev/null || { echo "error: pre-commit not found. Install with: brew install pre-commit"; exit 1; }
+    pre-commit install
+
+    echo ""
+    echo "Setup complete!"
+
 # Build all binary dependencies (agentd + libkrunfw).
 build-deps: build-agentd build-libkrunfw
 
