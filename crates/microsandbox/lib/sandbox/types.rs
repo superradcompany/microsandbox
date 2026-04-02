@@ -29,7 +29,7 @@ pub enum RootfsSource {
     /// Use a host directory directly as the root filesystem.
     Bind(PathBuf),
 
-    /// Use an OCI image reference (e.g. `python:3.12`).
+    /// Use an OCI image reference (e.g. `python`).
     Oci(String),
 
     /// Use a disk image file as the root filesystem via virtio-blk.
@@ -892,7 +892,7 @@ mod tests {
 
     #[test]
     fn test_image_source_resolves_oci_reference() {
-        let source = ImageSource::from("python:3.12");
+        let source = ImageSource::from("python");
         let rootfs = source.into_rootfs_source().unwrap();
         assert!(matches!(rootfs, RootfsSource::Oci(_)));
     }

@@ -14,7 +14,7 @@ microsandbox takes a different approach: every sandbox is a real VM with its own
 use microsandbox::{Sandbox, NetworkPolicy};
 
 let sb = Sandbox::builder("sandbox")
-    .image("python:3.12")
+    .image("python")
     .memory(512)
     .cpus(2)
     .secret(|s| s
@@ -32,7 +32,7 @@ import { NetworkPolicy, Sandbox, Secret } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "sandbox",
-    image: "python:3.12",
+    image: "python",
     memoryMib: 512,
     cpus: 2,
     secrets: [
@@ -65,7 +65,7 @@ So even with full code execution inside the sandbox, there's nothing to exfiltra
 
 ```rust Rust
 let sb = Sandbox::builder("sandbox")
-    .image("python:3.12")
+    .image("python")
     .secret_env("OPENAI_API_KEY", api_key, "api.openai.com")
     .create()
     .await?;
@@ -74,7 +74,7 @@ let sb = Sandbox::builder("sandbox")
 ```typescript TypeScript
 const sb = await Sandbox.create({
     name: "sandbox",
-    image: "python:3.12",
+    image: "python",
     secrets: [
         Secret.env("OPENAI_API_KEY", {
             value: process.env.OPENAI_API_KEY!,
@@ -96,7 +96,7 @@ There's no underlying host network to bridge to, no rules to circumvent, and no 
 
 ```rust Rust
 let sb = Sandbox::builder("sandbox")
-    .image("python:3.12")
+    .image("python")
     .network(|n| n
         .policy(NetworkPolicy::allowlist(["api.openai.com", "pypi.org"]))
     )
@@ -107,7 +107,7 @@ let sb = Sandbox::builder("sandbox")
 ```typescript TypeScript
 const sb = await Sandbox.create({
     name: "sandbox",
-    image: "python:3.12",
+    image: "python",
     network: NetworkPolicy.allowlist(["api.openai.com", "pypi.org"]),
 })
 ```
@@ -122,7 +122,7 @@ The host controls what the guest sees at the filesystem level. Mount host direct
 
 ```rust Rust
 let sb = Sandbox::builder("encrypted")
-    .image("python:3.12")
+    .image("python")
     .volume("/secrets", |v| v
         .bind("/data/secrets")
         .on_read(move |_path, data| decrypt(data, &key))
@@ -134,7 +134,7 @@ let sb = Sandbox::builder("encrypted")
 ```typescript TypeScript
 const sb = await Sandbox.create({
     name: "encrypted",
-    image: "python:3.12",
+    image: "python",
     volumes: {
         "/secrets": Mount.bind("/data/secrets", {
             hooks: {
@@ -156,7 +156,7 @@ Take a snapshot of a running sandbox (full VM state, memory, filesystem, everyth
 
 ```rust Rust
 let sb = Sandbox::builder("base")
-    .image("python:3.12")
+    .image("python")
     .create()
     .await?;
 
@@ -171,7 +171,7 @@ let workers: Vec<Sandbox> = futures::future::try_join_all(
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({ name: "base", image: "python:3.12" })
+const sb = await Sandbox.create({ name: "base", image: "python" })
 await sb.exec("pip", ["install", "-r", "requirements.txt"])
 
 const snapshot = await sb.snapshot()

@@ -4,7 +4,7 @@ async function main() {
   // 1. Default (public-only) — public internet works.
   const publicOnly = await Sandbox.create({
     name: "net-policy-public",
-    image: "alpine:latest",
+    image: "alpine",
     cpus: 1,
     memoryMib: 512,
     replace: true,
@@ -17,7 +17,7 @@ async function main() {
   // 2. Allow-all — everything reachable, including private networks.
   const allowAll = await Sandbox.create({
     name: "net-policy-all",
-    image: "alpine:latest",
+    image: "alpine",
     cpus: 1,
     memoryMib: 512,
     network: { policy: "allow-all" },
@@ -31,7 +31,7 @@ async function main() {
   // 3. No network — all connections denied.
   const noNet = await Sandbox.create({
     name: "net-policy-none",
-    image: "alpine:latest",
+    image: "alpine",
     cpus: 1,
     memoryMib: 512,
     network: { policy: "none" },

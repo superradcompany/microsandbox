@@ -1,12 +1,12 @@
 import { Sandbox } from "microsandbox";
 
 async function main() {
-  console.log("Creating sandbox (image=alpine:latest)");
+  console.log("Creating sandbox (image=alpine)");
 
   // Create a sandbox with an OCI image rootfs.
   const sandbox = await Sandbox.create({
     name: "oci-root",
-    image: "alpine:latest",
+    image: "alpine",
     cpus: 1,
     memoryMib: 512,
     replace: true,

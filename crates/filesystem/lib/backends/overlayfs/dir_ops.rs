@@ -77,7 +77,7 @@ pub(crate) fn do_readdirplus(
     _size: u32,
     offset: u64,
 ) -> io::Result<Vec<(DirEntry<'static>, Entry)>> {
-    // Skip dtype correction — readdirplus corrects from its own lookup results.
+    // Skip metadata resolution — readdirplus resolves from its own lookup results.
     let dir_entries = serve_snapshot_entries(fs, ino, handle, offset, false)?;
     let mut result = Vec::with_capacity(dir_entries.len());
 
@@ -91,6 +91,8 @@ pub(crate) fn do_readdirplus(
         // For init.krun, return synthetic entry.
         if name_bytes == init_binary::INIT_FILENAME {
             let entry = init_binary::init_entry(fs.cfg.entry_timeout, fs.cfg.attr_timeout);
+            let mut de = de;
+            de.ino = entry.inode;
             result.push((de, entry));
             continue;
         }
@@ -104,6 +106,7 @@ pub(crate) fn do_readdirplus(
             Ok(entry) => {
                 // Correct d_type from lookup's stat.
                 let mut de = de;
+                de.ino = entry.inode;
                 let file_type = platform::mode_file_type(entry.attr.st_mode);
                 de.type_ = mode_to_dtype(file_type);
                 result.push((de, entry));
@@ -133,15 +136,16 @@ pub(crate) fn do_releasedir(
 
 /// Build or retrieve the snapshot and serve entries from the given offset.
 ///
-/// When `correct_dtypes` is true (plain readdir), lazily corrects guest-visible
-/// d_types via stat override lookups. When false (readdirplus), skips correction
-/// since the caller corrects d_types from its own lookup results.
+/// When `resolve_metadata` is true (plain readdir), lazily resolves
+/// guest-visible inode numbers and d_types via overlay lookups. When false
+/// (readdirplus), skips resolution since the caller resolves metadata from
+/// its own lookup results.
 fn serve_snapshot_entries(
     fs: &OverlayFs,
     ino: u64,
     handle: u64,
     offset: u64,
-    correct_dtypes: bool,
+    resolve_metadata: bool,
 ) -> io::Result<Vec<DirEntry<'static>>> {
     let handles = fs.dir_handles.read().unwrap();
     let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
@@ -152,12 +156,12 @@ fn serve_snapshot_entries(
         *snapshot_lock = Some(build_snapshot(fs, ino)?);
     }
 
-    // Correct d_types lazily for readdir only.
-    if correct_dtypes {
+    // Resolve metadata lazily for readdir only.
+    if resolve_metadata {
         let snapshot = snapshot_lock.as_mut().unwrap();
-        if !snapshot.dtypes_corrected {
-            correct_entry_dtypes(fs, ino, &mut snapshot.entries);
-            snapshot.dtypes_corrected = true;
+        if !snapshot.metadata_resolved {
+            resolve_entry_metadata(fs, ino, &mut snapshot.entries);
+            snapshot.metadata_resolved = true;
         }
     }
     let snapshot = snapshot_lock.as_ref().unwrap();
@@ -187,7 +191,7 @@ fn serve_snapshot_entries(
         let name_offset = names_buf.len();
         names_buf.extend_from_slice(&entry.name);
         raw_entries.push((
-            0, // ino — not meaningful for overlay (guest sees synthetic inodes)
+            entry.inode,
             entry.offset,
             entry.file_type,
             name_offset,
@@ -250,6 +254,7 @@ fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
 
             seen.insert(name.clone());
             entries.push(MergedDirEntry {
+                inode: 0,
                 name,
                 offset: 0, // Assigned below.
                 file_type: d_type,
@@ -294,6 +299,7 @@ fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
                     let d_type = (entry_rec.mode >> 12) & 0xF;
                     seen.insert(name.clone());
                     entries.push(MergedDirEntry {
+                        inode: 0,
                         name,
                         offset: 0,
                         file_type: d_type,
@@ -341,6 +347,7 @@ fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
 
                 seen.insert(name.clone());
                 entries.push(MergedDirEntry {
+                    inode: 0,
                     name,
                     offset: 0,
                     file_type: d_type,
@@ -358,6 +365,7 @@ fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
         let init_name = init_binary::INIT_FILENAME.to_vec();
         if !seen.contains(&init_name) {
             entries.push(MergedDirEntry {
+                inode: init_binary::INIT_INODE,
                 name: init_name,
                 offset: 0,
                 file_type: platform::DIRENT_REG,
@@ -372,7 +380,7 @@ fn build_snapshot(fs: &OverlayFs, ino: u64) -> io::Result<DirSnapshot> {
 
     Ok(DirSnapshot {
         entries,
-        dtypes_corrected: false,
+        metadata_resolved: false,
     })
 }
 
@@ -525,33 +533,36 @@ fn get_lower_dir_fd(
     }
 }
 
-/// Correct guest-visible d_type for snapshot entries.
+/// Resolve guest-visible inode numbers and d_types for snapshot entries.
 ///
-/// On Linux, file-backed symlinks and virtual special files are stored as
-/// regular files on the host, so `DT_REG` from the host may not match the
-/// guest-visible type in the override xattr. This function opens each
-/// `DT_REG` entry, checks for an override, and corrects the `file_type`.
-fn correct_entry_dtypes(fs: &OverlayFs, parent_ino: u64, entries: &mut [MergedDirEntry]) {
+/// Each merged entry is resolved through overlay lookup so plain `readdir`
+/// returns stable synthetic inode numbers and corrected guest-visible d_types.
+/// (On Linux, host d_types may not match guest-visible types stored in override
+/// xattrs.) Entries that cannot be resolved are dropped, matching
+/// `do_readdirplus` which also skips unresolvable entries.
+fn resolve_entry_metadata(fs: &OverlayFs, parent_ino: u64, entries: &mut Vec<MergedDirEntry>) {
     for entry in entries.iter_mut() {
-        // Only DT_REG entries can have a different guest-visible type.
-        if entry.file_type != platform::DIRENT_REG {
+        // init.krun already has its reserved inode from build_snapshot — skip lookup.
+        if entry.name == init_binary::INIT_FILENAME {
             continue;
         }
 
-        // Try to look up the entry to get its inode, then open + check override.
         let name_cstr = match std::ffi::CString::new(entry.name.clone()) {
             Ok(c) => c,
             Err(_) => continue,
         };
 
         if let Ok(lookup_entry) = inode::do_lookup(fs, parent_ino, &name_cstr) {
-            // do_lookup already patches attr.st_mode with the guest-visible type
-            // from the override xattr, so no separate open_node_fd + get_override needed.
+            entry.inode = lookup_entry.inode;
             let guest_type = platform::mode_file_type(lookup_entry.attr.st_mode);
             entry.file_type = mode_to_dtype(guest_type);
             inode::forget_one(fs, lookup_entry.inode, 1);
         }
     }
+
+    // Drop entries where lookup failed — a zero inode is invalid and can
+    // cause tools like `ls` to treat the entry as missing.
+    entries.retain(|e| e.inode != 0);
 }
 
 /// Convert a file mode type to a directory entry type.

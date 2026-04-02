@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Sandbox A writes to the volume.
     let writer = Sandbox::builder("writer")
-        .image("alpine:latest")
+        .image("alpine")
         .volume("/data", |v| v.named(data.name()))
         .replace()
         .create()
@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Sandbox B reads from the same volume.
     let reader = Sandbox::builder("reader")
-        .image("alpine:latest")
+        .image("alpine")
         .volume("/data", |v| v.named(data.name()).readonly())
         .replace()
         .create()

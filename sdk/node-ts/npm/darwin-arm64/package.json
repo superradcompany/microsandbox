@@ -1,6 +1,6 @@
 {
   "name": "@superradcompany/microsandbox-darwin-arm64",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "os": ["darwin"],
   "cpu": ["arm64"],
   "main": "microsandbox.darwin-arm64.node",

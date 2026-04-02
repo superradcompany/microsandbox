@@ -803,7 +803,7 @@ mod tests {
     fn test_resolve_cached_pull_result_if_missing_uses_complete_cache() {
         let temp = tempdir().unwrap();
         let cache = GlobalCache::new(temp.path()).unwrap();
-        let reference: oci_client::Reference = "docker.io/library/alpine:latest".parse().unwrap();
+        let reference: oci_client::Reference = "docker.io/library/alpine".parse().unwrap();
         let metadata = write_cached_image_fixture(&cache, &reference, &[true, true]);
 
         let cached = resolve_cached_pull_result(
@@ -861,7 +861,7 @@ mod tests {
     fn test_pull_cached_uses_complete_cache() {
         let temp = tempdir().unwrap();
         let cache = GlobalCache::new(temp.path()).unwrap();
-        let reference: oci_client::Reference = "docker.io/library/alpine:latest".parse().unwrap();
+        let reference: oci_client::Reference = "docker.io/library/alpine".parse().unwrap();
         let metadata = write_cached_image_fixture(&cache, &reference, &[true]);
 
         let cached = super::Registry::pull_cached(

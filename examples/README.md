@@ -40,7 +40,7 @@ cargo run -p net-ports
 
 Creates a named volume, mounts it into two sandboxes (writer and reader),
 and demonstrates persistence across sandbox lifecycles. Also shows the
-host-side `VolumeFs` API and `VolumeHandle` metadata. Pulls `alpine:latest`
+host-side `VolumeFs` API and `VolumeHandle` metadata. Pulls `alpine`
 on first run.
 
 ```sh
@@ -49,7 +49,7 @@ cargo run -p named-volume
 
 ## oci-root
 
-Pulls an OCI image (`alpine:latest`) from a registry and boots a sandbox from
+Pulls an OCI image (`alpine`) from a registry and boots a sandbox from
 it.
 
 ```sh

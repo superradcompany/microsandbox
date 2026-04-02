@@ -480,7 +480,7 @@ mod tests {
     #[test]
     fn test_builder_sets_runtime_log_level() {
         let config = SandboxBuilder::new("test")
-            .image("alpine:3.23")
+            .image("alpine")
             .log_level(LogLevel::Debug)
             .build()
             .unwrap();
@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn test_builder_quiet_logs_clears_runtime_log_level() {
         let config = SandboxBuilder::new("test")
-            .image("alpine:3.23")
+            .image("alpine")
             .log_level(LogLevel::Trace)
             .quiet_logs()
             .build()
@@ -503,7 +503,7 @@ mod tests {
     #[test]
     fn test_builder_replace_sets_replace_existing() {
         let config = SandboxBuilder::new("test")
-            .image("alpine:3.23")
+            .image("alpine")
             .replace()
             .build()
             .unwrap();
@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn test_builder_ports_are_repeatable() {
         let config = SandboxBuilder::new("test")
-            .image("alpine:3.23")
+            .image("alpine")
             .port(8080, 80)
             .port(3000, 3000)
             .port_udp(5353, 53)
@@ -540,7 +540,7 @@ mod tests {
         use microsandbox_network::policy::Action;
 
         let config = SandboxBuilder::new("test")
-            .image("alpine:3.23")
+            .image("alpine")
             .disable_network()
             .build()
             .unwrap();
@@ -554,7 +554,7 @@ mod tests {
     #[test]
     fn test_builder_network_preserves_top_level_settings() {
         let config = SandboxBuilder::new("test")
-            .image("alpine:3.23")
+            .image("alpine")
             .port(8080, 80)
             .secret_env("OPENAI_API_KEY", "secret", "api.openai.com")
             .network(|n| n.max_connections(128))

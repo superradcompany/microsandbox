@@ -15,7 +15,7 @@ Mount a directory from the host directly into the sandbox. Changes inside the sa
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("dev")
-    .image("python:3.12")
+    .image("python")
     .volume("/app/src", |v| v.bind("./src").readonly())
     .volume("/app/data", |v| v.bind("./data"))
     .create()
@@ -27,7 +27,7 @@ import { Mount, Sandbox } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "dev",
-    image: "python:3.12",
+    image: "python",
     volumes: {
         "/app/src": Mount.bind("./src", { readonly: true }),
         "/app/data": Mount.bind("./data"),
@@ -62,7 +62,7 @@ const cache = await Volume.create({ name: "pip-cache", quotaMib: 1024 })
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("worker")
-    .image("python:3.12")
+    .image("python")
     .volume("/root/.cache/pip", |v| v.named(cache.name()))
     .create()
     .await?;
@@ -71,7 +71,7 @@ let sb = Sandbox::builder("worker")
 ```typescript TypeScript
 const sb = await Sandbox.create({
     name: "worker",
-    image: "python:3.12",
+    image: "python",
     volumes: {
         "/root/.cache/pip": Mount.named(cache.name),
     },
@@ -88,7 +88,7 @@ Named volumes are the simplest way to share data between sandboxes. Mount the sa
 ```rust Rust
 // Writer
 let writer = Sandbox::builder("writer")
-    .image("alpine:latest")
+    .image("alpine")
     .volume("/data", |v| v.named("shared-data"))
     .create()
     .await?;
@@ -96,7 +96,7 @@ writer.shell("echo 'hello' > /data/message.txt").await?;
 
 // Reader (read-only)
 let reader = Sandbox::builder("reader")
-    .image("alpine:latest")
+    .image("alpine")
     .volume("/data", |v| v.named("shared-data").readonly())
     .create()
     .await?;
@@ -108,7 +108,7 @@ let output = reader.exec("cat", ["/data/message.txt"]).await?;
 // Writer
 const writer = await Sandbox.create({
     name: "writer",
-    image: "alpine:latest",
+    image: "alpine",
     volumes: { "/data": Mount.named("shared-data") },
 })
 await writer.exec("sh", ["-c", "echo 'hello' > /data/message.txt"])
@@ -116,7 +116,7 @@ await writer.exec("sh", ["-c", "echo 'hello' > /data/message.txt"])
 // Reader (read-only)
 const reader = await Sandbox.create({
     name: "reader",
-    image: "alpine:latest",
+    image: "alpine",
     volumes: { "/data": Mount.named("shared-data", { readonly: true }) },
 })
 const output = await reader.exec("cat", ["/data/message.txt"])
@@ -167,7 +167,7 @@ An in-memory filesystem that disappears when the sandbox stops. Useful for scrat
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("worker")
-    .image("alpine:latest")
+    .image("alpine")
     .volume("/tmp/scratch", |v| v.tmpfs().size(100))
     .create()
     .await?;
@@ -176,7 +176,7 @@ let sb = Sandbox::builder("worker")
 ```typescript TypeScript
 const sb = await Sandbox.create({
     name: "worker",
-    image: "alpine:latest",
+    image: "alpine",
     volumes: {
         "/tmp/scratch": Mount.tmpfs({ sizeMib: 100 }),
     },

@@ -44,7 +44,7 @@ let cache = Volume::builder("pip-cache")
     .await?;
 
 let sb = Sandbox::builder("worker")
-    .image("python:3.12")
+    .image("python")
     .volume("/app/src", |v| v.bind("./src").readonly())
     .volume("/root/.cache/pip", |v| v.named(cache.name()))
     .volume("/tmp/scratch", |v| v.tmpfs().size(100))
@@ -59,7 +59,7 @@ const cache = await Volume.create({ name: "pip-cache", quotaMib: 1024 })
 
 const sb = await Sandbox.create({
     name: "worker",
-    image: "python:3.12",
+    image: "python",
     volumes: {
         "/app/src": Mount.bind("./src", { readonly: true }),
         "/root/.cache/pip": Mount.named(cache.name),
