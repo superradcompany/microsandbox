@@ -214,3 +214,8 @@ jobs:
       - name: Build Node SDK
         working-directory: sdk/node-ts
         run: npm install && npm run build
+
+      # -- Checks (MCP server) --
+      - name: Build MCP server
+        working-directory: mcp
+        run: npm install && npm run build
