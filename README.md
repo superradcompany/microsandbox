@@ -38,7 +38,7 @@ Today, AI agents operate with whatever permissions you give them, and that's usu
 - <img height="15" src="https://octicons-col.vercel.app/globe/A770EF"> **Programmable Filesystem & Network Stack**: Customizable filesystems and network operations.
 - <img height="15" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
 - <img height="15" src="https://octicons-col.vercel.app/database/A770EF"> **Long-Running**: Sandboxes can run in detached mode. They are great for long-lived sessions.
-- <img height="15" src="https://octicons-col.vercel.app/terminal/A770EF"> **Agent-Ready**: Your agents can create their own sandboxes with our [Agent Skills](https://github.com/superradcompany/skills) and [MCP server].
+- <img height="15" src="https://octicons-col.vercel.app/terminal/A770EF"> **Agent-Ready**: Your agents can create their own sandboxes with our [Agent Skills](https://github.com/superradcompany/skills) and [MCP server](https://github.com/superradcompany/microsandbox-mcp).
 
 > Microsandbox is still **beta software**. Expect breaking changes, missing features, and rough edges.
 
@@ -158,41 +158,6 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >   <a href="./typescript_examples.md#port-publishing"><img src="https://img.shields.io/badge/-→ Typescript-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript"></a>&nbsp;<a href="./python_examples.md"><img src="https://img.shields.io/badge/-→ Python-FFD43B?style=flat-square&logo=python&logoColor=306998" alt="Python"></a>
 > </div>
 
-#### <img height="14" src="https://octicons-col.vercel.app/database/A770EF">&nbsp;&nbsp;Named Volumes
-
-> Persistent storage that survives sandbox restarts and can be shared across sandboxes:
->
-> ```rs
-> use microsandbox::{Sandbox, Volume, size::SizeExt};
->
-> // Create a volume with a quota.
-> let data = Volume::builder("shared-data").quota(100.mib()).create().await?;
->
-> // Sandbox A writes to it.
-> let writer = Sandbox::builder("writer")
->     .image("alpine")
->     .volume("/data", |v| v.named(data.name()))
->     .create()
->     .await?;
->
-> writer.shell("echo 'hello' > /data/message.txt").await?;
-> writer.stop_and_wait().await?;
->
-> // Sandbox B reads from it.
-> let reader = Sandbox::builder("reader")
->     .image("alpine")
->     .volume("/data", |v| v.named(data.name()).readonly())
->     .create()
->     .await?;
->
-> let output = reader.shell("cat /data/message.txt").await?;
-> println!("{}", output.stdout()?); // hello
-> ```
->
-> <div align="left">
->   <a href="./typescript_examples.md#named-volumes"><img src="https://img.shields.io/badge/-→ Typescript-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript"></a>&nbsp;<a href="./python_examples.md"><img src="https://img.shields.io/badge/-→ Python-FFD43B?style=flat-square&logo=python&logoColor=306998" alt="Python"></a>
-> </div>
-
 #### <img height="14" src="https://octicons-col.vercel.app/pencil/A770EF">&nbsp;&nbsp;Scripts & Patches
 
 > Register named scripts that get mounted at `/.msb/scripts/` and added to `PATH`, so you can invoke them by name:
@@ -243,8 +208,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > Sandbox::builder("bind").image("./my-rootfs")
 >
 > // QCOW2 disk image
-> use microsandbox::sandbox::ImageBuilder;
-> Sandbox::builder("block").image(|img: ImageBuilder| img.disk("./disk.qcow2").fstype("ext4"))
+> Sandbox::builder("block").image_with(|img| img.disk("./disk.qcow2").fstype("ext4"))
 > ```
 >
 > <div align="left">
@@ -332,7 +296,7 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 > ```sh
 > msb pull python           # Pull an image
-> msb image ls                   # List cached images
+> msb image ls              # List cached images
 > msb image rm python       # Remove an image
 > ```
 
@@ -374,6 +338,29 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 <br />
 
 <a href="https://docs2.microsandbox.dev/cli/overview"><img src="https://img.shields.io/badge/CLI_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="CLI Docs"></a>
+
+<br />
+
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="13" src="https://octicons-col.vercel.app/dependabot/ffffff" alt="agents-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="13" src="https://octicons-col.vercel.app/dependabot/000000" alt="agents"></a>&nbsp;&nbsp;AI Agents
+
+Give your AI agents the ability to create and manage their own sandboxes.
+
+#### <img height="14" src="https://octicons-col.vercel.app/book/A770EF">&nbsp;&nbsp;Agent Skills
+
+> Teach any AI coding agent how to use microsandbox by installing the [Agent Skills](https://github.com/superradcompany/skills). Works with Claude Code, Cursor, Codex, Gemini CLI, GitHub Copilot, and more.
+>
+> ```sh
+> npx skills add superradcompany/skills
+> ```
+
+#### <img height="14" src="https://octicons-col.vercel.app/plug/A770EF">&nbsp;&nbsp;MCP Server
+
+> Connect any MCP-compatible agent to microsandbox with the [MCP server](https://github.com/superradcompany/microsandbox-mcp). Provides structured tool calls for sandbox lifecycle, command execution, filesystem access, volumes, and monitoring.
+>
+> ```sh
+> # Claude Code
+> claude mcp add --transport stdio microsandbox -- npx -y microsandbox-mcp
+> ```
 
 <br />
 

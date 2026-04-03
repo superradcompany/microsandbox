@@ -34,7 +34,7 @@ These options apply to a single execution and don't change the sandbox's default
 
 <CodeGroup>
 ```rust Rust
-let output = sb.exec("python", |e| e
+let output = sb.exec_with("python", |e| e
     .args(["compute.py"])
     .cwd("/app")
     .env("PYTHONPATH", "/app/lib")
@@ -111,7 +111,7 @@ Bridges your terminal directly to a process inside the sandbox for a fully inter
 ```rust Rust
 let exit_code = sb.attach_shell().await?;
 
-let exit_code = sb.attach("python", |a| a
+let exit_code = sb.attach_with("python", |a| a
     .env("DEBUG", "1")
     .cwd("/app")
     .detach_keys("ctrl-q")
@@ -138,7 +138,7 @@ Streaming handles can also accept stdin. Enable `stdin_pipe` and write bytes to 
 
 <CodeGroup>
 ```rust Rust
-let mut handle = sb.exec_stream("python", |e| e.stdin_pipe().tty(true)).await?;
+let mut handle = sb.exec_stream_with("python", |e| e.stdin_pipe().tty(true)).await?;
 let stdin = handle.take_stdin().unwrap();
 stdin.write(b"print('hello')\n").await?;
 stdin.write(b"exit()\n").await?;

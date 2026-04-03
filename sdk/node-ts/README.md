@@ -2,7 +2,7 @@
 
 Lightweight VM sandboxes for Node.js — run AI agents and untrusted code with hardware-level isolation.
 
-The `microsandbox` npm package provides native bindings to the [MicroSandbox](https://github.com/superradcompany/microsandbox) runtime. It spins up real microVMs (not containers) in under 100ms, runs standard OCI (Docker) images, and gives you full control over execution, filesystem, networking, and secrets — all from a simple async API.
+The `microsandbox` npm package provides native bindings to the [microsandbox](https://github.com/superradcompany/microsandbox) runtime. It spins up real microVMs (not containers) in under 100ms, runs standard OCI (Docker) images, and gives you full control over execution, filesystem, networking, and secrets — all from a simple async API.
 
 ## Features
 

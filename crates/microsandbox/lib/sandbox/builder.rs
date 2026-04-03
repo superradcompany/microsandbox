@@ -10,7 +10,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use super::{
     config::SandboxConfig,
-    types::{IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource},
+    types::{ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource},
 };
 use crate::{LogLevel, MicrosandboxResult, size::Mebibytes};
 
@@ -43,22 +43,37 @@ impl SandboxBuilder {
 
     /// Set the root filesystem image source.
     ///
-    /// Accepts a string, path, or closure:
     /// - **`&str` / `String`**: Paths starting with `/`, `./`, or `../` are treated as local
     ///   paths. Everything else is treated as an OCI image reference. Disk image extensions
     ///   (`.qcow2`, `.raw`, `.vmdk`) resolve to virtio-blk block device rootfs.
     /// - **`PathBuf`**: Always treated as a local path.
-    /// - **Closure**: `|i| i.disk("./image.qcow2").fstype("ext4")` for explicit disk image
-    ///   configuration.
+    ///
+    /// For explicit disk image configuration, see [`image_with`](Self::image_with).
     ///
     /// ```ignore
-    /// .image("python:3.12")                                // OCI image
-    /// .image("./rootfs")                                   // local directory (bind mount)
-    /// .image("./ubuntu.qcow2")                             // disk image (auto-detect fs)
-    /// .image(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))  // disk image (explicit fs)
+    /// .image("python:3.12")       // OCI image
+    /// .image("./rootfs")          // local directory (bind mount)
+    /// .image("./ubuntu.qcow2")   // disk image (auto-detect fs)
     /// ```
     pub fn image(mut self, image: impl IntoImage) -> Self {
         match image.into_rootfs_source() {
+            Ok(rootfs) => self.config.image = rootfs,
+            Err(e) => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(e);
+                }
+            }
+        }
+        self
+    }
+
+    /// Set the root filesystem image using a builder closure.
+    ///
+    /// ```ignore
+    /// .image_with(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
+    /// ```
+    pub fn image_with(mut self, f: impl FnOnce(ImageBuilder) -> ImageBuilder) -> Self {
+        match f(ImageBuilder::new()).build() {
             Ok(rootfs) => self.config.image = rootfs,
             Err(e) => {
                 if self.build_error.is_none() {
