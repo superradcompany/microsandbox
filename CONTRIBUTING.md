@@ -65,21 +65,22 @@ You don't need to be an expert programmer to contribute code! Here's a friendly 
    - This puts your fork on your local machine
    - Need help? Check out [this guide][git-clone]
 
-6. **Build the project**
+6. **Set up and build the project**
 
-   - Follow the instructions in our [DEVELOPMENT.md](./DEVELOPMENT.md) file
+   - Install prerequisites: `just` (`sudo apt install just`) and `git`
+   - Run `just setup` from the repository root — this installs system dependencies, initializes submodules, builds the project, and enables pre-commit hooks
+   - During the build, kernel config prompts will appear — press Enter for defaults
    - If you run into any issues, remember we're just an email away!
 
-7. **Install pre-commit hooks**
+7. **After setup**
 
-   - Install `pre-commit` with your package manager, for example `brew install pre-commit` or `pipx install pre-commit`
-   - Run `pre-commit install` from the repository root
+   - Add `~/.microsandbox/bin` to your PATH and `~/.microsandbox/lib` to your LD_LIBRARY_PATH (Linux) or DYLD_LIBRARY_PATH (macOS)
    - Optional but recommended: run `pre-commit run --all-files` once before your first commit
 
 8. **Make your changes**
 
    - Open your favorite editor and start coding
-   - Test your changes using the commands in our README
+   - Test your changes with `cargo test`
    - Take breaks and have fun with it!
 
 9. **Write tests**
@@ -100,7 +101,7 @@ You don't need to be an expert programmer to contribute code! Here's a friendly 
     - Send your work to your GitHub repository
     - We use [conventional commits][conventional-commits] for naming
     - New to Git? Learn about [committing code][committing-code] and [pushing][push-remote]
-    - Pre-commit hooks will run automatically if you installed them
+    - Pre-commit hooks will run automatically
 
 12. **Open a pull request** 🎉
     - This is how your code gets merged into the main project
@@ -118,11 +119,9 @@ Every contribution, no matter how small, makes a difference. We're grateful for 
 [forking]: https://docs.github.com/en/get-started/quickstart/fork-a-repo
 [gh-discussions]: https://docs.github.com/en/discussions
 [git-clone]: https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository
-[good-first-issues]: https://github.com/monoceros-alpha/monocore/labels/good%20first%20issue
+[good-first-issues]: https://github.com/superradcompany/microsandbox/labels/good%20first%20issue
 [post-signing]: https://dev.to/jmarhee/signing-existing-commits-with-gpg-5b58
 [prs]: https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/about-pull-requests
 [push-remote]: https://docs.github.com/en/get-started/using-git/pushing-commits-to-a-remote-repository
 [rust-style-guide]: https://rust-lang.github.io/api-guidelines/about.html
-[test-org]: https://doc.rust-lang.org/book/ch11-03-test-organization.html
 [support-email]: mailto:team@microsandbox.dev
-[unit-and-integration]: https://www.geeksforgeeks.org/difference-between-unit-testing-and-integration-testing/
