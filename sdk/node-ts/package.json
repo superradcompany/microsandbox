@@ -1,6 +1,6 @@
 {
   "name": "microsandbox",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "main": "index.cjs",
   "module": "index.mjs",
   "types": "index.d.cts",
@@ -26,9 +26,9 @@
     "@napi-rs/cli": "^3"
   },
   "optionalDependencies": {
-    "@superradcompany/microsandbox-darwin-arm64": "0.3.9",
-    "@superradcompany/microsandbox-linux-x64-gnu": "0.3.9",
-    "@superradcompany/microsandbox-linux-arm64-gnu": "0.3.9"
+    "@superradcompany/microsandbox-darwin-arm64": "0.3.10",
+    "@superradcompany/microsandbox-linux-x64-gnu": "0.3.10",
+    "@superradcompany/microsandbox-linux-arm64-gnu": "0.3.10"
   },
   "files": [
     "index.cjs",
