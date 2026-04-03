@@ -16,7 +16,9 @@
 
 use std::{ffi::CStr, io};
 
-use super::{OverlayFs, copy_up, inode, metadata};
+#[cfg(target_os = "macos")]
+use super::metadata;
+use super::{OverlayFs, copy_up, inode};
 use crate::{
     Context, GetxattrReply, ListxattrReply,
     backends::shared::{init_binary, platform, stat_override},

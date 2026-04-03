@@ -19,7 +19,9 @@
 
 use std::{ffi::CStr, io};
 
-use super::{PassthroughFs, inode, metadata};
+#[cfg(target_os = "macos")]
+use super::metadata;
+use super::{PassthroughFs, inode};
 use crate::{
     Context, GetxattrReply, ListxattrReply,
     backends::shared::{init_binary, platform, stat_override},
