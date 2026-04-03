@@ -15,7 +15,7 @@ use tokio::{io::AsyncBufReadExt, process::Command};
 use crate::{
     MicrosandboxResult, config,
     runtime::handle::ProcessHandle,
-    sandbox::{RootfsSource, SandboxConfig, VolumeMount},
+    sandbox::{Rlimit, RootfsSource, SandboxConfig, VolumeMount},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -237,6 +237,21 @@ fn push_mounts_spec(mounts_val: &mut String, guest: &str, readonly: bool) {
     }
 }
 
+fn encode_default_rlimits(rlimits: &[Rlimit]) -> String {
+    rlimits
+        .iter()
+        .map(|rlimit| {
+            format!(
+                "{}={}:{}",
+                rlimit.resource.as_str(),
+                rlimit.soft,
+                rlimit.hard
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 /// Generate a virtiofs tag from a guest mount path.
 ///
 /// Replaces `/` with `_` and strips leading underscores to produce a
@@ -397,6 +412,19 @@ fn sandbox_cli_args(
         )));
     }
 
+    if !config.default_rlimits.is_empty() {
+        // Edge case: per-exec rlimits do not help guest daemons started during
+        // bootstrap because they inherit PID 1's default soft limit first.
+        // Pass sandbox-wide defaults into agentd startup so bootstrap scripts
+        // and long-lived services share the same raised baseline.
+        args.push(OsString::from("--env"));
+        args.push(OsString::from(format!(
+            "{}={}",
+            microsandbox_protocol::ENV_DEFAULT_RLIMITS,
+            encode_default_rlimits(&config.default_rlimits)
+        )));
+    }
+
     // Network configuration.
     #[cfg(feature = "net")]
     {
@@ -450,7 +478,7 @@ mod tests {
     use super::sandbox_cli_args;
     use crate::{
         LogLevel,
-        sandbox::{RootfsSource, SandboxBuilder},
+        sandbox::{RlimitResource, RootfsSource, SandboxBuilder},
     };
 
     #[test]
@@ -534,6 +562,41 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair == ["--agent-sock", "/tmp/agent.sock"])
         );
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_include_default_rlimits_env() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .default_rlimit(RlimitResource::Nofile, 65_535)
+            .build()
+            .unwrap();
+
+        let args = sandbox_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/rootfs-base"),
+            Path::new("/tmp/rw"),
+            Path::new("/tmp/staging"),
+            Path::new("/tmp/agent.sock"),
+            Path::new("/tmp/libkrunfw.dylib"),
+        );
+
+        let rendered = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(rendered.windows(2).any(|pair| {
+            pair[0] == "--env"
+                && pair[1]
+                    == format!(
+                        "{}=nofile=65535:65535",
+                        microsandbox_protocol::ENV_DEFAULT_RLIMITS
+                    )
+        }));
     }
 
     #[test]

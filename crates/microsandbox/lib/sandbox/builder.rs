@@ -10,6 +10,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use super::{
     config::SandboxConfig,
+    exec::{Rlimit, RlimitResource},
     types::{ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource},
 };
 use crate::{LogLevel, MicrosandboxResult, size::Mebibytes};
@@ -308,6 +309,35 @@ impl SandboxBuilder {
         self
     }
 
+    /// Set a sandbox-wide default resource limit inherited by all guest processes.
+    ///
+    /// This is applied during agentd PID 1 startup, so bootstrap scripts and
+    /// long-lived daemons inherit the raised baseline without needing explicit
+    /// per-exec rlimits.
+    pub fn default_rlimit(mut self, resource: RlimitResource, limit: u64) -> Self {
+        self.config.default_rlimits.push(Rlimit {
+            resource,
+            soft: limit,
+            hard: limit,
+        });
+        self
+    }
+
+    /// Set a sandbox-wide default resource limit with different soft/hard values.
+    pub fn default_rlimit_range(
+        mut self,
+        resource: RlimitResource,
+        soft: u64,
+        hard: u64,
+    ) -> Self {
+        self.config.default_rlimits.push(Rlimit {
+            resource,
+            soft,
+            hard,
+        });
+        self
+    }
+
     /// Register a script that will be mounted at `/.msb/scripts/<name>` in
     /// the guest. Scripts are added to `PATH` so they can be invoked by name
     /// via [`exec`](super::Sandbox::exec).
@@ -489,6 +519,7 @@ impl From<SandboxConfig> for SandboxBuilder {
 mod tests {
     use super::SandboxBuilder;
     use crate::LogLevel;
+    use crate::sandbox::RlimitResource;
     #[cfg(feature = "net")]
     use microsandbox_network::config::PortProtocol;
 
@@ -524,6 +555,20 @@ mod tests {
             .unwrap();
 
         assert!(config.replace_existing);
+    }
+
+    #[test]
+    fn test_builder_default_rlimit_sets_sandbox_wide_limit() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .default_rlimit(RlimitResource::Nofile, 65_535)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.default_rlimits.len(), 1);
+        assert_eq!(config.default_rlimits[0].resource, RlimitResource::Nofile);
+        assert_eq!(config.default_rlimits[0].soft, 65_535);
+        assert_eq!(config.default_rlimits[0].hard, 65_535);
     }
 
     #[cfg(feature = "net")]
