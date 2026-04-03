@@ -110,6 +110,15 @@ fn test_lookup_nested() {
 }
 
 #[test]
+fn test_lookup_nested_nonexistent() {
+    let sb = TestSandbox::new();
+    sb.host_create_dir("dir");
+    let dir_entry = sb.lookup_root("dir").unwrap();
+    let result = sb.lookup(dir_entry.inode, "nested.txt");
+    TestSandbox::assert_errno(result, LINUX_ENOENT);
+}
+
+#[test]
 fn test_lookup_after_forget() {
     let sb = TestSandbox::new();
     sb.host_create_file("file.txt", b"data");
