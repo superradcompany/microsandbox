@@ -57,7 +57,7 @@ Today, AI agents operate with whatever permissions you give them, and that's usu
 
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI
 
-The `msb` CLI is useful for managing images, volumes, and sandboxes from the terminal:
+The SDK works on its own without the CLI. The `msb` CLI is a separate tool for managing sandboxes, images, and volumes from the terminal, and for giving AI agents direct access to microsandbox:
 
 > ```sh
 > curl -fsSL https://install.microsandbox.dev | sh
@@ -276,16 +276,23 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 #### <img height="14" src="https://octicons-col.vercel.app/stopwatch/A770EF">&nbsp;&nbsp;Named Sandboxes
 
 > ```sh
-> # Create and run detached
-> msb run --name my-app -d python
+> # Create and start a named sandbox
+> msb create --name my-app python
+> ```
 >
+> ```sh
 > # Execute commands
-> msb exec my-app -- pip install requests
-> msb exec my-app -- python3 main.py
+> msb exec my-app -- python -c "import this"
+> msb exec my-app -- curl https://example.com
+> ```
 >
+> ```sh
 > # Interactive shell into a running sandbox
 > msb shell my-app
+> msb shell my-app -- ls -la /
+> ```
 >
+> ```sh
 > # Lifecycle
 > msb stop my-app
 > msb start my-app

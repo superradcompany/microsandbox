@@ -1,32 +1,32 @@
-# 🚀 Contributing to Microsandbox
+# Contributing to Microsandbox
 
 Hello there! Whether you're a seasoned developer or just getting started, we're thrilled that you're interested in contributing to Microsandbox. This community thrives because of people like you!
 
-## 👋 Welcome, New Contributors!
+## Welcome, New Contributors!
 
 Never contributed to open source before? No problem! We've all been there. We've tagged issues with [good first issues][good-first-issues] to help you find a comfortable starting point. Remember, every expert was once a beginner!
 
-## 🤔 Need Help?
+## Need Help?
 
 We're here for you! Reach out to us at [development@superrad.company][support-email] with any questions. This guide is designed to help you get started, so don't worry if it seems detailed - it's meant to be thorough, not intimidating!
 
-## 💖 Code of Conduct
+## Code of Conduct
 
 Our community values kindness and inclusivity. Please take a moment to read our [code of conduct](./CODE_OF_CONDUCT.md) and help us maintain a welcoming environment for everyone.
 
-## 🔧 Development Setup
+## Development Setup
 
 For a complete guide on building, testing, and releasing microsandbox, see **[DEVELOPMENT.md](./DEVELOPMENT.md)**.
 
-## 🛠️ How to Contribute
+## How to Contribute
 
 There are many ways to contribute to Microsandbox, and we appreciate them all! Here's how to get started:
 
-### 💡 Contributing Ideas and Feedback
+### Contributing Ideas and Feedback
 
 #### Issues
 
-Found a bug or have a feature idea? We'd love to hear about it! ❤️
+Found a bug or have a feature idea? We'd love to hear about it!
 
 Before creating a new issue, please search existing ones to avoid duplicates. Then just hit the issue button, choose a template, and share your thoughts. Don't worry if you can't fill out the entire template - share what you can and you can always update it later.
 
@@ -39,7 +39,7 @@ For topics that aren't quite bugs or feature requests, start a [GitHub discussio
 - General questions about the project
 - Sharing your experience with Microsandbox
 
-### 💻 Contributing Code
+### Contributing Code
 
 You don't need to be an expert programmer to contribute code! Here's a friendly step-by-step guide:
 
@@ -91,13 +91,13 @@ You don't need to be an expert programmer to contribute code! Here's a friendly 
     - New to Git? Learn about [committing code][committing-code] and [pushing][push-remote]
     - Pre-commit hooks will run automatically
 
-11. **Open a pull request** 🎉
+11. **Open a pull request**
     - This is how your code gets merged into the main project
     - We'll review your code and may suggest some changes
     - Every pull request helps us grow, so thank you in advance!
     - Learn more about [pull requests here][prs]
 
-## 🙏 Thank You!
+## Thank You!
 
 Every contribution, no matter how small, makes a difference. We're grateful for your interest in making Microsandbox better for everyone!
 
