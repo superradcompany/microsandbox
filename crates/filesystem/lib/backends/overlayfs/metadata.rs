@@ -225,7 +225,7 @@ fn stat_handle(fs: &OverlayFs, handle: u64) -> io::Result<stat64> {
 }
 
 #[cfg(target_os = "macos")]
-fn open_symlink_inode_fd_macos(fs: &OverlayFs, ino: u64) -> io::Result<i32> {
+pub(crate) fn open_symlink_inode_fd_macos(fs: &OverlayFs, ino: u64) -> io::Result<i32> {
     let path = symlink_vol_path_macos(fs, ino)?;
     let fd = unsafe {
         libc::open(

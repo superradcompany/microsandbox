@@ -19,7 +19,7 @@
 
 use std::{ffi::CStr, io};
 
-use super::{PassthroughFs, inode};
+use super::{PassthroughFs, inode, metadata};
 use crate::{
     Context, GetxattrReply, ListxattrReply,
     backends::shared::{init_binary, platform, stat_override},
@@ -47,7 +47,7 @@ pub(crate) fn do_setxattr(
         return Err(platform::eacces());
     }
 
-    let fd = inode::open_inode_fd(fs, ino, libc::O_RDONLY)?;
+    let fd = open_xattr_fd(fs, ino)?;
 
     #[cfg(target_os = "linux")]
     {
@@ -109,7 +109,7 @@ pub(crate) fn do_getxattr(
         return Err(platform::eacces());
     }
 
-    let fd = inode::open_inode_fd(fs, ino, libc::O_RDONLY)?;
+    let fd = open_xattr_fd(fs, ino)?;
 
     if size == 0 {
         // Query size.
@@ -185,10 +185,13 @@ pub(crate) fn do_listxattr(
     size: u32,
 ) -> io::Result<ListxattrReply> {
     if ino == init_binary::INIT_INODE {
-        return Err(platform::enodata());
+        if size == 0 {
+            return Ok(ListxattrReply::Count(0));
+        }
+        return Ok(ListxattrReply::Names(Vec::new()));
     }
 
-    let fd = inode::open_inode_fd(fs, ino, libc::O_RDONLY)?;
+    let fd = open_xattr_fd(fs, ino)?;
 
     if size == 0 {
         // Do a full listxattr, filter, and return the filtered byte count.
@@ -300,7 +303,7 @@ pub(crate) fn do_removexattr(
         return Err(platform::eacces());
     }
 
-    let fd = inode::open_inode_fd(fs, ino, libc::O_RDONLY)?;
+    let fd = open_xattr_fd(fs, ino)?;
 
     #[cfg(target_os = "linux")]
     {
@@ -349,4 +352,16 @@ fn filter_xattr_names(names: &[u8], hidden: &[u8]) -> Vec<u8> {
     }
 
     result
+}
+
+fn open_xattr_fd(fs: &PassthroughFs, ino: u64) -> io::Result<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        let guest_file_type = platform::mode_file_type(inode::stat_inode(fs, ino)?.st_mode);
+        if guest_file_type == platform::MODE_LNK {
+            return metadata::open_symlink_inode_fd_macos(fs, ino);
+        }
+    }
+
+    inode::open_inode_fd(fs, ino, libc::O_RDONLY)
 }

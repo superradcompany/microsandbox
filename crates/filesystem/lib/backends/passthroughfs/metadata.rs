@@ -226,7 +226,7 @@ fn stat_handle(fs: &PassthroughFs, handle: u64) -> io::Result<stat64> {
 }
 
 #[cfg(target_os = "macos")]
-fn open_symlink_inode_fd_macos(fs: &PassthroughFs, ino: u64) -> io::Result<i32> {
+pub(crate) fn open_symlink_inode_fd_macos(fs: &PassthroughFs, ino: u64) -> io::Result<i32> {
     let inodes = fs.inodes.read().unwrap();
     let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
     let path = inode::vol_path(data.dev, data.ino);

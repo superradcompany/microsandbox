@@ -16,7 +16,7 @@
 
 use std::{ffi::CStr, io};
 
-use super::{OverlayFs, copy_up, inode};
+use super::{OverlayFs, copy_up, inode, metadata};
 use crate::{
     Context, GetxattrReply, ListxattrReply,
     backends::shared::{init_binary, platform, stat_override},
@@ -60,7 +60,7 @@ pub(crate) fn do_getxattr(
         return Err(platform::eacces());
     }
 
-    let fd = inode::open_node_fd(fs, ino, libc::O_RDONLY)?;
+    let fd = open_xattr_fd(fs, ino)?;
     let _close = scopeguard::guard(fd, |fd| unsafe {
         libc::close(fd);
     });
@@ -129,10 +129,13 @@ pub(crate) fn do_listxattr(
     size: u32,
 ) -> io::Result<ListxattrReply> {
     if ino == init_binary::INIT_INODE {
-        return Err(platform::enodata());
+        if size == 0 {
+            return Ok(ListxattrReply::Count(0));
+        }
+        return Ok(ListxattrReply::Names(Vec::new()));
     }
 
-    let fd = inode::open_node_fd(fs, ino, libc::O_RDONLY)?;
+    let fd = open_xattr_fd(fs, ino)?;
     let _close = scopeguard::guard(fd, |fd| unsafe {
         libc::close(fd);
     });
@@ -286,7 +289,7 @@ pub(crate) fn do_setxattr(
     // Copy-up before mutation.
     copy_up::ensure_upper(fs, ino)?;
 
-    let fd = inode::open_node_fd(fs, ino, libc::O_RDONLY)?;
+    let fd = open_xattr_fd(fs, ino)?;
     let _close = scopeguard::guard(fd, |fd| unsafe {
         libc::close(fd);
     });
@@ -351,7 +354,7 @@ pub(crate) fn do_removexattr(
     // Copy-up before mutation.
     copy_up::ensure_upper(fs, ino)?;
 
-    let fd = inode::open_node_fd(fs, ino, libc::O_RDONLY)?;
+    let fd = open_xattr_fd(fs, ino)?;
     let _close = scopeguard::guard(fd, |fd| unsafe {
         libc::close(fd);
     });
@@ -399,6 +402,18 @@ fn translate_xattr_flags(linux_flags: u32) -> i32 {
         mac_flags |= libc::XATTR_REPLACE;
     }
     mac_flags
+}
+
+fn open_xattr_fd(fs: &OverlayFs, ino: u64) -> io::Result<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        let guest_file_type = platform::mode_file_type(inode::stat_node(fs, ino)?.st_mode);
+        if guest_file_type == platform::MODE_LNK {
+            return metadata::open_symlink_inode_fd_macos(fs, ino);
+        }
+    }
+
+    inode::open_node_fd(fs, ino, libc::O_RDONLY)
 }
 
 /// Filter a NUL-separated xattr name list, removing all internal overlay keys.
