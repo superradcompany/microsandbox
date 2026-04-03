@@ -218,4 +218,7 @@ jobs:
       # -- Checks (MCP server) --
       - name: Build MCP server
         working-directory: mcp
-        run: npm install && npm run build
+        run: |
+          npm install --ignore-scripts
+          npm install --no-save ../sdk/node-ts --ignore-scripts
+          npm run build
