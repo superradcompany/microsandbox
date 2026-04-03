@@ -219,6 +219,11 @@ jobs:
       - name: Build MCP server
         working-directory: mcp
         run: |
-          npm install --ignore-scripts
-          npm install --no-save ../sdk/node-ts --ignore-scripts
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.dependencies.microsandbox = 'file:../sdk/node-ts';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          "
+          npm install --no-package-lock --ignore-scripts
           npm run build
