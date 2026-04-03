@@ -336,6 +336,32 @@ jobs:
         run: npm publish --access public
 
   # ---------------------------------------------------------------------------
+  # Publish MCP server to npm
+  # ---------------------------------------------------------------------------
+  mcp-publish:
+    name: Publish MCP server
+    needs: npm-publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Build and publish MCP server
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: mcp
+        run: |
+          npm install
+          npm run build
+          npm publish --access public
+
+  # ---------------------------------------------------------------------------
   # Publish Rust crates to crates.io
   # ---------------------------------------------------------------------------
   crates-publish:

@@ -14,3 +14,9 @@
 [submodule "examples/typescript/root-block/qcow2-alpine"]
 	path = examples/typescript/root-block/qcow2-alpine
 	url = https://github.com/superradcompany/qcow2-alpine
+[submodule "mcp"]
+	path = mcp
+	url = https://github.com/superradcompany/microsandbox-mcp.git
+[submodule "skills"]
+	path = skills
+	url = https://github.com/superradcompany/skills.git
