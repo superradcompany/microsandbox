@@ -25,6 +25,10 @@ pub struct Setup {
     #[builder(default, setter(strip_option, into))]
     base_dir: Option<PathBuf>,
 
+    /// Target version to download. Defaults to `PREBUILT_VERSION` (compile-time).
+    #[builder(default, setter(strip_option, into))]
+    version: Option<String>,
+
     /// Skip verification after installation.
     #[builder(default = false)]
     skip_verify: bool,
@@ -59,15 +63,16 @@ impl Setup {
     /// Download and extract the microsandbox bundle tarball.
     async fn install_bundle(&self, bin_dir: &Path, lib_dir: &Path) -> MicrosandboxResult<()> {
         let libkrunfw_name = microsandbox_utils::libkrunfw_filename(std::env::consts::OS);
+        let version = self.version.as_deref().unwrap_or(PREBUILT_VERSION);
 
         // Skip if all binaries are already present and the installed msb
-        // version matches this package version.
+        // version matches the target version.
         if !self.force
             && lib_dir.join(&libkrunfw_name).exists()
             && installed_msb_version(&bin_dir.join(MSB_BINARY))
                 .await
                 .as_deref()
-                == Some(PREBUILT_VERSION)
+                == Some(version)
         {
             tracing::debug!("setup: binaries already present, skipping download");
             return Ok(());
@@ -79,13 +84,13 @@ impl Setup {
         }
 
         let url = microsandbox_utils::bundle_download_url(
-            PREBUILT_VERSION,
+            version,
             std::env::consts::ARCH,
             std::env::consts::OS,
         );
 
         tracing::info!(
-            version = PREBUILT_VERSION,
+            version = version,
             url = %url,
             "downloading microsandbox runtime dependencies"
         );
