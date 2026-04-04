@@ -112,7 +112,7 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
     }
 
     let exec_opts = ExecOpts::parse(&args)?;
-    let interactive = std::io::stdin().is_terminal();
+    let interactive = args.tty && std::io::stdin().is_terminal();
 
     let result: anyhow::Result<i32> = async {
         let (cmd, cmd_args) = resolve_command(sandbox.config(), args.command, interactive)?;
@@ -167,7 +167,7 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
     }
 
     let exec_opts = ExecOpts::parse(&args)?;
-    let interactive = std::io::stdin().is_terminal();
+    let interactive = args.tty && std::io::stdin().is_terminal();
 
     let (cmd, cmd_args) = resolve_command(sandbox.config(), args.command, interactive)?;
     let (cmd, cmd_args) = match (cmd, cmd_args) {
