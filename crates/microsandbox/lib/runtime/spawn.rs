@@ -223,7 +223,7 @@ async fn terminate_startup_process(
 /// Scan `config.mounts` for file bind mounts and stage each file in its own
 /// isolated directory under `file_mounts_dir`.
 ///
-/// Returns a map from guest path to `(staging_dir, filename)` for each staged file.
+/// Returns a map from guest path to `(file_mount_dir, filename)` for each staged file.
 async fn stage_file_mounts(
     config: &SandboxConfig,
     file_mounts_dir: &Path,
@@ -244,8 +244,8 @@ async fn stage_file_mounts(
             continue;
         }
 
-        let staging = file_mounts_dir.join(format!("fm_{}", guest_mount_tag(guest)));
-        tokio::fs::create_dir_all(&staging).await?;
+        let file_mount_dir = file_mounts_dir.join(format!("fm_{}", guest_mount_tag(guest)));
+        tokio::fs::create_dir_all(&file_mount_dir).await?;
 
         let filename_os = host.file_name().ok_or_else(|| {
             crate::MicrosandboxError::InvalidConfig(format!(
@@ -268,9 +268,9 @@ async fn stage_file_mounts(
             )));
         }
 
-        let target = staging.join(filename);
+        let target = file_mount_dir.join(filename);
 
-        // Remove stale staging file from a previous run to avoid EEXIST.
+        // Remove stale file from a previous run to avoid EEXIST.
         let _ = tokio::fs::remove_file(&target).await;
 
         // Hard-link preserves the same inode — writes in the guest propagate
@@ -280,7 +280,7 @@ async fn stage_file_mounts(
             Ok(()) => {
                 tracing::debug!(
                     host = %host.display(),
-                    staging = %target.display(),
+                    file_mount_dir = %target.display(),
                     "file mount: hard-linked"
                 );
             }
@@ -288,14 +288,14 @@ async fn stage_file_mounts(
                 if !readonly {
                     tracing::warn!(
                         host = %host.display(),
-                        staging = %target.display(),
+                        file_mount_dir = %target.display(),
                         "file mount: cross-filesystem, falling back to copy \
                          (guest writes will NOT propagate to host)"
                     );
                 } else {
                     tracing::debug!(
                         host = %host.display(),
-                        staging = %target.display(),
+                        file_mount_dir = %target.display(),
                         "file mount: cross-filesystem, copying (read-only)"
                     );
                 }
@@ -304,7 +304,7 @@ async fn stage_file_mounts(
             Err(e) => return Err(e.into()),
         }
 
-        staged.insert(guest.clone(), (staging, filename.to_string()));
+        staged.insert(guest.clone(), (file_mount_dir, filename.to_string()));
     }
 
     Ok(staged)
@@ -340,10 +340,15 @@ fn push_dir_mounts_spec(dir_mounts_val: &mut String, guest: &str, readonly: bool
     }
 }
 
-/// Push a `--mount fm_tag:staging_dir[:ro]` arg pair.
-fn push_file_mount_arg(args: &mut Vec<OsString>, guest: &str, staging_dir: &Path, readonly: bool) {
+/// Push a `--mount fm_tag:file_mount_dir[:ro]` arg pair.
+fn push_file_mount_arg(
+    args: &mut Vec<OsString>,
+    guest: &str,
+    file_mount_dir: &Path,
+    readonly: bool,
+) {
     let tag = format!("fm_{}", guest_mount_tag(guest));
-    let mut arg = format!("{tag}:{}", staging_dir.display());
+    let mut arg = format!("{tag}:{}", file_mount_dir.display());
     if readonly {
         arg.push_str(":ro");
     }
@@ -494,8 +499,8 @@ fn sandbox_cli_args(
                 guest,
                 readonly,
             } => {
-                if let Some((staging_dir, filename)) = staged_file_mounts.get(guest) {
-                    push_file_mount_arg(&mut args, guest, staging_dir, *readonly);
+                if let Some((file_mount_dir, filename)) = staged_file_mounts.get(guest) {
+                    push_file_mount_arg(&mut args, guest, file_mount_dir, *readonly);
                     push_file_mounts_spec(&mut file_mounts_val, guest, filename, *readonly);
                 } else {
                     push_dir_mount_arg(&mut args, guest, &host.display(), *readonly);
