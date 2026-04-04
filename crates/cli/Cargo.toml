@@ -28,11 +28,11 @@ console.workspace = true
 dirs.workspace = true
 indicatif.workspace = true
 libc.workspace = true
-microsandbox = { version = "0.3.10", path = "../microsandbox", default-features = false }
-microsandbox-image = { version = "0.3.10", path = "../image" }
-microsandbox-network = { version = "0.3.10", path = "../network", optional = true }
-microsandbox-runtime = { version = "0.3.10", path = "../runtime", default-features = false }
-microsandbox-utils = { version = "0.3.10", path = "../utils" }
+microsandbox = { version = "0.3.11", path = "../microsandbox", default-features = false }
+microsandbox-image = { version = "0.3.11", path = "../image" }
+microsandbox-network = { version = "0.3.11", path = "../network", optional = true }
+microsandbox-runtime = { version = "0.3.11", path = "../runtime", default-features = false }
+microsandbox-utils = { version = "0.3.11", path = "../utils" }
 rand.workspace = true
 reqwest.workspace = true
 rpassword.workspace = true
