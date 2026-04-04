@@ -11,8 +11,8 @@ crate-type = ["cdylib"]
 path = "lib/lib.rs"
 
 [dependencies]
-microsandbox = { version = "0.3.8", path = "../../crates/microsandbox" }
-microsandbox-network = { version = "0.3.8", path = "../../crates/network" }
+microsandbox = { version = "0.3.11", path = "../../crates/microsandbox" }
+microsandbox-network = { version = "0.3.11", path = "../../crates/network" }
 napi = { version = "3", default-features = false, features = [
     "async",
     "tokio_rt",

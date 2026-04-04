@@ -98,9 +98,6 @@ mod linux_flags {
 ))]
 compile_error!("unsupported macOS architecture for Linux open-flag translation");
 
-#[cfg(target_os = "macos")]
-const O_RESOLVE_BENEATH: i32 = 0x0000_1000;
-
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -156,42 +153,35 @@ pub(crate) fn store_unlinked_fd(data: &InodeData, fd: i32) {
 }
 
 #[cfg(target_os = "macos")]
-fn is_unsupported_macos_open_flag(err: &io::Error) -> bool {
+fn is_unsupported_macos_reopen_flag(err: &io::Error) -> bool {
     matches!(
         err.raw_os_error(),
         Some(libc::EINVAL | libc::ENOTSUP | libc::EOPNOTSUPP)
     )
 }
 
+/// Reopen a trusted `/.vol/<dev>/<ino>` identity path on macOS.
+///
+/// These paths are derived from already-admitted inode identity, not from
+/// guest-provided path bytes, so `O_NOFOLLOW_ANY` is the relevant safety
+/// boundary here. `O_RESOLVE_BENEATH` is intentionally omitted because it
+/// applies to fd-relative containment, not absolute `/.vol/` identity paths.
 #[cfg(target_os = "macos")]
-fn open_macos_path_hardened(path: *const libc::c_char, flags: i32) -> io::Result<i32> {
+fn open_macos_inode_reopen(path: *const libc::c_char, flags: i32) -> io::Result<i32> {
     let attempts = [
-        (
-            (flags | libc::O_CLOEXEC | libc::O_NOFOLLOW_ANY | O_RESOLVE_BENEATH) & !libc::O_EXLOCK,
-            true,
-        ),
-        (
-            (flags | libc::O_CLOEXEC | libc::O_NOFOLLOW_ANY) & !libc::O_EXLOCK,
-            false,
-        ),
-        (
-            (flags | libc::O_CLOEXEC | libc::O_NOFOLLOW) & !libc::O_EXLOCK,
-            false,
-        ),
+        (flags | libc::O_CLOEXEC | libc::O_NOFOLLOW_ANY) & !libc::O_EXLOCK,
+        (flags | libc::O_CLOEXEC | libc::O_NOFOLLOW) & !libc::O_EXLOCK,
     ];
 
     let mut last_err: Option<io::Error> = None;
-    for (attempt, allow_access_denied_fallback) in attempts {
+    for attempt in attempts {
         let fd = unsafe { libc::open(path, attempt) };
         if fd >= 0 {
             return Ok(fd);
         }
 
         let err = io::Error::last_os_error();
-        let fallback_ok = is_unsupported_macos_open_flag(&err)
-            || (allow_access_denied_fallback
-                && matches!(err.raw_os_error(), Some(libc::EACCES | libc::EPERM)));
-        if !fallback_ok {
+        if !is_unsupported_macos_reopen_flag(&err) {
             return Err(platform::linux_error(err));
         }
         last_err = Some(err);
@@ -452,7 +442,7 @@ fn open_and_patch_stat_macos(
 
 #[cfg(target_os = "macos")]
 fn open_macos_path_for_stat(path: *const libc::c_char) -> io::Result<i32> {
-    match open_macos_path_hardened(path, libc::O_RDONLY) {
+    match open_macos_inode_reopen(path, libc::O_RDONLY) {
         Ok(fd) => return Ok(fd),
         Err(err) if err.raw_os_error() == platform::eloop().raw_os_error() => {
             let fd =
@@ -465,7 +455,7 @@ fn open_macos_path_for_stat(path: *const libc::c_char) -> io::Result<i32> {
         Err(_) => {}
     }
 
-    open_macos_path_hardened(path, libc::O_RDONLY | libc::O_DIRECTORY)
+    open_macos_inode_reopen(path, libc::O_RDONLY | libc::O_DIRECTORY)
 }
 
 /// Decrement the reference count for an inode. Remove it from the table
@@ -576,12 +566,12 @@ fn open_vol_fd(dev: u64, ino: u64) -> io::Result<i32> {
     let path = vol_path(dev, ino);
 
     // Try directory open first (most callers want a parent fd).
-    if let Ok(fd) = open_macos_path_hardened(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) {
+    if let Ok(fd) = open_macos_inode_reopen(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) {
         return Ok(fd);
     }
 
     // Fall back to regular open.
-    if let Ok(fd) = open_macos_path_hardened(path.as_ptr(), libc::O_RDONLY) {
+    if let Ok(fd) = open_macos_inode_reopen(path.as_ptr(), libc::O_RDONLY) {
         return Ok(fd);
     }
 
@@ -628,7 +618,7 @@ pub(crate) fn open_inode_fd(fs: &PassthroughFs, inode: u64, flags: i32) -> io::R
         }
 
         let path = vol_path(data.dev, data.ino);
-        open_macos_path_hardened(path.as_ptr(), flags)
+        open_macos_inode_reopen(path.as_ptr(), flags)
     }
 }
 

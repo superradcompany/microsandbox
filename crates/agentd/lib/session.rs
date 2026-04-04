@@ -855,8 +855,8 @@ mod tests {
         let req = ExecRequest {
             cmd: "/bin/sh".to_string(),
             args: vec![
-                "-lc".to_string(),
-                "i=0; while [ $i -lt 1024 ]; do printf AAAA; i=$((i+1)); done; printf SECOND; sleep 1; printf '<END>\\n'; sleep 1"
+                "-c".to_string(),
+                "i=0; while [ $i -lt 1024 ]; do printf AAAA; i=$((i+1)); done; printf SECOND; sleep 1; printf '<END>\\n'; sleep 1; exit 0"
                     .to_string(),
             ],
             env: vec!["PATH=/usr/local/bin:/usr/bin:/bin".to_string()],

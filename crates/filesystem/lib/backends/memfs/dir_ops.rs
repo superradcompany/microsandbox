@@ -15,7 +15,10 @@ use super::{
 };
 use crate::{
     Context, DirEntry, Entry, OpenOptions,
-    backends::shared::{init_binary, platform},
+    backends::shared::{
+        dir_snapshot::{self, SnapshotEntry},
+        init_binary, platform,
+    },
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -109,6 +112,28 @@ pub(crate) fn do_releasedir(
 }
 
 //--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl SnapshotEntry for MemDirEntry {
+    fn inode(&self) -> u64 {
+        self.inode
+    }
+
+    fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    fn file_type(&self) -> u32 {
+        self.file_type
+    }
+
+    fn name(&self) -> &[u8] {
+        &self.name
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
@@ -129,57 +154,10 @@ fn serve_snapshot_entries(
     }
     let snapshot = snapshot_lock.as_ref().unwrap();
 
-    // Serve entries from offset.
-    let start = if offset == 0 {
-        0
-    } else {
-        snapshot
-            .entries
-            .iter()
-            .position(|e| e.offset > offset)
-            .unwrap_or(snapshot.entries.len())
-    };
-
-    if start >= snapshot.entries.len() {
-        return Ok(Vec::new());
-    }
-
-    let slice = &snapshot.entries[start..];
-
-    // Collect names into a contiguous buffer for bounded leak.
-    let mut names_buf: Vec<u8> = Vec::new();
-    let mut raw_entries: Vec<(u64, u64, u32, usize, usize)> = Vec::new();
-
-    for entry in slice {
-        let name_offset = names_buf.len();
-        names_buf.extend_from_slice(&entry.name);
-        raw_entries.push((
-            entry.inode,
-            entry.offset,
-            entry.file_type,
-            name_offset,
-            entry.name.len(),
-        ));
-    }
-
-    if raw_entries.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Leak one contiguous buffer (bounded: one per readdir call).
-    let leaked: &'static [u8] = Box::leak(names_buf.into_boxed_slice());
-
-    let entries = raw_entries
-        .into_iter()
-        .map(|(ino, off, typ, start, len)| DirEntry {
-            ino,
-            offset: off,
-            type_: typ,
-            name: &leaked[start..start + len],
-        })
-        .collect();
-
-    Ok(entries)
+    Ok(dir_snapshot::serve_snapshot_entries(
+        &snapshot.entries,
+        offset,
+    ))
 }
 
 /// Build a point-in-time snapshot of a directory's entries.

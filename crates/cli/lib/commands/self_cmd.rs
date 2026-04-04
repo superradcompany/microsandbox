@@ -88,6 +88,7 @@ async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
     let spinner = ui::Spinner::start("Updating", &format!("to {latest}"));
     let result = microsandbox::setup::Setup::builder()
         .base_dir(base_dir)
+        .version(latest_clean.to_string())
         .force(true)
         .build()
         .install()

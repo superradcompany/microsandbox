@@ -120,3 +120,62 @@ fn test_getxattr_size_query() {
         GetxattrReply::Value(_) => panic!("expected Count for size query"),
     }
 }
+
+#[test]
+fn test_listxattr_init_empty() {
+    let sb = OverlayTestSandbox::new();
+
+    match sb.fs.listxattr(sb.ctx(), INIT_INODE, 0).unwrap() {
+        ListxattrReply::Count(count) => assert_eq!(count, 0),
+        ListxattrReply::Names(_) => panic!("expected Count for size=0 query"),
+    }
+
+    match sb.fs.listxattr(sb.ctx(), INIT_INODE, 256).unwrap() {
+        ListxattrReply::Names(names) => assert!(names.is_empty()),
+        ListxattrReply::Count(_) => panic!("expected Names for non-zero size query"),
+    }
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn test_symlink_xattr_roundtrip() {
+    let sb = OverlayTestSandbox::new();
+    let entry = sb
+        .fs
+        .symlink(
+            sb.ctx(),
+            &OverlayTestSandbox::cstr("/target/path"),
+            ROOT_INODE,
+            &OverlayTestSandbox::cstr("xattr-link"),
+            Extensions::default(),
+        )
+        .unwrap();
+    let key = OverlayTestSandbox::cstr("user.linkattr");
+    let value = b"link-value";
+
+    sb.fs
+        .setxattr(sb.ctx(), entry.inode, &key, value, 0)
+        .unwrap();
+
+    match sb.fs.getxattr(sb.ctx(), entry.inode, &key, 256).unwrap() {
+        GetxattrReply::Value(v) => assert_eq!(&v[..], value),
+        GetxattrReply::Count(_) => panic!("expected Value, got Count"),
+    }
+
+    match sb.fs.listxattr(sb.ctx(), entry.inode, 4096).unwrap() {
+        ListxattrReply::Names(data) => {
+            let names_str = String::from_utf8_lossy(&data);
+            assert!(
+                names_str.contains("user.linkattr"),
+                "listxattr should include user.linkattr, got: {names_str}"
+            );
+        }
+        ListxattrReply::Count(_) => panic!("expected Names, got Count"),
+    }
+
+    sb.fs.removexattr(sb.ctx(), entry.inode, &key).unwrap();
+    OverlayTestSandbox::assert_errno(
+        sb.fs.getxattr(sb.ctx(), entry.inode, &key, 256),
+        LINUX_ENODATA,
+    );
+}

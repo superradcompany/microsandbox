@@ -244,10 +244,18 @@ fn test_getxattr_init_enodata() {
 }
 
 #[test]
-fn test_listxattr_init_enodata() {
+fn test_listxattr_init_empty() {
     let sb = TestSandbox::new();
-    let result = sb.fs.listxattr(sb.ctx(), INIT_INODE, 0);
-    TestSandbox::assert_errno(result, LINUX_ENODATA);
+
+    match sb.fs.listxattr(sb.ctx(), INIT_INODE, 0).unwrap() {
+        ListxattrReply::Count(count) => assert_eq!(count, 0),
+        ListxattrReply::Names(_) => panic!("expected Count for size=0 query"),
+    }
+
+    match sb.fs.listxattr(sb.ctx(), INIT_INODE, 256).unwrap() {
+        ListxattrReply::Names(names) => assert!(names.is_empty()),
+        ListxattrReply::Count(_) => panic!("expected Names for non-zero size query"),
+    }
 }
 
 #[test]
@@ -257,4 +265,49 @@ fn test_removexattr_init_rejected() {
         .fs
         .removexattr(sb.ctx(), INIT_INODE, &TestSandbox::cstr("user.test"));
     TestSandbox::assert_errno(result, LINUX_EACCES);
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn test_symlink_xattr_roundtrip() {
+    let sb = TestSandbox::new();
+    let entry = sb
+        .fs
+        .symlink(
+            sb.ctx(),
+            &TestSandbox::cstr("/target/path"),
+            ROOT_INODE,
+            &TestSandbox::cstr("xattr-link"),
+            Extensions::default(),
+        )
+        .unwrap();
+    let key = TestSandbox::cstr("user.linkattr");
+    let value = b"link-value";
+
+    sb.fs
+        .setxattr(sb.ctx(), entry.inode, &key, value, 0)
+        .unwrap();
+
+    match sb.fs.getxattr(sb.ctx(), entry.inode, &key, 256).unwrap() {
+        GetxattrReply::Value(v) => assert_eq!(&v[..], value),
+        GetxattrReply::Count(_) => panic!("expected Value, got Count"),
+    }
+
+    match sb.fs.listxattr(sb.ctx(), entry.inode, 4096).unwrap() {
+        ListxattrReply::Names(names) => {
+            let name_list: Vec<&[u8]> =
+                names.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
+            assert!(
+                name_list.iter().any(|n| *n == b"user.linkattr"),
+                "user.linkattr should be in xattr list"
+            );
+        }
+        ListxattrReply::Count(_) => panic!("expected Names, got Count"),
+    }
+
+    sb.fs.removexattr(sb.ctx(), entry.inode, &key).unwrap();
+    TestSandbox::assert_errno(
+        sb.fs.getxattr(sb.ctx(), entry.inode, &key, 256),
+        LINUX_ENODATA,
+    );
 }

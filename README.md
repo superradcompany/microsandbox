@@ -57,7 +57,7 @@ Today, AI agents operate with whatever permissions you give them, and that's usu
 
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI
 
-The `msb` CLI is useful for managing images, volumes, and sandboxes from the terminal:
+The SDK works on its own without the CLI. The `msb` CLI is a separate tool for managing sandboxes, images, and volumes from the terminal, and for giving AI agents direct access to microsandbox:
 
 > ```sh
 > curl -fsSL https://install.microsandbox.dev | sh
@@ -259,7 +259,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 
 <br />
 
-<a href="https://docs2.microsandbox.dev/sdk/overview"><img src="https://img.shields.io/badge/SDK_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="SDK Docs"></a>
+<a href="https://docs.microsandbox.dev/sdk/overview"><img src="https://img.shields.io/badge/SDK_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="SDK Docs"></a>
 
 <br />
 
@@ -276,16 +276,23 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 #### <img height="14" src="https://octicons-col.vercel.app/stopwatch/A770EF">&nbsp;&nbsp;Named Sandboxes
 
 > ```sh
-> # Create and run detached
-> msb run --name my-app -d python
+> # Create and start a named sandbox
+> msb create --name my-app python
+> ```
 >
+> ```sh
 > # Execute commands
-> msb exec my-app -- pip install requests
-> msb exec my-app -- python3 main.py
+> msb exec my-app -- python -c "import this"
+> msb exec my-app -- curl https://example.com
+> ```
 >
+> ```sh
 > # Interactive shell into a running sandbox
 > msb shell my-app
+> msb shell my-app -- ls -la /
+> ```
 >
+> ```sh
 > # Lifecycle
 > msb stop my-app
 > msb start my-app
@@ -337,11 +344,11 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 <br />
 
-<a href="https://docs2.microsandbox.dev/cli/overview"><img src="https://img.shields.io/badge/CLI_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="CLI Docs"></a>
+<a href="https://docs.microsandbox.dev/cli/overview"><img src="https://img.shields.io/badge/CLI_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="CLI Docs"></a>
 
 <br />
 
-## <a href="./#gh-dark-mode-only" target="_blank"><img height="13" src="https://octicons-col.vercel.app/dependabot/ffffff" alt="agents-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="13" src="https://octicons-col.vercel.app/dependabot/000000" alt="agents"></a>&nbsp;&nbsp;AI Agents
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/dependabot/ffffff" alt="agents-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/dependabot/000000" alt="agents"></a>&nbsp;&nbsp;AI Agents
 
 Give your AI agents the ability to create and manage their own sandboxes.
 
@@ -364,9 +371,15 @@ Give your AI agents the ability to create and manage their own sandboxes.
 
 <br />
 
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/book/ffffff" alt="docs-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/book/000000" alt="docs"></a>&nbsp;&nbsp;Documentation
+
+For guides, API references, and examples, visit the [microsandbox documentation](https://docs.microsandbox.dev).
+
+<br />
+
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/gear/ffffff" alt="contributing-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/gear/000000" alt="contributing"></a>&nbsp;&nbsp;Contributing
 
-Interested in contributing to `microsandbox`? Check out our [Development Guide](./DEVELOPMENT.md) for instructions on setting up your development environment, building the project, running tests, and creating releases. For contribution guidelines, please refer to [CONTRIBUTING.md](./CONTRIBUTING.md).
+Interested in contributing to `microsandbox`? Check out our [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines and [DEVELOPMENT.md](./DEVELOPMENT.md) for build, test, and release instructions.
 
 <br />
 
