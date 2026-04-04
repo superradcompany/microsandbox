@@ -22,7 +22,7 @@ use std::{
     os::fd::{AsRawFd, FromRawFd},
     path::PathBuf,
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -78,6 +78,9 @@ pub struct PassthroughConfig {
 
     /// Whether to enable writeback caching.
     pub writeback: bool,
+
+    /// Whether to expose the synthetic `init.krun` entry at the mount root.
+    pub inject_init: bool,
 }
 
 /// Passthrough filesystem backend.
@@ -100,6 +103,9 @@ pub struct PassthroughFs {
     /// Open file handle table.
     pub(crate) handles: RwLock<BTreeMap<u64, Arc<HandleData>>>,
 
+    /// Open directory handle table.
+    pub(crate) dir_handles: RwLock<BTreeMap<u64, Arc<PassthroughDirHandle>>>,
+
     /// Next file handle number to allocate (starts at 1, after init_handle=0).
     pub(crate) next_handle: AtomicU64,
 
@@ -119,6 +125,36 @@ pub struct PassthroughFs {
     /// after first rejecting real host symlinks on the pinned inode.
     #[cfg(target_os = "linux")]
     pub(crate) proc_self_fd: File,
+}
+
+/// Open directory handle with a lazy point-in-time snapshot.
+pub(crate) struct PassthroughDirHandle {
+    /// Real open fd for directory operations.
+    pub file: RwLock<File>,
+
+    /// Snapshot built on the first readdir call.
+    pub snapshot: Mutex<Option<DirSnapshot>>,
+}
+
+/// Snapshot of one directory handle's entries.
+pub(crate) struct DirSnapshot {
+    /// Guest-visible entries for this handle.
+    pub entries: Vec<PassthroughDirEntry>,
+}
+
+/// One passthrough directory entry in a snapshot.
+pub(crate) struct PassthroughDirEntry {
+    /// Guest-visible inode number.
+    pub inode: u64,
+
+    /// Entry name bytes.
+    pub name: Vec<u8>,
+
+    /// Stable synthetic offset cookie.
+    pub offset: u64,
+
+    /// Guest-visible directory entry type.
+    pub file_type: u32,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -190,6 +226,7 @@ impl PassthroughFs {
             inodes: RwLock::new(MultikeyBTreeMap::new()),
             next_inode: AtomicU64::new(3), // 1=root, 2=init
             handles: RwLock::new(BTreeMap::new()),
+            dir_handles: RwLock::new(BTreeMap::new()),
             next_handle: AtomicU64::new(1), // 0=init handle
             writeback: AtomicBool::new(false),
             init_file,
@@ -281,6 +318,21 @@ impl PassthroughFs {
             CachePolicy::Always => OpenOptions::CACHE_DIR,
         }
     }
+
+    /// Whether this mount exposes the synthetic init binary.
+    pub(crate) fn injects_init(&self) -> bool {
+        self.cfg.inject_init
+    }
+
+    /// Whether a root entry name is reserved for the synthetic init binary.
+    pub(crate) fn is_reserved_init_name(&self, parent: u64, name: &[u8]) -> bool {
+        self.injects_init() && parent == 1 && init_binary::is_init_name(name)
+    }
+
+    /// Whether the given inode refers to the synthetic init binary.
+    pub(crate) fn is_virtual_init_inode(&self, inode: u64) -> bool {
+        self.injects_init() && inode == init_binary::INIT_INODE
+    }
 }
 
 impl Default for PassthroughConfig {
@@ -293,6 +345,7 @@ impl Default for PassthroughConfig {
             attr_timeout: Duration::from_secs(5),
             cache_policy: CachePolicy::Auto,
             writeback: false,
+            inject_init: true,
         }
     }
 }
@@ -349,12 +402,13 @@ impl DynFileSystem for PassthroughFs {
 
     fn destroy(&self) {
         self.handles.write().unwrap().clear();
+        self.dir_handles.write().unwrap().clear();
         self.inodes.write().unwrap().clear();
     }
 
     fn lookup(&self, _ctx: Context, parent: u64, name: &CStr) -> io::Result<Entry> {
         // Handle init.krun lookup in root directory.
-        if parent == 1 && init_binary::is_init_name(name.to_bytes()) {
+        if self.is_reserved_init_name(parent, name.to_bytes()) {
             return Ok(init_binary::init_entry(
                 self.cfg.entry_timeout,
                 self.cfg.attr_timeout,
@@ -364,7 +418,7 @@ impl DynFileSystem for PassthroughFs {
     }
 
     fn forget(&self, _ctx: Context, ino: u64, count: u64) {
-        if ino == init_binary::INIT_INODE {
+        if self.is_virtual_init_inode(ino) {
             return;
         }
         inode::forget_one(self, ino, count);
@@ -375,7 +429,7 @@ impl DynFileSystem for PassthroughFs {
         // batch_forget is called with hundreds of entries after directory traversals.
         let mut inodes = self.inodes.write().unwrap();
         for (ino, count) in requests {
-            if ino == init_binary::INIT_INODE {
+            if self.is_virtual_init_inode(ino) {
                 continue;
             }
             inode::forget_one_locked(&mut inodes, ino, count);

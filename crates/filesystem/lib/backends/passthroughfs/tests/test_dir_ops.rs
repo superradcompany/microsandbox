@@ -163,6 +163,101 @@ fn test_readdir_large_dir() {
 }
 
 #[test]
+fn test_readdir_offset_resume() {
+    let sb = TestSandbox::new();
+    sb.fuse_create_root("a.txt").unwrap();
+    sb.fuse_create_root("b.txt").unwrap();
+    sb.fuse_create_root("c.txt").unwrap();
+
+    let handle = sb.fuse_opendir(ROOT_INODE).unwrap();
+    let all_entries = sb
+        .fs
+        .readdir(sb.ctx(), ROOT_INODE, handle, 65536, 0)
+        .unwrap();
+    assert!(all_entries.len() >= 4, "expected . .. init.krun and files");
+
+    let resume_after = all_entries[2].offset;
+    let resumed = sb
+        .fs
+        .readdir(sb.ctx(), ROOT_INODE, handle, 65536, resume_after)
+        .unwrap();
+
+    let expected_names: Vec<&[u8]> = all_entries
+        .iter()
+        .filter(|entry| entry.offset > resume_after)
+        .map(|entry| entry.name)
+        .collect();
+    let resumed_names: Vec<&[u8]> = resumed.iter().map(|entry| entry.name).collect();
+
+    assert_eq!(resumed_names, expected_names);
+}
+
+#[test]
+fn test_readdir_snapshot_is_handle_local() {
+    let sb = TestSandbox::new();
+    sb.fuse_create_root("before.txt").unwrap();
+
+    let handle = sb.fuse_opendir(ROOT_INODE).unwrap();
+    let before = sb
+        .fs
+        .readdir(sb.ctx(), ROOT_INODE, handle, 65536, 0)
+        .unwrap();
+    assert!(before.iter().any(|entry| entry.name == b"before.txt"));
+
+    sb.host_create_file("after.txt", b"new");
+
+    let same_handle = sb
+        .fs
+        .readdir(sb.ctx(), ROOT_INODE, handle, 65536, 0)
+        .unwrap();
+    assert!(!same_handle.iter().any(|entry| entry.name == b"after.txt"));
+
+    let next_handle = sb.fuse_opendir(ROOT_INODE).unwrap();
+    let next_handle_entries = sb
+        .fs
+        .readdir(sb.ctx(), ROOT_INODE, next_handle, 65536, 0)
+        .unwrap();
+    assert!(
+        next_handle_entries
+            .iter()
+            .any(|entry| entry.name == b"after.txt")
+    );
+}
+
+#[test]
+fn test_readdir_root_without_init_when_disabled() {
+    let sb = TestSandbox::with_config(|mut cfg| {
+        cfg.inject_init = false;
+        cfg
+    });
+
+    let handle = sb.fuse_opendir(ROOT_INODE).unwrap();
+    let entries = sb
+        .fs
+        .readdir(sb.ctx(), ROOT_INODE, handle, 65536, 0)
+        .unwrap();
+
+    assert!(!entries.iter().any(|entry| entry.name == b"init.krun"));
+}
+
+#[test]
+fn test_root_init_name_is_not_reserved_when_disabled() {
+    let sb = TestSandbox::with_config(|mut cfg| {
+        cfg.inject_init = false;
+        cfg
+    });
+
+    let (entry, handle) = sb.fuse_create_root("init.krun").unwrap();
+    assert_ne!(entry.inode, INIT_INODE);
+    sb.fs
+        .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
+        .unwrap();
+
+    let looked_up = sb.lookup_root("init.krun").unwrap();
+    assert_eq!(looked_up.inode, entry.inode);
+}
+
+#[test]
 fn test_readdirplus_skips_dot_dotdot() {
     let sb = TestSandbox::new();
     let handle = sb.fuse_opendir(ROOT_INODE).unwrap();

@@ -488,6 +488,7 @@ fn build_vm(
         let runtime_tag = microsandbox_protocol::RUNTIME_FS_TAG.to_string();
         let cfg = PassthroughConfig {
             root_dir: config.runtime_dir.clone(),
+            inject_init: false,
             ..Default::default()
         };
         let backend = PassthroughFs::new(cfg)
@@ -506,6 +507,7 @@ fn build_vm(
             let tag = tag.to_string();
             let cfg = PassthroughConfig {
                 root_dir: PathBuf::from(path),
+                inject_init: false,
                 ..Default::default()
             };
             let backend = PassthroughFs::new(cfg)

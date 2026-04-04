@@ -9,7 +9,7 @@ use std::{ffi::CStr, io};
 use super::{PassthroughFs, inode};
 use crate::{
     Context,
-    backends::shared::{init_binary, name_validation, platform},
+    backends::shared::{name_validation, platform},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -30,7 +30,7 @@ pub(crate) fn do_unlink(
     name_validation::validate_name(name)?;
 
     // Protect init.krun from deletion.
-    if init_binary::is_init_name(name.to_bytes()) {
+    if fs.is_reserved_init_name(parent, name.to_bytes()) {
         return Err(platform::eacces());
     }
 
@@ -92,7 +92,7 @@ pub(crate) fn do_rmdir(
 ) -> io::Result<()> {
     name_validation::validate_name(name)?;
 
-    if init_binary::is_init_name(name.to_bytes()) {
+    if fs.is_reserved_init_name(parent, name.to_bytes()) {
         return Err(platform::eacces());
     }
 
@@ -118,8 +118,8 @@ pub(crate) fn do_rename(
     name_validation::validate_name(newname)?;
 
     // Protect init.krun from being renamed or overwritten.
-    if init_binary::is_init_name(oldname.to_bytes())
-        || init_binary::is_init_name(newname.to_bytes())
+    if fs.is_reserved_init_name(olddir, oldname.to_bytes())
+        || fs.is_reserved_init_name(newdir, newname.to_bytes())
     {
         return Err(platform::eacces());
     }

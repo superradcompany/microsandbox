@@ -39,6 +39,7 @@ pub struct PassthroughFsBuilder {
     attr_timeout: Duration,
     cache_policy: CachePolicy,
     writeback: bool,
+    inject_init: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -56,6 +57,7 @@ impl PassthroughFsBuilder {
             attr_timeout: Duration::from_secs(5),
             cache_policy: CachePolicy::Auto,
             writeback: false,
+            inject_init: true,
         }
     }
 
@@ -98,6 +100,12 @@ impl PassthroughFsBuilder {
     /// Enable or disable writeback caching.
     pub fn writeback(mut self, enabled: bool) -> Self {
         self.writeback = enabled;
+        self
+    }
+
+    /// Enable or disable exposing the synthetic init binary at mount root.
+    pub fn inject_init(mut self, enabled: bool) -> Self {
+        self.inject_init = enabled;
         self
     }
 
@@ -160,6 +168,7 @@ impl PassthroughFsBuilder {
             attr_timeout: self.attr_timeout,
             cache_policy: self.cache_policy,
             writeback: self.writeback,
+            inject_init: self.inject_init,
         };
 
         Ok(PassthroughFs {
@@ -168,6 +177,7 @@ impl PassthroughFsBuilder {
             inodes: RwLock::new(MultikeyBTreeMap::new()),
             next_inode: AtomicU64::new(3), // 1=root, 2=init
             handles: RwLock::new(BTreeMap::new()),
+            dir_handles: RwLock::new(BTreeMap::new()),
             next_handle: AtomicU64::new(1), // 0=init handle
             writeback: AtomicBool::new(false),
             init_file,

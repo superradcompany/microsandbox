@@ -24,7 +24,7 @@ use super::metadata;
 use super::{PassthroughFs, inode};
 use crate::{
     Context, GetxattrReply, ListxattrReply,
-    backends::shared::{init_binary, platform, stat_override},
+    backends::shared::{platform, stat_override},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -40,7 +40,7 @@ pub(crate) fn do_setxattr(
     value: &[u8],
     flags: u32,
 ) -> io::Result<()> {
-    if ino == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(ino) {
         return Err(platform::eacces());
     }
 
@@ -102,7 +102,7 @@ pub(crate) fn do_getxattr(
     name: &CStr,
     size: u32,
 ) -> io::Result<GetxattrReply> {
-    if ino == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(ino) {
         return Err(platform::enodata());
     }
 
@@ -186,7 +186,7 @@ pub(crate) fn do_listxattr(
     ino: u64,
     size: u32,
 ) -> io::Result<ListxattrReply> {
-    if ino == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(ino) {
         if size == 0 {
             return Ok(ListxattrReply::Count(0));
         }
@@ -296,7 +296,7 @@ pub(crate) fn do_removexattr(
     ino: u64,
     name: &CStr,
 ) -> io::Result<()> {
-    if ino == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(ino) {
         return Err(platform::eacces());
     }
 
