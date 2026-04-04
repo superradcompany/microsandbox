@@ -90,7 +90,7 @@ pub const ENV_NET_IPV4: &str = "MSB_NET_IPV4";
 /// - `MSB_NET_IPV6=addr=fd42:6d73:62:2a::2/64,gw=fd42:6d73:62:2a::1,dns=fd42:6d73:62:2a::1`
 pub const ENV_NET_IPV6: &str = "MSB_NET_IPV6";
 
-/// Environment variable carrying virtiofs volume mount specs for guest init.
+/// Environment variable carrying virtiofs directory volume mount specs for guest init.
 ///
 /// Format: `tag:guest_path[:ro][;tag:guest_path[:ro];...]`
 ///
@@ -106,7 +106,7 @@ pub const ENV_NET_IPV6: &str = "MSB_NET_IPV6";
 /// - `MSB_DIR_MOUNTS=data:/data;cache:/cache:ro` — two mounts
 pub const ENV_DIR_MOUNTS: &str = "MSB_DIR_MOUNTS";
 
-/// Environment variable carrying virtiofs **file** mount specs for guest init.
+/// Environment variable carrying virtiofs **file** volume mount specs for guest init.
 ///
 /// Used when the host path is a single file rather than a directory. The SDK
 /// wraps each file in an isolated staging directory (hard-linked to preserve

@@ -22,7 +22,7 @@ struct BlockRootSpec<'a> {
     fstype: Option<&'a str>,
 }
 
-/// Parsed virtiofs directory mount specification.
+/// Parsed virtiofs directory volume mount specification.
 #[derive(Debug)]
 struct DirMountSpec<'a> {
     tag: &'a str,
@@ -30,7 +30,7 @@ struct DirMountSpec<'a> {
     readonly: bool,
 }
 
-/// Parsed virtiofs file mount specification.
+/// Parsed virtiofs file volume mount specification.
 #[derive(Debug)]
 struct FileMountSpec<'a> {
     tag: &'a str,
@@ -134,7 +134,7 @@ fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec<'_>> {
     Ok(BlockRootSpec { device, fstype })
 }
 
-/// Parses a single virtiofs volume mount entry: `tag:guest_path[:ro]`
+/// Parses a single virtiofs directory volume mount entry: `tag:guest_path[:ro]`
 fn parse_dir_mount_entry(entry: &str) -> AgentdResult<DirMountSpec<'_>> {
     let parts: Vec<&str> = entry.split(':').collect();
     if parts.len() < 2 {
@@ -179,7 +179,7 @@ fn parse_dir_mount_entry(entry: &str) -> AgentdResult<DirMountSpec<'_>> {
     })
 }
 
-/// Parses a single virtiofs file mount entry: `tag:filename:guest_path[:ro]`
+/// Parses a single virtiofs file volume mount entry: `tag:filename:guest_path[:ro]`
 fn parse_file_mount_entry(entry: &str) -> AgentdResult<FileMountSpec<'_>> {
     let parts: Vec<&str> = entry.split(':').collect();
     if parts.len() < 3 {
@@ -455,9 +455,13 @@ mod linux {
         )))
     }
 
-    /// Reads `MSB_DIR_MOUNTS` env var and mounts each virtiofs volume.
+    /// Reads `MSB_DIR_MOUNTS` env var and mounts each virtiofs directory volume.
     ///
-    /// Missing env var is not an error (no volume mounts requested).
+    /// For each entry, creates the guest mount point directory and mounts the
+    /// virtiofs share using the tag provided by the host. If the entry
+    /// specifies `:ro`, the mount is made read-only via `MS_RDONLY`.
+    ///
+    /// Missing env var is not an error (no directory volume mounts requested).
     /// Parse failures and mount failures are hard errors.
     pub fn apply_dir_mounts() -> AgentdResult<()> {
         let val = match std::env::var(microsandbox_protocol::ENV_DIR_MOUNTS) {
@@ -477,6 +481,7 @@ mod linux {
         Ok(())
     }
 
+    /// Mounts a single virtiofs directory share from a parsed spec.
     fn mount_dir(spec: &super::DirMountSpec<'_>) -> AgentdResult<()> {
         let path = spec.guest_path;
 
@@ -499,6 +504,10 @@ mod linux {
         Ok(())
     }
 
+    /// Reads `MSB_FILE_MOUNTS` env var and bind-mounts each file.
+    ///
+    /// Missing env var is not an error (no file mounts requested).
+    /// Parse failures and mount failures are hard errors.
     pub fn apply_file_mounts() -> AgentdResult<()> {
         let val = match std::env::var(microsandbox_protocol::ENV_FILE_MOUNTS) {
             Ok(v) if !v.is_empty() => v,
