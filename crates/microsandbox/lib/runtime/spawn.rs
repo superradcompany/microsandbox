@@ -7,7 +7,12 @@
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::{ffi::OsString, path::Path, process::Stdio};
+use std::{
+    collections::HashSet,
+    ffi::OsString,
+    path::{Path, PathBuf},
+    process::Stdio,
+};
 
 use serde::Deserialize;
 use tokio::{io::AsyncBufReadExt, process::Command};
@@ -26,6 +31,16 @@ use crate::{
 #[derive(Debug, Deserialize)]
 struct StartupInfo {
     pid: u32,
+}
+
+/// A file bind mount staged into an isolated directory for virtiofs sharing.
+struct StagedFileMount {
+    /// Index into `config.mounts`.
+    mount_index: usize,
+    /// Host-side staging directory containing the hard-linked/copied file.
+    staging_dir: PathBuf,
+    /// Filename inside the staging directory.
+    filename: String,
 }
 
 /// How the sandbox process should behave relative to the creating process.
@@ -78,6 +93,7 @@ pub async fn spawn_sandbox(
     let empty_rootfs_dir = sandbox_dir.join("rootfs-base");
     let rw_dir = sandbox_dir.join("rw");
     let staging_dir = sandbox_dir.join("staging");
+    let file_mounts_dir = sandbox_dir.join("file-mounts");
     let db_dir = global.home().join(microsandbox_utils::DB_SUBDIR);
     let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
 
@@ -88,6 +104,7 @@ pub async fn spawn_sandbox(
         tokio::fs::create_dir_all(&empty_rootfs_dir),
         tokio::fs::create_dir_all(&rw_dir),
         tokio::fs::create_dir_all(&staging_dir),
+        tokio::fs::create_dir_all(&file_mounts_dir),
     )?;
 
     // Write scripts to the runtime scripts directory.
@@ -105,6 +122,11 @@ pub async fn spawn_sandbox(
     // Compute the agent relay socket path.
     let agent_sock_path = runtime_dir.join("agent.sock");
 
+    // Stage file bind mounts: each file gets its own isolated directory so
+    // that virtio-fs (which requires directories) can share it without
+    // exposing adjacent files on the host.
+    let file_mount_entries = stage_file_mounts(config, &file_mounts_dir).await?;
+
     // Build the command.
     let mut cmd = Command::new(&msb_path);
     cmd.args(sandbox_cli_args(
@@ -118,6 +140,7 @@ pub async fn spawn_sandbox(
         &staging_dir,
         &agent_sock_path,
         &libkrunfw_path,
+        &file_mount_entries,
     ));
 
     // Prevent the sandbox process from inheriting the parent's terminal on
@@ -207,6 +230,101 @@ async fn terminate_startup_process(
     child.wait().await.ok()
 }
 
+/// Scan `config.mounts` for file bind mounts and stage each file in its own
+/// isolated directory under `file_mounts_dir`.
+///
+async fn stage_file_mounts(
+    config: &SandboxConfig,
+    file_mounts_dir: &Path,
+) -> MicrosandboxResult<Vec<StagedFileMount>> {
+    let mut entries = Vec::new();
+
+    for (idx, mount) in config.mounts.iter().enumerate() {
+        let (host, guest, readonly) = match mount {
+            VolumeMount::Bind {
+                host,
+                guest,
+                readonly,
+            } => (host, guest, *readonly),
+            _ => continue,
+        };
+
+        if !host.is_file() {
+            continue;
+        }
+
+        let staging = file_mounts_dir.join(format!("fm_{}", guest_mount_tag(guest)));
+        tokio::fs::create_dir_all(&staging).await?;
+
+        let filename_os = host.file_name().ok_or_else(|| {
+            crate::MicrosandboxError::InvalidConfig(format!(
+                "file mount has no filename: {}",
+                host.display()
+            ))
+        })?;
+
+        let filename = filename_os.to_str().ok_or_else(|| {
+            crate::MicrosandboxError::InvalidConfig(format!(
+                "file mount filename is not valid UTF-8: {}",
+                host.display()
+            ))
+        })?;
+
+        // The MSB_FILE_MOUNTS protocol uses `:` and `;` as delimiters.
+        // Filenames containing these characters would break parsing.
+        if filename.contains(':') || filename.contains(';') {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "file mount filename must not contain ':' or ';': {filename}"
+            )));
+        }
+
+        let filename = filename.to_string();
+        let target = staging.join(&filename);
+
+        // Remove stale staging file from a previous run to avoid EEXIST.
+        let _ = tokio::fs::remove_file(&target).await;
+
+        // Hard-link preserves the same inode — writes in the guest propagate
+        // to the host and vice-versa. Falls back to copy for cross-filesystem
+        // mounts (different device IDs).
+        match tokio::fs::hard_link(host, &target).await {
+            Ok(()) => {
+                tracing::debug!(
+                    host = %host.display(),
+                    staging = %target.display(),
+                    "file mount: hard-linked"
+                );
+            }
+            Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+                if !readonly {
+                    tracing::warn!(
+                        host = %host.display(),
+                        staging = %target.display(),
+                        "file mount: cross-filesystem, falling back to copy \
+                         (guest writes will NOT propagate to host)"
+                    );
+                } else {
+                    tracing::debug!(
+                        host = %host.display(),
+                        staging = %target.display(),
+                        "file mount: cross-filesystem, copying (read-only)"
+                    );
+                }
+                tokio::fs::copy(host, &target).await?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        entries.push(StagedFileMount {
+            mount_index: idx,
+            staging_dir: staging,
+            filename,
+        });
+    }
+
+    Ok(entries)
+}
+
 /// Push a `--mount tag:host_path[:ro]` arg pair.
 fn push_mount_arg(
     args: &mut Vec<OsString>,
@@ -223,17 +341,17 @@ fn push_mount_arg(
     args.push(OsString::from(arg));
 }
 
-/// Append a `tag:guest_path[:ro]` entry to the `MSB_MOUNTS` env var value.
-fn push_mounts_spec(mounts_val: &mut String, guest: &str, readonly: bool) {
-    if !mounts_val.is_empty() {
-        mounts_val.push(';');
+/// Append a `tag:guest_path[:ro]` entry to the `MSB_DIR_MOUNTS` env var value.
+fn push_mounts_spec(dir_mounts_val: &mut String, guest: &str, readonly: bool) {
+    if !dir_mounts_val.is_empty() {
+        dir_mounts_val.push(';');
     }
     let tag = guest_mount_tag(guest);
-    mounts_val.push_str(&tag);
-    mounts_val.push(':');
-    mounts_val.push_str(guest);
+    dir_mounts_val.push_str(&tag);
+    dir_mounts_val.push(':');
+    dir_mounts_val.push_str(guest);
     if readonly {
-        mounts_val.push_str(":ro");
+        dir_mounts_val.push_str(":ro");
     }
 }
 
@@ -261,6 +379,7 @@ fn sandbox_cli_args(
     staging_dir: &Path,
     agent_sock_path: &Path,
     libkrunfw_path: &Path,
+    file_mounts: &[StagedFileMount],
 ) -> Vec<OsString> {
     let mut args = vec![OsString::from("sandbox")];
 
@@ -348,9 +467,18 @@ fn sandbox_cli_args(
 
     // Process mounts: emit --mount args for virtiofs mounts, collect tmpfs and
     // virtiofs guest-side mount specs as env vars for agentd.
+    //
+    // File bind mounts (host path is a regular file) are handled separately
+    // via `file_mounts` — they use isolated staging directories and the
+    // MSB_FILE_MOUNTS env var instead of MSB_DIR_MOUNTS.
+    let file_mount_indices: HashSet<usize> = file_mounts.iter().map(|fm| fm.mount_index).collect();
+
     let mut tmpfs_val = String::new();
-    let mut mounts_val = String::new();
-    for mount in &config.mounts {
+    let mut dir_mounts_val = String::new();
+    for (idx, mount) in config.mounts.iter().enumerate() {
+        if file_mount_indices.contains(&idx) {
+            continue;
+        }
         match mount {
             VolumeMount::Bind {
                 host,
@@ -358,7 +486,7 @@ fn sandbox_cli_args(
                 readonly,
             } => {
                 push_mount_arg(&mut args, guest, &host.display(), *readonly);
-                push_mounts_spec(&mut mounts_val, guest, *readonly);
+                push_mounts_spec(&mut dir_mounts_val, guest, *readonly);
             }
             VolumeMount::Named {
                 name,
@@ -367,7 +495,7 @@ fn sandbox_cli_args(
             } => {
                 let vol_path = config::config().volumes_dir().join(name);
                 push_mount_arg(&mut args, guest, &vol_path.display(), *readonly);
-                push_mounts_spec(&mut mounts_val, guest, *readonly);
+                push_mounts_spec(&mut dir_mounts_val, guest, *readonly);
             }
             VolumeMount::Tmpfs { guest, size_mib } => {
                 if !tmpfs_val.is_empty() {
@@ -381,6 +509,37 @@ fn sandbox_cli_args(
         }
     }
 
+    // File mounts: each staged file gets its own --mount and MSB_FILE_MOUNTS entry.
+    let mut file_mounts_val = String::new();
+    for fm in file_mounts {
+        let (guest, readonly) = match &config.mounts[fm.mount_index] {
+            VolumeMount::Bind {
+                guest, readonly, ..
+            } => (guest.as_str(), *readonly),
+            _ => unreachable!("stage_file_mounts only produces Bind entries"),
+        };
+        let tag = format!("fm_{}", guest_mount_tag(guest));
+
+        let mut mount_arg = format!("{tag}:{}", fm.staging_dir.display());
+        if readonly {
+            mount_arg.push_str(":ro");
+        }
+        args.push(OsString::from("--mount"));
+        args.push(OsString::from(mount_arg));
+
+        if !file_mounts_val.is_empty() {
+            file_mounts_val.push(';');
+        }
+        file_mounts_val.push_str(&tag);
+        file_mounts_val.push(':');
+        file_mounts_val.push_str(&fm.filename);
+        file_mounts_val.push(':');
+        file_mounts_val.push_str(guest);
+        if readonly {
+            file_mounts_val.push_str(":ro");
+        }
+    }
+
     if !tmpfs_val.is_empty() {
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!(
@@ -389,11 +548,19 @@ fn sandbox_cli_args(
         )));
     }
 
-    if !mounts_val.is_empty() {
+    if !dir_mounts_val.is_empty() {
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!(
-            "{}={mounts_val}",
-            microsandbox_protocol::ENV_MOUNTS
+            "{}={dir_mounts_val}",
+            microsandbox_protocol::ENV_DIR_MOUNTS
+        )));
+    }
+
+    if !file_mounts_val.is_empty() {
+        args.push(OsString::from("--env"));
+        args.push(OsString::from(format!(
+            "{}={file_mounts_val}",
+            microsandbox_protocol::ENV_FILE_MOUNTS
         )));
     }
 
@@ -472,6 +639,7 @@ mod tests {
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
+            &[],
         );
 
         assert!(args.iter().any(|arg| arg == "--debug"));
@@ -495,6 +663,7 @@ mod tests {
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
+            &[],
         );
 
         assert!(!args.iter().any(|arg| {
@@ -523,6 +692,7 @@ mod tests {
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
+            &[],
         );
 
         let rendered = args
@@ -554,6 +724,7 @@ mod tests {
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
+            &[],
         );
 
         let rendered = args
@@ -584,6 +755,7 @@ mod tests {
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
+            &[],
         );
 
         let rendered = args
@@ -616,6 +788,7 @@ mod tests {
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
+            &[],
         );
 
         let rendered = args
@@ -648,6 +821,7 @@ mod tests {
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
+            &[],
         );
 
         let rendered = args
@@ -679,6 +853,7 @@ mod tests {
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
+            &[],
         );
 
         let rendered = args
@@ -707,6 +882,7 @@ mod tests {
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
+            &[],
         );
 
         let rendered = args
@@ -737,6 +913,7 @@ mod tests {
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
+            &[],
         );
 
         let rendered = args
@@ -777,6 +954,7 @@ mod tests {
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
+            &[],
         );
 
         let rendered = args
@@ -793,5 +971,141 @@ mod tests {
         // Should not contain bind or overlay args.
         assert!(!rendered.contains(&"--rootfs-path".to_string()));
         assert!(!rendered.contains(&"--rootfs-lower".to_string()));
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_file_mount_uses_staging_dir() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/guest/config.txt", |m| m.bind("/host/config.txt"))
+            .build()
+            .unwrap();
+
+        let file_mounts = vec![super::StagedFileMount {
+            mount_index: 0,
+            staging_dir: "/tmp/sandbox/file-mounts/fm_guest_config.txt".into(),
+            filename: "config.txt".to_string(),
+        }];
+
+        let args = sandbox_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/rootfs-base"),
+            Path::new("/tmp/rw"),
+            Path::new("/tmp/staging"),
+            Path::new("/tmp/agent.sock"),
+            Path::new("/tmp/libkrunfw.dylib"),
+            &file_mounts,
+        );
+
+        let rendered = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        // File mount should use staging dir in --mount, not the original host path.
+        assert!(rendered.windows(2).any(|pair| pair[0] == "--mount"
+            && pair[1] == "fm_guest_config.txt:/tmp/sandbox/file-mounts/fm_guest_config.txt"));
+
+        // MSB_FILE_MOUNTS should contain the file mount spec.
+        assert!(rendered.contains(
+            &"MSB_FILE_MOUNTS=fm_guest_config.txt:config.txt:/guest/config.txt".to_string()
+        ));
+
+        // MSB_DIR_MOUNTS should NOT contain the file mount.
+        assert!(!rendered.iter().any(|a| a.starts_with("MSB_DIR_MOUNTS=")));
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_mixed_file_and_dir_mounts() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.bind("/host/data"))
+            .volume("/guest/file.txt", |m| m.bind("/host/file.txt"))
+            .build()
+            .unwrap();
+
+        let file_mounts = vec![super::StagedFileMount {
+            mount_index: 1,
+            staging_dir: "/tmp/sandbox/file-mounts/fm_guest_file.txt".into(),
+            filename: "file.txt".to_string(),
+        }];
+
+        let args = sandbox_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/rootfs-base"),
+            Path::new("/tmp/rw"),
+            Path::new("/tmp/staging"),
+            Path::new("/tmp/agent.sock"),
+            Path::new("/tmp/libkrunfw.dylib"),
+            &file_mounts,
+        );
+
+        let rendered = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        // Directory mount should be in MSB_DIR_MOUNTS.
+        assert!(rendered.contains(&"MSB_DIR_MOUNTS=data:/data".to_string()));
+
+        // File mount should be in MSB_FILE_MOUNTS.
+        assert!(
+            rendered.contains(
+                &"MSB_FILE_MOUNTS=fm_guest_file.txt:file.txt:/guest/file.txt".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_file_mount_readonly() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/guest/secret.key", |m| {
+                m.bind("/host/secret.key").readonly()
+            })
+            .build()
+            .unwrap();
+
+        let file_mounts = vec![super::StagedFileMount {
+            mount_index: 0,
+            staging_dir: "/tmp/sandbox/file-mounts/fm_guest_secret.key".into(),
+            filename: "secret.key".to_string(),
+        }];
+
+        let args = sandbox_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/rootfs-base"),
+            Path::new("/tmp/rw"),
+            Path::new("/tmp/staging"),
+            Path::new("/tmp/agent.sock"),
+            Path::new("/tmp/libkrunfw.dylib"),
+            &file_mounts,
+        );
+
+        let rendered = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        // --mount should include :ro suffix.
+        assert!(rendered.windows(2).any(|pair| pair[0] == "--mount"
+            && pair[1] == "fm_guest_secret.key:/tmp/sandbox/file-mounts/fm_guest_secret.key:ro"));
+
+        // MSB_FILE_MOUNTS should include :ro suffix.
+        assert!(rendered.contains(
+            &"MSB_FILE_MOUNTS=fm_guest_secret.key:secret.key:/guest/secret.key:ro".to_string()
+        ));
     }
 }

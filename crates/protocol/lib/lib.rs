@@ -18,6 +18,9 @@ pub const RUNTIME_FS_TAG: &str = "msb_runtime";
 /// Guest mount point for the runtime filesystem.
 pub const RUNTIME_MOUNT_POINT: &str = "/.msb";
 
+/// Guest directory for file mount virtiofs shares.
+pub const FILE_MOUNTS_DIR: &str = "/.msb/file-mounts";
+
 /// Guest path for named scripts (added to PATH by agentd).
 pub const SCRIPTS_PATH: &str = "/.msb/scripts";
 
@@ -98,10 +101,33 @@ pub const ENV_NET_IPV6: &str = "MSB_NET_IPV6";
 /// Entries are separated by `;`.
 ///
 /// Examples:
-/// - `MSB_MOUNTS=data:/data` — mount virtiofs tag `data` at `/data`
-/// - `MSB_MOUNTS=data:/data:ro` — mount read-only
-/// - `MSB_MOUNTS=data:/data;cache:/cache:ro` — two mounts
-pub const ENV_MOUNTS: &str = "MSB_MOUNTS";
+/// - `MSB_DIR_MOUNTS=data:/data` — mount virtiofs tag `data` at `/data`
+/// - `MSB_DIR_MOUNTS=data:/data:ro` — mount read-only
+/// - `MSB_DIR_MOUNTS=data:/data;cache:/cache:ro` — two mounts
+pub const ENV_DIR_MOUNTS: &str = "MSB_DIR_MOUNTS";
+
+/// Environment variable carrying virtiofs **file** mount specs for guest init.
+///
+/// Used when the host path is a single file rather than a directory. The SDK
+/// wraps each file in an isolated staging directory (hard-linked to preserve
+/// the same inode) and shares that directory via virtiofs. Agentd mounts the
+/// share at [`FILE_MOUNTS_DIR`]`/<tag>/` and bind-mounts the file to the
+/// guest path.
+///
+/// Format: `tag:filename:guest_path[:ro][;tag:filename:guest_path[:ro];...]`
+///
+/// - `tag` — virtiofs tag name (required, matches the tag used in `--mount`)
+/// - `filename` — name of the file inside the virtiofs share (required)
+/// - `guest_path` — final file path inside the guest (required)
+/// - `ro` — mount read-only (optional suffix)
+///
+/// Entries are separated by `;`.
+///
+/// Examples:
+/// - `MSB_FILE_MOUNTS=fm_config:app.conf:/etc/app.conf`
+/// - `MSB_FILE_MOUNTS=fm_config:app.conf:/etc/app.conf:ro`
+/// - `MSB_FILE_MOUNTS=fm_a:a.sh:/usr/bin/a.sh;fm_b:b.sh:/usr/bin/b.sh`
+pub const ENV_FILE_MOUNTS: &str = "MSB_FILE_MOUNTS";
 
 /// Environment variable carrying the default guest user for agentd execs.
 ///
