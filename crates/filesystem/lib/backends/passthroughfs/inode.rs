@@ -16,6 +16,10 @@
 //! add `O_NOFOLLOW` or the kernel will fail with `ELOOP`. Instead, the pinned
 //! inode is `fstat`'d first and real host symlinks are rejected before reopen.
 
+#[cfg(target_os = "linux")]
+use std::os::fd::{FromRawFd, RawFd};
+#[cfg(target_os = "linux")]
+use std::{collections::HashSet, fs::File};
 use std::{
     ffi::CStr,
     io,
@@ -24,6 +28,8 @@ use std::{
 };
 
 use super::PassthroughFs;
+#[cfg(target_os = "linux")]
+use crate::backends::shared::inode_table::NamespaceAlias;
 use crate::{
     Entry,
     backends::shared::{
@@ -39,11 +45,11 @@ use crate::{
 
 /// Owned-or-borrowed fd for inode operations.
 ///
-/// On Linux, borrows the O_PATH fd from InodeData (no close on drop).
-/// On macOS, may own a temporary fd opened via `/.vol/` (closed on drop).
+/// On Linux, linked inodes reopen from a trusted namespace anchor and detached
+/// inodes dup a retained fd.
+/// On macOS, may own a temporary fd opened via `/.vol/`.
 pub(crate) struct InodeFd {
     fd: i32,
-    #[cfg(target_os = "macos")]
     owned: bool,
 }
 
@@ -55,7 +61,6 @@ impl InodeFd {
 
 impl Drop for InodeFd {
     fn drop(&mut self) {
-        #[cfg(target_os = "macos")]
         if self.owned && self.fd >= 0 {
             unsafe { libc::close(self.fd) };
         }
@@ -110,7 +115,7 @@ compile_error!("unsupported macOS architecture for Linux open-flag translation")
 /// `O_APPEND` (0x400) becomes macOS `O_TRUNC` (0x400).
 #[cfg(target_os = "linux")]
 pub(crate) fn translate_open_flags(flags: i32) -> i32 {
-    flags
+    platform::sanitize_linux_open_flags(flags)
 }
 
 #[cfg(target_os = "macos")]
@@ -142,6 +147,13 @@ pub(crate) fn translate_open_flags(linux_flags_val: i32) -> i32 {
         flags |= libc::O_DIRECTORY;
     }
     flags
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn store_unlinked_fd(data: &InodeData, fd: i32) {
+    let mut retained = data.retained_fd.lock().unwrap();
+    let new_file = unsafe { File::from_raw_fd(fd) };
+    let _ = retained.replace(new_file);
 }
 
 #[cfg(target_os = "macos")]
@@ -211,7 +223,7 @@ pub(crate) fn do_lookup(fs: &PassthroughFs, parent: u64, name: &CStr) -> io::Res
     let parent_fd = get_inode_fd(fs, parent)?;
 
     #[cfg(target_os = "linux")]
-    return do_lookup_linux(fs, parent_fd.raw(), name);
+    return do_lookup_linux(fs, parent, parent_fd.raw(), name);
 
     #[cfg(target_os = "macos")]
     return do_lookup_macos(fs, parent_fd.raw(), name);
@@ -227,9 +239,12 @@ pub(crate) fn do_lookup(fs: &PassthroughFs, parent: u64, name: &CStr) -> io::Res
 /// which atomically blocks `..` traversal, absolute symlinks, and handles concurrent
 /// rename races. Falls back to `openat(O_NOFOLLOW)` on older kernels.
 #[cfg(target_os = "linux")]
-fn do_lookup_linux(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Result<Entry> {
-    use std::os::fd::FromRawFd;
-
+fn do_lookup_linux(
+    fs: &PassthroughFs,
+    parent: u64,
+    parent_fd: i32,
+    name: &CStr,
+) -> io::Result<Entry> {
     // Syscall 1: Open with RESOLVE_BENEATH containment.
     let fd = platform::open_beneath(
         parent_fd,
@@ -262,49 +277,15 @@ fn do_lookup_linux(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
     let st = platform::statx_to_stat64(&stx);
     let mnt_id = stx.stx_mnt_id;
     let alt_key = InodeAltKey::new(st.st_ino, st.st_dev, mnt_id);
+    let alias = NamespaceAlias::new(parent, name.to_bytes());
+    let patched =
+        crate::backends::shared::stat_override::patched_stat(fd, st, fs.cfg.xattr, fs.cfg.strict)?;
 
-    // Fast path: most lookups hit an already-tracked inode and only need a
-    // refcount bump. We still recheck under the write lock below before
-    // inserting to close the concurrent registration race.
-    {
-        let inodes = fs.inodes.read().unwrap();
-        if let Some(data) = inodes.get_alt(&alt_key) {
-            data.refcount.fetch_add(1, Ordering::Acquire);
-            // Close the fd — we already have one for this inode.
-            unsafe { libc::close(fd) };
-            // Syscall 3: getxattr for override stat.
-            let patched = crate::backends::shared::stat_override::patched_stat(
-                inode_raw_fd(data),
-                st,
-                fs.cfg.xattr,
-                fs.cfg.strict,
-            )?;
-            return Ok(Entry {
-                inode: data.inode,
-                generation: 0,
-                attr: patched,
-                attr_flags: 0,
-                attr_timeout: fs.cfg.attr_timeout,
-                entry_timeout: fs.cfg.entry_timeout,
-            });
-        }
-    }
-
-    // New inode candidate — take ownership of the fd while we race-proof registration.
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    // Syscall 3: getxattr for override stat.
-    let patched = crate::backends::shared::stat_override::patched_stat(
-        file.as_raw_fd(),
-        st,
-        fs.cfg.xattr,
-        fs.cfg.strict,
-    )?;
-
-    // Recheck under the write lock so concurrent lookups cannot register two
-    // synthetic inode numbers for the same host identity.
     let mut inodes = fs.inodes.write().unwrap();
-    if let Some(data) = inodes.get_alt(&alt_key) {
+    if let Some(data) = inodes.get_alt(&alt_key).cloned() {
         data.refcount.fetch_add(1, Ordering::Acquire);
+        register_alias_locked(&mut inodes, &data, alias);
+        unsafe { libc::close(fd) };
         return Ok(Entry {
             inode: data.inode,
             generation: 0,
@@ -321,10 +302,16 @@ fn do_lookup_linux(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
         ino: st.st_ino,
         dev: st.st_dev,
         refcount: std::sync::atomic::AtomicU64::new(1),
-        file,
         mnt_id,
+        anchor_parent: std::sync::atomic::AtomicU64::new(0),
+        anchor_name: std::sync::RwLock::new(Vec::new()),
+        aliases: std::sync::RwLock::new(std::collections::BTreeSet::new()),
+        anchor_children: std::sync::atomic::AtomicU64::new(0),
+        retained_fd: std::sync::Mutex::new(None),
     });
-    inodes.insert(inode_num, alt_key, data);
+    inodes.insert(inode_num, alt_key, data.clone());
+    register_alias_locked(&mut inodes, &data, alias);
+    unsafe { libc::close(fd) };
 
     Ok(Entry {
         inode: inode_num,
@@ -478,7 +465,7 @@ pub(crate) fn forget_one_locked(
     inode: u64,
     count: u64,
 ) {
-    if let Some(data) = inodes.get(&inode) {
+    if let Some(data) = inodes.get(&inode).cloned() {
         loop {
             let old = data.refcount.load(Ordering::Relaxed);
             let new = old.saturating_sub(count);
@@ -488,15 +475,17 @@ pub(crate) fn forget_one_locked(
                 .is_ok()
             {
                 if new == 0 {
-                    // Close the unlinked fd if one was preserved.
+                    #[cfg(target_os = "linux")]
+                    maybe_remove_inode_locked(inodes, inode);
+
                     #[cfg(target_os = "macos")]
                     {
                         let ufd = data.unlinked_fd.load(Ordering::Acquire);
                         if ufd >= 0 {
                             unsafe { libc::close(ufd as i32) };
                         }
+                        inodes.remove(&inode);
                     }
-                    inodes.remove(&inode);
                 }
                 break;
             }
@@ -506,8 +495,9 @@ pub(crate) fn forget_one_locked(
 
 /// Get an fd for an inode suitable for `*at()` syscalls.
 ///
-/// On Linux, returns the borrowed O_PATH fd from InodeData (no close on drop).
-/// On macOS, opens a temporary fd via `/.vol/<dev>/<ino>` (closed on drop).
+/// On Linux, linked inodes reopen from the export root using the current
+/// trusted anchor, while detached inodes use the retained fd.
+/// On macOS, opens a temporary fd via `/.vol/<dev>/<ino>`.
 /// Root inode (1) always borrows the stored root fd.
 pub(crate) fn get_inode_fd(fs: &PassthroughFs, inode: u64) -> io::Result<InodeFd> {
     // Root inode uses the stored root fd.
@@ -520,23 +510,20 @@ pub(crate) fn get_inode_fd(fs: &PassthroughFs, inode: u64) -> io::Result<InodeFd
 
         return Ok(InodeFd {
             fd: fs.root_fd.as_raw_fd(),
-            #[cfg(target_os = "macos")]
             owned: false,
         });
     }
 
-    let inodes = fs.inodes.read().unwrap();
-    let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
-
     #[cfg(target_os = "linux")]
     {
-        Ok(InodeFd {
-            fd: data.file.as_raw_fd(),
-        })
+        get_inode_fd_linux(fs, inode)
     }
 
     #[cfg(target_os = "macos")]
     {
+        let inodes = fs.inodes.read().unwrap();
+        let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
+
         // Try unlinked_fd first — /.vol/ path is invalid after unlink.
         let ufd = data.unlinked_fd.load(Ordering::Acquire);
         if ufd >= 0 {
@@ -551,10 +538,346 @@ pub(crate) fn get_inode_fd(fs: &PassthroughFs, inode: u64) -> io::Result<InodeFd
     }
 }
 
-/// Get the raw fd from an InodeData (Linux only).
 #[cfg(target_os = "linux")]
-fn inode_raw_fd(data: &InodeData) -> i32 {
-    data.file.as_raw_fd()
+fn get_inode_fd_linux(fs: &PassthroughFs, inode: u64) -> io::Result<InodeFd> {
+    let inodes = fs.inodes.read().unwrap();
+    let data = inodes.get(&inode).cloned().ok_or_else(platform::ebadf)?;
+    let expected = inode_alt_key(&data);
+
+    if let Some(fd) = dup_retained_fd_linux(&data)? {
+        return Ok(InodeFd { fd, owned: true });
+    }
+
+    let current_anchor = current_anchor_alias(&data);
+    let candidates = candidate_aliases(&data, current_anchor.clone());
+    for alias in candidates {
+        let mut seen = HashSet::new();
+        let components = match build_alias_components_locked(&inodes, &alias, &mut seen) {
+            Ok(components) => components,
+            Err(_) => continue,
+        };
+        let fd = match secure_open_path_linux(fs, &components, libc::O_PATH | libc::O_NOFOLLOW) {
+            Ok(fd) => fd,
+            Err(_) => continue,
+        };
+        if validate_identity_linux(fd, expected).is_ok() {
+            drop(inodes);
+            if current_anchor.as_ref() != Some(&alias) {
+                repair_anchor(fs, inode, &alias);
+            }
+            return Ok(InodeFd { fd, owned: true });
+        }
+        unsafe { libc::close(fd) };
+    }
+
+    Err(platform::enoent())
+}
+
+#[cfg(target_os = "linux")]
+fn inode_alt_key(data: &InodeData) -> InodeAltKey {
+    InodeAltKey::new(data.ino, data.dev, data.mnt_id)
+}
+
+#[cfg(target_os = "linux")]
+fn current_anchor_alias(data: &InodeData) -> Option<NamespaceAlias> {
+    let parent = data.anchor_parent.load(Ordering::Acquire);
+    if parent == 0 {
+        return None;
+    }
+
+    Some(NamespaceAlias {
+        parent,
+        name: data.anchor_name.read().unwrap().clone(),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn candidate_aliases(
+    data: &InodeData,
+    current_anchor: Option<NamespaceAlias>,
+) -> Vec<NamespaceAlias> {
+    let aliases = data.aliases.read().unwrap();
+    let mut result = Vec::with_capacity(aliases.len());
+    if let Some(anchor) = current_anchor.as_ref()
+        && aliases.contains(anchor)
+    {
+        result.push(anchor.clone());
+    }
+    for alias in aliases.iter() {
+        if current_anchor.as_ref() == Some(alias) {
+            continue;
+        }
+        result.push(alias.clone());
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn build_alias_components_locked(
+    inodes: &MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
+    alias: &NamespaceAlias,
+    seen: &mut HashSet<u64>,
+) -> io::Result<Vec<Vec<u8>>> {
+    validate_component(&alias.name)?;
+    let mut components = if alias.parent == 1 {
+        Vec::new()
+    } else {
+        build_anchor_components_locked(inodes, alias.parent, seen)?
+    };
+    components.push(alias.name.clone());
+    Ok(components)
+}
+
+#[cfg(target_os = "linux")]
+fn build_anchor_components_locked(
+    inodes: &MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
+    inode: u64,
+    seen: &mut HashSet<u64>,
+) -> io::Result<Vec<Vec<u8>>> {
+    if inode == 1 {
+        return Ok(Vec::new());
+    }
+    if !seen.insert(inode) {
+        return Err(platform::eio());
+    }
+
+    let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
+    let alias = current_anchor_alias(data).ok_or_else(platform::enoent)?;
+    build_alias_components_locked(inodes, &alias, seen)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_component(component: &[u8]) -> io::Result<()> {
+    if component.is_empty() || component == b"." {
+        return Err(platform::einval());
+    }
+    if component == b".." || component.contains(&b'/') {
+        return Err(platform::eperm());
+    }
+    if component.contains(&0) {
+        return Err(platform::einval());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn secure_open_path_linux(
+    fs: &PassthroughFs,
+    components: &[Vec<u8>],
+    flags: i32,
+) -> io::Result<RawFd> {
+    let root_fd = unsafe { libc::fcntl(fs.root_fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if root_fd < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    if components.is_empty() {
+        return Ok(root_fd);
+    }
+
+    let mut current_fd = root_fd;
+    for (index, component) in components.iter().enumerate() {
+        if let Err(err) = validate_component(component) {
+            unsafe { libc::close(current_fd) };
+            return Err(err);
+        }
+        let name = match std::ffi::CString::new(component.as_slice()) {
+            Ok(name) => name,
+            Err(_) => {
+                unsafe { libc::close(current_fd) };
+                return Err(platform::einval());
+            }
+        };
+        let is_last = index + 1 == components.len();
+        let open_flags = if is_last {
+            flags
+        } else {
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_DIRECTORY
+        };
+        let next_fd = platform::open_beneath(
+            current_fd,
+            name.as_ptr(),
+            open_flags,
+            fs.has_openat2.load(Ordering::Relaxed),
+        );
+        let current_close = current_fd;
+        unsafe { libc::close(current_close) };
+        if next_fd < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
+        }
+        current_fd = next_fd;
+    }
+
+    Ok(current_fd)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_identity_linux(fd: RawFd, expected: InodeAltKey) -> io::Result<()> {
+    let actual = linux_alt_key_from_fd(fd)?;
+    if actual != expected {
+        return Err(platform::enoent());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_alt_key_from_fd(fd: RawFd) -> io::Result<InodeAltKey> {
+    let mut stx: libc::statx = unsafe { std::mem::zeroed() };
+    let ret = unsafe {
+        libc::statx(
+            fd,
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_SYNC_AS_STAT,
+            libc::STATX_BASIC_STATS | libc::STATX_MNT_ID,
+            &mut stx,
+        )
+    };
+    if ret < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+
+    Ok(InodeAltKey::new(
+        stx.stx_ino,
+        platform::statx_to_stat64(&stx).st_dev,
+        stx.stx_mnt_id,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn dup_retained_fd_linux(data: &InodeData) -> io::Result<Option<RawFd>> {
+    let retained = data.retained_fd.lock().unwrap();
+    let Some(file) = retained.as_ref() else {
+        return Ok(None);
+    };
+    let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    Ok(Some(fd))
+}
+
+#[cfg(target_os = "linux")]
+fn repair_anchor(fs: &PassthroughFs, inode: u64, alias: &NamespaceAlias) {
+    let mut inodes = fs.inodes.write().unwrap();
+    let Some(data) = inodes.get(&inode).cloned() else {
+        return;
+    };
+    if !data.aliases.read().unwrap().contains(alias) {
+        return;
+    }
+    set_anchor_locked(&mut inodes, &data, Some(alias));
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn register_alias_locked(
+    inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
+    data: &Arc<InodeData>,
+    alias: NamespaceAlias,
+) {
+    let inserted = data.aliases.write().unwrap().insert(alias.clone());
+    if inserted && data.anchor_parent.load(Ordering::Acquire) == 0 {
+        set_anchor_locked(inodes, data, Some(&alias));
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn remove_alias_locked(
+    inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
+    data: &Arc<InodeData>,
+    alias: &NamespaceAlias,
+) -> bool {
+    let removed = data.aliases.write().unwrap().remove(alias);
+    if !removed {
+        return false;
+    }
+
+    if current_anchor_alias(data).as_ref() == Some(alias) {
+        let replacement = data.aliases.read().unwrap().iter().next().cloned();
+        set_anchor_locked(inodes, data, replacement.as_ref());
+    }
+
+    data.aliases.read().unwrap().is_empty()
+}
+
+#[cfg(target_os = "linux")]
+fn set_anchor_locked(
+    inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
+    data: &Arc<InodeData>,
+    alias: Option<&NamespaceAlias>,
+) {
+    let old_parent = data.anchor_parent.load(Ordering::Acquire);
+    let new_parent = alias.map(|alias| alias.parent).unwrap_or(0);
+    if let Some(alias) = alias {
+        *data.anchor_name.write().unwrap() = alias.name.clone();
+    } else {
+        data.anchor_name.write().unwrap().clear();
+    }
+    data.anchor_parent.store(new_parent, Ordering::Release);
+
+    if old_parent != new_parent {
+        if new_parent != 0
+            && let Some(parent) = inodes.get(&new_parent)
+        {
+            parent.anchor_children.fetch_add(1, Ordering::AcqRel);
+        }
+        if old_parent != 0 {
+            decrement_anchor_children_locked(inodes, old_parent);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn decrement_anchor_children_locked(
+    inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
+    inode: u64,
+) {
+    let Some(data) = inodes.get(&inode).cloned() else {
+        return;
+    };
+
+    loop {
+        let old = data.anchor_children.load(Ordering::Acquire);
+        if old == 0 {
+            break;
+        }
+        if data
+            .anchor_children
+            .compare_exchange(old, old - 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            break;
+        }
+    }
+
+    maybe_remove_inode_locked(inodes, inode);
+}
+
+#[cfg(target_os = "linux")]
+fn maybe_remove_inode_locked(
+    inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
+    inode: u64,
+) {
+    if inode == 1 {
+        return;
+    }
+
+    let Some(data) = inodes.get(&inode).cloned() else {
+        return;
+    };
+    if data.refcount.load(Ordering::Acquire) != 0 {
+        return;
+    }
+    if data.anchor_children.load(Ordering::Acquire) != 0 {
+        return;
+    }
+
+    let anchor_parent = data.anchor_parent.load(Ordering::Acquire);
+    if let Some(removed) = inodes.remove(&inode) {
+        let _ = removed.retained_fd.lock().unwrap().take();
+    }
+
+    if anchor_parent != 0 {
+        decrement_anchor_children_locked(inodes, anchor_parent);
+    }
 }
 
 /// Open a temporary fd via `/.vol/<dev>/<ino>` on macOS.

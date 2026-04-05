@@ -12,10 +12,6 @@
 //! `primary_parent`/`primary_name`, and each ancestor is ensured upper
 //! before proceeding to the next.
 
-#[cfg(target_os = "linux")]
-use std::fs::File;
-#[cfg(target_os = "linux")]
-use std::os::fd::FromRawFd;
 use std::{
     ffi::CStr,
     io,
@@ -27,9 +23,11 @@ use super::{
     OverlayFs, inode, origin,
     types::{NodeState, OverlayNode, ROOT_INODE},
 };
+#[cfg(target_os = "macos")]
+use crate::backends::shared::inode_table::InodeAltKey;
+use crate::backends::shared::platform;
 #[cfg(target_os = "linux")]
 use crate::backends::shared::stat_override;
-use crate::backends::shared::{inode_table::InodeAltKey, platform};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -124,30 +122,11 @@ pub(crate) fn open_upper_parent_fd(fs: &OverlayFs, parent_ino: u64) -> io::Resul
             .ok_or_else(platform::enoent)?
     };
 
-    let state = parent_node.state.read().unwrap();
-    match &*state {
-        NodeState::Root { root_fd } => inode::dup_fd_raw(root_fd.as_raw_fd()),
-        #[cfg(target_os = "linux")]
-        NodeState::Upper { file, .. } => inode::reopen_fd_linux(
-            &fs.proc_self_fd,
-            file.as_raw_fd(),
-            libc::O_RDONLY | libc::O_DIRECTORY,
-        ),
-        #[cfg(target_os = "macos")]
-        NodeState::Upper { ino, dev, .. } => {
-            let path = inode::vol_path(*dev, *ino);
-            let fd = unsafe {
-                libc::open(
-                    path.as_ptr(),
-                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-                )
-            };
-            if fd < 0 {
-                return Err(platform::linux_error(io::Error::last_os_error()));
-            }
-            Ok(fd)
-        }
-        _ => Err(platform::einval()),
+    let fd = inode::get_upper_dir_fd(fs, &parent_node).ok_or_else(platform::einval)?;
+    if fd.is_owned() {
+        Ok(fd.into_raw())
+    } else {
+        inode::dup_fd_raw(fd.raw())
     }
 }
 
@@ -315,15 +294,10 @@ fn copy_up_symlink(
 ) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        // Get the O_PATH fd from node state to determine symlink type.
-        // This is safe because the copy_up_lock is held, preventing state changes.
-        let o_path_fd = {
-            let state = node.state.read().unwrap();
-            match &*state {
-                NodeState::Lower { file, .. } => file.as_raw_fd(),
-                _ => return Err(platform::einval()),
-            }
-        };
+        let o_path_fd = inode::open_node_fd(fs, node.inode, libc::O_PATH | libc::O_NOFOLLOW)?;
+        let _close = scopeguard::guard(o_path_fd, |fd| unsafe {
+            libc::close(fd);
+        });
 
         let st = platform::fstat(o_path_fd)?;
 
@@ -652,11 +626,15 @@ fn try_link_to_existing(
 
     #[cfg(target_os = "linux")]
     {
-        if let NodeState::Upper { file, .. } = &*state {
+        if matches!(&*state, NodeState::Upper { .. }) {
+            let fd = inode::open_node_fd(fs, existing_node.inode, libc::O_PATH | libc::O_NOFOLLOW)?;
+            let _close = scopeguard::guard(fd, |fd| unsafe {
+                libc::close(fd);
+            });
             // linkat via /proc/self/fd/<fd> with AT_EMPTY_PATH.
             let ret = unsafe {
                 libc::linkat(
-                    file.as_raw_fd(),
+                    fd,
                     c"".as_ptr(),
                     upper_parent_fd,
                     name.as_ptr(),
@@ -673,7 +651,7 @@ fn try_link_to_existing(
             }
             // EPERM: AT_EMPTY_PATH requires CAP_DAC_READ_SEARCH. Try /proc path.
             if err.raw_os_error() == Some(libc::EPERM) {
-                let proc_path = format!("/proc/self/fd/{}\0", file.as_raw_fd());
+                let proc_path = format!("/proc/self/fd/{fd}\0");
                 let ret = unsafe {
                     libc::linkat(
                         libc::AT_FDCWD,
@@ -733,7 +711,6 @@ pub(crate) fn transition_to_upper(
 ) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        // Open O_PATH fd to the new upper entry.
         let fd = unsafe {
             libc::openat(
                 upper_parent_fd,
@@ -744,38 +721,23 @@ pub(crate) fn transition_to_upper(
         if fd < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
-        let file = unsafe { File::from_raw_fd(fd) };
+        let _close_fd = scopeguard::guard(fd, |fd| unsafe {
+            libc::close(fd);
+        });
 
         // Write origin xattr if this was a lower-layer node.
         if let Some(ref origin_id) = node.origin {
-            origin::set_origin_xattr(file.as_raw_fd(), origin_id)?;
+            origin::set_origin_xattr(fd, origin_id)?;
         }
 
-        let mut stx: libc::statx = unsafe { std::mem::zeroed() };
-        let ret = unsafe {
-            libc::statx(
-                file.as_raw_fd(),
-                c"".as_ptr(),
-                libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_SYNC_AS_STAT,
-                libc::STATX_BASIC_STATS | libc::STATX_MNT_ID,
-                &mut stx,
-            )
-        };
-        if ret < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
-
-        let alt_key = InodeAltKey::new(
-            stx.stx_ino,
-            stx.stx_dev_major as u64 * 256 + stx.stx_dev_minor as u64,
-            stx.stx_mnt_id,
-        );
+        let alt_key = inode::linux_identity_from_fd(fd)?;
 
         // Update node state.
         {
             let mut state = node.state.write().unwrap();
-            *state = NodeState::Upper { file };
+            *state = NodeState::Upper {};
         }
+        *node.identity.write().unwrap() = Some(alt_key);
 
         // Register alt key.
         {

@@ -30,6 +30,7 @@ use crate::error::{AgentdError, AgentdResult};
 ///
 /// Output reading is handled by a background task that sends events
 /// via the `mpsc` channel provided at spawn time.
+#[derive(Debug)]
 pub struct ExecSession {
     /// The PID of the spawned process.
     pid: i32,
@@ -75,6 +76,11 @@ struct PasswdEntry {
 
 struct GroupEntry {
     gid: libc::gid_t,
+}
+
+struct ExecErrorPipe {
+    read_end: OwnedFd,
+    write_end: OwnedFd,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -156,6 +162,7 @@ impl ExecSession {
         tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
     ) -> AgentdResult<Self> {
         let pty = openpty(None, None)?;
+        let err_pipe = new_exec_error_pipe()?;
 
         // Set initial window size.
         let ws = libc::winsize {
@@ -232,6 +239,7 @@ impl ExecSession {
         if pid == 0 {
             // Child process — only async-signal-safe operations from here.
             drop(pty.master);
+            drop(err_pipe.read_end);
 
             // Create new session.
             if unsafe { libc::setsid() } < 0 {
@@ -298,11 +306,23 @@ impl ExecSession {
             }
 
             // If execvp returns, it failed.
-            unsafe { libc::_exit(127) };
+            write_exec_error_and_exit(err_pipe.write_end.as_raw_fd());
         }
 
         // Parent process.
         drop(pty.slave);
+        drop(err_pipe.write_end);
+
+        if let Some(exec_errno) = read_exec_error(err_pipe.read_end.as_raw_fd())? {
+            let _ = wait_for_exec_failure_child(pid);
+            return Err(AgentdError::ExecSession(format!(
+                "spawn pty cmd={} args={:?} cwd={:?}: {}",
+                req.cmd,
+                req.args,
+                req.cwd,
+                std::io::Error::from_raw_os_error(exec_errno)
+            )));
+        }
 
         // Dup the master fd for the reader task.
         let reader_fd = unsafe { libc::dup(pty.master.as_raw_fd()) };
@@ -366,7 +386,12 @@ impl ExecSession {
             }
         }
 
-        let mut child = cmd.spawn()?;
+        let mut child = cmd.spawn().map_err(|err| {
+            AgentdError::ExecSession(format!(
+                "spawn pipe cmd={} args={:?} cwd={:?}: {}",
+                req.cmd, req.args, req.cwd, err
+            ))
+        })?;
         let pid = child.id().unwrap_or(0) as i32;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
@@ -436,6 +461,52 @@ fn parse_rlimits(req: &ExecRequest) -> Vec<(libc::c_int, libc::rlimit)> {
             ))
         })
         .collect()
+}
+
+fn new_exec_error_pipe() -> AgentdResult<ExecErrorPipe> {
+    let mut fds = [0; 2];
+    let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    Ok(ExecErrorPipe {
+        read_end: unsafe { OwnedFd::from_raw_fd(fds[0]) },
+        write_end: unsafe { OwnedFd::from_raw_fd(fds[1]) },
+    })
+}
+
+fn write_exec_error_and_exit(err_fd: RawFd) -> ! {
+    let errno = unsafe { *libc::__errno_location() };
+    let bytes = errno.to_ne_bytes();
+    let _ = unsafe { libc::write(err_fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
+    unsafe { libc::_exit(127) }
+}
+
+fn read_exec_error(err_fd: RawFd) -> AgentdResult<Option<i32>> {
+    let mut buf = [0u8; std::mem::size_of::<i32>()];
+    let n = unsafe { libc::read(err_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+    if n < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if n == 0 {
+        return Ok(None);
+    }
+    if n as usize != buf.len() {
+        return Err(AgentdError::ExecSession(format!(
+            "short exec error report: expected {} bytes, got {n}",
+            buf.len()
+        )));
+    }
+    Ok(Some(i32::from_ne_bytes(buf)))
+}
+
+fn wait_for_exec_failure_child(pid: i32) -> AgentdResult<()> {
+    let ret = unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
 }
 
 fn resolve_requested_user(req: &ExecRequest) -> AgentdResult<Option<ResolvedUser>> {
@@ -990,5 +1061,32 @@ mod tests {
         };
 
         assert!(default_home_dir(&req, Some(&user)).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_spawn_pipe_error_does_not_include_probe_details() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let req = ExecRequest {
+            cmd: "/definitely/not/a/real/binary".to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        };
+
+        let err = ExecSession::spawn(9, &req, tx).expect_err("spawn should fail");
+        let message = err.to_string();
+
+        assert!(message.contains("spawn pipe"));
+        assert!(!message.contains("symlink_metadata="));
+        assert!(!message.contains("metadata="));
+        assert!(!message.contains("magic="));
+        assert!(!message.contains("path_probe="));
+        assert!(!message.contains("cwd_probe="));
+        assert!(!message.contains("target_probe="));
     }
 }
