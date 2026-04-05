@@ -10,6 +10,8 @@ const LINUX_O_TRUNC: i32 = 0x200;
 const LINUX_O_APPEND: i32 = 0x400;
 const LINUX_O_NONBLOCK: i32 = 0x800;
 const LINUX_O_CLOEXEC: i32 = 0x80000;
+#[cfg(target_os = "linux")]
+const LINUX_FMODE_EXEC: i32 = 0x20;
 
 #[cfg(target_os = "linux")]
 const LINUX_O_NOFOLLOW: i32 = libc::O_NOFOLLOW;
@@ -218,23 +220,18 @@ fn test_translate_all_flags() {
     assert!(result & libc::O_DIRECTORY != 0);
 }
 
-/// Unknown bits (not in the translation table) should be silently dropped,
-/// not passed through as garbage host flags.
+/// Kernel-internal FUSE exec bits must not leak into host open flags.
 #[test]
-fn test_translate_unknown_bits_dropped() {
-    // 0x1000 is not a translated Linux flag (it's Linux O_DSYNC on some arches).
-    let linux_flags: i32 = 0x1000;
-    // On Linux, identity — fine to pass through.
+fn test_translate_kernel_exec_bit_dropped() {
     #[cfg(target_os = "linux")]
     assert_eq!(
-        translate_open_flags(linux_flags),
-        linux_flags,
-        "Linux hosts should preserve Linux guest bits verbatim"
+        translate_open_flags(LINUX_FMODE_EXEC),
+        0,
+        "Linux hosts must strip FMODE_EXEC from guest open requests"
     );
-    // On macOS, should be 0 (only access mode bits, which are 0 = O_RDONLY).
     #[cfg(target_os = "macos")]
     assert_eq!(
-        translate_open_flags(linux_flags),
+        translate_open_flags(0x20),
         0,
         "untranslated Linux bits must not leak through on macOS"
     );

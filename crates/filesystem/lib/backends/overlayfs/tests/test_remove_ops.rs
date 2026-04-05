@@ -158,3 +158,46 @@ fn test_getattr_upper_file_after_unlink() {
     let data = sb.fuse_read(entry.inode, handle, 4096, 0).unwrap();
     assert_eq!(&data[..], b"overlay");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_unlink_upper_hardlink_keeps_live_alias_path() {
+    let sb = OverlayTestSandbox::new();
+    let (entry, handle) = sb.fuse_create_root("original.txt").unwrap();
+    sb.fuse_write(entry.inode, handle, b"overlay", 0).unwrap();
+    sb.fs
+        .link(
+            sb.ctx(),
+            entry.inode,
+            ROOT_INODE,
+            &OverlayTestSandbox::cstr("alias.txt"),
+        )
+        .unwrap();
+    let alias_entry = sb.lookup_root("alias.txt").unwrap();
+    assert_eq!(alias_entry.inode, entry.inode);
+
+    sb.fs
+        .unlink(
+            sb.ctx(),
+            ROOT_INODE,
+            &OverlayTestSandbox::cstr("original.txt"),
+        )
+        .unwrap();
+
+    let (st, _) = sb.fs.getattr(sb.ctx(), entry.inode, None).unwrap();
+    assert_eq!(st.st_size, 7);
+
+    let alias = sb.lookup_root("alias.txt").unwrap();
+    let alias_handle = sb.fuse_open(alias.inode, libc::O_RDONLY as u32).unwrap();
+    let data = sb.fuse_read(alias.inode, alias_handle, 4096, 0).unwrap();
+    assert_eq!(&data[..], b"overlay");
+
+    let node = {
+        let nodes = sb.fs.nodes.read().unwrap();
+        nodes.get(&entry.inode).cloned().unwrap()
+    };
+    assert!(
+        node.detached_fd.lock().unwrap().is_none(),
+        "an upper inode with another visible hardlink alias should not fall back to detached-fd mode"
+    );
+}

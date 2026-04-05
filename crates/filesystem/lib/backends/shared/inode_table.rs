@@ -6,6 +6,12 @@
 #[cfg(target_os = "macos")]
 use std::sync::atomic::AtomicI64;
 use std::{borrow::Borrow, collections::BTreeMap, sync::atomic::AtomicU64};
+#[cfg(target_os = "linux")]
+use std::{
+    collections::BTreeSet,
+    fs::File,
+    sync::{Mutex, RwLock},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -41,6 +47,14 @@ pub(crate) struct InodeAltKey {
     pub mnt_id: u64,
 }
 
+/// One namespace alias for a tracked passthrough inode.
+#[cfg(target_os = "linux")]
+#[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Debug)]
+pub(crate) struct NamespaceAlias {
+    pub parent: u64,
+    pub name: Vec<u8>,
+}
+
 /// Per-inode data tracked by the filesystem backend.
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) struct InodeData {
@@ -56,13 +70,29 @@ pub(crate) struct InodeData {
     /// FUSE lookup reference count. When this reaches 0, the inode is removed.
     pub refcount: AtomicU64,
 
-    /// O_PATH file descriptor pinning this inode on the host filesystem.
-    #[cfg(target_os = "linux")]
-    pub file: std::fs::File,
-
     /// Mount ID from statx (Linux only, for cross-mount deduplication).
     #[cfg(target_os = "linux")]
     pub mnt_id: u64,
+
+    /// Current anchor parent inode for secure reopen-from-root.
+    #[cfg(target_os = "linux")]
+    pub anchor_parent: AtomicU64,
+
+    /// Current anchor name under `anchor_parent`.
+    #[cfg(target_os = "linux")]
+    pub anchor_name: RwLock<Vec<u8>>,
+
+    /// All known live aliases for this inode within the exported namespace.
+    #[cfg(target_os = "linux")]
+    pub aliases: RwLock<BTreeSet<NamespaceAlias>>,
+
+    /// Number of descendant anchors that currently depend on this inode.
+    #[cfg(target_os = "linux")]
+    pub anchor_children: AtomicU64,
+
+    /// Retained fd for detached objects that lost their last visible alias.
+    #[cfg(target_os = "linux")]
+    pub retained_fd: Mutex<Option<File>>,
 
     /// Fd grabbed before unlink, keeping the file accessible after deletion.
     ///
@@ -167,5 +197,15 @@ impl InodeAltKey {
     #[cfg(target_os = "macos")]
     pub fn new(ino: u64, dev: u64) -> Self {
         Self { ino, dev }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl NamespaceAlias {
+    pub fn new(parent: u64, name: &[u8]) -> Self {
+        Self {
+            parent,
+            name: name.to_vec(),
+        }
     }
 }

@@ -280,17 +280,17 @@ impl PassthroughFs {
             dev: platform::stat_dev(&st),
             refcount: AtomicU64::new(2), // libfuse convention: root gets refcount 2
             #[cfg(target_os = "linux")]
-            file: {
-                use std::os::fd::FromRawFd;
-                // Dup the root fd so InodeData owns its own copy.
-                let fd = unsafe { libc::fcntl(root_fd, libc::F_DUPFD_CLOEXEC, 0) };
-                if fd < 0 {
-                    return Err(platform::linux_error(io::Error::last_os_error()));
-                }
-                unsafe { std::fs::File::from_raw_fd(fd) }
-            },
-            #[cfg(target_os = "linux")]
             mnt_id,
+            #[cfg(target_os = "linux")]
+            anchor_parent: AtomicU64::new(0),
+            #[cfg(target_os = "linux")]
+            anchor_name: RwLock::new(Vec::new()),
+            #[cfg(target_os = "linux")]
+            aliases: RwLock::new(std::collections::BTreeSet::new()),
+            #[cfg(target_os = "linux")]
+            anchor_children: AtomicU64::new(0),
+            #[cfg(target_os = "linux")]
+            retained_fd: Mutex::new(None),
             #[cfg(target_os = "macos")]
             unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
         });
@@ -382,10 +382,8 @@ impl DynFileSystem for PassthroughFs {
         if capable.contains(FsOptions::HANDLE_KILLPRIV_V2) {
             opts |= FsOptions::HANDLE_KILLPRIV_V2;
         }
-        // READDIRPLUS_AUTO: let kernel decide when to use readdirplus vs plain readdir.
-        // readdirplus returns attrs with entries, saving per-entry getattr calls.
         if capable.contains(FsOptions::DO_READDIRPLUS) {
-            opts |= FsOptions::DO_READDIRPLUS | FsOptions::READDIRPLUS_AUTO;
+            opts |= FsOptions::DO_READDIRPLUS;
         }
 
         // Enable writeback cache if requested and supported.

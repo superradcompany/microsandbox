@@ -22,9 +22,6 @@ use std::{
     sync::{Arc, RwLock, atomic::Ordering},
 };
 
-#[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
-
 use super::{OverlayFs, copy_up, inode, types::FileHandle, whiteout};
 use crate::{
     Context, Entry, Extensions, OpenOptions,
@@ -384,8 +381,12 @@ pub(crate) fn do_link(
 
     #[cfg(target_os = "linux")]
     {
-        if let super::types::NodeState::Upper { file, .. } = &*state {
-            let path = format!("/proc/self/fd/{}\0", file.as_raw_fd());
+        if matches!(&*state, super::types::NodeState::Upper { .. }) {
+            let fd = inode::open_node_fd(fs, ino, libc::O_PATH | libc::O_NOFOLLOW)?;
+            let _close = scopeguard::guard(fd, |fd| unsafe {
+                libc::close(fd);
+            });
+            let path = format!("/proc/self/fd/{fd}\0");
             let ret = unsafe {
                 libc::linkat(
                     libc::AT_FDCWD,
