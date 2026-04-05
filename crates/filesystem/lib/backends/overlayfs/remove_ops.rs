@@ -1217,7 +1217,6 @@ fn update_dentry_cache(
         if !removed.is_empty() {
             inode::cleanup_dedup_maps_batch(fs, &removed);
         }
-        return;
     }
 
     #[cfg(target_os = "macos")]
