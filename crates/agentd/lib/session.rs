@@ -510,20 +510,12 @@ fn wait_for_exec_failure_child(pid: i32) -> AgentdResult<()> {
 }
 
 fn resolve_requested_user(req: &ExecRequest) -> AgentdResult<Option<ResolvedUser>> {
-    let requested = req
-        .user
+    req.user
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            std::env::var(microsandbox_protocol::ENV_USER)
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        });
-
-    requested.as_deref().map(resolve_user_spec).transpose()
+        .map(resolve_user_spec)
+        .transpose()
 }
 
 fn resolve_user_spec(spec: &str) -> AgentdResult<ResolvedUser> {
@@ -986,32 +978,6 @@ mod tests {
         let resolved = resolve_user_spec(&format!("{uid}:{gid}")).expect("resolve numeric user");
         assert_eq!(resolved.uid, uid);
         assert_eq!(resolved.gid, gid);
-    }
-
-    #[test]
-    fn test_request_user_overrides_env_default() {
-        unsafe {
-            std::env::set_var(microsandbox_protocol::ENV_USER, "0:0");
-        }
-
-        let req = ExecRequest {
-            cmd: "/bin/true".to_string(),
-            args: Vec::new(),
-            env: Vec::new(),
-            cwd: None,
-            user: Some("1:1".to_string()),
-            tty: false,
-            rows: 24,
-            cols: 80,
-            rlimits: Vec::new(),
-        };
-
-        let resolved = resolve_requested_user(&req).expect("resolve requested user");
-        assert_eq!(resolved.unwrap().uid, 1);
-
-        unsafe {
-            std::env::remove_var(microsandbox_protocol::ENV_USER);
-        }
     }
 
     #[test]
