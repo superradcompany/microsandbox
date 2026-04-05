@@ -112,7 +112,7 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
     }
 
     let exec_opts = ExecOpts::parse(&args)?;
-    let interactive = args.tty && std::io::stdin().is_terminal();
+    let interactive = std::io::stdin().is_terminal();
 
     let result: anyhow::Result<i32> = async {
         let (cmd, cmd_args) = resolve_command(sandbox.config(), args.command, interactive)?;
@@ -167,7 +167,7 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
     }
 
     let exec_opts = ExecOpts::parse(&args)?;
-    let interactive = args.tty && std::io::stdin().is_terminal();
+    let interactive = std::io::stdin().is_terminal();
 
     let (cmd, cmd_args) = resolve_command(sandbox.config(), args.command, interactive)?;
     let (cmd, cmd_args) = match (cmd, cmd_args) {
@@ -241,22 +241,34 @@ async fn exec_in_sandbox(
     if interactive {
         let rlimits = opts.rlimits.clone();
         let detach_keys = opts.detach_keys.clone();
+        let timeout = opts.timeout;
         let has_opts = !rlimits.is_empty() || detach_keys.is_some();
-        if has_opts {
-            Ok(sandbox
-                .attach_with(cmd, |a| {
-                    let mut a = a.args(cmd_args);
-                    for (resource, soft, hard) in rlimits {
-                        a = a.rlimit_range(resource, soft, hard);
-                    }
-                    if let Some(keys) = detach_keys {
-                        a = a.detach_keys(keys);
-                    }
-                    a
-                })
-                .await?)
-        } else {
-            Ok(sandbox.attach(cmd, cmd_args).await?)
+
+        let attach_fut = async {
+            if has_opts {
+                Ok(sandbox
+                    .attach_with(cmd, |a| {
+                        let mut a = a.args(cmd_args);
+                        for (resource, soft, hard) in rlimits {
+                            a = a.rlimit_range(resource, soft, hard);
+                        }
+                        if let Some(keys) = detach_keys {
+                            a = a.detach_keys(keys);
+                        }
+                        a
+                    })
+                    .await?)
+            } else {
+                Ok(sandbox.attach(cmd, cmd_args).await?)
+            }
+        };
+
+        match timeout {
+            Some(duration) => match tokio::time::timeout(duration, attach_fut).await {
+                Ok(result) => result,
+                Err(_) => anyhow::bail!("command timed out after {duration:?}"),
+            },
+            None => attach_fut.await,
         }
     } else {
         let rlimits = opts.rlimits.clone();
