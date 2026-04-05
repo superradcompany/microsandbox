@@ -30,6 +30,7 @@ use crate::error::{AgentdError, AgentdResult};
 ///
 /// Output reading is handled by a background task that sends events
 /// via the `mpsc` channel provided at spawn time.
+#[derive(Debug)]
 pub struct ExecSession {
     /// The PID of the spawned process.
     pid: i32,
