@@ -105,7 +105,7 @@ compile_error!("unsupported macOS architecture for Linux open-flag translation")
 /// Translate Linux guest open flags to host open flags.
 #[cfg(target_os = "linux")]
 pub(crate) fn translate_open_flags(flags: i32) -> i32 {
-    flags
+    platform::sanitize_linux_open_flags(flags)
 }
 
 #[cfg(target_os = "macos")]
@@ -170,12 +170,18 @@ pub(crate) fn register_root_inode(fs: &OverlayFs) -> io::Result<()> {
         kind: platform::MODE_DIR,
         lookup_refs: std::sync::atomic::AtomicU64::new(2), // libfuse convention
         state: RwLock::new(NodeState::Root { root_fd: root_file }),
+        #[cfg(target_os = "linux")]
+        identity: RwLock::new(None),
         opaque: std::sync::atomic::AtomicBool::new(false),
         copy_up_lock: Mutex::new(()),
+        #[cfg(target_os = "linux")]
+        detached_fd: Mutex::new(None),
         origin: None,
         redirect: RwLock::new(None),
         primary_parent: std::sync::atomic::AtomicU64::new(0),
         primary_name: RwLock::new(root_name),
+        #[cfg(target_os = "linux")]
+        primary_children: std::sync::atomic::AtomicU64::new(0),
         dir_record_cache: RwLock::new(root_dir_record_cache),
     });
 
@@ -449,43 +455,32 @@ fn hydrate_upper_entry(fs: &OverlayFs, parent_ino: u64, name: &CStr, fd: RawFd) 
         // New entry — allocate inode.
         let inode = fs.next_inode.fetch_add(1, Ordering::Relaxed);
 
-        // Open an O_PATH fd for the node state.
-        let path_fd = unsafe {
-            libc::openat(
-                fd,
-                c"".as_ptr(),
-                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        // If O_PATH fails, try to dup the fd.
-        let file = if path_fd >= 0 {
-            unsafe { File::from_raw_fd(path_fd) }
-        } else {
-            let dup_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
-            if dup_fd < 0 {
-                return Err(platform::linux_error(io::Error::last_os_error()));
-            }
-            unsafe { File::from_raw_fd(dup_fd) }
-        };
-
         let kind = (stx.stx_mode as u32) & platform::MODE_TYPE_MASK;
 
         let node = Arc::new(OverlayNode {
             inode,
             kind,
             lookup_refs: std::sync::atomic::AtomicU64::new(1),
-            state: RwLock::new(NodeState::Upper { file }),
+            state: RwLock::new(NodeState::Upper {}),
+            identity: RwLock::new(Some(alt_key)),
             opaque: std::sync::atomic::AtomicBool::new(false),
             copy_up_lock: Mutex::new(()),
+            detached_fd: Mutex::new(None),
             origin: None,
             redirect: RwLock::new(None),
             primary_parent: std::sync::atomic::AtomicU64::new(parent_ino),
             primary_name: RwLock::new(name_id),
+            #[cfg(target_os = "linux")]
+            primary_children: std::sync::atomic::AtomicU64::new(0),
             dir_record_cache: RwLock::new(None),
         });
 
         // Register.
-        fs.nodes.write().unwrap().insert(inode, node);
+        {
+            let mut nodes = fs.nodes.write().unwrap();
+            nodes.insert(inode, node);
+            increment_primary_child_locked(&nodes, parent_ino);
+        }
         fs.upper_alt_keys.write().unwrap().insert(alt_key, inode);
         fs.dentries
             .write()
@@ -527,16 +522,27 @@ fn hydrate_upper_entry(fs: &OverlayFs, parent_ino: u64, name: &CStr, fd: RawFd) 
                 dev: platform::stat_dev(&st),
                 unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
             }),
+            #[cfg(target_os = "linux")]
+            identity: RwLock::new(None),
             opaque: std::sync::atomic::AtomicBool::new(false),
             copy_up_lock: Mutex::new(()),
+            #[cfg(target_os = "linux")]
+            detached_fd: Mutex::new(None),
             origin: None,
             redirect: RwLock::new(None),
             primary_parent: std::sync::atomic::AtomicU64::new(parent_ino),
             primary_name: RwLock::new(name_id),
+            #[cfg(target_os = "linux")]
+            primary_children: std::sync::atomic::AtomicU64::new(0),
             dir_record_cache: RwLock::new(None),
         });
 
-        fs.nodes.write().unwrap().insert(inode, node);
+        {
+            let mut nodes = fs.nodes.write().unwrap();
+            nodes.insert(inode, node);
+            #[cfg(target_os = "linux")]
+            increment_primary_child_locked(&nodes, parent_ino);
+        }
         fs.upper_alt_keys.write().unwrap().insert(alt_key, inode);
         fs.dentries
             .write()
@@ -774,12 +780,7 @@ fn resolve_upper(fs: &OverlayFs, parent: u64, name: &CStr, fd: RawFd) -> io::Res
     let inode = fs.next_inode.fetch_add(1, Ordering::Relaxed);
 
     #[cfg(target_os = "linux")]
-    let state = {
-        // Take ownership of the fd (defuse the close guard).
-        let owned_fd = scopeguard::ScopeGuard::into_inner(_close_guard);
-        let file = unsafe { File::from_raw_fd(owned_fd) };
-        NodeState::Upper { file }
-    };
+    let state = { NodeState::Upper {} };
 
     #[cfg(target_os = "macos")]
     let state = {
@@ -799,12 +800,18 @@ fn resolve_upper(fs: &OverlayFs, parent: u64, name: &CStr, fd: RawFd) -> io::Res
         kind,
         lookup_refs: std::sync::atomic::AtomicU64::new(1),
         state: RwLock::new(state),
+        #[cfg(target_os = "linux")]
+        identity: RwLock::new(Some(alt_key)),
         opaque: std::sync::atomic::AtomicBool::new(false),
         copy_up_lock: Mutex::new(()),
+        #[cfg(target_os = "linux")]
+        detached_fd: Mutex::new(None),
         origin: None,
         redirect: RwLock::new(None),
         primary_parent: std::sync::atomic::AtomicU64::new(parent),
         primary_name: RwLock::new(name_id),
+        #[cfg(target_os = "linux")]
+        primary_children: std::sync::atomic::AtomicU64::new(0),
         dir_record_cache: RwLock::new(None),
     });
 
@@ -830,6 +837,7 @@ fn resolve_upper(fs: &OverlayFs, parent: u64, name: &CStr, fd: RawFd) -> io::Res
     {
         let mut nodes = fs.nodes.write().unwrap();
         nodes.insert(inode, node);
+        increment_primary_child_locked(&nodes, parent);
     }
     {
         let mut upper_alt = fs.upper_alt_keys.write().unwrap();
@@ -930,26 +938,33 @@ fn resolve_lower(
 
     #[cfg(target_os = "linux")]
     let state = {
-        // Reuse the fd opened above — take ownership from the scopeguard.
-        let fd = scopeguard::ScopeGuard::into_inner(_close);
-        let file = unsafe { File::from_raw_fd(fd) };
-        let mut stx: libc::statx = unsafe { std::mem::zeroed() };
-        let ret = unsafe {
-            libc::statx(
-                file.as_raw_fd(),
-                c"".as_ptr(),
-                libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_SYNC_AS_STAT,
-                libc::STATX_BASIC_STATS | libc::STATX_MNT_ID,
-                &mut stx,
+        let identity = {
+            let fd = lower_fd;
+            let mut stx: libc::statx = unsafe { std::mem::zeroed() };
+            let ret = unsafe {
+                libc::statx(
+                    fd,
+                    c"".as_ptr(),
+                    libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_SYNC_AS_STAT,
+                    libc::STATX_BASIC_STATS | libc::STATX_MNT_ID,
+                    &mut stx,
+                )
+            };
+            if ret < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
+            InodeAltKey::new(
+                stx.stx_ino,
+                stx.stx_dev_major as u64 * 256 + stx.stx_dev_minor as u64,
+                stx.stx_mnt_id,
             )
         };
-        if ret < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
-        NodeState::Lower {
+        let fd = scopeguard::ScopeGuard::into_inner(_close);
+        unsafe { libc::close(fd) };
+        let state = NodeState::Lower {
             layer_idx: lower_layer.index,
-            file,
-        }
+        };
+        (state, identity)
     };
 
     #[cfg(target_os = "macos")]
@@ -965,13 +980,22 @@ fn resolve_lower(
         inode,
         kind,
         lookup_refs: std::sync::atomic::AtomicU64::new(1),
+        #[cfg(target_os = "linux")]
+        state: RwLock::new(state.0),
+        #[cfg(target_os = "macos")]
         state: RwLock::new(state),
+        #[cfg(target_os = "linux")]
+        identity: RwLock::new(Some(state.1)),
         opaque: std::sync::atomic::AtomicBool::new(false),
         copy_up_lock: Mutex::new(()),
+        #[cfg(target_os = "linux")]
+        detached_fd: Mutex::new(None),
         origin: Some(origin_id),
         redirect: RwLock::new(None),
         primary_parent: std::sync::atomic::AtomicU64::new(parent),
         primary_name: RwLock::new(name_id),
+        #[cfg(target_os = "linux")]
+        primary_children: std::sync::atomic::AtomicU64::new(0),
         dir_record_cache: RwLock::new(None),
     });
 
@@ -989,6 +1013,7 @@ fn resolve_lower(
     {
         let mut nodes = fs.nodes.write().unwrap();
         nodes.insert(inode, node);
+        increment_primary_child_locked(&nodes, parent);
     }
     {
         let mut origin_keys = fs.lower_origin_keys.write().unwrap();
@@ -1016,23 +1041,23 @@ pub(crate) fn forget_one(fs: &OverlayFs, inode: u64, count: u64) {
 
     // Clean up dedup maps after releasing nodes/dentries locks to avoid
     // lock ordering inversions (resolve_upper acquires upper_alt_keys → nodes).
-    if let Some(origin) = removed {
-        cleanup_dedup_maps(fs, inode, origin);
+    if !removed.is_empty() {
+        cleanup_dedup_maps_batch(fs, &removed);
     }
 }
 
 /// Inner forget implementation for use under existing locks (batch_forget).
 ///
-/// Returns `Some(origin)` if the inode was removed (for dedup map cleanup),
-/// `None` if the inode was not removed.
+/// Returns all removed inodes (including any now-unreachable ancestors) so the
+/// caller can clean up dedup maps after releasing the node-table locks.
 pub(crate) fn forget_one_locked(
     nodes: &mut std::collections::BTreeMap<u64, Arc<OverlayNode>>,
     dentries: &mut std::collections::BTreeMap<(u64, NameId), Dentry>,
     inode: u64,
     count: u64,
-) -> Option<Option<LowerOriginId>> {
+) -> Vec<(u64, Option<LowerOriginId>)> {
     if inode == init_binary::INIT_INODE {
-        return None;
+        return Vec::new();
     }
 
     let should_remove = if let Some(node) = nodes.get(&inode) {
@@ -1052,46 +1077,12 @@ pub(crate) fn forget_one_locked(
     };
 
     if should_remove {
-        let removed = nodes.remove(&inode)?;
-        let origin = removed.origin;
-        let primary_parent = removed.primary_parent.load(Ordering::Acquire);
-        let primary_name = *removed.primary_name.read().unwrap();
-        close_node_resources(&removed);
-
-        // Remove primary dentry in O(1).
-        dentries.remove(&(primary_parent, primary_name));
-
-        // If this node had hardlink aliases, scan for any remaining dentries.
-        if origin.is_some() {
-            dentries.retain(|_, d| d.node != inode);
-        }
-
-        Some(origin)
-    } else {
-        None
-    }
-}
-
-/// Clean up dedup maps after an inode is removed.
-///
-/// Must be called AFTER releasing nodes/dentries write locks to avoid
-/// lock ordering deadlocks.
-fn cleanup_dedup_maps(fs: &OverlayFs, inode: u64, origin: Option<LowerOriginId>) {
-    // Always clean lower_origin_keys (populated for lower-layer hardlinks even in read-only mode).
-    // Only clean upper_alt_keys and origin_index in writable mode.
-    if !fs.cfg.read_only {
-        fs.upper_alt_keys
-            .write()
-            .unwrap()
-            .retain(|_, &mut v| v != inode);
+        let mut removed = Vec::new();
+        maybe_remove_node_locked(nodes, dentries, inode, &mut removed);
+        return removed;
     }
 
-    if let Some(origin_id) = origin {
-        fs.lower_origin_keys.write().unwrap().remove(&origin_id);
-        if !fs.cfg.read_only {
-            fs.origin_index.write().unwrap().remove(&origin_id);
-        }
-    }
+    Vec::new()
 }
 
 /// Batch-clean dedup maps after multiple inodes are removed.
@@ -1124,6 +1115,61 @@ pub(crate) fn cleanup_dedup_maps_batch(fs: &OverlayFs, removed: &[(u64, Option<L
     }
 }
 
+#[cfg(target_os = "linux")]
+fn maybe_remove_node_locked(
+    nodes: &mut std::collections::BTreeMap<u64, Arc<OverlayNode>>,
+    dentries: &mut std::collections::BTreeMap<(u64, NameId), Dentry>,
+    inode: u64,
+    removed: &mut Vec<(u64, Option<LowerOriginId>)>,
+) {
+    let mut current = Some(inode);
+
+    while let Some(next_inode) = current {
+        if next_inode == ROOT_INODE {
+            break;
+        }
+
+        let Some(node) = nodes.get(&next_inode).cloned() else {
+            break;
+        };
+        if node.lookup_refs.load(Ordering::Acquire) != 0 {
+            break;
+        }
+        if node.primary_children.load(Ordering::Acquire) != 0 {
+            break;
+        }
+
+        let parent = node.primary_parent.load(Ordering::Acquire);
+        let origin = node.origin;
+        close_node_resources(&node);
+        nodes.remove(&next_inode);
+        dentries.retain(|_, dentry| dentry.node != next_inode);
+        removed.push((next_inode, origin));
+
+        if parent <= ROOT_INODE {
+            break;
+        }
+
+        decrement_primary_child_count(nodes, parent);
+        current = Some(parent);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn maybe_remove_node_locked(
+    nodes: &mut std::collections::BTreeMap<u64, Arc<OverlayNode>>,
+    dentries: &mut std::collections::BTreeMap<(u64, NameId), Dentry>,
+    inode: u64,
+    removed: &mut Vec<(u64, Option<LowerOriginId>)>,
+) {
+    if let Some(node) = nodes.remove(&inode) {
+        let origin = node.origin;
+        close_node_resources(&node);
+        dentries.retain(|_, dentry| dentry.node != inode);
+        removed.push((inode, origin));
+    }
+}
+
 /// Get the stat for an inode, applying xattr override.
 pub(crate) fn stat_node(fs: &OverlayFs, inode: u64) -> io::Result<stat64> {
     if inode == init_binary::INIT_INODE {
@@ -1142,12 +1188,20 @@ pub(crate) fn stat_node(fs: &OverlayFs, inode: u64) -> io::Result<stat64> {
             stat_override::patched_stat(root_fd.as_raw_fd(), st, true, fs.cfg.strict)
         }
         #[cfg(target_os = "linux")]
-        NodeState::Lower { file, .. } | NodeState::Upper { file, .. } => {
-            // On Linux, fstat works on O_PATH fds — no need to reopen.
-            // The fd is borrowed from the File, so we must NOT close it.
-            let fd = file.as_raw_fd();
+        NodeState::Lower { .. } => {
+            let fd = open_lower_node_linux(fs, &node, libc::O_PATH | libc::O_NOFOLLOW)?;
             let st = platform::fstat(fd)?;
-            stat_override::patched_stat(fd, st, true, fs.cfg.strict)
+            let result = stat_override::patched_stat(fd, st, true, fs.cfg.strict);
+            unsafe { libc::close(fd) };
+            result
+        }
+        #[cfg(target_os = "linux")]
+        NodeState::Upper { .. } => {
+            let fd = open_upper_node_linux(fs, &node, libc::O_PATH | libc::O_NOFOLLOW)?;
+            let st = platform::fstat(fd)?;
+            let result = stat_override::patched_stat(fd, st, true, fs.cfg.strict);
+            unsafe { libc::close(fd) };
+            result
         }
         #[cfg(target_os = "macos")]
         NodeState::Lower { ino, dev, .. } => {
@@ -1201,9 +1255,9 @@ pub(crate) fn open_node_fd(fs: &OverlayFs, inode: u64, flags: i32) -> io::Result
             Ok(fd)
         }
         #[cfg(target_os = "linux")]
-        NodeState::Lower { file, .. } | NodeState::Upper { file, .. } => {
-            reopen_fd_linux(&fs.proc_self_fd, file.as_raw_fd(), flags)
-        }
+        NodeState::Lower { .. } => open_lower_node_linux(fs, &node, flags),
+        #[cfg(target_os = "linux")]
+        NodeState::Upper { .. } => open_upper_node_linux(fs, &node, flags),
         #[cfg(target_os = "macos")]
         NodeState::Lower { ino, dev, .. } => {
             let path = vol_path(*dev, *ino);
@@ -1264,6 +1318,213 @@ fn make_entry(
     })
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_identity_from_fd(fd: RawFd) -> io::Result<InodeAltKey> {
+    let mut stx: libc::statx = unsafe { std::mem::zeroed() };
+    let ret = unsafe {
+        libc::statx(
+            fd,
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_SYNC_AS_STAT,
+            libc::STATX_BASIC_STATS | libc::STATX_MNT_ID,
+            &mut stx,
+        )
+    };
+    if ret < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+
+    Ok(InodeAltKey::new(
+        stx.stx_ino,
+        stx.stx_dev_major as u64 * 256 + stx.stx_dev_minor as u64,
+        stx.stx_mnt_id,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn node_identity(node: &OverlayNode) -> io::Result<InodeAltKey> {
+    node.identity
+        .read()
+        .unwrap()
+        .as_ref()
+        .copied()
+        .ok_or_else(platform::enoent)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_reopen_component(component: &[u8]) -> io::Result<()> {
+    if component.is_empty() || component == b"." {
+        return Err(platform::einval());
+    }
+    if component == b".." || component.contains(&b'/') {
+        return Err(platform::eperm());
+    }
+    if component.contains(&0) {
+        return Err(platform::einval());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn secure_open_path_linux(
+    root_fd: RawFd,
+    components: &[Vec<u8>],
+    flags: i32,
+    has_openat2: bool,
+) -> io::Result<RawFd> {
+    if components.is_empty() {
+        return dup_fd_raw(root_fd);
+    }
+
+    let mut current_fd = root_fd;
+    let mut owned = false;
+
+    for (index, component) in components.iter().enumerate() {
+        validate_reopen_component(component)?;
+        let name = CString::new(component.as_slice()).map_err(|_| platform::einval())?;
+        let child_flags = if index + 1 == components.len() {
+            flags
+        } else {
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW
+        };
+
+        let next_fd = platform::open_beneath(current_fd, name.as_ptr(), child_flags, has_openat2);
+        if owned {
+            unsafe { libc::close(current_fd) };
+        }
+        if next_fd < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
+        }
+
+        current_fd = next_fd;
+        owned = true;
+    }
+
+    Ok(current_fd)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_identity_linux(fd: RawFd, expected: InodeAltKey) -> io::Result<()> {
+    if linux_identity_from_fd(fd)? != expected {
+        return Err(platform::enoent());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn reopen_detached_fd_linux(
+    fs: &OverlayFs,
+    node: &OverlayNode,
+    flags: i32,
+) -> io::Result<Option<RawFd>> {
+    let detached = node.detached_fd.lock().unwrap();
+    let Some(file) = detached.as_ref() else {
+        return Ok(None);
+    };
+    reopen_fd_linux(&fs.proc_self_fd, file.as_raw_fd(), flags).map(Some)
+}
+
+#[cfg(target_os = "linux")]
+fn lower_node_path_components(node: &OverlayNode, fs: &OverlayFs) -> io::Result<Vec<Vec<u8>>> {
+    let redirect = node.redirect.read().unwrap();
+    if let Some(ref redir) = *redirect {
+        return Ok(redir.lower_path.clone());
+    }
+    drop(redirect);
+
+    walk_parent_chain(fs, node)
+}
+
+#[cfg(target_os = "linux")]
+fn visible_path_components(node: &OverlayNode, fs: &OverlayFs) -> io::Result<Vec<Vec<u8>>> {
+    {
+        let state = node.state.read().unwrap();
+        if matches!(&*state, NodeState::Root { .. }) {
+            return Ok(Vec::new());
+        }
+    }
+
+    let mut components = Vec::new();
+    let mut current_ino = node.inode;
+    let mut visited = HashSet::new();
+
+    loop {
+        let cur_node = {
+            let nodes = fs.nodes.read().unwrap();
+            nodes
+                .get(&current_ino)
+                .cloned()
+                .ok_or_else(platform::enoent)?
+        };
+        let state = cur_node.state.read().unwrap();
+        if matches!(&*state, NodeState::Root { .. }) {
+            break;
+        }
+        drop(state);
+
+        let name_id = cur_node.primary_name.read().unwrap();
+        components.push(fs.names.resolve(*name_id));
+        let parent_ino = cur_node.primary_parent.load(Ordering::Acquire);
+        if parent_ino == ROOT_INODE {
+            break;
+        }
+        if !visited.insert(parent_ino) {
+            return Err(platform::eloop());
+        }
+        current_ino = parent_ino;
+    }
+
+    components.reverse();
+    Ok(components)
+}
+
+#[cfg(target_os = "linux")]
+fn open_upper_node_linux(fs: &OverlayFs, node: &OverlayNode, flags: i32) -> io::Result<RawFd> {
+    if let Some(fd) = reopen_detached_fd_linux(fs, node, flags)? {
+        return Ok(fd);
+    }
+
+    let upper = fs.upper.as_ref().ok_or_else(platform::enoent)?;
+    let fd = secure_open_path_linux(
+        upper.root_fd.as_raw_fd(),
+        &visible_path_components(node, fs)?,
+        flags,
+        upper.has_openat2,
+    )?;
+    if let Err(err) = validate_identity_linux(fd, node_identity(node)?) {
+        unsafe { libc::close(fd) };
+        return Err(err);
+    }
+    Ok(fd)
+}
+
+#[cfg(target_os = "linux")]
+fn open_lower_node_linux(fs: &OverlayFs, node: &OverlayNode, flags: i32) -> io::Result<RawFd> {
+    let layer_idx = {
+        let state = node.state.read().unwrap();
+        match &*state {
+            NodeState::Lower { layer_idx, .. } => *layer_idx,
+            _ => return Err(platform::einval()),
+        }
+    };
+    let layer = fs
+        .lowers
+        .iter()
+        .find(|candidate| candidate.index == layer_idx)
+        .ok_or_else(platform::enoent)?;
+    let fd = secure_open_path_linux(
+        layer.root_fd.as_raw_fd(),
+        &lower_node_path_components(node, fs)?,
+        flags,
+        layer.has_openat2,
+    )?;
+    if let Err(err) = validate_identity_linux(fd, node_identity(node)?) {
+        unsafe { libc::close(fd) };
+        return Err(err);
+    }
+    Ok(fd)
+}
+
 /// Get the upper layer fd for a parent node's directory.
 ///
 /// Returns `Some(NodeFd)` if the parent has an upper representation, `None`
@@ -1279,12 +1540,8 @@ pub(crate) fn get_upper_dir_fd(fs: &OverlayFs, parent_node: &OverlayNode) -> Opt
         }),
         NodeState::Upper { .. } => {
             #[cfg(target_os = "linux")]
-            if let NodeState::Upper { file, .. } = &*state
-                && let Ok(fd) = reopen_fd_linux(
-                    &fs.proc_self_fd,
-                    file.as_raw_fd(),
-                    libc::O_RDONLY | libc::O_DIRECTORY,
-                )
+            if let Ok(fd) =
+                open_upper_node_linux(fs, parent_node, libc::O_RDONLY | libc::O_DIRECTORY)
             {
                 return Some(NodeFd { fd, owned: true });
             }
@@ -1309,9 +1566,91 @@ pub(crate) fn get_upper_dir_fd(fs: &OverlayFs, parent_node: &OverlayNode) -> Opt
 
 /// Close any node-owned host resources before dropping the node.
 pub(crate) fn close_node_resources(_node: &OverlayNode) {
+    #[cfg(target_os = "linux")]
+    {
+        _node.detached_fd.lock().unwrap().take();
+    }
     #[cfg(target_os = "macos")]
     if let NodeState::Upper { unlinked_fd, .. } = &*_node.state.read().unwrap() {
         close_unlinked_fd(unlinked_fd);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn increment_primary_child_locked(
+    nodes: &std::collections::BTreeMap<u64, Arc<OverlayNode>>,
+    parent: u64,
+) {
+    if parent <= ROOT_INODE {
+        return;
+    }
+
+    if let Some(parent_node) = nodes.get(&parent) {
+        parent_node.primary_children.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn increment_primary_child_locked(
+    _nodes: &std::collections::BTreeMap<u64, Arc<OverlayNode>>,
+    _parent: u64,
+) {
+}
+
+#[cfg(target_os = "linux")]
+fn decrement_primary_child_count(
+    nodes: &std::collections::BTreeMap<u64, Arc<OverlayNode>>,
+    parent: u64,
+) {
+    if let Some(parent_node) = nodes.get(&parent) {
+        loop {
+            let old = parent_node.primary_children.load(Ordering::Acquire);
+            if old == 0 {
+                break;
+            }
+            if parent_node
+                .primary_children
+                .compare_exchange(old, old - 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn move_primary_link_locked(
+    nodes: &mut std::collections::BTreeMap<u64, Arc<OverlayNode>>,
+    dentries: &mut std::collections::BTreeMap<(u64, NameId), Dentry>,
+    node: &OverlayNode,
+    new_parent: u64,
+    new_name: NameId,
+    removed: &mut Vec<(u64, Option<LowerOriginId>)>,
+) {
+    let old_parent = node.primary_parent.swap(new_parent, Ordering::AcqRel);
+    *node.primary_name.write().unwrap() = new_name;
+
+    if new_parent != old_parent {
+        increment_primary_child_locked(nodes, new_parent);
+        if old_parent > ROOT_INODE {
+            decrement_primary_child_count(nodes, old_parent);
+            maybe_remove_node_locked(nodes, dentries, old_parent, removed);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn detach_primary_link_locked(
+    nodes: &mut std::collections::BTreeMap<u64, Arc<OverlayNode>>,
+    dentries: &mut std::collections::BTreeMap<(u64, NameId), Dentry>,
+    node: &OverlayNode,
+    removed: &mut Vec<(u64, Option<LowerOriginId>)>,
+) {
+    let old_parent = node.primary_parent.swap(0, Ordering::AcqRel);
+    if old_parent > ROOT_INODE {
+        decrement_primary_child_count(nodes, old_parent);
+        maybe_remove_node_locked(nodes, dentries, old_parent, removed);
     }
 }
 
@@ -1432,42 +1771,11 @@ pub(crate) fn open_lower_parent(
                 owned: false,
             })
         }
-        NodeState::Lower { layer_idx, .. } if *layer_idx == layer.index => {
-            // Parent is on this same lower layer.
-            #[cfg(target_os = "linux")]
-            if let NodeState::Lower { file, .. } = &*state
-                && let Ok(fd) = reopen_fd_linux(
-                    &layer.proc_self_fd,
-                    file.as_raw_fd(),
-                    libc::O_RDONLY | libc::O_DIRECTORY,
-                )
-            {
-                return Some(NodeFd { fd, owned: true });
-            }
-            #[cfg(target_os = "macos")]
-            if let NodeState::Lower { ino, dev, .. } = &*state {
-                let path = vol_path(*dev, *ino);
-                let fd = unsafe {
-                    libc::open(
-                        path.as_ptr(),
-                        libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-                    )
-                };
-                if fd >= 0 {
-                    return Some(NodeFd { fd, owned: true });
-                }
-            }
-            None
-        }
         _ => {
-            // Parent is on a different lower layer, or is Upper/Init.
-            // Try to open by walking path_components from the layer root.
+            // Parent is on a lower layer, a different layer, or is Upper/Init.
+            // Reopen by walking the trusted lower-layer path from the layer root.
             drop(state);
-            if !path_components.is_empty() {
-                open_lower_by_path(layer, path_components)
-            } else {
-                None
-            }
+            open_lower_by_path(layer, path_components)
         }
     }
 }
@@ -1477,41 +1785,56 @@ pub(crate) fn open_lower_parent(
 /// Used when the parent is on a different layer or is Upper, so we can't
 /// use the fd directly. Walks each component via openat from the layer root.
 pub(crate) fn open_lower_by_path(layer: &Layer, components: &[Vec<u8>]) -> Option<NodeFd> {
-    let mut fd = layer.root_fd.as_raw_fd();
-    let mut owned = false;
-
-    for component in components {
-        let name = match CString::new(component.clone()) {
-            Ok(n) => n,
-            Err(_) => {
-                if owned {
-                    unsafe { libc::close(fd) };
-                }
-                return None;
-            }
-        };
-
-        let child_fd = unsafe {
-            libc::openat(
-                fd,
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-            )
-        };
-
-        if owned {
-            unsafe { libc::close(fd) };
-        }
-
-        if child_fd < 0 {
-            return None;
-        }
-
-        fd = child_fd;
-        owned = true;
+    #[cfg(target_os = "linux")]
+    {
+        secure_open_path_linux(
+            layer.root_fd.as_raw_fd(),
+            components,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            layer.has_openat2,
+        )
+        .ok()
+        .map(|fd| NodeFd { fd, owned: true })
     }
 
-    Some(NodeFd { fd, owned })
+    #[cfg(target_os = "macos")]
+    {
+        let mut fd = layer.root_fd.as_raw_fd();
+        let mut owned = false;
+
+        for component in components {
+            let name = match CString::new(component.clone()) {
+                Ok(n) => n,
+                Err(_) => {
+                    if owned {
+                        unsafe { libc::close(fd) };
+                    }
+                    return None;
+                }
+            };
+
+            let child_fd = unsafe {
+                libc::openat(
+                    fd,
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+                )
+            };
+
+            if owned {
+                unsafe { libc::close(fd) };
+            }
+
+            if child_fd < 0 {
+                return None;
+            }
+
+            fd = child_fd;
+            owned = true;
+        }
+
+        Some(NodeFd { fd, owned })
+    }
 }
 
 /// Open a child entry fd in a lower layer for stat/xattr.
@@ -1608,6 +1931,13 @@ pub(crate) fn dup_fd_raw(fd: RawFd) -> io::Result<RawFd> {
         return Err(platform::linux_error(io::Error::last_os_error()));
     }
     Ok(new_fd)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn store_unlinked_upper_fd(node: &OverlayNode, fd: RawFd) {
+    let mut detached = node.detached_fd.lock().unwrap();
+    let new_file = unsafe { File::from_raw_fd(fd) };
+    let _ = detached.replace(new_file);
 }
 
 #[cfg(target_os = "macos")]

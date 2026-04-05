@@ -219,7 +219,16 @@ fn deserialize_redirect(bytes: &[u8]) -> Option<Vec<Vec<u8>>> {
         if pos + len > bytes.len() {
             return None;
         }
-        components.push(bytes[pos..pos + len].to_vec());
+        let component = bytes[pos..pos + len].to_vec();
+        if component.is_empty()
+            || component == b"."
+            || component == b".."
+            || component.contains(&b'/')
+            || component.contains(&0)
+        {
+            return None;
+        }
+        components.push(component);
         pos += len;
     }
 

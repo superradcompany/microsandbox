@@ -47,7 +47,9 @@ const LINUX_ELOOP: i32 = 40;
 const LINUX_ENOSYS: i32 = 38;
 const LINUX_ENOTEMPTY: i32 = 39;
 const LINUX_ENODATA: i32 = 61;
+#[cfg(target_os = "macos")]
 const LINUX_EOVERFLOW: i32 = 75;
+#[cfg(target_os = "macos")]
 const LINUX_EOPNOTSUPP: i32 = 95;
 
 /// Linux open flags (FUSE always passes Linux values, even on macOS).

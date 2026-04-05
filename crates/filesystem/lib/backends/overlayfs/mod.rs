@@ -153,7 +153,7 @@ impl DynFileSystem for OverlayFs {
         opts |= capable & read_wanted;
 
         if capable.contains(FsOptions::DO_READDIRPLUS) {
-            opts |= FsOptions::DO_READDIRPLUS | FsOptions::READDIRPLUS_AUTO;
+            opts |= FsOptions::DO_READDIRPLUS;
         }
 
         // Write-relevant capabilities (skipped in read-only mode).
@@ -216,11 +216,12 @@ impl DynFileSystem for OverlayFs {
                 if ino == init_binary::INIT_INODE {
                     continue;
                 }
-                if let Some(origin) =
-                    inode::forget_one_locked(&mut nodes, &mut dentries, ino, count)
-                {
-                    removed.push((ino, origin));
-                }
+                removed.extend(inode::forget_one_locked(
+                    &mut nodes,
+                    &mut dentries,
+                    ino,
+                    count,
+                ));
             }
             removed
         };

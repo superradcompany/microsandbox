@@ -178,3 +178,49 @@ fn test_rename_noreplace() {
     );
     TestSandbox::assert_errno(result, LINUX_EEXIST);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_rename_exchange_same_inode_keeps_aliases() {
+    let sb = TestSandbox::new();
+    let (entry, _handle) = sb.fuse_create_root("a.txt").unwrap();
+    sb.fs
+        .link(
+            sb.ctx(),
+            entry.inode,
+            ROOT_INODE,
+            &TestSandbox::cstr("b.txt"),
+        )
+        .unwrap();
+
+    let alias = sb.lookup_root("b.txt").unwrap();
+    assert_eq!(alias.inode, entry.inode);
+
+    sb.fs
+        .rename(
+            sb.ctx(),
+            ROOT_INODE,
+            &TestSandbox::cstr("a.txt"),
+            ROOT_INODE,
+            &TestSandbox::cstr("b.txt"),
+            2,
+        )
+        .unwrap();
+
+    let data = {
+        let inodes = sb.fs.inodes.read().unwrap();
+        inodes.get(&entry.inode).cloned().unwrap()
+    };
+    let aliases = data.aliases.read().unwrap();
+    assert_eq!(aliases.len(), 2);
+    assert!(
+        aliases.contains(&crate::backends::shared::inode_table::NamespaceAlias::new(
+            ROOT_INODE, b"a.txt",
+        ))
+    );
+    assert!(
+        aliases.contains(&crate::backends::shared::inode_table::NamespaceAlias::new(
+            ROOT_INODE, b"b.txt",
+        ))
+    );
+}
