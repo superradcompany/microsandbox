@@ -4,12 +4,11 @@ description: Global config.json reference
 icon: "gear"
 ---
 
-microsandbox reads its global configuration from `~/.microsandbox/config.json`. All fields are optional. A missing file or an empty `{}` uses the defaults.
+microsandbox reads its global configuration from `~/.microsandbox/config.json`. All fields are optional. A missing file or empty JSON object is equivalent to using the defaults.
 
 The config is loaded once on first access. To override values programmatically, call `set_config()` before any other SDK call.
 
-## Full example
-
+<Accordion title="Full example">
 ```json
 {
   "home": "/custom/path/.microsandbox",
@@ -51,24 +50,25 @@ The config is loaded once on first access. To override values programmatically, 
   }
 }
 ```
+</Accordion>
 
 ## Top-level fields
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `home` | `string \| null` | `~/.microsandbox` | Root directory for all microsandbox data |
-| `log_level` | `string \| null` | `null` (silent) | Default log level for sandbox runtime processes. One of `error`, `warn`, `info`, `debug`, `trace` |
-| `database` | `object` | See below | Database connection settings |
-| `paths` | `object` | See below | Path overrides for binaries and data directories |
-| `sandbox_defaults` | `object` | See below | Default values applied to every sandbox unless overridden |
-| `registries` | `object` | See below | Container registry authentication |
+| Field | Default | Description |
+|-------|---------|-------------|
+| `home` | `~/.microsandbox` | Root directory for all microsandbox data |
+| `log_level` | `null` (silent) | Log level for sandbox processes: `error`, `warn`, `info`, `debug`, `trace` |
+| `database` | [reference](#database) | Database connection settings |
+| `paths` | [reference](#paths) | Path overrides for binaries and directories |
+| `sandbox_defaults` | [reference](#sandbox_defaults) | Defaults applied to every sandbox |
+| `registries` | [reference](#registries) | Container registry authentication |
 
 ## `database`
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `url` | `string \| null` | `null` | Database connection URL. When `null`, uses a SQLite database under the `home` directory |
-| `max_connections` | `integer` | `5` | Maximum connection pool size |
+| Field | Default | Description |
+|-------|---------|-------------|
+| `url` | `null` | Database URL. Uses SQLite under `home` when null |
+| `max_connections` | `5` | Maximum connection pool size |
 
 ## `paths`
 
@@ -76,24 +76,24 @@ All path fields are optional. When `null`, they resolve relative to `home`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `msb` | `~/.microsandbox/bin/msb` | Path to the `msb` runtime binary. Resolution order: `MSB_PATH` env var, then this field, then `~/.microsandbox/bin/msb`, then `PATH` lookup |
-| `libkrunfw` | Sibling to `msb` | Path to the `libkrunfw` shared library (`.so` on Linux, `.dylib` on macOS) |
-| `cache` | `~/.microsandbox/cache` | Image layer cache directory |
-| `sandboxes` | `~/.microsandbox/sandboxes` | Per-sandbox state directory |
-| `volumes` | `~/.microsandbox/volumes` | Named volumes directory |
-| `logs` | `~/.microsandbox/logs` | Sandbox log files |
-| `secrets` | `~/.microsandbox/secrets` | Secrets directory. Registry secret files live under `secrets/registries/` |
+| `msb` | `{home}/bin/msb` | `msb` binary. Resolved via: `MSB_PATH` env, this field, default path, `PATH` |
+| `libkrunfw` | Sibling to `msb` | `libkrunfw` shared library (`.so` / `.dylib`) |
+| `cache` | `{home}/cache` | Image layer cache |
+| `sandboxes` | `{home}/sandboxes` | Per-sandbox state |
+| `volumes` | `{home}/volumes` | Named volumes |
+| `logs` | `{home}/logs` | Sandbox logs |
+| `secrets` | `{home}/secrets` | Secrets. Registry secrets live under `secrets/registries/` |
 
 ## `sandbox_defaults`
 
-These defaults apply to every sandbox unless explicitly overridden per-sandbox.
+Defaults applied to every sandbox unless overridden per-sandbox.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `cpus` | `integer` | `1` | Number of vCPUs |
-| `memory_mib` | `integer` | `512` | Guest memory in MiB |
-| `shell` | `string` | `"/bin/sh"` | Shell used for interactive sessions and scripts |
-| `workdir` | `string \| null` | `null` | Working directory inside the sandbox |
+| Field | Default | Description |
+|-------|---------|-------------|
+| `cpus` | `1` | Number of vCPUs |
+| `memory_mib` | `512` | Guest memory in MiB |
+| `shell` | `"/bin/sh"` | Shell for interactive sessions and scripts |
+| `workdir` | `null` | Working directory inside the sandbox |
 
 ## `registries`
 
@@ -116,12 +116,12 @@ A map of registry hostnames to authentication entries. Each entry specifies a us
 
 #### Auth entry fields
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `username` | `string` | Yes | Registry username |
-| `store` | `string \| null` | No | Credential store. Currently only `"keyring"` is supported (OS keyring: Keychain on macOS, Credential Manager on Windows, Secret Service on Linux) |
-| `password_env` | `string \| null` | No | Name of an environment variable containing the password or token |
-| `secret_name` | `string \| null` | No | Filename under `~/.microsandbox/secrets/registries/` containing the password or token |
+| Field | Required | Description |
+|-------|----------|-------------|
+| `username` | Yes | Registry username |
+| `store` | No | Credential store. Only `"keyring"` is supported (macOS Keychain, Windows Credential Manager, Linux Secret Service) |
+| `password_env` | No | Environment variable containing the password or token |
+| `secret_name` | No | Filename under `{home}/secrets/registries/` containing the password or token |
 
 <Note>
   Exactly one of `store`, `password_env`, or `secret_name` must be set per entry. Setting none or more than one is an error.
