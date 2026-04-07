@@ -128,23 +128,6 @@ msb exec devbox -- ls -la /app
   The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it captures output. No `-i` flag is needed.
 </Tip>
 
-## msb shell
-
-Open an interactive shell session or run a shell script.
-
-```bash
-msb shell devbox
-msb shell devbox --shell /bin/zsh
-msb shell devbox -- echo "hello from shell"
-echo "ls -la" | msb shell devbox
-```
-
-| Flag | Description |
-|------|-------------|
-| `--shell` | Shell program to use (default: sandbox config or `/bin/sh`) |
-| `-u`, `--user` | Run the shell as the specified guest user |
-| `-q`, `--quiet` | Suppress progress output |
-
 ## msb ls
 
 List all stored sandboxes.

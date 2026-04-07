@@ -287,12 +287,6 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 > ```
 >
 > ```sh
-> # Interactive shell into a running sandbox
-> msb shell my-app
-> msb shell my-app -- ls -la /
-> ```
->
-> ```sh
 > # Lifecycle
 > msb stop my-app
 > msb start my-app

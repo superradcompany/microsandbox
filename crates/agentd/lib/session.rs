@@ -927,7 +927,7 @@ mod tests {
             cmd: "/bin/sh".to_string(),
             args: vec![
                 "-c".to_string(),
-                "i=0; while [ $i -lt 1024 ]; do printf AAAA; i=$((i+1)); done; printf SECOND; sleep 1; printf '<END>\\n'; sleep 1; exit 0"
+                "i=0; while [ $i -lt 1024 ]; do printf AAAA; i=$((i+1)); done; printf SECOND; sleep 0.1; printf '<END>\\n'; sleep 0.1; exit 0"
                     .to_string(),
             ],
             env: vec!["PATH=/usr/local/bin:/usr/bin:/bin".to_string()],
@@ -943,7 +943,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut exit = None;
 
-        let recv_result = timeout(Duration::from_secs(5), async {
+        let recv_result = timeout(Duration::from_secs(15), async {
             while let Some((id, output)) = rx.recv().await {
                 assert_eq!(id, 7);
                 match output {

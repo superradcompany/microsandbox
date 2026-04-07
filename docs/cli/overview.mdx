@@ -30,10 +30,9 @@ msb run --name devbox ubuntu -- bash
 
 # Resume later
 msb start devbox
-msb shell devbox
 
 # Execute in a running sandbox
-msb exec devbox -- ls -la /app
+msb exec devbox -- sh -c "apt update && apt install -y cowsay && /usr/games/cowsay \"Hello from devbox\""
 
 # Manage
 msb ls                   # List all sandboxes
