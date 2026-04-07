@@ -29,7 +29,8 @@
             "icon": "rocket",
             "pages": [
               "introduction",
-              "quickstart"
+              "quickstart",
+              "configuration"
             ]
           },
           {
