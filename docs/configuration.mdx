@@ -4,7 +4,7 @@ description: Global config.json reference
 icon: "gear"
 ---
 
-microsandbox reads its global configuration from `~/.microsandbox/config.json`. All fields are optional — a missing file or an empty `{}` is equivalent to a fully default configuration.
+microsandbox reads its global configuration from `~/.microsandbox/config.json`. All fields are optional. A missing file or an empty `{}` uses the defaults.
 
 The config is loaded once on first access. To override values programmatically, call `set_config()` before any other SDK call.
 
@@ -56,7 +56,7 @@ The config is loaded once on first access. To override values programmatically, 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `home` | `string \| null` | `~/.microsandbox` | Root directory for all microsandbox data (sandboxes, volumes, logs, cache, etc.) |
+| `home` | `string \| null` | `~/.microsandbox` | Root directory for all microsandbox data |
 | `log_level` | `string \| null` | `null` (silent) | Default log level for sandbox runtime processes. One of `error`, `warn`, `info`, `debug`, `trace` |
 | `database` | `object` | See below | Database connection settings |
 | `paths` | `object` | See below | Path overrides for binaries and data directories |
@@ -76,17 +76,17 @@ All path fields are optional. When `null`, they resolve relative to `home`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `msb` | `~/.microsandbox/bin/msb` | Path to the `msb` runtime binary. Resolution order: `MSB_PATH` env var → this field → `~/.microsandbox/bin/msb` → `PATH` lookup |
+| `msb` | `~/.microsandbox/bin/msb` | Path to the `msb` runtime binary. Resolution order: `MSB_PATH` env var, then this field, then `~/.microsandbox/bin/msb`, then `PATH` lookup |
 | `libkrunfw` | Sibling to `msb` | Path to the `libkrunfw` shared library (`.so` on Linux, `.dylib` on macOS) |
 | `cache` | `~/.microsandbox/cache` | Image layer cache directory |
 | `sandboxes` | `~/.microsandbox/sandboxes` | Per-sandbox state directory |
 | `volumes` | `~/.microsandbox/volumes` | Named volumes directory |
 | `logs` | `~/.microsandbox/logs` | Sandbox log files |
-| `secrets` | `~/.microsandbox/secrets` | Secrets directory (registry secret files live under `secrets/registries/`) |
+| `secrets` | `~/.microsandbox/secrets` | Secrets directory. Registry secret files live under `secrets/registries/` |
 
 ## `sandbox_defaults`
 
-These defaults apply to every sandbox created via the SDK or CLI unless explicitly overridden per-sandbox.
+These defaults apply to every sandbox unless explicitly overridden per-sandbox.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -131,27 +131,8 @@ A map of registry hostnames to authentication entries. Each entry specifies a us
 
 When pulling from a registry, credentials are resolved in this order:
 
-1. **Explicit SDK auth** — `.registry_auth()` on the sandbox builder
-2. **OS keyring** — entries created by `msb registry login`
-3. **Config file** — `registries.auth` entries in `config.json`
-4. **Docker config** — `~/.docker/config.json` credential helpers
-5. **Anonymous** — no authentication
-
-## Directory layout
-
-When `home` is `~/.microsandbox` (the default), the full directory structure is:
-
-```
-~/.microsandbox/
-├── config.json
-├── bin/
-│   └── msb
-├── lib/
-│   └── libkrunfw.{so,dylib}
-├── cache/
-├── sandboxes/
-├── volumes/
-├── logs/
-└── secrets/
-    └── registries/
-```
+1. **Explicit SDK auth** via `.registry_auth()` on the sandbox builder
+2. **OS keyring** entries created by `msb registry login`
+3. **Config file** `registries.auth` entries in `config.json`
+4. **Docker config** `~/.docker/config.json` credential helpers
+5. **Anonymous** (no authentication)

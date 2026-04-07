@@ -29,8 +29,7 @@
             "icon": "rocket",
             "pages": [
               "introduction",
-              "quickstart",
-              "configuration"
+              "quickstart"
             ]
           },
           {
@@ -105,7 +104,8 @@
               "cli/overview",
               "cli/sandbox-commands",
               "cli/volume-commands",
-              "cli/image-commands"
+              "cli/image-commands",
+              "configuration"
             ]
           }
         ]
