@@ -75,7 +75,7 @@ All path fields are optional. When `null`, they resolve relative to `home`.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `msb` | `{home}/bin/msb` | `msb` binary. Resolved via: `MSB_PATH` env, this field, default path, `PATH` |
-| `libkrunfw` | Sibling to `msb` | `libkrunfw` shared library (`.so` / `.dylib`) |
+| `libkrunfw` | `{home}/lib/libkrunfw` | Path to a custom VM kernel (`.so` on Linux, `.dylib` on macOS) |
 | `cache` | `{home}/cache` | Image layer cache |
 | `sandboxes` | `{home}/sandboxes` | Per-sandbox state |
 | `volumes` | `{home}/volumes` | Named volumes |
