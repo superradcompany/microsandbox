@@ -33,6 +33,13 @@
             ]
           },
           {
+            "group": "Configuration",
+            "icon": "gear",
+            "pages": [
+              "configuration"
+            ]
+          },
+          {
             "group": "Sandboxes",
             "icon": "box",
             "pages": [
@@ -104,8 +111,7 @@
               "cli/overview",
               "cli/sandbox-commands",
               "cli/volume-commands",
-              "cli/image-commands",
-              "configuration"
+              "cli/image-commands"
             ]
           }
         ]
