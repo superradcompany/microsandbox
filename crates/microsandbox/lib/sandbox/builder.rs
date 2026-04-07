@@ -25,6 +25,34 @@ pub struct SandboxBuilder {
     build_error: Option<crate::MicrosandboxError>,
 }
 
+/// Sub-builder for registry connection settings.
+#[derive(Default)]
+pub struct RegistryConfigBuilder {
+    pub(crate) auth: Option<RegistryAuth>,
+    pub(crate) insecure: bool,
+    pub(crate) ca_certs: Vec<Vec<u8>>,
+}
+
+impl RegistryConfigBuilder {
+    /// Set authentication credentials.
+    pub fn auth(mut self, auth: RegistryAuth) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    /// Access the registry over plain HTTP instead of HTTPS.
+    pub fn insecure(mut self) -> Self {
+        self.insecure = true;
+        self
+    }
+
+    /// Add PEM-encoded CA root certificates to trust.
+    pub fn ca_certs(mut self, pem_data: Vec<u8>) -> Self {
+        self.ca_certs.push(pem_data);
+        self
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -134,9 +162,34 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set registry authentication for private OCI registries.
-    pub fn registry_auth(mut self, auth: RegistryAuth) -> Self {
-        self.config.registry_auth = Some(auth);
+    /// Configure registry connection settings (auth, TLS, insecure).
+    ///
+    /// ```rust,ignore
+    /// use microsandbox::{RegistryAuth, sandbox::Sandbox};
+    ///
+    /// let sb = Sandbox::builder("worker")
+    ///     .image("localhost:5050/my-app:latest")
+    ///     .registry(|r| r
+    ///         .auth(RegistryAuth::Basic {
+    ///             username: "user".into(),
+    ///             password: "pass".into(),
+    ///         })
+    ///         .insecure()
+    ///     )
+    ///     .create()
+    ///     .await
+    ///     .unwrap();
+    /// ```
+    pub fn registry(
+        mut self,
+        f: impl FnOnce(RegistryConfigBuilder) -> RegistryConfigBuilder,
+    ) -> Self {
+        let builder = f(RegistryConfigBuilder::default());
+        if let Some(auth) = builder.auth {
+            self.config.registry_auth = Some(auth);
+        }
+        self.config.insecure = builder.insecure;
+        self.config.ca_certs = builder.ca_certs;
         self
     }
 

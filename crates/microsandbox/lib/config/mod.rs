@@ -14,7 +14,7 @@ use microsandbox_image::RegistryAuth;
 use microsandbox_runtime::logging::LogLevel;
 use serde::{Deserialize, Serialize};
 
-use crate::MicrosandboxResult;
+use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -130,28 +130,49 @@ pub struct SandboxDefaults {
     pub workdir: Option<String>,
 }
 
-/// Registry authentication configuration.
+/// Registry configuration.
+///
+/// Example:
+/// ```json
+/// {
+///   "registries": {
+///     "ca_certs": "/path/to/corporate-ca.pem",
+///     "hosts": {
+///       "localhost:5050": { "insecure": true },
+///       "ghcr.io": {
+///         "auth": { "username": "user", "store": "keyring" }
+///       }
+///     }
+///   }
+/// }
+/// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RegistriesConfig {
-    /// Per-registry authentication entries, keyed by registry hostname.
+    /// Path to a PEM file containing additional CA root certificates to trust.
     ///
-    /// Example:
-    /// ```json
-    /// {
-    ///   "registries": {
-    ///     "auth": {
-    ///       "ghcr.io": { "username": "user", "store": "keyring" },
-    ///       "registry.example.com": { "username": "deploy", "password_env": "REGISTRY_TOKEN" },
-    ///       "docker.io": { "username": "user", "secret_name": "dockerhub" }
-    ///     }
-    ///   }
-    /// }
-    /// ```
-    pub auth: HashMap<String, RegistryAuthEntry>,
+    /// Applies globally to all registry connections.
+    pub ca_certs: Option<PathBuf>,
+
+    /// Per-registry settings keyed by hostname.
+    #[serde(default)]
+    pub hosts: HashMap<String, RegistryEntry>,
 }
 
-/// A single registry authentication entry from global config.
+/// Configuration for a single OCI registry.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RegistryEntry {
+    /// Authentication credentials.
+    #[serde(default)]
+    pub auth: Option<RegistryAuthEntry>,
+
+    /// Access this registry over plain HTTP instead of HTTPS.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub insecure: bool,
+}
+
+/// Authentication credentials for a registry entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryAuthEntry {
     /// Registry username.
@@ -233,11 +254,40 @@ impl GlobalConfig {
             .unwrap_or_else(|| self.home().join(microsandbox_utils::SECRETS_SUBDIR))
     }
 
+    /// Resolve registry transport for a given hostname from the global config.
+    /// Load additional CA root certificates from the global `registries.ca_certs` path.
+    ///
+    /// Returns an empty vec if no path is configured.
+    pub async fn resolve_ca_certs(&self) -> MicrosandboxResult<Vec<Vec<u8>>> {
+        match &self.registries.ca_certs {
+            Some(path) => {
+                let data = tokio::fs::read(path).await.map_err(|e| {
+                    MicrosandboxError::InvalidConfig(format!(
+                        "failed to read CA certs from `{}`: {e}",
+                        path.display()
+                    ))
+                })?;
+                Ok(vec![data])
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Return all registry hostnames configured as insecure (plain HTTP).
+    pub fn insecure_registries(&self) -> Vec<String> {
+        self.registries
+            .hosts
+            .iter()
+            .filter(|(_, entry)| entry.insecure)
+            .map(|(hostname, _)| hostname.clone())
+            .collect()
+    }
+
     /// Resolve registry authentication for a given hostname.
     ///
     /// Resolution order:
     /// 1. OS keyring (interactive CLI login, when the `keyring` feature is enabled)
-    /// 2. `registries.auth` in global config
+    /// 2. `registries.<hostname>.auth` in global config
     /// 3. Docker credential store/config
     /// 4. Anonymous
     ///
@@ -269,7 +319,12 @@ impl GlobalConfig {
         &self,
         hostname: &str,
     ) -> MicrosandboxResult<Option<RegistryAuth>> {
-        let entry = match self.registries.auth.get(hostname) {
+        let entry = match self
+            .registries
+            .hosts
+            .get(hostname)
+            .and_then(|e| e.auth.as_ref())
+        {
             Some(entry) => entry,
             None => return Ok(None),
         };
@@ -279,13 +334,13 @@ impl GlobalConfig {
             + usize::from(entry.secret_name.is_some());
 
         if source_count == 0 {
-            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            return Err(MicrosandboxError::InvalidConfig(format!(
                 "registry auth for {hostname}: entry has no credential source"
             )));
         }
 
         if source_count > 1 {
-            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            return Err(MicrosandboxError::InvalidConfig(format!(
                 "registry auth for {hostname}: entry defines multiple credential sources"
             )));
         }
@@ -293,10 +348,10 @@ impl GlobalConfig {
         if entry.store == Some(RegistryCredentialStore::Keyring) {
             return match lookup_registry_keyring_auth(hostname) {
                 Ok(Some(auth)) => Ok(Some(auth)),
-                Ok(None) => Err(crate::MicrosandboxError::InvalidConfig(format!(
+                Ok(None) => Err(MicrosandboxError::InvalidConfig(format!(
                     "registry auth for {hostname}: OS keyring entry is missing"
                 ))),
-                Err(error) => Err(crate::MicrosandboxError::InvalidConfig(format!(
+                Err(error) => Err(MicrosandboxError::InvalidConfig(format!(
                     "registry auth for {hostname}: failed to read OS keyring entry: {error}"
                 ))),
             };
@@ -304,7 +359,7 @@ impl GlobalConfig {
 
         let password = if let Some(ref env_var) = entry.password_env {
             std::env::var(env_var).map_err(|_| {
-                crate::MicrosandboxError::InvalidConfig(format!(
+                MicrosandboxError::InvalidConfig(format!(
                     "registry auth for {hostname}: environment variable `{env_var}` is not set"
                 ))
             })?
@@ -312,7 +367,7 @@ impl GlobalConfig {
             let secret_path = self.secrets_dir().join("registries").join(secret_name);
             std::fs::read_to_string(&secret_path)
                 .map_err(|e| {
-                    crate::MicrosandboxError::InvalidConfig(format!(
+                    MicrosandboxError::InvalidConfig(format!(
                         "registry auth for {hostname}: failed to read secret `{}`: {e}",
                         secret_path.display()
                     ))
@@ -320,7 +375,7 @@ impl GlobalConfig {
                 .trim()
                 .to_string()
         } else {
-            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            return Err(MicrosandboxError::InvalidConfig(format!(
                 "registry auth for {hostname}: entry has no usable credential source"
             )));
         };
@@ -360,6 +415,10 @@ impl Default for SandboxDefaults {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn is_false(v: &bool) -> bool {
+    !v
+}
 
 fn resolve_docker_registry_auth(hostname: &str) -> Option<RegistryAuth> {
     resolve_registry_auth_with_lookup(hostname, docker_credential::get_credential)
@@ -447,22 +506,18 @@ pub fn save_persisted_config(config: &GlobalConfig) -> MicrosandboxResult<()> {
     let path = config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
-            crate::MicrosandboxError::Custom(format!(
+            MicrosandboxError::Custom(format!(
                 "failed to create config directory `{}`: {e}",
                 parent.display()
             ))
         })?;
     }
 
-    let content = serde_json::to_string_pretty(config).map_err(|e| {
-        crate::MicrosandboxError::Custom(format!("failed to serialize config: {e}"))
-    })?;
+    let content = serde_json::to_string_pretty(config)
+        .map_err(|e| MicrosandboxError::Custom(format!("failed to serialize config: {e}")))?;
 
     std::fs::write(&path, format!("{content}\n")).map_err(|e| {
-        crate::MicrosandboxError::Custom(format!(
-            "failed to write config `{}`: {e}",
-            path.display()
-        ))
+        MicrosandboxError::Custom(format!("failed to write config `{}`: {e}", path.display()))
     })?;
     Ok(())
 }
@@ -473,18 +528,17 @@ pub fn set_registry_keyring_auth(
     username: &str,
     password: &str,
 ) -> MicrosandboxResult<()> {
-    store_registry_keyring_auth(hostname, username, password)
-        .map_err(crate::MicrosandboxError::Custom)
+    store_registry_keyring_auth(hostname, username, password).map_err(MicrosandboxError::Custom)
 }
 
 /// Load registry credentials from the OS keyring, if present.
 pub fn get_registry_keyring_auth(hostname: &str) -> MicrosandboxResult<Option<RegistryAuth>> {
-    lookup_registry_keyring_auth(hostname).map_err(crate::MicrosandboxError::Custom)
+    lookup_registry_keyring_auth(hostname).map_err(MicrosandboxError::Custom)
 }
 
 /// Delete registry credentials from the OS keyring if they exist.
 pub fn delete_registry_keyring_auth(hostname: &str) -> MicrosandboxResult<()> {
-    remove_registry_keyring_auth(hostname).map_err(crate::MicrosandboxError::Custom)
+    remove_registry_keyring_auth(hostname).map_err(MicrosandboxError::Custom)
 }
 
 /// Override the global configuration programmatically.
@@ -547,7 +601,7 @@ pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
     }
 
     let path = which::which(microsandbox_utils::MSB_BINARY).map_err(|_| {
-        crate::MicrosandboxError::Custom(
+        MicrosandboxError::Custom(
             "msb binary not found. Run `cargo clean -p microsandbox && cargo build` to reinstall, \
              or set MSB_PATH to the binary location"
                 .into(),
@@ -569,7 +623,7 @@ pub fn resolve_libkrunfw_path() -> MicrosandboxResult<PathBuf> {
         if path.is_file() {
             return Ok(path.clone());
         }
-        return Err(crate::MicrosandboxError::LibkrunfwNotFound(format!(
+        return Err(MicrosandboxError::LibkrunfwNotFound(format!(
             "configured path does not exist: {}",
             path.display()
         )));
@@ -602,7 +656,7 @@ pub fn resolve_libkrunfw_path() -> MicrosandboxResult<PathBuf> {
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    Err(crate::MicrosandboxError::LibkrunfwNotFound(format!(
+    Err(MicrosandboxError::LibkrunfwNotFound(format!(
         "searched: {searched}"
     )))
 }
@@ -667,11 +721,11 @@ fn dedupe_strings(values: &mut Vec<String>) {
 
 fn read_config_from(path: &Path) -> MicrosandboxResult<GlobalConfig> {
     let content = std::fs::read_to_string(path).map_err(|e| {
-        crate::MicrosandboxError::Custom(format!("failed to read config `{}`: {e}", path.display()))
+        MicrosandboxError::Custom(format!("failed to read config `{}`: {e}", path.display()))
     })?;
 
     serde_json::from_str(&content).map_err(|e| {
-        crate::MicrosandboxError::InvalidConfig(format!(
+        MicrosandboxError::InvalidConfig(format!(
             "failed to parse config `{}`: {e}",
             path.display()
         ))
@@ -893,21 +947,41 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// Helper to build a `RegistriesConfig` from a list of `(hostname, RegistryEntry)` pairs.
+    fn registries(entries: Vec<(&str, RegistryEntry)>) -> RegistriesConfig {
+        RegistriesConfig {
+            hosts: entries
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_deserialize_registry_keyring_store() {
         let json = r#"{
             "registries": {
-                "auth": {
+                "hosts": {
                     "ghcr.io": {
-                        "username": "octocat",
-                        "store": "keyring"
+                        "auth": {
+                            "username": "octocat",
+                            "store": "keyring"
+                        }
                     }
                 }
             }
         }"#;
 
         let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
-        let entry = cfg.registries.auth.get("ghcr.io").unwrap();
+        let entry = cfg
+            .registries
+            .hosts
+            .get("ghcr.io")
+            .unwrap()
+            .auth
+            .as_ref()
+            .unwrap();
         assert_eq!(entry.username, "octocat");
         assert_eq!(entry.store, Some(RegistryCredentialStore::Keyring));
         assert!(entry.password_env.is_none());
@@ -920,17 +994,18 @@ mod tests {
         let path = temp.path().join("config.json");
 
         let cfg = GlobalConfig {
-            registries: RegistriesConfig {
-                auth: HashMap::from([(
-                    "ghcr.io".to_string(),
-                    RegistryAuthEntry {
+            registries: registries(vec![(
+                "ghcr.io",
+                RegistryEntry {
+                    auth: Some(RegistryAuthEntry {
                         username: "octocat".to_string(),
                         store: Some(RegistryCredentialStore::Keyring),
                         password_env: None,
                         secret_name: None,
-                    },
-                )]),
-            },
+                    }),
+                    ..Default::default()
+                },
+            )]),
             ..Default::default()
         };
 
@@ -938,7 +1013,14 @@ mod tests {
         std::fs::write(&path, content).unwrap();
 
         let loaded = read_config_from(&path).unwrap();
-        let entry = loaded.registries.auth.get("ghcr.io").unwrap();
+        let entry = loaded
+            .registries
+            .hosts
+            .get("ghcr.io")
+            .unwrap()
+            .auth
+            .as_ref()
+            .unwrap();
         assert_eq!(entry.username, "octocat");
         assert_eq!(entry.store, Some(RegistryCredentialStore::Keyring));
     }
@@ -989,17 +1071,18 @@ mod tests {
                 secrets: Some(temp.path().to_path_buf()),
                 ..Default::default()
             },
-            registries: RegistriesConfig {
-                auth: HashMap::from([(
-                    "ghcr.io".to_string(),
-                    RegistryAuthEntry {
+            registries: registries(vec![(
+                "ghcr.io",
+                RegistryEntry {
+                    auth: Some(RegistryAuthEntry {
                         username: "user".to_string(),
                         store: None,
                         password_env: None,
                         secret_name: Some("ghcr-token".to_string()),
-                    },
-                )]),
-            },
+                    }),
+                    ..Default::default()
+                },
+            )]),
             ..Default::default()
         };
 
@@ -1016,17 +1099,18 @@ mod tests {
     #[test]
     fn test_resolve_configured_registry_auth_rejects_multiple_sources() {
         let cfg = GlobalConfig {
-            registries: RegistriesConfig {
-                auth: HashMap::from([(
-                    "ghcr.io".to_string(),
-                    RegistryAuthEntry {
+            registries: registries(vec![(
+                "ghcr.io",
+                RegistryEntry {
+                    auth: Some(RegistryAuthEntry {
                         username: "user".to_string(),
                         store: Some(RegistryCredentialStore::Keyring),
                         password_env: Some("GHCR_TOKEN".to_string()),
                         secret_name: None,
-                    },
-                )]),
-            },
+                    }),
+                    ..Default::default()
+                },
+            )]),
             ..Default::default()
         };
 
@@ -1123,5 +1207,139 @@ mod tests {
             }
             other => panic!("expected basic auth, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_deserialize_registry_insecure() {
+        let json = r#"{
+            "registries": {
+                "hosts": {
+                    "localhost:5050": { "insecure": true }
+                }
+            }
+        }"#;
+
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        let entry = cfg.registries.hosts.get("localhost:5050").unwrap();
+        assert!(entry.insecure);
+        assert!(entry.auth.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_registry_ca_certs_global() {
+        let json = r#"{
+            "registries": {
+                "ca_certs": "/path/to/ca.pem"
+            }
+        }"#;
+
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.registries.ca_certs,
+            Some(PathBuf::from("/path/to/ca.pem"))
+        );
+    }
+
+    #[test]
+    fn test_deserialize_registry_full_entry() {
+        let json = r#"{
+            "registries": {
+                "ca_certs": "/path/to/ca.pem",
+                "hosts": {
+                    "localhost:5050": {
+                        "insecure": true,
+                        "auth": {
+                            "username": "user",
+                            "password_env": "TOKEN"
+                        }
+                    }
+                }
+            }
+        }"#;
+
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.registries.ca_certs,
+            Some(PathBuf::from("/path/to/ca.pem"))
+        );
+        let entry = cfg.registries.hosts.get("localhost:5050").unwrap();
+        assert!(entry.insecure);
+        let auth = entry.auth.as_ref().unwrap();
+        assert_eq!(auth.username, "user");
+        assert_eq!(auth.password_env, Some("TOKEN".to_string()));
+    }
+
+    #[test]
+    fn test_deserialize_empty_registries() {
+        let json = r#"{"registries": {}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.registries.hosts.is_empty());
+        assert!(cfg.registries.ca_certs.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_ca_certs_from_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let pem_path = temp.path().join("ca.pem");
+        let pem_data = b"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n";
+        std::fs::write(&pem_path, pem_data).unwrap();
+
+        let cfg = GlobalConfig {
+            registries: RegistriesConfig {
+                ca_certs: Some(pem_path),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let certs = cfg.resolve_ca_certs().await.unwrap();
+        assert_eq!(certs.len(), 1);
+        assert_eq!(certs[0], pem_data);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_ca_certs_missing_file_errors() {
+        let cfg = GlobalConfig {
+            registries: RegistriesConfig {
+                ca_certs: Some(PathBuf::from("/nonexistent/ca.pem")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let err = cfg.resolve_ca_certs().await.unwrap_err();
+        assert!(err.to_string().contains("failed to read CA certs"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_ca_certs_none_returns_empty() {
+        let cfg = GlobalConfig::default();
+        let certs = cfg.resolve_ca_certs().await.unwrap();
+        assert!(certs.is_empty());
+    }
+
+    #[test]
+    fn test_insecure_registries() {
+        let cfg = GlobalConfig {
+            registries: registries(vec![
+                (
+                    "localhost:5050",
+                    RegistryEntry {
+                        insecure: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "ghcr.io",
+                    RegistryEntry {
+                        ..Default::default()
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        let insecure = cfg.insecure_registries();
+        assert_eq!(insecure, vec!["localhost:5050"]);
     }
 }

@@ -161,7 +161,7 @@ pub fn build_config_from_kwargs(
                 pyo3::exceptions::PyValueError::new_err("registry_auth.password required")
             })?
             .extract()?;
-        builder = builder.registry_auth(RegistryAuth::Basic { username, password });
+        builder = builder.registry(|r| r.auth(RegistryAuth::Basic { username, password }));
     }
 
     // Volumes.

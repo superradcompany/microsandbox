@@ -2637,6 +2637,8 @@ dependencies = [
  "microsandbox-utils",
  "oci-client",
  "oci-spec",
+ "rcgen",
+ "rustls-pemfile",
  "scopeguard",
  "serde",
  "serde_json",

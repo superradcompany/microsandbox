@@ -51,8 +51,8 @@ pub struct SandboxConfig {
     pub stop_signal: Option<String>,
     /// Maximum run duration in seconds.
     pub max_duration_secs: Option<f64>,
-    /// Registry credentials for pulling private images.
-    pub registry_auth: Option<RegistryCredentials>,
+    /// Registry connection settings (auth, TLS, insecure).
+    pub registry: Option<RegistryConfig>,
     /// Port mappings: host_port → guest_port (TCP).
     pub ports: Option<HashMap<String, u32>>,
     /// Network configuration.
@@ -205,9 +205,20 @@ pub struct SecretEntry {
     pub on_violation: Option<String>,
 }
 
-/// Registry credentials for pulling private images.
+/// Registry connection settings.
 #[napi(object)]
-pub struct RegistryCredentials {
+pub struct RegistryConfig {
+    /// Authentication credentials.
+    pub auth: Option<RegistryAuth>,
+    /// Access the registry over plain HTTP instead of HTTPS.
+    pub insecure: Option<bool>,
+    /// Path to a PEM file containing additional CA root certificates to trust.
+    pub ca_certs_path: Option<String>,
+}
+
+/// Registry authentication credentials.
+#[napi(object)]
+pub struct RegistryAuth {
     pub username: String,
     pub password: String,
 }

@@ -6,6 +6,7 @@ use std::time::Instant;
 use clap::{Args, Subcommand};
 use console::style;
 use microsandbox::image::Image;
+use microsandbox_image::Registry;
 
 use crate::ui;
 
@@ -92,6 +93,8 @@ pub async fn run(args: ImageArgs) -> anyhow::Result<()> {
                 args.reference,
                 args.force,
                 args.quiet,
+                args.insecure,
+                args.ca_certs,
                 microsandbox_image::PullPolicy::IfMissing,
             )
             .await
@@ -108,6 +111,8 @@ pub async fn run_pull(args: pull::PullArgs) -> anyhow::Result<()> {
         args.reference,
         args.force,
         args.quiet,
+        args.insecure,
+        args.ca_certs,
         microsandbox_image::PullPolicy::IfMissing,
     )
     .await
@@ -118,6 +123,8 @@ async fn run_pull_inner(
     reference: String,
     force: bool,
     quiet: bool,
+    insecure: bool,
+    cli_ca_certs: Option<String>,
     pull_policy: microsandbox_image::PullPolicy,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
@@ -180,7 +187,22 @@ async fn run_pull_inner(
     let _ = display_ready_rx.recv();
 
     let auth = global.resolve_registry_auth(image_ref.registry())?;
-    let registry = microsandbox_image::Registry::with_auth(platform, cache, auth)?;
+    let mut ca_certs = global.resolve_ca_certs().await?;
+    if let Some(path) = &cli_ca_certs {
+        let data = tokio::fs::read(path)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to read CA certs from `{path}`: {e}"))?;
+        ca_certs.push(data);
+    }
+    let mut insecure_registries = global.insecure_registries();
+    if insecure {
+        insecure_registries.push(image_ref.registry().to_string());
+    }
+    let registry = Registry::builder(platform, cache)
+        .auth(auth)
+        .extra_ca_certs(ca_certs)
+        .add_insecure_registries(insecure_registries)
+        .build()?;
 
     let task = registry.pull_with_sender(&image_ref, &options, sender);
 
@@ -282,6 +304,8 @@ pub(crate) async fn pull_if_missing(reference: &str, quiet: bool) -> anyhow::Res
         reference.to_string(),
         false,
         quiet,
+        false,
+        None,
         microsandbox_image::PullPolicy::IfMissing,
     )
     .await

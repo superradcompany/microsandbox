@@ -74,6 +74,10 @@ pub enum ImageError {
         reference: String,
     },
 
+    /// Invalid PEM certificate data.
+    #[error("invalid PEM certificate: {0}")]
+    InvalidCertificate(String),
+
     /// General I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),

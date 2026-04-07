@@ -150,6 +150,14 @@ pub struct SandboxConfig {
     #[serde(default, skip_serializing)]
     pub registry_auth: Option<RegistryAuth>,
 
+    /// Access the registry over plain HTTP (SDK override).
+    #[serde(skip)]
+    pub(crate) insecure: bool,
+
+    /// Additional PEM-encoded CA certs (SDK override).
+    #[serde(skip)]
+    pub(crate) ca_certs: Vec<Vec<u8>>,
+
     /// Replace an existing sandbox with the same name during create.
     ///
     /// If the existing sandbox is still active, microsandbox stops it and
@@ -324,6 +332,8 @@ impl Default for SandboxConfig {
             pull_policy: PullPolicy::default(),
             policy: SandboxPolicy::default(),
             registry_auth: None,
+            insecure: false,
+            ca_certs: Vec::new(),
             replace_existing: false,
             manifest_digest: None,
         }

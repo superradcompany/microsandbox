@@ -93,15 +93,17 @@ fn run_login(args: RegistryLoginArgs) -> anyhow::Result<()> {
     })?;
 
     let mut config = load_persisted_config_or_default()?;
-    config.registries.auth.insert(
-        args.registry.clone(),
-        RegistryAuthEntry {
-            username: args.username,
-            store: Some(RegistryCredentialStore::Keyring),
-            password_env: None,
-            secret_name: None,
-        },
-    );
+    config
+        .registries
+        .hosts
+        .entry(args.registry.clone())
+        .or_default()
+        .auth = Some(RegistryAuthEntry {
+        username: args.username,
+        store: Some(RegistryCredentialStore::Keyring),
+        password_env: None,
+        secret_name: None,
+    });
 
     if let Err(error) = save_persisted_config(&config) {
         let restore = match previous_auth {
@@ -130,7 +132,12 @@ fn run_login(args: RegistryLoginArgs) -> anyhow::Result<()> {
 fn run_logout(args: RegistryLogoutArgs) -> anyhow::Result<()> {
     let mut config = load_persisted_config_or_default()?;
     let previous_auth = get_registry_keyring_auth(&args.registry).ok().flatten();
-    let had_config_entry = config.registries.auth.remove(&args.registry).is_some();
+    let had_config_entry = config
+        .registries
+        .hosts
+        .get_mut(&args.registry)
+        .and_then(|e| e.auth.take())
+        .is_some();
     let had_keyring_entry = previous_auth.is_some();
 
     if !had_config_entry && !had_keyring_entry {
@@ -156,12 +163,19 @@ fn run_logout(args: RegistryLogoutArgs) -> anyhow::Result<()> {
 
 fn run_list(_args: RegistryListArgs) -> anyhow::Result<()> {
     let config = load_persisted_config_or_default()?;
-    if config.registries.auth.is_empty() {
+    let auth_entries: Vec<_> = config
+        .registries
+        .hosts
+        .iter()
+        .filter_map(|(hostname, entry)| entry.auth.as_ref().map(|auth| (hostname, auth)))
+        .collect();
+
+    if auth_entries.is_empty() {
         println!("No registries configured.");
         return Ok(());
     }
 
-    let mut entries: Vec<_> = config.registries.auth.iter().collect();
+    let mut entries: Vec<_> = auth_entries;
     entries.sort_by_key(|(name, _)| *name);
 
     let mut table = ui::Table::new(&["REGISTRY", "USERNAME", "SOURCE"]);

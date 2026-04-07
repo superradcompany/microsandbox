@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Authentication credentials for OCI registry access.
 ///
 /// Resolution chain (in [`Registry`](crate::Registry)):
-/// 1. Explicit [`RegistryAuth`] via [`Registry::with_auth()`](crate::Registry::with_auth)
+/// 1. Explicit [`RegistryAuth`] via [`RegistryBuilder::auth()`](crate::RegistryBuilder::auth)
 /// 2. OS keyring / credential store (when configured by the caller)
 /// 3. Global config `registries.auth` (`store`, `password_env`, or `secret_name`)
 /// 4. Docker credential store/config fallback (when enabled by the caller)

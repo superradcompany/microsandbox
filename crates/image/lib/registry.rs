@@ -13,7 +13,11 @@ use std::{
     time::Instant,
 };
 
-use oci_client::{Client, client::ClientConfig, manifest::ImageIndexEntry};
+use oci_client::{
+    Client,
+    client::{Certificate, CertificateEncoding, ClientConfig, ClientProtocol},
+    manifest::ImageIndexEntry,
+};
 use tokio::{
     io::{AsyncRead, ReadBuf},
     sync::Semaphore,
@@ -65,6 +69,15 @@ struct LayerDescriptor {
     digest: Digest,
     media_type: Option<String>,
     size: Option<u64>,
+}
+
+/// Builder for constructing a [`Registry`] client with optional auth and TLS settings.
+pub struct RegistryBuilder {
+    platform: Platform,
+    cache: GlobalCache,
+    auth: oci_client::secrets::RegistryAuth,
+    insecure_registries: Vec<String>,
+    extra_ca_certs: Vec<Vec<u8>>,
 }
 
 struct CachedPullInfo {
@@ -122,32 +135,20 @@ impl<R> MaterializeProgressReader<R> {
 }
 
 impl Registry {
-    /// Create a registry client with anonymous authentication.
+    /// Create a registry client with anonymous authentication and default TLS settings.
     pub fn new(platform: Platform, cache: GlobalCache) -> ImageResult<Self> {
-        let client = build_client(&platform);
-
-        Ok(Self {
-            client,
-            auth: oci_client::secrets::RegistryAuth::Anonymous,
-            platform,
-            cache,
-        })
+        Self::builder(platform, cache).build()
     }
 
-    /// Create a registry client with explicit authentication.
-    pub fn with_auth(
-        platform: Platform,
-        cache: GlobalCache,
-        auth: RegistryAuth,
-    ) -> ImageResult<Self> {
-        let client = build_client(&platform);
-
-        Ok(Self {
-            client,
-            auth: (&auth).into(),
+    /// Create a builder for configuring auth, TLS, and other registry options.
+    pub fn builder(platform: Platform, cache: GlobalCache) -> RegistryBuilder {
+        RegistryBuilder {
             platform,
             cache,
-        })
+            auth: oci_client::secrets::RegistryAuth::Anonymous,
+            insecure_registries: Vec::new(),
+            extra_ca_certs: Vec::new(),
+        }
     }
 
     /// Resolve a pull directly from the on-disk cache without building a registry client.
@@ -1263,16 +1264,75 @@ fn detect_manifest_media_type(bytes: &[u8]) -> String {
     "application/vnd.oci.image.manifest.v1+json".to_string()
 }
 
-/// Build an OCI client that resolves multi-platform manifests for the requested target.
-fn build_client(platform: &Platform) -> Client {
-    let platform = platform.clone();
-    Client::new(ClientConfig {
-        protocol: oci_client::client::ClientProtocol::Https,
-        platform_resolver: Some(Box::new(move |manifests| {
-            resolve_platform_digest(manifests, &platform)
-        })),
-        ..Default::default()
-    })
+impl RegistryBuilder {
+    /// Set authentication credentials for the registry.
+    pub fn auth(mut self, auth: RegistryAuth) -> Self {
+        self.auth = (&auth).into();
+        self
+    }
+
+    /// Add registries that should be accessed over plain HTTP instead of HTTPS.
+    pub fn add_insecure_registries(mut self, registries: Vec<String>) -> Self {
+        self.insecure_registries.extend(registries);
+        self
+    }
+
+    /// Add PEM-encoded CA root certificates to trust.
+    pub fn extra_ca_certs(mut self, certs: Vec<Vec<u8>>) -> Self {
+        self.extra_ca_certs = certs;
+        self
+    }
+
+    /// Build the registry client.
+    ///
+    /// Returns [`ImageError::InvalidCertificate`] if any PEM data in
+    /// `extra_ca_certs` cannot be parsed as valid certificates.
+    pub fn build(self) -> ImageResult<Registry> {
+        let protocol = if self.insecure_registries.is_empty() {
+            ClientProtocol::Https
+        } else {
+            ClientProtocol::HttpsExcept(self.insecure_registries)
+        };
+
+        let mut extra_root_certificates = Vec::new();
+        for (i, pem_data) in self.extra_ca_certs.into_iter().enumerate() {
+            let certs: Vec<_> = rustls_pemfile::certs(&mut pem_data.as_slice())
+                .collect::<Result<_, _>>()
+                .map_err(|e| {
+                    ImageError::InvalidCertificate(format!("entry {i}: failed to parse: {e}"))
+                })?;
+
+            if certs.is_empty() {
+                return Err(ImageError::InvalidCertificate(format!(
+                    "entry {i}: no certificates found in PEM data"
+                )));
+            }
+
+            for cert in certs {
+                extra_root_certificates.push(Certificate {
+                    encoding: CertificateEncoding::Der,
+                    data: cert.to_vec(),
+                });
+            }
+        }
+
+        let platform = self.platform.clone();
+        let client = Client::new(ClientConfig {
+            protocol,
+            extra_root_certificates,
+            platform_resolver: Some(Box::new(move |manifests| {
+                resolve_platform_digest(manifests, &platform)
+            })),
+            ..Default::default()
+        });
+
+        Ok(Registry {
+            client,
+            auth: self.auth,
+            platform: self.platform,
+            cache: self.cache,
+        })
+    }
 }
 
 /// Resolve the best matching platform-specific manifest digest.
@@ -1902,5 +1962,134 @@ mod tests {
         cache_root
             .join("manifests")
             .join(format!("{}.json", hex::encode(hasher.finalize())))
+    }
+
+    #[test]
+    fn test_registry_builder_default() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let registry = super::Registry::builder(Platform::default(), cache)
+            .build()
+            .unwrap();
+
+        assert!(matches!(
+            registry.auth,
+            oci_client::secrets::RegistryAuth::Anonymous
+        ));
+    }
+
+    #[test]
+    fn test_registry_builder_with_auth() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let registry = super::Registry::builder(Platform::default(), cache)
+            .auth(crate::RegistryAuth::Basic {
+                username: "user".into(),
+                password: "pass".into(),
+            })
+            .build()
+            .unwrap();
+
+        assert!(matches!(
+            registry.auth,
+            oci_client::secrets::RegistryAuth::Basic(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_registry_builder_with_insecure_registries() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        // Should build without error — we can't inspect ClientConfig directly,
+        // but we verify it doesn't panic or fail.
+        super::Registry::builder(Platform::default(), cache)
+            .add_insecure_registries(vec!["localhost:5000".into()])
+            .build()
+            .unwrap();
+    }
+
+    /// Generate a self-signed CA certificate and return PEM bytes.
+    fn generate_test_ca_pem() -> Vec<u8> {
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::default();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let cert = params.self_signed(&key_pair).unwrap();
+        cert.pem().into_bytes()
+    }
+
+    #[test]
+    fn test_registry_builder_with_valid_ca_cert() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let pem = generate_test_ca_pem();
+        super::Registry::builder(Platform::default(), cache)
+            .extra_ca_certs(vec![pem])
+            .build()
+            .unwrap();
+    }
+
+    /// Helper to extract the error from a builder result.
+    fn build_err(result: Result<super::Registry, crate::ImageError>) -> crate::ImageError {
+        match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected build to fail"),
+        }
+    }
+
+    #[test]
+    fn test_registry_builder_rejects_invalid_pem() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let bad_pem = b"not valid PEM data".to_vec();
+        let err = build_err(
+            super::Registry::builder(Platform::default(), cache)
+                .extra_ca_certs(vec![bad_pem])
+                .build(),
+        );
+
+        assert!(
+            err.to_string().contains("no certificates found"),
+            "expected 'no certificates found', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_registry_builder_rejects_empty_pem() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let err = build_err(
+            super::Registry::builder(Platform::default(), cache)
+                .extra_ca_certs(vec![Vec::new()])
+                .build(),
+        );
+
+        assert!(
+            err.to_string().contains("no certificates found"),
+            "expected 'no certificates found', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_registry_builder_all_options() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let pem = generate_test_ca_pem();
+        super::Registry::builder(Platform::default(), cache)
+            .auth(crate::RegistryAuth::Basic {
+                username: "user".into(),
+                password: "pass".into(),
+            })
+            .add_insecure_registries(vec!["localhost:5000".into()])
+            .extra_ca_certs(vec![pem])
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn test_registry_new_equals_builder_default() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        // Registry::new() should succeed just like builder().build()
+        super::Registry::new(Platform::default(), cache).unwrap();
     }
 }

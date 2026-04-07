@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use microsandbox::sandbox::{NetworkPolicy, PullPolicy, SandboxConfig as RustSandboxConfig};
-use microsandbox::{LogLevel, RegistryAuth};
+use microsandbox::{LogLevel, RegistryAuth as RustRegistryAuth};
 use microsandbox_network::dns;
 use microsandbox_network::policy::{
     Action, Destination, DestinationGroup, Direction, PortRange, Protocol, Rule,
@@ -68,7 +68,7 @@ impl Sandbox {
     /// Create a sandbox from configuration (attached mode — stops on GC/process exit).
     #[napi(factory)]
     pub async fn create(config: SandboxConfig) -> Result<Sandbox> {
-        let rust_config = convert_config(config)?;
+        let rust_config = convert_config(config).await?;
         let inner = microsandbox::sandbox::Sandbox::create(rust_config)
             .await
             .map_err(to_napi_error)?;
@@ -80,7 +80,7 @@ impl Sandbox {
     /// Create a sandbox that survives the parent process (detached mode).
     #[napi(factory)]
     pub async fn create_detached(config: SandboxConfig) -> Result<Sandbox> {
-        let rust_config = convert_config(config)?;
+        let rust_config = convert_config(config).await?;
         let inner = microsandbox::sandbox::Sandbox::create_detached(rust_config)
             .await
             .map_err(to_napi_error)?;
@@ -441,7 +441,7 @@ impl AsyncGenerator for JsMetricsStream {
 }
 
 /// Convert a JS `SandboxConfig` to the Rust `SandboxConfig` via the builder pattern.
-fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
+async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
     let mut builder =
         microsandbox::sandbox::Sandbox::builder(&config.name).image(config.image.as_str());
 
@@ -511,10 +511,30 @@ fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
     if config.quiet_logs.unwrap_or(false) {
         builder = builder.quiet_logs();
     }
-    if let Some(ref auth) = config.registry_auth {
-        builder = builder.registry_auth(RegistryAuth::Basic {
-            username: auth.username.clone(),
-            password: auth.password.clone(),
+    if let Some(ref registry) = config.registry {
+        let auth = registry.auth.as_ref().map(|a| RustRegistryAuth::Basic {
+            username: a.username.clone(),
+            password: a.password.clone(),
+        });
+        let insecure = registry.insecure.unwrap_or(false);
+        let ca_certs = match &registry.ca_certs_path {
+            Some(path) => Some(tokio::fs::read(path).await.map_err(|e| {
+                napi::Error::from_reason(format!("failed to read CA certs from `{path}`: {e}"))
+            })?),
+            None => None,
+        };
+
+        builder = builder.registry(|mut r| {
+            if let Some(auth) = auth {
+                r = r.auth(auth);
+            }
+            if insecure {
+                r = r.insecure();
+            }
+            if let Some(data) = ca_certs {
+                r = r.ca_certs(data);
+            }
+            r
         });
     }
     if let Some(ref ports) = config.ports {
