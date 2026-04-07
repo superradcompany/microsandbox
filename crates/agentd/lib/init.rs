@@ -259,7 +259,7 @@ mod linux {
     };
 
     use nix::{
-        mount::{MsFlags, mount},
+        mount::{MntFlags, MsFlags, mount, umount2},
         sys::stat::Mode,
         unistd::{chdir, chroot, mkdir},
     };
@@ -531,6 +531,10 @@ mod linux {
             mount_file(&spec)?;
         }
 
+        // Best-effort cleanup of the staging root (succeeds only if all
+        // per-tag subdirs were already removed inside mount_file).
+        let _ = std::fs::remove_dir(microsandbox_protocol::FILE_MOUNTS_DIR);
+
         Ok(())
     }
 
@@ -619,6 +623,12 @@ mod linux {
                 ))
             })?;
         }
+
+        // 7. Unmount the staging virtiofs share and remove the directory.
+        //    The bind mount keeps the file accessible at the guest path;
+        //    removing the share prevents alternate-path access.
+        let _ = umount2(staging_path.as_str(), MntFlags::MNT_DETACH);
+        let _ = std::fs::remove_dir(&staging_path);
 
         Ok(())
     }
