@@ -350,12 +350,7 @@ fn push_dir_mounts_spec(dir_mounts_val: &mut String, guest: &str, readonly: bool
 }
 
 /// Push a `--mount fm_tag:file_mount_dir[:ro]` arg pair.
-fn push_file_mount_arg(
-    args: &mut Vec<OsString>,
-    tag: &str,
-    file_mount_dir: &Path,
-    readonly: bool,
-) {
+fn push_file_mount_arg(args: &mut Vec<OsString>, tag: &str, file_mount_dir: &Path, readonly: bool) {
     let mut arg = format!("{tag}:{}", file_mount_dir.display());
     if readonly {
         arg.push_str(":ro");
@@ -1008,13 +1003,17 @@ mod tests {
             .collect::<Vec<_>>();
 
         // File mount should use staging dir in --mount.
-        assert!(rendered
-            .windows(2)
-            .any(|pair| pair[0] == "--mount"
-                && pair[1] == "fm_aabbccdd:/tmp/staging/fm_aabbccdd"));
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--mount"
+                    && pair[1] == "fm_aabbccdd:/tmp/staging/fm_aabbccdd")
+        );
         // MSB_FILE_MOUNTS should contain the spec.
-        assert!(rendered
-            .contains(&"MSB_FILE_MOUNTS=fm_aabbccdd:config.txt:/guest/config.txt".to_string()));
+        assert!(
+            rendered
+                .contains(&"MSB_FILE_MOUNTS=fm_aabbccdd:config.txt:/guest/config.txt".to_string())
+        );
         // MSB_DIR_MOUNTS should NOT contain the file mount.
         assert!(!rendered.iter().any(|a| a.starts_with("MSB_DIR_MOUNTS=")));
     }
@@ -1060,7 +1059,8 @@ mod tests {
         // Directory mount in MSB_DIR_MOUNTS.
         assert!(rendered.contains(&"MSB_DIR_MOUNTS=data:/data".to_string()));
         // File mount in MSB_FILE_MOUNTS.
-        assert!(rendered
-            .contains(&"MSB_FILE_MOUNTS=fm_11223344:file.txt:/guest/file.txt".to_string()));
+        assert!(
+            rendered.contains(&"MSB_FILE_MOUNTS=fm_11223344:file.txt:/guest/file.txt".to_string())
+        );
     }
 }
