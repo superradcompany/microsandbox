@@ -641,7 +641,15 @@ fn write_startup_info(json: &str) -> RuntimeResult<()> {
 /// Connect to the sandbox database.
 async fn connect_db(db_path: &std::path::Path) -> RuntimeResult<DatabaseConnection> {
     let url = format!("sqlite://{}?mode=rwc", db_path.display());
-    let opts = ConnectOptions::new(url).max_connections(1).to_owned();
+    let mut opts = ConnectOptions::new(url);
+    opts.max_connections(1)
+        .connect_timeout(Duration::from_secs(30))
+        .map_sqlx_sqlite_opts(|sqlx_opts| {
+            sqlx_opts
+                .foreign_keys(true)
+                .busy_timeout(Duration::from_secs(5))
+                .pragma("journal_mode", "WAL")
+        });
     let db = Database::connect(opts)
         .await
         .map_err(|e| RuntimeError::Custom(format!("database connect: {e}")))?;

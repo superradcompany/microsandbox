@@ -6,7 +6,10 @@
 
 pub use microsandbox_db::entity;
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use microsandbox_migration::{Migrator, MigratorTrait};
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
@@ -123,12 +126,27 @@ async fn connect_and_migrate(
     let db_url = format!("sqlite://{db_path_str}?mode=rwc");
 
     let mut opts = ConnectOptions::new(&db_url);
-    opts.max_connections(max_connections);
+    configure_sqlite_connect_options(&mut opts, max_connections);
 
     let conn = Database::connect(opts).await?;
     Migrator::up(&conn, None).await?;
 
     Ok(conn)
+}
+
+fn configure_sqlite_connect_options(opts: &mut ConnectOptions, max_connections: u32) {
+    // The global microsandbox DB is shared across short-lived CLI processes and
+    // long-lived sandbox runtimes. WAL mode plus a busy timeout makes that
+    // multi-process pattern much more reliable than the default rollback
+    // journal on Linux hosts.
+    opts.max_connections(max_connections)
+        .connect_timeout(Duration::from_secs(30))
+        .map_sqlx_sqlite_opts(|sqlx_opts| {
+            sqlx_opts
+                .foreign_keys(true)
+                .busy_timeout(Duration::from_secs(5))
+                .pragma("journal_mode", "WAL")
+        });
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -137,7 +155,7 @@ async fn connect_and_migrate(
 
 #[cfg(test)]
 mod tests {
-    use sea_orm::{ConnectionTrait, Statement};
+    use sea_orm::{ConnectionTrait, Database, Statement};
 
     use super::*;
 
@@ -192,5 +210,92 @@ mod tests {
 
         // Running migrations again on the same DB should succeed.
         Migrator::up(&conn1, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_connect_and_migrate_recovers_from_partial_storage_migration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+
+        let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let conn = Database::connect(&db_url).await.unwrap();
+
+        Migrator::up(&conn, Some(2)).await.unwrap();
+
+        conn.execute_unprepared(
+            r#"
+            CREATE TABLE IF NOT EXISTS "volume" (
+                "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+                "name" text NOT NULL UNIQUE,
+                "quota_mib" integer,
+                "size_bytes" bigint,
+                "labels" text,
+                "created_at" datetime_text,
+                "updated_at" datetime_text
+            );
+            CREATE TABLE IF NOT EXISTS "snapshot" (
+                "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+                "name" text NOT NULL,
+                "sandbox_id" integer,
+                "size_bytes" bigint,
+                "description" text,
+                "created_at" datetime_text,
+                FOREIGN KEY ("sandbox_id") REFERENCES "sandbox" ("id") ON DELETE SET NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS "idx_snapshots_name_sandbox_unique" ON "snapshot" ("name", "sandbox_id");
+            "#,
+        )
+        .await
+        .unwrap();
+
+        drop(conn);
+
+        let conn = connect_and_migrate(&db_dir, 1).await.unwrap();
+
+        let migrations = conn
+            .query_all(Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                "SELECT version FROM seaql_migrations ORDER BY version",
+            ))
+            .await
+            .unwrap();
+
+        let migration_names: Vec<String> = migrations
+            .iter()
+            .map(|row| row.try_get_by_index::<String>(0).unwrap())
+            .collect();
+
+        assert_eq!(
+            migration_names,
+            vec![
+                "m20260305_000001_create_image_tables",
+                "m20260305_000002_create_sandbox_tables",
+                "m20260305_000003_create_storage_tables",
+                "m20260305_000004_create_sandbox_images_table",
+            ]
+        );
+
+        let indexes = conn
+            .query_all(Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_snapshots%' ORDER BY name",
+            ))
+            .await
+            .unwrap();
+
+        let index_names: Vec<String> = indexes
+            .iter()
+            .map(|row| row.try_get_by_index::<String>(0).unwrap())
+            .collect();
+
+        assert_eq!(
+            index_names,
+            vec![
+                "idx_snapshots_name_sandbox_unique",
+                "idx_snapshots_name_unique_no_sandbox",
+            ]
+        );
     }
 }
