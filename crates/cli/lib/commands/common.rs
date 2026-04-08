@@ -115,6 +115,11 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub no_dns_rebind_protection: bool,
 
+    /// Allow traffic to host/private IP addresses (enables access to LAN services).
+    #[cfg(feature = "net")]
+    #[arg(long)]
+    pub allow_private_ips: bool,
+
     /// Limit the number of concurrent network connections.
     #[cfg(feature = "net")]
     #[arg(long)]
@@ -192,6 +197,7 @@ impl SandboxOpts {
             || !self.dns_block_domain.is_empty()
             || !self.dns_block_suffix.is_empty()
             || self.no_dns_rebind_protection
+            || self.allow_private_ips
             || self.max_connections.is_some()
             || self.tls_intercept
             || !self.tls_intercept_port.is_empty()
@@ -342,6 +348,7 @@ fn apply_network_opts(
     let has_network_config = !opts.dns_block_domain.is_empty()
         || !opts.dns_block_suffix.is_empty()
         || opts.no_dns_rebind_protection
+        || opts.allow_private_ips
         || opts.max_connections.is_some()
         || opts.tls_intercept
         || !opts.tls_intercept_port.is_empty()
@@ -355,6 +362,7 @@ fn apply_network_opts(
         let dns_block_domain = opts.dns_block_domain.clone();
         let dns_block_suffix = opts.dns_block_suffix.clone();
         let no_dns_rebind = opts.no_dns_rebind_protection;
+        let allow_private_ips = opts.allow_private_ips;
         let max_conn = opts.max_connections;
         let tls_intercept = opts.tls_intercept;
         let tls_ports = opts.tls_intercept_port.clone();
@@ -373,6 +381,9 @@ fn apply_network_opts(
             }
             if no_dns_rebind {
                 n = n.dns_rebind_protection(false);
+            }
+            if allow_private_ips {
+                n = n.policy(microsandbox_network::policy::NetworkPolicy::allow_all());
             }
             if let Some(max) = max_conn {
                 n = n.max_connections(max);
