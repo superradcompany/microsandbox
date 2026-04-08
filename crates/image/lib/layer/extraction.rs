@@ -5,6 +5,7 @@
 //! platform-aware symlinks, special file handling, and whiteout markers.
 
 use std::{
+    borrow::Cow,
     collections::BTreeSet,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -196,6 +197,7 @@ pub(crate) async fn extract_layer(
     let mut implicit_dirs: BTreeSet<PathBuf> = BTreeSet::new();
     let mut total_size: u64 = 0;
     let mut entry_count: u64 = 0;
+    let case_sensitive_host_paths = host_fs_is_case_sensitive(dest, tar_path)?;
 
     let mut entries = archive.entries().map_err(|e| ImageError::Extraction {
         digest: tar_path.display().to_string(),
@@ -232,8 +234,11 @@ pub(crate) async fn extract_layer(
             })?
             .into_owned();
 
-        // Validate path.
-        let full_path = validate_entry_path(dest, &entry_path, tar_path)?;
+        // Validate path (skip bare root entries).
+        let full_path = match validate_entry_path(dest, &entry_path, tar_path)? {
+            Some(p) => p,
+            None => continue,
+        };
 
         let uid = header.uid().unwrap_or(0) as u32;
         let gid = header.gid().unwrap_or(0) as u32;
@@ -242,14 +247,17 @@ pub(crate) async fn extract_layer(
 
         let entry_type = header.entry_type();
 
+        reject_case_insensitive_name_collision(&full_path, tar_path, case_sensitive_host_paths)?;
+
         // Check for hardlink — defer to pass 2.
         if entry_type == tar::EntryType::Link {
             if let Ok(Some(link_target)) = entry.link_name() {
-                let target_full = validate_entry_path(dest, &link_target, tar_path)?;
-                deferred_hardlinks.push(DeferredHardlink {
-                    path: full_path,
-                    target: target_full,
-                });
+                if let Some(target_full) = validate_entry_path(dest, &link_target, tar_path)? {
+                    deferred_hardlinks.push(DeferredHardlink {
+                        path: full_path,
+                        target: target_full,
+                    });
+                }
             }
             continue;
         }
@@ -257,7 +265,9 @@ pub(crate) async fn extract_layer(
         if entry_type == tar::EntryType::Directory {
             // Directory.
             if !full_path.exists() {
-                std::fs::create_dir_all(&full_path).map_err(|e| extraction_err(tar_path, e))?;
+                std::fs::create_dir_all(&full_path).map_err(|e| {
+                    extraction_path_err(tar_path, &full_path, "create directory", e)
+                })?;
             }
             // Set host permissions: u+rwx minimum.
             set_host_permissions(&full_path, 0o700)?;
@@ -283,8 +293,9 @@ pub(crate) async fn extract_layer(
                 // Remove any existing entry (could be a directory from a lower layer).
                 let _ = std::fs::remove_dir_all(&full_path);
                 let _ = std::fs::remove_file(&full_path);
-                std::fs::write(&full_path, link_target.as_os_str().as_encoded_bytes())
-                    .map_err(|e| extraction_err(tar_path, e))?;
+                std::fs::write(&full_path, link_target.as_os_str().as_encoded_bytes()).map_err(
+                    |e| extraction_path_err(tar_path, &full_path, "write symlink payload", e),
+                )?;
                 set_host_permissions(&full_path, 0o600)?;
                 set_override_stat(&full_path, uid, gid, mode, 0)?;
                 clear_implicit_entry(&full_path, dest, &mut implicit_dirs);
@@ -294,7 +305,7 @@ pub(crate) async fn extract_layer(
                 let _ = std::fs::remove_dir_all(&full_path);
                 let _ = std::fs::remove_file(&full_path);
                 std::os::unix::fs::symlink(&link_target, &full_path)
-                    .map_err(|e| extraction_err(tar_path, e))?;
+                    .map_err(|e| extraction_path_err(tar_path, &full_path, "create symlink", e))?;
                 set_override_stat_symlink(&full_path, uid, gid, mode, 0)?;
                 clear_implicit_entry(&full_path, dest, &mut implicit_dirs);
             }
@@ -321,10 +332,10 @@ pub(crate) async fn extract_layer(
 
             let mut file = tokio::fs::File::create(&full_path)
                 .await
-                .map_err(|e| extraction_err(tar_path, e))?;
+                .map_err(|e| extraction_path_err(tar_path, &full_path, "create file", e))?;
             tokio::io::copy(&mut entry, &mut file)
                 .await
-                .map_err(|e| extraction_err(tar_path, e))?;
+                .map_err(|e| extraction_path_err(tar_path, &full_path, "write file", e))?;
             drop(file);
 
             set_host_permissions(&full_path, 0o600)?;
@@ -334,7 +345,14 @@ pub(crate) async fn extract_layer(
         } else if entry_type == tar::EntryType::Block || entry_type == tar::EntryType::Char {
             // Block/char device: store as empty regular file with device info in xattr.
             ensure_parent_dir(&full_path, dest, &mut implicit_dirs)?;
-            std::fs::write(&full_path, b"").map_err(|e| extraction_err(tar_path, e))?;
+            std::fs::write(&full_path, b"").map_err(|e| {
+                extraction_path_err(
+                    tar_path,
+                    &full_path,
+                    "materialize device node placeholder",
+                    e,
+                )
+            })?;
             set_host_permissions(&full_path, 0o600)?;
 
             let major = header.device_major().unwrap_or(None).unwrap_or(0);
@@ -351,7 +369,9 @@ pub(crate) async fn extract_layer(
         } else if entry_type == tar::EntryType::Fifo {
             // FIFO: store as empty regular file.
             ensure_parent_dir(&full_path, dest, &mut implicit_dirs)?;
-            std::fs::write(&full_path, b"").map_err(|e| extraction_err(tar_path, e))?;
+            std::fs::write(&full_path, b"").map_err(|e| {
+                extraction_path_err(tar_path, &full_path, "materialize fifo placeholder", e)
+            })?;
             set_host_permissions(&full_path, 0o600)?;
             let mode = S_IFIFO | (tar_mode & 0o7777);
             set_override_stat(&full_path, uid, gid, mode, 0)?;
@@ -370,6 +390,7 @@ pub(crate) async fn extract_layer(
             );
             continue;
         }
+        reject_case_insensitive_name_collision(&hl.path, tar_path, case_sensitive_host_paths)?;
         ensure_parent_dir(&hl.path, dest, &mut implicit_dirs)?;
         let _ = std::fs::remove_file(&hl.path);
         std::fs::hard_link(&hl.target, &hl.path).map_err(|e| ImageError::Extraction {
@@ -394,15 +415,23 @@ pub(crate) async fn extract_layer(
 //--------------------------------------------------------------------------------------------------
 
 /// Validate a tar entry path to prevent path traversal.
-fn validate_entry_path(dest: &Path, entry_path: &Path, tar_path: &Path) -> ImageResult<PathBuf> {
-    // Reject absolute paths.
-    if entry_path.is_absolute() {
-        return Err(ImageError::Extraction {
-            digest: tar_path.display().to_string(),
-            message: format!("absolute path in tar entry: {}", entry_path.display()),
-            source: None,
-        });
-    }
+///
+/// Returns `None` if the entry is a bare root (`/`) that should be skipped.
+fn validate_entry_path(
+    dest: &Path,
+    entry_path: &Path,
+    tar_path: &Path,
+) -> ImageResult<Option<PathBuf>> {
+    // Strip leading `/` from absolute paths (same as `tar` behavior).
+    let entry_path = if entry_path.is_absolute() {
+        match entry_path.strip_prefix("/") {
+            Ok(p) if p.as_os_str().is_empty() => return Ok(None),
+            Ok(p) => Cow::Borrowed(p),
+            Err(_) => Cow::Borrowed(entry_path),
+        }
+    } else {
+        Cow::Borrowed(entry_path)
+    };
 
     // Reject .. components.
     let mut depth = 0usize;
@@ -432,9 +461,9 @@ fn validate_entry_path(dest: &Path, entry_path: &Path, tar_path: &Path) -> Image
         }
     }
 
-    let full_path = dest.join(entry_path);
+    let full_path = dest.join(entry_path.as_ref());
     ensure_host_path_contained(dest, &full_path, tar_path)?;
-    Ok(full_path)
+    Ok(Some(full_path))
 }
 
 /// Ensure parent directories exist, tracking implicitly-created ones for post-fixup.
@@ -601,6 +630,117 @@ fn extraction_err(
     }
 }
 
+fn extraction_path_err(
+    tar_path: &Path,
+    path: &Path,
+    action: &str,
+    e: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+) -> ImageError {
+    let source = e.into();
+    ImageError::Extraction {
+        digest: tar_path.display().to_string(),
+        message: format!("{action} {}: {source}", path.display()),
+        source: Some(source),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn host_fs_is_case_sensitive(dest: &Path, tar_path: &Path) -> ImageResult<bool> {
+    let probe_dir = dest.join(".msb_case_probe");
+    let lower = probe_dir.join("a");
+    let upper = probe_dir.join("A");
+
+    std::fs::create_dir(&probe_dir).map_err(|e| {
+        extraction_path_err(
+            tar_path,
+            &probe_dir,
+            "create case-sensitivity probe directory",
+            e,
+        )
+    })?;
+    std::fs::write(&lower, b"").map_err(|e| {
+        extraction_path_err(tar_path, &lower, "create case-sensitivity probe file", e)
+    })?;
+
+    let case_sensitive = !upper.exists();
+
+    let _ = std::fs::remove_file(&lower);
+    let _ = std::fs::remove_dir(&probe_dir);
+
+    Ok(case_sensitive)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn host_fs_is_case_sensitive(_dest: &Path, _tar_path: &Path) -> ImageResult<bool> {
+    Ok(true)
+}
+
+fn reject_case_insensitive_name_collision(
+    path: &Path,
+    tar_path: &Path,
+    case_sensitive_host_paths: bool,
+) -> ImageResult<()> {
+    if case_sensitive_host_paths {
+        return Ok(());
+    }
+
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    let Some(name) = path.file_name() else {
+        return Ok(());
+    };
+
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(extraction_path_err(
+                tar_path,
+                parent,
+                "scan parent directory for case collisions",
+                err,
+            ));
+        }
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            extraction_path_err(
+                tar_path,
+                parent,
+                "read parent directory entry for case collision scan",
+                e,
+            )
+        })?;
+        let existing_name = entry.file_name();
+        if existing_name == name {
+            continue;
+        }
+        if ascii_case_eq(existing_name.as_encoded_bytes(), name.as_encoded_bytes()) {
+            return Err(ImageError::Extraction {
+                digest: tar_path.display().to_string(),
+                message: format!(
+                    "cannot extract {} on a case-insensitive host filesystem: it collides with existing sibling {}. Configure microsandbox to use a case-sensitive cache directory.",
+                    path.display(),
+                    parent.join(&existing_name).display()
+                ),
+                source: None,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn ascii_case_eq(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right.iter())
+            .all(|(lhs, rhs)| lhs.eq_ignore_ascii_case(rhs))
+}
+
 /// Fix xattrs on implicitly-created directories by copying from lower layers.
 ///
 /// After parallel extraction, directories that were created by `ensure_parent_dir`
@@ -733,8 +873,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        LayerCompression, OVERRIDE_XATTR_KEY, detect_layer_compression, extract_layer,
-        validate_entry_path,
+        LayerCompression, OVERRIDE_XATTR_KEY, ascii_case_eq, detect_layer_compression,
+        extract_layer, reject_case_insensitive_name_collision, validate_entry_path,
     };
 
     #[test]
@@ -763,6 +903,12 @@ mod tests {
             .unwrap(),
             LayerCompression::Plain,
         );
+    }
+
+    #[test]
+    fn test_ascii_case_eq_matches_ascii_only() {
+        assert!(ascii_case_eq(b"NCR260VT300WPP", b"ncr260vt300wpp"));
+        assert!(!ascii_case_eq(b"NCR260VT300WPP", b"ncr260vt300wan"));
     }
 
     #[test]
@@ -937,5 +1083,23 @@ mod tests {
         for &(_, _, total) in &progress_events {
             assert_eq!(total, tar_size);
         }
+    }
+
+    #[test]
+    fn test_reject_case_insensitive_name_collision_detects_existing_sibling() {
+        let temp = tempdir().unwrap();
+        let parent = temp.path().join("terminfo");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::write(parent.join("NCR260VT300WPP"), b"alias").unwrap();
+
+        let err = reject_case_insensitive_name_collision(
+            &parent.join("ncr260vt300wpp"),
+            Path::new("layer.tar"),
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("case-insensitive host filesystem"));
+        assert!(err.to_string().contains("NCR260VT300WPP"));
     }
 }
