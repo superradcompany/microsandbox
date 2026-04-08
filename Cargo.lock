@@ -2620,6 +2620,7 @@ version = "0.3.12"
 dependencies = [
  "bytes",
  "chrono",
+ "futures",
  "microsandbox",
  "microsandbox-network",
  "napi",

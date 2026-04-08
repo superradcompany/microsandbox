@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
+use futures::StreamExt;
 use microsandbox::sandbox::{NetworkPolicy, PullPolicy, SandboxConfig as RustSandboxConfig};
 use microsandbox::{LogLevel, RegistryAuth};
 use microsandbox_network::policy::{
@@ -28,6 +30,20 @@ use crate::types::*;
 #[napi]
 pub struct Sandbox {
     inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
+}
+
+/// A streaming subscription for sandbox metrics at a regular interval.
+///
+/// Supports both manual `recv()` calls and `for await...of` iteration:
+/// ```js
+/// const stream = await sb.metricsStream(1000);
+/// for await (const m of stream) {
+///   console.log(`CPU: ${m.cpuPercent.toFixed(1)}%`);
+/// }
+/// ```
+#[napi(async_iterator, js_name = "MetricsStream")]
+pub struct JsMetricsStream {
+    rx: Arc<Mutex<tokio::sync::mpsc::Receiver<napi::Result<SandboxMetrics>>>>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -226,6 +242,81 @@ impl Sandbox {
         Ok(metrics_to_js(&m))
     }
 
+    /// Stream metrics snapshots at the requested interval (in milliseconds).
+    #[napi]
+    pub async fn metrics_stream(&self, interval_ms: f64) -> Result<JsMetricsStream> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let interval = Duration::from_millis(interval_ms as u64);
+        let mut stream = Box::pin(sb.metrics_stream(interval));
+
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            while let Some(result) = stream.next().await {
+                let item = result.map(|m| metrics_to_js(&m)).map_err(to_napi_error);
+                if tx.send(item).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(JsMetricsStream {
+            rx: Arc::new(Mutex::new(rx)),
+        })
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Attach
+    //----------------------------------------------------------------------------------------------
+
+    /// Attach to an interactive PTY session inside the sandbox.
+    ///
+    /// Bridges the host terminal to the guest process. Returns the exit code.
+    #[napi]
+    pub async fn attach(&self, cmd: String, args: Option<Vec<String>>) -> Result<i32> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let args_owned = args.unwrap_or_default();
+        sb.attach(&cmd, args_owned).await.map_err(to_napi_error)
+    }
+
+    /// Attach with full configuration options.
+    #[napi(js_name = "attachWithConfig")]
+    pub async fn attach_with_config(&self, config: AttachConfig) -> Result<i32> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.attach_with(&config.cmd, |mut b| {
+            if let Some(ref args) = config.args {
+                b = b.args(args.clone());
+            }
+            if let Some(ref cwd) = config.cwd {
+                b = b.cwd(cwd);
+            }
+            if let Some(ref user) = config.user {
+                b = b.user(user);
+            }
+            if let Some(ref env) = config.env {
+                for (k, v) in env {
+                    b = b.env(k, v);
+                }
+            }
+            if let Some(ref keys) = config.detach_keys {
+                b = b.detach_keys(keys);
+            }
+            b
+        })
+        .await
+        .map_err(to_napi_error)
+    }
+
+    /// Attach to the sandbox's default shell.
+    #[napi]
+    pub async fn attach_shell(&self) -> Result<i32> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        sb.attach_shell().await.map_err(to_napi_error)
+    }
+
     //----------------------------------------------------------------------------------------------
     // Lifecycle
     //----------------------------------------------------------------------------------------------
@@ -294,6 +385,40 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+#[napi]
+impl JsMetricsStream {
+    /// Receive the next metrics snapshot. Returns `null` when the stream ends.
+    #[napi]
+    pub async fn recv(&self) -> Result<Option<SandboxMetrics>> {
+        let mut guard = self.rx.lock().await;
+        match guard.recv().await {
+            Some(result) => Ok(Some(result?)),
+            None => Ok(None),
+        }
+    }
+}
+
+#[napi]
+impl AsyncGenerator for JsMetricsStream {
+    type Yield = SandboxMetrics;
+    type Next = ();
+    type Return = ();
+
+    fn next(
+        &mut self,
+        _value: Option<Self::Next>,
+    ) -> impl std::future::Future<Output = Result<Option<Self::Yield>>> + Send + 'static {
+        let rx = Arc::clone(&self.rx);
+        async move {
+            let mut guard = rx.lock().await;
+            match guard.recv().await {
+                Some(result) => Ok(Some(result?)),
+                None => Ok(None),
+            }
+        }
+    }
+}
 
 /// Convert a JS `SandboxConfig` to the Rust `SandboxConfig` via the builder pattern.
 fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
