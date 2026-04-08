@@ -35,7 +35,6 @@ Today, AI agents operate with whatever permissions you give them, and that's usu
 - <img height="15" src="https://octicons-col.vercel.app/zap/A770EF"> **Instant Startup**: Boot times under 100 milliseconds.
 - <img height="15" src="https://octicons-col.vercel.app/plug/A770EF"> **Embeddable**: Spawn VMs right within your code. No setup server. No long-running daemon.
 - <img height="15" src="https://octicons-col.vercel.app/lock/A770EF"> **Secrets That Can't Leak**: Secret keys never enter the VM. The guest VM only sees placeholders.
-- <img height="15" src="https://octicons-col.vercel.app/globe/A770EF"> **Programmable Filesystem & Network Stack**: Customizable filesystems and network operations.
 - <img height="15" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
 - <img height="15" src="https://octicons-col.vercel.app/database/A770EF"> **Long-Running**: Sandboxes can run in detached mode. They are great for long-lived sessions.
 - <img height="15" src="https://octicons-col.vercel.app/terminal/A770EF"> **Agent-Ready**: Your agents can create their own sandboxes with our [Agent Skills](https://github.com/superradcompany/skills) and [MCP server](https://github.com/superradcompany/microsandbox-mcp).
