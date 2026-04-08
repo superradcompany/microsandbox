@@ -97,6 +97,8 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > </div>
 
 
+> The first call to `create()` pulls the image if it isn't cached locally, so it may take longer depending on your connection. Subsequent runs reuse the cache.
+
 <br />
 
 <a href="https://docs.microsandbox.dev/sdk/overview"><img src="https://img.shields.io/badge/SDK_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="SDK Docs"></a>
