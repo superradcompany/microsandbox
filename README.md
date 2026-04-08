@@ -96,8 +96,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > <div align="left">
 >   <a href="./typescript_examples.md#run-code-in-a-sandbox"><img src="https://img.shields.io/badge/-→ Typescript-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript"></a>&nbsp;<a href="./python_examples.md"><img src="https://img.shields.io/badge/-→ Python-FFD43B?style=flat-square&logo=python&logoColor=306998" alt="Python"></a>
 > </div>
->
-> Behind the scenes, `create()` pulls the image (if not cached), assembles the filesystem, boots a microVM. All in under a second.
+
 
 <br />
 
