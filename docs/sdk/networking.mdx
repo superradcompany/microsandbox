@@ -70,7 +70,10 @@ Build a policy with explicit egress and ingress rules. Rules are evaluated first
 <CodeGroup>
 ```rust Rust
 use microsandbox::Sandbox;
-use microsandbox_network::policy::*;
+use microsandbox::NetworkPolicy;
+use microsandbox_network::policy::{
+    Action, Destination, DestinationGroup, Direction, PortRange, Protocol, Rule,
+};
 
 let policy = NetworkPolicy {
     default_action: Action::Deny,
