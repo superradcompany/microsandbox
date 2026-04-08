@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use microsandbox::sandbox::{FsEntry as RustFsEntry, FsEntryKind, FsMetadata as RustFsMetadata};
+use microsandbox::sandbox::{
+    FsEntry as RustFsEntry, FsEntryKind, FsMetadata as RustFsMetadata,
+    FsReadStream as RustFsReadStream,
+};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use tokio::sync::Mutex;
@@ -16,6 +19,20 @@ use crate::types::*;
 #[napi(js_name = "SandboxFs")]
 pub struct JsSandboxFs {
     sandbox: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
+}
+
+/// A streaming reader for file data from the sandbox.
+///
+/// Supports both manual `recv()` calls and `for await...of` iteration:
+/// ```js
+/// const stream = await sb.fs().readStream("/app/data.bin");
+/// for await (const chunk of stream) {
+///   processChunk(chunk);
+/// }
+/// ```
+#[napi(async_iterator, js_name = "FsReadStream")]
+pub struct JsFsReadStream {
+    inner: Arc<Mutex<RustFsReadStream>>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -142,6 +159,51 @@ impl JsSandboxFs {
             .copy_to_host(&guest_path, &host_path)
             .await
             .map_err(to_napi_error)
+    }
+
+    /// Read a file with streaming (~3 MiB chunks).
+    #[napi(js_name = "readStream")]
+    pub async fn read_stream(&self, path: String) -> Result<JsFsReadStream> {
+        let guard = self.sandbox.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let stream = sb.fs().read_stream(&path).await.map_err(to_napi_error)?;
+        Ok(JsFsReadStream {
+            inner: Arc::new(Mutex::new(stream)),
+        })
+    }
+}
+
+#[napi]
+impl JsFsReadStream {
+    /// Receive the next chunk of data. Returns `null` when the stream ends.
+    #[napi]
+    pub async fn recv(&self) -> Result<Option<Buffer>> {
+        let mut guard = self.inner.lock().await;
+        match guard.recv().await.map_err(to_napi_error)? {
+            Some(bytes) => Ok(Some(bytes.to_vec().into())),
+            None => Ok(None),
+        }
+    }
+}
+
+#[napi]
+impl AsyncGenerator for JsFsReadStream {
+    type Yield = Buffer;
+    type Next = ();
+    type Return = ();
+
+    fn next(
+        &mut self,
+        _value: Option<Self::Next>,
+    ) -> impl Future<Output = Result<Option<Self::Yield>>> + Send + 'static {
+        let inner = Arc::clone(&self.inner);
+        async move {
+            let mut guard = inner.lock().await;
+            match guard.recv().await.map_err(to_napi_error)? {
+                Some(bytes) => Ok(Some(bytes.to_vec().into())),
+                None => Ok(None),
+            }
+        }
     }
 }
 

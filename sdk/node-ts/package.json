@@ -23,12 +23,13 @@
     "postinstall": "node postinstall.js"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3"
+    "@napi-rs/cli": "^3",
+    "@types/node": "^25.5.2"
   },
   "optionalDependencies": {
     "@superradcompany/microsandbox-darwin-arm64": "0.3.12",
-    "@superradcompany/microsandbox-linux-x64-gnu": "0.3.12",
-    "@superradcompany/microsandbox-linux-arm64-gnu": "0.3.12"
+    "@superradcompany/microsandbox-linux-arm64-gnu": "0.3.12",
+    "@superradcompany/microsandbox-linux-x64-gnu": "0.3.12"
   },
   "files": [
     "index.cjs",
