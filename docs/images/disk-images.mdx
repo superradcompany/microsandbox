@@ -24,6 +24,8 @@ When you pass a file path ending in `.qcow2`, `.raw`, or `.vmdk`, microsandbox a
 
 <CodeGroup>
 ```rust Rust
+use microsandbox::size::SizeExt;
+
 // Auto-detect
 let sb = Sandbox::builder("custom-vm")
     .image("./ubuntu-22.04.qcow2")

@@ -93,9 +93,8 @@ let sb = Sandbox::builder("safe-agent")
     .image("python")
     .network(|n| n
         .policy(NetworkPolicy::public_only())
-        .dns(DnsMode::Intercepted)
         .block_domain("malware.example.com")
-        .block_domain("*.tracking.com")
+        .block_domain_suffix(".tracking.com")
     )
     .create()
     .await?;
@@ -108,7 +107,7 @@ const sb = await Sandbox.create({
     network: {
         ...NetworkPolicy.publicOnly(),
         blockDomains: ["malware.example.com"],
-        blockDomainSuffixes: ["*.tracking.com"],
+        blockDomainSuffixes: [".tracking.com"],
     },
 })
 ```

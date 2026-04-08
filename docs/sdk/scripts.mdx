@@ -44,8 +44,8 @@ const sb = await Sandbox.create({
     },
 })
 
-await sb.run("setup")
-const output = await sb.run("run")
+await sb.shell("setup")
+const output = await sb.shell("run")
 ```
 
 </CodeGroup>

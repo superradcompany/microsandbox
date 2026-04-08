@@ -57,7 +57,7 @@ let output = sb.exec_with("python", |e| e
     .env("PYTHONPATH", "/app/lib")
     .timeout(Duration::from_secs(30))
     .rlimit(RlimitResource::Nofile, 1024)
-    .rlimit("cpu", 60)
+    .rlimit(RlimitResource::Cpu, 60)
 ).await?;
 ```
 
@@ -158,7 +158,7 @@ await sb.attach("bash", a => a.env("DEBUG", "1").cwd("/app").detachKeys("ctrl-q"
 
 </CodeGroup>
 
-## Sessions
+## Sessions <sup><sup>coming soon</sup></sup>
 
 Each streaming exec or attach creates a session. You can list active sessions and reattach to them by ID. Up to 16 simultaneous client connections are supported, so multiple sessions can run concurrently without interfering with each other.
 
