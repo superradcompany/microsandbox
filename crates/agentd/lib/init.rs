@@ -22,10 +22,19 @@ struct BlockRootSpec<'a> {
     fstype: Option<&'a str>,
 }
 
-/// Parsed virtiofs volume mount specification.
+/// Parsed virtiofs directory volume mount specification.
 #[derive(Debug)]
-struct VolumeMountSpec<'a> {
+struct DirMountSpec<'a> {
     tag: &'a str,
+    guest_path: &'a str,
+    readonly: bool,
+}
+
+/// Parsed virtiofs file volume mount specification.
+#[derive(Debug)]
+struct FileMountSpec<'a> {
+    tag: &'a str,
+    filename: &'a str,
     guest_path: &'a str,
     readonly: bool,
 }
@@ -36,14 +45,16 @@ struct VolumeMountSpec<'a> {
 
 /// Performs synchronous PID 1 initialization.
 ///
-/// Mounts essential filesystems, applies volume and tmpfs mounts from
-/// `MSB_MOUNTS` / `MSB_TMPFS` env vars, configures networking from
-/// `MSB_NET*` env vars, and prepares runtime directories.
+/// Mounts essential filesystems, applies directory mounts from
+/// `MSB_DIR_MOUNTS`, file mounts from `MSB_FILE_MOUNTS`, and tmpfs mounts
+/// from `MSB_TMPFS`. Configures networking from `MSB_NET*` env vars and
+/// prepares runtime directories.
 pub fn init() -> AgentdResult<()> {
     linux::mount_filesystems()?;
     linux::mount_runtime()?;
     linux::mount_block_root()?;
-    linux::apply_volume_mounts()?;
+    linux::apply_dir_mounts()?;
+    linux::apply_file_mounts()?;
     crate::network::apply_hostname()?;
     linux::apply_tmpfs_mounts()?;
     linux::ensure_standard_tmp_permissions()?;
@@ -123,12 +134,12 @@ fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec<'_>> {
     Ok(BlockRootSpec { device, fstype })
 }
 
-/// Parses a single virtiofs volume mount entry: `tag:guest_path[:ro]`
-fn parse_volume_mount_entry(entry: &str) -> AgentdResult<VolumeMountSpec<'_>> {
+/// Parses a single virtiofs directory volume mount entry: `tag:guest_path[:ro]`
+fn parse_dir_mount_entry(entry: &str) -> AgentdResult<DirMountSpec<'_>> {
     let parts: Vec<&str> = entry.split(':').collect();
     if parts.len() < 2 {
         return Err(AgentdError::Init(format!(
-            "MSB_MOUNTS entry must be tag:path[:ro], got: {entry}"
+            "MSB_DIR_MOUNTS entry must be tag:path[:ro], got: {entry}"
         )));
     }
 
@@ -139,28 +150,82 @@ fn parse_volume_mount_entry(entry: &str) -> AgentdResult<VolumeMountSpec<'_>> {
         None => false,
         Some(flag) => {
             return Err(AgentdError::Init(format!(
-                "MSB_MOUNTS unknown flag '{flag}' (expected 'ro')"
+                "MSB_DIR_MOUNTS unknown flag '{flag}' (expected 'ro')"
             )));
         }
     };
 
     if parts.len() > 3 {
         return Err(AgentdError::Init(format!(
-            "MSB_MOUNTS entry has too many parts: {entry}"
+            "MSB_DIR_MOUNTS entry has too many parts: {entry}"
         )));
     }
 
     if tag.is_empty() {
-        return Err(AgentdError::Init("MSB_MOUNTS entry has empty tag".into()));
+        return Err(AgentdError::Init(
+            "MSB_DIR_MOUNTS entry has empty tag".into(),
+        ));
     }
     if guest_path.is_empty() || !guest_path.starts_with('/') {
         return Err(AgentdError::Init(format!(
-            "MSB_MOUNTS guest path must be absolute: {guest_path}"
+            "MSB_DIR_MOUNTS guest path must be absolute: {guest_path}"
         )));
     }
 
-    Ok(VolumeMountSpec {
+    Ok(DirMountSpec {
         tag,
+        guest_path,
+        readonly,
+    })
+}
+
+/// Parses a single virtiofs file volume mount entry: `tag:filename:guest_path[:ro]`
+fn parse_file_mount_entry(entry: &str) -> AgentdResult<FileMountSpec<'_>> {
+    let parts: Vec<&str> = entry.split(':').collect();
+    if parts.len() < 3 {
+        return Err(AgentdError::Init(format!(
+            "MSB_FILE_MOUNTS entry must be tag:filename:path[:ro], got: {entry}"
+        )));
+    }
+
+    let tag = parts[0];
+    let filename = parts[1];
+    let guest_path = parts[2];
+    let readonly = match parts.get(3) {
+        Some(&"ro") => true,
+        None => false,
+        Some(flag) => {
+            return Err(AgentdError::Init(format!(
+                "MSB_FILE_MOUNTS unknown flag '{flag}' (expected 'ro')"
+            )));
+        }
+    };
+
+    if parts.len() > 4 {
+        return Err(AgentdError::Init(format!(
+            "MSB_FILE_MOUNTS entry has too many parts: {entry}"
+        )));
+    }
+
+    if tag.is_empty() {
+        return Err(AgentdError::Init(
+            "MSB_FILE_MOUNTS entry has empty tag".into(),
+        ));
+    }
+    if filename.is_empty() {
+        return Err(AgentdError::Init(
+            "MSB_FILE_MOUNTS entry has empty filename".into(),
+        ));
+    }
+    if guest_path.is_empty() || !guest_path.starts_with('/') {
+        return Err(AgentdError::Init(format!(
+            "MSB_FILE_MOUNTS guest path must be absolute: {guest_path}"
+        )));
+    }
+
+    Ok(FileMountSpec {
+        tag,
+        filename,
         guest_path,
         readonly,
     })
@@ -194,7 +259,7 @@ mod linux {
     };
 
     use nix::{
-        mount::{MsFlags, mount},
+        mount::{MntFlags, MsFlags, mount, umount2},
         sys::stat::Mode,
         unistd::{chdir, chroot, mkdir},
     };
@@ -390,16 +455,16 @@ mod linux {
         )))
     }
 
-    /// Reads `MSB_MOUNTS` env var and mounts each virtiofs volume.
+    /// Reads `MSB_DIR_MOUNTS` env var and mounts each virtiofs directory volume.
     ///
     /// For each entry, creates the guest mount point directory and mounts the
     /// virtiofs share using the tag provided by the host. If the entry
     /// specifies `:ro`, the mount is made read-only via `MS_RDONLY`.
     ///
-    /// Missing env var is not an error (no volume mounts requested).
+    /// Missing env var is not an error (no directory volume mounts requested).
     /// Parse failures and mount failures are hard errors.
-    pub fn apply_volume_mounts() -> AgentdResult<()> {
-        let val = match std::env::var(microsandbox_protocol::ENV_MOUNTS) {
+    pub fn apply_dir_mounts() -> AgentdResult<()> {
+        let val = match std::env::var(microsandbox_protocol::ENV_DIR_MOUNTS) {
             Ok(v) if !v.is_empty() => v,
             _ => return Ok(()),
         };
@@ -409,15 +474,15 @@ mod linux {
                 continue;
             }
 
-            let spec = super::parse_volume_mount_entry(entry)?;
-            mount_virtiofs(&spec)?;
+            let spec = super::parse_dir_mount_entry(entry)?;
+            mount_dir(&spec)?;
         }
 
         Ok(())
     }
 
-    /// Mounts a single virtiofs share from a parsed spec.
-    fn mount_virtiofs(spec: &super::VolumeMountSpec<'_>) -> AgentdResult<()> {
+    /// Mounts a single virtiofs directory share from a parsed spec.
+    fn mount_dir(spec: &super::DirMountSpec<'_>) -> AgentdResult<()> {
         let path = spec.guest_path;
 
         // Create the mount point directory.
@@ -435,6 +500,135 @@ mod linux {
                 spec.tag
             ))
         })?;
+
+        Ok(())
+    }
+
+    /// Reads `MSB_FILE_MOUNTS` env var and bind-mounts each file.
+    ///
+    /// Missing env var is not an error (no file mounts requested).
+    /// Parse failures and mount failures are hard errors.
+    pub fn apply_file_mounts() -> AgentdResult<()> {
+        let val = match std::env::var(microsandbox_protocol::ENV_FILE_MOUNTS) {
+            Ok(v) if !v.is_empty() => v,
+            _ => return Ok(()),
+        };
+
+        // Create the staging root directory.
+        std::fs::create_dir_all(microsandbox_protocol::FILE_MOUNTS_DIR).map_err(|e| {
+            AgentdError::Init(format!(
+                "failed to create file mounts dir {}: {e}",
+                microsandbox_protocol::FILE_MOUNTS_DIR
+            ))
+        })?;
+
+        for entry in val.split(';') {
+            if entry.is_empty() {
+                continue;
+            }
+
+            let spec = super::parse_file_mount_entry(entry)?;
+            mount_file(&spec)?;
+        }
+
+        // Best-effort cleanup of the staging root (succeeds only if all
+        // per-tag subdirs were already removed inside mount_file).
+        let _ = std::fs::remove_dir(microsandbox_protocol::FILE_MOUNTS_DIR);
+
+        Ok(())
+    }
+
+    /// Mounts a single file from a virtiofs share via bind mount.
+    fn mount_file(spec: &super::FileMountSpec<'_>) -> AgentdResult<()> {
+        let staging_path = format!("{}/{}", microsandbox_protocol::FILE_MOUNTS_DIR, spec.tag);
+
+        // 1. Create the staging mount point directory.
+        std::fs::create_dir_all(&staging_path).map_err(|e| {
+            AgentdError::Init(format!("failed to create staging dir {staging_path}: {e}"))
+        })?;
+
+        // 2. Mount the virtiofs share at the staging directory.
+        let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
+        if spec.readonly {
+            flags |= MsFlags::MS_RDONLY;
+        }
+
+        mount(
+            Some(spec.tag),
+            staging_path.as_str(),
+            Some("virtiofs"),
+            flags,
+            None::<&str>,
+        )
+        .map_err(|e| {
+            AgentdError::Init(format!(
+                "failed to mount virtiofs tag '{}' at {staging_path}: {e}",
+                spec.tag
+            ))
+        })?;
+
+        // 3. Create parent directories for the guest path.
+        let guest = Path::new(spec.guest_path);
+        if let Some(parent) = guest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AgentdError::Init(format!(
+                    "failed to create parent dirs for {}: {e}",
+                    spec.guest_path
+                ))
+            })?;
+        }
+
+        // 4. Create the target file (touch) as a bind mount target.
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(spec.guest_path)
+            .map_err(|e| {
+                AgentdError::Init(format!(
+                    "failed to create bind target {}: {e}",
+                    spec.guest_path
+                ))
+            })?;
+
+        // 5. Bind mount the file from staging to the guest path.
+        let source_path = format!("{staging_path}/{}", spec.filename);
+        mount(
+            Some(source_path.as_str()),
+            spec.guest_path,
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>,
+        )
+        .map_err(|e| {
+            AgentdError::Init(format!(
+                "failed to bind mount {source_path} to {}: {e}",
+                spec.guest_path
+            ))
+        })?;
+
+        // 6. If read-only, remount the bind mount as read-only.
+        if spec.readonly {
+            mount(
+                None::<&str>,
+                spec.guest_path,
+                None::<&str>,
+                MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+                None::<&str>,
+            )
+            .map_err(|e| {
+                AgentdError::Init(format!(
+                    "failed to remount {} as read-only: {e}",
+                    spec.guest_path
+                ))
+            })?;
+        }
+
+        // 7. Unmount the staging virtiofs share and remove the directory.
+        //    The bind mount keeps the file accessible at the guest path;
+        //    removing the share prevents alternate-path access.
+        let _ = umount2(staging_path.as_str(), MntFlags::MNT_DETACH);
+        let _ = std::fs::remove_dir(&staging_path);
 
         Ok(())
     }
@@ -698,6 +892,51 @@ mod tests {
     fn test_parse_block_root_empty_fstype_errors() {
         let err = parse_block_root("/dev/vda,fstype=").unwrap_err();
         assert!(err.to_string().contains("empty fstype"));
+    }
+
+    #[test]
+    fn test_parse_file_mount_entry_basic() {
+        let spec = parse_file_mount_entry("fm_config:app.conf:/etc/app.conf").unwrap();
+        assert_eq!(spec.tag, "fm_config");
+        assert_eq!(spec.filename, "app.conf");
+        assert_eq!(spec.guest_path, "/etc/app.conf");
+        assert!(!spec.readonly);
+    }
+
+    #[test]
+    fn test_parse_file_mount_entry_readonly() {
+        let spec = parse_file_mount_entry("fm_config:app.conf:/etc/app.conf:ro").unwrap();
+        assert!(spec.readonly);
+    }
+
+    #[test]
+    fn test_parse_file_mount_entry_too_few_parts() {
+        assert!(parse_file_mount_entry("fm_config:/etc/app.conf").is_err());
+    }
+
+    #[test]
+    fn test_parse_file_mount_entry_empty_filename() {
+        assert!(parse_file_mount_entry("fm_config::/etc/app.conf").is_err());
+    }
+
+    #[test]
+    fn test_parse_file_mount_entry_relative_path() {
+        assert!(parse_file_mount_entry("fm_config:app.conf:relative/path").is_err());
+    }
+
+    #[test]
+    fn test_parse_file_mount_entry_too_many_parts() {
+        assert!(parse_file_mount_entry("fm_config:app.conf:/etc/app.conf:ro:extra").is_err());
+    }
+
+    #[test]
+    fn test_parse_file_mount_entry_unknown_flag() {
+        assert!(parse_file_mount_entry("fm_config:app.conf:/etc/app.conf:rw").is_err());
+    }
+
+    #[test]
+    fn test_parse_file_mount_entry_empty_tag() {
+        assert!(parse_file_mount_entry(":app.conf:/etc/app.conf").is_err());
     }
 
     #[test]

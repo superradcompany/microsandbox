@@ -2496,6 +2496,7 @@ dependencies = [
  "microsandbox-runtime",
  "microsandbox-utils",
  "nix 0.30.1",
+ "rand 0.10.0",
  "reqwest",
  "scopeguard",
  "sea-orm",
