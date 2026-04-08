@@ -1,11 +1,11 @@
 [package]
-name = "attach"
+name = "shell-attach"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [[bin]]
-name = "attach"
+name = "shell-attach"
 path = "bin/main.rs"
 
 [dependencies]
