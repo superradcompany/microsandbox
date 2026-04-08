@@ -250,7 +250,7 @@ impl Sandbox {
         let interval = Duration::from_millis(interval_ms as u64);
         let mut stream = Box::pin(sb.metrics_stream(interval));
 
-        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
         tokio::spawn(async move {
             while let Some(result) = stream.next().await {
                 let item = result.map(|m| metrics_to_js(&m)).map_err(to_napi_error);
