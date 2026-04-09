@@ -215,6 +215,14 @@ jobs:
         working-directory: sdk/node-ts
         run: npm install && npm run build
 
+      # -- Upload build artifacts (linux-x86_64 only, for SDK smoke tests) --
+      - name: Upload build artifacts
+        if: matrix.target == 'linux-x86_64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
       # -- Checks (MCP server) --
       - name: Build MCP server
         working-directory: mcp
@@ -227,3 +235,53 @@ jobs:
           "
           npm install --no-package-lock --ignore-scripts
           npm run build
+
+  # ---------------------------------------------------------------------------
+  # Node.js SDK smoke tests (requires KVM)
+  # ---------------------------------------------------------------------------
+  node-sdk-test:
+    name: Node.js SDK Tests
+    needs: check
+    runs-on: self-hosted-Linux-x86
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+
+      # -- Download pre-built artifacts --
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      # -- Install msb + libkrunfw --
+      - name: Install msb
+        run: |
+          chmod +x build/msb
+          mkdir -p ~/.microsandbox/bin ~/.microsandbox/lib
+          install -m755 build/msb ~/.microsandbox/bin/msb
+          install -m644 build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
+
+      # -- Build & test Node.js SDK --
+      - name: Build Node.js SDK
+        working-directory: sdk/node-ts
+        run: npm install && npm run build
+
+      - name: Run SDK smoke tests
+        working-directory: sdk/node-ts
+        env:
+          PATH: "$HOME/.microsandbox/bin:$PATH"
+          LD_LIBRARY_PATH: "${{ github.workspace }}/build:$HOME/.microsandbox/lib"
+        run: npm test
