@@ -236,3 +236,7 @@ uninstall:
 clean:
     rm -rf build
     cd vendor/libkrunfw && make clean || true
+
+# Run the filesystem benchmark harness with the default image and settings.
+bench-fs:
+    cd benchmarks && uv run bench_fs.py

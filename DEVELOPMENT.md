@@ -139,6 +139,17 @@ Run a specific test:
 cargo test -p microsandbox test_name
 ```
 
+## Benchmarking
+
+```bash
+just bench-fs
+```
+
+Runs Docker-vs-Microsandbox filesystem benchmarks (14 workloads covering metadata, reads,
+writes, deletes, renames, mmap, and concurrent I/O). Results are written as JSON to
+`build/bench/fs/`. See [`benchmarks/README.md`](benchmarks/README.md) for full usage,
+workload descriptions, multi-image runs, and baseline comparison.
+
 ## Code Quality
 
 ### Pre-commit Hooks
