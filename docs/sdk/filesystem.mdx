@@ -53,22 +53,20 @@ for (const entry of entries) {
 
 </CodeGroup>
 
-## Stream large files <sup><sup>coming soon</sup></sup>
+## Stream large files
 
 For files too large to fit in memory, stream them in chunks (~3 MiB each).
 
 <CodeGroup>
 ```rust Rust
-use futures::StreamExt;
-
 let mut stream = sb.fs().read_stream("/app/data.bin").await?;
-while let Some(chunk) = stream.next().await {
-    process(chunk?);
+while let Some(chunk) = stream.recv().await? {
+    process(&chunk);
 }
 ```
 
 ```typescript TypeScript
-const stream = await sb.fs.readStream("/app/data.bin")
+const stream = await sb.fs().readStream("/app/data.bin")
 for await (const chunk of stream) {
     processChunk(chunk)
 }

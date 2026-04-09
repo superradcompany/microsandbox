@@ -41,7 +41,7 @@ while let Some(m) = stream.next().await {
 
 ```typescript TypeScript
 for await (const m of sb.metricsStream(1000)) {
-    console.log(`[${m.timestamp}] CPU: ${m.cpuPercent.toFixed(1)}%`)
+    console.log(`[${m.timestampMs}] CPU: ${m.cpuPercent.toFixed(1)}%`)
 }
 ```
 
