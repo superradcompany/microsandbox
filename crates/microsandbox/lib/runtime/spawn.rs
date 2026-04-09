@@ -418,6 +418,10 @@ fn sandbox_cli_args(
     args.push(OsString::from(sandbox_id.to_string()));
     args.push(OsString::from("--db-path"));
     args.push(db_path.as_os_str().to_os_string());
+    args.push(OsString::from("--db-connect-timeout"));
+    args.push(OsString::from(
+        config::config().database.connect_timeout_secs.to_string(),
+    ));
     args.push(OsString::from("--log-dir"));
     args.push(log_dir.as_os_str().to_os_string());
     args.push(OsString::from("--runtime-dir"));

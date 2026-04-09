@@ -153,8 +153,7 @@ impl Image {
         reference: &str,
         metadata: microsandbox_image::CachedImageMetadata,
     ) -> MicrosandboxResult<i32> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = crate::db::init_global().await?;
 
         let reference = reference.to_string();
 
@@ -216,8 +215,7 @@ impl Image {
 
     /// Get an image handle by reference.
     pub async fn get(reference: &str) -> MicrosandboxResult<ImageHandle> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = crate::db::init_global().await?;
 
         let image_model = image_entity::Entity::find()
             .filter(image_entity::Column::Reference.eq(reference))
@@ -230,8 +228,7 @@ impl Image {
 
     /// List all cached images, ordered by creation time (newest first).
     pub async fn list() -> MicrosandboxResult<Vec<ImageHandle>> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = crate::db::init_global().await?;
 
         let image_models = image_entity::Entity::find()
             .order_by_desc(image_entity::Column::CreatedAt)
@@ -247,8 +244,7 @@ impl Image {
 
     /// Get full detail for an image (config + layers).
     pub async fn inspect(reference: &str) -> MicrosandboxResult<ImageDetail> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = crate::db::init_global().await?;
 
         let image_model = image_entity::Entity::find()
             .filter(image_entity::Column::Reference.eq(reference))
@@ -353,8 +349,7 @@ impl Image {
     /// If `force` is false and the image is referenced by any sandbox, returns
     /// [`MicrosandboxError::ImageInUse`].
     pub async fn remove(reference: &str, force: bool) -> MicrosandboxResult<()> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = crate::db::init_global().await?;
 
         let image_model = image_entity::Entity::find()
             .filter(image_entity::Column::Reference.eq(reference))

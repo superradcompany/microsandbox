@@ -56,6 +56,9 @@ pub struct Config {
     /// Path to the sandbox database file.
     pub sandbox_db_path: PathBuf,
 
+    /// Pool acquire timeout for the sandbox database, in seconds.
+    pub sandbox_db_connect_timeout_secs: u64,
+
     /// Directory for log files.
     pub log_dir: PathBuf,
 
@@ -241,7 +244,10 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     std::fs::create_dir_all(config.runtime_dir.join("scripts"))?;
 
     // Connect to DB and insert records.
-    let db = tokio_rt.block_on(connect_db(&config.sandbox_db_path))?;
+    let db = tokio_rt.block_on(connect_db(
+        &config.sandbox_db_path,
+        Duration::from_secs(config.sandbox_db_connect_timeout_secs),
+    ))?;
     let run_db_id = tokio_rt.block_on(insert_run(&db, config.sandbox_id, pid))?;
 
     // Shared termination reason — background tasks store the reason before
@@ -639,11 +645,14 @@ fn write_startup_info(json: &str) -> RuntimeResult<()> {
 }
 
 /// Connect to the sandbox database.
-async fn connect_db(db_path: &std::path::Path) -> RuntimeResult<DatabaseConnection> {
+async fn connect_db(
+    db_path: &std::path::Path,
+    connect_timeout: Duration,
+) -> RuntimeResult<DatabaseConnection> {
     let url = format!("sqlite://{}?mode=rwc", db_path.display());
     let mut opts = ConnectOptions::new(url);
     opts.max_connections(1)
-        .connect_timeout(Duration::from_secs(30))
+        .connect_timeout(connect_timeout)
         .map_sqlx_sqlite_opts(|sqlx_opts| {
             sqlx_opts
                 .foreign_keys(true)

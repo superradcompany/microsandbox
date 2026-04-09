@@ -181,8 +181,7 @@ impl Sandbox {
 
         // Initialize the database before any expensive image pull so we can
         // fail fast on conflicting persisted sandbox state.
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = crate::db::init_global().await?;
         let sandbox_dir = crate::config::config().sandboxes_dir().join(&config.name);
         prepare_create_target(db, &config, &sandbox_dir).await?;
 
@@ -267,8 +266,7 @@ impl Sandbox {
 
     pub(super) async fn start_with_mode(name: &str, mode: SpawnMode) -> MicrosandboxResult<Self> {
         tracing::debug!(sandbox = name, ?mode, "start_with_mode: loading record");
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = crate::db::init_global().await?;
         let model = load_sandbox_record_reconciled(db, name).await?;
         tracing::debug!(sandbox = name, status = ?model.status, "start_with_mode: current status");
 
@@ -327,8 +325,7 @@ impl Sandbox {
 
     /// Get a sandbox handle by name from the database.
     pub async fn get(name: &str) -> MicrosandboxResult<SandboxHandle> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = crate::db::init_global().await?;
 
         let model = sandbox_entity::Entity::find()
             .filter(sandbox_entity::Column::Name.eq(name))
@@ -342,8 +339,7 @@ impl Sandbox {
 
     /// List all sandboxes from the database.
     pub async fn list() -> MicrosandboxResult<Vec<SandboxHandle>> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = crate::db::init_global().await?;
 
         let sandboxes = sandbox_entity::Entity::find()
             .order_by_desc(sandbox_entity::Column::CreatedAt)
@@ -374,8 +370,7 @@ impl Sandbox {
 impl Sandbox {
     /// Remove this sandbox's persisted state after it has fully stopped.
     pub async fn remove_persisted(self) -> MicrosandboxResult<()> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = crate::db::init_global().await?;
 
         remove_dir_if_exists(
             &crate::config::config()
@@ -1178,7 +1173,7 @@ pub(super) async fn update_sandbox_status(
 /// from updating the database on exit are cleaned up without blocking the
 /// main path.
 pub async fn reap_stale_sandboxes() -> MicrosandboxResult<()> {
-    let db = crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+    let db = crate::db::init_global().await?;
 
     let stale = sandbox_entity::Entity::find()
         .filter(

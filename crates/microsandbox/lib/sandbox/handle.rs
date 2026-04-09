@@ -94,8 +94,7 @@ impl SandboxHandle {
             )));
         }
 
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = crate::db::init_global().await?;
         super::metrics::metrics_for_sandbox(
             db,
             self.db_id,
@@ -179,8 +178,7 @@ impl SandboxHandle {
         let all_dead = pids.is_empty() || pids.iter().all(|pid| !super::pid_is_alive(*pid));
 
         if all_dead {
-            let db = crate::db::init_global(Some(crate::config::config().database.max_connections))
-                .await?;
+            let db = crate::db::init_global().await?;
             if let Err(e) =
                 super::update_sandbox_status(db, self.db_id, SandboxStatus::Stopped).await
             {
@@ -204,8 +202,7 @@ impl SandboxHandle {
             )));
         }
 
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = crate::db::init_global().await?;
 
         super::remove_dir_if_exists(&crate::config::config().sandboxes_dir().join(&self.name))?;
         sandbox_entity::Entity::delete_by_id(self.db_id)

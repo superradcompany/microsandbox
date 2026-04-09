@@ -29,6 +29,9 @@ const DEFAULT_MEMORY_MIB: u32 = 512;
 /// Default database max connections.
 pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 5;
 
+/// Default database pool connect timeout in seconds.
+pub(crate) const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
+
 /// Service name for microsandbox-managed registry credentials in the OS keyring.
 const REGISTRY_KEYRING_SERVICE: &str = "dev.microsandbox.registry";
 
@@ -72,6 +75,13 @@ pub struct DatabaseConfig {
 
     /// Maximum connection pool size.
     pub max_connections: u32,
+
+    /// Pool acquire timeout in seconds.
+    ///
+    /// How long a caller waits for a free connection from the pool before
+    /// the acquire fails. On a healthy local DB this should never fire —
+    /// raising it masks contention rather than fixing it.
+    pub connect_timeout_secs: u64,
 }
 
 /// Path overrides for runtime binaries and data directories.
@@ -328,6 +338,7 @@ impl Default for DatabaseConfig {
         Self {
             url: None,
             max_connections: DEFAULT_MAX_CONNECTIONS,
+            connect_timeout_secs: DEFAULT_CONNECT_TIMEOUT_SECS,
         }
     }
 }

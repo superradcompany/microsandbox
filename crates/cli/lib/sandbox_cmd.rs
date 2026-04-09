@@ -31,6 +31,10 @@ pub struct SandboxArgs {
     #[arg(long = "db-path")]
     pub sandbox_db_path: PathBuf,
 
+    /// Pool acquire timeout for the sandbox database, in seconds.
+    #[arg(long = "db-connect-timeout")]
+    pub sandbox_db_connect_timeout_secs: u64,
+
     /// Directory for log files.
     #[arg(long)]
     pub log_dir: PathBuf,
@@ -173,6 +177,7 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
         sandbox_id: args.sandbox_id,
         log_level,
         sandbox_db_path: args.sandbox_db_path,
+        sandbox_db_connect_timeout_secs: args.sandbox_db_connect_timeout_secs,
         log_dir: args.log_dir,
         runtime_dir: args.runtime_dir,
         agent_sock_path: args.agent_sock,

@@ -47,8 +47,7 @@ pub struct SandboxMetrics {
 impl Sandbox {
     /// Get the latest metrics snapshot for this running sandbox.
     pub async fn metrics(&self) -> MicrosandboxResult<SandboxMetrics> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = crate::db::init_global().await?;
         metrics_for_sandbox(db, self.db_id, memory_limit_bytes(&self.config)).await
     }
 
@@ -69,9 +68,7 @@ impl Sandbox {
             tokio::time::interval(interval),
             move |mut ticker| async move {
                 ticker.tick().await;
-                let db =
-                    crate::db::init_global(Some(crate::config::config().database.max_connections))
-                        .await;
+                let db = crate::db::init_global().await;
                 let item = match db {
                     Ok(db) => metrics_for_sandbox(db, db_id, memory_limit_bytes).await,
                     Err(err) => Err(err),
@@ -88,7 +85,7 @@ impl Sandbox {
 
 /// Get the latest metrics snapshot for every running sandbox.
 pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, SandboxMetrics>> {
-    let db = crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+    let db = crate::db::init_global().await?;
     let sandboxes = sandbox_entity::Entity::find()
         .filter(
             sandbox_entity::Column::Status.is_in([SandboxStatus::Running, SandboxStatus::Draining]),

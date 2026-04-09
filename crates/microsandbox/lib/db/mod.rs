@@ -31,10 +31,9 @@ static PROJECT_POOL: OnceCell<(PathBuf, DatabaseConnection)> = OnceCell::const_n
 /// Initialize the global database connection pool at `~/.microsandbox/db/msb.db`.
 ///
 /// Migrations are applied automatically. This is idempotent — calling it
-/// multiple times returns the existing pool.
-pub async fn init_global(
-    max_connections: Option<u32>,
-) -> MicrosandboxResult<&'static DatabaseConnection> {
+/// multiple times returns the existing pool. Pool settings are read from
+/// `config::config().database`.
+pub async fn init_global() -> MicrosandboxResult<&'static DatabaseConnection> {
     GLOBAL_POOL
         .get_or_try_init(|| async {
             let base = dirs::home_dir().ok_or_else(|| {
@@ -45,9 +44,11 @@ pub async fn init_global(
                 .join(microsandbox_utils::BASE_DIR_NAME)
                 .join(microsandbox_utils::DB_SUBDIR);
 
+            let db_cfg = &crate::config::config().database;
             connect_and_migrate(
                 &db_dir,
-                max_connections.unwrap_or(crate::config::DEFAULT_MAX_CONNECTIONS),
+                db_cfg.max_connections,
+                Duration::from_secs(db_cfg.connect_timeout_secs),
             )
             .await
         })
@@ -61,7 +62,6 @@ pub async fn init_global(
 /// with a different project directory than the first call.
 pub async fn init_project(
     project_dir: impl AsRef<Path>,
-    max_connections: Option<u32>,
 ) -> MicrosandboxResult<&'static DatabaseConnection> {
     let requested = project_dir.as_ref().to_path_buf();
 
@@ -71,9 +71,11 @@ pub async fn init_project(
                 .join(microsandbox_utils::BASE_DIR_NAME)
                 .join(microsandbox_utils::DB_SUBDIR);
 
+            let db_cfg = &crate::config::config().database;
             let conn = connect_and_migrate(
                 &db_dir,
-                max_connections.unwrap_or(crate::config::DEFAULT_MAX_CONNECTIONS),
+                db_cfg.max_connections,
+                Duration::from_secs(db_cfg.connect_timeout_secs),
             )
             .await?;
             Ok::<_, crate::MicrosandboxError>((requested.clone(), conn))
@@ -113,6 +115,7 @@ pub fn project() -> Option<&'static DatabaseConnection> {
 async fn connect_and_migrate(
     db_dir: &Path,
     max_connections: u32,
+    connect_timeout: Duration,
 ) -> MicrosandboxResult<DatabaseConnection> {
     tokio::fs::create_dir_all(db_dir).await?;
 
@@ -126,7 +129,7 @@ async fn connect_and_migrate(
     let db_url = format!("sqlite://{db_path_str}?mode=rwc");
 
     let mut opts = ConnectOptions::new(&db_url);
-    configure_sqlite_connect_options(&mut opts, max_connections);
+    configure_sqlite_connect_options(&mut opts, max_connections, connect_timeout);
 
     let conn = Database::connect(opts).await?;
     Migrator::up(&conn, None).await?;
@@ -134,13 +137,17 @@ async fn connect_and_migrate(
     Ok(conn)
 }
 
-fn configure_sqlite_connect_options(opts: &mut ConnectOptions, max_connections: u32) {
+fn configure_sqlite_connect_options(
+    opts: &mut ConnectOptions,
+    max_connections: u32,
+    connect_timeout: Duration,
+) {
     // The global microsandbox DB is shared across short-lived CLI processes and
     // long-lived sandbox runtimes. WAL mode plus a busy timeout makes that
     // multi-process pattern much more reliable than the default rollback
     // journal on Linux hosts.
     opts.max_connections(max_connections)
-        .connect_timeout(Duration::from_secs(30))
+        .connect_timeout(connect_timeout)
         .map_sqlx_sqlite_opts(|sqlx_opts| {
             sqlx_opts
                 .foreign_keys(true)
@@ -164,7 +171,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_dir = tmp.path().join("db");
 
-        let conn = connect_and_migrate(&db_dir, 1).await.unwrap();
+        let conn = connect_and_migrate(&db_dir, 1, Duration::from_secs(30))
+            .await
+            .unwrap();
 
         // DB file should exist on disk.
         assert!(db_dir.join(microsandbox_utils::DB_FILENAME).exists());
@@ -206,7 +215,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_dir = tmp.path().join("db");
 
-        let conn1 = connect_and_migrate(&db_dir, 1).await.unwrap();
+        let conn1 = connect_and_migrate(&db_dir, 1, Duration::from_secs(30))
+            .await
+            .unwrap();
 
         // Running migrations again on the same DB should succeed.
         Migrator::up(&conn1, None).await.unwrap();
@@ -252,7 +263,9 @@ mod tests {
 
         drop(conn);
 
-        let conn = connect_and_migrate(&db_dir, 1).await.unwrap();
+        let conn = connect_and_migrate(&db_dir, 1, Duration::from_secs(30))
+            .await
+            .unwrap();
 
         let migrations = conn
             .query_all(Statement::from_string(
