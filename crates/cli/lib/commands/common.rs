@@ -115,10 +115,16 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub no_dns_rebind_protection: bool,
 
-    /// Allow traffic to host/private IP addresses (enables access to LAN services).
+    /// Network policy controlling which destinations are reachable from the sandbox.
+    ///
+    /// Options:
+    ///   none        — no network access
+    ///   public-only — public internet only (default); blocks private, loopback, link-local
+    ///   nonlocal    — public + private/LAN; blocks loopback, link-local, and metadata
+    ///   allow-all   — unrestricted access to any destination
     #[cfg(feature = "net")]
-    #[arg(long)]
-    pub allow_private_ips: bool,
+    #[arg(long, value_name = "POLICY")]
+    pub network_policy: Option<String>,
 
     /// Limit the number of concurrent network connections.
     #[cfg(feature = "net")]
@@ -197,7 +203,7 @@ impl SandboxOpts {
             || !self.dns_block_domain.is_empty()
             || !self.dns_block_suffix.is_empty()
             || self.no_dns_rebind_protection
-            || self.allow_private_ips
+            || self.network_policy.is_some()
             || self.max_connections.is_some()
             || self.tls_intercept
             || !self.tls_intercept_port.is_empty()
@@ -348,7 +354,7 @@ fn apply_network_opts(
     let has_network_config = !opts.dns_block_domain.is_empty()
         || !opts.dns_block_suffix.is_empty()
         || opts.no_dns_rebind_protection
-        || opts.allow_private_ips
+        || opts.network_policy.is_some()
         || opts.max_connections.is_some()
         || opts.tls_intercept
         || !opts.tls_intercept_port.is_empty()
@@ -362,7 +368,7 @@ fn apply_network_opts(
         let dns_block_domain = opts.dns_block_domain.clone();
         let dns_block_suffix = opts.dns_block_suffix.clone();
         let no_dns_rebind = opts.no_dns_rebind_protection;
-        let allow_private_ips = opts.allow_private_ips;
+        let network_policy = parse_network_policy(opts.network_policy.as_deref())?;
         let max_conn = opts.max_connections;
         let tls_intercept = opts.tls_intercept;
         let tls_ports = opts.tls_intercept_port.clone();
@@ -382,8 +388,8 @@ fn apply_network_opts(
             if no_dns_rebind {
                 n = n.dns_rebind_protection(false);
             }
-            if allow_private_ips {
-                n = n.policy(microsandbox_network::policy::NetworkPolicy::allow_all());
+            if let Some(policy) = network_policy {
+                n = n.policy(policy);
             }
             if let Some(max) = max_conn {
                 n = n.max_connections(max);
@@ -445,6 +451,25 @@ pub fn parse_duration_secs(s: &str) -> anyhow::Result<u64> {
         Ok(n.trim().parse::<u64>()? * 3600)
     } else {
         Ok(s.parse::<u64>()?)
+    }
+}
+
+/// Parse a `--network-policy` value into a [`NetworkPolicy`], or `None` to leave the default.
+#[cfg(feature = "net")]
+fn parse_network_policy(
+    s: Option<&str>,
+) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
+    use microsandbox_network::policy::NetworkPolicy;
+    match s {
+        None => Ok(None),
+        Some("none") => Ok(Some(NetworkPolicy::none())),
+        Some("public-only") => Ok(Some(NetworkPolicy::public_only())),
+        Some("nonlocal") => Ok(Some(NetworkPolicy::non_local())),
+        Some("allow-all") => Ok(Some(NetworkPolicy::allow_all())),
+        Some(other) => anyhow::bail!(
+            "unknown network policy {:?}; valid values are: none, public-only, nonlocal, allow-all",
+            other
+        ),
     }
 }
 

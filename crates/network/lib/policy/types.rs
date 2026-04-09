@@ -167,6 +167,19 @@ impl NetworkPolicy {
         }
     }
 
+    /// Non-local network access — allow public internet and private/LAN addresses,
+    /// but deny loopback, link-local, and cloud metadata addresses.
+    pub fn non_local() -> Self {
+        Self {
+            default_action: Action::Allow,
+            rules: vec![
+                Rule::deny_outbound(Destination::Group(DestinationGroup::Loopback)),
+                Rule::deny_outbound(Destination::Group(DestinationGroup::LinkLocal)),
+                Rule::deny_outbound(Destination::Group(DestinationGroup::Metadata)),
+            ],
+        }
+    }
+
     /// Evaluate an outbound connection against the policy.
     ///
     /// Returns the action from the first matching rule, or the default
