@@ -6,7 +6,6 @@ pub(crate) mod index;
 use std::{
     fs::{File, OpenOptions},
     io::{self, Read, Write},
-    os::fd::AsRawFd,
     path::{Path, PathBuf},
 };
 
@@ -16,6 +15,7 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use crate::{
     digest::Digest,
     error::{ImageError, ImageResult},
+    lock::{flock_exclusive_async, flock_unlock, open_lock_file},
     store::{self, GlobalCache},
 };
 
@@ -110,8 +110,7 @@ impl Layer {
         let part_path = &self.part_path;
 
         // Acquire cross-process download lock.
-        let lock_file = open_lock_file(&self.download_lock_path)?;
-        flock_exclusive(&lock_file)?;
+        let lock_file = flock_exclusive_async(open_lock_file(&self.download_lock_path)?).await?;
         let download_lock_path = self.download_lock_path.clone();
         let _guard = scopeguard::guard(lock_file, |f| {
             let _ = flock_unlock(&f);
@@ -244,7 +243,7 @@ impl Layer {
         drop(file);
 
         // Verify hash.
-        let actual_hash = compute_sha256_file(part_path)?;
+        let actual_hash = compute_sha256_file_async(part_path.to_path_buf()).await?;
         if actual_hash != expected_hex {
             let _ = std::fs::remove_file(part_path);
             return Err(ImageError::DigestMismatch {
@@ -285,8 +284,7 @@ impl Layer {
         force: bool,
     ) -> ImageResult<extraction::ExtractionResult> {
         // Cross-process lock.
-        let lock_file = open_lock_file(&self.lock_path)?;
-        flock_exclusive(&lock_file)?;
+        let lock_file = flock_exclusive_async(open_lock_file(&self.lock_path)?).await?;
         let lock_path = self.lock_path.clone();
         let _flock_guard = scopeguard::guard(lock_file, |f| {
             let _ = flock_unlock(&f);
@@ -391,37 +389,6 @@ impl Layer {
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Open or create a lock file.
-fn open_lock_file(path: &Path) -> ImageResult<File> {
-    OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path)
-        .map_err(|e| ImageError::Cache {
-            path: path.to_path_buf(),
-            source: e,
-        })
-}
-
-/// Acquire an exclusive `flock()`.
-fn flock_exclusive(file: &File) -> ImageResult<()> {
-    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-    if ret != 0 {
-        return Err(ImageError::Io(io::Error::last_os_error()));
-    }
-    Ok(())
-}
-
-/// Release a `flock()`.
-fn flock_unlock(file: &File) -> ImageResult<()> {
-    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-    if ret != 0 {
-        return Err(ImageError::Io(io::Error::last_os_error()));
-    }
-    Ok(())
-}
-
 /// Compute the SHA-256 hex digest of a file.
 fn compute_sha256_file(path: &Path) -> ImageResult<String> {
     let mut file = File::open(path).map_err(|e| ImageError::Cache {
@@ -441,6 +408,12 @@ fn compute_sha256_file(path: &Path) -> ImageResult<String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+async fn compute_sha256_file_async(path: PathBuf) -> ImageResult<String> {
+    tokio::task::spawn_blocking(move || compute_sha256_file(&path))
+        .await
+        .map_err(|error| ImageError::Io(io::Error::other(format!("hash task failed: {error}"))))?
 }
 
 fn remove_file_if_exists(path: &Path) -> ImageResult<()> {

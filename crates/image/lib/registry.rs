@@ -2,13 +2,7 @@
 //!
 //! Wraps `oci-client` with platform resolution, caching, and progress reporting.
 
-use std::{
-    fs::{File, OpenOptions},
-    io,
-    os::fd::AsRawFd,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use oci_client::{Client, client::ClientConfig, manifest::ImageIndexEntry};
 use tokio::task::JoinHandle;
@@ -19,6 +13,7 @@ use crate::{
     digest::Digest,
     error::{ImageError, ImageResult},
     layer::Layer,
+    lock::{flock_exclusive_async, flock_unlock, open_lock_file},
     manifest::OciManifest,
     platform::Platform,
     progress::{self, PullProgress, PullProgressHandle, PullProgressSender},
@@ -191,8 +186,7 @@ impl Registry {
         let ref_str: Arc<str> = reference.to_string().into();
         let oci_ref = reference;
         let image_lock_path = self.cache.image_lock_path(reference);
-        let image_lock_file = open_lock_file(&image_lock_path)?;
-        flock_exclusive(&image_lock_file)?;
+        let image_lock_file = flock_exclusive_async(open_lock_file(&image_lock_path)?).await?;
         let _image_lock_guard = scopeguard::guard(image_lock_file, |file| {
             let _ = flock_unlock(&file);
             drop(file);
@@ -254,6 +248,7 @@ impl Registry {
 
         // Step 4: Get layer descriptors.
         let layer_descriptors = self.extract_layer_digests(&manifest)?;
+        log_duplicate_layer_digests(reference, &layer_descriptors);
 
         let layer_count = layer_descriptors.len();
         let total_bytes: Option<u64> = {
@@ -715,32 +710,20 @@ fn resolve_cached_pull_result(
     Ok(Some(CachedPullInfo { result, metadata }))
 }
 
-fn open_lock_file(path: &Path) -> ImageResult<File> {
-    OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path)
-        .map_err(|e| ImageError::Cache {
-            path: path.to_path_buf(),
-            source: e,
-        })
-}
-
-fn flock_exclusive(file: &File) -> ImageResult<()> {
-    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-    if ret != 0 {
-        return Err(ImageError::Io(io::Error::last_os_error()));
+fn log_duplicate_layer_digests(reference: &oci_client::Reference, layers: &[LayerDescriptor]) {
+    let mut counts: HashMap<&Digest, usize> = HashMap::new();
+    for layer in layers {
+        *counts.entry(&layer.digest).or_default() += 1;
     }
-    Ok(())
-}
 
-fn flock_unlock(file: &File) -> ImageResult<()> {
-    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-    if ret != 0 {
-        return Err(ImageError::Io(io::Error::last_os_error()));
+    for (digest, count) in counts.into_iter().filter(|(_, count)| *count > 1) {
+        tracing::warn!(
+            reference = %reference,
+            digest = %digest,
+            occurrences = count,
+            "manifest contains duplicate layer digest; layer processing will be serialized"
+        );
     }
-    Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------

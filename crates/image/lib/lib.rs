@@ -11,6 +11,7 @@ mod config;
 mod digest;
 mod error;
 pub(crate) mod layer;
+mod lock;
 mod manifest;
 mod platform;
 mod progress;

@@ -5,7 +5,7 @@
 //! platform-aware symlinks, special file handling, and whiteout markers.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     io::Read,
     path::{Component, Path, PathBuf},
     pin::Pin,
@@ -196,6 +196,11 @@ pub(crate) async fn extract_layer(
     let mut implicit_dirs: BTreeSet<PathBuf> = BTreeSet::new();
     let mut total_size: u64 = 0;
     let mut entry_count: u64 = 0;
+    let mut casefold_paths = if host_path_is_case_sensitive(dest, tar_path)? {
+        None
+    } else {
+        Some(HashMap::new())
+    };
 
     let mut entries = archive.entries().map_err(|e| ImageError::Extraction {
         digest: tar_path.display().to_string(),
@@ -231,6 +236,10 @@ pub(crate) async fn extract_layer(
                 source: Some(Box::new(e)),
             })?
             .into_owned();
+
+        if let Some(ref mut seen) = casefold_paths {
+            record_casefold_path(seen, &entry_path, tar_path)?;
+        }
 
         // Validate path.
         let full_path = validate_entry_path(dest, &entry_path, tar_path)?;
@@ -494,6 +503,64 @@ fn clear_implicit_entry(path: &Path, dest: &Path, implicit_dirs: &mut BTreeSet<P
     }
 }
 
+fn host_path_is_case_sensitive(dest: &Path, tar_path: &Path) -> ImageResult<bool> {
+    let probe_name = format!(".__msb_case_probe_{}_abcdef", std::process::id());
+    let lower = dest.join(&probe_name);
+    let upper = dest.join(probe_name.to_uppercase());
+
+    std::fs::File::create(&lower).map_err(|e| ImageError::Extraction {
+        digest: tar_path.display().to_string(),
+        message: format!(
+            "failed to create case-sensitivity probe {}: {e}",
+            lower.display()
+        ),
+        source: Some(Box::new(e)),
+    })?;
+
+    let case_sensitive = !upper.exists();
+    let _ = std::fs::remove_file(&lower);
+
+    Ok(case_sensitive)
+}
+
+fn record_casefold_path(
+    seen: &mut HashMap<String, PathBuf>,
+    entry_path: &Path,
+    tar_path: &Path,
+) -> ImageResult<()> {
+    let key = path_casefold_key(entry_path);
+    if let Some(existing) = seen.get(&key) {
+        if existing != entry_path {
+            return Err(ImageError::Extraction {
+                digest: tar_path.display().to_string(),
+                message: format!(
+                    "layer contains paths that differ only by case on a case-insensitive host filesystem: {} and {}. Move the microsandbox cache to a case-sensitive volume to extract this image on macOS.",
+                    existing.display(),
+                    entry_path.display()
+                ),
+                source: None,
+            });
+        }
+        return Ok(());
+    }
+
+    seen.insert(key, entry_path.to_path_buf());
+    Ok(())
+}
+
+fn path_casefold_key(path: &Path) -> String {
+    path.components()
+        .map(|component| match component {
+            Component::Normal(part) => part.to_string_lossy().to_lowercase(),
+            Component::CurDir => ".".to_string(),
+            Component::ParentDir => "..".to_string(),
+            Component::RootDir => "/".to_string(),
+            Component::Prefix(prefix) => prefix.as_os_str().to_string_lossy().to_lowercase(),
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Set host file permissions (minimum readable/writable by owner).
 fn set_host_permissions(path: &Path, mode: u32) -> ImageResult<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -728,13 +795,13 @@ fn detect_layer_compression(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{collections::HashMap, path::Path};
 
     use tempfile::tempdir;
 
     use super::{
         LayerCompression, OVERRIDE_XATTR_KEY, detect_layer_compression, extract_layer,
-        validate_entry_path,
+        host_path_is_case_sensitive, record_casefold_path, validate_entry_path,
     };
 
     #[test]
@@ -937,5 +1004,92 @@ mod tests {
         for &(_, _, total) in &progress_events {
             assert_eq!(total, tar_size);
         }
+    }
+
+    #[test]
+    fn test_record_casefold_path_rejects_case_only_collisions() {
+        let mut seen = HashMap::new();
+        let tar_path = Path::new("layer.tar");
+
+        record_casefold_path(
+            &mut seen,
+            Path::new("usr/share/man/man2/_Exit.2.gz"),
+            tar_path,
+        )
+        .unwrap();
+        let err = record_casefold_path(
+            &mut seen,
+            Path::new("usr/share/man/man2/_exit.2.gz"),
+            tar_path,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("differ only by case"));
+        assert!(err.to_string().contains("_Exit.2.gz"));
+        assert!(err.to_string().contains("_exit.2.gz"));
+    }
+
+    #[test]
+    fn test_extract_layer_rejects_case_only_collisions_on_case_insensitive_fs() {
+        let temp = tempdir().unwrap();
+        let tar_path = temp.path().join("layer.tar");
+        let dest = temp.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+
+        if host_path_is_case_sensitive(&dest, &tar_path).unwrap() {
+            return;
+        }
+
+        let tar_file = std::fs::File::create(&tar_path).unwrap();
+        let mut builder = tar::Builder::new(tar_file);
+
+        let mut symlink_header = tar::Header::new_gnu();
+        symlink_header.set_entry_type(tar::EntryType::Symlink);
+        symlink_header.set_size(0);
+        symlink_header.set_mode(0o777);
+        symlink_header.set_uid(0);
+        symlink_header.set_gid(0);
+        symlink_header.set_link_name("_exit.2.gz").unwrap();
+        symlink_header.set_cksum();
+        builder
+            .append_data(
+                &mut symlink_header,
+                "usr/share/man/man2/_Exit.2.gz",
+                std::io::empty(),
+            )
+            .unwrap();
+
+        let contents = b"man page";
+        let mut file_header = tar::Header::new_gnu();
+        file_header.set_size(contents.len() as u64);
+        file_header.set_mode(0o644);
+        file_header.set_uid(0);
+        file_header.set_gid(0);
+        file_header.set_cksum();
+        builder
+            .append_data(
+                &mut file_header,
+                "usr/share/man/man2/_exit.2.gz",
+                &contents[..],
+            )
+            .unwrap();
+        builder.finish().unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = match runtime.block_on(extract_layer(
+            &tar_path,
+            &dest,
+            Some("application/vnd.oci.image.layer.v1.tar"),
+            None,
+            0,
+        )) {
+            Ok(_) => panic!("expected case-collision extraction failure"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("differ only by case"));
     }
 }

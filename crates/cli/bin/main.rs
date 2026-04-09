@@ -160,9 +160,10 @@ fn run_async_command(
     command: Commands,
     _log_level: Option<microsandbox::LogLevel>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // CLI commands are foreground and short-lived, so a current-thread
-    // runtime avoids worker startup overhead on each invocation.
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    // Pulls, extraction, and indexing fan out across layers, so the CLI
+    // needs worker threads to realize that parallelism without one task
+    // stalling all others.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
