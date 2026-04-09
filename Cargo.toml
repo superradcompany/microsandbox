@@ -11,6 +11,7 @@ members = [
     "crates/protocol",
     "crates/runtime",
     "crates/utils",
+    "examples/rust/fs-read-stream",
     "examples/rust/net-basic",
     "examples/rust/net-dns",
     "examples/rust/net-policy",
