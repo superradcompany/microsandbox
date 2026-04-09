@@ -60,8 +60,8 @@ For files too large to fit in memory, use streaming. Data is transferred in chun
 <CodeGroup>
 ```rust Rust
 let mut stream = sb.fs().read_stream("/app/data.bin").await?;
-while let Some(chunk) = stream.next().await {
-    process(chunk?);
+while let Some(chunk) = stream.recv().await? {
+    process(&chunk);
 }
 ```
 

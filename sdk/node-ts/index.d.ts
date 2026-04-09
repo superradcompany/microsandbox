@@ -70,6 +70,29 @@ export declare class ExecSink {
 export type JsExecSink = ExecSink
 
 /**
+ * A streaming reader for file data from the sandbox.
+ *
+ * Supports both manual `recv()` calls and `for await...of` iteration:
+ * ```js
+ * const stream = await sb.fs().readStream("/app/data.bin");
+ * for await (const chunk of stream) {
+ *   processChunk(chunk);
+ * }
+ * ```
+ *
+ * This type implements JavaScript's async iterable protocol.
+ * It can be used with `for await...of` loops.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
+ */
+export declare class FsReadStream {
+  /** Receive the next chunk of data. Returns `null` when the stream ends. */
+  recv(): Promise<Buffer | null>
+  [Symbol.asyncIterator](): AsyncGenerator<Buffer, void, undefined>
+}
+export type JsFsReadStream = FsReadStream
+
+/**
  * Factory for creating volume mount configurations.
  *
  * ```js
@@ -241,6 +264,8 @@ export declare class SandboxFs {
   copyFromHost(hostPath: string, guestPath: string): Promise<void>
   /** Copy a file from the sandbox to the host. */
   copyToHost(guestPath: string, hostPath: string): Promise<void>
+  /** Read a file with streaming (~3 MiB chunks). */
+  readStream(path: string): Promise<FsReadStream>
 }
 export type JsSandboxFs = SandboxFs
 
