@@ -1,0 +1,9 @@
+[project]
+name = "microsandbox-benchmarks"
+version = "0.1.0"
+description = "Docker vs Microsandbox filesystem benchmarks"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+package = false
