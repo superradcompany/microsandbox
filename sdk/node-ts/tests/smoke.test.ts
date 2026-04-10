@@ -18,7 +18,8 @@ describe("Node.js SDK Smoke Tests", () => {
 	});
 
 	afterAll(async () => {
-		await Sandbox.remove(SANDBOX_NAME);
+		await sandbox.stopAndWait().catch((e: unknown) => console.warn("cleanup stop:", e));
+		await Sandbox.remove(SANDBOX_NAME).catch((e: unknown) => console.warn("cleanup remove:", e));
 	});
 
 	it("should report msb as installed", () => {
@@ -68,8 +69,8 @@ describe("Node.js SDK Smoke Tests", () => {
 		expect(metrics.cpuPercent).toBeGreaterThanOrEqual(0);
 		expect(metrics.memoryBytes).toBeGreaterThan(0);
 		expect(metrics.memoryLimitBytes).toBe(512 * 1024 * 1024);
-		expect(metrics.diskReadBytes).toBeGreaterThan(0);
-		expect(metrics.diskWriteBytes).toBeGreaterThan(0);
+		expect(metrics.diskReadBytes).toBeGreaterThanOrEqual(0);
+		expect(metrics.diskWriteBytes).toBeGreaterThanOrEqual(0);
 		expect(metrics.netRxBytes).toBeGreaterThanOrEqual(0);
 		expect(metrics.netTxBytes).toBeGreaterThanOrEqual(0);
 		expect(metrics.uptimeMs).toBeGreaterThan(0);

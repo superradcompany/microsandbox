@@ -298,12 +298,3 @@ jobs:
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
           npm test
-
-      - name: Dump sandbox logs on failure
-        if: failure()
-        run: |
-          for dir in ~/.microsandbox/sandboxes/*/logs; do
-            [ -d "$dir" ] || continue
-            echo "=== $dir ==="
-            cat "$dir"/* 2>/dev/null || true
-          done
