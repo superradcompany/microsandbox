@@ -33,6 +33,13 @@
             ]
           },
           {
+            "group": "Configuration",
+            "icon": "gear",
+            "pages": [
+              "configuration"
+            ]
+          },
+          {
             "group": "Sandboxes",
             "icon": "box",
             "pages": [

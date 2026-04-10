@@ -168,3 +168,26 @@ fn test_lookup_after_forget_new_inode() {
         "re-lookup after full forget should allocate a fresh inode"
     );
 }
+
+#[test]
+fn test_nested_lookup_survives_ancestor_forget() {
+    let sb = OverlayTestSandbox::with_lower(|lower| {
+        std::fs::create_dir(lower.join("dir")).unwrap();
+        std::fs::create_dir(lower.join("dir/sub")).unwrap();
+        std::fs::write(lower.join("dir/sub/file.txt"), b"nested data").unwrap();
+    });
+
+    let dir = sb.lookup_root("dir").unwrap();
+    let subdir = sb.lookup(dir.inode, "sub").unwrap();
+    let file = sb.lookup(subdir.inode, "file.txt").unwrap();
+
+    sb.fs.forget(sb.ctx(), dir.inode, 1);
+    sb.fs.forget(sb.ctx(), subdir.inode, 1);
+
+    let (st, _) = sb.fs.getattr(sb.ctx(), file.inode, None).unwrap();
+    assert_eq!(st.st_size, 11);
+
+    let handle = sb.fuse_open(file.inode, libc::O_RDONLY as u32).unwrap();
+    let data = sb.fuse_read(file.inode, handle, 4096, 0).unwrap();
+    assert_eq!(&data[..], b"nested data");
+}

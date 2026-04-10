@@ -14,6 +14,8 @@ use std::{
 };
 
 use super::origin::LowerOriginId;
+#[cfg(target_os = "linux")]
+use crate::backends::shared::inode_table::InodeAltKey;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -75,11 +77,19 @@ pub(crate) struct OverlayNode {
     /// Current backing state (changes on copy-up).
     pub state: RwLock<NodeState>,
 
+    /// Linux host identity for secure reopen-on-demand.
+    #[cfg(target_os = "linux")]
+    pub identity: RwLock<Option<InodeAltKey>>,
+
     /// True if this directory is opaque (has .wh..wh..opq).
     pub opaque: AtomicBool,
 
     /// Copy-up lock. Acquired exclusively during copy-up to prevent races.
     pub copy_up_lock: Mutex<()>,
+
+    /// Linux retained handle for detached objects that lost their last visible name.
+    #[cfg(target_os = "linux")]
+    pub detached_fd: Mutex<Option<File>>,
 
     /// Lower-layer origin identity for hardlink unification.
     pub origin: Option<LowerOriginId>,
@@ -92,6 +102,10 @@ pub(crate) struct OverlayNode {
 
     /// Primary name for reverse lookup.
     pub primary_name: RwLock<NameId>,
+
+    /// Number of tracked nodes whose primary reopen chain depends on this node.
+    #[cfg(target_os = "linux")]
+    pub primary_children: AtomicU64,
 
     /// Cached `(layer_idx, dir_record_idx)` for index-accelerated directory descent.
     /// Set when a directory node is resolved from an indexed lower layer.
@@ -110,11 +124,8 @@ pub(crate) enum NodeState {
     /// Entry lives on a read-only lower layer.
     Lower {
         /// Which lower layer (index into OverlayFs::lowers).
+        #[allow(dead_code)]
         layer_idx: usize,
-
-        /// O_PATH fd pinning the inode.
-        #[cfg(target_os = "linux")]
-        file: File,
 
         /// Host inode number (macOS — no O_PATH fds).
         #[cfg(target_os = "macos")]
@@ -127,10 +138,6 @@ pub(crate) enum NodeState {
 
     /// Entry has been copied up to the upper layer.
     Upper {
-        /// O_PATH fd pinning the inode.
-        #[cfg(target_os = "linux")]
-        file: File,
-
         /// Host inode number (macOS).
         #[cfg(target_os = "macos")]
         ino: u64,
@@ -163,6 +170,7 @@ pub(crate) struct Layer {
 
     /// Linux: /proc/self/fd handle for secure inode reopening.
     #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
     pub proc_self_fd: File,
 
     /// Linux: whether openat2/RESOLVE_BENEATH is available.
@@ -193,14 +201,19 @@ pub(crate) struct DirSnapshot {
     /// Merged entries across all layers.
     pub entries: Vec<MergedDirEntry>,
 
-    /// Whether guest-visible d_types have been corrected via stat override lookups.
-    /// Lazily set on first `do_readdir` call; skipped by `do_readdirplus` which
-    /// corrects d_types from its own lookup results.
-    pub dtypes_corrected: bool,
+    /// Whether guest-visible metadata has been resolved via lookups.
+    ///
+    /// Lazily set on first `do_readdir` call so plain `readdir` can return
+    /// stable synthetic inode numbers and corrected guest-visible d_types.
+    /// `do_readdirplus` resolves metadata from its own lookup results.
+    pub metadata_resolved: bool,
 }
 
 /// A single entry in a merged directory snapshot.
 pub(crate) struct MergedDirEntry {
+    /// Guest-visible synthetic inode number.
+    pub inode: u64,
+
     /// Entry name (owned bytes — snapshot is per-handle, short-lived).
     pub name: Vec<u8>,
 

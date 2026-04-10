@@ -51,13 +51,13 @@ Per-execution overrides for working directory, environment variables, resource l
 use std::time::Duration;
 use microsandbox::RlimitResource;
 
-let output = sb.exec("python", |e| e
+let output = sb.exec_with("python", |e| e
     .args(["compute.py"])
     .cwd("/app")
     .env("PYTHONPATH", "/app/lib")
     .timeout(Duration::from_secs(30))
     .rlimit(RlimitResource::Nofile, 1024)
-    .rlimit("cpu", 60)
+    .rlimit(RlimitResource::Cpu, 60)
 ).await?;
 ```
 
@@ -114,7 +114,7 @@ Pipe data into a running process by opening a streaming handle with `stdin_pipe`
 
 <CodeGroup>
 ```rust Rust
-let mut handle = sb.exec_stream("python", |e| e.stdin_pipe().tty(true)).await?;
+let mut handle = sb.exec_stream_with("python", |e| e.stdin_pipe().tty(true)).await?;
 let stdin = handle.take_stdin().unwrap();
 stdin.write(b"print('hello')\n").await?;
 stdin.write(b"exit()\n").await?;
@@ -141,7 +141,7 @@ Bridge your terminal to a fully interactive PTY session inside the sandbox. Pres
 let exit_code = sb.attach_shell().await?;
 
 // Attach to a specific command with options
-let exit_code = sb.attach("python", |a| a
+let exit_code = sb.attach_with("python", |a| a
     .env("DEBUG", "1")
     .cwd("/app")
     .detach_keys("ctrl-q")
@@ -158,7 +158,7 @@ await sb.attach("bash", a => a.env("DEBUG", "1").cwd("/app").detachKeys("ctrl-q"
 
 </CodeGroup>
 
-## Sessions
+## Sessions <sup><sup>coming soon</sup></sup>
 
 Each streaming exec or attach creates a session. You can list active sessions and reattach to them by ID. Up to 16 simultaneous client connections are supported, so multiple sessions can run concurrently without interfering with each other.
 

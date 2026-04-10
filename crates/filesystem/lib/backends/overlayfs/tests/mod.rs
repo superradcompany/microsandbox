@@ -388,10 +388,6 @@ impl ReadOnlyOverlayTestSandbox {
         fs_fuse_open(&self.fs, inode, flags)
     }
 
-    fn fuse_opendir(&self, inode: u64) -> io::Result<u64> {
-        fs_fuse_opendir(&self.fs, inode)
-    }
-
     fn fuse_read(&self, inode: u64, handle: u64, size: u32, offset: u64) -> io::Result<Vec<u8>> {
         fs_fuse_read(&self.fs, inode, handle, size, offset)
     }

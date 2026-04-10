@@ -14,11 +14,7 @@
 use std::{io, os::fd::AsRawFd};
 
 use super::PassthroughFs;
-use crate::{
-    Context,
-    backends::shared::{init_binary, platform},
-    statvfs64,
-};
+use crate::{Context, backends::shared::platform, statvfs64};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -32,7 +28,7 @@ pub(crate) fn do_fsync(
     datasync: bool,
     handle: u64,
 ) -> io::Result<()> {
-    if inode == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(inode) {
         return Ok(());
     }
 
@@ -65,12 +61,26 @@ pub(crate) fn do_fsync(
 /// Synchronize directory contents.
 pub(crate) fn do_fsyncdir(
     fs: &PassthroughFs,
-    ctx: Context,
+    _ctx: Context,
     inode: u64,
-    datasync: bool,
+    _datasync: bool,
     handle: u64,
 ) -> io::Result<()> {
-    do_fsync(fs, ctx, inode, datasync, handle)
+    if fs.is_virtual_init_inode(inode) {
+        return Ok(());
+    }
+
+    let handles = fs.dir_handles.read().unwrap();
+    let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
+    #[allow(clippy::readonly_write_lock)]
+    let file = data.file.write().unwrap();
+
+    let ret = unsafe { libc::fsync(file.as_raw_fd()) };
+    if ret < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+
+    Ok(())
 }
 
 /// Allocate space for a file.
@@ -83,7 +93,7 @@ pub(crate) fn do_fallocate(
     offset: u64,
     length: u64,
 ) -> io::Result<()> {
-    if inode == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(inode) {
         return Err(platform::eacces());
     }
 
@@ -159,7 +169,7 @@ pub(crate) fn do_lseek(
     offset: u64,
     whence: u32,
 ) -> io::Result<u64> {
-    if inode == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(inode) {
         return Err(platform::enosys());
     }
 
@@ -195,7 +205,7 @@ pub(crate) fn do_copyfilerange(
     len: u64,
     flags: u64,
 ) -> io::Result<usize> {
-    if inode_in == init_binary::INIT_INODE || inode_out == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(inode_in) || fs.is_virtual_init_inode(inode_out) {
         return Err(platform::enosys());
     }
 
@@ -239,7 +249,7 @@ pub(crate) fn do_copyfilerange(
 pub(crate) fn do_statfs(fs: &PassthroughFs, _ctx: Context, inode: u64) -> io::Result<statvfs64> {
     // Keep InodeFd guard alive so the fd isn't closed before fstatvfs uses it.
     let inode_fd;
-    let fd = if inode == init_binary::INIT_INODE || inode == 1 {
+    let fd = if fs.is_virtual_init_inode(inode) || inode == 1 {
         fs.root_fd.as_raw_fd()
     } else {
         inode_fd = super::inode::get_inode_fd(fs, inode)?;

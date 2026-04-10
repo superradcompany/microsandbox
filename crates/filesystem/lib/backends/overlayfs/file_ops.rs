@@ -9,10 +9,9 @@ use std::{
     sync::{Arc, RwLock, atomic::Ordering},
 };
 
-use super::{
-    OverlayFs, copy_up, inode,
-    types::{FileHandle, NodeState},
-};
+#[cfg(target_os = "macos")]
+use super::types::NodeState;
+use super::{OverlayFs, copy_up, inode, types::FileHandle};
 use crate::{
     Context, OpenOptions, ZeroCopyReader, ZeroCopyWriter,
     backends::shared::{init_binary, platform, stat_override},
@@ -154,6 +153,7 @@ pub(crate) fn do_readlink(fs: &OverlayFs, _ctx: Context, ino: u64) -> io::Result
         return Err(platform::einval());
     }
 
+    #[allow(unused_variables)]
     let node = {
         let nodes = fs.nodes.read().unwrap();
         nodes.get(&ino).cloned().ok_or_else(platform::enoent)?
@@ -161,29 +161,14 @@ pub(crate) fn do_readlink(fs: &OverlayFs, _ctx: Context, ino: u64) -> io::Result
 
     #[cfg(target_os = "linux")]
     {
-        // Dup the O_PATH fd while the state lock is held to prevent a
-        // concurrent copy-up from closing it underneath us. open_node_fd
-        // rejects real host symlinks before procfd reopen, so readlink uses
-        // the duplicated O_PATH fd directly instead.
-        let (dup_fd, st) = {
-            let state = node.state.read().unwrap();
-            let fd = match &*state {
-                NodeState::Lower { file, .. } | NodeState::Upper { file, .. } => file.as_raw_fd(),
-                _ => return Err(platform::einval()),
-            };
-            let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
-            if dup < 0 {
-                return Err(platform::linux_error(io::Error::last_os_error()));
-            }
-            (dup, platform::fstat(fd)?)
-        };
-        let _close_dup = scopeguard::guard(dup_fd, |fd| unsafe {
+        let fd = inode::open_node_fd(fs, ino, libc::O_PATH | libc::O_NOFOLLOW)?;
+        let _close = scopeguard::guard(fd, |fd| unsafe {
             libc::close(fd);
         });
+        let st = platform::fstat(fd)?;
 
         if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
-            // Real symlink — read the target from the pinned fd itself.
-            return platform::readlink_fd(dup_fd);
+            return platform::readlink_fd(fd);
         }
 
         // File-backed symlink: reopen for reading (safe — it's a regular file).

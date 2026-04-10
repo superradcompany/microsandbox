@@ -16,7 +16,10 @@ use super::{
 };
 use crate::{
     Context, DirEntry, Entry, OpenOptions,
-    backends::shared::{init_binary, platform},
+    backends::shared::{
+        dir_snapshot::{self, SnapshotEntry},
+        init_binary, platform,
+    },
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -203,6 +206,28 @@ pub(crate) fn do_releasedir(
 ) -> io::Result<()> {
     fs.state.dir_handles.write().unwrap().remove(&handle);
     Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl SnapshotEntry for MergedDirEntry {
+    fn inode(&self) -> u64 {
+        self.inode
+    }
+
+    fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    fn file_type(&self) -> u32 {
+        self.file_type
+    }
+
+    fn name(&self) -> &[u8] {
+        &self.name
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -499,46 +524,10 @@ fn collect_dentry_entries(
 
 /// Serve readdir results from a snapshot starting at the given offset.
 fn serve_readdir(snapshot: &DirSnapshot, offset: u64) -> io::Result<Vec<DirEntry<'static>>> {
-    let start = snapshot
-        .entries
-        .iter()
-        .position(|e| e.offset > offset)
-        .unwrap_or(snapshot.entries.len());
-
-    let result_entries = &snapshot.entries[start..];
-    if result_entries.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Bounded-leak: collect all names into one contiguous buffer.
-    let mut names_buf = Vec::new();
-    let mut offsets_vec = Vec::new();
-
-    for entry in result_entries {
-        let name_start = names_buf.len();
-        names_buf.extend_from_slice(&entry.name);
-        offsets_vec.push((
-            name_start,
-            entry.name.len(),
-            entry.inode,
-            entry.offset,
-            entry.file_type,
-        ));
-    }
-
-    let leaked: &'static [u8] = Box::leak(names_buf.into_boxed_slice());
-
-    let result: Vec<DirEntry<'static>> = offsets_vec
-        .into_iter()
-        .map(|(name_start, name_len, ino, offset, file_type)| DirEntry {
-            ino,
-            offset,
-            type_: file_type,
-            name: &leaked[name_start..name_start + name_len],
-        })
-        .collect();
-
-    Ok(result)
+    Ok(dir_snapshot::serve_snapshot_entries(
+        &snapshot.entries,
+        offset,
+    ))
 }
 
 /// Get a directory handle by guest handle ID.

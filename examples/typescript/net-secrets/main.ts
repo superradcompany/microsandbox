@@ -5,7 +5,7 @@ async function main() {
   // Placeholder auto-generated as $MSB_API_KEY.
   const sandbox = await Sandbox.create({
     name: "net-secrets",
-    image: "alpine:latest",
+    image: "alpine",
     cpus: 1,
     memoryMib: 512,
     secrets: [

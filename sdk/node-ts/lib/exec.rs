@@ -1,5 +1,5 @@
+use microsandbox::sandbox::ExecOptionsBuilder;
 use microsandbox::sandbox::exec::{ExecEvent as RustExecEvent, ExecHandle, ExecSink};
-use microsandbox::sandbox::{ExecOptionsBuilder, IntoExecOptions};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use tokio::sync::Mutex;
@@ -231,8 +231,10 @@ fn exec_event_to_js(event: RustExecEvent) -> ExecEvent {
     }
 }
 
-/// Convert a JS exec config into the Rust `IntoExecOptions` closure form.
-pub fn convert_exec_config(config: &ExecConfig) -> impl IntoExecOptions + '_ {
+/// Convert a JS exec config into a builder closure.
+pub fn convert_exec_config(
+    config: &ExecConfig,
+) -> impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder + '_ {
     |mut b: ExecOptionsBuilder| {
         if let Some(ref args) = config.args {
             b = b.args(args.clone());

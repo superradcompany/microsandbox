@@ -12,7 +12,7 @@ use clap::Args;
 /// Download an image from a container registry.
 #[derive(Debug, Args)]
 pub struct PullArgs {
-    /// Image to pull (e.g. python:3.12, ubuntu:22.04).
+    /// Image to pull (e.g. python, ubuntu).
     pub reference: String,
 
     /// Re-download even if the image is already cached.

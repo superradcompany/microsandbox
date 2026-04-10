@@ -9,6 +9,7 @@ use nix::{
     sys::signal::{self, Signal},
     unistd::Pid,
 };
+use tempfile::TempDir;
 use tokio::process::Child;
 
 use crate::MicrosandboxResult;
@@ -30,6 +31,10 @@ pub struct ProcessHandle {
 
     /// When true, the Drop impl will NOT send SIGTERM.
     detached: bool,
+
+    /// Ephemeral staging directory for file mounts. Dropped when the
+    /// process handle is dropped, which auto-removes all staged files.
+    _file_mounts_staging: Option<TempDir>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -38,12 +43,18 @@ pub struct ProcessHandle {
 
 impl ProcessHandle {
     /// Create a new handle.
-    pub(crate) fn new(pid: u32, sandbox_name: String, child: Child) -> Self {
+    pub(crate) fn new(
+        pid: u32,
+        sandbox_name: String,
+        child: Child,
+        file_mounts_staging: Option<TempDir>,
+    ) -> Self {
         Self {
             pid,
             sandbox_name,
             child,
             detached: false,
+            _file_mounts_staging: file_mounts_staging,
         }
     }
 
@@ -89,8 +100,17 @@ impl ProcessHandle {
 
     /// Disarm the SIGTERM safety net so the sandbox keeps running after
     /// this handle is dropped. Used by detached sandbox flows.
+    ///
+    /// Also prevents the file-mounts staging directory from being deleted,
+    /// since the detached VM process still needs the backing files.
     pub fn disarm(&mut self) {
         self.detached = true;
+
+        // Consume the TempDir without deleting its contents — the detached
+        // VM process still reads from it via virtiofs.
+        if let Some(td) = self._file_mounts_staging.take() {
+            let _ = td.keep();
+        }
     }
 }
 

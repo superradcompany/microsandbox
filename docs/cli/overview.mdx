@@ -20,20 +20,19 @@ curl -fsSL https://install.microsandbox.dev | sh
 
 ```bash
 # Run a one-off command (ephemeral, auto-removed)
-msb run python:3.11 -- python -c "print('Hello!')"
+msb run python -- python -c "print('Hello!')"
 
 # Interactive shell (auto-detects TTY)
-msb run alpine:latest -- sh
+msb run alpine -- sh
 
 # Create a persistent sandbox
-msb run --name devbox ubuntu:22.04 -- bash
+msb run --name devbox ubuntu -- bash
 
 # Resume later
 msb start devbox
-msb shell devbox
 
 # Execute in a running sandbox
-msb exec devbox -- ls -la /app
+msb exec devbox -- sh -c "apt update && apt install -y cowsay && /usr/games/cowsay \"Hello from devbox\""
 
 # Manage
 msb ls                   # List all sandboxes
@@ -44,9 +43,9 @@ msb stop devbox          # Graceful shutdown
 msb rm devbox            # Remove stopped sandbox
 
 # Images
-msb pull python:3.11     # Pre-pull to cache
+msb pull python     # Pre-pull to cache
 msb image ls             # List cached images
-msb image rm python:3.11 # Remove a cached image
+msb image rm python # Remove a cached image
 
 # Volumes
 msb volume create data --size 10G

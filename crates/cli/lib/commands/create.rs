@@ -13,7 +13,7 @@ use crate::ui;
 /// Create a sandbox and boot it in the background.
 #[derive(Debug, Args)]
 pub struct CreateArgs {
-    /// Image to use (e.g. alpine, python:3.12, ./rootfs, ./disk.qcow2).
+    /// Image to use (e.g. alpine, python, ./rootfs, ./disk.qcow2).
     pub image: String,
 
     /// Sandbox configuration options.

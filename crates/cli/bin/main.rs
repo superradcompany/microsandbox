@@ -4,7 +4,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use microsandbox_cli::{
     commands::{
         create, exec, image, inspect, install, list, metrics, ps, pull, registry, remove, run,
-        self_cmd, shell, start, stop, uninstall, volume,
+        self_cmd, start, stop, uninstall, volume,
     },
     log_args::{self, LogArgs},
     sandbox_cmd::{self, SandboxArgs},
@@ -71,9 +71,6 @@ enum Commands {
     /// Run a command in a running sandbox.
     Exec(exec::ExecArgs),
 
-    /// Open a shell in a running sandbox.
-    Shell(shell::ShellArgs),
-
     /// Manage OCI images.
     Image(image::ImageArgs),
 
@@ -136,12 +133,21 @@ fn main() {
 
     let cli = Cli::parse();
     let log_level = cli.logs.selected_level();
-    log_args::init_tracing(log_level);
 
     let result: Result<(), Box<dyn std::error::Error>> = match cli.command {
         // Sandbox process entry — never returns (VMM takes over).
-        Commands::Sandbox(args) => sandbox_cmd::run(*args, log_level),
-        command => run_async_command(command, log_level),
+        // Always install tracing for sandbox processes: default to info when
+        // no explicit level is set so lifecycle events and VMM diagnostics
+        // are captured in host.log for post-mortem debugging.
+        Commands::Sandbox(args) => {
+            let sandbox_level = log_level.or(Some(microsandbox_runtime::logging::LogLevel::Info));
+            log_args::init_tracing(sandbox_level);
+            sandbox_cmd::run(*args, log_level)
+        }
+        command => {
+            log_args::init_tracing(log_level);
+            run_async_command(command, log_level)
+        }
     };
 
     if let Err(e) = result {
@@ -178,7 +184,6 @@ fn run_async_command(
             Commands::Metrics(args) => metrics::run(args).await.map_err(Into::into),
             Commands::Remove(args) => remove::run(args).await.map_err(Into::into),
             Commands::Exec(args) => exec::run(args).await.map_err(Into::into),
-            Commands::Shell(args) => shell::run(args).await.map_err(Into::into),
             Commands::Image(args) => image::run(args).await.map_err(Into::into),
             Commands::Pull(args) => image::run_pull(args).await.map_err(Into::into),
             Commands::Registry(args) => registry::run(args).await.map_err(Into::into),

@@ -41,18 +41,18 @@ Creating a sandbox boots the microVM, mounts the filesystem, initializes the gue
 <CodeGroup>
 ```rust Rust
 // Attached: sandbox stops when your process exits
-let sb = Sandbox::builder("worker").image("python:3.12").create().await?;
+let sb = Sandbox::builder("worker").image("python").create().await?;
 
 // Detached: sandbox survives after your process exits
-let sb = Sandbox::builder("worker").image("python:3.12").create_detached().await?;
+let sb = Sandbox::builder("worker").image("python").create_detached().await?;
 ```
 
 ```typescript TypeScript
 // Standard creation (attached, sandbox stops when your process exits)
-const sb = await Sandbox.create({ name: "worker", image: "python:3.12" })
+const sb = await Sandbox.create({ name: "worker", image: "python" })
 
 // Detached creation (sandbox survives after your process exits)
-const sb = await Sandbox.createDetached({ name: "worker", image: "python:3.12" })
+const sb = await Sandbox.createDetached({ name: "worker", image: "python" })
 ```
 
 </CodeGroup>
@@ -223,7 +223,7 @@ For production workloads, configure how the sandbox process handles shutdown, id
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("worker")
-    .image("python:3.12")
+    .image("python")
     .max_duration(3600)
     .idle_timeout(300)
     .create()
@@ -233,7 +233,7 @@ let sb = Sandbox::builder("worker")
 ```typescript TypeScript
 const sb = await Sandbox.create({
     name: "worker",
-    image: "python:3.12",
+    image: "python",
     maxDurationSecs: 3600,  // maximum sandbox lifetime in seconds
 })
 ```

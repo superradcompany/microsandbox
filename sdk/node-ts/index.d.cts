@@ -70,6 +70,52 @@ export declare class ExecSink {
 export type JsExecSink = ExecSink
 
 /**
+ * A streaming reader for file data from the sandbox.
+ *
+ * Supports both manual `recv()` calls and `for await...of` iteration:
+ * ```js
+ * const stream = await sb.fs().readStream("/app/data.bin");
+ * for await (const chunk of stream) {
+ *   processChunk(chunk);
+ * }
+ * ```
+ *
+ * This type implements JavaScript's async iterable protocol.
+ * It can be used with `for await...of` loops.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
+ */
+export declare class FsReadStream {
+  /** Receive the next chunk of data. Returns `null` when the stream ends. */
+  recv(): Promise<Buffer | null>
+  [Symbol.asyncIterator](): AsyncGenerator<Buffer, void, undefined>
+}
+export type JsFsReadStream = FsReadStream
+
+/**
+ * A streaming subscription for sandbox metrics at a regular interval.
+ *
+ * Supports both manual `recv()` calls and `for await...of` iteration:
+ * ```js
+ * const stream = await sb.metricsStream(1000);
+ * for await (const m of stream) {
+ *   console.log(`CPU: ${m.cpuPercent.toFixed(1)}%`);
+ * }
+ * ```
+ *
+ * This type implements JavaScript's async iterable protocol.
+ * It can be used with `for await...of` loops.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
+ */
+export declare class MetricsStream {
+  /** Receive the next metrics snapshot. Returns `null` when the stream ends. */
+  recv(): Promise<SandboxMetrics | null>
+  [Symbol.asyncIterator](): AsyncGenerator<SandboxMetrics, void, undefined>
+}
+export type JsMetricsStream = MetricsStream
+
+/**
  * Factory for creating volume mount configurations.
  *
  * ```js
@@ -77,7 +123,7 @@ export type JsExecSink = ExecSink
  *
  * const sb = await Sandbox.create({
  *     name: "worker",
- *     image: "python:3.12",
+ *     image: "python",
  *     volumes: {
  *         "/app/src": Mount.bind("./src", { readonly: true }),
  *         "/data": Mount.named("my-data"),
@@ -103,7 +149,7 @@ export declare class Mount {
  *
  * const sb = await Sandbox.create({
  *     name: "worker",
- *     image: "python:3.12",
+ *     image: "python",
  *     network: NetworkPolicy.publicOnly(),
  * })
  * ```
@@ -117,6 +163,46 @@ export declare class NetworkPolicy {
   static allowAll(): NetworkConfig
 }
 export type JsNetworkPolicy = NetworkPolicy
+
+/**
+ * Factory for creating rootfs patch configurations.
+ *
+ * ```js
+ * import { Patch, Sandbox } from 'microsandbox'
+ *
+ * const sb = await Sandbox.create({
+ *     name: "worker",
+ *     image: "alpine",
+ *     patches: [
+ *         Patch.text("/etc/greeting.txt", "Hello!
+"),
+ *         Patch.mkdir("/app", { mode: 0o755 }),
+ *         Patch.append("/etc/hosts", "127.0.0.1 myapp.local
+"),
+ *         Patch.copyFile("./config.json", "/app/config.json"),
+ *         Patch.copyDir("./scripts", "/app/scripts"),
+ *         Patch.symlink("/usr/bin/python3", "/usr/bin/python"),
+ *         Patch.remove("/etc/motd"),
+ *     ],
+ * })
+ * ```
+ */
+export declare class Patch {
+  /** Write text content to a file in the guest filesystem. */
+  static text(path: string, content: string, opts?: PatchOptions | undefined | null): PatchConfig
+  /** Create a directory in the guest filesystem (idempotent). */
+  static mkdir(path: string, opts?: PatchOptions | undefined | null): PatchConfig
+  /** Append content to an existing file in the guest filesystem. */
+  static append(path: string, content: string): PatchConfig
+  /** Copy a file from the host into the guest filesystem. */
+  static copyFile(src: string, dst: string, opts?: PatchOptions | undefined | null): PatchConfig
+  /** Copy a directory from the host into the guest filesystem. */
+  static copyDir(src: string, dst: string, opts?: PatchReplaceOptions | undefined | null): PatchConfig
+  /** Create a symlink in the guest filesystem. */
+  static symlink(target: string, link: string, opts?: PatchReplaceOptions | undefined | null): PatchConfig
+  /** Remove a file or directory from the guest filesystem (idempotent). */
+  static remove(path: string): PatchConfig
+}
 
 /**
  * A running sandbox instance.
@@ -157,6 +243,18 @@ export declare class Sandbox {
   fs(): SandboxFs
   /** Get point-in-time resource metrics. */
   metrics(): Promise<SandboxMetrics>
+  /** Stream metrics snapshots at the requested interval (in milliseconds). */
+  metricsStream(intervalMs: number): Promise<MetricsStream>
+  /**
+   * Attach to an interactive PTY session inside the sandbox.
+   *
+   * Bridges the host terminal to the guest process. Returns the exit code.
+   */
+  attach(cmd: string, args?: Array<string> | undefined | null): Promise<number>
+  /** Attach with full configuration options. */
+  attachWithConfig(config: AttachConfig): Promise<number>
+  /** Attach to the sandbox's default shell. */
+  attachShell(): Promise<number>
   /** Stop the sandbox gracefully (SIGTERM). */
   stop(): Promise<void>
   /** Stop and wait for exit, returning the exit status. */
@@ -201,6 +299,8 @@ export declare class SandboxFs {
   copyFromHost(hostPath: string, guestPath: string): Promise<void>
   /** Copy a file from the sandbox to the host. */
   copyToHost(guestPath: string, hostPath: string): Promise<void>
+  /** Read a file with streaming (~3 MiB chunks). */
+  readStream(path: string): Promise<FsReadStream>
 }
 export type JsSandboxFs = SandboxFs
 
@@ -245,7 +345,7 @@ export type JsSandboxHandle = SandboxHandle
  *
  * const sb = await Sandbox.create({
  *     name: "agent",
- *     image: "python:3.12",
+ *     image: "python",
  *     secrets: [
  *         Secret.env("OPENAI_API_KEY", {
  *             value: process.env.OPENAI_API_KEY,
@@ -297,6 +397,22 @@ export type JsVolumeHandle = VolumeHandle
 /** Get metrics for all running sandboxes. */
 export declare function allSandboxMetrics(): Promise<Record<string, SandboxMetrics>>
 
+/** Configuration for interactive attach sessions. */
+export interface AttachConfig {
+  /** Command to execute. */
+  cmd: string
+  /** Command arguments. */
+  args?: Array<string>
+  /** Working directory inside the sandbox. */
+  cwd?: string
+  /** User to run as. */
+  user?: string
+  /** Environment variables. */
+  env?: Record<string, string>
+  /** Detach key sequence (default: "ctrl-]"). Uses Docker-style syntax. */
+  detachKeys?: string
+}
+
 /** Configuration for command execution. */
 export interface ExecConfig {
   /** Command to execute. */
@@ -329,6 +445,14 @@ export interface ExecEvent {
   code?: number
 }
 
+/** Execution event type. */
+export declare const enum ExecEventType {
+  Started = 'started',
+  Stdout = 'stdout',
+  Stderr = 'stderr',
+  Exited = 'exited'
+}
+
 /** Process exit status. */
 export interface ExitStatus {
   code: number
@@ -343,6 +467,14 @@ export interface FsEntry {
   size: number
   mode: number
   modified?: number
+}
+
+/** Filesystem entry kind. */
+export declare const enum FsEntryKind {
+  File = 'file',
+  Directory = 'directory',
+  Symlink = 'symlink',
+  Other = 'other'
 }
 
 /** Filesystem metadata returned by `fs.stat()`. */
@@ -434,6 +566,40 @@ export interface PatchConfig {
   mode?: number
   /** Allow replacing existing files. */
   replace?: boolean
+}
+
+/** Options for `Patch.text()` and `Patch.copyFile()`. */
+export interface PatchOptions {
+  /** File permissions (e.g. 0o644). */
+  mode?: number
+  /** Allow replacing existing files. */
+  replace?: boolean
+}
+
+/** Options for `Patch.copyDir()` and `Patch.symlink()`. */
+export interface PatchReplaceOptions {
+  /** Allow replacing existing files/directories. */
+  replace?: boolean
+}
+
+/** Network policy rule action. */
+export declare const enum PolicyAction {
+  Allow = 'allow',
+  Deny = 'deny'
+}
+
+/** Network policy rule direction. */
+export declare const enum PolicyDirection {
+  Outbound = 'outbound',
+  Inbound = 'inbound'
+}
+
+/** Network policy rule protocol. */
+export declare const enum PolicyProtocol {
+  Tcp = 'tcp',
+  Udp = 'udp',
+  Icmpv4 = 'icmpv4',
+  Icmpv6 = 'icmpv6'
 }
 
 /** A network policy rule. */
@@ -558,6 +724,14 @@ export interface SandboxMetrics {
   timestampMs: number
 }
 
+/** Sandbox status. */
+export declare const enum SandboxStatus {
+  Running = 'running',
+  Stopped = 'stopped',
+  Crashed = 'crashed',
+  Draining = 'draining'
+}
+
 /**
  * A secret entry for the `secrets` array on `SandboxConfig`.
  *
@@ -622,6 +796,16 @@ export interface TmpfsOptions {
   sizeMib?: number
   /** Read-only mount. */
   readonly?: boolean
+}
+
+/** Action to take when a secret is sent to a disallowed host. */
+export declare const enum ViolationAction {
+  /** Silently block the request. */
+  Block = 'block',
+  /** Block the request and log the violation. */
+  BlockAndLog = 'block-and-log',
+  /** Block the request and terminate the sandbox. */
+  BlockAndTerminate = 'block-and-terminate'
 }
 
 /** Volume configuration for creation. */

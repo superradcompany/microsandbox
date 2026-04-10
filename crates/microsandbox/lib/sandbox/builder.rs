@@ -10,7 +10,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use super::{
     config::SandboxConfig,
-    types::{IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource},
+    types::{ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource},
 };
 use crate::{LogLevel, MicrosandboxResult, size::Mebibytes};
 
@@ -43,22 +43,37 @@ impl SandboxBuilder {
 
     /// Set the root filesystem image source.
     ///
-    /// Accepts a string, path, or closure:
     /// - **`&str` / `String`**: Paths starting with `/`, `./`, or `../` are treated as local
     ///   paths. Everything else is treated as an OCI image reference. Disk image extensions
     ///   (`.qcow2`, `.raw`, `.vmdk`) resolve to virtio-blk block device rootfs.
     /// - **`PathBuf`**: Always treated as a local path.
-    /// - **Closure**: `|i| i.disk("./image.qcow2").fstype("ext4")` for explicit disk image
-    ///   configuration.
+    ///
+    /// For explicit disk image configuration, see [`image_with`](Self::image_with).
     ///
     /// ```ignore
-    /// .image("python:3.12")                                // OCI image
-    /// .image("./rootfs")                                   // local directory (bind mount)
-    /// .image("./ubuntu.qcow2")                             // disk image (auto-detect fs)
-    /// .image(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))  // disk image (explicit fs)
+    /// .image("python:3.12")       // OCI image
+    /// .image("./rootfs")          // local directory (bind mount)
+    /// .image("./ubuntu.qcow2")   // disk image (auto-detect fs)
     /// ```
     pub fn image(mut self, image: impl IntoImage) -> Self {
         match image.into_rootfs_source() {
+            Ok(rootfs) => self.config.image = rootfs,
+            Err(e) => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(e);
+                }
+            }
+        }
+        self
+    }
+
+    /// Set the root filesystem image using a builder closure.
+    ///
+    /// ```ignore
+    /// .image_with(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
+    /// ```
+    pub fn image_with(mut self, f: impl FnOnce(ImageBuilder) -> ImageBuilder) -> Self {
+        match f(ImageBuilder::new()).build() {
             Ok(rootfs) => self.config.image = rootfs,
             Err(e) => {
                 if self.build_error.is_none() {
@@ -480,7 +495,7 @@ mod tests {
     #[test]
     fn test_builder_sets_runtime_log_level() {
         let config = SandboxBuilder::new("test")
-            .image("alpine:3.23")
+            .image("alpine")
             .log_level(LogLevel::Debug)
             .build()
             .unwrap();
@@ -491,7 +506,7 @@ mod tests {
     #[test]
     fn test_builder_quiet_logs_clears_runtime_log_level() {
         let config = SandboxBuilder::new("test")
-            .image("alpine:3.23")
+            .image("alpine")
             .log_level(LogLevel::Trace)
             .quiet_logs()
             .build()
@@ -503,7 +518,7 @@ mod tests {
     #[test]
     fn test_builder_replace_sets_replace_existing() {
         let config = SandboxBuilder::new("test")
-            .image("alpine:3.23")
+            .image("alpine")
             .replace()
             .build()
             .unwrap();
@@ -515,7 +530,7 @@ mod tests {
     #[test]
     fn test_builder_ports_are_repeatable() {
         let config = SandboxBuilder::new("test")
-            .image("alpine:3.23")
+            .image("alpine")
             .port(8080, 80)
             .port(3000, 3000)
             .port_udp(5353, 53)
@@ -540,7 +555,7 @@ mod tests {
         use microsandbox_network::policy::Action;
 
         let config = SandboxBuilder::new("test")
-            .image("alpine:3.23")
+            .image("alpine")
             .disable_network()
             .build()
             .unwrap();
@@ -554,7 +569,7 @@ mod tests {
     #[test]
     fn test_builder_network_preserves_top_level_settings() {
         let config = SandboxBuilder::new("test")
-            .image("alpine:3.23")
+            .image("alpine")
             .port(8080, 80)
             .secret_env("OPENAI_API_KEY", "secret", "api.openai.com")
             .network(|n| n.max_connections(128))

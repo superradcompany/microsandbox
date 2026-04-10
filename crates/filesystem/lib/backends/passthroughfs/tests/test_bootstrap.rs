@@ -120,6 +120,7 @@ fn test_default_config_values() {
     assert_eq!(cfg.attr_timeout, Duration::from_secs(5));
     assert_eq!(cfg.cache_policy, CachePolicy::Auto);
     assert!(!cfg.writeback);
+    assert!(cfg.inject_init);
 }
 
 #[test]

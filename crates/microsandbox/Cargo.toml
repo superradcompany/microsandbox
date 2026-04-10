@@ -25,18 +25,20 @@ dirs.workspace = true
 flate2.workspace = true
 futures.workspace = true
 libc.workspace = true
-microsandbox-db = { version = "0.3.7", path = "../db" }
-microsandbox-filesystem = { version = "0.3.7", path = "../filesystem", default-features = false }
-microsandbox-image = { version = "0.3.7", path = "../image" }
-microsandbox-migration = { version = "0.3.7", path = "../migration" }
-microsandbox-network = { version = "0.3.7", path = "../network", optional = true }
-microsandbox-protocol = { version = "0.3.7", path = "../protocol" }
-microsandbox-runtime = { version = "0.3.7", path = "../runtime", default-features = false }
-microsandbox-utils = { version = "0.3.7", path = "../utils" }
+microsandbox-db = { version = "0.3.12", path = "../db" }
+microsandbox-filesystem = { version = "0.3.12", path = "../filesystem", default-features = false }
+microsandbox-image = { version = "0.3.12", path = "../image" }
+microsandbox-migration = { version = "0.3.12", path = "../migration" }
+microsandbox-network = { version = "0.3.12", path = "../network", optional = true }
+microsandbox-protocol = { version = "0.3.12", path = "../protocol" }
+microsandbox-runtime = { version = "0.3.12", path = "../runtime", default-features = false }
+microsandbox-utils = { version = "0.3.12", path = "../utils" }
 nix = { workspace = true, features = ["process", "signal"] }
+rand.workspace = true
 reqwest.workspace = true
 scopeguard.workspace = true
 tar.workspace = true
+tempfile.workspace = true
 sea-orm.workspace = true
 serde.workspace = true
 serde_json.workspace = true

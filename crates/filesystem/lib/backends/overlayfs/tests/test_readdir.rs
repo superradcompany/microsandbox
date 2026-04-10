@@ -151,6 +151,27 @@ fn test_readdir_multi_layer() {
 }
 
 #[test]
+fn test_readdir_returns_nonzero_inodes() {
+    let sb = OverlayTestSandbox::with_lower(|lower| {
+        std::fs::create_dir(lower.join("etc")).unwrap();
+        std::fs::write(lower.join("hosts"), b"127.0.0.1 localhost\n").unwrap();
+    });
+    let handle = sb.fuse_opendir(ROOT_INODE).unwrap();
+    let entries = sb
+        .fs
+        .readdir(sb.ctx(), ROOT_INODE, handle, 65536, 0)
+        .unwrap();
+
+    for entry in entries {
+        assert_ne!(
+            entry.ino, 0,
+            "readdir must not expose zero inode for {:?}",
+            entry.name
+        );
+    }
+}
+
+#[test]
 fn test_releasedir() {
     let sb = OverlayTestSandbox::new();
     let handle = sb.fuse_opendir(ROOT_INODE).unwrap();

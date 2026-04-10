@@ -1,11 +1,11 @@
 import { Patch, Sandbox } from "microsandbox";
 
 async function main() {
-  console.log("Creating sandbox with rootfs patches (image=alpine:latest)");
+  console.log("Creating sandbox with rootfs patches (image=alpine)");
 
   const sandbox = await Sandbox.create({
     name: "rootfs-patch",
-    image: "alpine:latest",
+    image: "alpine",
     cpus: 1,
     memoryMib: 512,
     replace: true,

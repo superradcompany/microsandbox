@@ -15,7 +15,7 @@ At minimum, a sandbox needs a name and an image. Everything else has sensible de
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("worker")
-    .image("python:3.12")
+    .image("python")
     .create()
     .await?;
 ```
@@ -23,7 +23,7 @@ let sb = Sandbox::builder("worker")
 ```typescript TypeScript
 const sb = await Sandbox.create({
     name: "worker",
-    image: "python:3.12",
+    image: "python",
 })
 ```
 
@@ -34,10 +34,10 @@ const sb = await Sandbox.create({
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("worker")
-    .image("python:3.12")
+    .image("python")
     .memory(1024)
     .cpus(2)
-    .workdir("/app")
+
     .env("DEBUG", "true")
     .env("API_PORT", "8000")
     .volume("/app/src", |v| v.bind("./src").readonly())
@@ -52,10 +52,10 @@ import { Mount, Sandbox } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "worker",
-    image: "python:3.12",
+    image: "python",
     memoryMib: 1024,
     cpus: 2,
-    workdir: "/app",
+
     env: { DEBUG: "true", API_PORT: "8000" },
     volumes: {
         "/app/src": Mount.bind("./src", { readonly: true }),
@@ -93,11 +93,11 @@ The most common option. microsandbox pulls the image and stacks its layers as a 
 
 <CodeGroup>
 ```rust Rust
-Sandbox::builder("worker").image("python:3.12").create().await?;
+Sandbox::builder("worker").image("python").create().await?;
 ```
 
 ```typescript TypeScript
-await Sandbox.create({ name: "worker", image: "python:3.12" })
+await Sandbox.create({ name: "worker", image: "python" })
 ```
 
 </CodeGroup>
@@ -128,7 +128,7 @@ Boot from a QCOW2, Raw, or VMDK disk image. Unlike OCI images (which use a copy-
 <CodeGroup>
 ```rust Rust
 Sandbox::builder("worker")
-    .image(|i| i.disk("./alpine.qcow2").fstype("ext4"))
+    .image_with(|i| i.disk("./alpine.qcow2").fstype("ext4"))
     .create()
     .await?;
 ```

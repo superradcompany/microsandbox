@@ -35,10 +35,9 @@ Today, AI agents operate with whatever permissions you give them, and that's usu
 - <img height="15" src="https://octicons-col.vercel.app/zap/A770EF"> **Instant Startup**: Boot times under 100 milliseconds.
 - <img height="15" src="https://octicons-col.vercel.app/plug/A770EF"> **Embeddable**: Spawn VMs right within your code. No setup server. No long-running daemon.
 - <img height="15" src="https://octicons-col.vercel.app/lock/A770EF"> **Secrets That Can't Leak**: Secret keys never enter the VM. The guest VM only sees placeholders.
-- <img height="15" src="https://octicons-col.vercel.app/globe/A770EF"> **Programmable Filesystem & Network Stack**: Customizable filesystems and network operations.
 - <img height="15" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
 - <img height="15" src="https://octicons-col.vercel.app/database/A770EF"> **Long-Running**: Sandboxes can run in detached mode. They are great for long-lived sessions.
-- <img height="15" src="https://octicons-col.vercel.app/terminal/A770EF"> **Agent-Ready**: Your agents can create their own sandboxes with our [Agent Skills] and [MCP server].
+- <img height="15" src="https://octicons-col.vercel.app/terminal/A770EF"> **Agent-Ready**: Your agents can create their own sandboxes with our [Agent Skills](https://github.com/superradcompany/skills) and [MCP server](https://github.com/superradcompany/microsandbox-mcp).
 
 > Microsandbox is still **beta software**. Expect breaking changes, missing features, and rough edges.
 
@@ -49,15 +48,15 @@ Today, AI agents operate with whatever permissions you give them, and that's usu
 #### <img height="14" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;Install the SDK
 
 > ```sh
-> npm i microsandbox        # TypeScript
-> ```
-> ```sh
 > cargo add microsandbox    # Rust
 > ```
+> ```sh
+> npm i microsandbox        # TypeScript
+> ```
 
-#### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI
+#### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI **(Optional)**
 
-The `msb` CLI is useful for managing images, volumes, and sandboxes from the terminal:
+The SDK works on its own without the CLI. The `msb` CLI is a separate tool for managing sandboxes, images, and volumes from the terminal, and for giving AI agents direct access to microsandbox:
 
 > ```sh
 > curl -fsSL https://install.microsandbox.dev | sh
@@ -69,225 +68,40 @@ The `msb` CLI is useful for managing images, volumes, and sandboxes from the ter
 
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package-dependencies/ffffff" alt="sdk-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package-dependencies/000000" alt="sdk"></a>&nbsp;&nbsp;SDK
 
-The SDK lets you create and control sandboxes directly from your application. `Sandbox::builder(...)` boots a microVM as a child process. No infrastructure required.
+The SDK lets you create and control sandboxes directly from your application. `Sandbox::builder("...").create()` boots a microVM as a child process. No infrastructure required.
 
 #### <img height="14" src="https://octicons-col.vercel.app/play/A770EF">&nbsp;&nbsp;Run Code in a Sandbox
 
-> ```typescript
-> import { Sandbox } from "microsandbox";
+> ```rs
+> use microsandbox::Sandbox;
 >
-> const sandbox = await Sandbox.create({
->   name: "my-sandbox",
->   image: "python",
->   cpus: 1,
->   memoryMib: 512,
-> });
+> #[tokio::main]
+> async fn main() -> Result<(), Box<dyn std::error::Error>> {
+>     let sandbox = Sandbox::builder("my-sandbox")
+>         .image("python")
+>         .cpus(1)
+>         .memory(512)
+>         .create()
+>         .await?;
 >
-> const output = await sandbox.shell("print('Hello from a microVM!')");
-> console.log(output.stdout());
+>     let output = sandbox.shell("print('Hello from a microVM!')").await?;
+>     println!("{}", output.stdout()?);
 >
-> await sandbox.stopAndWait();
-> ```
->
-> <div align="left">
->   <a href="./rust_examples.md#run-code-in-a-sandbox"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
-> </div>
->
-> Behind the scenes, `create()` pulls the image (if not cached), assembles the filesystem, boots a microVM. All in under a second.
-
-#### <img height="14" src="https://octicons-col.vercel.app/lock/A770EF">&nbsp;&nbsp;Secrets That Never Enter the VM
-
-> Secrets are injected via placeholder substitution. The guest environment only ever sees a random placeholder. The real value is swapped in at the network level.
->
-> ```typescript
-> const sandbox = await Sandbox.create({
->   name: "api-client",
->   image: "python",
->   secretEnv: { OPENAI_API_KEY: { value: "sk-real-secret-123", domain: "api.openai.com" } },
-> });
->
-> // Inside the VM: $OPENAI_API_KEY = "$MSB_OPENAI_API_KEY" (placeholder)
-> // Requests to api.openai.com: placeholder is replaced with the real key
-> // Requests to any other host: placeholder stays, secret never leaks
-> ```
->
-> <div align="left">
->   <a href="./rust_examples.md#secrets-that-never-enter-the-vm"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
-> </div>
-
-#### <img height="14" src="https://octicons-col.vercel.app/globe/A770EF">&nbsp;&nbsp;Network Policy
-
-> Control exactly what the sandbox can reach. The in-process networking stack enforces policy at the IP, DNS, and HTTP level. There's no host network to bridge to, so guests can't bypass the filter.
->
-> ```typescript
-> import { Sandbox } from "microsandbox";
->
-> const sandbox = await Sandbox.create({
->   name: "restricted",
->   image: "alpine",
->   network: {
->     policy: "public-only",            // blocks private/loopback
->     blockDomainSuffixes: [".evil.com"] // DNS-level blocking
->   },
-> });
-> ```
->
-> <div align="left">
->   <a href="./rust_examples.md#network-policy"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
-> </div>
->
-> Three built-in policies: `NetworkPolicy::public_only()` (default, blocks private IPs), `NetworkPolicy::allow_all()`, and `NetworkPolicy::none()` (fully airgapped).
-
-#### <img height="14" src="https://octicons-col.vercel.app/upload/A770EF">&nbsp;&nbsp;Port Publishing
-
-> Expose guest services on host ports:
->
-> ```typescript
-> const sandbox = await Sandbox.create({
->   name: "web-server",
->   image: "alpine",
->   ports: { 8080: 80 }, // host:8080 → guest:80
-> });
-> ```
->
-> <div align="left">
->   <a href="./rust_examples.md#port-publishing"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
-> </div>
-
-#### <img height="14" src="https://octicons-col.vercel.app/database/A770EF">&nbsp;&nbsp;Named Volumes
-
-> Persistent storage that survives sandbox restarts and can be shared across sandboxes:
->
-> ```typescript
-> import { Sandbox, Volume } from "microsandbox";
->
-> // Create a volume with a quota.
-> const data = await Volume.create({ name: "shared-data", quotaMib: 100 });
->
-> // Sandbox A writes to it.
-> const writer = await Sandbox.create({
->   name: "writer",
->   image: "alpine",
->   volumes: { "/data": { named: data.name } },
-> });
->
-> await writer.shell("echo 'hello' > /data/message.txt");
-> await writer.stopAndWait();
->
-> // Sandbox B reads from it.
-> const reader = await Sandbox.create({
->   name: "reader",
->   image: "alpine",
->   volumes: { "/data": { named: data.name, readonly: true } },
-> });
->
-> const output = await reader.shell("cat /data/message.txt");
-> console.log(output.stdout()); // hello
-> ```
->
-> <div align="left">
->   <a href="./rust_examples.md#named-volumes"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
-> </div>
-
-#### <img height="14" src="https://octicons-col.vercel.app/pencil/A770EF">&nbsp;&nbsp;Scripts & Patches
-
-> Register named scripts that get mounted at `/.msb/scripts/` and added to `PATH`, so you can invoke them by name:
->
-> ```typescript
-> const sandbox = await Sandbox.create({
->   name: "worker",
->   image: "ubuntu",
->   scripts: {
->     setup: "#!/bin/bash\napt-get update && apt-get install -y python3 curl",
->     start: "#!/bin/bash\nexec python3 /app/main.py",
->   },
-> });
->
-> await sandbox.shell("setup");
-> const output = await sandbox.shell("start");
-> ```
->
-> <div align="left">
->   <a href="./rust_examples.md#scripts"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
-> </div>
->
-> Patches modify the filesystem before the VM boots. Inject config files, create directories, append to existing files:
->
-> ```typescript
-> import { Patch, Sandbox } from "microsandbox";
->
-> const sandbox = await Sandbox.create({
->   name: "configured",
->   image: "alpine",
->   patches: [
->     Patch.text("/etc/app.conf", "key=value\n"),
->     Patch.mkdir("/app", { mode: 0o755 }),
->     Patch.append("/etc/hosts", "127.0.0.1 myapp.local\n"),
->   ],
-> });
-> ```
->
-> <div align="left">
->   <a href="./rust_examples.md#patches"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
-> </div>
-
-#### <img height="14" src="https://octicons-col.vercel.app/file-binary/A770EF">&nbsp;&nbsp;Flexible Rootfs Sources
-
-> Boot from an OCI image, a local directory, or a disk image:
->
-> ```typescript
-> // OCI image (default)
-> await Sandbox.create({ name: "oci", image: "python:3.12" });
->
-> // Local directory
-> await Sandbox.create({ name: "bind", image: "./my-rootfs" });
-> ```
->
-> <div align="left">
->   <a href="./rust_examples.md#flexible-rootfs-sources"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
-> </div>
-
-#### <img height="14" src="https://octicons-col.vercel.app/file/A770EF">&nbsp;&nbsp;Guest Filesystem Access
-
-> Read and write files inside the running sandbox from the host side:
->
-> ```typescript
-> // Write a file into the sandbox.
-> await sandbox.fs().write("/tmp/input.txt", Buffer.from("some data"));
->
-> // Read a file from the sandbox.
-> const content = await sandbox.fs().readString("/tmp/output.txt");
->
-> // List directory contents.
-> const entries = await sandbox.fs().list("/tmp");
-> ```
->
-> <div align="left">
->   <a href="./rust_examples.md#guest-filesystem-access"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
-> </div>
-
-#### <img height="14" src="https://octicons-col.vercel.app/meter/A770EF">&nbsp;&nbsp;Streaming Execution
-
-> For long-running commands, stream stdout/stderr events in real time:
->
-> ```typescript
-> const handle = await sandbox.shellStream("python train.py");
->
-> let event;
-> while ((event = await handle.recv()) !== null) {
->   if (event.eventType === "stdout") process.stdout.write(event.data);
->   if (event.eventType === "stderr") process.stderr.write(event.data);
->   if (event.eventType === "exited") console.log(`Process exited: ${event.code}`);
+>     sandbox.stop_and_wait().await?;
+>     Ok(())
 > }
 > ```
 >
 > <div align="left">
->   <a href="./rust_examples.md#streaming-execution"><img src="https://img.shields.io/badge/-→ Rust Example-D34516?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+>   <a href="./typescript_examples.md#run-code-in-a-sandbox"><img src="https://img.shields.io/badge/-→ Typescript-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript"></a>&nbsp;<a href="./python_examples.md"><img src="https://img.shields.io/badge/-→ Python-FFD43B?style=flat-square&logo=python&logoColor=306998" alt="Python"></a>
 > </div>
+
+
+> The first call to `create()` pulls the image if it isn't cached locally, so it may take longer depending on your connection. Subsequent runs reuse the cache.
 
 <br />
 
-<a href="https://docs2.microsandbox.dev/sdk/overview"><img src="https://img.shields.io/badge/SDK_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="SDK Docs"></a>
+<a href="https://docs.microsandbox.dev/sdk/overview"><img src="https://img.shields.io/badge/SDK_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="SDK Docs"></a>
 
 <br />
 
@@ -298,22 +112,23 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 #### <img height="14" src="https://octicons-col.vercel.app/play/A770EF">&nbsp;&nbsp;Run a Command
 
 > ```sh
-> msb run python:3.12 -- python3 -c "print('Hello from a microVM!')"
+> msb run python -- python3 -c "print('Hello from a microVM!')"
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/stopwatch/A770EF">&nbsp;&nbsp;Named Sandboxes
 
 > ```sh
-> # Create and run detached
-> msb run --name my-app -d python:3.12
+> # Create and start a named sandbox
+> msb create --name my-app python
+> ```
 >
+> ```sh
 > # Execute commands
-> msb exec my-app -- pip install requests
-> msb exec my-app -- python3 main.py
+> msb exec my-app -- python -c "import this"
+> msb exec my-app -- curl https://example.com
+> ```
 >
-> # Interactive shell into a running sandbox
-> msb shell my-app
->
+> ```sh
 > # Lifecycle
 > msb stop my-app
 > msb start my-app
@@ -323,9 +138,9 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 #### <img height="14" src="https://octicons-col.vercel.app/cache/A770EF">&nbsp;&nbsp;Image Management
 
 > ```sh
-> msb pull python:3.12           # Pull an image
-> msb image ls                   # List cached images
-> msb image rm python:3.12       # Remove an image
+> msb pull python           # Pull an image
+> msb image ls              # List cached images
+> msb image rm python       # Remove an image
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install & Uninstall Sandboxes
@@ -340,14 +155,6 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 > msb install --tmp alpine         # Ephemeral: fresh sandbox every run
 > msb install --list               # List installed commands
 > msb uninstall nodebox            # Remove an installed command
-> ```
-
-#### <img height="14" src="https://octicons-col.vercel.app/database/A770EF">&nbsp;&nbsp;Volume Management
-
-> ```sh
-> msb volume create my-data      # Create a volume
-> msb volume ls                  # List volumes
-> msb volume rm my-data          # Remove a volume
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/list-unordered/A770EF">&nbsp;&nbsp;Status & Inspection
@@ -365,19 +172,42 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 
 <br />
 
-<a href="https://docs2.microsandbox.dev/cli/overview"><img src="https://img.shields.io/badge/CLI_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="CLI Docs"></a>
+<a href="https://docs.microsandbox.dev/cli/overview"><img src="https://img.shields.io/badge/CLI_Docs-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="CLI Docs"></a>
 
 <br />
 
-## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/light-bulb/ffffff" alt="uninstall-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/light-bulb/000000" alt="uninstall"></a>&nbsp;&nbsp;Uninstall
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/dependabot/ffffff" alt="agents-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/dependabot/000000" alt="agents"></a>&nbsp;&nbsp;AI Agents
 
-To uninstall microsandbox, run: `msb self uninstall`.
+Give your AI agents the ability to create and manage their own sandboxes.
+
+#### <img height="14" src="https://octicons-col.vercel.app/book/A770EF">&nbsp;&nbsp;Agent Skills
+
+> Teach any AI coding agent how to use microsandbox by installing the [Agent Skills](https://github.com/superradcompany/skills). Works with Claude Code, Cursor, Codex, Gemini CLI, GitHub Copilot, and more.
+>
+> ```sh
+> npx skills add superradcompany/skills
+> ```
+
+#### <img height="14" src="https://octicons-col.vercel.app/plug/A770EF">&nbsp;&nbsp;MCP Server
+
+> Connect any MCP-compatible agent to microsandbox with the [MCP server](https://github.com/superradcompany/microsandbox-mcp). Provides structured tool calls for sandbox lifecycle, command execution, filesystem access, volumes, and monitoring.
+>
+> ```sh
+> # Claude Code
+> claude mcp add --transport stdio microsandbox -- npx -y microsandbox-mcp
+> ```
+
+<br />
+
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/book/ffffff" alt="docs-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/book/000000" alt="docs"></a>&nbsp;&nbsp;Documentation
+
+For guides, API references, and examples, visit the [microsandbox documentation](https://docs.microsandbox.dev).
 
 <br />
 
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/gear/ffffff" alt="contributing-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/gear/000000" alt="contributing"></a>&nbsp;&nbsp;Contributing
 
-Interested in contributing to `microsandbox`? Check out our [Development Guide](./DEVELOPMENT.md) for instructions on setting up your development environment, building the project, running tests, and creating releases. For contribution guidelines, please refer to [CONTRIBUTING.md](./CONTRIBUTING.md).
+Interested in contributing to `microsandbox`? Check out our [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines and [DEVELOPMENT.md](./DEVELOPMENT.md) for build, test, and release instructions.
 
 <br />
 

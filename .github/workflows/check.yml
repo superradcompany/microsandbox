@@ -214,3 +214,16 @@ jobs:
       - name: Build Node SDK
         working-directory: sdk/node-ts
         run: npm install && npm run build
+
+      # -- Checks (MCP server) --
+      - name: Build MCP server
+        working-directory: mcp
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.dependencies.microsandbox = 'file:../sdk/node-ts';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          "
+          npm install --no-package-lock --ignore-scripts
+          npm run build

@@ -31,3 +31,12 @@ Sandboxfile*
 # Node
 node_modules/
 dist/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+env/
+venv/
+.venv/

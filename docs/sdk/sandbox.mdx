@@ -13,10 +13,10 @@ The builder/options pattern lets you configure everything about a sandbox before
 use microsandbox::{Sandbox, NetworkPolicy};
 
 let sb = Sandbox::builder("worker")
-    .image("python:3.12")
+    .image("python")
     .memory(1024)
     .cpus(2)
-    .workdir("/app")
+
     .shell("/bin/bash")
     .env("DEBUG", "true")
     .env("API_PORT", "8000")
@@ -33,10 +33,10 @@ import { Mount, NetworkPolicy, Sandbox } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "worker",
-    image: "python:3.12",
+    image: "python",
     memoryMib: 1024,
     cpus: 2,
-    workdir: "/app",
+
     shell: "/bin/bash",
     env: { DEBUG: "true", API_PORT: "8000" },
     volumes: {
@@ -57,7 +57,7 @@ By default, a sandbox is "attached" to your process: when your process exits, th
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("worker")
-    .image("python:3.12")
+    .image("python")
     .create_detached()
     .await?;
 ```
@@ -65,7 +65,7 @@ let sb = Sandbox::builder("worker")
 ```typescript TypeScript
 const sb = await Sandbox.createDetached({
     name: "worker",
-    image: "python:3.12",
+    image: "python",
 })
 ```
 
@@ -78,7 +78,7 @@ Replace a stopped sandbox with the same name instead of failing on conflict. Thi
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("worker")
-    .image("python:3.12")
+    .image("python")
     .replace()
     .create()
     .await?;
@@ -87,7 +87,7 @@ let sb = Sandbox::builder("worker")
 ```typescript TypeScript
 const sb = await Sandbox.create({
     name: "worker",
-    image: "python:3.12",
+    image: "python",
     replace: true,
 })
 ```
@@ -103,7 +103,7 @@ Build a sandbox configuration without booting the VM. Useful for serializing, st
 use microsandbox::Sandbox;
 
 let config = Sandbox::builder("preview")
-    .image("python:3.12")
+    .image("python")
     .memory(1024)
     .build()?;
 
@@ -116,7 +116,7 @@ import { Sandbox } from 'microsandbox'
 
 const config = Sandbox.buildConfig({
     name: "preview",
-    image: "python:3.12",
+    image: "python",
     memoryMib: 1024,
 })
 
@@ -144,7 +144,7 @@ let sb = Sandbox::builder("vm-sandbox")
 
 // Explicit filesystem type
 let sb = Sandbox::builder("vm-sandbox")
-    .image(|i| i.disk("./alpine.raw").fstype("ext4"))
+    .image_with(|i| i.disk("./alpine.raw").fstype("ext4"))
     .cpus(1)
     .memory(512)
     .create()
@@ -198,7 +198,7 @@ let sb = Sandbox::builder("worker")
 
 // Use cached image, never pull
 let sb = Sandbox::builder("offline")
-    .image("python:3.12")
+    .image("python")
     .pull_policy(PullPolicy::Never)
     .create()
     .await?;
@@ -218,7 +218,7 @@ const sb = await Sandbox.create({
 // Use cached image, never pull
 const sb2 = await Sandbox.create({
     name: "offline",
-    image: "python:3.12",
+    image: "python",
     pullPolicy: PullPolicy.Never,
 })
 ```
@@ -234,7 +234,7 @@ Pull policies control whether the SDK fetches the image from the registry:
 | `Never` | Never pull; fail if the image is not cached |
 
 <Tip>
-  Once an OCI image is resolved, microsandbox pins the exact layers. A `python:3.12` reference is resolved to an immutable set of layers at first pull. Subsequent `start()` calls use the pinned layers without re-resolving the mutable tag, so your sandbox is reproducible even if the upstream tag is updated.
+  Once an OCI image is resolved, microsandbox pins the exact layers. A `python` reference is resolved to an immutable set of layers at first pull. Subsequent `start()` calls use the pinned layers without re-resolving the mutable tag, so your sandbox is reproducible even if the upstream tag is updated.
 </Tip>
 
 ## Lifecycle
@@ -401,7 +401,7 @@ Configure how the sandbox handles shutdown escalation, idle detection, and maxim
 use microsandbox::{Sandbox, LogLevel};
 
 let sb = Sandbox::builder("worker")
-    .image("python:3.12")
+    .image("python")
     .max_duration(3600)
     .idle_timeout(300)
     .log_level(LogLevel::Debug)
@@ -414,7 +414,7 @@ import { Sandbox, LogLevel } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "worker",
-    image: "python:3.12",
+    image: "python",
     maxDurationSecs: 3600,
     logLevel: LogLevel.Debug,
 })

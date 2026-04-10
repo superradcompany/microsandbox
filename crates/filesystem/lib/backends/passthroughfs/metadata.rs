@@ -31,7 +31,7 @@ pub(crate) fn do_getattr(
     ino: u64,
     handle: Option<u64>,
 ) -> io::Result<(stat64, Duration)> {
-    if ino == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(ino) {
         return Ok((init_binary::init_stat(), fs.cfg.attr_timeout));
     }
 
@@ -51,7 +51,7 @@ pub(crate) fn do_setattr(
     _handle: Option<u64>,
     valid: SetattrValid,
 ) -> io::Result<(stat64, Duration)> {
-    if ino == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(ino) {
         return Err(platform::eacces());
     }
 
@@ -172,7 +172,7 @@ pub(crate) fn do_setattr(
 /// the guest-visible ownership and mode bits, not the real host file permissions.
 /// Root (uid 0) bypasses read/write checks but still needs at least one execute bit.
 pub(crate) fn do_access(fs: &PassthroughFs, ctx: Context, ino: u64, mask: u32) -> io::Result<()> {
-    if ino == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(ino) {
         // init.krun is always readable and executable.
         return Ok(());
     }
@@ -226,7 +226,7 @@ fn stat_handle(fs: &PassthroughFs, handle: u64) -> io::Result<stat64> {
 }
 
 #[cfg(target_os = "macos")]
-fn open_symlink_inode_fd_macos(fs: &PassthroughFs, ino: u64) -> io::Result<i32> {
+pub(crate) fn open_symlink_inode_fd_macos(fs: &PassthroughFs, ino: u64) -> io::Result<i32> {
     let inodes = fs.inodes.read().unwrap();
     let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
     let path = inode::vol_path(data.dev, data.ino);

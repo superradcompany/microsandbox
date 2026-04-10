@@ -553,6 +553,25 @@ pub(crate) const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 #[cfg(target_os = "linux")]
 const OPENAT2_RESOLVE_FLAGS: u64 = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS;
 
+#[cfg(target_os = "linux")]
+const LINUX_OPEN_FLAG_MASK: i32 = libc::O_APPEND
+    | libc::O_CREAT
+    | libc::O_EXCL
+    | libc::O_NOCTTY
+    | libc::O_TRUNC
+    | libc::O_NONBLOCK
+    | libc::O_DSYNC
+    | libc::O_SYNC
+    | libc::O_ASYNC
+    | libc::O_DIRECT
+    | libc::O_LARGEFILE
+    | libc::O_DIRECTORY
+    | libc::O_NOFOLLOW
+    | libc::O_NOATIME
+    | libc::O_CLOEXEC
+    | libc::O_PATH
+    | libc::O_TMPFILE;
+
 /// Syscall number for `openat2` (same on x86_64 and aarch64).
 #[cfg(target_os = "linux")]
 const SYS_OPENAT2: libc::c_long = 437;
@@ -619,6 +638,11 @@ pub(crate) fn open_beneath(
         // ENOSYS fallthrough to regular openat.
     }
     unsafe { libc::openat(dirfd, name, flags | libc::O_CLOEXEC) }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn sanitize_linux_open_flags(flags: i32) -> i32 {
+    (flags & libc::O_ACCMODE) | (flags & LINUX_OPEN_FLAG_MASK)
 }
 
 /// Convert a `libc::statx` struct to a `stat64` struct (Linux only).

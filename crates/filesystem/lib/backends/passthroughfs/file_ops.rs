@@ -40,7 +40,7 @@ pub(crate) fn do_open(
     kill_priv: bool,
     flags: u32,
 ) -> io::Result<(Option<u64>, OpenOptions)> {
-    if inode == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(inode) {
         return Ok((Some(init_binary::INIT_HANDLE), OpenOptions::KEEP_CACHE));
     }
 
@@ -92,7 +92,7 @@ pub(crate) fn do_read(
     offset: u64,
 ) -> io::Result<usize> {
     // Virtual init.krun binary.
-    if inode == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(inode) {
         return init_binary::read_init(w, &fs.init_file, size, offset);
     }
 
@@ -118,7 +118,7 @@ pub(crate) fn do_write(
     offset: u64,
     kill_priv: bool,
 ) -> io::Result<usize> {
-    if inode == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(inode) {
         return Err(platform::eacces());
     }
 
@@ -149,7 +149,7 @@ pub(crate) fn do_flush(
     inode: u64,
     handle: u64,
 ) -> io::Result<()> {
-    if inode == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(inode) {
         return Ok(());
     }
 
@@ -175,7 +175,7 @@ pub(crate) fn do_release(
     inode: u64,
     handle: u64,
 ) -> io::Result<()> {
-    if inode == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(inode) {
         return Ok(());
     }
 

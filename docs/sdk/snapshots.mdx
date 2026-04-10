@@ -21,7 +21,7 @@ Capturing a snapshot pauses the sandbox, saves its state, and returns a handle. 
 use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("base")
-    .image("python:3.12")
+    .image("python")
     .create()
     .await?;
 
@@ -34,7 +34,7 @@ sb.resume().await?;
 ```typescript TypeScript
 import { Sandbox } from 'microsandbox'
 
-const sb = await Sandbox.create({ name: "base", image: "python:3.12" })
+const sb = await Sandbox.create({ name: "base", image: "python" })
 await sb.exec("pip", ["install", "-r", "requirements.txt"])
 
 const snapshot = await sb.snapshot()

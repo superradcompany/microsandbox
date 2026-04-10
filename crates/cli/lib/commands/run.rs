@@ -1,10 +1,10 @@
 //! `msb run` command — create and start a new sandbox.
 
 use std::io::{IsTerminal, Write};
+use std::time::Duration;
 
 use clap::Args;
-use microsandbox::sandbox::Sandbox;
-use microsandbox::sandbox::{AttachOptionsBuilder, ExecOptionsBuilder, ExecOutput};
+use microsandbox::sandbox::{ExecOutput, RlimitResource, Sandbox};
 
 use super::common::{SandboxOpts, apply_sandbox_opts};
 use crate::ui;
@@ -16,12 +16,28 @@ use crate::ui;
 /// Create a sandbox from an image and run a command in it.
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// Image to use (e.g. alpine, python:3.12, ./rootfs, ./disk.qcow2).
+    /// Image to use (e.g. alpine, python, ./rootfs, ./disk.qcow2).
     pub image: String,
 
     /// Start the sandbox in the background and print its name.
     #[arg(short, long)]
     pub detach: bool,
+
+    /// Allocate a pseudo-terminal (enables colors, line editing).
+    #[arg(short = 't', long)]
+    pub tty: bool,
+
+    /// Kill the command after this duration (e.g. 30s, 5m, 1h).
+    #[arg(long)]
+    pub timeout: Option<String>,
+
+    /// Set a POSIX resource limit (e.g. nofile=1024, nproc=64, as=1073741824).
+    #[arg(long)]
+    pub rlimit: Vec<String>,
+
+    /// Key sequence to detach from interactive session (default: ctrl-]).
+    #[arg(long)]
+    pub detach_keys: Option<String>,
 
     /// Command to run inside the sandbox (after --).
     #[arg(last = true)]
@@ -30,6 +46,36 @@ pub struct RunArgs {
     /// Sandbox configuration options.
     #[command(flatten)]
     pub sandbox: SandboxOpts,
+}
+
+/// Parsed per-command execution options for `msb run`.
+struct ExecOpts {
+    tty: bool,
+    timeout: Option<Duration>,
+    rlimits: Vec<(RlimitResource, u64, u64)>,
+    detach_keys: Option<String>,
+}
+
+impl ExecOpts {
+    fn parse(args: &RunArgs) -> anyhow::Result<Self> {
+        let rlimits: Vec<_> = args
+            .rlimit
+            .iter()
+            .map(|s| super::common::parse_rlimit(s))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let timeout = match &args.timeout {
+            Some(t) => Some(Duration::from_secs(super::common::parse_duration_secs(t)?)),
+            None => None,
+        };
+
+        Ok(Self {
+            tty: args.tty,
+            timeout,
+            rlimits,
+            detach_keys: args.detach_keys.clone(),
+        })
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -65,12 +111,13 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let exec_opts = ExecOpts::parse(&args)?;
     let interactive = std::io::stdin().is_terminal();
 
     let result: anyhow::Result<i32> = async {
         let (cmd, cmd_args) = resolve_command(sandbox.config(), args.command, interactive)?;
         match cmd {
-            Some(cmd) => exec_in_sandbox(&sandbox, &cmd, cmd_args, interactive).await,
+            Some(cmd) => exec_in_sandbox(&sandbox, &cmd, cmd_args, interactive, &exec_opts).await,
             None => Ok(0),
         }
     }
@@ -119,6 +166,7 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
         return Ok(());
     }
 
+    let exec_opts = ExecOpts::parse(&args)?;
     let interactive = std::io::stdin().is_terminal();
 
     let (cmd, cmd_args) = resolve_command(sandbox.config(), args.command, interactive)?;
@@ -135,7 +183,7 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
         }
     };
 
-    let result = exec_in_sandbox(&sandbox, &cmd, cmd_args, interactive).await;
+    let result = exec_in_sandbox(&sandbox, &cmd, cmd_args, interactive, &exec_opts).await;
 
     // Cleanup always runs, even on exec/attach/IO errors.
     if let Err(e) = sandbox.stop_and_wait().await {
@@ -188,15 +236,64 @@ async fn exec_in_sandbox(
     cmd: &str,
     cmd_args: Vec<String>,
     interactive: bool,
+    opts: &ExecOpts,
 ) -> anyhow::Result<i32> {
     if interactive {
-        Ok(sandbox
-            .attach(cmd, |a: AttachOptionsBuilder| a.args(cmd_args))
-            .await?)
+        let rlimits = opts.rlimits.clone();
+        let detach_keys = opts.detach_keys.clone();
+        let timeout = opts.timeout;
+        let has_opts = !rlimits.is_empty() || detach_keys.is_some();
+
+        let attach_fut = async {
+            if has_opts {
+                Ok(sandbox
+                    .attach_with(cmd, |a| {
+                        let mut a = a.args(cmd_args);
+                        for (resource, soft, hard) in rlimits {
+                            a = a.rlimit_range(resource, soft, hard);
+                        }
+                        if let Some(keys) = detach_keys {
+                            a = a.detach_keys(keys);
+                        }
+                        a
+                    })
+                    .await?)
+            } else {
+                Ok(sandbox.attach(cmd, cmd_args).await?)
+            }
+        };
+
+        match timeout {
+            Some(duration) => match tokio::time::timeout(duration, attach_fut).await {
+                Ok(result) => result,
+                Err(_) => anyhow::bail!("command timed out after {duration:?}"),
+            },
+            None => attach_fut.await,
+        }
     } else {
-        let output: ExecOutput = sandbox
-            .exec(cmd, |e: ExecOptionsBuilder| e.args(cmd_args))
-            .await?;
+        let rlimits = opts.rlimits.clone();
+        let timeout = opts.timeout;
+        let tty = opts.tty;
+        let has_opts = tty || timeout.is_some() || !rlimits.is_empty();
+        let output: ExecOutput = if has_opts {
+            sandbox
+                .exec_with(cmd, |e| {
+                    let mut e = e.args(cmd_args);
+                    if tty {
+                        e = e.tty(true);
+                    }
+                    if let Some(t) = timeout {
+                        e = e.timeout(t);
+                    }
+                    for (resource, soft, hard) in rlimits {
+                        e = e.rlimit_range(resource, soft, hard);
+                    }
+                    e
+                })
+                .await?
+        } else {
+            sandbox.exec(cmd, cmd_args).await?
+        };
 
         std::io::stdout().write_all(output.stdout_bytes())?;
         std::io::stderr().write_all(output.stderr_bytes())?;

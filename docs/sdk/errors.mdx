@@ -16,7 +16,7 @@ async fn get_or_create(name: &str) -> Result<Sandbox, Error> {
     match Sandbox::get(name).await {
         Ok(handle) => handle.start().await,
         Err(Error::SandboxNotFound(_)) => {
-            Sandbox::builder(name).image("python:3.12").create().await
+            Sandbox::builder(name).image("python").create().await
         }
         Err(e) => Err(e),
     }
@@ -73,7 +73,7 @@ use microsandbox::Sandbox;
 // For explicit control, call stop() or kill().
 {
     let sb = Sandbox::builder("temp")
-        .image("python:3.12")
+        .image("python")
         .create()
         .await?;
 
@@ -83,7 +83,7 @@ use microsandbox::Sandbox;
 
 ```typescript TypeScript
 async function runTemporary(): Promise<string> {
-    const sb = await Sandbox.create({ name: "temp", image: "python:3.12" })
+    const sb = await Sandbox.create({ name: "temp", image: "python" })
     try {
         const out = await sb.exec("python", ["-c", "print('hello')"])
         return out.stdout()

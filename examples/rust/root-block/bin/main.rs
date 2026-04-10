@@ -3,7 +3,6 @@
 //! See [examples/README.md](../../../README.md) for prerequisites and usage.
 
 use microsandbox::Sandbox;
-use microsandbox::sandbox::ImageBuilder;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -12,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a sandbox with a qcow2 disk image rootfs.
     let sandbox = Sandbox::builder("block-root")
-        .image(|image: ImageBuilder| image.disk(image_path).fstype("ext4"))
+        .image_with(|image| image.disk(image_path).fstype("ext4"))
         .cpus(1)
         .memory(512)
         .replace()

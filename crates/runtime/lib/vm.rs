@@ -207,6 +207,16 @@ pub fn enter(config: Config) -> ! {
 }
 
 fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
+    // Write startup JSON and redirect output FIRST, before any tracing.
+    // This ensures all tracing goes to runtime.log, not the terminal.
+    let pid = std::process::id();
+    let startup = StartupInfo { pid };
+    let startup_json = serde_json::to_string(&startup)
+        .map_err(|e| RuntimeError::Custom(format!("serialize startup: {e}")))?;
+
+    write_startup_info(&startup_json)?;
+    setup_log_capture(&config.log_dir, config.forward_output)?;
+
     tracing::info!(sandbox = %config.sandbox_name, "sandbox starting");
 
     // Create console shared state (ring buffers + wake pipes).
@@ -232,7 +242,6 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
 
     // Connect to DB and insert records.
     let db = tokio_rt.block_on(connect_db(&config.sandbox_db_path))?;
-    let pid = std::process::id();
     let run_db_id = tokio_rt.block_on(insert_run(&db, config.sandbox_id, pid))?;
 
     // Shared termination reason — background tasks store the reason before
@@ -398,16 +407,6 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         });
     }
 
-    // Write startup info to stdout BEFORE log capture redirects fd 1.
-    let startup = StartupInfo { pid };
-    let startup_json = serde_json::to_string(&startup)
-        .map_err(|e| RuntimeError::Custom(format!("serialize startup: {e}")))?;
-    write_startup_info(&startup_json)?;
-
-    // Console log capture: redirect stdout/stderr through pipes so
-    // background threads can tee to rotating log files.
-    setup_log_capture(&config.log_dir, config.forward_output)?;
-
     // Forget the tokio runtime (keep background tasks alive).
     std::mem::forget(tokio_rt);
 
@@ -489,6 +488,7 @@ fn build_vm(
         let runtime_tag = microsandbox_protocol::RUNTIME_FS_TAG.to_string();
         let cfg = PassthroughConfig {
             root_dir: config.runtime_dir.clone(),
+            inject_init: false,
             ..Default::default()
         };
         let backend = PassthroughFs::new(cfg)
@@ -507,6 +507,7 @@ fn build_vm(
             let tag = tag.to_string();
             let cfg = PassthroughConfig {
                 root_dir: PathBuf::from(path),
+                inject_init: false,
                 ..Default::default()
             };
             let backend = PassthroughFs::new(cfg)
@@ -566,11 +567,13 @@ fn build_vm(
         e
     });
 
-    // Console — ring-buffer-based custom backend.
+    // Console — ring-buffer-based custom backend for agent protocol, plus
+    // implicit console output routed to guest.log for kernel/init logs.
     // NOTE: The implicit console must remain enabled (do not call
     // `disable_implicit()`) because disk image rootfs boots depend on it.
+    let guest_log_path = config.log_dir.join("guest.log");
     builder = builder.console(|c| {
-        c.custom(
+        c.output(&guest_log_path).custom(
             microsandbox_protocol::AGENT_PORT_NAME,
             Box::new(console_backend),
         )
@@ -590,39 +593,39 @@ fn build_vm(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-/// Set up console log capture.
+/// Set up host log capture.
 ///
-/// Duplicates stdout and stderr, then spawns background threads that read
-/// from the originals and write to rotating log files. If `forward` is true,
-/// output is also written to the original stdout/stderr (tee behavior).
+/// Redirects stderr through a pipe so a background thread can write to a
+/// rotating log file (`host.log`). Stdout is redirected to `/dev/null`
+/// because kernel console output is routed to `guest.log` directly via
+/// `console_output` in the VM builder.
+///
+/// If `forward` is true, stderr is also tee'd to the original fd.
 fn setup_log_capture(log_dir: &std::path::Path, forward: bool) -> RuntimeResult<()> {
-    // Create pipe pairs for stdout and stderr.
-    let (stdout_read, stdout_write) = create_pipe()?;
+    // Redirect stdout to /dev/null — kernel console goes to guest.log
+    // via console_output, so nothing useful writes to stdout after the
+    // startup JSON. This prevents SIGPIPE when the parent drops the pipe.
+    let devnull = std::fs::OpenOptions::new().write(true).open("/dev/null")?;
+    unsafe {
+        libc::dup2(devnull.as_raw_fd(), libc::STDOUT_FILENO);
+    }
+    drop(devnull);
+
+    // Capture stderr → host.log (rotating).
     let (stderr_read, stderr_write) = create_pipe()?;
 
-    // Save the original stdout/stderr for forwarding.
-    let orig_stdout: Option<std::fs::File> = if forward {
-        Some(unsafe { std::fs::File::from_raw_fd(libc::dup(libc::STDOUT_FILENO)) })
-    } else {
-        None
-    };
     let orig_stderr: Option<std::fs::File> = if forward {
         Some(unsafe { std::fs::File::from_raw_fd(libc::dup(libc::STDERR_FILENO)) })
     } else {
         None
     };
 
-    // Redirect stdout/stderr to the write ends of our pipes.
     unsafe {
-        libc::dup2(stdout_write.as_raw_fd(), libc::STDOUT_FILENO);
         libc::dup2(stderr_write.as_raw_fd(), libc::STDERR_FILENO);
     }
-    drop(stdout_write);
     drop(stderr_write);
 
-    // Spawn background threads to tee pipe output to log files.
-    spawn_log_thread("log-stdout", stdout_read, log_dir, "vm.stdout", orig_stdout)?;
-    spawn_log_thread("log-stderr", stderr_read, log_dir, "vm.stderr", orig_stderr)?;
+    spawn_log_thread("log-host", stderr_read, log_dir, "host", orig_stderr)?;
 
     Ok(())
 }

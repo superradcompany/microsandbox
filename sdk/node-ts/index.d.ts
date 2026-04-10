@@ -70,6 +70,52 @@ export declare class ExecSink {
 export type JsExecSink = ExecSink
 
 /**
+ * A streaming reader for file data from the sandbox.
+ *
+ * Supports both manual `recv()` calls and `for await...of` iteration:
+ * ```js
+ * const stream = await sb.fs().readStream("/app/data.bin");
+ * for await (const chunk of stream) {
+ *   processChunk(chunk);
+ * }
+ * ```
+ *
+ * This type implements JavaScript's async iterable protocol.
+ * It can be used with `for await...of` loops.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
+ */
+export declare class FsReadStream {
+  /** Receive the next chunk of data. Returns `null` when the stream ends. */
+  recv(): Promise<Buffer | null>
+  [Symbol.asyncIterator](): AsyncGenerator<Buffer, void, undefined>
+}
+export type JsFsReadStream = FsReadStream
+
+/**
+ * A streaming subscription for sandbox metrics at a regular interval.
+ *
+ * Supports both manual `recv()` calls and `for await...of` iteration:
+ * ```js
+ * const stream = await sb.metricsStream(1000);
+ * for await (const m of stream) {
+ *   console.log(`CPU: ${m.cpuPercent.toFixed(1)}%`);
+ * }
+ * ```
+ *
+ * This type implements JavaScript's async iterable protocol.
+ * It can be used with `for await...of` loops.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
+ */
+export declare class MetricsStream {
+  /** Receive the next metrics snapshot. Returns `null` when the stream ends. */
+  recv(): Promise<SandboxMetrics | null>
+  [Symbol.asyncIterator](): AsyncGenerator<SandboxMetrics, void, undefined>
+}
+export type JsMetricsStream = MetricsStream
+
+/**
  * Factory for creating volume mount configurations.
  *
  * ```js
@@ -77,7 +123,7 @@ export type JsExecSink = ExecSink
  *
  * const sb = await Sandbox.create({
  *     name: "worker",
- *     image: "python:3.12",
+ *     image: "python",
  *     volumes: {
  *         "/app/src": Mount.bind("./src", { readonly: true }),
  *         "/data": Mount.named("my-data"),
@@ -103,7 +149,7 @@ export declare class Mount {
  *
  * const sb = await Sandbox.create({
  *     name: "worker",
- *     image: "python:3.12",
+ *     image: "python",
  *     network: NetworkPolicy.publicOnly(),
  * })
  * ```
@@ -197,6 +243,18 @@ export declare class Sandbox {
   fs(): SandboxFs
   /** Get point-in-time resource metrics. */
   metrics(): Promise<SandboxMetrics>
+  /** Stream metrics snapshots at the requested interval (in milliseconds). */
+  metricsStream(intervalMs: number): Promise<MetricsStream>
+  /**
+   * Attach to an interactive PTY session inside the sandbox.
+   *
+   * Bridges the host terminal to the guest process. Returns the exit code.
+   */
+  attach(cmd: string, args?: Array<string> | undefined | null): Promise<number>
+  /** Attach with full configuration options. */
+  attachWithConfig(config: AttachConfig): Promise<number>
+  /** Attach to the sandbox's default shell. */
+  attachShell(): Promise<number>
   /** Stop the sandbox gracefully (SIGTERM). */
   stop(): Promise<void>
   /** Stop and wait for exit, returning the exit status. */
@@ -241,6 +299,8 @@ export declare class SandboxFs {
   copyFromHost(hostPath: string, guestPath: string): Promise<void>
   /** Copy a file from the sandbox to the host. */
   copyToHost(guestPath: string, hostPath: string): Promise<void>
+  /** Read a file with streaming (~3 MiB chunks). */
+  readStream(path: string): Promise<FsReadStream>
 }
 export type JsSandboxFs = SandboxFs
 
@@ -285,7 +345,7 @@ export type JsSandboxHandle = SandboxHandle
  *
  * const sb = await Sandbox.create({
  *     name: "agent",
- *     image: "python:3.12",
+ *     image: "python",
  *     secrets: [
  *         Secret.env("OPENAI_API_KEY", {
  *             value: process.env.OPENAI_API_KEY,
@@ -336,6 +396,22 @@ export type JsVolumeHandle = VolumeHandle
 
 /** Get metrics for all running sandboxes. */
 export declare function allSandboxMetrics(): Promise<Record<string, SandboxMetrics>>
+
+/** Configuration for interactive attach sessions. */
+export interface AttachConfig {
+  /** Command to execute. */
+  cmd: string
+  /** Command arguments. */
+  args?: Array<string>
+  /** Working directory inside the sandbox. */
+  cwd?: string
+  /** User to run as. */
+  user?: string
+  /** Environment variables. */
+  env?: Record<string, string>
+  /** Detach key sequence (default: "ctrl-]"). Uses Docker-style syntax. */
+  detachKeys?: string
+}
 
 /** Configuration for command execution. */
 export interface ExecConfig {

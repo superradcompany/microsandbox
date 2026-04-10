@@ -53,22 +53,20 @@ for (const entry of entries) {
 
 </CodeGroup>
 
-## Stream large files <sup><sup>coming soon</sup></sup>
+## Stream large files
 
 For files too large to fit in memory, stream them in chunks (~3 MiB each).
 
 <CodeGroup>
 ```rust Rust
-use futures::StreamExt;
-
 let mut stream = sb.fs().read_stream("/app/data.bin").await?;
-while let Some(chunk) = stream.next().await {
-    process(chunk?);
+while let Some(chunk) = stream.recv().await? {
+    process(&chunk);
 }
 ```
 
 ```typescript TypeScript
-const stream = await sb.fs.readStream("/app/data.bin")
+const stream = await sb.fs().readStream("/app/data.bin")
 for await (const chunk of stream) {
     processChunk(chunk)
 }
@@ -105,7 +103,7 @@ use microsandbox::Sandbox;
 
 let key = get_encryption_key();
 let sb = Sandbox::builder("encrypted")
-    .image("python:3.12")
+    .image("python")
     .volume("/secrets", |v| v
         .bind("/data/secrets")
         .on_read(move |_path, data| decrypt(data, &key))
@@ -119,7 +117,7 @@ import { Mount, Sandbox } from 'microsandbox'
 
 const sb = await Sandbox.create({
     name: "encrypted",
-    image: "python:3.12",
+    image: "python",
     volumes: {
         "/secrets": Mount.bind("/data/secrets", {
             hooks: {

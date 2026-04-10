@@ -28,9 +28,7 @@ use std::{
 use super::{PassthroughFs, inode};
 use crate::{
     Context, Entry, Extensions, OpenOptions,
-    backends::shared::{
-        handle_table::HandleData, init_binary, name_validation, platform, stat_override,
-    },
+    backends::shared::{handle_table::HandleData, name_validation, platform, stat_override},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -56,7 +54,7 @@ pub(crate) fn do_create(
 ) -> io::Result<(Entry, Option<u64>, OpenOptions)> {
     name_validation::validate_name(name)?;
 
-    if init_binary::is_init_name(name.to_bytes()) {
+    if fs.is_reserved_init_name(parent, name.to_bytes()) {
         return Err(platform::eacces());
     }
 
@@ -131,7 +129,7 @@ pub(crate) fn do_mkdir(
 ) -> io::Result<Entry> {
     name_validation::validate_name(name)?;
 
-    if init_binary::is_init_name(name.to_bytes()) {
+    if fs.is_reserved_init_name(parent, name.to_bytes()) {
         return Err(platform::eacces());
     }
 
@@ -178,7 +176,7 @@ pub(crate) fn do_mknod(
 ) -> io::Result<Entry> {
     name_validation::validate_name(name)?;
 
-    if init_binary::is_init_name(name.to_bytes()) {
+    if fs.is_reserved_init_name(parent, name.to_bytes()) {
         return Err(platform::eacces());
     }
 
@@ -226,7 +224,7 @@ pub(crate) fn do_symlink(
 ) -> io::Result<Entry> {
     name_validation::validate_name(name)?;
 
-    if init_binary::is_init_name(name.to_bytes()) {
+    if fs.is_reserved_init_name(parent, name.to_bytes()) {
         return Err(platform::eacces());
     }
 
@@ -321,11 +319,11 @@ pub(crate) fn do_link(
 ) -> io::Result<Entry> {
     name_validation::validate_name(newname)?;
 
-    if init_binary::is_init_name(newname.to_bytes()) {
+    if fs.is_reserved_init_name(newparent, newname.to_bytes()) {
         return Err(platform::eacces());
     }
 
-    if inode == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(inode) {
         return Err(platform::eacces());
     }
 
@@ -383,7 +381,7 @@ pub(crate) fn do_link(
 /// On macOS, verifies the inode is actually a symlink via `stat_inode` (which applies
 /// xattr patching) before calling readlinkat.
 pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Result<Vec<u8>> {
-    if ino == init_binary::INIT_INODE {
+    if fs.is_virtual_init_inode(ino) {
         return Err(platform::einval());
     }
 
