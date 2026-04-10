@@ -215,13 +215,30 @@ jobs:
         working-directory: sdk/node-ts
         run: npm install && npm run build
 
-      # -- Upload build artifacts (linux-x86_64 only, for SDK smoke tests) --
+      # -- Upload artifacts (linux-x86_64 only, for SDK smoke tests) --
       - name: Upload build artifacts
         if: matrix.target == 'linux-x86_64'
         uses: actions/upload-artifact@v4
         with:
           name: msb-linux-x86_64
           path: build/
+
+      - name: Upload Node SDK artifacts
+        if: matrix.target == 'linux-x86_64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-sdk-linux-x86_64
+          path: |
+            sdk/node-ts/index.cjs
+            sdk/node-ts/index.mjs
+            sdk/node-ts/index.d.cts
+            sdk/node-ts/index.d.ts
+            sdk/node-ts/postinstall.js
+            sdk/node-ts/microsandbox.*.node
+            sdk/node-ts/package.json
+            sdk/node-ts/package-lock.json
+            sdk/node-ts/tests/
+            sdk/node-ts/vitest.config.ts
 
       # -- Checks (MCP server) --
       - name: Build MCP server
@@ -244,10 +261,6 @@ jobs:
     needs: check
     runs-on: self-hosted-ubuntu-2404-x64
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -259,6 +272,11 @@ jobs:
           name: msb-linux-x86_64
           path: build/
 
+      - name: Download Node SDK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: node-sdk-linux-x86_64
+
       # -- Install msb + libkrunfw --
       - name: Install msb
         run: |
@@ -269,10 +287,10 @@ jobs:
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
 
-      # -- Build & test Node.js SDK --
-      - name: Build Node.js SDK
+      # -- Install deps & run tests --
+      - name: Install Node.js dependencies
         working-directory: sdk/node-ts
-        run: npm install && npm run build
+        run: npm install --ignore-scripts
 
       - name: Run SDK smoke tests
         working-directory: sdk/node-ts
