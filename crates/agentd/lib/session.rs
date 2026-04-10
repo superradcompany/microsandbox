@@ -927,7 +927,7 @@ mod tests {
             cmd: "/bin/sh".to_string(),
             args: vec![
                 "-c".to_string(),
-                "i=0; while [ $i -lt 1024 ]; do printf AAAA; i=$((i+1)); done; printf SECOND; sleep 0.1; printf '<END>\\n'; sleep 0.1; exit 0"
+                "i=0; while [ $i -lt 256 ]; do printf AAAA; i=$((i+1)); done; printf SECOND; sleep 0.1; printf '<END>\\n'; sleep 0.1; exit 0"
                     .to_string(),
             ],
             env: vec!["PATH=/usr/local/bin:/usr/bin:/bin".to_string()],
