@@ -294,7 +294,7 @@ jobs:
 
       - name: Run SDK smoke tests
         working-directory: sdk/node-ts
-        env:
-          PATH: "$HOME/.microsandbox/bin:$PATH"
-          LD_LIBRARY_PATH: "${{ github.workspace }}/build:$HOME/.microsandbox/lib"
-        run: npm test
+        run: |
+          export PATH="$HOME/.microsandbox/bin:$PATH"
+          export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
+          npm test
