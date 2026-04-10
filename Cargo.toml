@@ -17,6 +17,7 @@ members = [
     "examples/rust/net-basic",
     "examples/rust/net-dns",
     "examples/rust/net-policy",
+    "examples/rust/net-secrets-body",
     "examples/rust/net-ports",
     "examples/rust/net-secrets",
     "examples/rust/net-tls",

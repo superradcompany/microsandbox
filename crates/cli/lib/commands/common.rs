@@ -155,12 +155,18 @@ pub struct SandboxOpts {
     /// Use a custom CA certificate for TLS interception (PEM file).
     #[cfg(feature = "net")]
     #[arg(long)]
-    pub tls_ca_cert: Option<PathBuf>,
+    pub tls_intercept_ca_cert: Option<PathBuf>,
 
     /// Use a custom CA private key for TLS interception (PEM file).
     #[cfg(feature = "net")]
     #[arg(long)]
-    pub tls_ca_key: Option<PathBuf>,
+    pub tls_intercept_ca_key: Option<PathBuf>,
+
+    /// Trust an additional CA certificate for upstream server verification (PEM file).
+    /// Can be specified multiple times.
+    #[cfg(feature = "net")]
+    #[arg(long)]
+    pub tls_upstream_ca_cert: Vec<PathBuf>,
 
     // --- Secrets ---
     /// Inject a secret that is only sent to an allowed host (ENV=VALUE@HOST).
@@ -209,8 +215,9 @@ impl SandboxOpts {
             || !self.tls_intercept_port.is_empty()
             || !self.tls_bypass.is_empty()
             || self.no_block_quic
-            || self.tls_ca_cert.is_some()
-            || self.tls_ca_key.is_some()
+            || self.tls_intercept_ca_cert.is_some()
+            || self.tls_intercept_ca_key.is_some()
+            || !self.tls_upstream_ca_cert.is_empty()
             || !self.secret.is_empty()
             || self.on_secret_violation.is_some();
 
@@ -360,8 +367,9 @@ fn apply_network_opts(
         || !opts.tls_intercept_port.is_empty()
         || !opts.tls_bypass.is_empty()
         || opts.no_block_quic
-        || opts.tls_ca_cert.is_some()
-        || opts.tls_ca_key.is_some()
+        || opts.tls_intercept_ca_cert.is_some()
+        || opts.tls_intercept_ca_key.is_some()
+        || !opts.tls_upstream_ca_cert.is_empty()
         || opts.on_secret_violation.is_some();
 
     if has_network_config {
@@ -374,8 +382,9 @@ fn apply_network_opts(
         let tls_ports = opts.tls_intercept_port.clone();
         let tls_bypass = opts.tls_bypass.clone();
         let no_block_quic = opts.no_block_quic;
-        let ca_cert = opts.tls_ca_cert.clone();
-        let ca_key = opts.tls_ca_key.clone();
+        let intercept_ca_cert = opts.tls_intercept_ca_cert.clone();
+        let intercept_ca_key = opts.tls_intercept_ca_key.clone();
+        let upstream_ca_cert = opts.tls_upstream_ca_cert.clone();
         let violation_action = parse_violation_action(&opts.on_secret_violation)?;
 
         builder = builder.network(move |mut n| {
@@ -403,14 +412,16 @@ fn apply_network_opts(
                 || !tls_ports.is_empty()
                 || !tls_bypass.is_empty()
                 || no_block_quic
-                || ca_cert.is_some()
-                || ca_key.is_some();
+                || intercept_ca_cert.is_some()
+                || intercept_ca_key.is_some()
+                || !upstream_ca_cert.is_empty();
 
             if has_tls {
                 let tls_ports = tls_ports.clone();
                 let tls_bypass = tls_bypass.clone();
-                let ca_cert = ca_cert.clone();
-                let ca_key = ca_key.clone();
+                let intercept_ca_cert = intercept_ca_cert.clone();
+                let intercept_ca_key = intercept_ca_key.clone();
+                let upstream_ca_cert = upstream_ca_cert.clone();
                 n = n.tls(move |mut t| {
                     if !tls_ports.is_empty() {
                         t = t.intercepted_ports(tls_ports);
@@ -421,11 +432,14 @@ fn apply_network_opts(
                     if no_block_quic {
                         t = t.block_quic(false);
                     }
-                    if let Some(ref cert) = ca_cert {
-                        t = t.ca_cert(cert);
+                    if let Some(ref cert) = intercept_ca_cert {
+                        t = t.intercept_ca_cert(cert);
                     }
-                    if let Some(ref key) = ca_key {
-                        t = t.ca_key(key);
+                    if let Some(ref key) = intercept_ca_key {
+                        t = t.intercept_ca_key(key);
+                    }
+                    for path in &upstream_ca_cert {
+                        t = t.upstream_ca_cert(path);
                     }
                     t
                 });

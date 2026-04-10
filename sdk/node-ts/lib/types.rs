@@ -159,10 +159,12 @@ pub struct TlsConfig {
     pub intercepted_ports: Option<Vec<u32>>,
     /// Block QUIC on intercepted ports (default: false).
     pub block_quic: Option<bool>,
-    /// Path to custom CA certificate PEM file.
-    pub ca_cert: Option<String>,
-    /// Path to custom CA private key PEM file.
-    pub ca_key: Option<String>,
+    /// Path to custom interception CA certificate PEM file.
+    pub intercept_ca_cert: Option<String>,
+    /// Path to custom interception CA private key PEM file.
+    pub intercept_ca_key: Option<String>,
+    /// Paths to additional CA certificate PEM files to trust for upstream verification.
+    pub upstream_ca_cert: Option<Vec<String>>,
 }
 
 /// A secret entry for the `secrets` array on `SandboxConfig`.
