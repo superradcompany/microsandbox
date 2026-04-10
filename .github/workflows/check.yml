@@ -252,9 +252,6 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
-
       # -- Download pre-built artifacts --
       - name: Download build artifacts
         uses: actions/download-artifact@v4
