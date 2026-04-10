@@ -242,7 +242,7 @@ jobs:
   node-sdk-test:
     name: Node.js SDK Tests
     needs: check
-    runs-on: self-hosted-Linux-x86
+    runs-on: self-hosted-ubuntu-2404-x64
     steps:
       - uses: actions/checkout@v4
         with:
