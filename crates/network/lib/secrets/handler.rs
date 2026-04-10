@@ -170,6 +170,11 @@ impl SecretsHandler {
             }
         }
 
+        // If body substitution changed the length, update Content-Length.
+        if boundary.is_some() && body_str.len() != body_bytes.len() {
+            header_str = update_content_length(&header_str, body_str.len());
+        }
+
         let mut output = header_str;
         output.push_str(&body_str);
         Some(Cow::Owned(output.into_bytes()))
@@ -251,6 +256,29 @@ fn substitute_in_headers(
         }
     }
 
+    result
+}
+
+/// Update the Content-Length header value in `headers` to `new_len`.
+///
+/// Performs a case-insensitive line scan. If no Content-Length header exists
+/// (e.g. chunked transfer encoding), the headers are returned unchanged.
+fn update_content_length(headers: &str, new_len: usize) -> String {
+    let mut result = String::with_capacity(headers.len());
+    for (i, line) in headers.split("\r\n").enumerate() {
+        if i > 0 {
+            result.push_str("\r\n");
+        }
+        if line
+            .as_bytes()
+            .get(..15)
+            .is_some_and(|b| b.eq_ignore_ascii_case(b"content-length:"))
+        {
+            result.push_str(&format!("Content-Length: {new_len}"));
+        } else {
+            result.push_str(line);
+        }
+    }
     result
 }
 
@@ -337,6 +365,56 @@ mod tests {
             String::from_utf8(output.into_owned()).unwrap(),
             "POST / HTTP/1.1\r\n\r\n{\"key\": \"real-secret\"}"
         );
+    }
+
+    #[test]
+    fn body_injection_updates_content_length() {
+        let mut secret = make_secret("$KEY", "a]longer]secret]value", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let body = "{\"key\": \"$KEY\"}";
+        let input = format!(
+            "POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let output = handler.substitute(input.as_bytes()).unwrap();
+        let result = String::from_utf8(output.into_owned()).unwrap();
+
+        let expected_body = "{\"key\": \"a]longer]secret]value\"}";
+        assert!(result.contains(expected_body));
+        assert!(result.contains(&format!("Content-Length: {}", expected_body.len())));
+    }
+
+    #[test]
+    fn body_injection_no_content_length_header() {
+        let mut secret = make_secret("$KEY", "longer-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        // No Content-Length header (e.g. chunked).
+        let input = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n{\"key\": \"$KEY\"}";
+        let output = handler.substitute(input).unwrap();
+        let result = String::from_utf8(output.into_owned()).unwrap();
+        assert!(result.contains("longer-secret"));
+        assert!(!result.contains("Content-Length"));
+    }
+
+    #[test]
+    fn header_only_substitution_preserves_content_length() {
+        let config = make_config(vec![make_secret("$KEY", "longer-value", "api.openai.com")]);
+        let handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input =
+            b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nContent-Length: 5\r\n\r\nhello";
+        let output = handler.substitute(input).unwrap();
+        let result = String::from_utf8(output.into_owned()).unwrap();
+        // Body unchanged, Content-Length should stay 5.
+        assert!(result.contains("Content-Length: 5"));
+        assert!(result.ends_with("hello"));
     }
 
     #[test]
