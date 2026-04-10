@@ -277,6 +277,23 @@ pub struct ExecConfig {
     pub tty: Option<bool>,
 }
 
+/// Configuration for interactive attach sessions.
+#[napi(object)]
+pub struct AttachConfig {
+    /// Command to execute.
+    pub cmd: String,
+    /// Command arguments.
+    pub args: Option<Vec<String>>,
+    /// Working directory inside the sandbox.
+    pub cwd: Option<String>,
+    /// User to run as.
+    pub user: Option<String>,
+    /// Environment variables.
+    pub env: Option<HashMap<String, String>>,
+    /// Detach key sequence (default: "ctrl-]"). Uses Docker-style syntax.
+    pub detach_keys: Option<String>,
+}
+
 /// Lightweight handle info for a sandbox from the database.
 #[napi(object)]
 pub struct SandboxInfo {
