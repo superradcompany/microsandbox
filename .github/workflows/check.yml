@@ -279,6 +279,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: node-sdk-linux-x86_64
+          path: sdk/node-ts/
 
       # -- Install msb + libkrunfw --
       - name: Install msb
