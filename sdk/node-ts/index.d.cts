@@ -93,6 +93,29 @@ export declare class FsReadStream {
 export type JsFsReadStream = FsReadStream
 
 /**
+ * A streaming subscription for sandbox metrics at a regular interval.
+ *
+ * Supports both manual `recv()` calls and `for await...of` iteration:
+ * ```js
+ * const stream = await sb.metricsStream(1000);
+ * for await (const m of stream) {
+ *   console.log(`CPU: ${m.cpuPercent.toFixed(1)}%`);
+ * }
+ * ```
+ *
+ * This type implements JavaScript's async iterable protocol.
+ * It can be used with `for await...of` loops.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
+ */
+export declare class MetricsStream {
+  /** Receive the next metrics snapshot. Returns `null` when the stream ends. */
+  recv(): Promise<SandboxMetrics | null>
+  [Symbol.asyncIterator](): AsyncGenerator<SandboxMetrics, void, undefined>
+}
+export type JsMetricsStream = MetricsStream
+
+/**
  * Factory for creating volume mount configurations.
  *
  * ```js
@@ -220,6 +243,18 @@ export declare class Sandbox {
   fs(): SandboxFs
   /** Get point-in-time resource metrics. */
   metrics(): Promise<SandboxMetrics>
+  /** Stream metrics snapshots at the requested interval (in milliseconds). */
+  metricsStream(intervalMs: number): Promise<MetricsStream>
+  /**
+   * Attach to an interactive PTY session inside the sandbox.
+   *
+   * Bridges the host terminal to the guest process. Returns the exit code.
+   */
+  attach(cmd: string, args?: Array<string> | undefined | null): Promise<number>
+  /** Attach with full configuration options. */
+  attachWithConfig(config: AttachConfig): Promise<number>
+  /** Attach to the sandbox's default shell. */
+  attachShell(): Promise<number>
   /** Stop the sandbox gracefully (SIGTERM). */
   stop(): Promise<void>
   /** Stop and wait for exit, returning the exit status. */
@@ -361,6 +396,22 @@ export type JsVolumeHandle = VolumeHandle
 
 /** Get metrics for all running sandboxes. */
 export declare function allSandboxMetrics(): Promise<Record<string, SandboxMetrics>>
+
+/** Configuration for interactive attach sessions. */
+export interface AttachConfig {
+  /** Command to execute. */
+  cmd: string
+  /** Command arguments. */
+  args?: Array<string>
+  /** Working directory inside the sandbox. */
+  cwd?: string
+  /** User to run as. */
+  user?: string
+  /** Environment variables. */
+  env?: Record<string, string>
+  /** Detach key sequence (default: "ctrl-]"). Uses Docker-style syntax. */
+  detachKeys?: string
+}
 
 /** Configuration for command execution. */
 export interface ExecConfig {

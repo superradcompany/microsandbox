@@ -6,6 +6,7 @@ export const {
   ExecOutput,
   ExecSink,
   FsReadStream,
+  MetricsStream,
   Mount,
   NetworkPolicy,
   Sandbox,
