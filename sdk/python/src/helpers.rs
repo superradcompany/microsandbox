@@ -1,0 +1,661 @@
+use microsandbox::sandbox::{NetworkPolicy, Patch, PullPolicy, SandboxConfig};
+use microsandbox::{LogLevel, RegistryAuth};
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
+
+use crate::error::to_py_err;
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Config Conversion
+//--------------------------------------------------------------------------------------------------
+
+/// Build a `SandboxConfig` from Python kwargs.
+pub fn build_config_from_kwargs(
+    name: String,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<SandboxConfig> {
+    let Some(kwargs) = kwargs else {
+        return Err(pyo3::exceptions::PyValueError::new_err("image is required"));
+    };
+
+    let image_obj = kwargs
+        .get_item("image")?
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("image is required"))?;
+
+    // Accept str, PathLike, or ImageSource (with _to_image_str method).
+    let image_str: String = if let Ok(s) = image_obj.extract::<String>() {
+        s
+    } else if let Ok(method) = image_obj.getattr("_to_image_str") {
+        method.call0()?.extract()?
+    } else if let Ok(fspath) = image_obj.call_method0("__fspath__") {
+        fspath.extract()?
+    } else {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "image must be str, os.PathLike, or ImageSource",
+        ));
+    };
+
+    let mut builder = microsandbox::Sandbox::builder(name);
+
+    // Handle disk image with fstype if ImageSource has those attributes.
+    if let Ok(fstype_attr) = image_obj.getattr("_fstype") {
+        if !fstype_attr.is_none() {
+            let fstype: String = fstype_attr.extract()?;
+            builder = builder.image_with(|i| i.disk(&image_str).fstype(&fstype));
+        } else {
+            builder = builder.image(image_str.as_str());
+        }
+    } else {
+        builder = builder.image(image_str.as_str());
+    };
+
+    if let Some(memory) = extract_opt::<u32>(kwargs, "memory")? {
+        builder = builder.memory(memory);
+    }
+    if let Some(cpus) = extract_opt::<u8>(kwargs, "cpus")? {
+        builder = builder.cpus(cpus);
+    }
+    if let Some(workdir) = extract_opt::<String>(kwargs, "workdir")? {
+        builder = builder.workdir(workdir);
+    }
+    if let Some(shell) = extract_opt::<String>(kwargs, "shell")? {
+        builder = builder.shell(shell);
+    }
+    if let Some(hostname) = extract_opt::<String>(kwargs, "hostname")? {
+        builder = builder.hostname(hostname);
+    }
+    if let Some(user) = extract_opt::<String>(kwargs, "user")? {
+        builder = builder.user(user);
+    }
+    if let Some(entrypoint) = extract_opt::<Vec<String>>(kwargs, "entrypoint")? {
+        builder = builder.entrypoint(entrypoint);
+    }
+    if let Some(replace) = extract_opt::<bool>(kwargs, "replace")?
+        && replace
+    {
+        builder = builder.replace();
+    }
+    if let Some(max_duration) = extract_opt::<f64>(kwargs, "max_duration")? {
+        if max_duration < 0.0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "max_duration must be non-negative",
+            ));
+        }
+        builder = builder.max_duration(max_duration as u64);
+    }
+    if let Some(idle_timeout) = extract_opt::<f64>(kwargs, "idle_timeout")? {
+        if idle_timeout < 0.0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "idle_timeout must be non-negative",
+            ));
+        }
+        builder = builder.idle_timeout(idle_timeout as u64);
+    }
+    let stop_signal_val = extract_opt::<String>(kwargs, "stop_signal")?;
+
+    // Environment variables.
+    if let Some(env) = kwargs.get_item("env")? {
+        let env_dict: &Bound<'_, PyDict> = env.downcast()?;
+        for (k, v) in env_dict.iter() {
+            let key: String = k.extract()?;
+            let val: String = v.extract()?;
+            builder = builder.env(key, val);
+        }
+    }
+
+    // Scripts.
+    if let Some(scripts) = kwargs.get_item("scripts")? {
+        let scripts_dict: &Bound<'_, PyDict> = scripts.downcast()?;
+        for (k, v) in scripts_dict.iter() {
+            let key: String = k.extract()?;
+            let val: String = v.extract()?;
+            builder = builder.script(key, val);
+        }
+    }
+
+    // Pull policy.
+    if let Some(pp) = extract_opt::<String>(kwargs, "pull_policy")? {
+        let policy = match pp.as_str() {
+            "always" => PullPolicy::Always,
+            "if-missing" | "if_missing" | "IF_MISSING" => PullPolicy::IfMissing,
+            "never" => PullPolicy::Never,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid pull_policy: {pp}. Expected: always, if-missing, never"
+                )));
+            }
+        };
+        builder = builder.pull_policy(policy);
+    }
+
+    // Log level.
+    if let Some(ll) = extract_opt::<String>(kwargs, "log_level")? {
+        let level = match ll.as_str() {
+            "trace" | "TRACE" => LogLevel::Trace,
+            "debug" | "DEBUG" => LogLevel::Debug,
+            "info" | "INFO" => LogLevel::Info,
+            "warn" | "WARN" => LogLevel::Warn,
+            "error" | "ERROR" => LogLevel::Error,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid log_level: {ll}"
+                )));
+            }
+        };
+        builder = builder.log_level(level);
+    }
+
+    // Registry auth.
+    if let Some(auth) = kwargs.get_item("registry_auth")? {
+        let auth_dict = as_dict(&auth)?;
+        let auth_dict = &auth_dict;
+        let username: String = auth_dict
+            .get_item("username")?
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("registry_auth.username required")
+            })?
+            .extract()?;
+        let password: String = auth_dict
+            .get_item("password")?
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("registry_auth.password required")
+            })?
+            .extract()?;
+        builder = builder.registry_auth(RegistryAuth::Basic { username, password });
+    }
+
+    // Volumes.
+    if let Some(volumes) = kwargs.get_item("volumes")? {
+        let vol_dict: &Bound<'_, PyDict> = volumes.downcast()?;
+        for (guest_path_obj, mount_obj) in vol_dict.iter() {
+            let guest_path: String = guest_path_obj.extract()?;
+            let mount_dict = as_dict(&mount_obj)?;
+            builder = apply_mount(builder, guest_path, &mount_dict)?;
+        }
+    }
+
+    // Patches.
+    if let Some(patches) = kwargs.get_item("patches")? {
+        let patches_list: &Bound<'_, PyList> = patches.downcast()?;
+        for patch_obj in patches_list.iter() {
+            let patch_dict = as_dict(&patch_obj)?;
+            builder = apply_patch(builder, &patch_dict)?;
+        }
+    }
+
+    // Ports.
+    if let Some(ports) = kwargs.get_item("ports")? {
+        let ports_dict: &Bound<'_, PyDict> = ports.downcast()?;
+        for (host_obj, guest_obj) in ports_dict.iter() {
+            let host_port: u16 = host_obj.extract()?;
+            let guest_port: u16 = guest_obj.extract()?;
+            builder = builder.port(host_port, guest_port);
+        }
+    }
+
+    // Network.
+    if let Some(network) = kwargs.get_item("network")? {
+        let net_dict = as_dict(&network)?;
+        builder = apply_network(builder, &net_dict)?;
+    }
+
+    // Secrets.
+    if let Some(secrets) = kwargs.get_item("secrets")? {
+        let secrets_list: &Bound<'_, PyList> = secrets.downcast()?;
+        for secret_obj in secrets_list.iter() {
+            let secret_dict = as_dict(&secret_obj)?;
+            builder = apply_secret(builder, &secret_dict)?;
+        }
+    }
+
+    // Secret violation action (top-level kwarg).
+    if let Some(violation) = extract_opt::<String>(kwargs, "on_secret_violation")? {
+        let action = parse_violation_action(&violation)?;
+        builder = builder.network(|n| n.on_secret_violation(action));
+    }
+
+    let mut config = builder.build().map_err(to_py_err)?;
+    if let Some(sig) = stop_signal_val {
+        config.stop_signal = Some(sig);
+    }
+    Ok(config)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Mount
+//--------------------------------------------------------------------------------------------------
+
+fn apply_mount(
+    builder: microsandbox::sandbox::SandboxBuilder,
+    guest_path: String,
+    mount: &Bound<'_, PyDict>,
+) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+    let readonly = extract_opt::<bool>(mount, "readonly")?.unwrap_or(false);
+
+    if let Some(bind_path) = extract_opt::<String>(mount, "bind")? {
+        Ok(builder.volume(&guest_path, |v| {
+            let m = v.bind(&bind_path);
+            if readonly { m.readonly() } else { m }
+        }))
+    } else if let Some(vol_name) = extract_opt::<String>(mount, "named")? {
+        Ok(builder.volume(&guest_path, |v| {
+            let m = v.named(&vol_name);
+            if readonly { m.readonly() } else { m }
+        }))
+    } else if extract_opt::<bool>(mount, "tmpfs")?.unwrap_or(false) {
+        let size_mib = extract_opt::<u32>(mount, "size_mib")?;
+        Ok(builder.volume(&guest_path, |v| {
+            let mut m = v.tmpfs();
+            if let Some(size) = size_mib {
+                m = m.size(size);
+            }
+            if readonly { m.readonly() } else { m }
+        }))
+    } else {
+        Err(pyo3::exceptions::PyValueError::new_err(
+            "mount must have one of: bind, named, tmpfs",
+        ))
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Patch
+//--------------------------------------------------------------------------------------------------
+
+fn apply_patch(
+    builder: microsandbox::sandbox::SandboxBuilder,
+    patch: &Bound<'_, PyDict>,
+) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+    let kind: String = patch
+        .get_item("kind")?
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("patch.kind required"))?
+        .extract()?;
+
+    let mode = extract_opt::<u32>(patch, "mode")?;
+    let replace = extract_opt::<bool>(patch, "replace")?.unwrap_or(false);
+
+    match kind.as_str() {
+        "text" => {
+            let path: String = extract_required(patch, "path")?;
+            let content: String = extract_required(patch, "content")?;
+            Ok(builder.add_patch(Patch::Text {
+                path,
+                content,
+                mode,
+                replace,
+            }))
+        }
+        "append" => {
+            let path: String = extract_required(patch, "path")?;
+            let content: String = extract_required(patch, "content")?;
+            Ok(builder.add_patch(Patch::Append { path, content }))
+        }
+        "copy_file" => {
+            let src: String = extract_required(patch, "src")?;
+            let dst: String = extract_required(patch, "dst")?;
+            Ok(builder.add_patch(Patch::CopyFile {
+                src: src.into(),
+                dst,
+                mode,
+                replace,
+            }))
+        }
+        "copy_dir" => {
+            let src: String = extract_required(patch, "src")?;
+            let dst: String = extract_required(patch, "dst")?;
+            Ok(builder.add_patch(Patch::CopyDir {
+                src: src.into(),
+                dst,
+                replace,
+            }))
+        }
+        "symlink" => {
+            let target: String = extract_required(patch, "target")?;
+            let link: String = extract_required(patch, "link")?;
+            Ok(builder.add_patch(Patch::Symlink {
+                target,
+                link,
+                replace,
+            }))
+        }
+        "mkdir" => {
+            let path: String = extract_required(patch, "path")?;
+            Ok(builder.add_patch(Patch::Mkdir { path, mode }))
+        }
+        "remove" => {
+            let path: String = extract_required(patch, "path")?;
+            Ok(builder.add_patch(Patch::Remove { path }))
+        }
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown patch kind: {kind}"
+        ))),
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Network
+//--------------------------------------------------------------------------------------------------
+
+fn apply_network(
+    mut builder: microsandbox::sandbox::SandboxBuilder,
+    net: &Bound<'_, PyDict>,
+) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+    // Check for preset policy string.
+    if let Some(policy_str) = extract_opt::<String>(net, "policy")? {
+        let policy = match policy_str.as_str() {
+            "none" => NetworkPolicy::none(),
+            "public_only" | "public-only" => NetworkPolicy::public_only(),
+            "allow_all" | "allow-all" => NetworkPolicy::allow_all(),
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown network policy preset: {policy_str}"
+                )));
+            }
+        };
+        builder = builder.network(|n| n.policy(policy));
+    }
+
+    // Check for custom policy object.
+    if let Some(custom) = net.get_item("custom_policy")?
+        && !custom.is_none()
+    {
+        let cp_dict = as_dict(&custom)?;
+        let default_action_str: String =
+            extract_opt(&cp_dict, "default_action")?.unwrap_or_else(|| "allow".to_string());
+        let default_action = match default_action_str.as_str() {
+            "allow" => microsandbox_network::policy::Action::Allow,
+            "deny" => microsandbox_network::policy::Action::Deny,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown default_action: {default_action_str}"
+                )));
+            }
+        };
+
+        let mut rules = Vec::new();
+        if let Some(rules_obj) = cp_dict.get_item("rules")?
+            && !rules_obj.is_none()
+        {
+            let rules_list: &Bound<'_, PyList> = rules_obj.downcast()?;
+            for rule_obj in rules_list.iter() {
+                let rd = as_dict(&rule_obj)?;
+                let action_str: String = extract_required(&rd, "action")?;
+                let action = match action_str.as_str() {
+                    "allow" => microsandbox_network::policy::Action::Allow,
+                    "deny" => microsandbox_network::policy::Action::Deny,
+                    _ => {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "unknown rule action: {action_str}"
+                        )));
+                    }
+                };
+                let direction_str: String =
+                    extract_opt(&rd, "direction")?.unwrap_or_else(|| "egress".to_string());
+                let direction = match direction_str.as_str() {
+                    "egress" => microsandbox_network::policy::Direction::Outbound,
+                    "ingress" => microsandbox_network::policy::Direction::Inbound,
+                    _ => {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "unknown direction: {direction_str}"
+                        )));
+                    }
+                };
+                let destination = if let Some(dest_str) = extract_opt::<String>(&rd, "destination")?
+                {
+                    match dest_str.as_str() {
+                        "*" => microsandbox_network::policy::Destination::Any,
+                        "loopback" => microsandbox_network::policy::Destination::Group(
+                            microsandbox_network::policy::DestinationGroup::Loopback,
+                        ),
+                        "private" => microsandbox_network::policy::Destination::Group(
+                            microsandbox_network::policy::DestinationGroup::Private,
+                        ),
+                        "link-local" => microsandbox_network::policy::Destination::Group(
+                            microsandbox_network::policy::DestinationGroup::LinkLocal,
+                        ),
+                        "metadata" => microsandbox_network::policy::Destination::Group(
+                            microsandbox_network::policy::DestinationGroup::Metadata,
+                        ),
+                        "multicast" => microsandbox_network::policy::Destination::Group(
+                            microsandbox_network::policy::DestinationGroup::Multicast,
+                        ),
+                        s if s.starts_with('.') => {
+                            microsandbox_network::policy::Destination::DomainSuffix(s.to_string())
+                        }
+                        s if s.contains('/') => {
+                            let cidr: ipnetwork::IpNetwork = s.parse().map_err(|e| {
+                                pyo3::exceptions::PyValueError::new_err(format!(
+                                    "invalid CIDR: {e}"
+                                ))
+                            })?;
+                            microsandbox_network::policy::Destination::Cidr(cidr)
+                        }
+                        s => microsandbox_network::policy::Destination::Domain(s.to_string()),
+                    }
+                } else {
+                    microsandbox_network::policy::Destination::Any
+                };
+                let protocol = if let Some(proto_str) = extract_opt::<String>(&rd, "protocol")? {
+                    Some(match proto_str.as_str() {
+                        "tcp" => microsandbox_network::policy::Protocol::Tcp,
+                        "udp" => microsandbox_network::policy::Protocol::Udp,
+                        "icmpv4" => microsandbox_network::policy::Protocol::Icmpv4,
+                        "icmpv6" => microsandbox_network::policy::Protocol::Icmpv6,
+                        _ => {
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "unknown protocol: {proto_str}"
+                            )));
+                        }
+                    })
+                } else {
+                    None
+                };
+                let ports = if let Some(port_val) = extract_opt::<String>(&rd, "port")? {
+                    if let Ok(p) = port_val.parse::<u16>() {
+                        Some(microsandbox_network::policy::PortRange { start: p, end: p })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                rules.push(microsandbox_network::policy::Rule {
+                    direction,
+                    destination,
+                    protocol,
+                    ports,
+                    action,
+                });
+            }
+        }
+
+        let policy = NetworkPolicy {
+            default_action,
+            rules,
+        };
+        builder = builder.network(|n| n.policy(policy));
+    }
+
+    // Block domains.
+    if let Some(domains) = extract_opt::<Vec<String>>(net, "block_domains")? {
+        builder = builder.network(|n| {
+            let mut n = n;
+            for d in &domains {
+                n = n.block_domain(d);
+            }
+            n
+        });
+    }
+
+    // Block domain suffixes.
+    if let Some(suffixes) = extract_opt::<Vec<String>>(net, "block_domain_suffixes")? {
+        builder = builder.network(|n| {
+            let mut n = n;
+            for s in &suffixes {
+                n = n.block_domain_suffix(s);
+            }
+            n
+        });
+    }
+
+    // DNS rebind protection.
+    if let Some(rebind) = extract_opt::<bool>(net, "dns_rebind_protection")? {
+        builder = builder.network(|n| n.dns_rebind_protection(rebind));
+    }
+
+    // Max connections.
+    if let Some(max) = extract_opt::<usize>(net, "max_connections")? {
+        builder = builder.network(|n| n.max_connections(max));
+    }
+
+    // Secret violation action (sandbox-level, not per-secret).
+    if let Some(violation) = extract_opt::<String>(net, "on_secret_violation")? {
+        let action = parse_violation_action(&violation)?;
+        builder = builder.network(|n| n.on_secret_violation(action));
+    }
+
+    // TLS config.
+    if let Some(tls) = net.get_item("tls")?
+        && !tls.is_none()
+    {
+        let tls_dict = as_dict(&tls)?;
+        let bypass: Vec<String> = extract_opt(&tls_dict, "bypass")?.unwrap_or_default();
+        let verify_upstream: Option<bool> = extract_opt(&tls_dict, "verify_upstream")?;
+        let intercepted_ports: Option<Vec<u16>> = extract_opt(&tls_dict, "intercepted_ports")?;
+        let block_quic: Option<bool> = extract_opt(&tls_dict, "block_quic")?;
+        let ca_cert: Option<String> = extract_opt(&tls_dict, "ca_cert")?;
+        let ca_key: Option<String> = extract_opt(&tls_dict, "ca_key")?;
+
+        builder = builder.network(|n| {
+            n.tls(|mut t| {
+                for domain in &bypass {
+                    t = t.bypass(domain);
+                }
+                if let Some(v) = verify_upstream {
+                    t = t.verify_upstream(v);
+                }
+                if let Some(ports) = intercepted_ports {
+                    t = t.intercepted_ports(ports);
+                }
+                if let Some(b) = block_quic {
+                    t = t.block_quic(b);
+                }
+                if let Some(ref cert) = ca_cert {
+                    t = t.ca_cert(cert);
+                }
+                if let Some(ref key) = ca_key {
+                    t = t.ca_key(key);
+                }
+                t
+            })
+        });
+    }
+
+    // Ports inside Network object.
+    if let Some(ports) = net.get_item("ports")?
+        && !ports.is_none()
+    {
+        let ports_dict: &Bound<'_, PyDict> = ports.downcast()?;
+        for (host_obj, guest_obj) in ports_dict.iter() {
+            let host_port: u16 = host_obj.extract()?;
+            let guest_port: u16 = guest_obj.extract()?;
+            builder = builder.port(host_port, guest_port);
+        }
+    }
+
+    Ok(builder)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Secret
+//--------------------------------------------------------------------------------------------------
+
+fn apply_secret(
+    builder: microsandbox::sandbox::SandboxBuilder,
+    secret: &Bound<'_, PyDict>,
+) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+    let env_var: String = extract_required(secret, "env_var")?;
+    let value: String = extract_required(secret, "value")?;
+    let allow_hosts: Vec<String> = extract_opt(secret, "allow_hosts")?.unwrap_or_default();
+    let allow_host_patterns: Vec<String> =
+        extract_opt(secret, "allow_host_patterns")?.unwrap_or_default();
+
+    let placeholder: Option<String> = extract_opt(secret, "placeholder")?;
+    let require_tls: Option<bool> = extract_opt(secret, "require_tls")?;
+
+    Ok(builder.secret(|s| {
+        let mut s = s.env(&env_var).value(value.clone());
+        for host in &allow_hosts {
+            s = s.allow_host(host);
+        }
+        for pattern in &allow_host_patterns {
+            s = s.allow_host_pattern(pattern);
+        }
+        if let Some(ref ph) = placeholder {
+            s = s.placeholder(ph);
+        }
+        if let Some(req) = require_tls {
+            s = s.require_tls_identity(req);
+        }
+        s
+    }))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Extraction Helpers
+//--------------------------------------------------------------------------------------------------
+
+/// Convert an object to a PyDict — either it's already a dict, or call _to_dict().
+fn as_dict<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+    if let Ok(dict) = obj.downcast::<PyDict>() {
+        return Ok(dict.clone());
+    }
+    // Try calling _to_dict() on the object (for our frozen dataclasses).
+    if let Ok(method) = obj.getattr("_to_dict") {
+        let result = method.call0()?;
+        return Ok(result.downcast::<PyDict>()?.clone());
+    }
+    // Try __dict__ as last resort.
+    if let Ok(d) = obj.getattr("__dict__")
+        && let Ok(dict) = d.downcast::<PyDict>()
+    {
+        return Ok(dict.clone());
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "expected dict or object with _to_dict(), got {}",
+        obj.get_type().name()?
+    )))
+}
+
+fn parse_violation_action(
+    s: &str,
+) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
+    use microsandbox_network::secrets::config::ViolationAction;
+    match s {
+        "block" => Ok(ViolationAction::Block),
+        "block-and-log" | "block_and_log" => Ok(ViolationAction::BlockAndLog),
+        "block-and-terminate" | "block_and_terminate" => Ok(ViolationAction::BlockAndTerminate),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown violation action: {s}"
+        ))),
+    }
+}
+
+fn extract_opt<'py, T: FromPyObject<'py>>(
+    dict: &Bound<'py, PyDict>,
+    key: &str,
+) -> PyResult<Option<T>> {
+    match dict.get_item(key)? {
+        Some(val) if !val.is_none() => Ok(Some(val.extract()?)),
+        _ => Ok(None),
+    }
+}
+
+fn extract_required<'py, T: FromPyObject<'py>>(
+    dict: &Bound<'py, PyDict>,
+    key: &str,
+) -> PyResult<T> {
+    dict.get_item(key)?
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("{key} is required")))?
+        .extract()
+}

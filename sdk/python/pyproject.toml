@@ -1,0 +1,64 @@
+[build-system]
+requires = ["maturin>=1.6"]
+build-backend = "maturin"
+
+[project]
+name = "microsandbox"
+description = "Python SDK for microsandbox — secure, fast microVM-based sandboxing."
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Super Rad Company", email = "development@superrad.company" }]
+readme = "README.md"
+dynamic = ["version"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+keywords = ["sandbox", "microvm", "isolation", "security", "vm"]
+
+[project.urls]
+Homepage = "https://github.com/superradcompany/microsandbox"
+Documentation = "https://docs.microsandbox.dev"
+Repository = "https://github.com/superradcompany/microsandbox"
+Issues = "https://github.com/superradcompany/microsandbox/issues"
+
+[dependency-groups]
+dev = [
+    "maturin>=1.6",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-xdist>=3",
+    "ruff>=0.7",
+]
+
+[tool.uv]
+managed = true
+
+[tool.maturin]
+module-name = "microsandbox._microsandbox"
+python-source = "."
+features = ["pyo3/extension-module"]
+include = [
+    { path = "microsandbox/_bundled/**/*", format = "wheel" },
+]
+sdist-exclude = ["*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
