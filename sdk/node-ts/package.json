@@ -20,11 +20,13 @@
   "scripts": {
     "build": "napi build --release --platform --js index.cjs --dts index.d.cts",
     "build:debug": "napi build --platform --js index.cjs --dts index.d.cts",
+    "test": "vitest run",
     "postinstall": "node postinstall.js"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3",
-    "@types/node": "^25.5.2"
+    "@types/node": "^25.5.2",
+    "vitest": "^4.1"
   },
   "optionalDependencies": {
     "@superradcompany/microsandbox-darwin-arm64": "0.3.12",
