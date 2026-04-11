@@ -261,6 +261,9 @@ jobs:
     needs: check
     runs-on: self-hosted-ubuntu-2404-x64
     steps:
+      - name: Clean workspace
+        run: rm -rf "${{ github.workspace }}"/{sdk,build}
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
