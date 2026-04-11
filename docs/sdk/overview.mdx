@@ -33,7 +33,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .memory(512)
         .cpus(2)
         .env("PYTHONDONTWRITEBYTECODE", "1")
-
         .volume("/app/src", |v| v.bind("./src").readonly())
         .network(|n| n.policy(NetworkPolicy::public_only()))
         .create()
@@ -56,7 +55,6 @@ const sb = await Sandbox.create({
     memoryMib: 512,
     cpus: 2,
     env: { PYTHONDONTWRITEBYTECODE: "1" },
-
     volumes: {
         "/app/src": Mount.bind("./src", { readonly: true }),
     },
@@ -71,4 +69,4 @@ await sb.stop()
 
 </CodeGroup>
 
-The rest of the SDK reference covers each area in detail: [sandbox configuration](/sdk/sandbox), [execution](/sdk/execution), [filesystem](/sdk/filesystem), [networking](/sdk/networking), [secrets](/sdk/secrets), [volumes](/sdk/volumes), [snapshots](/sdk/snapshots), [scripts](/sdk/scripts), [events](/sdk/events), [errors](/sdk/errors), and [metrics](/sdk/metrics).
+The SDK reference is split by language - choose [Rust SDK](/sdk/rust/sandbox) or [TypeScript SDK](/sdk/typescript/sandbox) for the full API. See also [error handling](/sdk/errors).

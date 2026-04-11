@@ -1,0 +1,435 @@
+---
+title: Sandbox
+description: TypeScript SDK - Sandbox API reference
+icon: "cube"
+---
+
+See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
+
+## Static methods
+
+---
+
+#### Sandbox.create()
+
+```typescript
+static create(config: SandboxConfig): Promise<Sandbox>
+```
+
+Create and boot a sandbox in attached mode. The sandbox stops when your process exits. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it's ready to accept commands.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| config | [`SandboxConfig`](#sandboxconfig) | Sandbox configuration |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Sandbox`](#instance-methods) | Running sandbox |
+
+---
+
+#### Sandbox.createDetached()
+
+```typescript
+static createDetached(config: SandboxConfig): Promise<Sandbox>
+```
+
+Create and boot in detached mode. The sandbox survives after your process exits. Reconnect later with [`Sandbox.get()`](#sandboxget).
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| config | [`SandboxConfig`](#sandboxconfig) | Sandbox configuration |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Sandbox`](#instance-methods) | Running sandbox |
+
+---
+
+#### Sandbox.get()
+
+```typescript
+static get(name: string): Promise<SandboxHandle>
+```
+
+Get a handle to an existing sandbox (running or stopped). The handle provides status, configuration, and lifecycle control.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Sandbox name |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxHandle`](#sandboxhandle) | Handle with status and lifecycle control |
+
+---
+
+#### Sandbox.list()
+
+```typescript
+static list(): Promise<Array<SandboxInfo>>
+```
+
+List all sandboxes (running, stopped, and crashed).
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Array<`[`SandboxInfo`](#sandboxinfo)`>` | All sandboxes |
+
+---
+
+#### Sandbox.remove()
+
+```typescript
+static remove(name: string): Promise<void>
+```
+
+Delete a stopped sandbox and all its state from disk. Fails if the sandbox is still running.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Sandbox name |
+
+---
+
+#### Sandbox.start()
+
+```typescript
+static start(name: string): Promise<Sandbox>
+```
+
+Restart a previously stopped sandbox. The VM reboots using the persisted configuration.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Name of a stopped sandbox |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Sandbox`](#instance-methods) | Running sandbox |
+
+---
+
+#### Sandbox.startDetached()
+
+```typescript
+static startDetached(name: string): Promise<Sandbox>
+```
+
+Restart a stopped sandbox in detached mode.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Name of a stopped sandbox |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Sandbox`](#instance-methods) | Running sandbox |
+
+---
+
+## Instance properties
+
+---
+
+#### name
+
+```typescript
+get name(): Promise<string>
+```
+
+Sandbox name.
+
+---
+
+#### ownsLifecycle
+
+```typescript
+get ownsLifecycle(): Promise<boolean>
+```
+
+Whether this handle owns the sandbox lifecycle. `true` in attached mode, `false` in detached mode.
+
+---
+
+## Instance methods
+
+---
+
+#### detach()
+
+```typescript
+detach(): Promise<void>
+```
+
+Release the handle without stopping the sandbox. Reconnect later with [`Sandbox.get()`](#sandboxget).
+
+---
+
+#### drain()
+
+```typescript
+drain(): Promise<void>
+```
+
+Start a graceful drain. Existing commands run to completion, new `exec` calls are rejected.
+
+---
+
+#### fs()
+
+```typescript
+fs(): SandboxFs
+```
+
+Get a filesystem handle for reading and writing files inside the running sandbox. See [Filesystem](/sdk/typescript/filesystem) for the full API.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxFs`](/sdk/typescript/filesystem) | Filesystem handle |
+
+---
+
+#### kill()
+
+```typescript
+kill(): Promise<void>
+```
+
+Force-terminate the sandbox immediately. No graceful shutdown.
+
+---
+
+#### metrics()
+
+```typescript
+metrics(): Promise<SandboxMetrics>
+```
+
+Get a point-in-time snapshot of the sandbox's resource usage.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxMetrics`](#sandboxmetrics) | CPU, memory, disk, network metrics |
+
+---
+
+#### metricsStream()
+
+```typescript
+metricsStream(intervalMs: number): Promise<MetricsStream>
+```
+
+Stream resource metrics at a regular interval. The returned stream supports both `recv()` and `for await...of`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| intervalMs | `number` | Milliseconds between metric snapshots |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`MetricsStream`](#metricsstream) | Async stream of metrics |
+
+---
+
+#### removePersisted()
+
+```typescript
+removePersisted(): Promise<void>
+```
+
+Remove the sandbox and all its persisted state from disk.
+
+---
+
+#### stop()
+
+```typescript
+stop(): Promise<void>
+```
+
+Gracefully shut down the sandbox.
+
+---
+
+#### stopAndWait()
+
+```typescript
+stopAndWait(): Promise<ExitStatus>
+```
+
+Stop the sandbox and wait for the exit status.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExitStatus`](/sdk/typescript/execution#exitstatus) | Exit code and success flag |
+
+---
+
+#### wait()
+
+```typescript
+wait(): Promise<ExitStatus>
+```
+
+Block until the sandbox exits on its own.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExitStatus`](/sdk/typescript/execution#exitstatus) | Exit code and success flag |
+
+---
+
+## Types
+
+### LogLevel
+
+Sandbox process log verbosity.
+
+| Value | Description |
+|-------|-------------|
+| `'debug'` | Debug and higher |
+| `'error'` | Errors only |
+| `'info'` | Info and higher |
+| `'trace'` | Most verbose - all diagnostic output |
+| `'warn'` | Warnings and errors only |
+
+### MetricsStream
+
+Async stream for receiving periodic metrics snapshots.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [Symbol.asyncIterator] | `AsyncGenerator<`[`SandboxMetrics`](#sandboxmetrics)`>` | Use with `for await...of` |
+| recv() | `Promise<`[`SandboxMetrics`](#sandboxmetrics)` \| null>` | Receive next snapshot. Returns `null` when the stream ends. |
+
+### PullPolicy
+
+Controls when the SDK fetches an OCI image from the registry.
+
+| Value | Description |
+|-------|-------------|
+| `'always'` | Pull the image every time, even if cached locally |
+| `'if-missing'` | Pull only if the image is not already cached. This is the default. |
+| `'never'` | Never pull; fail if the image is not cached locally |
+
+### SandboxConfig
+
+Configuration object passed to [`Sandbox.create()`](#sandboxcreate) and [`Sandbox.createDetached()`](#sandboxcreatedetached).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| cpus? | `number` | `1` | Virtual CPUs |
+| entrypoint? | `Array<string>` | - | Override image entrypoint |
+| env? | `Record<string, string>` | `{}` | Environment variables visible to all commands |
+| hostname? | `string` | - | Guest hostname |
+| image | `string` | - | OCI image, local path, or disk image (required) |
+| logLevel? | [`LogLevel`](#loglevel) | - | Override log verbosity |
+| maxDurationSecs? | `number` | - | Maximum sandbox lifetime in seconds |
+| memoryMib? | `number` | `512` | Guest memory in MiB. This is a limit, not a reservation. |
+| name | `string` | - | Sandbox name (required) |
+| network? | [`NetworkConfig`](/sdk/typescript/networking#networkconfig) | `publicOnly` | Network policy and configuration |
+| patches? | `Array<PatchConfig>` | `[]` | Rootfs modifications applied before boot |
+| ports? | `Record<string, number>` | `{}` | Port mappings (`"hostPort": guestPort`) |
+| pullPolicy? | [`PullPolicy`](#pullpolicy) | `'if-missing'` | Image pull behavior |
+| quietLogs? | `boolean` | `false` | Suppress log output |
+| registryAuth? | `{ username: string, password: string }` | - | Private registry credentials |
+| replace? | `boolean` | `false` | Replace existing sandbox with same name |
+| scripts? | `Record<string, string>` | `{}` | Named scripts mounted at `/.msb/scripts/` |
+| secrets? | `Array<`[`SecretEntry`](/sdk/typescript/secrets#secretentry)`>` | `[]` | Secret injection |
+| shell? | `string` | `/bin/sh` | Shell for `shell()` calls |
+| user? | `string` | - | Default guest user |
+| volumes? | `Record<string, MountConfig>` | `{}` | Volume mounts. See [Volumes](/sdk/typescript/volumes). |
+| workdir? | `string` | - | Default working directory for commands |
+
+### SandboxHandle
+
+A lightweight handle to an existing sandbox (running or stopped). Obtained via [`Sandbox.get()`](#sandboxget) or [`Sandbox.list()`](#sandboxlist). Provides status, configuration, and lifecycle control **without** an active connection to the guest agent. Call `.start()` or `.connect()` to upgrade to a full [`Sandbox`](#instance-methods).
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| configJson | `string` | Raw JSON configuration |
+| connect() | `Promise<`[`Sandbox`](#instance-methods)`>` | Connect to a running sandbox |
+| createdAt | `number \| null` | Creation timestamp (ms since epoch) |
+| kill() | `Promise<void>` | Force terminate |
+| metrics() | `Promise<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
+| name | `string` | Sandbox name |
+| remove() | `Promise<void>` | Delete sandbox and state |
+| start() | `Promise<`[`Sandbox`](#instance-methods)`>` | Start in attached mode |
+| startDetached() | `Promise<`[`Sandbox`](#instance-methods)`>` | Start in detached mode |
+| status | [`SandboxStatus`](#sandboxstatus) | Current status |
+| stop() | `Promise<void>` | Graceful shutdown |
+| updatedAt | `number \| null` | Last update timestamp (ms since epoch) |
+
+### SandboxInfo
+
+Summary information about a sandbox, returned by [`Sandbox.list()`](#sandboxlist).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| configJson | `string` | Raw JSON configuration |
+| createdAt | `number \| null` | Creation timestamp |
+| name | `string` | Sandbox name |
+| status | `string` | Current status |
+| updatedAt | `number \| null` | Last update timestamp |
+
+### SandboxMetrics
+
+Point-in-time resource usage snapshot.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| cpuPercent | `number` | CPU usage as a percentage |
+| diskReadBytes | `number` | Total bytes read from disk since boot |
+| diskWriteBytes | `number` | Total bytes written to disk since boot |
+| memoryBytes | `number` | Current memory usage in bytes |
+| memoryLimitBytes | `number` | Memory limit in bytes |
+| netRxBytes | `number` | Total bytes received over the network since boot |
+| netTxBytes | `number` | Total bytes sent over the network since boot |
+| timestampMs | `number` | When this measurement was taken (ms since epoch) |
+| uptimeMs | `number` | Time since the sandbox was created (ms) |
+
+### SandboxStatus
+
+| Value | Description |
+|-------|-------------|
+| `'crashed'` | VM exited unexpectedly |
+| `'draining'` | Graceful shutdown in progress |
+| `'running'` | Guest agent is ready |
+| `'stopped'` | VM shut down; can be restarted |

@@ -4,6 +4,10 @@ description: Fork-based scaling and state preservation
 icon: "code-branch"
 ---
 
+<Note>
+  Snapshots are coming soon and not yet available in the current SDK.
+</Note>
+
 Snapshots capture the full VM state: memory, CPU registers, filesystem, everything. From a single snapshot you can fork hundreds of sandboxes, each starting exactly where the original left off with no re-boot or dependency reinstall. Forks are cheap because each one gets its own copy-on-write filesystem.
 
 Particularly useful for agent workloads where every sandbox needs the same base environment (Python + packages, Node + node_modules, etc). Install once, snapshot, fork on demand.

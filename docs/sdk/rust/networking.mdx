@@ -1,0 +1,369 @@
+---
+title: Networking
+description: Rust SDK - Network API reference
+icon: "network-wired"
+---
+
+See [Networking](/networking/overview) for conceptual overview and [TLS Interception](/networking/tls) for TLS proxy details.
+
+## NetworkPolicy presets
+
+Static methods that return pre-configured policies.
+
+---
+
+#### NetworkPolicy::allow_all()
+
+```rust
+fn allow_all() -> NetworkPolicy
+```
+
+Unrestricted network access, including to private addresses and the host machine.
+
+---
+
+#### NetworkPolicy::none()
+
+```rust
+fn none() -> NetworkPolicy
+```
+
+Deny all traffic. No network interface is created - the guest is fully offline. `exec` and `fs` still work since they use the host-guest channel, not the network.
+
+---
+
+#### NetworkPolicy::public_only()
+
+```rust
+fn public_only() -> NetworkPolicy
+```
+
+Block private address ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`) and cloud metadata endpoints. Allow everything else. This is the **default** policy.
+
+---
+
+## NetworkBuilder
+
+Builder for configuring the sandbox's network stack. Used in `SandboxBuilder::network(|n| n...)`.
+
+---
+
+#### block_domain()
+
+```rust
+fn block_domain(self, domain: impl Into<String>) -> Self
+```
+
+Block DNS lookups for an exact domain. The guest receives NXDOMAIN for this domain. Can be called multiple times.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| domain | `impl Into<String>` | Domain to block (e.g. `"malware.example.com"`) |
+
+---
+
+#### block_domain_suffix()
+
+```rust
+fn block_domain_suffix(self, suffix: impl Into<String>) -> Self
+```
+
+Block DNS lookups for all subdomains matching a suffix. For example, `.tracking.com` blocks `a.tracking.com`, `b.c.tracking.com`, etc.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| suffix | `impl Into<String>` | Domain suffix (e.g. `".tracking.com"`) |
+
+---
+
+#### dns_rebind_protection()
+
+```rust
+fn dns_rebind_protection(self, enabled: bool) -> Self
+```
+
+When enabled, DNS responses that resolve to private IP addresses are blocked. This prevents DNS rebinding attacks where an attacker-controlled domain resolves to an internal service. Default: `true`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| enabled | `bool` | Enable or disable |
+
+---
+
+#### max_connections()
+
+```rust
+fn max_connections(self, max: usize) -> Self
+```
+
+Limit the maximum number of concurrent network connections from the sandbox.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| max | `usize` | Maximum concurrent connections |
+
+---
+
+#### on_secret_violation()
+
+```rust
+fn on_secret_violation(self, action: ViolationAction) -> Self
+```
+
+Set the action taken when a secret placeholder is detected in traffic destined for a host not in the secret's allow list.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| action | [`ViolationAction`](#violationaction) | Response to a violation |
+
+---
+
+#### policy()
+
+```rust
+fn policy(self, policy: NetworkPolicy) -> Self
+```
+
+Set the network access policy. Overrides the default `public_only` policy.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| policy | [`NetworkPolicy`](#networkpolicy-1) | Network access policy |
+
+---
+
+#### tls()
+
+```rust
+fn tls(self, f: impl FnOnce(TlsBuilder) -> TlsBuilder) -> Self
+```
+
+Configure TLS interception. The closure receives a [`TlsBuilder`](#tlsbuilder) for setting bypass domains, intercepted ports, CA certificates, and upstream verification.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| f | [`TlsBuilder`](#tlsbuilder) | Configure TLS interception. |
+
+---
+
+## TlsBuilder
+
+Builder for TLS interception settings. Used in `NetworkBuilder::tls(|t| t...)`.
+
+---
+
+#### block_quic()
+
+```rust
+fn block_quic(self, block: bool) -> Self
+```
+
+Block QUIC/HTTP3 (UDP) traffic on intercepted ports, forcing clients to fall back to TCP/TLS where interception is possible. Default: `true`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| block | `bool` | Enable or disable |
+
+---
+
+#### bypass()
+
+```rust
+fn bypass(self, pattern: impl Into<String>) -> Self
+```
+
+Skip TLS interception for connections to this domain. Traffic passes through as an opaque TCP stream. Supports `*.suffix` wildcards. Use for domains that use certificate pinning.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| pattern | `impl Into<String>` | Domain or wildcard (e.g. `"*.pinned-api.com"`) |
+
+---
+
+#### intercept_ca_cert()
+
+```rust
+fn intercept_ca_cert(self, path: impl Into<PathBuf>) -> Self
+```
+
+Provide a custom CA certificate for TLS interception. By default, microsandbox generates an ephemeral CA and installs it in the guest's trust store. Use this to provide a stable CA across sandbox restarts.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl Into<PathBuf>` | Path to PEM-encoded CA certificate |
+
+---
+
+#### intercept_ca_key()
+
+```rust
+fn intercept_ca_key(self, path: impl Into<PathBuf>) -> Self
+```
+
+Provide the private key for the custom interception CA certificate.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl Into<PathBuf>` | Path to PEM-encoded CA private key |
+
+---
+
+#### intercepted_ports()
+
+```rust
+fn intercepted_ports(self, ports: Vec<u16>) -> Self
+```
+
+Set the TCP ports where TLS interception is active. Default: `[443]`. Add additional ports if services use non-standard HTTPS ports.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| ports | `Vec<u16>` | List of TCP ports |
+
+---
+
+#### upstream_ca_cert()
+
+```rust
+fn upstream_ca_cert(self, path: impl Into<PathBuf>) -> Self
+```
+
+Trust an additional CA certificate when verifying upstream servers. Use this when connecting to servers with self-signed or private PKI certificates. Can be called multiple times to add several CAs.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl Into<PathBuf>` | Path to PEM-encoded CA certificate |
+
+---
+
+#### verify_upstream()
+
+```rust
+fn verify_upstream(self, verify: bool) -> Self
+```
+
+Control whether the TLS proxy verifies the upstream server's certificate. When `true`, connections to servers with invalid or self-signed certificates are rejected. When `false`, all server certificates are accepted. Default: `true`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| verify | `bool` | Enable or disable |
+
+---
+
+## Types
+
+### Action
+
+| Value | Description |
+|-------|-------------|
+| `Allow` | Permit the traffic |
+| `Deny` | Drop the traffic silently |
+
+### Destination
+
+| Variant | Description |
+|---------|-------------|
+| `Any` | Match any address |
+| `Cidr(IpNetwork)` | Match a CIDR range (e.g. `10.0.0.0/8`) |
+| `Domain(String)` | Match an exact domain |
+| `DomainSuffix(String)` | Match a domain suffix |
+| `Group(`[`DestinationGroup`](#destinationgroup)`)` | Match a predefined address group |
+
+### DestinationGroup
+
+| Value | Description |
+|-------|-------------|
+| `LinkLocal` | `169.254.0.0/16`, `fe80::/10` |
+| `Loopback` | `127.0.0.0/8`, `::1` |
+| `Metadata` | Cloud metadata endpoints (`169.254.169.254`) |
+| `Multicast` | `224.0.0.0/4`, `ff00::/8` |
+| `Private` | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` |
+
+### Direction
+
+| Value | Description |
+|-------|-------------|
+| `Inbound` | Traffic entering the sandbox (via published ports) |
+| `Outbound` | Traffic leaving the sandbox |
+
+### NetworkPolicy
+
+A network access policy consisting of a default action and an ordered list of rules evaluated first-match-wins.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| default_action | [`Action`](#action) | Action when no rule matches |
+| rules | `Vec<`[`Rule`](#rule)`>` | Ordered list of rules |
+
+### PortRange
+
+| Method | Description |
+|--------|-------------|
+| `PortRange::range(start, end)` | Match a range of ports (inclusive) |
+| `PortRange::single(port)` | Match a single port |
+
+### Protocol
+
+| Value | Description |
+|-------|-------------|
+| `Icmpv4` | ICMPv4 traffic |
+| `Icmpv6` | ICMPv6 traffic |
+| `Tcp` | TCP traffic |
+| `Udp` | UDP traffic |
+
+### Rule
+
+A single network policy rule.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| action | [`Action`](#action) | What to do when this rule matches |
+| destination | [`Destination`](#destination) | Target address filter |
+| direction | [`Direction`](#direction) | Traffic direction |
+| ports | `Option<`[`PortRange`](#portrange)`>` | Port filter (`None` matches all) |
+| protocol | `Option<`[`Protocol`](#protocol)`>` | Protocol filter (`None` matches all) |
+
+**Convenience constructors:**
+
+| Method | Description |
+|--------|-------------|
+| `Rule::allow_outbound(destination)` | Create an outbound allow rule |
+| `Rule::deny_outbound(destination)` | Create an outbound deny rule |
+
+### ViolationAction
+
+Action taken when a secret placeholder is sent to a disallowed host.
+
+| Value | Description |
+|-------|-------------|
+| `Block` | Silently drop the request. The guest sees a connection reset. This is the default. |
+| `BlockAndLog` | Drop the request and emit a warning log on the host side. |
+| `BlockAndTerminate` | Drop the request, log an error, and shut down the entire sandbox. |

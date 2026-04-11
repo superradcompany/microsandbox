@@ -27,6 +27,10 @@ const sb = await Sandbox.create({
 })
 ```
 
+```bash CLI
+msb create python --name worker
+```
+
 </CodeGroup>
 
 ## Configuration options
@@ -65,6 +69,17 @@ const sb = await Sandbox.create({
 })
 ```
 
+```bash CLI
+msb create python --name worker \
+  -c 2 \
+  -m 1G \
+  -e DEBUG=true \
+  -e API_PORT=8000 \
+  -v ./src:/app/src:ro \
+  -v my-data:/data \
+  --tmpfs /tmp/scratch:100
+```
+
 </CodeGroup>
 
 | Option | Default | Description |
@@ -100,6 +115,10 @@ Sandbox::builder("worker").image("python").create().await?;
 await Sandbox.create({ name: "worker", image: "python" })
 ```
 
+```bash CLI
+msb create python --name worker
+```
+
 </CodeGroup>
 
 ### Bind mounts
@@ -113,6 +132,10 @@ Sandbox::builder("worker").image("./my-rootfs").create().await?;
 
 ```typescript TypeScript
 await Sandbox.create({ name: "worker", image: "./my-rootfs" })
+```
+
+```bash CLI
+msb create ./my-rootfs --name worker
 ```
 
 </CodeGroup>
@@ -147,6 +170,10 @@ await Sandbox.create({
 })
 ```
 
+```bash CLI
+msb create ./alpine.qcow2 --name worker
+```
+
 </CodeGroup>
 
 <Note>
@@ -172,6 +199,10 @@ const sb = await Sandbox.create({
     image: "python",
     replace: true,
 })
+```
+
+```bash CLI
+msb create --replace python --name worker
 ```
 
 </CodeGroup>
@@ -204,6 +235,12 @@ const sb = await Sandbox.create({
     registryAuth: { username: "deploy", password: process.env.REGISTRY_TOKEN! },
     pullPolicy: PullPolicy.Always,
 })
+```
+
+```bash CLI
+msb registry login private.registry.io -u deploy
+msb create private.registry.io/org/app:v1 \
+  --name worker --pull always
 ```
 
 </CodeGroup>
@@ -250,5 +287,5 @@ const sb = await Sandbox.create(config)
 
 If you need to run setup logic, install packages, or inject files before a sandbox starts doing real work, there are two ways to do it without building a custom image:
 
-- **[Scripts](/sdk/scripts)** are files mounted into the sandbox at `/.msb/scripts/` and added to `PATH`. Define them at creation time and call them by name with `exec()` or `shell()`. Good for multi-step setup procedures or named entry points.
-- **[Patches](/sdk/scripts#patches)** modify the rootfs before the VM boots: write config files, copy directories from the host, create symlinks, append to existing files, etc. The base image stays untouched since patches go into the writable layer.
+- **[Scripts](/sandboxes/scripts)** are files mounted into the sandbox at `/.msb/scripts/` and added to `PATH`. Define them at creation time and call them by name with `exec()` or `shell()`. Good for multi-step setup procedures or named entry points.
+- **[Patches](/sandboxes/scripts#patches)** modify the rootfs before the VM boots: write config files, copy directories from the host, create symlinks, append to existing files, etc. The base image stays untouched since patches go into the writable layer.

@@ -49,6 +49,17 @@ const sb3 = await Sandbox.create({
 })
 ```
 
+```bash CLI
+# No network access
+msb create python --name isolated --no-network
+
+# Public internet only (default)
+msb create python --name web-agent
+
+# With TLS interception
+msb create python --name agent --tls-intercept
+```
+
 </CodeGroup>
 
 ## Custom policies
@@ -138,6 +149,10 @@ const sb = await Sandbox.create({
 })
 ```
 
+```bash CLI
+msb create python --name api -p 8080:80
+```
+
 </CodeGroup>
 
 ## DNS interception
@@ -171,6 +186,12 @@ const sb = await Sandbox.create({
         blockDomainSuffixes: [".tracking.com"],
     },
 })
+```
+
+```bash CLI
+msb create python --name safe-agent \
+  --dns-block-domain malware.example.com \
+  --dns-block-suffix .tracking.com
 ```
 
 </CodeGroup>

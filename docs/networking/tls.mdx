@@ -38,4 +38,11 @@ const sb = await Sandbox.create({
 })
 ```
 
+```bash CLI
+msb create python --name agent \
+  --tls-intercept \
+  --tls-bypass "pinned-api.example.com" \
+  --tls-bypass "*.gov"
+```
+
 </CodeGroup>

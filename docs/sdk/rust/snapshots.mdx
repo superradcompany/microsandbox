@@ -1,0 +1,162 @@
+---
+title: Snapshots
+description: Rust SDK - Snapshot API reference
+icon: "camera"
+---
+
+<Note>
+  Snapshots are coming soon and not yet available in the current SDK.
+</Note>
+
+See [Snapshots](/sandboxes/snapshots) for usage examples and patterns.
+
+## Sandbox methods
+
+---
+
+#### resume()
+
+```rust
+async fn resume(&self) -> MicrosandboxResult<()>
+```
+
+Resume the sandbox after a snapshot. The VM continues from exactly where it was paused.
+
+---
+
+#### snapshot()
+
+```rust
+async fn snapshot(&self) -> MicrosandboxResult<Snapshot>
+```
+
+Capture the full VM state: memory, CPU registers, filesystem, everything. The sandbox is paused during capture. Call [`resume()`](#resume) to continue running, or use the snapshot to fork new sandboxes.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Snapshot` | Handle to the captured state |
+
+---
+
+## Snapshot (instance)
+
+---
+
+#### restore()
+
+```rust
+async fn restore(&self, sandbox_name: impl Into<String>) -> MicrosandboxResult<Sandbox>
+```
+
+Fork a new sandbox from this snapshot. The new sandbox starts exactly where the original was when the snapshot was taken - no boot, no setup, no dependency install. Each fork gets its own copy-on-write filesystem.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| sandbox_name | `impl Into<String>` | Name for the new sandbox |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Sandbox`](/sdk/rust/sandbox#instance-methods) | The forked sandbox, ready to accept commands |
+
+---
+
+#### restore_with()
+
+```rust
+async fn restore_with(&self, name: impl Into<String>, f: impl FnOnce(RestoreBuilder) -> RestoreBuilder) -> MicrosandboxResult<Sandbox>
+```
+
+Fork with configuration overrides. The VM state is restored from the snapshot, but the overridden settings (memory, CPUs, env vars) take effect on the new sandbox.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `impl Into<String>` | Name for the new sandbox |
+| f | `RestoreBuilder` | Configure overrides (memory, cpus, env). |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Sandbox`](/sdk/rust/sandbox#instance-methods) | The forked sandbox with overrides applied |
+
+---
+
+#### save_named()
+
+```rust
+async fn save_named(&self, name: &str) -> MicrosandboxResult<()>
+```
+
+Persist this snapshot under a name so it survives beyond the lifetime of the original sandbox. Named snapshots can be loaded later with [`Snapshot::get()`](#snapshotget) to fork workers without keeping the base sandbox around.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `&str` | Snapshot name (e.g. `"after-pip-install"`) |
+
+---
+
+## Snapshot (static)
+
+---
+
+#### Snapshot::delete()
+
+```rust
+async fn delete(name: &str) -> MicrosandboxResult<()>
+```
+
+Delete a named snapshot from disk.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `&str` | Snapshot name |
+
+---
+
+#### Snapshot::get()
+
+```rust
+async fn get(name: &str) -> MicrosandboxResult<Snapshot>
+```
+
+Load a previously saved named snapshot.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `&str` | Snapshot name |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Snapshot` | The loaded snapshot |
+
+---
+
+#### Snapshot::list()
+
+```rust
+async fn list() -> MicrosandboxResult<Vec<SnapshotInfo>>
+```
+
+List all saved named snapshots.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Vec<SnapshotInfo>` | All named snapshots |

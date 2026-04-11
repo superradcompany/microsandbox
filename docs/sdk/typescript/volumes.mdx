@@ -1,0 +1,178 @@
+---
+title: Volumes
+description: TypeScript SDK - Volume API reference
+icon: "hard-drive"
+---
+
+See [Volumes](/sandboxes/volumes) for usage examples and patterns.
+
+## Volume
+
+Named volumes are managed by microsandbox and stored at `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox.
+
+## Static methods
+
+---
+
+#### Volume.create()
+
+```typescript
+static create(config: VolumeConfig): Promise<Volume>
+```
+
+Create a new named volume.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| config | [`VolumeConfig`](#volumeconfig) | Volume configuration |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Volume` | Created volume with `name` and `path` properties |
+
+---
+
+#### Volume.get()
+
+```typescript
+static get(name: string): Promise<VolumeHandle>
+```
+
+Get a handle to an existing named volume.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Volume name |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`VolumeHandle`](#volumehandle) | Volume handle |
+
+---
+
+#### Volume.list()
+
+```typescript
+static list(): Promise<Array<VolumeInfo>>
+```
+
+List all named volumes.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Array<`[`VolumeInfo`](#volumeinfo)`>` | All volumes |
+
+---
+
+#### Volume.remove()
+
+```typescript
+static remove(name: string): Promise<void>
+```
+
+Delete a named volume and its contents. Fails if the volume is currently mounted.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Volume name |
+
+---
+
+## Mount
+
+Static factory for creating mount configurations used in [`SandboxConfig.volumes`](/sdk/typescript/sandbox#sandboxconfig).
+
+---
+
+#### Mount.bind()
+
+```typescript
+static bind(path: string, opts?: MountOptions): MountConfig
+```
+
+Mount a host directory into the sandbox. Changes in the guest are reflected on the host and vice versa.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Directory path on the host |
+| opts? | `{ readonly?: boolean }` | Mount options |
+
+---
+
+#### Mount.named()
+
+```typescript
+static named(name: string, opts?: MountOptions): MountConfig
+```
+
+Mount a named volume. The volume must already exist (create it with [`Volume.create()`](#volumecreate)).
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Volume name |
+| opts? | `{ readonly?: boolean }` | Mount options |
+
+---
+
+#### Mount.tmpfs()
+
+```typescript
+static tmpfs(opts?: TmpfsOptions): MountConfig
+```
+
+Use an in-memory filesystem. Contents are discarded when the sandbox stops.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| opts? | `{ sizeMib?: number, readonly?: boolean }` | Tmpfs options |
+
+---
+
+## Types
+
+### VolumeConfig
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| labels? | `Record<string, string>` | `{}` | Metadata labels |
+| name | `string` | - | Volume name (required) |
+| quotaMib? | `number` | - | Maximum storage size in MiB |
+
+### VolumeHandle
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| createdAt | `number \| null` | Creation timestamp (ms since epoch) |
+| labels | `Record<string, string>` | Metadata labels |
+| name | `string` | Volume name |
+| quotaMib | `number \| null` | Storage quota |
+| remove() | `Promise<void>` | Delete this volume |
+| usedBytes | `number` | Current disk usage in bytes |
+
+### VolumeInfo
+
+| Field | Type | Description |
+|-------|------|-------------|
+| createdAt | `number \| null` | Creation timestamp |
+| labels | `Record<string, string>` | Metadata labels |
+| name | `string` | Volume name |
+| quotaMib | `number \| null` | Storage quota |
+| usedBytes | `number` | Current disk usage |

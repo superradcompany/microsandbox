@@ -1,0 +1,272 @@
+---
+title: Execution
+description: TypeScript SDK - Command execution API reference
+icon: "terminal"
+---
+
+See [Commands](/sandboxes/commands) for usage examples.
+
+---
+
+#### attach()
+
+```typescript
+attach(cmd: string, args?: Array<string>): Promise<number>
+```
+
+Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session. Press `Ctrl+]` (or configured detach keys) to disconnect without stopping the process.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `string` | Command to run |
+| args? | `Array<string>` | Command arguments |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `number` | Exit code of the process |
+
+---
+
+#### attachShell()
+
+```typescript
+attachShell(): Promise<number>
+```
+
+Attach to the sandbox's default shell.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `number` | Exit code |
+
+---
+
+#### attachWithConfig()
+
+```typescript
+attachWithConfig(config: AttachConfig): Promise<number>
+```
+
+Interactive PTY attach with options for environment variables, working directory, user, and custom detach keys.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| config | [`AttachConfig`](#attachconfig) | Attach configuration |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `number` | Exit code |
+
+---
+
+#### exec()
+
+```typescript
+exec(cmd: string, args?: Array<string>): Promise<ExecOutput>
+```
+
+Run a command inside the sandbox and wait for it to complete. Collects all stdout and stderr into memory and returns them along with the exit code. For long-running processes or large output, use [`execStream()`](#execstream) instead.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `string` | Command to execute (e.g. `"python"`, `"/usr/bin/node"`) |
+| args? | `Array<string>` | Command arguments (e.g. `["-c", "print('hello')"]`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecOutput`](#execoutput) | Collected stdout, stderr, and exit status |
+
+---
+
+#### execStream()
+
+```typescript
+execStream(cmd: string, args?: Array<string>): Promise<ExecHandle>
+```
+
+Run a command with streaming output. Returns a handle that emits stdout, stderr, and exit events as they happen, rather than buffering everything.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `string` | Command to execute |
+| args? | `Array<string>` | Command arguments |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecHandle`](#exechandle) | Streaming handle for receiving events and controlling the process |
+
+---
+
+#### execWithConfig()
+
+```typescript
+execWithConfig(config: ExecConfig): Promise<ExecOutput>
+```
+
+Run a command with per-execution overrides. Configure working directory, environment variables, timeout, stdin, and TTY allocation. These overrides apply only to this execution and don't change the sandbox's defaults.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| config | [`ExecConfig`](#execconfig) | Execution configuration |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecOutput`](#execoutput) | Collected stdout, stderr, and exit status |
+
+---
+
+#### shell()
+
+```typescript
+shell(script: string): Promise<ExecOutput>
+```
+
+Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Shell syntax like pipes, redirects, and `&&` chains works.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| script | `string` | Shell command string (e.g. `"ls -la /app && echo done"`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecOutput`](#execoutput) | Collected stdout, stderr, and exit status |
+
+---
+
+#### shellStream()
+
+```typescript
+shellStream(script: string): Promise<ExecHandle>
+```
+
+Shell command with streaming output.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| script | `string` | Shell command string |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecHandle`](#exechandle) | Streaming handle |
+
+---
+
+## Types
+
+### AttachConfig
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| args? | `Array<string>` | `[]` | Command arguments |
+| cmd | `string` | - | Command to run (required) |
+| cwd? | `string` | - | Working directory |
+| detachKeys? | `string` | `Ctrl+]` | Key sequence to detach without stopping |
+| env? | `Record<string, string>` | `{}` | Environment variables |
+| user? | `string` | - | Guest user |
+
+### ExecConfig
+
+Per-execution overrides.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| args? | `Array<string>` | `[]` | Command arguments |
+| cmd | `string` | - | Command to execute (required) |
+| cwd? | `string` | - | Working directory |
+| env? | `Record<string, string>` | `{}` | Environment variables (merged on top of sandbox env) |
+| stdin? | `string` | - | Fixed stdin content |
+| timeoutMs? | `number` | - | Kill the process after this many milliseconds |
+| tty? | `boolean` | `false` | Allocate a pseudo-terminal |
+| user? | `string` | - | Guest user |
+
+### ExecEvent
+
+| Field | Type | Description |
+|-------|------|-------------|
+| code? | `number` | Exit code (on `'exited'`) |
+| data? | `Buffer` | Output data (on `'stdout'` / `'stderr'`) |
+| eventType | [`ExecEventType`](#execeventtype) | Event type |
+| pid? | `number` | Guest PID (on `'started'`) |
+
+### ExecEventType
+
+| Value | Description |
+|-------|-------------|
+| `'exited'` | The process has exited |
+| `'started'` | The process has started |
+| `'stderr'` | A chunk of stderr data |
+| `'stdout'` | A chunk of stdout data |
+
+### ExecHandle
+
+A handle to a running streaming execution.
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| collect() | `Promise<`[`ExecOutput`](#execoutput)`>` | Wait and collect all remaining output |
+| id | `Promise<string>` | Session ID for this execution |
+| kill() | `Promise<void>` | Send SIGKILL |
+| recv() | `Promise<`[`ExecEvent`](#execevent)` \| null>` | Receive the next event. Returns `null` when done. |
+| signal(signal) | `Promise<void>` | Send a POSIX signal to the process |
+| takeStdin() | `Promise<`[`ExecSink`](#execsink)` \| null>` | Take the stdin writer. Returns `null` after first call. |
+| wait() | `Promise<`[`ExitStatus`](#exitstatus)`>` | Wait for the process to exit |
+
+### ExecOutput
+
+The result of a completed command execution.
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| code | `number` | Exit code |
+| status() | [`ExitStatus`](#exitstatus) | Exit status object |
+| stderr() | `string` | Collected stderr decoded as a string |
+| stderrBytes() | `Buffer` | Raw stderr bytes |
+| stdout() | `string` | Collected stdout decoded as a string |
+| stdoutBytes() | `Buffer` | Raw stdout bytes |
+| success | `boolean` | `true` if code is `0` |
+
+### ExecSink
+
+Writer for sending data to a running process's stdin.
+
+| Method | Parameters | Description |
+|--------|-----------|-------------|
+| close() | - | Close stdin. The process sees EOF. |
+| write() | `data: Buffer` | Write bytes to the process's stdin |
+
+### ExitStatus
+
+| Field | Type | Description |
+|-------|------|-------------|
+| code | `number` | Exit code. `0` typically means success. |
+| success | `boolean` | `true` if code is `0` |

@@ -55,6 +55,14 @@ const sb = await Sandbox.create({ name: "worker", image: "python" })
 const sb = await Sandbox.createDetached({ name: "worker", image: "python" })
 ```
 
+```bash CLI
+# Attached
+msb create python --name worker
+
+# Detached
+msb run -d python --name worker
+```
+
 </CodeGroup>
 
 ## Stop and restart
@@ -75,6 +83,13 @@ await sb.stop()
 const sb = await Sandbox.start("worker")
 ```
 
+```bash CLI
+msb stop worker
+
+# Later, resume where you left off
+msb start worker
+```
+
 </CodeGroup>
 
 ## Kill immediately
@@ -88,6 +103,10 @@ sb.kill().await?;
 
 ```typescript TypeScript
 await sb.kill()
+```
+
+```bash CLI
+msb stop --force worker
 ```
 
 </CodeGroup>
@@ -171,6 +190,10 @@ Sandbox::remove("worker").await?;
 await Sandbox.remove("worker")
 ```
 
+```bash CLI
+msb rm worker
+```
+
 </CodeGroup>
 
 ## List and inspect
@@ -190,6 +213,11 @@ for (const info of sandboxes) {
 
 const handle = await Sandbox.get("worker")
 console.log(handle.status) // "Running" | "Stopped" | ...
+```
+
+```bash CLI
+msb ls
+msb ps worker
 ```
 
 </CodeGroup>
