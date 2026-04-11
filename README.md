@@ -58,6 +58,13 @@ Today, AI agents operate with whatever permissions you give them, and that's usu
 
 The SDK works on its own without the CLI. The `msb` CLI is a separate tool for managing sandboxes, images, and volumes from the terminal, and for giving AI agents direct access to microsandbox:
 
+> **macOS**:
+> ```sh
+> brew tap superradcompany/microsandbox
+> brew install microsandbox
+> ```
+
+> **macOS / Linux**:
 > ```sh
 > curl -fsSL https://install.microsandbox.dev | sh
 > ```
