@@ -2,7 +2,7 @@
 
 import pytest
 
-from microsandbox import Sandbox, Volume
+from microsandbox import Volume
 
 
 @pytest.mark.asyncio
@@ -22,7 +22,7 @@ async def test_volume_create_remove():
 @pytest.mark.asyncio
 async def test_volume_get():
     """Test getting a volume handle."""
-    vol = await Volume.create("test-vol-get-py")
+    await Volume.create("test-vol-get-py")
     try:
         handle = await Volume.get("test-vol-get-py")
         assert handle.name == "test-vol-get-py"

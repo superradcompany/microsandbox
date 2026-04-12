@@ -2,7 +2,6 @@
 
 from microsandbox import (
     Action,
-    AttachOptions,
     DestGroup,
     Direction,
     DiskImageFormat,
@@ -17,7 +16,6 @@ from microsandbox import (
     Network,
     NetworkPolicy,
     Patch,
-    PatchConfig,
     PortProtocol,
     Protocol,
     PullPolicy,
@@ -27,7 +25,6 @@ from microsandbox import (
     Rule,
     SandboxStatus,
     Secret,
-    SecretEntry,
     Size,
     Stdin,
     TlsConfig,
@@ -174,7 +171,7 @@ def test_exec_options_frozen():
     opts = ExecOptions(args=("a", "b"))
     try:
         opts.args = ("c",)  # type: ignore
-        assert False, "should be frozen"
+        raise AssertionError("should be frozen")
     except AttributeError:
         pass
 

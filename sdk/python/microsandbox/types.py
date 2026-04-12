@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import enum
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Mapping, Sequence
 
 #--------------------------------------------------------------------------------------------------
 # Constants
@@ -322,7 +322,7 @@ class Image:
         *,
         fstype: str | None = None,
     ) -> ImageSource:
-        """Create a disk image rootfs. Format is auto-detected from extension (.qcow2, .raw, .vmdk)."""
+        """Create a disk image rootfs. Format auto-detected from extension."""
         return ImageSource(_type="disk", _path=path, _fstype=fstype)
 
 #--------------------------------------------------------------------------------------------------
@@ -356,8 +356,12 @@ class Patch:
     """Factory for rootfs patch configurations."""
 
     @staticmethod
-    def text(path: str, content: str, *, mode: int | None = None, replace: bool = False) -> PatchConfig:
-        return PatchConfig(kind="text", path=path, content=content, mode=mode, replace=replace)
+    def text(
+        path: str, content: str, *, mode: int | None = None, replace: bool = False,
+    ) -> PatchConfig:
+        return PatchConfig(
+            kind="text", path=path, content=content, mode=mode, replace=replace,
+        )
 
     @staticmethod
     def mkdir(path: str, *, mode: int | None = None) -> PatchConfig:
@@ -368,8 +372,12 @@ class Patch:
         return PatchConfig(kind="append", path=path, content=content)
 
     @staticmethod
-    def copy_file(src: str, dst: str, *, mode: int | None = None, replace: bool = False) -> PatchConfig:
-        return PatchConfig(kind="copy_file", src=src, dst=dst, mode=mode, replace=replace)
+    def copy_file(
+        src: str, dst: str, *, mode: int | None = None, replace: bool = False,
+    ) -> PatchConfig:
+        return PatchConfig(
+            kind="copy_file", src=src, dst=dst, mode=mode, replace=replace,
+        )
 
     @staticmethod
     def copy_dir(src: str, dst: str, *, replace: bool = False) -> PatchConfig:

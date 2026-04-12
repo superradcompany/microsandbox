@@ -3,7 +3,6 @@
 import pytest
 
 from microsandbox import Sandbox
-from microsandbox.events import ExitedEvent, StdoutEvent
 
 
 @pytest.mark.asyncio

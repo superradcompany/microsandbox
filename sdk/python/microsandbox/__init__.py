@@ -76,6 +76,7 @@ from microsandbox.types import (
     DestGroup,
     Direction,
     DiskImageFormat,
+    ExecOptions,
     ExitStatus,
     FsEntryKind,
     GiB,
@@ -103,7 +104,6 @@ from microsandbox.types import (
     Stdin,
     TlsConfig,
     ViolationAction,
-    ExecOptions,
 )
 
 __all__ = [

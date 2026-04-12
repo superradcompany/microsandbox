@@ -59,6 +59,7 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["RUF022"]  # __all__ organized by category, not alphabetically
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
