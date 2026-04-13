@@ -76,6 +76,19 @@ claude mcp add --transport stdio microsandbox -- npx -y microsandbox-mcp
 }
 ```
 
+```json Open Code
+// .opencode.json
+{
+  "mcpServers": {
+    "microsandbox": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "microsandbox-mcp"]
+    }
+  }
+}
+```
+
 ```json Zed
 // Zed settings
 {
