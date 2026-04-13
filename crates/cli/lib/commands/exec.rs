@@ -47,7 +47,8 @@ pub struct ExecArgs {
     pub quiet: bool,
 
     /// Command to run inside the sandbox (after --).
-    #[arg(last = true, required = true)]
+    /// When omitted in interactive mode, attaches to the default shell.
+    #[arg(last = true)]
     pub command: Vec<String>,
 }
 
@@ -59,10 +60,6 @@ pub struct ExecArgs {
 pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
     let sandbox = super::resolve_and_start(&args.name, args.quiet).await?;
 
-    let mut parts = args.command;
-    let cmd = parts.remove(0);
-    let cmd_args = parts;
-
     // Build exec options.
     let env_pairs: Vec<(String, String)> = args
         .env
@@ -72,6 +69,25 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
 
     let workdir = args.workdir;
     let interactive = std::io::stdin().is_terminal();
+
+    // Resolve the command: use provided command, or fall back to default shell.
+    let (cmd, cmd_args) = if args.command.is_empty() {
+        if !interactive {
+            anyhow::bail!("no command provided and stdin is not a terminal");
+        }
+
+        let shell = sandbox
+            .config()
+            .shell
+            .as_deref()
+            .unwrap_or("/bin/sh")
+            .to_string();
+        (shell, vec![])
+    } else {
+        let mut parts = args.command;
+        let cmd = parts.remove(0);
+        (cmd, parts)
+    };
 
     // Parse rlimits.
     let rlimits: Vec<_> = args
