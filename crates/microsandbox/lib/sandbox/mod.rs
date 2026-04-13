@@ -28,11 +28,16 @@ use sea_orm::{
 };
 use tokio::sync::{Mutex, mpsc};
 
+use microsandbox_image::{
+    GlobalCache, PullOptions, PullProgressSender, PullResult, Reference, Registry, RegistryAuth,
+    ext4, filetree, progress_channel,
+};
+
 use crate::{
     MicrosandboxResult,
     agent::AgentClient,
     db::entity::{
-        run as run_entity, sandbox as sandbox_entity, sandbox_image as sandbox_image_entity,
+        run as run_entity, sandbox as sandbox_entity, sandbox_rootfs as sandbox_rootfs_entity,
     },
     runtime::{ProcessHandle, SpawnMode, spawn_sandbox},
 };
@@ -52,7 +57,7 @@ pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
 pub use handle::SandboxHandle;
 pub use metrics::{SandboxMetrics, all_sandbox_metrics};
-pub use microsandbox_image::{PullPolicy, PullProgress, PullProgressHandle};
+pub use microsandbox_image::{LayerMode, PullPolicy, PullProgress, PullProgressHandle};
 #[cfg(feature = "net")]
 pub use microsandbox_network::builder::SecretBuilder;
 #[cfg(feature = "net")]
@@ -115,7 +120,7 @@ impl Sandbox {
     pub fn create_with_pull_progress(
         config: SandboxConfig,
     ) -> (
-        microsandbox_image::PullProgressHandle,
+        PullProgressHandle,
         tokio::task::JoinHandle<MicrosandboxResult<Self>>,
     ) {
         Self::create_with_pull_progress_and_mode(config, SpawnMode::Attached)
@@ -128,7 +133,7 @@ impl Sandbox {
     pub fn create_detached_with_pull_progress(
         config: SandboxConfig,
     ) -> (
-        microsandbox_image::PullProgressHandle,
+        PullProgressHandle,
         tokio::task::JoinHandle<MicrosandboxResult<Self>>,
     ) {
         Self::create_with_pull_progress_and_mode(config, SpawnMode::Detached)
@@ -138,10 +143,10 @@ impl Sandbox {
         config: SandboxConfig,
         mode: SpawnMode,
     ) -> (
-        microsandbox_image::PullProgressHandle,
+        PullProgressHandle,
         tokio::task::JoinHandle<MicrosandboxResult<Self>>,
     ) {
-        let (handle, sender) = microsandbox_image::progress_channel();
+        let (handle, sender) = progress_channel();
         let task =
             tokio::spawn(async move { Self::create_with_mode(config, mode, Some(sender)).await });
         (handle, task)
@@ -163,7 +168,7 @@ impl Sandbox {
     async fn create_with_mode(
         mut config: SandboxConfig,
         mode: SpawnMode,
-        progress: Option<microsandbox_image::PullProgressSender>,
+        progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<Self> {
         tracing::debug!(
             sandbox = %config.name,
@@ -176,6 +181,7 @@ impl Sandbox {
 
         let mut pinned_manifest_digest: Option<String> = None;
         let mut pinned_reference: Option<String> = None;
+        let mut pinned_layer_mode: Option<LayerMode> = None;
 
         validate_rootfs_source(&config.image)?;
 
@@ -191,6 +197,7 @@ impl Sandbox {
             let pull_result = pull_oci_image(
                 &reference,
                 config.pull_policy,
+                config.layer_mode,
                 config.registry_auth.take(),
                 progress,
             )
@@ -199,31 +206,70 @@ impl Sandbox {
             // Merge image config defaults under user-provided config.
             config.merge_image_defaults(&pull_result.config);
 
-            // Store resolved layer paths for spawn_sandbox.
-            config.resolved_rootfs_layers = pull_result.layers;
             pinned_manifest_digest = Some(pull_result.manifest_digest.to_string());
             pinned_reference = Some(reference.clone());
+            pinned_layer_mode = Some(pull_result.mode);
+            let layer_mode = pull_result.mode;
+
+            // Materialize EROFS layers and create upper.ext4.
+            let cache_dir = crate::config::config().cache_dir();
+            let cache = GlobalCache::new(&cache_dir)?;
+
+            let mut erofs_disks: Vec<std::path::PathBuf> = Vec::new();
+            match layer_mode {
+                LayerMode::Layered => {
+                    for layer_meta in &pull_result.layer_diff_ids {
+                        let erofs_path = cache.layer_erofs_path(layer_meta);
+                        if !erofs_path.exists() {
+                            return Err(crate::MicrosandboxError::Custom(format!(
+                                "EROFS layer not materialized: {}",
+                                erofs_path.display()
+                            )));
+                        }
+                        erofs_disks.push(erofs_path);
+                    }
+                }
+                LayerMode::Flat => {
+                    let flat_path = cache.flat_erofs_path(&pull_result.manifest_digest);
+                    if !flat_path.exists() {
+                        return Err(crate::MicrosandboxError::Custom(format!(
+                            "flat EROFS image not materialized: {}",
+                            flat_path.display()
+                        )));
+                    }
+                    erofs_disks.push(flat_path);
+                }
+            }
+
+            let upper_tree = if !config.patches.is_empty() {
+                Some(patch::build_upper_tree(&config.patches, &erofs_disks).await?)
+            } else {
+                None
+            };
+
+            // Create upper.ext4 for the writable overlay upper layer.
+            tokio::fs::create_dir_all(&sandbox_dir).await?;
+            let upper_path = sandbox_dir.join("upper.ext4");
+            if !upper_path.exists() || upper_tree.is_some() {
+                create_upper_ext4(&upper_path, upper_tree).await?;
+            }
+            erofs_disks.push(upper_path);
+
+            config.resolved_erofs_disks = erofs_disks;
 
             // Persist full image metadata to database.
-            let cache_dir = crate::config::config().cache_dir();
-            if let Ok(cache) = microsandbox_image::GlobalCache::new(&cache_dir)
-                && let Ok(image_ref) = reference.parse::<microsandbox_image::Reference>()
+            if let Ok(image_ref) = reference.parse::<Reference>()
                 && let Ok(Some(metadata)) = cache.read_image_metadata(&image_ref)
-                && let Err(e) = crate::image::Image::persist(&reference, metadata).await
+                && let Err(e) = crate::image::Image::persist(&reference, metadata, layer_mode).await
             {
                 tracing::warn!(error = %e, "failed to persist image metadata to database");
             }
         }
 
-        // Apply rootfs patches before VM start.
-        if !config.patches.is_empty() {
-            patch::apply_patches(
-                &config.image,
-                &config.patches,
-                &sandbox_dir,
-                &config.resolved_rootfs_layers,
-            )
-            .await?;
+        // Apply rootfs patches before VM start (bind mounts only — OCI patches
+        // are baked into upper.ext4 above).
+        if !config.patches.is_empty() && !matches!(config.image, RootfsSource::Oci(_)) {
+            patch::apply_patches(&config.image, &config.patches).await?;
         }
 
         // Insert the sandbox record and keep its stable database ID.
@@ -240,11 +286,12 @@ impl Sandbox {
             }
         };
 
-        if let (Some(reference), Some(manifest_digest)) = (
+        if let (Some(_reference), Some(manifest_digest), Some(layer_mode)) = (
             pinned_reference.as_deref(),
             pinned_manifest_digest.as_deref(),
+            pinned_layer_mode,
         ) && let Err(err) =
-            persist_oci_manifest_pin(db, sandbox_id, reference, manifest_digest).await
+            persist_oci_manifest_pin(db, sandbox_id, manifest_digest, layer_mode).await
         {
             let _ = sandbox.stop().await;
             let _ = update_sandbox_status(db, sandbox_id, SandboxStatus::Stopped).await;
@@ -1350,33 +1397,33 @@ pub(super) fn pid_is_alive(pid: i32) -> bool {
 /// progress events. The caller must consume the corresponding `PullProgressHandle`.
 async fn pull_oci_image(
     reference: &str,
-    pull_policy: microsandbox_image::PullPolicy,
-    explicit_auth: Option<microsandbox_image::RegistryAuth>,
-    progress: Option<microsandbox_image::PullProgressSender>,
-) -> MicrosandboxResult<microsandbox_image::PullResult> {
+    pull_policy: PullPolicy,
+    layer_mode: LayerMode,
+    explicit_auth: Option<RegistryAuth>,
+    progress: Option<PullProgressSender>,
+) -> MicrosandboxResult<PullResult> {
     let global = crate::config::config();
-    let cache = microsandbox_image::GlobalCache::new(&global.cache_dir())?;
+    let cache = GlobalCache::new(&global.cache_dir())?;
     let platform = microsandbox_image::Platform::host_linux();
-    let image_ref: microsandbox_image::Reference = reference.parse().map_err(|e| {
+    let image_ref: Reference = reference.parse().map_err(|e| {
         crate::MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
     })?;
-    let options = microsandbox_image::PullOptions {
+    let options = PullOptions {
         pull_policy,
+        layer_mode,
         ..Default::default()
     };
 
     // Warm runs spend most of their time outside the guest, so avoid
     // constructing the registry client when the image is already complete
     // in the local cache.
-    if let Some((result, metadata)) =
-        microsandbox_image::Registry::pull_cached(&cache, &image_ref, &options)?
-    {
+    if let Some((result, metadata)) = Registry::pull_cached(&cache, &image_ref, &options)? {
         if let Some(sender) = progress {
             let reference: std::sync::Arc<str> = reference.to_string().into();
-            sender.send(microsandbox_image::PullProgress::Resolving {
+            sender.send(PullProgress::Resolving {
                 reference: reference.clone(),
             });
-            sender.send(microsandbox_image::PullProgress::Resolved {
+            sender.send(PullProgress::Resolved {
                 reference: reference.clone(),
                 manifest_digest: metadata.manifest_digest.clone().into(),
                 layer_count: metadata.layers.len(),
@@ -1386,7 +1433,7 @@ async fn pull_oci_image(
                     .filter_map(|layer| layer.size_bytes)
                     .reduce(|a, b| a + b),
             });
-            sender.send(microsandbox_image::PullProgress::Complete {
+            sender.send(PullProgress::Complete {
                 reference,
                 layer_count: metadata.layers.len(),
             });
@@ -1400,7 +1447,7 @@ async fn pull_oci_image(
         None => global.resolve_registry_auth(image_ref.registry())?,
     };
 
-    let registry = microsandbox_image::Registry::with_auth(platform, cache, auth)?;
+    let registry = Registry::with_auth(platform, cache, auth)?;
 
     if let Some(sender) = progress {
         let task = registry.pull_with_sender(&image_ref, &options, sender);
@@ -1609,13 +1656,15 @@ fn validate_start_state(config: &SandboxConfig, sandbox_dir: &Path) -> Microsand
         )));
     }
 
-    if let RootfsSource::Oci(_) = &config.image {
-        for lower in &config.resolved_rootfs_layers {
-            if !lower.is_dir() {
+    if let RootfsSource::Oci(_) = &config.image
+        && !config.resolved_erofs_disks.is_empty()
+    {
+        for disk in &config.resolved_erofs_disks {
+            if !disk.exists() {
                 return Err(crate::MicrosandboxError::Custom(format!(
-                    "sandbox '{}' cannot start: pinned OCI lower is missing: {}",
+                    "sandbox '{}' cannot start: EROFS disk missing: {}",
                     config.name,
-                    lower.display()
+                    disk.display()
                 )));
             }
         }
@@ -1648,15 +1697,14 @@ async fn insert_sandbox_record(
 async fn persist_oci_manifest_pin(
     db: &sea_orm::DatabaseConnection,
     sandbox_id: i32,
-    reference: &str,
     manifest_digest: &str,
+    layer_mode: LayerMode,
 ) -> MicrosandboxResult<()> {
-    let reference = reference.to_string();
     let manifest_digest = manifest_digest.to_string();
 
     db.transaction::<_, (), crate::MicrosandboxError>(|txn| {
         Box::pin(async move {
-            replace_oci_manifest_pin(txn, sandbox_id, &reference, &manifest_digest).await
+            replace_oci_manifest_pin(txn, sandbox_id, &manifest_digest, layer_mode).await
         })
     })
     .await
@@ -1666,24 +1714,39 @@ async fn persist_oci_manifest_pin(
     })
 }
 
+/// Pin a sandbox to its resolved OCI manifest and layer mode.
 async fn replace_oci_manifest_pin<C: ConnectionTrait>(
     db: &C,
     sandbox_id: i32,
-    reference: &str,
     manifest_digest: &str,
+    layer_mode: LayerMode,
 ) -> MicrosandboxResult<()> {
-    let image_id = crate::image::upsert_image_record(db, reference, None).await?;
+    use crate::db::entity::manifest as manifest_entity;
+
     let now = chrono::Utc::now().naive_utc();
 
-    sandbox_image_entity::Entity::delete_many()
-        .filter(sandbox_image_entity::Column::SandboxId.eq(sandbox_id))
+    let manifest = manifest_entity::Entity::find()
+        .filter(manifest_entity::Column::Digest.eq(manifest_digest))
+        .one(db)
+        .await?;
+
+    let manifest_id = manifest.map(|m| m.id);
+    let db_mode = match layer_mode {
+        LayerMode::Layered => "layered_erofs",
+        LayerMode::Flat => "flat_erofs",
+    };
+
+    sandbox_rootfs_entity::Entity::delete_many()
+        .filter(sandbox_rootfs_entity::Column::SandboxId.eq(sandbox_id))
         .exec(db)
         .await?;
 
-    sandbox_image_entity::Entity::insert(sandbox_image_entity::ActiveModel {
+    sandbox_rootfs_entity::Entity::insert(sandbox_rootfs_entity::ActiveModel {
         sandbox_id: Set(sandbox_id),
-        image_id: Set(image_id),
-        manifest_digest: Set(manifest_digest.to_string()),
+        manifest_id: Set(manifest_id),
+        mode: Set(db_mode.to_string()),
+        flat_rootfs_id: Set(None),
+        upper_fstype: Set(Some("ext4".to_string())),
         created_at: Set(Some(now)),
         ..Default::default()
     })
@@ -1691,6 +1754,50 @@ async fn replace_oci_manifest_pin<C: ConnectionTrait>(
     .await?;
 
     Ok(())
+}
+
+/// Create a sparse ext4 image for the writable overlay upper layer.
+async fn create_upper_ext4(
+    path: &std::path::Path,
+    tree: Option<filetree::FileTree>,
+) -> MicrosandboxResult<()> {
+    let _ = tokio::fs::remove_file(path).await;
+    let ext4_options = ext4::Ext4FormatOptions::default();
+    let overlay_tree = build_overlay_upper_tree(tree);
+    let path = path.to_path_buf();
+
+    tokio::task::spawn_blocking(move || {
+        ext4::format_ext4_with_tree(&path, &ext4_options, overlay_tree)
+    })
+    .await
+    .map_err(|e| crate::MicrosandboxError::Custom(format!("ext4 format task failed: {e}")))?
+    .map_err(|e| crate::MicrosandboxError::Custom(format!("failed to create upper.ext4: {e}")))?;
+
+    Ok(())
+}
+
+/// Build the ext4 root directory tree that overlayfs expects.
+fn build_overlay_upper_tree(tree: Option<filetree::FileTree>) -> filetree::FileTree {
+    use filetree::{DirectoryNode, FileTree, InodeMetadata, TreeNode};
+
+    let mut overlay_tree = FileTree::new();
+    let mut upper_dir = DirectoryNode::new(InodeMetadata::default());
+    let work_dir = DirectoryNode::new(InodeMetadata::default());
+
+    if let Some(mut tree) = tree {
+        upper_dir.entries = std::mem::take(&mut tree.root.entries);
+    }
+
+    overlay_tree
+        .root
+        .entries
+        .insert("upper".into(), TreeNode::Directory(upper_dir));
+    overlay_tree
+        .root
+        .entries
+        .insert("work".into(), TreeNode::Directory(work_dir));
+
+    overlay_tree
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1707,9 +1814,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use microsandbox_db::entity::{
-        image as image_entity, run as run_entity, sandbox_image as sandbox_image_entity,
-    };
+    use microsandbox_db::entity::{run as run_entity, sandbox_rootfs as sandbox_rootfs_entity};
     use microsandbox_migration::{Migrator, MigratorTrait};
     use sea_orm::{ColumnTrait, ConnectOptions, Database, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
@@ -1883,7 +1988,7 @@ mod tests {
             image: RootfsSource::Oci("docker.io/library/alpine".into()),
             ..Default::default()
         };
-        config.resolved_rootfs_layers = vec!["/tmp/layer0".into()];
+        config.resolved_erofs_disks = vec!["/tmp/layer0".into()];
         let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
 
         persist_oci_manifest_pin(
@@ -1908,7 +2013,7 @@ mod tests {
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].reference, "docker.io/library/alpine");
 
-        let pins = sandbox_image_entity::Entity::find()
+        let pins = sandbox_rootfs_entity::Entity::find()
             .all(&conn)
             .await
             .unwrap();
@@ -1936,7 +2041,7 @@ mod tests {
             image: RootfsSource::Oci("docker.io/library/alpine".into()),
             ..Default::default()
         };
-        config.resolved_rootfs_layers = vec!["/tmp/layer0".into()];
+        config.resolved_erofs_disks = vec!["/tmp/layer0".into()];
         let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
 
         persist_oci_manifest_pin(
@@ -1960,7 +2065,7 @@ mod tests {
         let images = image_entity::Entity::find().all(&conn).await.unwrap();
         assert_eq!(images.len(), 2);
 
-        let pins = sandbox_image_entity::Entity::find()
+        let pins = sandbox_rootfs_entity::Entity::find()
             .all(&conn)
             .await
             .unwrap();
@@ -1994,7 +2099,7 @@ mod tests {
             image: RootfsSource::Oci("docker.io/library/alpine".into()),
             ..Default::default()
         };
-        config.resolved_rootfs_layers = vec!["/tmp/layer0".into(), "/tmp/layer1".into()];
+        config.resolved_erofs_disks = vec!["/tmp/layer0".into(), "/tmp/layer1".into()];
 
         let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
         let row = super::sandbox_entity::Entity::find_by_id(sandbox_id)
@@ -2252,7 +2357,7 @@ mod tests {
             image: RootfsSource::Oci("docker.io/library/alpine".into()),
             ..Default::default()
         };
-        config.resolved_rootfs_layers = vec![temp.path().join("missing-lower")];
+        config.resolved_erofs_disks = vec![temp.path().join("missing-lower")];
 
         let err = super::validate_start_state(&config, &sandbox_dir).unwrap_err();
         assert!(err.to_string().contains("pinned OCI lower is missing"));

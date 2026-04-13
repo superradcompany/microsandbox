@@ -16,36 +16,50 @@ use crate::{
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Subdirectory under the cache root for layer storage.
+/// Subdirectory for per-layer EROFS images (keyed by diff_id).
 const LAYERS_DIR: &str = "layers";
 
-/// Subdirectory under the cache root for image metadata.
-const IMAGES_DIR: &str = "images";
+/// Subdirectory for flat-mode merged EROFS images (keyed by manifest digest).
+const FLAT_DIR: &str = "flat";
 
-/// Marker file written as the last step of extraction.
-pub(crate) const COMPLETE_MARKER: &str = ".complete";
+/// Subdirectory for cached manifest + config metadata.
+const MANIFESTS_DIR: &str = "manifests";
+
+/// Subdirectory for transient staging (downloads, work dirs).
+const TMP_DIR: &str = "tmp";
+
+/// EROFS images are emitted in 4 KiB filesystem blocks.
+const EROFS_ALIGNMENT_BYTES: u64 = 4096;
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// On-disk global cache for OCI layers.
+/// On-disk global cache for OCI layers and EROFS images.
 ///
-/// Layout (all flat in `cache/layers/`, content-addressable by digest):
+/// Layout:
 /// ```text
-/// ~/.microsandbox/cache/layers/<digest_safe>.tar.gz            # compressed downloads
-/// ~/.microsandbox/cache/layers/<digest_safe>.extracted/        # extracted layer trees
-/// ~/.microsandbox/cache/layers/<digest_safe>.index             # binary sidecar indexes
-/// ~/.microsandbox/cache/layers/<digest_safe>.implicit_dirs     # pending implicit-dir fixups
-/// ~/.microsandbox/cache/layers/<digest_safe>.lock              # extraction flock files
-/// ~/.microsandbox/cache/layers/<digest_safe>.download.lock     # download flock files
+/// ~/.microsandbox/cache/manifests/<sha256-of-ref>.json       # manifest + config metadata
+/// ~/.microsandbox/cache/tmp/<blob>.part                      # partial downloads
+/// ~/.microsandbox/cache/tmp/<blob>.download.lock             # download flock files
+/// ~/.microsandbox/cache/tmp/<blob>.work/                     # materialization work dirs
+/// ~/.microsandbox/cache/layers/<diff_id_safe>.erofs          # per-layer EROFS (layered mode)
+/// ~/.microsandbox/cache/layers/<diff_id_safe>.erofs.lock     # materialization flock
+/// ~/.microsandbox/cache/flat/<manifest_safe>.erofs           # merged EROFS (flat mode)
+/// ~/.microsandbox/cache/flat/<manifest_safe>.erofs.lock      # materialization flock
 /// ```
 pub struct GlobalCache {
-    /// Root of the layer cache directory (`~/.microsandbox/cache/layers/`).
+    /// Root of the layer EROFS cache (`~/.microsandbox/cache/layers/`).
     layers_dir: PathBuf,
 
-    /// Root of the image metadata directory (`~/.microsandbox/cache/images/`).
-    images_dir: PathBuf,
+    /// Root of the flat EROFS cache (`~/.microsandbox/cache/flat/`).
+    flat_dir: PathBuf,
+
+    /// Root of the manifest metadata cache (`~/.microsandbox/cache/manifests/`).
+    manifests_dir: PathBuf,
+
+    /// Root of the transient staging area (`~/.microsandbox/cache/tmp/`).
+    tmp_dir: PathBuf,
 }
 
 /// Cached metadata for a pulled image reference.
@@ -64,7 +78,7 @@ pub struct CachedImageMetadata {
 /// Cached metadata for a single layer descriptor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedLayerMetadata {
-    /// Compressed layer digest from the manifest.
+    /// Compressed layer digest from the manifest (blob digest).
     pub digest: String,
     /// OCI media type of the layer blob.
     pub media_type: Option<String>,
@@ -81,91 +95,116 @@ pub struct CachedLayerMetadata {
 impl GlobalCache {
     /// Create a new GlobalCache using the provided cache directory.
     ///
-    /// Creates `<cache_dir>/layers/` if it doesn't exist.
+    /// Creates all subdirectories if they don't exist.
     pub fn new(cache_dir: &Path) -> ImageResult<Self> {
         let layers_dir = cache_dir.join(LAYERS_DIR);
-        let images_dir = cache_dir.join(IMAGES_DIR);
-        std::fs::create_dir_all(&layers_dir).map_err(|e| ImageError::Cache {
-            path: layers_dir.clone(),
-            source: e,
-        })?;
-        std::fs::create_dir_all(&images_dir).map_err(|e| ImageError::Cache {
-            path: images_dir.clone(),
-            source: e,
-        })?;
+        let flat_dir = cache_dir.join(FLAT_DIR);
+        let manifests_dir = cache_dir.join(MANIFESTS_DIR);
+        let tmp_dir = cache_dir.join(TMP_DIR);
+
+        for dir in [&layers_dir, &flat_dir, &manifests_dir, &tmp_dir] {
+            std::fs::create_dir_all(dir).map_err(|e| ImageError::Cache {
+                path: dir.clone(),
+                source: e,
+            })?;
+        }
+
         Ok(Self {
             layers_dir,
-            images_dir,
+            flat_dir,
+            manifests_dir,
+            tmp_dir,
         })
     }
 
-    /// Root layer cache directory.
+    // ── Layer EROFS paths (keyed by diff_id) ─────────────────────────
+
+    /// Root layer EROFS cache directory.
     pub fn layers_dir(&self) -> &Path {
         &self.layers_dir
     }
 
-    /// Path to the compressed tarball for a layer.
-    pub fn tar_path(&self, digest: &Digest) -> PathBuf {
+    /// Path to the per-layer EROFS image for a given diff_id.
+    pub fn layer_erofs_path(&self, diff_id: &Digest) -> PathBuf {
         self.layers_dir
-            .join(format!("{}.tar.gz", digest.to_path_safe()))
+            .join(format!("{}.erofs", diff_id.to_path_safe()))
     }
 
-    /// Path to the partial download file for a layer.
-    pub fn part_path(&self, digest: &Digest) -> PathBuf {
+    /// Path to the materialization lock for a layer EROFS image.
+    pub fn layer_erofs_lock_path(&self, diff_id: &Digest) -> PathBuf {
         self.layers_dir
-            .join(format!("{}.tar.gz.part", digest.to_path_safe()))
+            .join(format!("{}.erofs.lock", diff_id.to_path_safe()))
     }
 
-    /// Path to the extracted layer directory.
-    pub fn extracted_dir(&self, digest: &Digest) -> PathBuf {
-        self.layers_dir
-            .join(format!("{}.extracted", digest.to_path_safe()))
+    /// Check if a layer EROFS image exists.
+    pub fn is_layer_materialized(&self, diff_id: &Digest) -> bool {
+        is_valid_erofs_artifact(&self.layer_erofs_path(diff_id))
     }
 
-    /// Path to the in-progress extraction temp directory.
-    pub fn extracting_dir(&self, digest: &Digest) -> PathBuf {
-        self.layers_dir
-            .join(format!("{}.extracting", digest.to_path_safe()))
+    /// Check if all given layer diff_ids have materialized EROFS images.
+    pub fn all_layers_materialized(&self, diff_ids: &[Digest]) -> bool {
+        diff_ids.iter().all(|d| self.is_layer_materialized(d))
     }
 
-    /// Path to the binary sidecar index for a layer.
-    pub fn index_path(&self, digest: &Digest) -> PathBuf {
-        self.layers_dir
-            .join(format!("{}.index", digest.to_path_safe()))
+    // ── Flat EROFS paths (keyed by manifest digest) ──────────────────
+
+    /// Root flat EROFS cache directory.
+    pub fn flat_dir(&self) -> &Path {
+        &self.flat_dir
     }
 
-    /// Path to the pending implicit-dir fixup sidecar for a layer.
-    pub fn implicit_dirs_path(&self, digest: &Digest) -> PathBuf {
-        self.layers_dir
-            .join(format!("{}.implicit_dirs", digest.to_path_safe()))
+    /// Path to the flat merged EROFS image for a given manifest digest.
+    pub fn flat_erofs_path(&self, manifest_digest: &Digest) -> PathBuf {
+        self.flat_dir
+            .join(format!("{}.erofs", manifest_digest.to_path_safe()))
     }
 
-    /// Path to the extraction lock file for a layer.
-    pub fn lock_path(&self, digest: &Digest) -> PathBuf {
-        self.layers_dir
-            .join(format!("{}.lock", digest.to_path_safe()))
+    /// Path to the materialization lock for a flat EROFS image.
+    pub fn flat_erofs_lock_path(&self, manifest_digest: &Digest) -> PathBuf {
+        self.flat_dir
+            .join(format!("{}.erofs.lock", manifest_digest.to_path_safe()))
     }
 
-    /// Path to the download lock file for a layer.
-    pub fn download_lock_path(&self, digest: &Digest) -> PathBuf {
-        self.layers_dir
-            .join(format!("{}.download.lock", digest.to_path_safe()))
+    /// Check if a flat EROFS image exists.
+    pub fn is_flat_materialized(&self, manifest_digest: &Digest) -> bool {
+        is_valid_erofs_artifact(&self.flat_erofs_path(manifest_digest))
+    }
+
+    // ── Staging/tmp paths (downloads, work dirs) ─────────────────────
+
+    /// Root staging directory.
+    pub fn tmp_dir(&self) -> &Path {
+        &self.tmp_dir
+    }
+
+    /// Path to the partial download file for a blob.
+    pub fn part_path(&self, blob_digest: &Digest) -> PathBuf {
+        self.tmp_dir
+            .join(format!("{}.part", blob_digest.to_path_safe()))
+    }
+
+    /// Path to the download lock file for a blob.
+    pub fn download_lock_path(&self, blob_digest: &Digest) -> PathBuf {
+        self.tmp_dir
+            .join(format!("{}.download.lock", blob_digest.to_path_safe()))
+    }
+
+    /// Path to the materialization work directory for an EROFS build.
+    pub fn work_dir(&self, key: &Digest) -> PathBuf {
+        self.tmp_dir.join(format!("{}.work", key.to_path_safe()))
+    }
+
+    // ── Manifest metadata cache ──────────────────────────────────────
+
+    /// Root manifest metadata directory.
+    pub fn manifests_dir(&self) -> &Path {
+        &self.manifests_dir
     }
 
     /// Path to the pull lock file for an image reference.
     pub fn image_lock_path(&self, reference: &Reference) -> PathBuf {
-        self.images_dir
+        self.manifests_dir
             .join(format!("{}.lock", image_cache_key(reference)))
-    }
-
-    /// Check if a layer is fully extracted (`.complete` marker present).
-    pub fn is_extracted(&self, digest: &Digest) -> bool {
-        self.extracted_dir(digest).join(COMPLETE_MARKER).exists()
-    }
-
-    /// Check if all given layer digests are fully extracted.
-    pub fn all_layers_extracted(&self, digests: &[Digest]) -> bool {
-        digests.iter().all(|d| self.is_extracted(d))
     }
 
     /// Read cached metadata for an image reference.
@@ -223,8 +262,16 @@ impl GlobalCache {
 
     /// Path to the cached metadata file for an image reference.
     fn image_metadata_path(&self, reference: &Reference) -> PathBuf {
-        self.images_dir
+        self.manifests_dir
             .join(format!("{}.json", image_cache_key(reference)))
+    }
+
+    // ── Blob cache paths ──────────────────────────────────────────────
+
+    /// Path to the cached compressed tarball for a layer blob.
+    pub fn tar_path(&self, digest: &Digest) -> PathBuf {
+        self.layers_dir
+            .join(format!("{}.tar.gz", digest.to_path_safe()))
     }
 }
 
@@ -236,4 +283,14 @@ fn image_cache_key(reference: &Reference) -> String {
     let mut hasher = Sha256::new();
     hasher.update(reference.to_string().as_bytes());
     hex::encode(hasher.finalize())
+}
+
+pub(crate) fn is_valid_erofs_artifact(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            let len = meta.len();
+            len > 0 && len % EROFS_ALIGNMENT_BYTES == 0
+        }
+        Err(_) => false,
+    }
 }

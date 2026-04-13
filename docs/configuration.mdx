@@ -13,7 +13,8 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
   "log_level": "info",
   "database": {
     "url": "sqlite:///tmp/msb.db",
-    "max_connections": 10
+    "max_connections": 10,
+    "connect_timeout_secs": 30
   },
   "paths": {
     "msb": "/usr/local/bin/msb",
@@ -67,6 +68,7 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
 |-------|---------|-------------|
 | `url` | `null` | Database URL. Uses SQLite under `home` when null |
 | `max_connections` | `5` | Maximum connection pool size |
+| `connect_timeout_secs` | `30` | Timeout when acquiring a database connection from the pool |
 
 ## `paths`
 

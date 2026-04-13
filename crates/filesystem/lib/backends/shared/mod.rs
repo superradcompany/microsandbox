@@ -1,7 +1,6 @@
 //! Shared infrastructure for filesystem backends.
 //!
-//! Contains data structures and utilities used by both [`PassthroughFs`](super::passthrough)
-//! and the future `OverlayFs`.
+//! Contains data structures and utilities shared by the filesystem backends.
 
 pub(crate) mod dir_snapshot;
 pub(crate) mod handle_table;

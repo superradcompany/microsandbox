@@ -416,8 +416,7 @@ pub struct PullProgressDisplay {
     layer_bars: Vec<ProgressBar>,
     reference: String,
     download_style: ProgressStyle,
-    extract_style: ProgressStyle,
-    index_style: ProgressStyle,
+    materialize_style: ProgressStyle,
     done_style: ProgressStyle,
     _echo_guard: Option<EchoGuard>,
 }
@@ -463,18 +462,14 @@ impl PullProgressDisplay {
             _echo_guard: if is_tty { EchoGuard::acquire() } else { None },
             download_style: ProgressStyle::default_bar()
                 .template(
-                    "     {prefix}  {bar:36.magenta/dim}  {bytes}/{total_bytes}  {msg:.magenta}",
+                    "     {prefix}  {bar:36.magenta/238}  {bytes}/{total_bytes}  {msg:.magenta}",
                 )
                 .unwrap()
-                .progress_chars("█░"),
-            extract_style: ProgressStyle::default_bar()
-                .template("     {prefix}  {bar:36.blue/dim}  {bytes}/{total_bytes}  {msg:.blue}")
+                .progress_chars("━━╌"),
+            materialize_style: ProgressStyle::default_bar()
+                .template("     {prefix}  {bar:36.blue/238}  {bytes}/{total_bytes}  {msg:.blue}")
                 .unwrap()
-                .progress_chars("█░"),
-            index_style: ProgressStyle::default_spinner()
-                .tick_strings(BRAILLE_TICKS)
-                .template("     {prefix}  {spinner:.cyan} {msg:.cyan}")
-                .unwrap(),
+                .progress_chars("━━╌"),
             done_style: ProgressStyle::default_bar()
                 .template("     {prefix}  {msg}")
                 .unwrap(),
@@ -529,15 +524,20 @@ impl PullProgressDisplay {
                     pb.set_position(downloaded_bytes);
                 }
             }
-            PullProgress::LayerExtractStarted { layer_index, .. } => {
+            PullProgress::LayerDownloadVerifying { layer_index, .. } => {
                 if let Some(pb) = self.layer_bars.get(layer_index) {
-                    pb.set_style(self.extract_style.clone());
-                    pb.set_position(0);
-                    pb.set_length(1);
-                    pb.set_message("extracting");
+                    pb.set_message("verifying");
                 }
             }
-            PullProgress::LayerExtractProgress {
+            PullProgress::LayerMaterializeStarted { layer_index, .. } => {
+                if let Some(pb) = self.layer_bars.get(layer_index) {
+                    pb.set_style(self.materialize_style.clone());
+                    pb.set_position(0);
+                    pb.set_length(1);
+                    pb.set_message("materializing");
+                }
+            }
+            PullProgress::LayerMaterializeProgress {
                 layer_index,
                 bytes_read,
                 total_bytes,
@@ -547,25 +547,31 @@ impl PullProgressDisplay {
                     pb.set_position(bytes_read);
                 }
             }
-            PullProgress::LayerExtractComplete { layer_index, .. } => {
+            PullProgress::LayerMaterializeWriting { layer_index } => {
                 if let Some(pb) = self.layer_bars.get(layer_index) {
                     pb.set_position(pb.length().unwrap_or(0));
+                    pb.set_message("writing image");
                 }
             }
-            PullProgress::LayerIndexStarted { layer_index } => {
+            PullProgress::LayerMaterializeComplete { layer_index, .. } => {
                 if let Some(pb) = self.layer_bars.get(layer_index) {
-                    pb.set_style(self.index_style.clone());
-                    pb.set_message("indexing");
-                    pb.enable_steady_tick(Duration::from_millis(80));
-                }
-            }
-            PullProgress::LayerIndexComplete { layer_index } => {
-                if let Some(pb) = self.layer_bars.get(layer_index) {
-                    pb.disable_steady_tick();
+                    pb.set_position(pb.length().unwrap_or(0));
                     pb.set_style(self.done_style.clone());
                     pb.set_message(format!("{}", style("✓").green()));
                     pb.tick();
                 }
+            }
+            PullProgress::FlatMergeStarted { .. } => {
+                self.header.set_message(format!(
+                    "{:<12} {} (merging flat image)",
+                    "Pulling", self.reference
+                ));
+            }
+            PullProgress::FlatMergeComplete { .. } => {
+                self.header.set_message(format!(
+                    "{:<12} {} (flat image ready)",
+                    "Pulling", self.reference
+                ));
             }
             PullProgress::Complete { .. } => {}
         }

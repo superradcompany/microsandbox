@@ -9,13 +9,13 @@ use tokio::sync::mpsc;
 //--------------------------------------------------------------------------------------------------
 
 /// Default channel capacity.
-const DEFAULT_PROGRESS_CHANNEL_CAPACITY: usize = 256;
+const DEFAULT_PROGRESS_CHANNEL_CAPACITY: usize = 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Progress events emitted during image pull and layer extraction.
+/// Progress events emitted during image pull and EROFS materialization.
 #[derive(Debug, Clone)]
 pub enum PullProgress {
     /// Resolving the image reference.
@@ -58,43 +58,56 @@ pub enum PullProgress {
         downloaded_bytes: u64,
     },
 
-    /// Layer extraction started.
-    LayerExtractStarted {
+    /// Layer download completed and the blob is being verified.
+    LayerDownloadVerifying {
+        /// Layer index.
+        layer_index: usize,
+        /// Layer digest.
+        digest: Arc<str>,
+    },
+
+    /// Layer EROFS materialization started.
+    LayerMaterializeStarted {
         /// Layer index.
         layer_index: usize,
         /// Layer diff ID.
         diff_id: Arc<str>,
     },
 
-    /// Byte-level extraction progress for a single layer.
-    /// Tracks compressed bytes read from the layer tarball.
-    LayerExtractProgress {
+    /// Byte-level materialization progress for a single layer.
+    LayerMaterializeProgress {
         /// Layer index (0-based).
         layer_index: usize,
-        /// Compressed bytes read so far.
+        /// Bytes read so far.
         bytes_read: u64,
-        /// Total compressed file size.
+        /// Total bytes.
         total_bytes: u64,
     },
 
-    /// Layer extraction completed.
-    LayerExtractComplete {
+    /// Layer tar ingest is complete and the EROFS image is being written.
+    LayerMaterializeWriting {
+        /// Layer index.
+        layer_index: usize,
+    },
+
+    /// Layer EROFS materialization completed.
+    LayerMaterializeComplete {
         /// Layer index.
         layer_index: usize,
         /// Layer diff ID.
         diff_id: Arc<str>,
     },
 
-    /// Sidecar index generation started for a layer.
-    LayerIndexStarted {
-        /// Layer index.
-        layer_index: usize,
+    /// Flat mode: layer merge started.
+    FlatMergeStarted {
+        /// Number of layers being merged.
+        layer_count: usize,
     },
 
-    /// Sidecar index generation completed for a layer.
-    LayerIndexComplete {
-        /// Layer index.
-        layer_index: usize,
+    /// Flat mode: flat.erofs written.
+    FlatMergeComplete {
+        /// Manifest digest of the flat image.
+        manifest_digest: Arc<str>,
     },
 
     /// Entire image pull completed.

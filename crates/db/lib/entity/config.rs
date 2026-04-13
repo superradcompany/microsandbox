@@ -1,4 +1,4 @@
-//! Entity definition for the `configs` table.
+//! Entity definition for the `config` table.
 
 use sea_orm::entity::prelude::*;
 
@@ -15,19 +15,13 @@ pub struct Model {
     #[sea_orm(unique)]
     pub manifest_id: i32,
     pub digest: String,
-    pub architecture: Option<String>,
-    pub os: Option<String>,
-    pub os_variant: Option<String>,
     pub env: Option<String>,
     pub cmd: Option<String>,
     pub entrypoint: Option<String>,
     pub working_dir: Option<String>,
-    pub volumes: Option<String>,
-    pub exposed_ports: Option<String>,
     pub user: Option<String>,
-    pub rootfs_type: Option<String>,
-    pub rootfs_diff_ids: Option<String>,
-    pub history: Option<String>,
+    pub labels: Option<String>,
+    pub stop_signal: Option<String>,
     pub created_at: Option<DateTime>,
 }
 

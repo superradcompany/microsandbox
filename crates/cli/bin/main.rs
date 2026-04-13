@@ -160,9 +160,14 @@ fn run_async_command(
     command: Commands,
     _log_level: Option<microsandbox::LogLevel>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // CLI commands are foreground and short-lived, so a current-thread
-    // runtime avoids worker startup overhead on each invocation.
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    // Pull and create can overlap network I/O, decompression, and progress UI.
+    // Use a small-but-not-tiny worker pool so foreground UI tasks still get
+    // scheduled while multiple layers are downloading and materializing.
+    let worker_threads = std::thread::available_parallelism()
+        .map(|count| count.get().clamp(4, 8))
+        .unwrap_or(4);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
         .enable_all()
         .build()?;
 

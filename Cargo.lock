@@ -873,15 +873,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19d374276b40fb8bbdee95aef7c7fa6b5316ec764510eb64b8dd0e2ed0d7e7f5"
 
 [[package]]
-name = "crc32c"
-version = "0.6.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a47af21622d091a8f0fb295b88bc886ac74efcc613efc19f5d0b21de5c89e47"
-dependencies = [
- "rustc_version",
-]
-
-[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2772,7 +2763,6 @@ dependencies = [
 name = "microsandbox-utils"
 version = "0.3.14"
 dependencies = [
- "crc32c",
  "libc",
  "scopeguard",
 ]
@@ -2831,8 +2821,6 @@ dependencies = [
 [[package]]
 name = "msb_krun"
 version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "482757de70ab2e6d133320b90357844dd9911bea2f2bc3a1da0b208fe9d3a463"
 dependencies = [
  "crossbeam-channel",
  "kvm-bindings",
@@ -2851,8 +2839,6 @@ dependencies = [
 [[package]]
 name = "msb_krun_arch"
 version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7c09713c910b5a709b86c843c06761270188529605049683784a51c56f7f361"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -2867,14 +2853,10 @@ dependencies = [
 [[package]]
 name = "msb_krun_arch_gen"
 version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "150ba0c87d781c52a755cd46cda41bce95c87213f6d6bb4d03421d8609328aa6"
 
 [[package]]
 name = "msb_krun_cpuid"
 version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45ac7305e87bc9a3ae2057ac1c6f55f131387eecf36f75654583b56b4c6ad799"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -2884,8 +2866,6 @@ dependencies = [
 [[package]]
 name = "msb_krun_devices"
 version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dcdf72e5800c2bee0a4dc34b5feaaf02afffeb44ca67661cdc6c4aae3ca678c"
 dependencies = [
  "bitflags 1.3.2",
  "capng",
@@ -2912,8 +2892,6 @@ dependencies = [
 [[package]]
 name = "msb_krun_hvf"
 version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ffe7b9fd536ef259e07d81be24764b4c4824da6cb59d5ea203015da3532aadc"
 dependencies = [
  "crossbeam-channel",
  "libloading 0.8.9",
@@ -2924,8 +2902,6 @@ dependencies = [
 [[package]]
 name = "msb_krun_kernel"
 version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86322881d073cb7fc64dfe4cc452e244936afdb82af8c3de71aad7486f7baa63"
 dependencies = [
  "msb_krun_utils",
  "vm-memory 0.16.2",
@@ -2934,8 +2910,6 @@ dependencies = [
 [[package]]
 name = "msb_krun_polly"
 version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83d613563f3c275230da6b70a1f995ddd2029c4ea4fffd3f5ce4161f1c1d8ebd"
 dependencies = [
  "libc",
  "msb_krun_utils",
@@ -2944,8 +2918,6 @@ dependencies = [
 [[package]]
 name = "msb_krun_smbios"
 version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca1cbd0e82de1386898a75923a47ad80bce1a86dcf0466c65c5077dbbf0c3a48"
 dependencies = [
  "vm-memory 0.16.2",
 ]
@@ -2953,8 +2925,6 @@ dependencies = [
 [[package]]
 name = "msb_krun_utils"
 version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d7718c988ff1408cfdacc9bff1b5ac78a52cf664d5c0cb727c677f7e5db6062"
 dependencies = [
  "bitflags 1.3.2",
  "crossbeam-channel",
@@ -2968,8 +2938,6 @@ dependencies = [
 [[package]]
 name = "msb_krun_vmm"
 version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4271a097ed7d435060a608fbd963833b51c346f716050233228a7d2c5b194e0"
 dependencies = [
  "bzip2",
  "crossbeam-channel",

@@ -428,19 +428,6 @@ pub(crate) fn erange() -> io::Error {
     io::Error::from_raw_os_error(LINUX_ERANGE)
 }
 
-/// Create an `io::Error` with Linux `EROFS`.
-pub(crate) fn erofs() -> io::Error {
-    io::Error::from_raw_os_error(LINUX_EROFS)
-}
-
-/// Check if an error is ENOENT.
-///
-/// ENOENT is 2 on both Linux and macOS, so a single check suffices
-/// regardless of whether `linux_error()` was applied.
-pub(crate) fn is_enoent(err: &io::Error) -> bool {
-    err.raw_os_error() == Some(2)
-}
-
 /// Call `fstat` on a raw file descriptor and return a `stat64`.
 pub(crate) fn fstat(fd: RawFd) -> io::Result<stat64> {
     let mut st = unsafe { std::mem::zeroed::<stat64>() };

@@ -20,7 +20,6 @@ pub use backends::{
         DualFsConfig, MergeReadsBackendAPrecedence, ReadBackendBWriteBackendA,
     },
     memfs::{CachePolicy as MemCachePolicy, MemFs, MemFsConfig},
-    overlayfs::{CachePolicy as OverlayCachePolicy, OverlayConfig, OverlayFs},
     passthroughfs::{CachePolicy, PassthroughConfig, PassthroughFs, PassthroughFsBuilder},
 };
 pub use microsandbox_utils::size::{ByteSize, Bytes, Mebibytes, SizeExt};

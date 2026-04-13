@@ -135,18 +135,18 @@ enum MountKind {
 /// Rootfs patch applied before VM startup.
 ///
 /// How patches are applied depends on the root filesystem type:
-/// - **OCI images (OverlayFs):** Patches are written directly to the `rw/` upper layer
-///   (`sandboxes/<name>/rw/`). The extracted image layers remain shared and untouched.
+/// - **OCI images (EROFS + ext4 overlay):** Patches are baked into `upper.ext4` under
+///   the overlayfs `upperdir` so the shared EROFS lower layers remain untouched.
 /// - **Bind/Passthrough roots:** Patches are applied directly to the host directory.
 /// - **Block device roots (Qcow2, Raw):** Patches are not supported. Returns an error at
 ///   create time.
 ///
-/// By default, patches that target a path already present in the rootfs (lower layers for
-/// OverlayFs, existing files for bind roots) will return an error. Set `replace: true` on
+/// By default, patches that target a path already present in the rootfs (the visible lower
+/// overlay view for OCI, existing files for bind roots) will return an error. Set `replace: true` on
 /// the relevant variant to allow shadowing existing files.
 ///
 /// For `Append` patches targeting a file in a lower layer, the file is first copied up to
-/// `rw/` before appending.
+/// the writable overlay layer before appending.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Patch {
     /// Write text content to a file.
@@ -213,7 +213,8 @@ pub enum Patch {
         path: String,
     },
     /// Append content to an existing file. If the file lives in a lower layer,
-    /// it is copied up to `rw/` first, then the content is appended.
+    /// it is copied up to the writable overlay layer first, then the content is
+    /// appended.
     Append {
         /// Absolute guest path of the file to append to.
         path: String,

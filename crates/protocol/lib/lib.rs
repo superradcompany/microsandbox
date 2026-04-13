@@ -47,11 +47,16 @@ pub const SCRIPTS_PATH: &str = "/.msb/scripts";
 /// - `MSB_TMPFS=/tmp,size=256,noexec` — with noexec flag
 pub const ENV_TMPFS: &str = "MSB_TMPFS";
 
-/// Environment variable specifying the block device for rootfs switch.
+/// Environment variable specifying how agentd assembles the root filesystem.
 ///
-/// Format: `device[,key=value,...]`
-/// - `device` — block device path (required, always first element)
-/// - `fstype=TYPE` — filesystem type (optional; auto-detected if absent)
+/// Format: comma-separated `key=value` pairs, semicolons for multi-value fields.
+///
+/// Variants:
+/// - `kind=disk-image,device=/dev/vda[,fstype=ext4]`
+/// - `kind=oci-layered,lowers=/dev/vdb;/dev/vdc;/dev/vdd,lower_fstype=erofs,upper=/dev/vde,upper_fstype=ext4`
+/// - `kind=oci-flat,lower=/dev/vdb,lower_fstype=erofs,upper=/dev/vdc,upper_fstype=ext4`
+///
+/// Legacy format (`/dev/vda[,fstype=ext4]`) is accepted and treated as `kind=disk-image`.
 pub const ENV_BLOCK_ROOT: &str = "MSB_BLOCK_ROOT";
 
 /// Environment variable carrying the guest network interface configuration.
