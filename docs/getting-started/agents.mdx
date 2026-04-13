@@ -28,16 +28,63 @@ The [microsandbox MCP server](https://github.com/superradcompany/microsandbox-mc
 claude mcp add --transport stdio microsandbox -- npx -y microsandbox-mcp
 ```
 
-```bash Cursor
-npx -y microsandbox-mcp --stdio
-```
-
-```json Claude Desktop (claude_desktop_config.json)
+```json Cursor
+// ~/.cursor/mcp.json
 {
   "mcpServers": {
     "microsandbox": {
       "command": "npx",
       "args": ["-y", "microsandbox-mcp"]
+    }
+  }
+}
+```
+
+```json VS Code
+// .vscode/mcp.json
+{
+  "servers": {
+    "microsandbox": {
+      "command": "npx",
+      "args": ["-y", "microsandbox-mcp"]
+    }
+  }
+}
+```
+
+```json Claude Desktop
+// ~/Library/Application Support/Claude/claude_desktop_config.json
+{
+  "mcpServers": {
+    "microsandbox": {
+      "command": "npx",
+      "args": ["-y", "microsandbox-mcp"]
+    }
+  }
+}
+```
+
+```json Windsurf
+// ~/.codeium/windsurf/mcp_config.json
+{
+  "mcpServers": {
+    "microsandbox": {
+      "command": "npx",
+      "args": ["-y", "microsandbox-mcp"]
+    }
+  }
+}
+```
+
+```json Zed
+// Zed settings
+{
+  "context_servers": {
+    "microsandbox": {
+      "command": {
+        "path": "npx",
+        "args": ["-y", "microsandbox-mcp"]
+      }
     }
   }
 }
