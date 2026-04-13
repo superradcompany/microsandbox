@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use clap::Args;
 use microsandbox::sandbox::ExecOutput;
+use tokio::io::AsyncReadExt;
 
 use crate::ui;
 
@@ -70,6 +71,15 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
     let workdir = args.workdir;
     let interactive = std::io::stdin().is_terminal();
 
+    // Read piped stdin upfront so it can be forwarded into the sandbox.
+    let piped_stdin = if !interactive {
+        let mut buf = Vec::new();
+        tokio::io::stdin().read_to_end(&mut buf).await.ok();
+        Some(buf)
+    } else {
+        None
+    };
+
     // Resolve the command using the same OCI-aware logic as `msb run`:
     // user command > entrypoint [+ cmd] > cmd > config.shell > /bin/sh.
     let (cmd, cmd_args) =
@@ -124,7 +134,10 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         // Non-interactive: exec and capture output.
         let output: ExecOutput = sandbox
             .exec_with(cmd, |e| {
-                let mut e = e.args(cmd_args);
+                let mut e = e
+                    .args(cmd_args)
+                    .stdin_bytes(piped_stdin.unwrap_or_default());
+
                 for (k, v) in &env_pairs {
                     e = e.env(k, v);
                 }
