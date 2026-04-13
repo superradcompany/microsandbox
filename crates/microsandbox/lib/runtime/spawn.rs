@@ -741,6 +741,7 @@ mod tests {
             Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
+            &HashMap::new(),
         );
 
         let rendered = args
