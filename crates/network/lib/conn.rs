@@ -76,6 +76,9 @@ struct Connection {
     proxy_spawned: bool,
     /// Partial data from proxy that couldn't be fully written to smoltcp socket.
     write_buf: Option<(Bytes, usize)>,
+    /// Data read from smoltcp socket that couldn't be sent to proxy (channel full).
+    /// Must be sent before reading more from the socket to preserve stream order.
+    read_buf: Option<Bytes>,
     /// Counter for deferred close attempts (prevents stalling forever).
     close_attempts: u16,
 }
@@ -180,6 +183,7 @@ impl ConnectionTracker {
                 }),
                 proxy_spawned: false,
                 write_buf: None,
+                read_buf: None,
                 close_attempts: 0,
             },
         );
@@ -219,16 +223,25 @@ impl ConnectionTracker {
                 continue;
             }
 
-            // smoltcp → proxy: read from socket, send via channel.
-            while socket.can_recv() {
-                match socket.recv_slice(&mut relay_buf) {
-                    Ok(n) if n > 0 => {
-                        let data = Bytes::copy_from_slice(&relay_buf[..n]);
-                        if conn.to_proxy.try_send(data).is_err() {
-                            break;
+            // smoltcp → proxy: flush read_buf first, then read from socket.
+            if let Some(pending) = conn.read_buf.take()
+                && let Err(e) = conn.to_proxy.try_send(pending)
+            {
+                conn.read_buf = Some(e.into_inner());
+            }
+
+            if conn.read_buf.is_none() {
+                while socket.can_recv() {
+                    match socket.recv_slice(&mut relay_buf) {
+                        Ok(n) if n > 0 => {
+                            let data = Bytes::copy_from_slice(&relay_buf[..n]);
+                            if let Err(e) = conn.to_proxy.try_send(data) {
+                                conn.read_buf = Some(e.into_inner());
+                                break;
+                            }
                         }
+                        _ => break,
                     }
-                    _ => break,
                 }
             }
 

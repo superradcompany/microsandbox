@@ -1,0 +1,127 @@
+---
+title: Networking
+description: TypeScript SDK - Network API reference
+icon: "network-wired"
+---
+
+See [Networking](/networking/overview) for conceptual overview and [TLS Interception](/networking/tls) for TLS proxy details.
+
+## NetworkPolicy
+
+Static factory for creating preset network policies.
+
+---
+
+#### NetworkPolicy.allowAll()
+
+```typescript
+static allowAll(): NetworkConfig
+```
+
+Unrestricted network access, including to private addresses and the host machine.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`NetworkConfig`](#networkconfig) | Network configuration |
+
+---
+
+#### NetworkPolicy.none()
+
+```typescript
+static none(): NetworkConfig
+```
+
+Deny all traffic. No network interface is created - the guest is fully offline. `exec` and `fs` still work since they use the host-guest channel, not the network.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`NetworkConfig`](#networkconfig) | Network configuration |
+
+---
+
+#### NetworkPolicy.publicOnly()
+
+```typescript
+static publicOnly(): NetworkConfig
+```
+
+Block private address ranges and cloud metadata endpoints. Allow everything else. This is the **default** policy.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`NetworkConfig`](#networkconfig) | Network configuration |
+
+---
+
+## Types
+
+### NetworkConfig
+
+Network configuration object passed as [`SandboxConfig.network`](/sdk/typescript/sandbox#sandboxconfig). Use [`NetworkPolicy`](#networkpolicy) presets for common cases, or build a custom configuration with rules.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| blockDomains? | `Array<string>` | `[]` | Block DNS for exact domains (returns NXDOMAIN) |
+| blockDomainSuffixes? | `Array<string>` | `[]` | Block DNS for all subdomains of a suffix |
+| defaultAction? | [`PolicyAction`](#policyaction) | `'allow'` | Action when no rule matches |
+| dnsRebindProtection? | `boolean` | `true` | Block DNS responses resolving to private IPs |
+| maxConnections? | `number` | - | Maximum concurrent connections |
+| policy? | `string` | - | Preset name (set automatically by `NetworkPolicy.*()`) |
+| rules? | `Array<`[`PolicyRule`](#policyrule)`>` | `[]` | Custom rules evaluated first-match-wins |
+| tls? | [`TlsConfig`](#tlsconfig) | - | TLS interception configuration |
+
+### PolicyAction
+
+| Value | Description |
+|-------|-------------|
+| `'allow'` | Permit the traffic |
+| `'deny'` | Drop the traffic silently |
+
+### PolicyDirection
+
+| Value | Description |
+|-------|-------------|
+| `'inbound'` | Traffic entering the sandbox (via published ports) |
+| `'outbound'` | Traffic leaving the sandbox |
+
+### PolicyProtocol
+
+| Value | Description |
+|-------|-------------|
+| `'icmpv4'` | ICMPv4 traffic |
+| `'icmpv6'` | ICMPv6 traffic |
+| `'tcp'` | TCP traffic |
+| `'udp'` | UDP traffic |
+
+### PolicyRule
+
+A single network policy rule.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| action | [`PolicyAction`](#policyaction) | What to do when this rule matches |
+| destination? | `string` | Target filter: `'any'`, `'private'`, `'loopback'`, `'metadata'`, `'multicast'`, `'link-local'`, or a CIDR like `'10.0.0.0/8'` |
+| direction? | [`PolicyDirection`](#policydirection) | Traffic direction |
+| port? | `string` | Single port (`"443"`) or range (`"8000-9000"`) |
+| protocol? | [`PolicyProtocol`](#policyprotocol) | Protocol filter |
+
+### TlsConfig
+
+TLS interception settings within [`NetworkConfig`](#networkconfig).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| blockQuic? | `boolean` | `true` | Block QUIC/HTTP3 (UDP) on intercepted ports, forcing TCP/TLS fallback |
+| bypass? | `Array<string>` | `[]` | Domains to skip interception. Supports `*.suffix` wildcards. Use for domains with certificate pinning. |
+| interceptCaCert? | `string` | - | Path to a custom interception CA certificate PEM file |
+| interceptCaKey? | `string` | - | Path to a custom interception CA private key PEM file |
+| interceptedPorts? | `Array<number>` | `[443]` | TCP ports where TLS interception is active |
+| upstreamCaCert? | `Array<string>` | `[]` | Paths to additional trusted CA PEM files for upstream verification |
+| verifyUpstream? | `boolean` | `true` | Verify upstream server certificates. Set to `false` only for self-signed servers. |

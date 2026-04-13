@@ -148,10 +148,15 @@ async fn intercept_relay(
         .map_err(io::Error::other)?;
 
     // Feed the buffered ClientHello.
-    guest_tls
-        .read_tls(&mut &initial_buf[..])
-        .map_err(io::Error::other)?;
-    guest_tls.process_new_packets().map_err(io::Error::other)?;
+    {
+        let mut remaining = &initial_buf[..];
+        while !remaining.is_empty() {
+            guest_tls
+                .read_tls(&mut remaining)
+                .map_err(io::Error::other)?;
+            guest_tls.process_new_packets().map_err(io::Error::other)?;
+        }
+    }
 
     // Reusable buffer for TLS output — avoids per-flush heap allocation.
     let mut tls_buf = Vec::with_capacity(RELAY_BUF_SIZE + 256);
@@ -166,10 +171,13 @@ async fn intercept_relay(
                 .recv()
                 .await
                 .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed"))?;
-            guest_tls
-                .read_tls(&mut &data[..])
-                .map_err(io::Error::other)?;
-            guest_tls.process_new_packets().map_err(io::Error::other)?;
+            let mut remaining = &data[..];
+            while !remaining.is_empty() {
+                guest_tls
+                    .read_tls(&mut remaining)
+                    .map_err(io::Error::other)?;
+                guest_tls.process_new_packets().map_err(io::Error::other)?;
+            }
             flush_to_guest(&mut guest_tls, &to_smoltcp, &shared, &mut tls_buf).await?;
         }
         Ok::<_, io::Error>(())
@@ -191,6 +199,19 @@ async fn intercept_relay(
     let mut server_buf = vec![0u8; RELAY_BUF_SIZE];
     let mut plaintext_buf = vec![0u8; RELAY_BUF_SIZE];
 
+    // Drain any application data already buffered during the TLS handshake.
+    // In TLS 1.3, the client sends Finished + application data in the same
+    // flight, so process_new_packets() during the handshake loop may have
+    // already decrypted the first HTTP request into the plaintext buffer.
+    forward_plaintext(
+        &mut guest_tls,
+        &mut server_tls,
+        &secrets_handler,
+        &shared,
+        &mut plaintext_buf,
+    )
+    .await?;
+
     loop {
         tokio::select! {
             // Guest → server: receive encrypted, decrypt, forward plaintext.
@@ -199,43 +220,25 @@ async fn intercept_relay(
                     Some(d) => d,
                     None => break,
                 };
-                guest_tls
-                    .read_tls(&mut &data[..])
-                    .map_err(io::Error::other)?;
-                guest_tls
-                    .process_new_packets()
-                    .map_err(io::Error::other)?;
-
-                // Read all available decrypted plaintext and substitute secrets.
-                loop {
-                    match guest_tls.reader().read(&mut plaintext_buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if secrets_handler.is_empty() {
-                                server_tls.write_all(&plaintext_buf[..n]).await?;
-                            } else {
-                                match secrets_handler.substitute(&plaintext_buf[..n]) {
-                                    Some(substituted) => {
-                                        server_tls.write_all(&substituted).await?;
-                                    }
-                                    None => {
-                                        // Violation: placeholder going to disallowed host.
-                                        if secrets_handler.terminates_on_violation() {
-                                            shared.trigger_termination();
-                                        }
-                                        // Drop the connection.
-                                        return Err(io::Error::new(
-                                            io::ErrorKind::PermissionDenied,
-                                            "secret violation: placeholder sent to disallowed host",
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                        Err(e) => return Err(e),
-                    }
+                // Feed all data to rustls.
+                let mut remaining = &data[..];
+                while !remaining.is_empty() {
+                    guest_tls
+                        .read_tls(&mut remaining)
+                        .map_err(io::Error::other)?;
+                    guest_tls
+                        .process_new_packets()
+                        .map_err(io::Error::other)?;
                 }
+
+                forward_plaintext(
+                    &mut guest_tls,
+                    &mut server_tls,
+                    &secrets_handler,
+                    &shared,
+                    &mut plaintext_buf,
+                )
+                .await?;
             }
 
             // Server → guest: read plaintext, encrypt, send via channel.
@@ -280,6 +283,47 @@ async fn extract_sni_from_channel(
             ));
         }
     }
+}
+
+/// Read all available decrypted plaintext from the guest-facing TLS
+/// connection and forward it to the upstream server, applying secret
+/// substitution when configured.
+async fn forward_plaintext(
+    guest_tls: &mut rustls::ServerConnection,
+    server_tls: &mut tokio_rustls::client::TlsStream<TcpStream>,
+    secrets_handler: &SecretsHandler,
+    shared: &SharedState,
+    buf: &mut [u8],
+) -> io::Result<()> {
+    loop {
+        let n = match guest_tls.reader().read(buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) => return Err(e),
+        };
+
+        if secrets_handler.is_empty() {
+            server_tls.write_all(&buf[..n]).await?;
+            continue;
+        }
+
+        let substituted = secrets_handler.substitute(&buf[..n]);
+        if let Some(data) = substituted {
+            server_tls.write_all(&data).await?;
+            continue;
+        }
+
+        // Violation: placeholder going to disallowed host. Drop the connection.
+        if secrets_handler.terminates_on_violation() {
+            shared.trigger_termination();
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "secret violation: placeholder sent to disallowed host",
+        ));
+    }
+    Ok(())
 }
 
 /// Flush pending TLS output from the guest-facing rustls connection

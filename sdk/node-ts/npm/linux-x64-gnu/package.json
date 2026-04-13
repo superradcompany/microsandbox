@@ -1,6 +1,6 @@
 {
   "name": "@superradcompany/microsandbox-linux-x64-gnu",
-  "version": "0.3.9",
+  "version": "0.3.12",
   "os": ["linux"],
   "cpu": ["x64"],
   "main": "microsandbox.linux-x64-gnu.node",

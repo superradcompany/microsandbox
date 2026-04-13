@@ -55,6 +55,14 @@ const sb = await Sandbox.create({ name: "worker", image: "python" })
 const sb = await Sandbox.createDetached({ name: "worker", image: "python" })
 ```
 
+```bash CLI
+# Attached
+msb create python --name worker
+
+# Detached
+msb run -d python --name worker
+```
+
 </CodeGroup>
 
 ## Stop and restart
@@ -75,6 +83,13 @@ await sb.stop()
 const sb = await Sandbox.start("worker")
 ```
 
+```bash CLI
+msb stop worker
+
+# Later, resume where you left off
+msb start worker
+```
+
 </CodeGroup>
 
 ## Kill immediately
@@ -88,6 +103,10 @@ sb.kill().await?;
 
 ```typescript TypeScript
 await sb.kill()
+```
+
+```bash CLI
+msb stop --force worker
 ```
 
 </CodeGroup>
@@ -143,6 +162,21 @@ await sb.drain()
 
 </CodeGroup>
 
+## Wait
+
+Block until the sandbox exits on its own, without triggering a stop.
+
+<CodeGroup>
+```rust Rust
+let exit_status = sb.wait().await?;
+```
+
+```typescript TypeScript
+const exitStatus = await sb.wait()
+```
+
+</CodeGroup>
+
 ## Remove
 
 Delete a stopped sandbox and its associated state from disk.
@@ -154,6 +188,10 @@ Sandbox::remove("worker").await?;
 
 ```typescript TypeScript
 await Sandbox.remove("worker")
+```
+
+```bash CLI
+msb rm worker
 ```
 
 </CodeGroup>
@@ -175,6 +213,11 @@ for (const info of sandboxes) {
 
 const handle = await Sandbox.get("worker")
 console.log(handle.status) // "Running" | "Stopped" | ...
+```
+
+```bash CLI
+msb ls
+msb ps worker
 ```
 
 </CodeGroup>
@@ -215,6 +258,39 @@ The sandbox process also handles:
 - Maximum sandbox lifetime enforcement
 
 The sandbox process does not execute guest commands itself. It only relays traffic between your application and the guest agent.
+
+## Graceful shutdown with timeout fallback
+
+Attempt a graceful stop, then force-kill if the sandbox doesn't shut down in time.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+use std::time::Duration;
+
+let mut handle = Sandbox::get("worker").await?;
+match tokio::time::timeout(Duration::from_secs(30), handle.stop()).await {
+    Ok(Ok(())) => println!("Stopped"),
+    Ok(Err(e)) => eprintln!("Error: {e}"),
+    Err(_) => handle.kill().await?,
+}
+```
+
+```typescript TypeScript
+import { Sandbox } from 'microsandbox'
+
+const sb = await Sandbox.get("worker")
+try {
+    await Promise.race([
+        sb.stop(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 30_000)),
+    ])
+} catch {
+    await sb.kill()
+}
+```
+
+</CodeGroup>
 
 ## Sandbox Process Policies
 

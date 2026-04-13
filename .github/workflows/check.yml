@@ -215,6 +215,31 @@ jobs:
         working-directory: sdk/node-ts
         run: npm install && npm run build
 
+      # -- Upload artifacts (linux-x86_64 only, for SDK smoke tests) --
+      - name: Upload build artifacts
+        if: matrix.target == 'linux-x86_64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Upload Node SDK artifacts
+        if: matrix.target == 'linux-x86_64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-sdk-linux-x86_64
+          path: |
+            sdk/node-ts/index.cjs
+            sdk/node-ts/index.mjs
+            sdk/node-ts/index.d.cts
+            sdk/node-ts/index.d.ts
+            sdk/node-ts/postinstall.js
+            sdk/node-ts/microsandbox.*.node
+            sdk/node-ts/package.json
+            sdk/node-ts/package-lock.json
+            sdk/node-ts/tests/
+            sdk/node-ts/vitest.config.ts
+
       # -- Checks (MCP server) --
       - name: Build MCP server
         working-directory: mcp
@@ -227,3 +252,53 @@ jobs:
           "
           npm install --no-package-lock --ignore-scripts
           npm run build
+
+  # ---------------------------------------------------------------------------
+  # Node.js SDK smoke tests (requires KVM)
+  # ---------------------------------------------------------------------------
+  node-sdk-test:
+    name: Node.js SDK Tests
+    needs: check
+    runs-on: self-hosted-ubuntu-2404-x64
+    steps:
+      - name: Clean workspace
+        run: rm -rf "${{ github.workspace }}"/{sdk,build}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # -- Download pre-built artifacts --
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      - name: Download Node SDK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: node-sdk-linux-x86_64
+          path: sdk/node-ts/
+
+      # -- Install msb + libkrunfw --
+      - name: Install msb
+        run: |
+          chmod +x build/msb
+          mkdir -p ~/.microsandbox/bin ~/.microsandbox/lib
+          install -m755 build/msb ~/.microsandbox/bin/msb
+          install -m644 build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
+
+      # -- Install deps & run tests --
+      - name: Install Node.js dependencies
+        working-directory: sdk/node-ts
+        run: npm install --ignore-scripts
+
+      - name: Run SDK smoke tests
+        working-directory: sdk/node-ts
+        run: |
+          export PATH="$HOME/.microsandbox/bin:$PATH"
+          export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
+          npm test

@@ -27,6 +27,10 @@ const sb = await Sandbox.create({
 })
 ```
 
+```bash CLI
+msb create python --name worker
+```
+
 </CodeGroup>
 
 ## Configuration options
@@ -65,6 +69,17 @@ const sb = await Sandbox.create({
 })
 ```
 
+```bash CLI
+msb create python --name worker \
+  -c 2 \
+  -m 1G \
+  -e DEBUG=true \
+  -e API_PORT=8000 \
+  -v ./src:/app/src:ro \
+  -v my-data:/data \
+  --tmpfs /tmp/scratch:100
+```
+
 </CodeGroup>
 
 | Option | Default | Description |
@@ -100,6 +115,10 @@ Sandbox::builder("worker").image("python").create().await?;
 await Sandbox.create({ name: "worker", image: "python" })
 ```
 
+```bash CLI
+msb create python --name worker
+```
+
 </CodeGroup>
 
 ### Bind mounts
@@ -115,6 +134,10 @@ Sandbox::builder("worker").image("./my-rootfs").create().await?;
 await Sandbox.create({ name: "worker", image: "./my-rootfs" })
 ```
 
+```bash CLI
+msb create ./my-rootfs --name worker
+```
+
 </CodeGroup>
 
 <Note>
@@ -127,8 +150,15 @@ Boot from a QCOW2, Raw, or VMDK disk image. Unlike OCI images (which use a copy-
 
 <CodeGroup>
 ```rust Rust
+// Auto-detect filesystem
 Sandbox::builder("worker")
-    .image_with(|i| i.disk("./alpine.qcow2").fstype("ext4"))
+    .image("./ubuntu-22.04.qcow2")
+    .create()
+    .await?;
+
+// Explicit filesystem type
+Sandbox::builder("worker")
+    .image_with(|i| i.disk("./alpine.raw").fstype("ext4"))
     .create()
     .await?;
 ```
@@ -140,4 +170,122 @@ await Sandbox.create({
 })
 ```
 
+```bash CLI
+msb create ./alpine.qcow2 --name worker
+```
+
 </CodeGroup>
+
+<Note>
+  With OCI images, microsandbox stacks layers and adds a copy-on-write overlay so sandboxes share the base. With disk images, the guest gets the block device directly, so there's no copy-on-write isolation between sandboxes using the same disk image. Each sandbox needs its own copy (or use QCOW2's built-in snapshot/backing file support).
+</Note>
+
+## Replace existing
+
+Replace a stopped sandbox with the same name instead of failing on conflict. This stops the old sandbox (if still running), removes it, and creates a fresh one.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .replace()
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "python",
+    replace: true,
+})
+```
+
+```bash CLI
+msb create --replace python --name worker
+```
+
+</CodeGroup>
+
+## Private registry
+
+Authenticate to private container registries and control when images are pulled.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, RegistryAuth, PullPolicy};
+
+let sb = Sandbox::builder("worker")
+    .image("registry.corp.io/team/app:latest")
+    .registry_auth(RegistryAuth::Basic {
+        username: "deploy".into(),
+        password: std::env::var("REGISTRY_PASSWORD")?,
+    })
+    .pull_policy(PullPolicy::Always)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { PullPolicy, Sandbox } from 'microsandbox'
+
+const sb = await Sandbox.create({
+    name: "worker",
+    image: "private.registry.io/org/app:v1",
+    registryAuth: { username: "deploy", password: process.env.REGISTRY_TOKEN! },
+    pullPolicy: PullPolicy.Always,
+})
+```
+
+```bash CLI
+msb registry login private.registry.io -u deploy
+msb create private.registry.io/org/app:v1 \
+  --name worker --pull always
+```
+
+</CodeGroup>
+
+| Policy | Behavior |
+|--------|----------|
+| `Always` | Pull the image every time, even if cached locally |
+| `IfMissing` | Pull only if the image is not already cached (default) |
+| `Never` | Never pull; fail if the image is not cached |
+
+<Tip>
+  Once an OCI image is resolved, microsandbox pins the exact layers. A `python` reference is resolved to an immutable set of layers at first pull. Subsequent `start()` calls use the pinned layers without re-resolving the mutable tag, so your sandbox is reproducible even if the upstream tag is updated.
+</Tip>
+
+## Config inspection <sup><sup>coming soon</sup></sup>
+
+Build a sandbox configuration without booting the VM. Useful for serializing, storing, validating, or modifying configs before creation.
+
+<CodeGroup>
+```rust Rust
+let config = Sandbox::builder("preview")
+    .image("python")
+    .memory(1024)
+    .build()?;
+
+println!("{}", serde_json::to_string_pretty(&config)?);
+let sb = Sandbox::create(config).await?;
+```
+
+```typescript TypeScript
+const config = Sandbox.buildConfig({
+    name: "preview",
+    image: "python",
+    memoryMib: 1024,
+})
+
+console.log(JSON.stringify(config, null, 2))
+const sb = await Sandbox.create(config)
+```
+
+</CodeGroup>
+
+## Customizing the guest environment
+
+If you need to run setup logic, install packages, or inject files before a sandbox starts doing real work, there are two ways to do it without building a custom image:
+
+- **[Scripts](/sandboxes/customization#scripts)** are files mounted into the sandbox at `/.msb/scripts/` and added to `PATH`. Define them at creation time and call them by name with `exec()` or `shell()`. Good for multi-step setup procedures or named entry points.
+- **[Patches](/sandboxes/customization#patches)** modify the rootfs before the VM boots: write config files, copy directories from the host, create symlinks, append to existing files, etc. The base image stays untouched since patches go into the writable layer.

@@ -115,6 +115,17 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub no_dns_rebind_protection: bool,
 
+    /// Network policy controlling which destinations are reachable from the sandbox.
+    ///
+    /// Options:
+    ///   none        — no network access
+    ///   public-only — public internet only (default); blocks private, loopback, link-local
+    ///   nonlocal    — public + private/LAN; blocks loopback, link-local, and metadata
+    ///   allow-all   — unrestricted access to any destination
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "POLICY")]
+    pub network_policy: Option<String>,
+
     /// Limit the number of concurrent network connections.
     #[cfg(feature = "net")]
     #[arg(long)]
@@ -144,12 +155,18 @@ pub struct SandboxOpts {
     /// Use a custom CA certificate for TLS interception (PEM file).
     #[cfg(feature = "net")]
     #[arg(long)]
-    pub tls_ca_cert: Option<PathBuf>,
+    pub tls_intercept_ca_cert: Option<PathBuf>,
 
     /// Use a custom CA private key for TLS interception (PEM file).
     #[cfg(feature = "net")]
     #[arg(long)]
-    pub tls_ca_key: Option<PathBuf>,
+    pub tls_intercept_ca_key: Option<PathBuf>,
+
+    /// Trust an additional CA certificate for upstream server verification (PEM file).
+    /// Can be specified multiple times.
+    #[cfg(feature = "net")]
+    #[arg(long)]
+    pub tls_upstream_ca_cert: Vec<PathBuf>,
 
     // --- Secrets ---
     /// Inject a secret that is only sent to an allowed host (ENV=VALUE@HOST).
@@ -192,13 +209,15 @@ impl SandboxOpts {
             || !self.dns_block_domain.is_empty()
             || !self.dns_block_suffix.is_empty()
             || self.no_dns_rebind_protection
+            || self.network_policy.is_some()
             || self.max_connections.is_some()
             || self.tls_intercept
             || !self.tls_intercept_port.is_empty()
             || !self.tls_bypass.is_empty()
             || self.no_block_quic
-            || self.tls_ca_cert.is_some()
-            || self.tls_ca_key.is_some()
+            || self.tls_intercept_ca_cert.is_some()
+            || self.tls_intercept_ca_key.is_some()
+            || !self.tls_upstream_ca_cert.is_empty()
             || !self.secret.is_empty()
             || self.on_secret_violation.is_some();
 
@@ -342,26 +361,30 @@ fn apply_network_opts(
     let has_network_config = !opts.dns_block_domain.is_empty()
         || !opts.dns_block_suffix.is_empty()
         || opts.no_dns_rebind_protection
+        || opts.network_policy.is_some()
         || opts.max_connections.is_some()
         || opts.tls_intercept
         || !opts.tls_intercept_port.is_empty()
         || !opts.tls_bypass.is_empty()
         || opts.no_block_quic
-        || opts.tls_ca_cert.is_some()
-        || opts.tls_ca_key.is_some()
+        || opts.tls_intercept_ca_cert.is_some()
+        || opts.tls_intercept_ca_key.is_some()
+        || !opts.tls_upstream_ca_cert.is_empty()
         || opts.on_secret_violation.is_some();
 
     if has_network_config {
         let dns_block_domain = opts.dns_block_domain.clone();
         let dns_block_suffix = opts.dns_block_suffix.clone();
         let no_dns_rebind = opts.no_dns_rebind_protection;
+        let network_policy = parse_network_policy(opts.network_policy.as_deref())?;
         let max_conn = opts.max_connections;
         let tls_intercept = opts.tls_intercept;
         let tls_ports = opts.tls_intercept_port.clone();
         let tls_bypass = opts.tls_bypass.clone();
         let no_block_quic = opts.no_block_quic;
-        let ca_cert = opts.tls_ca_cert.clone();
-        let ca_key = opts.tls_ca_key.clone();
+        let intercept_ca_cert = opts.tls_intercept_ca_cert.clone();
+        let intercept_ca_key = opts.tls_intercept_ca_key.clone();
+        let upstream_ca_cert = opts.tls_upstream_ca_cert.clone();
         let violation_action = parse_violation_action(&opts.on_secret_violation)?;
 
         builder = builder.network(move |mut n| {
@@ -373,6 +396,9 @@ fn apply_network_opts(
             }
             if no_dns_rebind {
                 n = n.dns_rebind_protection(false);
+            }
+            if let Some(policy) = network_policy {
+                n = n.policy(policy);
             }
             if let Some(max) = max_conn {
                 n = n.max_connections(max);
@@ -386,14 +412,16 @@ fn apply_network_opts(
                 || !tls_ports.is_empty()
                 || !tls_bypass.is_empty()
                 || no_block_quic
-                || ca_cert.is_some()
-                || ca_key.is_some();
+                || intercept_ca_cert.is_some()
+                || intercept_ca_key.is_some()
+                || !upstream_ca_cert.is_empty();
 
             if has_tls {
                 let tls_ports = tls_ports.clone();
                 let tls_bypass = tls_bypass.clone();
-                let ca_cert = ca_cert.clone();
-                let ca_key = ca_key.clone();
+                let intercept_ca_cert = intercept_ca_cert.clone();
+                let intercept_ca_key = intercept_ca_key.clone();
+                let upstream_ca_cert = upstream_ca_cert.clone();
                 n = n.tls(move |mut t| {
                     if !tls_ports.is_empty() {
                         t = t.intercepted_ports(tls_ports);
@@ -404,11 +432,14 @@ fn apply_network_opts(
                     if no_block_quic {
                         t = t.block_quic(false);
                     }
-                    if let Some(ref cert) = ca_cert {
-                        t = t.ca_cert(cert);
+                    if let Some(ref cert) = intercept_ca_cert {
+                        t = t.intercept_ca_cert(cert);
                     }
-                    if let Some(ref key) = ca_key {
-                        t = t.ca_key(key);
+                    if let Some(ref key) = intercept_ca_key {
+                        t = t.intercept_ca_key(key);
+                    }
+                    for path in &upstream_ca_cert {
+                        t = t.upstream_ca_cert(path);
                     }
                     t
                 });
@@ -434,6 +465,25 @@ pub fn parse_duration_secs(s: &str) -> anyhow::Result<u64> {
         Ok(n.trim().parse::<u64>()? * 3600)
     } else {
         Ok(s.parse::<u64>()?)
+    }
+}
+
+/// Parse a `--network-policy` value into a [`NetworkPolicy`], or `None` to leave the default.
+#[cfg(feature = "net")]
+fn parse_network_policy(
+    s: Option<&str>,
+) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
+    use microsandbox_network::policy::NetworkPolicy;
+    match s {
+        None => Ok(None),
+        Some("none") => Ok(Some(NetworkPolicy::none())),
+        Some("public-only") => Ok(Some(NetworkPolicy::public_only())),
+        Some("nonlocal") => Ok(Some(NetworkPolicy::non_local())),
+        Some("allow-all") => Ok(Some(NetworkPolicy::allow_all())),
+        Some(other) => anyhow::bail!(
+            "unknown network policy {:?}; valid values are: none, public-only, nonlocal, allow-all",
+            other
+        ),
     }
 }
 

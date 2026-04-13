@@ -11,8 +11,12 @@
 //! layer presence, redirect xattrs are written before the swap to preserve
 //! lower-child visibility at the new positions.
 
+#[cfg(target_os = "linux")]
+use std::os::fd::RawFd;
 use std::{ffi::CStr, io, sync::atomic::Ordering};
 
+#[cfg(target_os = "linux")]
+use super::types::{NameId, OverlayNode};
 use super::{
     OverlayFs, copy_up, dir_ops, inode, layer, origin,
     types::{NodeState, ROOT_INODE, RedirectState},
@@ -89,6 +93,18 @@ pub(crate) fn do_unlink(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr)
         if fd >= 0 { Some(fd) } else { None }
     };
 
+    #[cfg(target_os = "linux")]
+    let pre_unlink_fd = {
+        let fd = unsafe {
+            libc::openat(
+                upper_parent_fd,
+                name.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd >= 0 { Some(fd) } else { None }
+    };
+
     // Try to unlink from upper.
     let ret = unsafe { libc::unlinkat(upper_parent_fd, name.as_ptr(), 0) };
     if ret < 0 {
@@ -120,6 +136,33 @@ pub(crate) fn do_unlink(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr)
 
     // Remove dentry from cache.
     let name_id = fs.names.intern(name.to_bytes());
+    #[cfg(target_os = "linux")]
+    {
+        let mut removed = Vec::new();
+        let mut nodes = fs.nodes.write().unwrap();
+        let mut dentries = fs.dentries.write().unwrap();
+        dentries.remove(&(parent, name_id));
+        if let Some(node) = _target_node.as_deref() {
+            handle_removed_alias_locked(
+                &mut nodes,
+                &mut dentries,
+                node,
+                parent,
+                name_id,
+                pre_unlink_fd,
+                &mut removed,
+            );
+        } else if let Some(fd) = pre_unlink_fd {
+            close_raw_fd(fd);
+        }
+        drop(dentries);
+        drop(nodes);
+        if !removed.is_empty() {
+            inode::cleanup_dedup_maps_batch(fs, &removed);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     fs.dentries.write().unwrap().remove(&(parent, name_id));
 
     Ok(())
@@ -142,6 +185,10 @@ pub(crate) fn do_rmdir(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr) 
 
     // Resolve the target entry to check type and emptiness.
     let target = inode::do_lookup(fs, parent, name)?;
+    let _target_node = {
+        let nodes = fs.nodes.read().unwrap();
+        nodes.get(&target.inode).cloned()
+    };
     // Balance the internal lookup refcount — the FUSE kernel doesn't know about it.
     inode::forget_one(fs, target.inode, 1);
     let target_type = platform::mode_file_type(target.attr.st_mode);
@@ -163,6 +210,18 @@ pub(crate) fn do_rmdir(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr) 
 
     let needs_whiteout = whiteout::has_lower_entry(fs, parent, name.to_bytes())?;
 
+    #[cfg(target_os = "linux")]
+    let pre_rmdir_fd = {
+        let fd = unsafe {
+            libc::openat(
+                upper_parent_fd,
+                name.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if fd >= 0 { Some(fd) } else { None }
+    };
+
     // Try to remove directory from upper (may contain whiteouts/opaque markers).
     // Remove internal overlay artifacts first so the host rmdir succeeds.
     remove_upper_dir_artifacts(upper_parent_fd, name)?;
@@ -170,6 +229,10 @@ pub(crate) fn do_rmdir(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr) 
     let ret = unsafe { libc::unlinkat(upper_parent_fd, name.as_ptr(), libc::AT_REMOVEDIR) };
     if ret < 0 {
         let err = io::Error::last_os_error();
+        #[cfg(target_os = "linux")]
+        if let Some(fd) = pre_rmdir_fd {
+            close_raw_fd(fd);
+        }
         if err.raw_os_error() != Some(libc::ENOENT) || !needs_whiteout {
             return Err(platform::linux_error(err));
         }
@@ -180,6 +243,33 @@ pub(crate) fn do_rmdir(fs: &OverlayFs, _ctx: Context, parent: u64, name: &CStr) 
     }
 
     let name_id = fs.names.intern(name.to_bytes());
+    #[cfg(target_os = "linux")]
+    {
+        let mut removed = Vec::new();
+        let mut nodes = fs.nodes.write().unwrap();
+        let mut dentries = fs.dentries.write().unwrap();
+        dentries.remove(&(parent, name_id));
+        if let Some(node) = _target_node.as_deref() {
+            handle_removed_alias_locked(
+                &mut nodes,
+                &mut dentries,
+                node,
+                parent,
+                name_id,
+                pre_rmdir_fd,
+                &mut removed,
+            );
+        } else if let Some(fd) = pre_rmdir_fd {
+            close_raw_fd(fd);
+        }
+        drop(dentries);
+        drop(nodes);
+        if !removed.is_empty() {
+            inode::cleanup_dedup_maps_batch(fs, &removed);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     fs.dentries.write().unwrap().remove(&(parent, name_id));
 
     Ok(())
@@ -271,6 +361,13 @@ pub(crate) fn do_rename(
         }
     }
 
+    let dest_node = if let Ok(ref de) = dest_entry {
+        let nodes = fs.nodes.read().unwrap();
+        nodes.get(&de.inode).cloned()
+    } else {
+        None
+    };
+
     // Guard: reject rename-into-own-subtree for directories.
     // The host renameat catches this for pure-upper dirs, but redirect-based
     // renames (lower/merged) never ask the host to move the subtree, so the
@@ -343,6 +440,22 @@ pub(crate) fn do_rename(
         libc::close(fd);
     });
 
+    #[cfg(target_os = "linux")]
+    let replaced_fd = {
+        let fd = unsafe {
+            libc::openat(
+                new_parent_fd,
+                newname.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        scopeguard::guard(fd, |fd| {
+            if fd >= 0 {
+                close_raw_fd(fd);
+            }
+        })
+    };
+
     // Remove whiteout at destination.
     whiteout::remove_whiteout(new_parent_fd, newname.to_bytes())?;
 
@@ -385,6 +498,14 @@ pub(crate) fn do_rename(
         newdir,
         newname,
         source_node.as_deref(),
+        dest_node.as_deref(),
+        #[cfg(target_os = "linux")]
+        {
+            let fd = scopeguard::ScopeGuard::into_inner(replaced_fd);
+            if fd >= 0 { Some(fd) } else { None }
+        },
+        #[cfg(target_os = "macos")]
+        None,
     );
 
     Ok(())
@@ -509,47 +630,112 @@ fn do_rename_exchange(
     let oldname_id = fs.names.intern(oldname.to_bytes());
     let newname_id = fs.names.intern(newname.to_bytes());
 
-    // Update in-memory state: opaque flags, redirects, primary_parent/name (single lock).
+    #[cfg(target_os = "linux")]
     {
-        let nodes = fs.nodes.read().unwrap();
-        if let Some(src_node) = nodes.get(&source_entry.inode) {
-            if src_is_dir && new_has_lower && src_redirect.is_none() {
-                src_node.opaque.store(true, Ordering::Release);
-            }
-            if let Some(redirect_path) = src_redirect {
-                *src_node.redirect.write().unwrap() = Some(RedirectState {
-                    lower_path: redirect_path,
-                });
-            }
-            src_node.primary_parent.store(newdir, Ordering::Release);
-            *src_node.primary_name.write().unwrap() = newname_id;
-        }
-        if let Some(dst_node) = nodes.get(&dest_entry.inode) {
-            if dst_is_dir && old_has_lower && dst_redirect.is_none() {
-                dst_node.opaque.store(true, Ordering::Release);
-            }
-            if let Some(redirect_path) = dst_redirect {
-                *dst_node.redirect.write().unwrap() = Some(RedirectState {
-                    lower_path: redirect_path,
-                });
-            }
-            dst_node.primary_parent.store(olddir, Ordering::Release);
-            *dst_node.primary_name.write().unwrap() = oldname_id;
-        }
-    }
-
-    // Swap dentry cache entries.
-    {
+        let mut removed = Vec::new();
+        let mut nodes = fs.nodes.write().unwrap();
         let mut dentries = fs.dentries.write().unwrap();
         let old_key = (olddir, oldname_id);
         let new_key = (newdir, newname_id);
         let old_val = dentries.remove(&old_key);
         let new_val = dentries.remove(&new_key);
+
+        if let Some(src_node) = nodes.get(&source_entry.inode).cloned() {
+            if src_is_dir && new_has_lower && src_redirect.is_none() {
+                src_node.opaque.store(true, Ordering::Release);
+            }
+            if let Some(ref redirect_path) = src_redirect {
+                *src_node.redirect.write().unwrap() = Some(RedirectState {
+                    lower_path: redirect_path.clone(),
+                });
+            }
+            inode::move_primary_link_locked(
+                &mut nodes,
+                &mut dentries,
+                &src_node,
+                newdir,
+                newname_id,
+                &mut removed,
+            );
+        }
+
+        if let Some(dst_node) = nodes.get(&dest_entry.inode).cloned() {
+            if dst_is_dir && old_has_lower && dst_redirect.is_none() {
+                dst_node.opaque.store(true, Ordering::Release);
+            }
+            if let Some(ref redirect_path) = dst_redirect {
+                *dst_node.redirect.write().unwrap() = Some(RedirectState {
+                    lower_path: redirect_path.clone(),
+                });
+            }
+            inode::move_primary_link_locked(
+                &mut nodes,
+                &mut dentries,
+                &dst_node,
+                olddir,
+                oldname_id,
+                &mut removed,
+            );
+        }
+
         if let Some(v) = old_val {
             dentries.insert(new_key, v);
         }
         if let Some(v) = new_val {
             dentries.insert(old_key, v);
+        }
+
+        drop(dentries);
+        drop(nodes);
+        if !removed.is_empty() {
+            inode::cleanup_dedup_maps_batch(fs, &removed);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // Update in-memory state: opaque flags, redirects, primary_parent/name.
+        {
+            let nodes = fs.nodes.read().unwrap();
+            if let Some(src_node) = nodes.get(&source_entry.inode) {
+                if src_is_dir && new_has_lower && src_redirect.is_none() {
+                    src_node.opaque.store(true, Ordering::Release);
+                }
+                if let Some(redirect_path) = src_redirect {
+                    *src_node.redirect.write().unwrap() = Some(RedirectState {
+                        lower_path: redirect_path,
+                    });
+                }
+                src_node.primary_parent.store(newdir, Ordering::Release);
+                *src_node.primary_name.write().unwrap() = newname_id;
+            }
+            if let Some(dst_node) = nodes.get(&dest_entry.inode) {
+                if dst_is_dir && old_has_lower && dst_redirect.is_none() {
+                    dst_node.opaque.store(true, Ordering::Release);
+                }
+                if let Some(redirect_path) = dst_redirect {
+                    *dst_node.redirect.write().unwrap() = Some(RedirectState {
+                        lower_path: redirect_path,
+                    });
+                }
+                dst_node.primary_parent.store(olddir, Ordering::Release);
+                *dst_node.primary_name.write().unwrap() = oldname_id;
+            }
+        }
+
+        // Swap dentry cache entries.
+        {
+            let mut dentries = fs.dentries.write().unwrap();
+            let old_key = (olddir, oldname_id);
+            let new_key = (newdir, newname_id);
+            let old_val = dentries.remove(&old_key);
+            let new_val = dentries.remove(&new_key);
+            if let Some(v) = old_val {
+                dentries.insert(new_key, v);
+            }
+            if let Some(v) = new_val {
+                dentries.insert(old_key, v);
+            }
         }
     }
 
@@ -684,7 +870,16 @@ fn rename_lower_directory(
     whiteout::create_whiteout(old_parent_fd, oldname.to_bytes())?;
 
     // Update dentry cache.
-    update_dentry_cache(fs, olddir, oldname_id, newdir, newname, Some(&**node));
+    update_dentry_cache(
+        fs,
+        olddir,
+        oldname_id,
+        newdir,
+        newname,
+        Some(&**node),
+        None,
+        None,
+    );
 
     Ok(())
 }
@@ -754,7 +949,16 @@ fn rename_merged_directory(
     }
 
     // Update dentry cache.
-    update_dentry_cache(fs, olddir, oldname_id, newdir, newname, Some(&**node));
+    update_dentry_cache(
+        fs,
+        olddir,
+        oldname_id,
+        newdir,
+        newname,
+        Some(&**node),
+        None,
+        None,
+    );
 
     Ok(())
 }
@@ -762,6 +966,67 @@ fn rename_merged_directory(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+fn close_raw_fd(fd: RawFd) {
+    unsafe { libc::close(fd) };
+}
+
+#[cfg(target_os = "linux")]
+fn is_upper_node(node: &OverlayNode) -> bool {
+    matches!(&*node.state.read().unwrap(), NodeState::Upper { .. })
+}
+
+#[cfg(target_os = "linux")]
+fn is_primary_alias(node: &OverlayNode, parent: u64, name_id: NameId) -> bool {
+    node.primary_parent.load(Ordering::Acquire) == parent
+        && *node.primary_name.read().unwrap() == name_id
+}
+
+#[cfg(target_os = "linux")]
+fn find_cached_alias_locked(
+    dentries: &std::collections::BTreeMap<(u64, NameId), super::types::Dentry>,
+    inode: u64,
+) -> Option<(u64, NameId)> {
+    dentries.iter().find_map(|(&(parent, name_id), dentry)| {
+        (dentry.node == inode).then_some((parent, name_id))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn handle_removed_alias_locked(
+    nodes: &mut std::collections::BTreeMap<u64, std::sync::Arc<OverlayNode>>,
+    dentries: &mut std::collections::BTreeMap<(u64, NameId), super::types::Dentry>,
+    node: &OverlayNode,
+    parent: u64,
+    name_id: NameId,
+    retained_fd: Option<RawFd>,
+    removed: &mut Vec<(u64, Option<origin::LowerOriginId>)>,
+) {
+    if !is_primary_alias(node, parent, name_id) {
+        if let Some(fd) = retained_fd {
+            close_raw_fd(fd);
+        }
+        return;
+    }
+
+    if let Some((alias_parent, alias_name)) = find_cached_alias_locked(dentries, node.inode) {
+        inode::move_primary_link_locked(nodes, dentries, node, alias_parent, alias_name, removed);
+        if let Some(fd) = retained_fd {
+            close_raw_fd(fd);
+        }
+        return;
+    }
+
+    if is_upper_node(node) {
+        if let Some(fd) = retained_fd {
+            inode::store_unlinked_upper_fd(node, fd);
+        }
+        inode::detach_primary_link_locked(nodes, dentries, node, removed);
+    } else if let Some(fd) = retained_fd {
+        close_raw_fd(fd);
+    }
+}
 
 /// Compute the redirect lower path for a directory being renamed.
 ///
@@ -892,6 +1157,7 @@ fn do_renameat(
 }
 
 /// Update the dentry cache after a rename operation.
+#[allow(clippy::too_many_arguments)]
 fn update_dentry_cache(
     fs: &OverlayFs,
     olddir: u64,
@@ -899,23 +1165,82 @@ fn update_dentry_cache(
     newdir: u64,
     newname: &CStr,
     source_node: Option<&super::types::OverlayNode>,
+    _replaced_node: Option<&super::types::OverlayNode>,
+    replaced_fd: Option<i32>,
 ) {
     let newname_id = fs.names.intern(newname.to_bytes());
-    let mut dentries = fs.dentries.write().unwrap();
 
-    // Remove old dentry.
-    if let Some(dentry) = dentries.remove(&(olddir, oldname_id)) {
-        // Update primary parent/name on the node.
+    #[cfg(target_os = "linux")]
+    {
+        let mut removed = Vec::new();
+        let mut nodes = fs.nodes.write().unwrap();
+        let mut dentries = fs.dentries.write().unwrap();
+        let old_key = (olddir, oldname_id);
+        let new_key = (newdir, newname_id);
+        let old_dentry = dentries.remove(&old_key);
+        let new_dentry = dentries.remove(&new_key);
+
         if let Some(node) = source_node {
-            node.primary_parent.store(newdir, Ordering::Release);
-            *node.primary_name.write().unwrap() = newname_id;
+            inode::move_primary_link_locked(
+                &mut nodes,
+                &mut dentries,
+                node,
+                newdir,
+                newname_id,
+                &mut removed,
+            );
         }
 
-        // Insert new dentry.
-        dentries.insert(
-            (newdir, newname_id),
-            super::types::Dentry { node: dentry.node },
-        );
+        if let Some(node) = _replaced_node
+            && source_node.map(|src| src.inode) != Some(node.inode)
+            && new_dentry.is_some()
+        {
+            handle_removed_alias_locked(
+                &mut nodes,
+                &mut dentries,
+                node,
+                newdir,
+                newname_id,
+                replaced_fd,
+                &mut removed,
+            );
+        } else if let Some(fd) = replaced_fd {
+            close_raw_fd(fd);
+        }
+
+        if let Some(dentry) = old_dentry {
+            dentries.insert(new_key, super::types::Dentry { node: dentry.node });
+        }
+
+        drop(dentries);
+        drop(nodes);
+        if !removed.is_empty() {
+            inode::cleanup_dedup_maps_batch(fs, &removed);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(fd) = replaced_fd {
+            unsafe { libc::close(fd) };
+        }
+
+        let mut dentries = fs.dentries.write().unwrap();
+
+        // Remove old dentry.
+        if let Some(dentry) = dentries.remove(&(olddir, oldname_id)) {
+            // Update primary parent/name on the node.
+            if let Some(node) = source_node {
+                node.primary_parent.store(newdir, Ordering::Release);
+                *node.primary_name.write().unwrap() = newname_id;
+            }
+
+            // Insert new dentry.
+            dentries.insert(
+                (newdir, newname_id),
+                super::types::Dentry { node: dentry.node },
+            );
+        }
     }
 }
 

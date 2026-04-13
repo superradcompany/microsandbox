@@ -2,6 +2,62 @@
 LIBKRUNFW_ABI := "5"
 LIBKRUNFW_VERSION := "5.2.1"
 
+# Set up the development environment, build, and install. Prerequisites: just, git (+ Docker on macOS).
+setup: _install-dev-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "==> Initializing submodules..."
+    git submodule update --init --recursive
+
+    echo "==> Building dependencies..."
+    just build-deps
+
+    echo "==> Building microsandbox..."
+    just build
+
+    echo "==> Installing..."
+    just install
+
+    echo "==> Setting up pre-commit hooks..."
+    command -v pre-commit &>/dev/null || { echo "error: pre-commit not found."; exit 1; }
+    pre-commit install
+
+    echo ""
+    echo "Setup complete!"
+
+[linux]
+_install-dev-deps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "==> Installing system dependencies..."
+    sudo apt install build-essential musl-tools flex bison libelf-dev \
+        python3-pyelftools pkg-config libdbus-1-dev libcap-ng-dev pre-commit
+
+    echo "==> Checking Rust toolchain..."
+    if ! command -v rustup &>/dev/null; then
+        echo "    Rust not found. Installing via rustup..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+        source "$HOME/.cargo/env"
+    fi
+
+[macos]
+_install-dev-deps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "==> Checking prerequisites..."
+    command -v docker &>/dev/null || { echo "error: Docker is required on macOS. Install Docker Desktop."; exit 1; }
+    xcode-select -p &>/dev/null || { echo "==> Installing Xcode Command Line Tools..."; xcode-select --install; }
+
+    echo "==> Checking Rust toolchain..."
+    if ! command -v rustup &>/dev/null; then
+        echo "    Rust not found. Installing via rustup..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+        source "$HOME/.cargo/env"
+    fi
+
 # Build all binary dependencies (agentd + libkrunfw).
 build-deps: build-agentd build-libkrunfw
 
@@ -180,3 +236,7 @@ uninstall:
 clean:
     rm -rf build
     cd vendor/libkrunfw && make clean || true
+
+# Run the filesystem benchmark harness with the default image and settings.
+bench-fs:
+    cd benchmarks && uv run bench_fs.py

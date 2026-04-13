@@ -269,10 +269,18 @@ fn test_init_setxattr_rejected() {
 }
 
 #[test]
-fn test_init_listxattr_enodata() {
+fn test_init_listxattr_empty() {
     let sb = TestSandbox::new();
-    let result = sb.fs.listxattr(sb.ctx(), INIT_INODE, 0);
-    TestSandbox::assert_errno(result, LINUX_ENODATA);
+
+    match sb.fs.listxattr(sb.ctx(), INIT_INODE, 0).unwrap() {
+        ListxattrReply::Count(count) => assert_eq!(count, 0),
+        ListxattrReply::Names(_) => panic!("expected Count for size=0 query"),
+    }
+
+    match sb.fs.listxattr(sb.ctx(), INIT_INODE, 256).unwrap() {
+        ListxattrReply::Names(names) => assert!(names.is_empty()),
+        ListxattrReply::Count(_) => panic!("expected Names for non-zero size query"),
+    }
 }
 
 #[test]

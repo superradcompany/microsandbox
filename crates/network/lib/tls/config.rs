@@ -36,9 +36,14 @@ pub struct TlsConfig {
     #[serde(default = "default_true")]
     pub block_quic_on_intercept: bool,
 
-    /// Certificate authority configuration.
+    /// CA certificate PEM files to trust for upstream server verification.
     #[serde(default)]
-    pub ca: CaConfig,
+    pub upstream_ca_cert: Vec<PathBuf>,
+
+    /// Interception CA configuration. The TLS proxy uses this CA to sign
+    /// per-domain certs that it presents to the guest during interception.
+    #[serde(default, alias = "ca")]
+    pub intercept_ca: InterceptCaConfig,
 
     /// Per-domain certificate cache configuration.
     #[serde(default)]
@@ -47,7 +52,7 @@ pub struct TlsConfig {
 
 /// Certificate authority configuration for TLS interception.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CaConfig {
+pub struct InterceptCaConfig {
     /// Path to an existing CA certificate PEM file.
     /// If `None`, a CA is auto-generated and persisted.
     #[serde(default)]
@@ -83,7 +88,8 @@ impl Default for TlsConfig {
             bypass: Vec::new(),
             verify_upstream: true,
             block_quic_on_intercept: true,
-            ca: CaConfig::default(),
+            upstream_ca_cert: Vec::new(),
+            intercept_ca: InterceptCaConfig::default(),
             cache: CertCacheConfig::default(),
         }
     }

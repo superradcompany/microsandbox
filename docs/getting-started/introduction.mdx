@@ -51,6 +51,15 @@ const sb = await Sandbox.create({
   microsandbox spins up lightweight VMs in **under a second**, right from your code on your machine. **No servers, no daemons**, no infrastructure to manage.
 </Callout>
 
+## The basics
+
+- **Under 100ms boot.** Sandboxes share the same kernel in memory. No QEMU, no disk images to load.
+- **No daemon.** The runtime spawns directly as a child process of whatever application creates the sandbox. No root process, no socket, no background service.
+- **Any OCI image.** Docker Hub, GHCR, ECR, GCR, or any OCI-compatible registry. Shared layers are deduplicated and only stored once.
+- **Cross-platform.** Native on macOS (Apple Silicon) and Linux (KVM). Same CLI, same SDKs.
+- **Multi-language SDKs.** Rust, TypeScript, and Python, all with consistent APIs.
+- **Programmable.** Network policies, filesystem hooks, secret bindings, and TLS interception are all configured from the host side through the SDK.
+
 ## What makes it different
 
 ### Secrets that can't leak
@@ -184,11 +193,11 @@ const workers = await Promise.all(
 
 </CodeGroup>
 
-### Spawn sandboxes from sandboxes
+### Spawn sandboxes from sandboxes <sup><sup>coming soon</sup></sup>
 
 Code running inside a sandbox can spawn peer sandboxes alongside itself. This is designed for multi-agent systems where agents need to create sub-environments. Peer sandboxes inherit nothing by default (their own network, filesystem, secrets), and the orchestrator coordinates via the SDK, not shared state. If the code isn't running inside a microsandbox, the spawn call fails safely.
 
-### Composable plugin system
+### Composable plugin system <sup><sup>coming soon</sup></sup>
 
 Extend microsandbox with in-process Rust plugins or out-of-process plugins in any language. Plugins hook into lifecycle events, exec calls, filesystem operations, or network traffic. They compose naturally, so you can stack an audit logger, a rate limiter, and a network monitor without them knowing about each other.
 
@@ -226,19 +235,10 @@ await sb.emit("task.start", { inputFile: "/data/input.txt", options: ["--verbose
 
 </CodeGroup>
 
-## The basics
-
-- **Under 100ms boot.** Sandboxes share the same kernel in memory. No QEMU, no disk images to load.
-- **No daemon.** The runtime spawns directly as a child process of whatever application creates the sandbox. No root process, no socket, no background service.
-- **Any OCI image.** Docker Hub, GHCR, ECR, GCR, or any OCI-compatible registry. Shared layers are deduplicated and only stored once.
-- **Cross-platform.** Native on macOS (Apple Silicon) and Linux (KVM). Same CLI, same SDKs.
-- **Multi-language SDKs.** Rust, TypeScript, and Python, all with consistent APIs.
-- **Programmable.** Network policies, filesystem hooks, secret bindings, and TLS interception are all configured from the host side through the SDK.
-
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Quickstart" icon="bolt" href="/quickstart">
+  <Card title="Quickstart" icon="bolt" href="/getting-started/quickstart">
     Get a sandbox running in under 5 minutes
   </Card>
 

@@ -4,7 +4,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use microsandbox_cli::{
     commands::{
         create, exec, image, inspect, install, list, metrics, ps, pull, registry, remove, run,
-        self_cmd, shell, start, stop, uninstall, volume,
+        self_cmd, start, stop, uninstall, volume,
     },
     log_args::{self, LogArgs},
     sandbox_cmd::{self, SandboxArgs},
@@ -70,9 +70,6 @@ enum Commands {
 
     /// Run a command in a running sandbox.
     Exec(exec::ExecArgs),
-
-    /// Open a shell in a running sandbox.
-    Shell(shell::ShellArgs),
 
     /// Manage OCI images.
     Image(image::ImageArgs),
@@ -187,7 +184,6 @@ fn run_async_command(
             Commands::Metrics(args) => metrics::run(args).await.map_err(Into::into),
             Commands::Remove(args) => remove::run(args).await.map_err(Into::into),
             Commands::Exec(args) => exec::run(args).await.map_err(Into::into),
-            Commands::Shell(args) => shell::run(args).await.map_err(Into::into),
             Commands::Image(args) => image::run(args).await.map_err(Into::into),
             Commands::Pull(args) => image::run_pull(args).await.map_err(Into::into),
             Commands::Registry(args) => registry::run(args).await.map_err(Into::into),

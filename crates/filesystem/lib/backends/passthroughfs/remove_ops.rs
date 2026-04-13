@@ -7,14 +7,20 @@
 use std::{ffi::CStr, io};
 
 use super::{PassthroughFs, inode};
+#[cfg(target_os = "linux")]
+use crate::backends::shared::inode_table::NamespaceAlias;
 use crate::{
     Context,
-    backends::shared::{init_binary, name_validation, platform},
+    backends::shared::{name_validation, platform},
 };
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Linux `RENAME_EXCHANGE` flag: atomically swap source and destination.
+#[cfg(target_os = "linux")]
+const RENAME_EXCHANGE: u32 = 2;
 
 /// Remove a file.
 ///
@@ -30,11 +36,35 @@ pub(crate) fn do_unlink(
     name_validation::validate_name(name)?;
 
     // Protect init.krun from deletion.
-    if init_binary::is_init_name(name.to_bytes()) {
+    if fs.is_reserved_init_name(parent, name.to_bytes()) {
         return Err(platform::eacces());
     }
 
     let parent_fd = inode::get_inode_fd(fs, parent)?;
+
+    #[cfg(target_os = "linux")]
+    let pre_unlink_fd = {
+        let fd = unsafe {
+            libc::openat(
+                parent_fd.raw(),
+                name.as_ptr(),
+                libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd >= 0 { Some(fd) } else { None }
+    };
+
+    #[cfg(target_os = "linux")]
+    let pre_unlink_key = match pre_unlink_fd {
+        Some(fd) => match inode::linux_alt_key_from_fd(fd) {
+            Ok(key) => Some(key),
+            Err(err) => {
+                unsafe { libc::close(fd) };
+                return Err(err);
+            }
+        },
+        None => None,
+    };
 
     // On macOS, grab an fd before unlink to keep the file data alive.
     #[cfg(target_os = "macos")]
@@ -51,11 +81,35 @@ pub(crate) fn do_unlink(
 
     let ret = unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
     if ret < 0 {
+        #[cfg(target_os = "linux")]
+        if let Some(fd) = pre_unlink_fd {
+            unsafe { libc::close(fd) };
+        }
         #[cfg(target_os = "macos")]
         if let Some(fd) = pre_unlink_fd {
             unsafe { libc::close(fd) };
         }
         return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+
+    #[cfg(target_os = "linux")]
+    if let Some(fd) = pre_unlink_fd {
+        let alias = NamespaceAlias::new(parent, name.to_bytes());
+        if let Some(alt_key) = pre_unlink_key {
+            let mut inodes = fs.inodes.write().unwrap();
+            if let Some(data) = inodes.get_alt(&alt_key).cloned() {
+                let detached = inode::remove_alias_locked(&mut inodes, &data, &alias);
+                if detached {
+                    inode::store_unlinked_fd(&data, fd);
+                } else {
+                    unsafe { libc::close(fd) };
+                }
+            } else {
+                unsafe { libc::close(fd) };
+            }
+        } else {
+            unsafe { libc::close(fd) };
+        }
     }
 
     // Store the fd in InodeData so open_inode_fd can use it.
@@ -92,14 +146,63 @@ pub(crate) fn do_rmdir(
 ) -> io::Result<()> {
     name_validation::validate_name(name)?;
 
-    if init_binary::is_init_name(name.to_bytes()) {
+    if fs.is_reserved_init_name(parent, name.to_bytes()) {
         return Err(platform::eacces());
     }
 
     let parent_fd = inode::get_inode_fd(fs, parent)?;
+
+    #[cfg(target_os = "linux")]
+    let pre_rmdir_fd = {
+        let fd = unsafe {
+            libc::openat(
+                parent_fd.raw(),
+                name.as_ptr(),
+                libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY,
+            )
+        };
+        if fd >= 0 { Some(fd) } else { None }
+    };
+
+    #[cfg(target_os = "linux")]
+    let pre_rmdir_key = match pre_rmdir_fd {
+        Some(fd) => match inode::linux_alt_key_from_fd(fd) {
+            Ok(key) => Some(key),
+            Err(err) => {
+                unsafe { libc::close(fd) };
+                return Err(err);
+            }
+        },
+        None => None,
+    };
+
     let ret = unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), libc::AT_REMOVEDIR) };
     if ret < 0 {
+        #[cfg(target_os = "linux")]
+        if let Some(fd) = pre_rmdir_fd {
+            unsafe { libc::close(fd) };
+        }
         return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+
+    #[cfg(target_os = "linux")]
+    if let Some(fd) = pre_rmdir_fd {
+        let alias = NamespaceAlias::new(parent, name.to_bytes());
+        if let Some(alt_key) = pre_rmdir_key {
+            let mut inodes = fs.inodes.write().unwrap();
+            if let Some(data) = inodes.get_alt(&alt_key).cloned() {
+                let detached = inode::remove_alias_locked(&mut inodes, &data, &alias);
+                if detached {
+                    inode::store_unlinked_fd(&data, fd);
+                } else {
+                    unsafe { libc::close(fd) };
+                }
+            } else {
+                unsafe { libc::close(fd) };
+            }
+        } else {
+            unsafe { libc::close(fd) };
+        }
     }
     Ok(())
 }
@@ -118,8 +221,8 @@ pub(crate) fn do_rename(
     name_validation::validate_name(newname)?;
 
     // Protect init.krun from being renamed or overwritten.
-    if init_binary::is_init_name(oldname.to_bytes())
-        || init_binary::is_init_name(newname.to_bytes())
+    if fs.is_reserved_init_name(olddir, oldname.to_bytes())
+        || fs.is_reserved_init_name(newdir, newname.to_bytes())
     {
         return Err(platform::eacces());
     }
@@ -129,6 +232,47 @@ pub(crate) fn do_rename(
 
     #[cfg(target_os = "linux")]
     {
+        let source_probe_fd = unsafe {
+            libc::openat(
+                old_fd.raw(),
+                oldname.as_ptr(),
+                libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if source_probe_fd < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
+        }
+        let source_key = match inode::linux_alt_key_from_fd(source_probe_fd) {
+            Ok(key) => key,
+            Err(err) => {
+                unsafe { libc::close(source_probe_fd) };
+                return Err(err);
+            }
+        };
+        unsafe { libc::close(source_probe_fd) };
+
+        let target_probe_fd = unsafe {
+            libc::openat(
+                new_fd.raw(),
+                newname.as_ptr(),
+                libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        let target_probe = if target_probe_fd >= 0 {
+            let target_key = match inode::linux_alt_key_from_fd(target_probe_fd) {
+                Ok(key) => key,
+                Err(err) => {
+                    unsafe { libc::close(target_probe_fd) };
+                    return Err(err);
+                }
+            };
+            Some((target_probe_fd, target_key))
+        } else if io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+            None
+        } else {
+            return Err(platform::linux_error(io::Error::last_os_error()));
+        };
+
         let ret = unsafe {
             libc::syscall(
                 libc::SYS_renameat2,
@@ -140,7 +284,60 @@ pub(crate) fn do_rename(
             )
         };
         if ret < 0 {
+            if let Some((fd, _)) = target_probe {
+                unsafe { libc::close(fd) };
+            }
             return Err(platform::linux_error(io::Error::last_os_error()));
+        }
+
+        let old_alias = NamespaceAlias::new(olddir, oldname.to_bytes());
+        let new_alias = NamespaceAlias::new(newdir, newname.to_bytes());
+        let mut inodes = fs.inodes.write().unwrap();
+        let source_data = inodes.get_alt(&source_key).cloned();
+
+        if flags & RENAME_EXCHANGE != 0 {
+            if let Some((fd, target_key)) = target_probe.as_ref()
+                && *target_key == source_key
+            {
+                unsafe { libc::close(*fd) };
+                return Ok(());
+            }
+
+            if let Some(source) = source_data.as_ref() {
+                let _ = inode::remove_alias_locked(&mut inodes, source, &old_alias);
+                inode::register_alias_locked(&mut inodes, source, new_alias.clone());
+            }
+
+            if let Some((fd, target_key)) = target_probe {
+                if let Some(target) = inodes.get_alt(&target_key).cloned() {
+                    let _ = inode::remove_alias_locked(&mut inodes, &target, &new_alias);
+                    inode::register_alias_locked(&mut inodes, &target, old_alias);
+                }
+                unsafe { libc::close(fd) };
+            }
+        } else {
+            if let Some(source) = source_data.as_ref() {
+                let _ = inode::remove_alias_locked(&mut inodes, source, &old_alias);
+                inode::register_alias_locked(&mut inodes, source, new_alias.clone());
+            }
+
+            if let Some((fd, target_key)) = target_probe {
+                let source_inode = source_data.as_ref().map(|data| data.inode);
+                if let Some(target) = inodes.get_alt(&target_key).cloned() {
+                    if Some(target.inode) != source_inode {
+                        let detached = inode::remove_alias_locked(&mut inodes, &target, &new_alias);
+                        if detached {
+                            inode::store_unlinked_fd(&target, fd);
+                        } else {
+                            unsafe { libc::close(fd) };
+                        }
+                    } else {
+                        unsafe { libc::close(fd) };
+                    }
+                } else {
+                    unsafe { libc::close(fd) };
+                }
+            }
         }
     }
 

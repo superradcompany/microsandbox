@@ -22,7 +22,6 @@ pub mod registry;
 pub mod remove;
 pub mod run;
 pub mod self_cmd;
-pub mod shell;
 pub mod start;
 pub mod stop;
 pub mod uninstall;

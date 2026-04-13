@@ -1,0 +1,48 @@
+---
+title: TLS Interception
+description: HTTPS inspection and certificate management
+icon: "lock"
+---
+
+## TLS interception
+
+Enable HTTPS traffic inspection with an auto-generated CA certificate. microsandbox generates a per-sandbox CA during creation, installs it in the guest's trust store, and generates per-domain certificates on first connection. Domains that use certificate pinning (or that you don't want to intercept) can be bypassed.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("agent")
+    .image("python")
+    .network(|n| n
+        .tls(|t| t
+            .bypass("pinned-api.example.com")
+            .bypass("*.gov")
+        )
+    )
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from 'microsandbox'
+
+const sb = await Sandbox.create({
+    name: "agent",
+    image: "python",
+    network: {
+        tls: {
+            bypass: ["pinned-api.example.com", "*.gov"],
+        },
+    },
+})
+```
+
+```bash CLI
+msb create python --name agent \
+  --tls-intercept \
+  --tls-bypass "pinned-api.example.com" \
+  --tls-bypass "*.gov"
+```
+
+</CodeGroup>

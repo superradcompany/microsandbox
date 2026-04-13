@@ -1,37 +1,25 @@
 ---
 title: Networking
-description: Network policies, secrets, and TLS interception
+description: Control network access and isolation
 icon: "network-wired"
 ---
 
-All sandbox network traffic passes through a host-controlled networking stack where policies are enforced at the packet level. There's no underlying host network to bypass. See [Networking concepts](/sandboxes/networking) for more on how this works.
+All network traffic from a sandbox flows through a host-controlled networking stack. From inside, the sandbox sees a normal network interface, but on the host side every packet is subject to policy before it goes anywhere.
 
-## Preset policies
+The sandbox's only path to the outside world is through this stack, so blocked traffic never leaves the VM.
 
-`public_only` is the default. It blocks private address ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`) while allowing public internet access.
+## Network presets
+
+The simplest way to configure networking. `public_only` is the default.
 
 <CodeGroup>
 ```rust Rust
-use microsandbox::{Sandbox, NetworkPolicy};
+use microsandbox::NetworkPolicy;
 
-// No network access
-let sb1 = Sandbox::builder("isolated")
-    .image("python")
-    .disable_network()
-    .create()
-    .await?;
-
-// Public internet only (default)
-let sb2 = Sandbox::builder("web-agent")
+// Public internet only
+let sb = Sandbox::builder("web-agent")
     .image("python")
     .network(|n| n.policy(NetworkPolicy::public_only()))
-    .create()
-    .await?;
-
-// Unrestricted access
-let sb3 = Sandbox::builder("dev")
-    .image("python")
-    .network(|n| n.policy(NetworkPolicy::allow_all()))
     .create()
     .await?;
 ```
@@ -46,7 +34,7 @@ const sb1 = await Sandbox.create({
     network: NetworkPolicy.none(),
 })
 
-// Public internet only (default)
+// Public internet only (default, blocks private ranges)
 const sb2 = await Sandbox.create({
     name: "web-agent",
     image: "python",
@@ -61,6 +49,17 @@ const sb3 = await Sandbox.create({
 })
 ```
 
+```bash CLI
+# No network access
+msb create python --name isolated --no-network
+
+# Public internet only (default)
+msb create python --name web-agent
+
+# With TLS interception
+msb create python --name agent --tls-intercept
+```
+
 </CodeGroup>
 
 ## Custom policies
@@ -70,7 +69,10 @@ Build a policy with explicit egress and ingress rules. Rules are evaluated first
 <CodeGroup>
 ```rust Rust
 use microsandbox::Sandbox;
-use microsandbox_network::policy::*;
+use microsandbox::NetworkPolicy;
+use microsandbox_network::policy::{
+    Action, Destination, DestinationGroup, Direction, PortRange, Protocol, Rule,
+};
 
 let policy = NetworkPolicy {
     default_action: Action::Deny,
@@ -125,12 +127,10 @@ const sb = await Sandbox.create({
 
 Expose ports from the sandbox to the host so services running inside the VM are accessible from your machine.
 
-For Rust, `SandboxBuilder::port()` and `port_udp()` are top-level shorthands that compose with `.network(...)` when you also need policy, DNS, or TLS settings.
+In Rust, `SandboxBuilder::port()` and `port_udp()` are top-level shorthands, so you can publish ports without nesting everything inside `.network(...)`.
 
 <CodeGroup>
 ```rust Rust
-use microsandbox::{Sandbox, NetworkPolicy};
-
 let sb = Sandbox::builder("api")
     .image("python")
     .port(8080, 80)
@@ -141,8 +141,6 @@ let sb = Sandbox::builder("api")
 ```
 
 ```typescript TypeScript
-import { NetworkPolicy, Sandbox } from 'microsandbox'
-
 const sb = await Sandbox.create({
     name: "api",
     image: "python",
@@ -151,16 +149,22 @@ const sb = await Sandbox.create({
 })
 ```
 
+```bash CLI
+msb create python --name api -p 8080:80
+```
+
 </CodeGroup>
 
 ## DNS interception
 
-All DNS queries are intercepted and resolved on the host side. This enables domain blocking, suffix blocking, and rebinding protection.
+DNS queries from the guest are intercepted and resolved on the host side, which opens up a few useful controls:
+
+- **Domain blocking** by exact match or suffix (e.g. `*.tracking.com`).
+- **Rebinding protection**: if a DNS response resolves to a private IP (`10.x`, `172.16.x`, `192.168.x`, `127.x`, link-local), the query is blocked. This prevents the trick where an attacker registers a public domain that points to an internal service.
+- **DNS-to-IP binding**: when secrets are configured, domains can be pinned to the IPs they resolved to, preventing TOCTOU attacks where DNS changes between the policy check and the actual connection.
 
 <CodeGroup>
 ```rust Rust
-use microsandbox::{Sandbox, NetworkPolicy};
-
 let sb = Sandbox::builder("safe-agent")
     .image("python")
     .network(|n| n
@@ -173,8 +177,6 @@ let sb = Sandbox::builder("safe-agent")
 ```
 
 ```typescript TypeScript
-import { NetworkPolicy, Sandbox } from 'microsandbox'
-
 const sb = await Sandbox.create({
     name: "safe-agent",
     image: "python",
@@ -186,90 +188,22 @@ const sb = await Sandbox.create({
 })
 ```
 
-</CodeGroup>
-
-## Secrets
-
-Secrets use a **placeholder substitution** model. The guest VM never sees the real credential.
-
-When you bind a secret to an environment variable and one or more allowed hosts, microsandbox generates a random placeholder (e.g., `OPENAI_API_KEY=msb_ph_a8f3c2...`) and injects that into the guest instead. The real value never enters the VM. The only way it reaches the outside world is when a request goes to an allowed host, at which point microsandbox swaps the placeholder for the real value. Everywhere else, the placeholder is just a meaningless string.
-
-So even with full code execution inside the sandbox, there's nothing to steal. The credential was never there.
-
-<CodeGroup>
-```rust Rust
-use microsandbox::Sandbox;
-
-let sb = Sandbox::builder("agent")
-    .image("python")
-    .secret(|s| s
-        .env("GITHUB_TOKEN")
-        .value(std::env::var("GITHUB_TOKEN")?)
-        .allow_host("api.github.com")
-        .allow_host_pattern("*.githubusercontent.com")
-    )
-    .secret_env("OPENAI_API_KEY", api_key, "api.openai.com")
-    .create()
-    .await?;
-```
-
-```typescript TypeScript
-import { Sandbox, Secret } from 'microsandbox'
-
-const sb = await Sandbox.create({
-    name: "agent",
-    image: "python",
-    secrets: [
-        Secret.env("GITHUB_TOKEN", {
-            value: process.env.GITHUB_TOKEN!,
-            allowHosts: ["api.github.com"],
-            allowHostPatterns: ["*.githubusercontent.com"],
-        }),
-        Secret.env("OPENAI_API_KEY", {
-            value: process.env.OPENAI_API_KEY!,
-            allowHosts: ["api.openai.com"],
-        }),
-    ],
-})
+```bash CLI
+msb create python --name safe-agent \
+  --dns-block-domain malware.example.com \
+  --dns-block-suffix .tracking.com
 ```
 
 </CodeGroup>
 
-## TLS interception
+## How it works
 
-Enable HTTPS traffic inspection with an auto-generated CA certificate. microsandbox generates a per-sandbox CA during creation, installs it in the guest's trust store, and generates per-domain certificates on first connection. Domains that use certificate pinning (or that you don't want to intercept) can be bypassed.
+Policy rules are evaluated first-match-wins. Allowed traffic goes to the real network; everything else is dropped.
 
-<CodeGroup>
-```rust Rust
-use microsandbox::Sandbox;
-
-let sb = Sandbox::builder("agent")
-    .image("python")
-    .network(|n| n
-        .tls(|t| t
-            .bypass("pinned-api.example.com")
-            .bypass("*.gov")
-        )
-    )
-    .create()
-    .await?;
-```
-
-```typescript TypeScript
-import { Sandbox } from 'microsandbox'
-
-const sb = await Sandbox.create({
-    name: "agent",
-    image: "python",
-    network: {
-        tls: {
-            bypass: ["pinned-api.example.com", "*.gov"],
-        },
-    },
-})
-```
-
-</CodeGroup>
+- **`none`**: no network interface at all. The guest is fully offline, though `exec` and `fs` still work since they don't use the network.
+- **`public_only`**: blocks private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`) and only allows routable public addresses. This is the default.
+- **`allow_all`**: no filtering, including access to the host machine and local network.
+- **`allowlist`** / **`denylist`** (coming soon): fine-grained per-host control.
 
 ## Protocol support
 

@@ -1,7 +1,7 @@
 ---
 title: Snapshots
-description: Capture VM state, fork workers, and restore
-icon: "camera"
+description: Fork-based scaling and state preservation
+icon: "code-branch"
 ---
 
 <Note>
@@ -12,9 +12,7 @@ Snapshots capture the full VM state: memory, CPU registers, filesystem, everythi
 
 Particularly useful for agent workloads where every sandbox needs the same base environment (Python + packages, Node + node_modules, etc). Install once, snapshot, fork on demand.
 
-## Create a snapshot
-
-Capturing a snapshot pauses the sandbox, saves its state, and returns a handle. You can resume the original sandbox afterward.
+## Basic example
 
 <CodeGroup>
 ```rust Rust

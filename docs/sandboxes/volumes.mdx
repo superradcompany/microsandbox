@@ -35,6 +35,12 @@ const sb = await Sandbox.create({
 })
 ```
 
+```bash CLI
+msb create python --name dev \
+  -v ./src:/app/src:ro \
+  -v ./data:/app/data
+```
+
 </CodeGroup>
 
 ## Named volumes
@@ -53,6 +59,10 @@ let cache = Volume::builder("pip-cache")
 
 ```typescript TypeScript
 const cache = await Volume.create({ name: "pip-cache", quotaMib: 1024 })
+```
+
+```bash CLI
+msb volume create pip-cache --size 1024
 ```
 
 </CodeGroup>
@@ -76,6 +86,11 @@ const sb = await Sandbox.create({
         "/root/.cache/pip": Mount.named(cache.name),
     },
 })
+```
+
+```bash CLI
+msb create python --name worker \
+  -v pip-cache:/root/.cache/pip
 ```
 
 </CodeGroup>
@@ -158,6 +173,11 @@ const volumes = await Volume.list()
 await Volume.remove("old-cache")
 ```
 
+```bash CLI
+msb volume ls
+msb volume rm old-cache
+```
+
 </CodeGroup>
 
 ## Tmpfs
@@ -181,6 +201,11 @@ const sb = await Sandbox.create({
         "/tmp/scratch": Mount.tmpfs({ sizeMib: 100 }),
     },
 })
+```
+
+```bash CLI
+msb create alpine --name worker \
+  --tmpfs /tmp/scratch:100
 ```
 
 </CodeGroup>
