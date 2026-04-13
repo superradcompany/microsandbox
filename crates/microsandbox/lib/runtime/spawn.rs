@@ -568,7 +568,7 @@ mod tests {
     fn test_sandbox_cli_args_include_default_rlimits_env() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
-            .default_rlimit(RlimitResource::Nofile, 65_535)
+            .rlimit(RlimitResource::Nofile, 65_535)
             .build()
             .unwrap();
 

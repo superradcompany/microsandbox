@@ -314,7 +314,7 @@ impl SandboxBuilder {
     /// This is applied during agentd PID 1 startup, so bootstrap scripts and
     /// long-lived daemons inherit the raised baseline without needing explicit
     /// per-exec rlimits.
-    pub fn default_rlimit(mut self, resource: RlimitResource, limit: u64) -> Self {
+    pub fn rlimit(mut self, resource: RlimitResource, limit: u64) -> Self {
         self.config.default_rlimits.push(Rlimit {
             resource,
             soft: limit,
@@ -324,7 +324,7 @@ impl SandboxBuilder {
     }
 
     /// Set a sandbox-wide default resource limit with different soft/hard values.
-    pub fn default_rlimit_range(
+    pub fn rlimit_range(
         mut self,
         resource: RlimitResource,
         soft: u64,
@@ -558,10 +558,10 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_default_rlimit_sets_sandbox_wide_limit() {
+    fn test_builder_rlimit_sets_sandbox_wide_limit() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
-            .default_rlimit(RlimitResource::Nofile, 65_535)
+            .rlimit(RlimitResource::Nofile, 65_535)
             .build()
             .unwrap();
 
