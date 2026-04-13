@@ -109,7 +109,3 @@ rustls-native-certs = "0.8"
 rcgen = { version = "0.13", features = ["x509-parser"] }
 lru = "0.16.3"
 rpassword = "7"
-
-
-[patch.crates-io]
-msb_krun = { path = "/Users/steveakinyemi/Desktop/Personal/FOCUS/libkrun/src/krun" }
