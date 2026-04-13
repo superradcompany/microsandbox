@@ -413,10 +413,6 @@ fn sandbox_cli_args(
     }
 
     if !config.rlimits.is_empty() {
-        // Edge case: per-exec rlimits do not help guest daemons started during
-        // bootstrap because they inherit PID 1's default soft limit first.
-        // Pass sandbox-wide rlimits into agentd startup so bootstrap scripts
-        // and long-lived services share the same raised baseline.
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!(
             "{}={}",
@@ -589,6 +585,7 @@ mod tests {
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+
         assert!(rendered.windows(2).any(|pair| {
             pair[0] == "--env"
                 && pair[1]
