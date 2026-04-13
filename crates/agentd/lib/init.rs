@@ -76,7 +76,11 @@ pub fn apply_rlimits() -> AgentdResult<()> {
         return Ok(());
     };
 
-    for entry in spec.to_string_lossy().split(';').filter(|entry| !entry.is_empty()) {
+    for entry in spec
+        .to_string_lossy()
+        .split(';')
+        .filter(|entry| !entry.is_empty())
+    {
         let (resource_name, limit_spec) = entry.split_once('=').ok_or_else(|| {
             AgentdError::Init(format!(
                 "{ENV_RLIMITS} entry must be resource=soft[:hard], got: {entry}"
@@ -1081,7 +1085,13 @@ mod tests {
 
     #[test]
     fn test_parse_rlimit_resource_supports_nofile() {
-        assert_eq!(parse_rlimit_resource("nofile"), Some(libc::RLIMIT_NOFILE as _));
-        assert_eq!(parse_rlimit_resource("NOFILE"), Some(libc::RLIMIT_NOFILE as _));
+        assert_eq!(
+            parse_rlimit_resource("nofile"),
+            Some(libc::RLIMIT_NOFILE as _)
+        );
+        assert_eq!(
+            parse_rlimit_resource("NOFILE"),
+            Some(libc::RLIMIT_NOFILE as _)
+        );
     }
 }
