@@ -55,6 +55,7 @@ msb run -d --name worker python -- python worker.py
 | `--max-duration` | Kill the entire sandbox after this duration (e.g. `30s`, `5m`, `1h`). Sandbox-level lifetime limit |
 | `--idle-timeout` | Stop the sandbox after this period of inactivity (e.g. `30s`, `5m`, `1h`) |
 | `--no-network` | Disable all network access |
+| `--network-policy` | Control which destinations are reachable from the sandbox. Accepted values: `none` (no network), `public-only` (default — public internet only), `nonlocal` (public + private/LAN; blocks loopback, link-local, and metadata), `allow-all` (unrestricted) |
 | `--dns-block-domain` | Block DNS lookups for a domain (returns NXDOMAIN) |
 | `--dns-block-suffix` | Block DNS lookups for all subdomains of a suffix (e.g. `.ads.com`) |
 | `--no-dns-rebind-protection` | Allow DNS responses pointing to private/internal IP addresses |

@@ -26,6 +26,10 @@ console.log(output.success)   // true
 console.log(output.code)      // 0
 ```
 
+```bash CLI
+msb exec worker -- python -c "print('hello')"
+```
+
 </CodeGroup>
 
 ## Execution options
@@ -53,6 +57,15 @@ const output = await sb.execWithConfig({
 })
 ```
 
+```bash CLI
+msb exec worker \
+  -w /app \
+  -e PYTHONPATH=/app/lib \
+  --timeout 30s \
+  --rlimit nofile=1024 \
+  -- python compute.py
+```
+
 </CodeGroup>
 
 ## Shell commands
@@ -66,6 +79,10 @@ let output = sb.shell("ls -la /app && echo done").await?;
 
 ```typescript TypeScript
 const output = await sb.shell("ls -la /app && echo done")
+```
+
+```bash CLI
+msb exec worker -- sh -c "ls -la /app && echo done"
 ```
 
 </CodeGroup>
@@ -126,6 +143,14 @@ const exitCode = await sb.attach()
 await sb.attach("bash", a => a.env("DEBUG", "1").cwd("/app").detachKeys("ctrl-q"))
 ```
 
+```bash CLI
+# Attach to the default shell
+msb exec -t worker
+
+# Attach to a specific command
+msb exec -t worker -e DEBUG=1 -w /app -- python
+```
+
 </CodeGroup>
 
 <Tip>
@@ -152,6 +177,37 @@ await stdin.write(Buffer.from("print('hello')\n"))
 await stdin.write(Buffer.from("exit()\n"))
 await stdin.close()
 await handle.wait()
+```
+
+</CodeGroup>
+
+## Sessions <sup><sup>coming soon</sup></sup>
+
+Each streaming exec or attach creates a session. You can list active sessions and reattach to them by ID. Up to 16 simultaneous client connections are supported, so multiple sessions can run concurrently without interfering with each other.
+
+<CodeGroup>
+```rust Rust
+// Start a background process and capture its session ID
+let handle = sb.exec_stream("python", ["server.py"]).await?;
+let session_id = handle.id().to_string();
+
+// List active sessions
+let sessions = sb.sessions().await?;
+
+// Reattach to a session by ID
+let mut handle = sb.session(&session_id).await?;
+```
+
+```typescript TypeScript
+// Start a background process and capture its session ID
+const handle = await sb.execStream("python", ["server.py"])
+const sessionId = handle.id
+
+// List active sessions
+const sessions = await sb.sessions()
+
+// Reattach to a session by ID
+const reattached = await sb.session(sessionId)
 ```
 
 </CodeGroup>

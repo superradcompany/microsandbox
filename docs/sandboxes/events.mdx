@@ -12,9 +12,7 @@ The events API is for structured communication between host and guest beyond std
 
 On the guest side, processes just write JSON to `/run/agent.sock`, which is a standard Unix domain socket. No special library needed. Any language that can open a socket and write a newline-delimited JSON message will work.
 
-## Receive events from guest
-
-Subscribe to named events emitted by guest processes. The callback fires each time a matching event arrives.
+## Basic example
 
 <CodeGroup>
 ```rust Rust

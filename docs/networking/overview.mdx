@@ -49,6 +49,78 @@ const sb3 = await Sandbox.create({
 })
 ```
 
+```bash CLI
+# No network access
+msb create python --name isolated --no-network
+
+# Public internet only (default)
+msb create python --name web-agent
+
+# With TLS interception
+msb create python --name agent --tls-intercept
+```
+
+</CodeGroup>
+
+## Custom policies
+
+Build a policy with explicit egress and ingress rules. Rules are evaluated first-match-wins.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+use microsandbox::NetworkPolicy;
+use microsandbox_network::policy::{
+    Action, Destination, DestinationGroup, Direction, PortRange, Protocol, Rule,
+};
+
+let policy = NetworkPolicy {
+    default_action: Action::Deny,
+    rules: vec![
+        Rule {
+            direction: Direction::Outbound,
+            destination: Destination::Any,
+            protocol: Some(Protocol::Tcp),
+            ports: Some(PortRange::single(443)),
+            action: Action::Allow,
+        },
+        Rule {
+            direction: Direction::Outbound,
+            destination: Destination::Any,
+            protocol: Some(Protocol::Udp),
+            ports: Some(PortRange::single(53)),
+            action: Action::Allow,
+        },
+        Rule::deny_outbound(Destination::Group(DestinationGroup::Metadata)),
+        Rule::deny_outbound(Destination::Group(DestinationGroup::Private)),
+    ],
+};
+
+let sb = Sandbox::builder("secure-agent")
+    .image("alpine")
+    .network(|n| n.policy(policy))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from 'microsandbox'
+
+const sb = await Sandbox.create({
+    name: "secure-agent",
+    image: "alpine",
+    network: {
+        rules: [
+            { action: "allow", direction: "outbound", protocol: "tcp", port: "443" },
+            { action: "allow", direction: "outbound", protocol: "udp", port: "53" },
+            { action: "deny", direction: "outbound", destination: "metadata" },
+            { action: "deny", direction: "outbound", destination: "private" },
+        ],
+        defaultAction: "deny",
+    },
+})
+```
+
 </CodeGroup>
 
 ## Port mapping
@@ -75,6 +147,10 @@ const sb = await Sandbox.create({
     ports: { "8080": 80 },
     network: NetworkPolicy.publicOnly(),
 })
+```
+
+```bash CLI
+msb create python --name api -p 8080:80
 ```
 
 </CodeGroup>
@@ -110,6 +186,12 @@ const sb = await Sandbox.create({
         blockDomainSuffixes: [".tracking.com"],
     },
 })
+```
+
+```bash CLI
+msb create python --name safe-agent \
+  --dns-block-domain malware.example.com \
+  --dns-block-suffix .tracking.com
 ```
 
 </CodeGroup>

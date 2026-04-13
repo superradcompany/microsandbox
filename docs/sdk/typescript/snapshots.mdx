@@ -1,0 +1,140 @@
+---
+title: Snapshots
+description: TypeScript SDK - Snapshot API reference
+icon: "camera"
+---
+
+<Note>
+  Snapshots are coming soon and not yet available in the current SDK.
+</Note>
+
+See [Snapshots](/sandboxes/snapshots) for usage examples and patterns.
+
+## Sandbox methods
+
+---
+
+#### resume()
+
+```typescript
+resume(): Promise<void>
+```
+
+Resume the sandbox after a snapshot. The VM continues from exactly where it was paused.
+
+---
+
+#### snapshot()
+
+```typescript
+snapshot(): Promise<Snapshot>
+```
+
+Capture the full VM state: memory, CPU registers, filesystem, everything. The sandbox is paused during capture. Call [`resume()`](#resume) to continue running, or use the snapshot to fork new sandboxes.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Snapshot` | Handle to the captured state |
+
+---
+
+## Snapshot (instance)
+
+---
+
+#### restore()
+
+```typescript
+restore(sandboxName: string, opts?: RestoreOptions): Promise<Sandbox>
+```
+
+Fork a new sandbox from this snapshot. The new sandbox starts exactly where the original was - no boot, no setup. Each fork gets its own copy-on-write filesystem.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| sandboxName | `string` | Name for the new sandbox |
+| opts? | `{ memoryMib?: number, cpus?: number }` | Optional config overrides |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Sandbox`](/sdk/typescript/sandbox#instance-methods) | The forked sandbox, ready to accept commands |
+
+---
+
+#### saveNamed()
+
+```typescript
+saveNamed(name: string): Promise<void>
+```
+
+Persist this snapshot under a name so it survives beyond the lifetime of the original sandbox. Named snapshots can be loaded later with [`Snapshot.get()`](#snapshotget) to fork workers.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Snapshot name (e.g. `"after-pip-install"`) |
+
+---
+
+## Snapshot (static)
+
+---
+
+#### Snapshot.delete()
+
+```typescript
+static delete(name: string): Promise<void>
+```
+
+Delete a named snapshot from disk.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Snapshot name |
+
+---
+
+#### Snapshot.get()
+
+```typescript
+static get(name: string): Promise<Snapshot>
+```
+
+Load a previously saved named snapshot.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Snapshot name |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Snapshot` | The loaded snapshot |
+
+---
+
+#### Snapshot.list()
+
+```typescript
+static list(): Promise<Array<SnapshotInfo>>
+```
+
+List all saved named snapshots.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Array<SnapshotInfo>` | All named snapshots |

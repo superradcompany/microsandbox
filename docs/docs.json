@@ -33,13 +33,6 @@
             ]
           },
           {
-            "group": "Configuration",
-            "icon": "gear",
-            "pages": [
-              "configuration"
-            ]
-          },
-          {
             "group": "Sandboxes",
             "icon": "box",
             "pages": [
@@ -48,7 +41,19 @@
               "sandboxes/commands",
               "sandboxes/filesystem",
               "sandboxes/volumes",
-              "sandboxes/networking"
+              "sandboxes/secrets",
+              "sandboxes/snapshots",
+              "sandboxes/events",
+              "sandboxes/scripts",
+              "sandboxes/metrics"
+            ]
+          },
+          {
+            "group": "Networking",
+            "icon": "network-wired",
+            "pages": [
+              "networking/overview",
+              "networking/tls"
             ]
           },
           {
@@ -57,6 +62,13 @@
             "pages": [
               "images/overview",
               "images/disk-images"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "icon": "gear",
+            "pages": [
+              "configuration"
             ]
           }
         ]
@@ -68,35 +80,36 @@
             "group": "Getting Started",
             "icon": "flag",
             "pages": [
-              "sdk/overview"
-            ]
-          },
-          {
-            "group": "Core",
-            "icon": "circle",
-            "pages": [
-              "sdk/sandbox",
-              "sdk/execution",
-              "sdk/filesystem",
-              "sdk/volumes"
-            ]
-          },
-          {
-            "group": "Features",
-            "icon": "puzzle-piece",
-            "pages": [
-              "sdk/snapshots",
-              "sdk/networking",
-              "sdk/events"
-            ]
-          },
-          {
-            "group": "Advanced",
-            "icon": "gear",
-            "pages": [
-              "sdk/scripts",
-              "sdk/metrics",
+              "sdk/overview",
               "sdk/errors"
+            ]
+          },
+          {
+            "group": "Rust SDK",
+            "icon": "rust",
+            "pages": [
+              "sdk/rust/sandbox",
+              "sdk/rust/execution",
+              "sdk/rust/filesystem",
+              "sdk/rust/volumes",
+              "sdk/rust/networking",
+              "sdk/rust/secrets",
+              "sdk/rust/snapshots",
+              "sdk/rust/events"
+            ]
+          },
+          {
+            "group": "TypeScript SDK",
+            "icon": "js",
+            "pages": [
+              "sdk/typescript/sandbox",
+              "sdk/typescript/execution",
+              "sdk/typescript/filesystem",
+              "sdk/typescript/volumes",
+              "sdk/typescript/networking",
+              "sdk/typescript/secrets",
+              "sdk/typescript/snapshots",
+              "sdk/typescript/events"
             ]
           }
         ]
