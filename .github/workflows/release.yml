@@ -283,6 +283,23 @@ jobs:
             release-artifacts/*
 
   # ---------------------------------------------------------------------------
+  # Update Homebrew formula in the tap repo
+  # ---------------------------------------------------------------------------
+  update-homebrew:
+    name: Update Homebrew Formula
+    needs: assemble
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch to homebrew tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_PAT }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh api repos/superradcompany/homebrew-microsandbox/dispatches \
+            -f event_type=update-formula \
+            -f "client_payload[version]=$VERSION"
+
+  # ---------------------------------------------------------------------------
   # Publish Node SDK to npm
   # ---------------------------------------------------------------------------
   npm-publish:
