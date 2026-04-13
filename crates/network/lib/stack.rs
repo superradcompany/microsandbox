@@ -287,6 +287,16 @@ pub fn smoltcp_poll_loop(
         // Detect newly-established connections and spawn proxy tasks.
         let new_conns = conn_tracker.take_new_connections(&mut sockets);
         for conn in new_conns {
+            // Rewrite connections targeting the gateway IP to host loopback.
+            //
+            // The guest has no route to 127.0.0.1 on the host (its own loopback
+            // is `lo`). Instead, guests use the gateway IP as a stable alias for
+            // the host. smoltcp accepts these via `any_ip`, but the proxy would
+            // otherwise try TcpStream::connect(gateway_ip:port) on the host,
+            // which fails because that virtual IP has no host interface.
+            // Rewriting to 127.0.0.1 / ::1 makes the proxy dial host loopback.
+            let proxy_dst = rewrite_gateway_to_loopback(conn.dst, &config);
+
             if let Some(ref tls_state) = tls_state
                 && tls_state
                     .config
@@ -296,7 +306,7 @@ pub fn smoltcp_poll_loop(
                 // TLS-intercepted port — spawn TLS MITM proxy.
                 tls_proxy::spawn_tls_proxy(
                     &tokio_handle,
-                    conn.dst,
+                    proxy_dst,
                     conn.from_smoltcp,
                     conn.to_smoltcp,
                     shared.clone(),
@@ -307,7 +317,7 @@ pub fn smoltcp_poll_loop(
             // Plain TCP proxy.
             proxy::spawn_tcp_proxy(
                 &tokio_handle,
-                conn.dst,
+                proxy_dst,
                 conn.from_smoltcp,
                 conn.to_smoltcp,
                 shared.clone(),
@@ -521,6 +531,26 @@ fn icmp_repr_buffer_len_v6(data: &[u8]) -> usize {
         data,
     }
     .buffer_len()
+}
+
+/// Rewrite a connection destination that targets the gateway IP to host loopback.
+///
+/// Guests use the gateway IP (`100.96.0.x` / `fd42:…::1`) as a stable alias
+/// for the host, since they cannot connect to `127.0.0.1` (that resolves to
+/// their own loopback interface). smoltcp accepts the SYN via `any_ip`, but
+/// the host-side proxy must dial `127.0.0.1`/`::1` to reach host services.
+fn rewrite_gateway_to_loopback(dst: SocketAddr, config: &PollLoopConfig) -> SocketAddr {
+    match dst {
+        SocketAddr::V4(v4) if *v4.ip() == config.gateway_ipv4 => SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            dst.port(),
+        ),
+        SocketAddr::V6(v6) if *v6.ip() == config.gateway_ipv6 => SocketAddr::new(
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            dst.port(),
+        ),
+        other => other,
+    }
 }
 
 /// Classify an IPv4 packet payload (after stripping the Ethernet header).
