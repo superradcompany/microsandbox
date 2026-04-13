@@ -51,10 +51,6 @@ icon: "bolt"
     }
     ```
 
-    ```bash CLI
-    msb run python -- python3 -c "print('Hello from a microVM!')"
-    ```
-
     ```typescript TypeScript
     import { Sandbox } from 'microsandbox'
 
@@ -68,6 +64,10 @@ icon: "bolt"
     console.log(output.stdout()) // Hello from a microVM!
 
     await sb.stop()
+    ```
+
+    ```bash CLI
+    msb run python -- python3 -c "print('Hello from a microVM!')"
     ```
 
     </CodeGroup>
