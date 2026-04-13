@@ -42,8 +42,10 @@ pub fn generate_domain_cert(domain: &str, ca: &CertAuthority, validity_hours: u6
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
 
     // Set certificate validity period.
+    // Backdate not_before by 5 minutes to tolerate clock skew between the
+    // host (which generates the cert) and the guest (which validates it).
     let now = OffsetDateTime::now_utc();
-    params.not_before = now;
+    params.not_before = now - Duration::minutes(5);
     params.not_after = now + Duration::hours(validity_hours as i64);
 
     let key_pair = rcgen::KeyPair::generate().expect("failed to generate domain key pair");
