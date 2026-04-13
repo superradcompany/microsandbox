@@ -588,11 +588,7 @@ mod tests {
 
         assert!(rendered.windows(2).any(|pair| {
             pair[0] == "--env"
-                && pair[1]
-                    == format!(
-                        "{}=nofile=65535:65535",
-                        microsandbox_protocol::ENV_RLIMITS
-                    )
+                && pair[1] == format!("{}=nofile=65535:65535", microsandbox_protocol::ENV_RLIMITS)
         }));
     }
 

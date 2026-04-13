@@ -324,12 +324,7 @@ impl SandboxBuilder {
     }
 
     /// Set a sandbox-wide resource limit with different soft/hard values.
-    pub fn rlimit_range(
-        mut self,
-        resource: RlimitResource,
-        soft: u64,
-        hard: u64,
-    ) -> Self {
+    pub fn rlimit_range(mut self, resource: RlimitResource, soft: u64, hard: u64) -> Self {
         self.config.rlimits.push(Rlimit {
             resource,
             soft,
