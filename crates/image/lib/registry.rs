@@ -3,28 +3,43 @@
 //! Wraps `oci-client` with platform resolution, caching, and progress reporting.
 
 use std::{
-    fs::{File, OpenOptions},
     io,
     os::fd::AsRawFd,
-    path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
+    task::{Context, Poll},
+    time::Instant,
 };
 
 use oci_client::{Client, client::ClientConfig, manifest::ImageIndexEntry};
-use tokio::task::JoinHandle;
+use tokio::{
+    io::{AsyncRead, ReadBuf},
+    task::JoinHandle,
+};
 
 use crate::{
     auth::RegistryAuth,
     config::ImageConfig,
     digest::Digest,
+    erofs,
     error::{ImageError, ImageResult},
+    filetree::{FileTree, ResourceLimits},
     layer::Layer,
+    lock::{flock_unlock, open_lock_file},
     manifest::OciManifest,
     platform::Platform,
     progress::{self, PullProgress, PullProgressHandle, PullProgressSender},
-    pull::{PullOptions, PullPolicy, PullResult},
-    store::{CachedImageMetadata, CachedLayerMetadata, GlobalCache},
+    pull::{LayerMode, PullOptions, PullPolicy, PullResult},
+    store::{self, CachedImageMetadata, CachedLayerMetadata, GlobalCache},
+    tar_ingest::{self, Compression},
 };
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Minimum byte delta between per-layer materialization progress updates.
+const MATERIALIZE_PROGRESS_EMIT_BYTES: u64 = 256 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -38,7 +53,7 @@ pub struct Registry {
     cache: GlobalCache,
 }
 
-/// Resolved manifest layer descriptor used during download/extraction.
+/// Resolved manifest layer descriptor used during download/materialization.
 #[derive(Debug, Clone)]
 struct LayerDescriptor {
     digest: Digest,
@@ -51,20 +66,53 @@ struct CachedPullInfo {
     metadata: CachedImageMetadata,
 }
 
-struct LayerPipelineSuccess {
-    layer_index: usize,
-    layer: Layer,
-    extracted_dir: PathBuf,
-    implicit_dirs: Vec<PathBuf>,
-}
+struct LayerPipelineSuccess;
 
 struct LayerPipelineFailure {
     error: ImageError,
 }
 
+struct FlatLayerTreeSuccess {
+    layer_index: usize,
+    tree: FileTree,
+}
+
+/// Wraps an `AsyncRead` to emit `LayerMaterializeProgress` events as the
+/// tar stream is read during EROFS materialization.
+///
+/// Progress events are throttled to avoid flooding the channel — an update
+/// is sent only after at least `MATERIALIZE_PROGRESS_EMIT_BYTES` (256 KiB)
+/// have been read since the last event.
+struct MaterializeProgressReader<R> {
+    inner: R,
+    progress: Option<PullProgressSender>,
+    layer_index: usize,
+    total_bytes: u64,
+    bytes_read: u64,
+    last_emitted_bytes: u64,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl<R> MaterializeProgressReader<R> {
+    fn new(
+        inner: R,
+        progress: Option<PullProgressSender>,
+        layer_index: usize,
+        total_bytes: u64,
+    ) -> Self {
+        Self {
+            inner,
+            progress,
+            layer_index,
+            total_bytes: total_bytes.max(1),
+            bytes_read: 0,
+            last_emitted_bytes: 0,
+        }
+    }
+}
 
 impl Registry {
     /// Create a registry client with anonymous authentication.
@@ -105,7 +153,7 @@ impl Registry {
             .map(|cached| (cached.result, cached.metadata)))
     }
 
-    /// Pull an image. Downloads, extracts, and indexes layers concurrently.
+    /// Pull an image. Downloads blobs and materializes EROFS layers concurrently.
     pub async fn pull(
         &self,
         reference: &oci_client::Reference,
@@ -188,19 +236,37 @@ impl Registry {
         options: &PullOptions,
         progress: Option<PullProgressSender>,
     ) -> ImageResult<PullResult> {
+        let pull_started_at = Instant::now();
         let ref_str: Arc<str> = reference.to_string().into();
         let oci_ref = reference;
         let image_lock_path = self.cache.image_lock_path(reference);
         let image_lock_file = open_lock_file(&image_lock_path)?;
-        flock_exclusive(&image_lock_file)?;
+        {
+            let fd = image_lock_file.as_raw_fd();
+            tokio::task::spawn_blocking(move || {
+                let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+                if ret != 0 {
+                    return Err(ImageError::Io(io::Error::last_os_error()));
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|e| ImageError::Io(io::Error::other(e)))??;
+        }
+        // Lock files are intentionally never deleted — stable inodes prevent
+        // TOCTOU races where two processes flock different inodes at the same path.
         let _image_lock_guard = scopeguard::guard(image_lock_file, |file| {
             let _ = flock_unlock(&file);
-            drop(file);
-            let _ = std::fs::remove_file(&image_lock_path);
         });
 
         // Step 1: Early cache check using persisted image metadata.
         if let Some(cached) = resolve_cached_pull_result(&self.cache, reference, options)? {
+            tracing::debug!(
+                reference = %reference,
+                elapsed_ms = pull_started_at.elapsed().as_millis(),
+                "pull resolved entirely from cached image metadata"
+            );
+
             if let Some(ref p) = progress {
                 p.send(PullProgress::Resolving {
                     reference: ref_str.clone(),
@@ -238,6 +304,7 @@ impl Registry {
             });
         }
 
+        let resolve_started_at = Instant::now();
         let (manifest_bytes, manifest_digest, config_bytes) =
             self.fetch_manifest_and_config(oci_ref).await?;
 
@@ -255,6 +322,15 @@ impl Registry {
         // Step 4: Get layer descriptors.
         let layer_descriptors = self.extract_layer_digests(&manifest)?;
 
+        // OCI spec requires diff_ids and layer descriptors to have the same count.
+        if diff_ids.len() != layer_descriptors.len() {
+            return Err(ImageError::ManifestParse(format!(
+                "layer count mismatch: config has {} diff_ids but manifest has {} layers",
+                diff_ids.len(),
+                layer_descriptors.len()
+            )));
+        }
+
         let layer_count = layer_descriptors.len();
         let total_bytes: Option<u64> = {
             let sum: u64 = layer_descriptors
@@ -263,6 +339,13 @@ impl Registry {
                 .sum();
             if sum > 0 { Some(sum) } else { None }
         };
+
+        tracing::debug!(
+            reference = %reference,
+            layer_count,
+            elapsed_ms = resolve_started_at.elapsed().as_millis(),
+            "pull resolved manifest and layer descriptors"
+        );
 
         if let Some(ref p) = progress {
             p.send(PullProgress::Resolved {
@@ -273,129 +356,72 @@ impl Registry {
             });
         }
 
-        // Step 5+6: Download, extract, and index ALL layers in parallel.
-        //
-        // Each layer's pipeline (download → extract → index) runs independently.
-        // Extraction no longer depends on other layers being extracted first.
-        // A fast post-fixup pass corrects xattrs on any implicitly-created
-        // directories that need metadata from lower layers.
-        let layer_futures: Vec<_> = layer_descriptors
-            .iter()
-            .enumerate()
-            .map(|(i, layer_desc)| {
-                let layer = Layer::new(layer_desc.digest.clone(), &self.cache);
-                let client = self.client.clone();
-                let oci_ref = oci_ref.clone();
-                let size = layer_desc.size;
-                let force = options.force;
-                let build_index = options.build_index;
-                let progress = progress.clone();
-                let media_type = layer_desc.media_type.clone();
-                let diff_id = diff_ids.get(i).cloned().unwrap_or_default();
+        // Give the receiver a chance to render the resolved state before the
+        // layer tasks begin flooding download events.
+        tokio::task::yield_now().await;
 
-                async move {
-                    // Download.
-                    if let Err(error) = layer
-                        .download(&client, &oci_ref, size, force, progress.as_ref(), i)
-                        .await
-                    {
-                        return Err(LayerPipelineFailure { error });
-                    }
-
-                    // Extract (no parent layer dependency — parallel safe).
-                    let result = if !layer.is_extracted() || force {
-                        let result = match layer
-                            .extract(progress.as_ref(), i, media_type.as_deref(), &diff_id, force)
-                            .await
-                        {
-                            Ok(result) => result,
-                            Err(error) => return Err(LayerPipelineFailure { error }),
-                        };
-
-                        // Index.
-                        if build_index {
-                            if let Some(ref p) = progress {
-                                p.send(PullProgress::LayerIndexStarted { layer_index: i });
-                            }
-                            if let Err(error) = layer.build_index().await {
-                                return Err(LayerPipelineFailure { error });
-                            }
-                            if let Some(ref p) = progress {
-                                p.send(PullProgress::LayerIndexComplete { layer_index: i });
-                            }
-                        }
-
-                        result
-                    } else {
-                        // Already extracted — send completion events so the UI
-                        // advances this layer's bar to the done state.
-                        if let Some(ref p) = progress {
-                            p.send(PullProgress::LayerIndexComplete { layer_index: i });
-                        }
-
-                        crate::layer::extraction::ExtractionResult {
-                            implicit_dirs: match layer.pending_implicit_dirs() {
-                                Ok(implicit_dirs) => implicit_dirs,
-                                Err(error) => return Err(LayerPipelineFailure { error }),
-                            },
-                        }
-                    };
-
-                    Ok::<_, LayerPipelineFailure>(LayerPipelineSuccess {
-                        layer_index: i,
-                        extracted_dir: layer.extracted_dir(),
-                        implicit_dirs: result.implicit_dirs,
-                        layer,
-                    })
-                }
-            })
-            .collect();
-
-        let outcomes = futures::future::join_all(layer_futures).await;
-        let mut results: Vec<LayerPipelineSuccess> = Vec::with_capacity(layer_count);
-        let mut first_error: Option<ImageError> = None;
-
-        for outcome in outcomes {
-            match outcome {
-                Ok(result) => results.push(result),
-                Err(failure) => {
-                    if first_error.is_none() {
-                        first_error = Some(failure.error);
-                    }
+        // Warn about duplicate layer digests — they can cause contention.
+        {
+            let mut seen = std::collections::HashSet::new();
+            for desc in &layer_descriptors {
+                if !seen.insert(&desc.digest) {
+                    tracing::warn!(
+                        digest = %desc.digest,
+                        "manifest contains duplicate layer digest; \
+                         per-layer processing will be serialized for this digest"
+                    );
                 }
             }
         }
 
-        if let Some(error) = first_error {
-            return Err(error);
+        let effective_mode = select_layer_mode(options.layer_mode, layer_count);
+        if effective_mode != options.layer_mode {
+            tracing::debug!(
+                reference = %reference,
+                requested_mode = ?options.layer_mode,
+                effective_mode = ?effective_mode,
+                layer_count,
+                "pull adjusted rootfs mode"
+            );
         }
 
-        // Sort results by layer index (futures may complete out of order).
-        results.sort_by_key(|result| result.layer_index);
-
-        // Step 6b: Sequential fixup pass for implicitly-created directories.
-        //
-        // Most layers are self-contained (their tars include all parent directory
-        // entries), so this is typically a no-op. For the rare case where a layer
-        // references a path whose parent was defined by a lower layer, we copy
-        // the correct override_stat xattr from that lower layer.
-        let extracted_dirs: Vec<PathBuf> = results
-            .iter()
-            .map(|result| result.extracted_dir.clone())
-            .collect();
-        for result in &results {
-            if !result.implicit_dirs.is_empty() && result.layer_index > 0 {
-                crate::layer::extraction::fixup_implicit_dirs(
-                    &extracted_dirs[result.layer_index],
-                    &result.implicit_dirs,
-                    &extracted_dirs[..result.layer_index],
-                )?;
+        match effective_mode {
+            LayerMode::Layered => {
+                self.materialize_layered_layers(
+                    oci_ref,
+                    &layer_descriptors,
+                    &diff_ids,
+                    options.force,
+                    progress.clone(),
+                )
+                .await?;
             }
-            result.layer.clear_pending_implicit_dirs()?;
+            LayerMode::Flat => {
+                self.materialize_flat_image(
+                    oci_ref,
+                    &manifest_digest,
+                    &layer_descriptors,
+                    &diff_ids,
+                    options.force,
+                    progress.clone(),
+                )
+                .await?;
+            }
         }
 
-        // Step 7: Return result.
-        let layers = extracted_dirs;
+        // Clean up compressed tarballs after all layer tasks complete.
+        // Deferred from per-task cleanup to avoid races with duplicate layer digests.
+        for layer_desc in &layer_descriptors {
+            let layer = Layer::new(layer_desc.digest.clone(), &self.cache);
+            let _ = tokio::fs::remove_file(&layer.tar_path_ref()).await;
+        }
+
+        let layer_diff_ids: Vec<Digest> = diff_ids
+            .iter()
+            .map(|diff_id| diff_id.parse())
+            .collect::<ImageResult<Vec<Digest>>>()?;
+
+        // Persist cached image metadata.
         let cached_image = CachedImageMetadata {
             manifest_digest: manifest_digest.to_string(),
             config_digest: manifest.config_digest().unwrap_or_default(),
@@ -413,6 +439,13 @@ impl Registry {
         };
         self.cache.write_image_metadata(reference, &cached_image)?;
 
+        tracing::debug!(
+            reference = %reference,
+            layer_count,
+            elapsed_ms = pull_started_at.elapsed().as_millis(),
+            "pull completed and cached image metadata was persisted"
+        );
+
         if let Some(ref p) = progress {
             p.send(PullProgress::Complete {
                 reference: ref_str,
@@ -421,10 +454,11 @@ impl Registry {
         }
 
         Ok(PullResult {
-            layers,
+            layer_diff_ids,
             config: image_config,
             manifest_digest,
             cached: false,
+            mode: effective_mode,
         })
     }
 
@@ -584,6 +618,509 @@ impl Registry {
             )),
         }
     }
+
+    async fn materialize_layered_layers(
+        &self,
+        oci_ref: &oci_client::Reference,
+        layer_descriptors: &[LayerDescriptor],
+        diff_ids: &[String],
+        force: bool,
+        progress: Option<PullProgressSender>,
+    ) -> ImageResult<()> {
+        // Validate all diff_ids parse as digests before spawning layer tasks.
+        // diff_ids come from the remote config blob (untrusted input).
+        let validated_diff_ids: Vec<Digest> = diff_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                id.parse::<Digest>().map_err(|_| {
+                    ImageError::ManifestParse(format!("invalid diff_id at layer {i}: {id}"))
+                })
+            })
+            .collect::<ImageResult<Vec<_>>>()?;
+
+        let layer_tasks: Vec<_> = layer_descriptors
+            .iter()
+            .enumerate()
+            .map(|(i, layer_desc)| {
+                let layer = Layer::new(layer_desc.digest.clone(), &self.cache);
+                let client = self.client.clone();
+                let oci_ref = oci_ref.clone();
+                let size = layer_desc.size;
+                let progress = progress.clone();
+                let media_type = layer_desc.media_type.clone();
+                let diff_id = diff_ids[i].clone();
+
+                let diff_id_digest: Digest = validated_diff_ids[i].clone();
+                let erofs_path = self.cache.layer_erofs_path(&diff_id_digest);
+                let lock_path = self.cache.layer_erofs_lock_path(&diff_id_digest);
+                let tmp_dir = self.cache.tmp_dir().to_path_buf();
+
+                tokio::spawn(async move {
+                    let layer_started_at = Instant::now();
+
+                    if store::is_valid_erofs_artifact(&erofs_path) && !force {
+                        if let Some(ref p) = progress {
+                            p.send(PullProgress::LayerMaterializeComplete {
+                                layer_index: i,
+                                diff_id: diff_id.clone().into(),
+                            });
+                        }
+
+                        tracing::debug!(
+                            layer_index = i,
+                            diff_id = %diff_id,
+                            elapsed_ms = layer_started_at.elapsed().as_millis(),
+                            "layer reused existing EROFS image"
+                        );
+
+                        return Ok::<_, LayerPipelineFailure>(LayerPipelineSuccess);
+                    }
+
+                    if let Err(error) = layer
+                        .download(&client, &oci_ref, size, force, progress.as_ref(), i)
+                        .await
+                    {
+                        return Err(LayerPipelineFailure { error });
+                    }
+
+                    // Acquire per-layer flock to coordinate with concurrent pulls.
+                    let lock_file = open_lock_file(&lock_path)
+                        .map_err(|e| LayerPipelineFailure { error: e })?;
+                    {
+                        let fd = lock_file.as_raw_fd();
+                        tokio::task::spawn_blocking(move || {
+                            let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+                            if ret != 0 {
+                                return Err(ImageError::Io(io::Error::last_os_error()));
+                            }
+                            Ok(())
+                        })
+                        .await
+                        .map_err(|e| LayerPipelineFailure {
+                            error: ImageError::Io(io::Error::other(e)),
+                        })?
+                        .map_err(|e| LayerPipelineFailure { error: e })?;
+                    }
+                    let _lock_guard = scopeguard::guard(lock_file, |file| {
+                        let _ = flock_unlock(&file);
+                    });
+
+                    // Re-check after lock — another process may have materialized it.
+                    if store::is_valid_erofs_artifact(&erofs_path) && !force {
+                        if let Some(ref p) = progress {
+                            p.send(PullProgress::LayerMaterializeComplete {
+                                layer_index: i,
+                                diff_id: diff_id.clone().into(),
+                            });
+                        }
+                        return Ok::<_, LayerPipelineFailure>(LayerPipelineSuccess);
+                    }
+
+                    if let Some(ref p) = progress {
+                        p.send(PullProgress::LayerMaterializeStarted {
+                            layer_index: i,
+                            diff_id: diff_id.clone().into(),
+                        });
+                    }
+
+                    let tar_path = layer.tar_path_ref();
+                    let tar_size =
+                        tokio::fs::metadata(&tar_path)
+                            .await
+                            .map_err(|e| LayerPipelineFailure {
+                                error: ImageError::Cache {
+                                    path: tar_path.clone(),
+                                    source: e,
+                                },
+                            })?;
+                    let tar_file = tokio::fs::File::open(&tar_path).await.map_err(|e| {
+                        LayerPipelineFailure {
+                            error: ImageError::Cache {
+                                path: tar_path.clone(),
+                                source: e,
+                            },
+                        }
+                    })?;
+
+                    let compression =
+                        Compression::from_media_type(media_type.as_deref().unwrap_or(""));
+                    let limits = ResourceLimits::default();
+                    let spool_path = tmp_dir.join(format!("{}.spool", diff_id));
+                    let ingest_started_at = Instant::now();
+                    let ingest_result = tar_ingest::ingest_compressed_tar(
+                        MaterializeProgressReader::new(
+                            tar_file,
+                            progress.clone(),
+                            i,
+                            tar_size.len(),
+                        ),
+                        compression,
+                        &limits,
+                        Some(&spool_path),
+                    )
+                    .await
+                    .map_err(|e| LayerPipelineFailure {
+                        error: ImageError::Materialize {
+                            digest: diff_id.clone(),
+                            message: format!("tar ingestion failed: {e}"),
+                            source: None,
+                        },
+                    })?;
+
+                    // Verify the uncompressed digest matches the config's diff_id.
+                    // This is the OCI content trust check — the diff_id is signed
+                    // as part of the image config, so a tampered layer would be caught.
+                    let expected_diff_hex = diff_id_digest.hex();
+                    if ingest_result.uncompressed_digest != expected_diff_hex {
+                        return Err(LayerPipelineFailure {
+                            error: ImageError::DigestMismatch {
+                                digest: diff_id.clone(),
+                                expected: format!("sha256:{expected_diff_hex}"),
+                                actual: format!("sha256:{}", ingest_result.uncompressed_digest),
+                            },
+                        });
+                    }
+                    let tree = ingest_result.tree;
+
+                    tracing::debug!(
+                        layer_index = i,
+                        diff_id = %diff_id,
+                        tar_bytes = tar_size.len(),
+                        elapsed_ms = ingest_started_at.elapsed().as_millis(),
+                        "layer tar ingestion completed (diff_id verified)"
+                    );
+
+                    if let Some(ref p) = progress {
+                        p.send(PullProgress::LayerMaterializeWriting { layer_index: i });
+                    }
+
+                    // Write to a temp file, then atomic rename to the final path.
+                    // This prevents partial files from being visible to concurrent readers.
+                    let temp_path = tmp_dir.join(format!("{}.erofs.part", diff_id));
+                    let erofs_final = erofs_path.clone();
+                    let diff_id_for_join = diff_id.clone();
+                    let write_started_at = Instant::now();
+                    tokio::task::spawn_blocking(move || {
+                        erofs::write_erofs(&tree, &temp_path)?;
+                        std::fs::rename(&temp_path, &erofs_final).map_err(erofs::ErofsError::Io)?;
+                        Ok::<(), erofs::ErofsError>(())
+                    })
+                    .await
+                    .map_err(|e| LayerPipelineFailure {
+                        error: ImageError::Materialize {
+                            digest: diff_id_for_join.clone(),
+                            message: format!("EROFS write task failed: {e}"),
+                            source: None,
+                        },
+                    })?
+                    .map_err(|e| LayerPipelineFailure {
+                        error: ImageError::Materialize {
+                            digest: diff_id.clone(),
+                            message: format!("EROFS write failed: {e}"),
+                            source: None,
+                        },
+                    })?;
+
+                    tracing::debug!(
+                        layer_index = i,
+                        diff_id = %diff_id,
+                        elapsed_ms = write_started_at.elapsed().as_millis(),
+                        total_elapsed_ms = layer_started_at.elapsed().as_millis(),
+                        "layer EROFS image write completed"
+                    );
+
+                    // Tarball cleanup is deferred — with duplicate layer digests,
+                    // another task may still need the same blob. Tarballs are cleaned
+                    // up after all layer tasks complete.
+                    let _ = tokio::fs::remove_file(&spool_path).await;
+
+                    if let Some(ref p) = progress {
+                        p.send(PullProgress::LayerMaterializeComplete {
+                            layer_index: i,
+                            diff_id: diff_id.clone().into(),
+                        });
+                    }
+
+                    Ok::<_, LayerPipelineFailure>(LayerPipelineSuccess)
+                })
+            })
+            .collect();
+
+        wait_for_layer_pipeline(layer_tasks).await
+    }
+
+    async fn materialize_flat_image(
+        &self,
+        oci_ref: &oci_client::Reference,
+        manifest_digest: &Digest,
+        layer_descriptors: &[LayerDescriptor],
+        diff_ids: &[String],
+        force: bool,
+        progress: Option<PullProgressSender>,
+    ) -> ImageResult<()> {
+        let flat_path = self.cache.flat_erofs_path(manifest_digest);
+
+        if store::is_valid_erofs_artifact(&flat_path) && !force {
+            for (layer_index, diff_id) in diff_ids.iter().enumerate() {
+                if let Some(ref p) = progress {
+                    p.send(PullProgress::LayerMaterializeComplete {
+                        layer_index,
+                        diff_id: diff_id.clone().into(),
+                    });
+                }
+            }
+
+            if let Some(ref p) = progress {
+                p.send(PullProgress::FlatMergeComplete {
+                    manifest_digest: manifest_digest.to_string().into(),
+                });
+            }
+
+            tracing::debug!(
+                manifest_digest = %manifest_digest,
+                "flat pull reused existing EROFS image"
+            );
+            return Ok(());
+        }
+
+        // Validate diff_ids before spawning (untrusted registry input).
+        let validated_diff_ids: Vec<Digest> = diff_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                id.parse::<Digest>().map_err(|_| {
+                    ImageError::ManifestParse(format!("invalid diff_id at layer {i}: {id}"))
+                })
+            })
+            .collect::<ImageResult<Vec<_>>>()?;
+
+        let layer_tasks: Vec<_> = layer_descriptors
+            .iter()
+            .enumerate()
+            .map(|(i, layer_desc)| {
+                let layer = Layer::new(layer_desc.digest.clone(), &self.cache);
+                let client = self.client.clone();
+                let oci_ref = oci_ref.clone();
+                let size = layer_desc.size;
+                let progress = progress.clone();
+                let media_type = layer_desc.media_type.clone();
+                let diff_id = diff_ids[i].clone();
+                let diff_id_digest = validated_diff_ids[i].clone();
+                let tmp_dir = self.cache.tmp_dir().to_path_buf();
+
+                tokio::spawn(async move {
+                    if let Err(error) = layer
+                        .download(&client, &oci_ref, size, force, progress.as_ref(), i)
+                        .await
+                    {
+                        return Err(LayerPipelineFailure { error });
+                    }
+
+                    if let Some(ref p) = progress {
+                        p.send(PullProgress::LayerMaterializeStarted {
+                            layer_index: i,
+                            diff_id: diff_id.clone().into(),
+                        });
+                    }
+
+                    let tar_path = layer.tar_path_ref();
+                    let tar_size =
+                        tokio::fs::metadata(&tar_path)
+                            .await
+                            .map_err(|e| LayerPipelineFailure {
+                                error: ImageError::Cache {
+                                    path: tar_path.clone(),
+                                    source: e,
+                                },
+                            })?;
+                    let tar_file = tokio::fs::File::open(&tar_path).await.map_err(|e| {
+                        LayerPipelineFailure {
+                            error: ImageError::Cache {
+                                path: tar_path.clone(),
+                                source: e,
+                            },
+                        }
+                    })?;
+
+                    let compression =
+                        Compression::from_media_type(media_type.as_deref().unwrap_or(""));
+                    let limits = ResourceLimits::default();
+                    let spool_path = tmp_dir.join(format!("{}.spool", diff_id));
+                    let ingest_result = tar_ingest::ingest_compressed_tar(
+                        MaterializeProgressReader::new(
+                            tar_file,
+                            progress.clone(),
+                            i,
+                            tar_size.len(),
+                        ),
+                        compression,
+                        &limits,
+                        Some(&spool_path),
+                    )
+                    .await
+                    .map_err(|e| LayerPipelineFailure {
+                        error: ImageError::Materialize {
+                            digest: diff_id.clone(),
+                            message: format!("tar ingestion failed: {e}"),
+                            source: None,
+                        },
+                    })?;
+
+                    // Verify uncompressed digest (diff_id).
+                    let expected_diff_hex = diff_id_digest.hex();
+                    if ingest_result.uncompressed_digest != expected_diff_hex {
+                        return Err(LayerPipelineFailure {
+                            error: ImageError::DigestMismatch {
+                                digest: diff_id.clone(),
+                                expected: format!("sha256:{expected_diff_hex}"),
+                                actual: format!("sha256:{}", ingest_result.uncompressed_digest),
+                            },
+                        });
+                    }
+                    let tree = ingest_result.tree;
+
+                    // Tarball cleanup is deferred — with duplicate layer digests,
+                    // another task may still need the same blob. Tarballs are cleaned
+                    // up after all layer tasks complete.
+                    let _ = tokio::fs::remove_file(&spool_path).await;
+
+                    if let Some(ref p) = progress {
+                        p.send(PullProgress::LayerMaterializeComplete {
+                            layer_index: i,
+                            diff_id: diff_id.clone().into(),
+                        });
+                    }
+
+                    Ok::<_, LayerPipelineFailure>(FlatLayerTreeSuccess {
+                        layer_index: i,
+                        tree,
+                    })
+                })
+            })
+            .collect();
+
+        let mut layer_trees = wait_for_flat_layer_pipeline(layer_tasks).await?;
+        layer_trees.sort_by_key(|result| result.layer_index);
+
+        if let Some(ref p) = progress {
+            p.send(PullProgress::FlatMergeStarted {
+                layer_count: layer_trees.len(),
+            });
+        }
+
+        let flat_path_for_write = flat_path.clone();
+        let manifest_digest_for_write = manifest_digest.clone();
+        let work_dir = self.cache.work_dir(manifest_digest);
+        let lock_path = self.cache.flat_erofs_lock_path(manifest_digest);
+        let lock_file = open_lock_file(&lock_path)?;
+        {
+            let fd = lock_file.as_raw_fd();
+            tokio::task::spawn_blocking(move || {
+                let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+                if ret != 0 {
+                    return Err(ImageError::Io(io::Error::last_os_error()));
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|e| ImageError::Io(io::Error::other(e)))??;
+        }
+        let _lock_guard = scopeguard::guard(lock_file, |file| {
+            let _ = flock_unlock(&file);
+        });
+
+        if store::is_valid_erofs_artifact(&flat_path) && !force {
+            if let Some(ref p) = progress {
+                p.send(PullProgress::FlatMergeComplete {
+                    manifest_digest: manifest_digest.to_string().into(),
+                });
+            }
+            return Ok(());
+        }
+
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&work_dir).map_err(|e| ImageError::Cache {
+                path: work_dir.clone(),
+                source: e,
+            })?;
+
+            // Clean up work_dir on both success and failure paths.
+            let _work_guard = scopeguard::guard((), |_| {
+                let _ = std::fs::remove_dir_all(&work_dir);
+            });
+
+            let temp_path = work_dir.join("flat.erofs");
+            let mut merged = FileTree::new();
+            for layer in layer_trees {
+                merged.merge_layer(layer.tree);
+            }
+
+            erofs::write_erofs(&merged, &temp_path).map_err(|e| ImageError::Materialize {
+                digest: manifest_digest_for_write.to_string(),
+                message: format!("EROFS write failed: {e}"),
+                source: None,
+            })?;
+
+            std::fs::rename(&temp_path, &flat_path_for_write).map_err(|e| ImageError::Cache {
+                path: flat_path_for_write.clone(),
+                source: e,
+            })?;
+
+            Ok::<(), ImageError>(())
+        })
+        .await
+        .map_err(|e| ImageError::Io(io::Error::other(e)))??;
+
+        if let Some(ref p) = progress {
+            p.send(PullProgress::FlatMergeComplete {
+                manifest_digest: manifest_digest.to_string().into(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl<R: AsyncRead + Unpin> AsyncRead for MaterializeProgressReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        match Pin::new(&mut self.inner).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                let bytes_read = (buf.filled().len() - before) as u64;
+                if bytes_read > 0 {
+                    self.bytes_read += bytes_read;
+                    let should_emit_progress =
+                        self.bytes_read.saturating_sub(self.last_emitted_bytes)
+                            >= MATERIALIZE_PROGRESS_EMIT_BYTES
+                            || self.bytes_read >= self.total_bytes;
+
+                    if should_emit_progress {
+                        if let Some(progress) = &self.progress {
+                            progress.send(PullProgress::LayerMaterializeProgress {
+                                layer_index: self.layer_index,
+                                bytes_read: self.bytes_read.min(self.total_bytes),
+                                total_bytes: self.total_bytes,
+                            });
+                        }
+                        self.last_emitted_bytes = self.bytes_read;
+                    }
+                }
+
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -658,25 +1195,20 @@ fn resolve_platform_digest(manifests: &[ImageIndexEntry], target: &Platform) -> 
 }
 
 /// Build a pull result from cached image metadata.
-fn cached_pull_result(
-    cache: &GlobalCache,
-    metadata: &CachedImageMetadata,
-) -> ImageResult<PullResult> {
+fn cached_pull_result(metadata: &CachedImageMetadata, mode: LayerMode) -> ImageResult<PullResult> {
     let manifest_digest: Digest = metadata.manifest_digest.parse()?;
-    let layer_digests = metadata
+    let layer_diff_ids = metadata
         .layers
         .iter()
-        .map(|layer| layer.digest.parse())
+        .map(|layer| layer.diff_id.parse())
         .collect::<ImageResult<Vec<Digest>>>()?;
 
     Ok(PullResult {
-        layers: layer_digests
-            .iter()
-            .map(|digest| cache.extracted_dir(digest))
-            .collect(),
+        layer_diff_ids,
         config: metadata.config.clone(),
         manifest_digest,
         cached: true,
+        mode,
     })
 }
 
@@ -693,21 +1225,34 @@ fn resolve_cached_pull_result(
         return Ok(None);
     };
 
-    let cached_digests = match metadata
-        .layers
-        .iter()
-        .map(|layer| layer.digest.parse())
-        .collect::<ImageResult<Vec<Digest>>>()
-    {
-        Ok(digests) => digests,
-        Err(_) => return Ok(None),
+    let effective_mode = select_layer_mode(options.layer_mode, metadata.layers.len());
+    let artifacts_ready = match effective_mode {
+        LayerMode::Layered => {
+            let cached_diff_ids = match metadata
+                .layers
+                .iter()
+                .map(|layer| layer.diff_id.parse())
+                .collect::<ImageResult<Vec<Digest>>>()
+            {
+                Ok(digests) => digests,
+                Err(_) => return Ok(None),
+            };
+            cache.all_layers_materialized(&cached_diff_ids)
+        }
+        LayerMode::Flat => {
+            let manifest_digest = match metadata.manifest_digest.parse::<Digest>() {
+                Ok(digest) => digest,
+                Err(_) => return Ok(None),
+            };
+            cache.is_flat_materialized(&manifest_digest)
+        }
     };
 
-    if !cache.all_layers_extracted(&cached_digests) {
+    if !artifacts_ready {
         return Ok(None);
     }
 
-    let result = match cached_pull_result(cache, &metadata) {
+    let result = match cached_pull_result(&metadata, effective_mode) {
         Ok(result) => result,
         Err(_) => return Ok(None),
     };
@@ -715,32 +1260,79 @@ fn resolve_cached_pull_result(
     Ok(Some(CachedPullInfo { result, metadata }))
 }
 
-fn open_lock_file(path: &Path) -> ImageResult<File> {
-    OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path)
-        .map_err(|e| ImageError::Cache {
-            path: path.to_path_buf(),
-            source: e,
-        })
+fn select_layer_mode(requested: LayerMode, layer_count: usize) -> LayerMode {
+    if layer_count == 0 {
+        return LayerMode::Layered;
+    }
+
+    if requested == LayerMode::Layered && layer_count > 126 {
+        LayerMode::Flat
+    } else {
+        requested
+    }
 }
 
-fn flock_exclusive(file: &File) -> ImageResult<()> {
-    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-    if ret != 0 {
-        return Err(ImageError::Io(io::Error::last_os_error()));
+async fn wait_for_layer_pipeline(
+    layer_tasks: Vec<JoinHandle<Result<LayerPipelineSuccess, LayerPipelineFailure>>>,
+) -> ImageResult<()> {
+    let outcomes = futures::future::join_all(layer_tasks).await;
+    let mut first_error: Option<ImageError> = None;
+
+    for outcome in outcomes {
+        match outcome {
+            Ok(Ok(_)) => {}
+            Ok(Err(failure)) => {
+                if first_error.is_none() {
+                    first_error = Some(failure.error);
+                }
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(ImageError::Io(io::Error::other(format!(
+                        "layer task failed: {error}"
+                    ))));
+                }
+            }
+        }
     }
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+
     Ok(())
 }
 
-fn flock_unlock(file: &File) -> ImageResult<()> {
-    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-    if ret != 0 {
-        return Err(ImageError::Io(io::Error::last_os_error()));
+async fn wait_for_flat_layer_pipeline(
+    layer_tasks: Vec<JoinHandle<Result<FlatLayerTreeSuccess, LayerPipelineFailure>>>,
+) -> ImageResult<Vec<FlatLayerTreeSuccess>> {
+    let outcomes = futures::future::join_all(layer_tasks).await;
+    let mut results = Vec::new();
+    let mut first_error: Option<ImageError> = None;
+
+    for outcome in outcomes {
+        match outcome {
+            Ok(Ok(result)) => results.push(result),
+            Ok(Err(failure)) => {
+                if first_error.is_none() {
+                    first_error = Some(failure.error);
+                }
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(ImageError::Io(io::Error::other(format!(
+                        "layer task failed: {error}"
+                    ))));
+                }
+            }
+        }
     }
-    Ok(())
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+
+    Ok(results)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -757,8 +1349,8 @@ mod tests {
     use crate::{
         config::ImageConfig,
         error::ImageError,
-        pull::{PullOptions, PullPolicy},
-        store::{COMPLETE_MARKER, CachedImageMetadata, CachedLayerMetadata, GlobalCache},
+        pull::{LayerMode, PullOptions, PullPolicy},
+        store::{CachedImageMetadata, CachedLayerMetadata, GlobalCache},
     };
 
     #[test]
@@ -812,26 +1404,26 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
-                build_index: true,
+                ..Default::default()
             },
         )
         .unwrap()
         .expect("expected cached pull result");
 
         assert!(cached.result.cached);
-        assert_eq!(cached.result.layers.len(), 2);
+        assert_eq!(cached.result.layer_diff_ids.len(), 2);
         assert_eq!(
             cached.result.manifest_digest.to_string(),
             metadata.manifest_digest
         );
         assert_eq!(cached.result.config.env, metadata.config.env);
         assert_eq!(
-            cached.result.layers[0],
-            cache.extracted_dir(&parse_digest(&metadata.layers[0].digest))
+            cached.result.layer_diff_ids[0].to_string(),
+            metadata.layers[0].diff_id
         );
         assert_eq!(
-            cached.result.layers[1],
-            cache.extracted_dir(&parse_digest(&metadata.layers[1].digest))
+            cached.result.layer_diff_ids[1].to_string(),
+            metadata.layers[1].diff_id
         );
     }
 
@@ -848,7 +1440,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::Never,
                 force: false,
-                build_index: true,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -870,7 +1462,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
-                build_index: true,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -897,7 +1489,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::Never,
                 force: false,
-                build_index: true,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -910,7 +1502,7 @@ mod tests {
                 &PullOptions {
                     pull_policy: PullPolicy::Never,
                     force: false,
-                    build_index: true,
+                    ..Default::default()
                 },
             )
             .await;
@@ -932,7 +1524,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
-                build_index: true,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -953,7 +1545,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: true,
-                build_index: true,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -965,7 +1557,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::Always,
                 force: false,
-                build_index: true,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -978,7 +1570,7 @@ mod tests {
         let cache = GlobalCache::new(temp.path()).unwrap();
         let reference: oci_client::Reference = "docker.io/library/redis:latest".parse().unwrap();
         let mut metadata = write_cached_image_fixture(&cache, &reference, &[true]);
-        metadata.layers[0].digest = "not-a-digest".into();
+        metadata.layers[0].diff_id = "not-a-digest".into();
         cache.write_image_metadata(&reference, &metadata).unwrap();
 
         let cached = resolve_cached_pull_result(
@@ -987,12 +1579,85 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
-                build_index: true,
+                ..Default::default()
             },
         )
         .unwrap();
 
         assert!(cached.is_none());
+    }
+
+    #[test]
+    fn test_resolve_cached_pull_result_flat_uses_flat_artifact() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let reference: oci_client::Reference = "docker.io/library/alpine:latest".parse().unwrap();
+        let metadata = write_cached_image_fixture(&cache, &reference, &[false, false]);
+        let manifest_digest = parse_digest(&metadata.manifest_digest);
+        // EROFS validation checks size > 0 and 4 KiB alignment.
+        std::fs::write(cache.flat_erofs_path(&manifest_digest), &[0u8; 4096]).unwrap();
+
+        let cached = resolve_cached_pull_result(
+            &cache,
+            &reference,
+            &PullOptions {
+                pull_policy: PullPolicy::IfMissing,
+                force: false,
+                layer_mode: LayerMode::Flat,
+            },
+        )
+        .unwrap()
+        .expect("expected cached flat pull result");
+
+        assert!(cached.result.cached);
+        assert_eq!(cached.result.mode, LayerMode::Flat);
+        assert_eq!(cached.result.layer_diff_ids.len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_cached_pull_result_flat_ignores_layer_only_cache() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let reference: oci_client::Reference = "docker.io/library/busybox:latest".parse().unwrap();
+        write_cached_image_fixture(&cache, &reference, &[true, true]);
+
+        let cached = resolve_cached_pull_result(
+            &cache,
+            &reference,
+            &PullOptions {
+                pull_policy: PullPolicy::IfMissing,
+                force: false,
+                layer_mode: LayerMode::Flat,
+            },
+        )
+        .unwrap();
+
+        assert!(cached.is_none());
+    }
+
+    #[test]
+    fn test_resolve_cached_pull_result_auto_switches_large_images_to_flat() {
+        let temp = tempdir().unwrap();
+        let cache = GlobalCache::new(temp.path()).unwrap();
+        let reference: oci_client::Reference = "docker.io/library/python:3.12".parse().unwrap();
+        let metadata = write_cached_image_fixture(&cache, &reference, &vec![false; 127]);
+        let manifest_digest = parse_digest(&metadata.manifest_digest);
+        std::fs::write(cache.flat_erofs_path(&manifest_digest), vec![0u8; 4096]).unwrap();
+
+        let cached = resolve_cached_pull_result(
+            &cache,
+            &reference,
+            &PullOptions {
+                pull_policy: PullPolicy::IfMissing,
+                force: false,
+                layer_mode: LayerMode::Layered,
+            },
+        )
+        .unwrap()
+        .expect("expected cached auto-flat pull result");
+
+        assert_eq!(cached.result.mode, LayerMode::Flat);
+        assert_eq!(cached.result.layer_diff_ids.len(), 127);
     }
 
     #[tokio::test]
@@ -1001,7 +1666,7 @@ mod tests {
         let cache = GlobalCache::new(temp.path()).unwrap();
         let reference: oci_client::Reference = "docker.io/library/httpd:latest".parse().unwrap();
         let mut metadata = write_cached_image_fixture(&cache, &reference, &[true]);
-        metadata.layers[0].digest = "not-a-digest".into();
+        metadata.layers[0].diff_id = "not-a-digest".into();
         cache.write_image_metadata(&reference, &metadata).unwrap();
 
         let registry = super::Registry::new(Platform::default(), cache).unwrap();
@@ -1011,7 +1676,7 @@ mod tests {
                 &PullOptions {
                     pull_policy: PullPolicy::Never,
                     force: false,
-                    build_index: true,
+                    ..Default::default()
                 },
             )
             .await;
@@ -1032,7 +1697,7 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
-                build_index: true,
+                ..Default::default()
             },
         );
 
@@ -1069,7 +1734,7 @@ mod tests {
     fn write_cached_image_fixture(
         cache: &GlobalCache,
         reference: &oci_client::Reference,
-        extracted_layers: &[bool],
+        materialized_layers: &[bool],
     ) -> CachedImageMetadata {
         let metadata = CachedImageMetadata {
             manifest_digest:
@@ -1082,7 +1747,7 @@ mod tests {
                 env: vec!["PATH=/usr/bin".into()],
                 ..Default::default()
             },
-            layers: extracted_layers
+            layers: materialized_layers
                 .iter()
                 .enumerate()
                 .map(|(index, _)| CachedLayerMetadata {
@@ -1096,12 +1761,12 @@ mod tests {
 
         cache.write_image_metadata(reference, &metadata).unwrap();
 
-        for (index, extracted) in extracted_layers.iter().copied().enumerate() {
-            let digest = parse_digest(&layer_digest(index));
-            let extracted_dir = cache.extracted_dir(&digest);
-            std::fs::create_dir_all(&extracted_dir).unwrap();
-            if extracted {
-                std::fs::write(extracted_dir.join(COMPLETE_MARKER), b"").unwrap();
+        // Create EROFS files keyed by diff_id for cache hit detection.
+        for (index, materialized) in materialized_layers.iter().copied().enumerate() {
+            let diff_id = parse_digest(&format!("sha256:{:064x}", index as u64 + 1000));
+            let erofs_path = cache.layer_erofs_path(&diff_id);
+            if materialized {
+                std::fs::write(&erofs_path, vec![0u8; 4096]).unwrap();
             }
         }
 
@@ -1125,7 +1790,7 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(reference.to_string().as_bytes());
         cache_root
-            .join("images")
+            .join("manifests")
             .join(format!("{}.json", hex::encode(hasher.finalize())))
     }
 }

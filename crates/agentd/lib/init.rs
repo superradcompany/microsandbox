@@ -15,11 +15,28 @@ struct TmpfsSpec<'a> {
     noexec: bool,
 }
 
-/// Parsed block-device root specification.
+/// Parsed block root specification with kind-based dispatch.
 #[derive(Debug)]
-struct BlockRootSpec<'a> {
-    device: &'a str,
-    fstype: Option<&'a str>,
+enum BlockRootSpec<'a> {
+    /// Single disk image (replaces legacy MSB_BLOCK_ROOT format).
+    DiskImage {
+        device: &'a str,
+        fstype: Option<&'a str>,
+    },
+    /// OCI layered: N EROFS lower devices + ext4 upper + guest overlayfs.
+    OciLayered {
+        lowers: Vec<&'a str>,
+        lower_fstype: &'a str,
+        upper: &'a str,
+        upper_fstype: &'a str,
+    },
+    /// OCI flat: 1 merged EROFS lower + ext4 upper + guest overlayfs.
+    OciFlat {
+        lower: &'a str,
+        lower_fstype: &'a str,
+        upper: &'a str,
+        upper_fstype: &'a str,
+    },
 }
 
 /// Parsed virtiofs directory volume mount specification.
@@ -105,33 +122,95 @@ fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec<'_>> {
     })
 }
 
-/// Parses a block-device root specification: `device[,fstype=TYPE]`
+/// Parses MSB_BLOCK_ROOT into a kind-based spec.
+///
+/// Supports:
+/// - `kind=disk-image,device=/dev/vda[,fstype=ext4]`
+/// - `kind=oci-layered,lowers=/dev/vdb;/dev/vdc,lower_fstype=erofs,upper=/dev/vde,upper_fstype=ext4`
+/// - `kind=oci-flat,lower=/dev/vdb,lower_fstype=erofs,upper=/dev/vdc,upper_fstype=ext4`
+/// - Legacy: `/dev/vda[,fstype=ext4]` (no `kind=`, treated as disk-image)
 fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec<'_>> {
-    let mut parts = val.split(',');
-    let device = parts.next().unwrap();
-    if device.is_empty() {
-        return Err(AgentdError::Init(
-            "MSB_BLOCK_ROOT has empty device path".into(),
-        ));
-    }
-
-    let mut fstype = None;
-    for opt in parts {
-        if let Some(val) = opt.strip_prefix("fstype=") {
-            if val.is_empty() {
-                return Err(AgentdError::Init(
-                    "MSB_BLOCK_ROOT has empty fstype value".into(),
-                ));
-            }
-            fstype = Some(val);
-        } else {
-            return Err(AgentdError::Init(format!(
-                "unknown MSB_BLOCK_ROOT option: {opt}"
-            )));
+    let mut kv: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for part in val.split(',') {
+        if let Some((k, v)) = part.split_once('=') {
+            kv.insert(k, v);
         }
     }
 
-    Ok(BlockRootSpec { device, fstype })
+    let get = |key: &str| -> AgentdResult<&str> {
+        kv.get(key)
+            .filter(|v| !v.is_empty())
+            .copied()
+            .ok_or_else(|| AgentdError::Init(format!("MSB_BLOCK_ROOT missing '{key}'")))
+    };
+
+    match kv.get("kind").copied() {
+        Some("disk-image") => {
+            let device = get("device")?;
+            let fstype = kv.get("fstype").filter(|v| !v.is_empty()).copied();
+            Ok(BlockRootSpec::DiskImage { device, fstype })
+        }
+        Some("oci-layered") => {
+            let lowers_str = kv.get("lowers").copied().ok_or_else(|| {
+                AgentdError::Init("MSB_BLOCK_ROOT kind=oci-layered missing 'lowers' key".into())
+            })?;
+            let lowers: Vec<&str> = if lowers_str.is_empty() {
+                Vec::new()
+            } else {
+                lowers_str.split(';').collect()
+            };
+            let lower_fstype = get("lower_fstype")?;
+            let upper = get("upper")?;
+            let upper_fstype = get("upper_fstype")?;
+            Ok(BlockRootSpec::OciLayered {
+                lowers,
+                lower_fstype,
+                upper,
+                upper_fstype,
+            })
+        }
+        Some("oci-flat") => {
+            let lower = get("lower")?;
+            let lower_fstype = get("lower_fstype")?;
+            let upper = get("upper")?;
+            let upper_fstype = get("upper_fstype")?;
+            Ok(BlockRootSpec::OciFlat {
+                lower,
+                lower_fstype,
+                upper,
+                upper_fstype,
+            })
+        }
+        Some(other) => Err(AgentdError::Init(format!(
+            "MSB_BLOCK_ROOT unknown kind: {other}"
+        ))),
+        None => {
+            // Legacy format: device[,fstype=TYPE]
+            let mut parts = val.split(',');
+            let device = parts.next().unwrap();
+            if device.is_empty() {
+                return Err(AgentdError::Init(
+                    "MSB_BLOCK_ROOT has empty device path".into(),
+                ));
+            }
+            let mut fstype = None;
+            for opt in parts {
+                if let Some(v) = opt.strip_prefix("fstype=") {
+                    if v.is_empty() {
+                        return Err(AgentdError::Init(
+                            "MSB_BLOCK_ROOT has empty fstype value".into(),
+                        ));
+                    }
+                    fstype = Some(v);
+                } else {
+                    return Err(AgentdError::Init(format!(
+                        "unknown MSB_BLOCK_ROOT option: {opt}"
+                    )));
+                }
+            }
+            Ok(BlockRootSpec::DiskImage { device, fstype })
+        }
+    }
 }
 
 /// Parses a single virtiofs directory volume mount entry: `tag:guest_path[:ro]`
@@ -357,10 +436,12 @@ mod linux {
         Ok(())
     }
 
-    /// Mounts a block device as the new root filesystem, if `MSB_BLOCK_ROOT` is set.
+    /// Assembles the root filesystem based on `MSB_BLOCK_ROOT`, if set.
     ///
-    /// Steps: mount block device at `/newroot`, bind-mount `/.msb` into it,
-    /// pivot via `MS_MOVE` + `chroot`, then re-mount essential filesystems.
+    /// Dispatches to the appropriate handler based on `kind`:
+    /// - `disk-image`: single device mount + pivot
+    /// - `oci-layered`: N EROFS lowers + ext4 upper + guest overlayfs + pivot
+    /// - `oci-flat`: 1 EROFS lower + ext4 upper + guest overlayfs + pivot
     pub fn mount_block_root() -> AgentdResult<()> {
         let val = match std::env::var(microsandbox_protocol::ENV_BLOCK_ROOT) {
             Ok(v) if !v.is_empty() => v,
@@ -368,14 +449,41 @@ mod linux {
         };
 
         let spec = super::parse_block_root(&val)?;
-
-        // Create the temporary mount point.
         mkdir_ignore_exists("/newroot")?;
 
-        // Mount the block device.
-        if let Some(fstype) = spec.fstype {
+        match spec {
+            super::BlockRootSpec::DiskImage { device, fstype } => {
+                mount_disk_image(device, fstype)?;
+            }
+            super::BlockRootSpec::OciLayered {
+                lowers,
+                lower_fstype,
+                upper,
+                upper_fstype,
+            } => {
+                mount_oci_overlay(&lowers, lower_fstype, upper, upper_fstype)?;
+            }
+            super::BlockRootSpec::OciFlat {
+                lower,
+                lower_fstype,
+                upper,
+                upper_fstype,
+            } => {
+                mount_oci_overlay(&[lower], lower_fstype, upper, upper_fstype)?;
+            }
+        }
+
+        // Common tail: bind-mount /.msb, pivot, re-mount essentials.
+        pivot_to_newroot()?;
+
+        Ok(())
+    }
+
+    /// Mount a single disk image at /newroot.
+    fn mount_disk_image(device: &str, fstype: Option<&str>) -> AgentdResult<()> {
+        if let Some(fstype) = fstype {
             mount(
-                Some(spec.device),
+                Some(device),
                 "/newroot",
                 Some(fstype),
                 MsFlags::empty(),
@@ -383,15 +491,96 @@ mod linux {
             )
             .map_err(|e| {
                 AgentdError::Init(format!(
-                    "failed to mount {} at /newroot as {fstype}: {e}",
-                    spec.device
+                    "failed to mount {device} at /newroot as {fstype}: {e}"
                 ))
             })?;
         } else {
-            try_mount(spec.device, "/newroot")?;
+            try_mount(device, "/newroot")?;
+        }
+        Ok(())
+    }
+
+    /// Mount EROFS lower layers + ext4 upper + overlayfs at /newroot.
+    ///
+    /// Works for both layered (N lowers) and flat (1 lower) modes.
+    fn mount_oci_overlay(
+        lowers: &[&str],
+        lower_fstype: &str,
+        upper_device: &str,
+        upper_fstype: &str,
+    ) -> AgentdResult<()> {
+        let rootfs_base = "/.msb/rootfs";
+        std::fs::create_dir_all(rootfs_base)
+            .map_err(|e| AgentdError::Init(format!("failed to create {rootfs_base}: {e}")))?;
+
+        // Mount each lower EROFS device.
+        let mut lower_dirs = Vec::with_capacity(lowers.len());
+        for (i, device) in lowers.iter().enumerate() {
+            let mount_point = format!("{rootfs_base}/layers/{i}");
+            std::fs::create_dir_all(&mount_point)
+                .map_err(|e| AgentdError::Init(format!("mkdir {mount_point}: {e}")))?;
+            mount(
+                Some(*device),
+                mount_point.as_str(),
+                Some(lower_fstype),
+                MsFlags::MS_RDONLY,
+                None::<&str>,
+            )
+            .map_err(|e| AgentdError::Init(format!("mount {device} at {mount_point}: {e}")))?;
+            lower_dirs.push(mount_point);
         }
 
-        // Bind-mount the runtime filesystem into the new root.
+        // Mount the ext4 upper device.
+        let upperfs_dir = format!("{rootfs_base}/upperfs");
+        std::fs::create_dir_all(&upperfs_dir)
+            .map_err(|e| AgentdError::Init(format!("mkdir {upperfs_dir}: {e}")))?;
+        mount(
+            Some(upper_device),
+            upperfs_dir.as_str(),
+            Some(upper_fstype),
+            MsFlags::empty(),
+            None::<&str>,
+        )
+        .map_err(|e| AgentdError::Init(format!("mount {upper_device} at {upperfs_dir}: {e}")))?;
+
+        // Create upper and work subdirs on the ext4 device.
+        let upper_dir = format!("{upperfs_dir}/upper");
+        let work_dir = format!("{upperfs_dir}/work");
+        std::fs::create_dir_all(&upper_dir)
+            .map_err(|e| AgentdError::Init(format!("mkdir {upper_dir}: {e}")))?;
+        std::fs::create_dir_all(&work_dir)
+            .map_err(|e| AgentdError::Init(format!("mkdir {work_dir}: {e}")))?;
+
+        // Build overlayfs lowerdir option: top layer first (reverse of OCI order).
+        let lowerdir = if lower_dirs.is_empty() {
+            String::new()
+        } else {
+            let mut reversed = lower_dirs.clone();
+            reversed.reverse();
+            reversed.join(":")
+        };
+
+        // Assemble overlayfs mount options.
+        let mount_data = if lowerdir.is_empty() {
+            format!("upperdir={upper_dir},workdir={work_dir}")
+        } else {
+            format!("lowerdir={lowerdir},upperdir={upper_dir},workdir={work_dir}")
+        };
+
+        mount(
+            Some("overlay"),
+            "/newroot",
+            Some("overlay"),
+            MsFlags::empty(),
+            Some(mount_data.as_str()),
+        )
+        .map_err(|e| AgentdError::Init(format!("mount overlay at /newroot: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Bind-mount /.msb into /newroot, then MS_MOVE + chroot + re-mount essentials.
+    fn pivot_to_newroot() -> AgentdResult<()> {
         let msb_target = "/newroot/.msb";
         mkdir_ignore_exists(msb_target)?;
         mount(
@@ -403,7 +592,6 @@ mod linux {
         )
         .map_err(|e| AgentdError::Init(format!("failed to bind-mount /.msb into /newroot: {e}")))?;
 
-        // Pivot: move the new root on top of /.
         chdir("/newroot")
             .map_err(|e| AgentdError::Init(format!("failed to chdir /newroot: {e}")))?;
 
@@ -415,7 +603,6 @@ mod linux {
         chdir("/")
             .map_err(|e| AgentdError::Init(format!("failed to chdir / after chroot: {e}")))?;
 
-        // Re-mount essential filesystems in the new root.
         mount_filesystems()?;
 
         Ok(())
@@ -862,36 +1049,119 @@ mod tests {
         assert!(err.to_string().contains("empty path"));
     }
 
+    // ── Legacy format tests ───────────────────────────────────────────
+
     #[test]
-    fn test_parse_block_root_device_only() {
+    fn test_parse_block_root_legacy_device_only() {
         let spec = parse_block_root("/dev/vda").unwrap();
-        assert_eq!(spec.device, "/dev/vda");
-        assert_eq!(spec.fstype, None);
+        let BlockRootSpec::DiskImage { device, fstype } = spec else {
+            panic!("expected DiskImage");
+        };
+        assert_eq!(device, "/dev/vda");
+        assert_eq!(fstype, None);
     }
 
     #[test]
-    fn test_parse_block_root_with_fstype() {
+    fn test_parse_block_root_legacy_with_fstype() {
         let spec = parse_block_root("/dev/vda,fstype=ext4").unwrap();
-        assert_eq!(spec.device, "/dev/vda");
-        assert_eq!(spec.fstype, Some("ext4"));
+        let BlockRootSpec::DiskImage { device, fstype } = spec else {
+            panic!("expected DiskImage");
+        };
+        assert_eq!(device, "/dev/vda");
+        assert_eq!(fstype, Some("ext4"));
     }
 
     #[test]
-    fn test_parse_block_root_empty_device_errors() {
+    fn test_parse_block_root_legacy_empty_device_errors() {
         let err = parse_block_root(",fstype=ext4").unwrap_err();
         assert!(err.to_string().contains("empty device path"));
     }
 
     #[test]
-    fn test_parse_block_root_unknown_option_errors() {
+    fn test_parse_block_root_legacy_unknown_option_errors() {
         let err = parse_block_root("/dev/vda,bogus=42").unwrap_err();
         assert!(err.to_string().contains("unknown MSB_BLOCK_ROOT option"));
     }
 
     #[test]
-    fn test_parse_block_root_empty_fstype_errors() {
+    fn test_parse_block_root_legacy_empty_fstype_errors() {
         let err = parse_block_root("/dev/vda,fstype=").unwrap_err();
         assert!(err.to_string().contains("empty fstype"));
+    }
+
+    // ── kind=disk-image tests ────────────────────────────────────────
+
+    #[test]
+    fn test_parse_block_root_disk_image() {
+        let spec = parse_block_root("kind=disk-image,device=/dev/vda,fstype=ext4").unwrap();
+        let BlockRootSpec::DiskImage { device, fstype } = spec else {
+            panic!("expected DiskImage");
+        };
+        assert_eq!(device, "/dev/vda");
+        assert_eq!(fstype, Some("ext4"));
+    }
+
+    // ── kind=oci-layered tests ───────────────────────────────────────
+
+    #[test]
+    fn test_parse_block_root_oci_layered() {
+        let spec = parse_block_root(
+            "kind=oci-layered,lowers=/dev/vdb;/dev/vdc,lower_fstype=erofs,upper=/dev/vdd,upper_fstype=ext4"
+        ).unwrap();
+        let BlockRootSpec::OciLayered {
+            lowers,
+            lower_fstype,
+            upper,
+            upper_fstype,
+        } = spec
+        else {
+            panic!("expected OciLayered");
+        };
+        assert_eq!(lowers, vec!["/dev/vdb", "/dev/vdc"]);
+        assert_eq!(lower_fstype, "erofs");
+        assert_eq!(upper, "/dev/vdd");
+        assert_eq!(upper_fstype, "ext4");
+    }
+
+    #[test]
+    fn test_parse_block_root_oci_layered_empty_lowers() {
+        let spec = parse_block_root(
+            "kind=oci-layered,lowers=,lower_fstype=erofs,upper=/dev/vdb,upper_fstype=ext4",
+        )
+        .unwrap();
+        let BlockRootSpec::OciLayered { lowers, .. } = spec else {
+            panic!("expected OciLayered");
+        };
+        assert!(lowers.is_empty());
+    }
+
+    // ── kind=oci-flat tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_parse_block_root_oci_flat() {
+        let spec = parse_block_root(
+            "kind=oci-flat,lower=/dev/vdb,lower_fstype=erofs,upper=/dev/vdc,upper_fstype=ext4",
+        )
+        .unwrap();
+        let BlockRootSpec::OciFlat {
+            lower,
+            lower_fstype,
+            upper,
+            upper_fstype,
+        } = spec
+        else {
+            panic!("expected OciFlat");
+        };
+        assert_eq!(lower, "/dev/vdb");
+        assert_eq!(lower_fstype, "erofs");
+        assert_eq!(upper, "/dev/vdc");
+        assert_eq!(upper_fstype, "ext4");
+    }
+
+    #[test]
+    fn test_parse_block_root_unknown_kind_errors() {
+        let err = parse_block_root("kind=bogus,device=/dev/vda").unwrap_err();
+        assert!(err.to_string().contains("unknown kind"));
     }
 
     #[test]

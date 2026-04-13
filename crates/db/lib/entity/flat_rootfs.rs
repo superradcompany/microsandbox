@@ -1,7 +1,6 @@
-//! Entity definition for the `sandbox_image` join table.
+//! Entity definition for the `flat_rootfs` table.
 //!
-//! Links sandboxes to their pinned images, enabling safe image GC
-//! (images referenced by running sandboxes cannot be deleted).
+//! Tracks flat-mode EROFS images (single merged image per manifest).
 
 use sea_orm::entity::prelude::*;
 
@@ -9,15 +8,17 @@ use sea_orm::entity::prelude::*;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// The sandbox-image join entity model.
+/// The flat rootfs entity model.
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-#[sea_orm(table_name = "sandbox_image")]
+#[sea_orm(table_name = "flat_rootfs")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
-    pub sandbox_id: i32,
-    pub image_id: i32,
-    pub manifest_digest: String,
+    pub manifest_id: i32,
+    pub state: String,
+    pub size_bytes: Option<i64>,
+    pub pinned: bool,
+    pub last_used_at: Option<DateTime>,
     pub created_at: Option<DateTime>,
 }
 
@@ -25,35 +26,32 @@ pub struct Model {
 // Types: Relations
 //--------------------------------------------------------------------------------------------------
 
-/// Relations for the sandbox_image entity.
+/// Relations for the flat_rootfs entity.
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    /// Belongs to a sandbox.
+    /// A flat rootfs belongs to a manifest.
     #[sea_orm(
-        belongs_to = "super::sandbox::Entity",
-        from = "Column::SandboxId",
-        to = "super::sandbox::Column::Id"
+        belongs_to = "super::manifest::Entity",
+        from = "Column::ManifestId",
+        to = "super::manifest::Column::Id",
+        on_delete = "Cascade"
     )]
-    Sandbox,
+    Manifest,
 
-    /// Belongs to an image.
-    #[sea_orm(
-        belongs_to = "super::image::Entity",
-        from = "Column::ImageId",
-        to = "super::image::Column::Id"
-    )]
-    Image,
+    /// A flat rootfs may be referenced by sandbox_rootfs entries.
+    #[sea_orm(has_many = "super::sandbox_rootfs::Entity")]
+    SandboxRootfs,
 }
 
-impl Related<super::sandbox::Entity> for Entity {
+impl Related<super::manifest::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Sandbox.def()
+        Relation::Manifest.def()
     }
 }
 
-impl Related<super::image::Entity> for Entity {
+impl Related<super::sandbox_rootfs::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Image.def()
+        Relation::SandboxRootfs.def()
     }
 }
 

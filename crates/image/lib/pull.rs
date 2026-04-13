@@ -1,7 +1,5 @@
 //! Pull options, policy, and result types.
 
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 use crate::{config::ImageConfig, digest::Digest};
@@ -25,23 +23,34 @@ pub enum PullPolicy {
     Never,
 }
 
+/// EROFS rootfs mode selection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LayerMode {
+    /// Per-layer EROFS block devices + guest overlayfs (default, up to 126 layers).
+    #[default]
+    Layered,
+
+    /// Single merged EROFS block device + guest overlayfs.
+    Flat,
+}
+
 /// Options for [`Registry::pull()`](crate::Registry::pull).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PullOptions {
     /// Controls when the registry is contacted.
     pub pull_policy: PullPolicy,
 
-    /// Re-download and re-extract even if all layers are already cached.
+    /// Re-download blobs and re-materialize rootfs images even if cached.
     pub force: bool,
 
-    /// Generate binary sidecar indexes after extraction.
-    pub build_index: bool,
+    /// EROFS rootfs mode (layered or flat).
+    pub layer_mode: LayerMode,
 }
 
 /// Result of a successful image pull.
 pub struct PullResult {
-    /// Extracted layer directories in bottom-to-top order.
-    pub layers: Vec<PathBuf>,
+    /// Layer diff_ids in bottom-to-top order (new EROFS path).
+    pub layer_diff_ids: Vec<Digest>,
 
     /// Parsed OCI image configuration.
     pub config: ImageConfig,
@@ -51,18 +60,11 @@ pub struct PullResult {
 
     /// True if all layers were already cached and no downloads occurred.
     pub cached: bool,
+
+    /// The rootfs mode used.
+    pub mode: LayerMode,
 }
 
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
-
-impl Default for PullOptions {
-    fn default() -> Self {
-        Self {
-            pull_policy: PullPolicy::default(),
-            force: false,
-            build_index: true,
-        }
-    }
-}

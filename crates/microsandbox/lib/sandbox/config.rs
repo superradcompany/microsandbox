@@ -8,7 +8,7 @@ use std::{
 use microsandbox_runtime::{logging::LogLevel, policy::SandboxPolicy};
 use serde::{Deserialize, Serialize};
 
-use microsandbox_image::{ImageConfig, PullPolicy, RegistryAuth};
+use microsandbox_image::{ImageConfig, LayerMode, PullPolicy, RegistryAuth};
 
 use super::types::{Patch, RootfsSource, SecretsConfig, SshConfig, VolumeMount};
 
@@ -79,7 +79,10 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub mounts: Vec<VolumeMount>,
 
-    /// Rootfs patches applied as overlay layers before VM start.
+    /// Rootfs patches applied before VM start.
+    ///
+    /// OCI roots bake patches into `upper.ext4`; bind roots patch the host
+    /// directory directly.
     #[serde(default)]
     pub patches: Vec<Patch>,
 
@@ -124,6 +127,15 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub pull_policy: PullPolicy,
 
+    /// How OCI image layers are assembled into EROFS block devices.
+    ///
+    /// `Layered` (default) creates one EROFS image per OCI layer.
+    /// `Flat` merges all layers into a single EROFS image.
+    /// Layered is used automatically up to 126 layers; flat is used
+    /// beyond that or when explicitly set here.
+    #[serde(default)]
+    pub layer_mode: LayerMode,
+
     /// Sandbox lifecycle policy.
     #[serde(default)]
     pub policy: SandboxPolicy,
@@ -144,14 +156,13 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub replace_existing: bool,
 
-    /// Resolved rootfs lower layer paths (populated at create time for OCI images).
+    /// Resolved EROFS block device paths in attachment order.
     ///
-    /// Sidecar indexes are discovered by naming convention in the runtime as
-    /// `<lower>.index`, so only the lower directory path is carried here.
-    /// Persisted so existing sandboxes can reuse the pinned lower stack
-    /// without re-resolving a mutable OCI reference.
+    /// For layered OCI: `[layer0.erofs, layer1.erofs, ..., upper.ext4]`
+    /// For flat OCI: `[flat.erofs, upper.ext4]`
+    /// Populated at create time. Persisted so restarts can reuse pinned artifacts.
     #[serde(default)]
-    pub(crate) resolved_rootfs_layers: Vec<PathBuf>,
+    pub(crate) resolved_erofs_disks: Vec<PathBuf>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -268,10 +279,11 @@ impl Default for SandboxConfig {
             labels: HashMap::new(),
             stop_signal: None,
             pull_policy: PullPolicy::default(),
+            layer_mode: LayerMode::default(),
             policy: SandboxPolicy::default(),
             registry_auth: None,
             replace_existing: false,
-            resolved_rootfs_layers: Vec::new(),
+            resolved_erofs_disks: Vec::new(),
         }
     }
 }
@@ -432,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_config_serializes_pinned_rootfs_layers_but_redacts_registry_auth() {
+    fn test_sandbox_config_serializes_resolved_erofs_disks_but_redacts_registry_auth() {
         let mut config = SandboxConfig {
             name: "persisted".into(),
             ..Default::default()
@@ -442,19 +454,20 @@ mod tests {
             password: "secret".into(),
         });
         config.replace_existing = true;
-        config.resolved_rootfs_layers = vec!["/tmp/layer0".into(), "/tmp/layer1".into()];
+        config.resolved_erofs_disks = vec![
+            "/tmp/layer0.erofs".into(),
+            "/tmp/layer1.erofs".into(),
+            "/tmp/upper.ext4".into(),
+        ];
 
         let json = serde_json::to_string(&config).unwrap();
         assert!(!json.contains("registry_auth"));
         assert!(!json.contains("replace_existing"));
-        assert!(json.contains("resolved_rootfs_layers"));
+        assert!(json.contains("resolved_erofs_disks"));
 
         let decoded: SandboxConfig = serde_json::from_str(&json).unwrap();
         assert!(decoded.registry_auth.is_none());
         assert!(!decoded.replace_existing);
-        assert_eq!(
-            decoded.resolved_rootfs_layers,
-            config.resolved_rootfs_layers
-        );
+        assert_eq!(decoded.resolved_erofs_disks, config.resolved_erofs_disks);
     }
 }

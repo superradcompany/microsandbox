@@ -1,4 +1,4 @@
-//! Entity definition for the `layers` table.
+//! Entity definition for the `layer` table.
 
 use sea_orm::entity::prelude::*;
 
@@ -7,17 +7,22 @@ use sea_orm::entity::prelude::*;
 //--------------------------------------------------------------------------------------------------
 
 /// The OCI layer entity model.
+///
+/// Keyed by `diff_id` (uncompressed content hash) — the canonical identity
+/// for layer deduplication across images.
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "layer")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
     #[sea_orm(unique)]
-    pub digest: String,
     pub diff_id: String,
+    pub blob_digest: String,
     pub media_type: Option<String>,
-    pub size_bytes: Option<i64>,
+    pub compressed_size_bytes: Option<i64>,
+    pub erofs_size_bytes: Option<i64>,
     pub created_at: Option<DateTime>,
+    pub last_used_at: Option<DateTime>,
 }
 
 //--------------------------------------------------------------------------------------------------

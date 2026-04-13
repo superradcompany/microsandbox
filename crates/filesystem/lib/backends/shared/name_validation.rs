@@ -57,31 +57,6 @@ pub(crate) fn validate_memfs_name(name: &CStr) -> io::Result<()> {
     Ok(())
 }
 
-/// Validate a directory entry name for overlay operations.
-///
-/// Extends [`validate_name`] with overlay-specific rejection of:
-/// - `.` (would alias the directory itself)
-/// - Names longer than `NAME_MAX` (255 bytes)
-/// - Whiteout/opaque marker names (`.wh.*`), which are internal overlay
-///   artifacts that must not be created or accessed directly by the guest.
-pub(crate) fn validate_overlay_name(name: &CStr) -> io::Result<()> {
-    validate_name(name)?;
-
-    let bytes = name.to_bytes();
-
-    if bytes == b"." {
-        return Err(platform::eperm());
-    }
-    if bytes.len() > NAME_MAX {
-        return Err(platform::enametoolong());
-    }
-    if bytes.starts_with(b".wh.") {
-        return Err(platform::einval());
-    }
-
-    Ok(())
-}
-
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -121,37 +96,5 @@ mod tests {
     #[test]
     fn validate_name_allows_backslash() {
         assert!(validate_name(&cstr(b"a\\b")).is_ok());
-    }
-
-    #[test]
-    fn validate_overlay_name_accepts_normal() {
-        assert!(validate_overlay_name(&cstr(b"hello.txt")).is_ok());
-        assert!(validate_overlay_name(&cstr(b".hidden")).is_ok());
-    }
-
-    #[test]
-    fn validate_overlay_name_rejects_dot() {
-        assert!(validate_overlay_name(&cstr(b".")).is_err());
-    }
-
-    #[test]
-    fn validate_overlay_name_rejects_long_name() {
-        let long = vec![b'a'; 256];
-        assert!(validate_overlay_name(&cstr(&long)).is_err());
-
-        let max = vec![b'a'; 255];
-        assert!(validate_overlay_name(&cstr(&max)).is_ok());
-    }
-
-    #[test]
-    fn validate_overlay_name_rejects_whiteout_prefix() {
-        assert!(validate_overlay_name(&cstr(b".wh.foo")).is_err());
-        assert!(validate_overlay_name(&cstr(b".wh..wh..opq")).is_err());
-    }
-
-    #[test]
-    fn validate_overlay_name_inherits_base_rejections() {
-        assert!(validate_overlay_name(&cstr(b"..")).is_err());
-        assert!(validate_overlay_name(&cstr(b"a/b")).is_err());
     }
 }
