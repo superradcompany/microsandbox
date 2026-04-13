@@ -70,25 +70,16 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
     let workdir = args.workdir;
     let interactive = std::io::stdin().is_terminal();
 
-    // Resolve the command: use provided command, or fall back to the pre-configured
-    // default shell (or /bin/sh if none was configured).
-    let (cmd, cmd_args) = if args.command.is_empty() {
-        if !interactive {
-            anyhow::bail!("no command provided and stdin is not a terminal");
-        }
-
-        let shell = sandbox
-            .config()
-            .shell
-            .as_deref()
-            .unwrap_or("/bin/sh")
-            .to_string();
-        (shell, vec![])
-    } else {
-        let mut parts = args.command;
-        let cmd = parts.remove(0);
-        (cmd, parts)
-    };
+    // Resolve the command using the same OCI-aware logic as `msb run`:
+    // user command > entrypoint [+ cmd] > cmd > config.shell > /bin/sh.
+    let (cmd, cmd_args) =
+        match super::common::resolve_command(sandbox.config(), args.command, interactive)? {
+            (Some(cmd), cmd_args) => (cmd, cmd_args),
+            (None, _) => {
+                super::maybe_stop(&sandbox).await;
+                std::process::exit(0);
+            }
+        };
 
     // Parse rlimits.
     let rlimits: Vec<_> = args
