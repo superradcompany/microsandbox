@@ -148,10 +148,15 @@ async fn intercept_relay(
         .map_err(io::Error::other)?;
 
     // Feed the buffered ClientHello.
-    guest_tls
-        .read_tls(&mut &initial_buf[..])
-        .map_err(io::Error::other)?;
-    guest_tls.process_new_packets().map_err(io::Error::other)?;
+    {
+        let mut remaining = &initial_buf[..];
+        while !remaining.is_empty() {
+            guest_tls
+                .read_tls(&mut remaining)
+                .map_err(io::Error::other)?;
+            guest_tls.process_new_packets().map_err(io::Error::other)?;
+        }
+    }
 
     // Reusable buffer for TLS output — avoids per-flush heap allocation.
     let mut tls_buf = Vec::with_capacity(RELAY_BUF_SIZE + 256);
@@ -166,10 +171,13 @@ async fn intercept_relay(
                 .recv()
                 .await
                 .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed"))?;
-            guest_tls
-                .read_tls(&mut &data[..])
-                .map_err(io::Error::other)?;
-            guest_tls.process_new_packets().map_err(io::Error::other)?;
+            let mut remaining = &data[..];
+            while !remaining.is_empty() {
+                guest_tls
+                    .read_tls(&mut remaining)
+                    .map_err(io::Error::other)?;
+                guest_tls.process_new_packets().map_err(io::Error::other)?;
+            }
             flush_to_guest(&mut guest_tls, &to_smoltcp, &shared, &mut tls_buf).await?;
         }
         Ok::<_, io::Error>(())
@@ -199,12 +207,16 @@ async fn intercept_relay(
                     Some(d) => d,
                     None => break,
                 };
-                guest_tls
-                    .read_tls(&mut &data[..])
-                    .map_err(io::Error::other)?;
-                guest_tls
-                    .process_new_packets()
-                    .map_err(io::Error::other)?;
+                // Feed all data to rustls.
+                let mut remaining = &data[..];
+                while !remaining.is_empty() {
+                    guest_tls
+                        .read_tls(&mut remaining)
+                        .map_err(io::Error::other)?;
+                    guest_tls
+                        .process_new_packets()
+                        .map_err(io::Error::other)?;
+                }
 
                 // Read all available decrypted plaintext and substitute secrets.
                 loop {
