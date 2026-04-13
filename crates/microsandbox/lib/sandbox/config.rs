@@ -78,13 +78,13 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub env: Vec<(String, String)>,
 
-    /// Sandbox-wide default resource limits inherited by guest processes.
+    /// Sandbox-wide resource limits inherited by guest processes.
     ///
     /// Unlike per-exec rlimits, these are applied by agentd during PID 1
     /// startup so long-lived daemons and bootstrap scripts inherit the same
     /// raised baseline automatically.
     #[serde(default)]
-    pub default_rlimits: Vec<Rlimit>,
+    pub rlimits: Vec<Rlimit>,
 
     /// Volume mounts.
     #[serde(default)]
@@ -266,7 +266,7 @@ impl Default for SandboxConfig {
             shell: None,
             scripts: HashMap::new(),
             env: Vec::new(),
-            default_rlimits: Vec::new(),
+            rlimits: Vec::new(),
             mounts: Vec::new(),
             patches: Vec::new(),
             #[cfg(feature = "net")]

@@ -237,7 +237,7 @@ fn push_mounts_spec(mounts_val: &mut String, guest: &str, readonly: bool) {
     }
 }
 
-fn encode_default_rlimits(rlimits: &[Rlimit]) -> String {
+fn encode_rlimits(rlimits: &[Rlimit]) -> String {
     rlimits
         .iter()
         .map(|rlimit| {
@@ -412,16 +412,16 @@ fn sandbox_cli_args(
         )));
     }
 
-    if !config.default_rlimits.is_empty() {
+    if !config.rlimits.is_empty() {
         // Edge case: per-exec rlimits do not help guest daemons started during
         // bootstrap because they inherit PID 1's default soft limit first.
-        // Pass sandbox-wide defaults into agentd startup so bootstrap scripts
+        // Pass sandbox-wide rlimits into agentd startup so bootstrap scripts
         // and long-lived services share the same raised baseline.
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!(
             "{}={}",
-            microsandbox_protocol::ENV_DEFAULT_RLIMITS,
-            encode_default_rlimits(&config.default_rlimits)
+            microsandbox_protocol::ENV_RLIMITS,
+            encode_rlimits(&config.rlimits)
         )));
     }
 
@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_cli_args_include_default_rlimits_env() {
+    fn test_sandbox_cli_args_include_rlimits_env() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .rlimit(RlimitResource::Nofile, 65_535)
@@ -594,7 +594,7 @@ mod tests {
                 && pair[1]
                     == format!(
                         "{}=nofile=65535:65535",
-                        microsandbox_protocol::ENV_DEFAULT_RLIMITS
+                        microsandbox_protocol::ENV_RLIMITS
                     )
         }));
     }

@@ -309,13 +309,13 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set a sandbox-wide default resource limit inherited by all guest processes.
+    /// Set a sandbox-wide resource limit inherited by all guest processes.
     ///
     /// This is applied during agentd PID 1 startup, so bootstrap scripts and
     /// long-lived daemons inherit the raised baseline without needing explicit
     /// per-exec rlimits.
     pub fn rlimit(mut self, resource: RlimitResource, limit: u64) -> Self {
-        self.config.default_rlimits.push(Rlimit {
+        self.config.rlimits.push(Rlimit {
             resource,
             soft: limit,
             hard: limit,
@@ -323,14 +323,14 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set a sandbox-wide default resource limit with different soft/hard values.
+    /// Set a sandbox-wide resource limit with different soft/hard values.
     pub fn rlimit_range(
         mut self,
         resource: RlimitResource,
         soft: u64,
         hard: u64,
     ) -> Self {
-        self.config.default_rlimits.push(Rlimit {
+        self.config.rlimits.push(Rlimit {
             resource,
             soft,
             hard,
@@ -565,10 +565,10 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(config.default_rlimits.len(), 1);
-        assert_eq!(config.default_rlimits[0].resource, RlimitResource::Nofile);
-        assert_eq!(config.default_rlimits[0].soft, 65_535);
-        assert_eq!(config.default_rlimits[0].hard, 65_535);
+        assert_eq!(config.rlimits.len(), 1);
+        assert_eq!(config.rlimits[0].resource, RlimitResource::Nofile);
+        assert_eq!(config.rlimits[0].soft, 65_535);
+        assert_eq!(config.rlimits[0].hard, 65_535);
     }
 
     #[cfg(feature = "net")]

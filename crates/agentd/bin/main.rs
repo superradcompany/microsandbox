@@ -18,8 +18,8 @@ fn main() {
     // Capture CLOCK_BOOTTIME immediately — this represents kernel boot duration.
     let boot_time_ns = microsandbox_agentd::clock::boottime_ns();
 
-    if let Err(e) = microsandbox_agentd::init::apply_default_rlimits() {
-        eprintln!("agentd: failed to apply default rlimits: {e}");
+    if let Err(e) = microsandbox_agentd::init::apply_rlimits() {
+        eprintln!("agentd: failed to apply rlimits: {e}");
         std::process::exit(1);
     }
 

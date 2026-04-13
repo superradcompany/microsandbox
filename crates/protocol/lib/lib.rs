@@ -130,7 +130,7 @@ pub const ENV_USER: &str = "MSB_USER";
 /// Defaults to the sandbox name when not explicitly set.
 pub const ENV_HOSTNAME: &str = "MSB_HOSTNAME";
 
-/// Environment variable carrying sandbox-wide default resource limits.
+/// Environment variable carrying sandbox-wide resource limits.
 ///
 /// Format: `resource=limit[:hard][;resource=limit[:hard];...]`
 ///
@@ -139,12 +139,12 @@ pub const ENV_HOSTNAME: &str = "MSB_HOSTNAME";
 /// - `hard` — hard limit (optional; if omitted, uses the soft limit)
 ///
 /// Examples:
-/// - `MSB_DEFAULT_RLIMITS=nofile=65535`
-/// - `MSB_DEFAULT_RLIMITS=nofile=65535:65535;nproc=4096:4096`
+/// - `MSB_RLIMITS=nofile=65535`
+/// - `MSB_RLIMITS=nofile=65535:65535;nproc=4096:4096`
 ///
 /// agentd applies these during PID 1 startup so every later guest process
 /// inherits the raised baseline instead of having to opt into per-exec rlimits.
-pub const ENV_DEFAULT_RLIMITS: &str = "MSB_DEFAULT_RLIMITS";
+pub const ENV_RLIMITS: &str = "MSB_RLIMITS";
 
 /// Guest-side path to the CA certificate for TLS interception.
 ///

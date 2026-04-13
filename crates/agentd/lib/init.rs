@@ -1,7 +1,7 @@
 //! PID 1 init: mount filesystems, apply tmpfs mounts, prepare runtime directories.
 
 use crate::error::{AgentdError, AgentdResult};
-use microsandbox_protocol::ENV_DEFAULT_RLIMITS;
+use microsandbox_protocol::ENV_RLIMITS;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -55,32 +55,32 @@ pub fn init() -> AgentdResult<()> {
     Ok(())
 }
 
-/// Applies sandbox-wide default resource limits for PID 1.
+/// Applies sandbox-wide resource limits for PID 1.
 ///
 /// This runs before the rest of init so every later guest process inherits
 /// the raised baseline automatically, including bootstrap daemons that are
 /// not started through the per-exec API.
-pub fn apply_default_rlimits() -> AgentdResult<()> {
-    let Some(spec) = std::env::var_os(ENV_DEFAULT_RLIMITS) else {
+pub fn apply_rlimits() -> AgentdResult<()> {
+    let Some(spec) = std::env::var_os(ENV_RLIMITS) else {
         return Ok(());
     };
 
     for entry in spec.to_string_lossy().split(';').filter(|entry| !entry.is_empty()) {
         let (resource_name, limit_spec) = entry.split_once('=').ok_or_else(|| {
             AgentdError::Init(format!(
-                "{ENV_DEFAULT_RLIMITS} entry must be resource=soft[:hard], got: {entry}"
+                "{ENV_RLIMITS} entry must be resource=soft[:hard], got: {entry}"
             ))
         })?;
 
         let resource = parse_rlimit_resource(resource_name).ok_or_else(|| {
             AgentdError::Init(format!(
-                "{ENV_DEFAULT_RLIMITS} has unknown resource: {resource_name}"
+                "{ENV_RLIMITS} has unknown resource: {resource_name}"
             ))
         })?;
 
         let (soft, hard) = parse_rlimit_pair(limit_spec).map_err(|err| {
             AgentdError::Init(format!(
-                "{ENV_DEFAULT_RLIMITS} has invalid limit for {resource_name}: {err}"
+                "{ENV_RLIMITS} has invalid limit for {resource_name}: {err}"
             ))
         })?;
 
@@ -94,7 +94,7 @@ pub fn apply_default_rlimits() -> AgentdResult<()> {
         // raised soft limit before they open large descriptor sets.
         if unsafe { libc::setrlimit(resource as _, &limit) } != 0 {
             return Err(AgentdError::Init(format!(
-                "failed to apply {ENV_DEFAULT_RLIMITS} entry {entry}: {}",
+                "failed to apply {ENV_RLIMITS} entry {entry}: {}",
                 std::io::Error::last_os_error()
             )));
         }
