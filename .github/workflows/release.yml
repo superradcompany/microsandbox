@@ -222,6 +222,40 @@ jobs:
             sdk/node-ts/index.cjs
             sdk/node-ts/index.d.cts
 
+      # -- Python SDK --
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "sdk/python/uv.lock"
+
+      - name: Stage runtime bundle (Python SDK)
+        run: |
+          mkdir -p sdk/python/microsandbox/_bundled/bin
+          mkdir -p sdk/python/microsandbox/_bundled/lib
+          cp build/msb sdk/python/microsandbox/_bundled/bin/
+          cp build/${{ matrix.libkrunfw_file }} sdk/python/microsandbox/_bundled/lib/
+          cd sdk/python/microsandbox/_bundled/lib
+          if [ "${{ matrix.os }}" = "darwin" ]; then
+            ln -sf ${{ matrix.libkrunfw_file }} libkrunfw.dylib
+          else
+            ln -sf ${{ matrix.libkrunfw_file }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+            ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
+          fi
+
+      - name: Build Python wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: sdk/python
+          command: build
+          args: --release --out dist
+          manylinux: ${{ matrix.os == 'linux' && '2_28' || 'off' }}
+
+      - name: Upload Python SDK wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-sdk-${{ matrix.target }}
+          path: sdk/python/dist/*.whl
+
       # -- Stage release artifacts --
       - name: Stage artifacts
         run: |
@@ -395,3 +429,33 @@ jobs:
             cargo publish -p "$crate" --no-verify
             sleep 60
           done
+
+  # ---------------------------------------------------------------------------
+  # Publish Python SDK to PyPI
+  # ---------------------------------------------------------------------------
+  pypi-publish:
+    name: Publish Python SDK
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    environment:
+      name: pypi
+      url: https://pypi.org/p/microsandbox
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+
+      - name: Download Python SDK wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: python-sdk-*
+          merge-multiple: true
+
+      - name: List wheels
+        run: ls -lh dist/
+
+      - name: Publish to PyPI
+        run: uv publish dist/*.whl

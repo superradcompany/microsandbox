@@ -1,57 +1,38 @@
 # Examples
 
-Examples showing how to use the microsandbox SDK.
+Examples showing how to use the microsandbox SDK in Rust, Python, and TypeScript.
 
-Some examples use git submodules for their sample Alpine assets.
+Each language directory has its own README with setup and run instructions.
+
+| Language | Directory | README |
+|----------|-----------|--------|
+| Rust | [`rust/`](./rust/) | [rust/README.md](./rust/README.md) |
+| Python | [`python/`](./python/) | [python/README.md](./python/README.md) |
+| TypeScript | [`typescript/`](./typescript/) | [typescript/README.md](./typescript/README.md) |
+
+## Prerequisites
+
+Some examples use git submodules for sample Alpine rootfs assets:
 
 ```sh
 git submodule update --init --recursive
 ```
 
-## bind-root
+## Examples
 
-Boots a sandbox from a local directory (bind-mounted rootfs), runs a few shell
-commands, and stops it. Requires the `rootfs-alpine` submodule.
-
-```sh
-cargo run -p bind-root
-```
-
-## block-root
-
-Demonstrates configuring a sandbox from the bundled `qcow2-alpine` disk image
-submodule.
-
-```sh
-cargo run -p block-root
-```
-
-## net-ports
-
-Publishes one TCP port and one UDP port from the guest to the host using the
-top-level `SandboxBuilder::port()` and `port_udp()` helpers, then exercises
-both mappings from the host.
-
-```sh
-cargo run -p net-ports
-```
-
-## named-volume
-
-Creates a named volume, mounts it into two sandboxes (writer and reader),
-and demonstrates persistence across sandbox lifecycles. Also shows the
-host-side `VolumeFs` API and `VolumeHandle` metadata. Pulls `alpine`
-on first run.
-
-```sh
-cargo run -p named-volume
-```
-
-## oci-root
-
-Pulls an OCI image (`alpine`) from a registry and boots a sandbox from
-it.
-
-```sh
-cargo run -p oci-root
-```
+| Example | Description |
+|---------|-------------|
+| `root-oci` | Create a sandbox from an OCI image (e.g. `alpine`) |
+| `root-bind` | Create a sandbox from a local bind-mounted directory |
+| `root-block` | Create a sandbox from a qcow2 disk image |
+| `rootfs-patch` | Pre-boot filesystem modifications (files, dirs, appends) |
+| `volume-named` | Persistent named volume shared between sandboxes |
+| `fs-read-stream` | Stream a large file from the sandbox in chunks |
+| `metrics-stream` | Subscribe to streaming resource metrics |
+| `shell-attach` | Interactive terminal session inside a sandbox |
+| `net-basic` | DNS resolution, HTTP fetch, interface status |
+| `net-dns` | DNS filtering — block domains and suffixes |
+| `net-policy` | Network policies — public-only, allow-all, no-network |
+| `net-ports` | Port publishing — expose guest services on host ports |
+| `net-secrets` | Secret injection with TLS placeholder substitution |
+| `net-tls` | TLS interception with per-domain cert generation |

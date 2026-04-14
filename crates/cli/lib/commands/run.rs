@@ -115,7 +115,8 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
     let interactive = std::io::stdin().is_terminal();
 
     let result: anyhow::Result<i32> = async {
-        let (cmd, cmd_args) = resolve_command(sandbox.config(), args.command, interactive)?;
+        let (cmd, cmd_args) =
+            super::common::resolve_command(sandbox.config(), args.command, interactive)?;
         match cmd {
             Some(cmd) => exec_in_sandbox(&sandbox, &cmd, cmd_args, interactive, &exec_opts).await,
             None => Ok(0),
@@ -169,7 +170,8 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
     let exec_opts = ExecOpts::parse(&args)?;
     let interactive = std::io::stdin().is_terminal();
 
-    let (cmd, cmd_args) = resolve_command(sandbox.config(), args.command, interactive)?;
+    let (cmd, cmd_args) =
+        super::common::resolve_command(sandbox.config(), args.command, interactive)?;
     let (cmd, cmd_args) = match (cmd, cmd_args) {
         (Some(cmd), args) => (cmd, args),
         (None, _) => {
@@ -196,38 +198,6 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
     }
 
     handle_exit(result?)
-}
-
-/// Resolve the command to run following OCI semantics.
-///
-/// Returns `(Some(cmd), args)` or `(None, _)` when no command is available.
-fn resolve_command(
-    config: &microsandbox::sandbox::SandboxConfig,
-    user_command: Vec<String>,
-    interactive: bool,
-) -> anyhow::Result<(Option<String>, Vec<String>)> {
-    if !user_command.is_empty() {
-        match &config.entrypoint {
-            Some(ep) if !ep.is_empty() => {
-                let bin = ep[0].clone();
-                let args = ep[1..].iter().cloned().chain(user_command).collect();
-                Ok((Some(bin), args))
-            }
-            _ => {
-                let mut parts = user_command;
-                let cmd = parts.remove(0);
-                Ok((Some(cmd), parts))
-            }
-        }
-    } else if let Some((cmd, cmd_args)) = resolve_image_command(config) {
-        Ok((Some(cmd), cmd_args))
-    } else if interactive {
-        let shell = config.shell.as_deref().unwrap_or("/bin/sh");
-        Ok((Some(shell.to_string()), vec![]))
-    } else {
-        ui::warn("no command provided and stdin is not a terminal");
-        Ok((None, vec![]))
-    }
 }
 
 /// Execute or attach to a command in a sandbox.
@@ -312,33 +282,4 @@ fn handle_exit(exit_code: i32) -> anyhow::Result<()> {
         std::process::exit(exit_code);
     }
     Ok(())
-}
-
-/// Resolve the default process from OCI image config.
-///
-/// Follows OCI semantics:
-/// - `entrypoint` + `cmd`: entrypoint is the binary, cmd provides default arguments.
-/// - `entrypoint` only: entrypoint is the full command.
-/// - `cmd` only: cmd[0] is the binary, cmd[1..] are arguments.
-/// - Neither set: returns `None`.
-fn resolve_image_command(
-    config: &microsandbox::sandbox::SandboxConfig,
-) -> Option<(String, Vec<String>)> {
-    match (&config.entrypoint, &config.cmd) {
-        (Some(ep), cmd) if !ep.is_empty() => {
-            let bin = ep[0].clone();
-            let args = ep[1..]
-                .iter()
-                .chain(cmd.iter().flatten())
-                .cloned()
-                .collect();
-            Some((bin, args))
-        }
-        (_, Some(cmd)) if !cmd.is_empty() => {
-            let bin = cmd[0].clone();
-            let args = cmd[1..].to_vec();
-            Some((bin, args))
-        }
-        _ => None,
-    }
 }
