@@ -97,15 +97,18 @@ jobs:
             arch: x86_64
             os: linux
             agentd_target: x86_64-unknown-linux-musl
+            libkrunfw_file: libkrunfw.so.5.2.1
           - target: linux-aarch64
             runner: ubuntu-24.04-arm
             arch: aarch64
             os: linux
             agentd_target: aarch64-unknown-linux-musl
+            libkrunfw_file: libkrunfw.so.5.2.1
           - target: darwin-aarch64
             runner: macos-14
             arch: aarch64
             os: darwin
+            libkrunfw_file: libkrunfw.5.dylib
 
     steps:
       - uses: actions/checkout@v4
@@ -218,6 +221,42 @@ jobs:
         working-directory: sdk/node-ts
         run: npm install && npm run build
 
+      # -- Checks (Python SDK) --
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "sdk/python/uv.lock"
+
+      - name: Sync Python dev environment
+        working-directory: sdk/python
+        run: uv sync --group dev
+
+      - name: Stage runtime bundle (Python SDK)
+        run: |
+          mkdir -p sdk/python/microsandbox/_bundled/bin
+          mkdir -p sdk/python/microsandbox/_bundled/lib
+          cp build/msb sdk/python/microsandbox/_bundled/bin/
+          cp build/${{ matrix.libkrunfw_file }} sdk/python/microsandbox/_bundled/lib/
+          cd sdk/python/microsandbox/_bundled/lib
+          if [ "${{ matrix.os }}" = "darwin" ]; then
+            ln -sf ${{ matrix.libkrunfw_file }} libkrunfw.dylib
+          else
+            ln -sf ${{ matrix.libkrunfw_file }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+            ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
+          fi
+
+      - name: Build Python SDK (editable)
+        working-directory: sdk/python
+        run: uv run maturin develop --release
+
+      - name: Lint Python SDK (ruff)
+        working-directory: sdk/python
+        run: uv run ruff check .
+
+      - name: Sanity wheel build (Python SDK)
+        working-directory: sdk/python
+        run: uv build --wheel
+
       # -- Upload artifacts (linux-x86_64 only, for SDK smoke tests) --
       - name: Upload build artifacts
         if: matrix.target == 'linux-x86_64'
@@ -318,7 +357,9 @@ jobs:
     runs-on: self-hosted-ubuntu-2404-x64
     steps:
       - name: Clean workspace
-        run: rm -rf "${{ github.workspace }}"/{sdk,build}
+        run: |
+          rm -rf "${{ github.workspace }}"/{sdk,build}
+          rm -rf ~/.microsandbox
 
       - uses: actions/setup-node@v4
         with:
@@ -340,6 +381,7 @@ jobs:
       # -- Install msb + libkrunfw --
       - name: Install msb
         run: |
+          rm -f ~/.microsandbox/db/microsandbox.db
           chmod +x build/msb
           mkdir -p ~/.microsandbox/bin ~/.microsandbox/lib
           install -m755 build/msb ~/.microsandbox/bin/msb

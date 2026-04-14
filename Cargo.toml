@@ -27,6 +27,7 @@ members = [
     "examples/rust/rootfs-patch",
     "examples/rust/volume-named",
     "sdk/node-ts",
+    "sdk/python",
 ]
 
 [workspace.package]
