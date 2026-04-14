@@ -40,7 +40,13 @@ await sb.resume()
 ```
 
 ```python Python
-# Coming soon — snapshots for the Python SDK
+from microsandbox import Sandbox
+
+sb = await Sandbox.create("base", image="python")
+await sb.exec("pip", ["install", "-r", "requirements.txt"])
+
+snapshot = await sb.snapshot()
+await sb.resume()
 ```
 
 </CodeGroup>
@@ -73,7 +79,14 @@ const saved = await Snapshot.get("after-pip-install")
 ```
 
 ```python Python
-# Coming soon — snapshots for the Python SDK
+from microsandbox import Snapshot
+
+# Save
+snapshot = await sb.snapshot()
+await snapshot.save_named("after-pip-install")
+
+# Load by name
+saved = await Snapshot.get("after-pip-install")
 ```
 
 </CodeGroup>
@@ -104,7 +117,14 @@ const workers = await Promise.all(
 ```
 
 ```python Python
-# Coming soon — snapshots for the Python SDK
+import asyncio
+from microsandbox import Snapshot
+
+saved = await Snapshot.get("after-pip-install")
+
+workers = await asyncio.gather(
+    *(saved.restore(f"worker-{i}") for i in range(10))
+)
 ```
 
 </CodeGroup>
@@ -138,7 +158,16 @@ const custom = await saved.restore("custom", {
 ```
 
 ```python Python
-# Coming soon — snapshots for the Python SDK
+from microsandbox import Snapshot
+
+saved = await Snapshot.get("after-pip-install")
+
+custom = await saved.restore(
+    "custom",
+    memory=1024,
+    cpus=4,
+    env={"WORKER_ID": "42"},
+)
 ```
 
 </CodeGroup>
@@ -161,7 +190,10 @@ await Snapshot.delete("old-snapshot")
 ```
 
 ```python Python
-# Coming soon — snapshots for the Python SDK
+from microsandbox import Snapshot
+
+snapshots = await Snapshot.list()
+await Snapshot.delete("old-snapshot")
 ```
 
 </CodeGroup>

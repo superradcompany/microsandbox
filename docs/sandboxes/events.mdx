@@ -45,7 +45,13 @@ const sub = sb.onEvent("task.progress", (event: EventData) => {
 ```
 
 ```python Python
-# Coming soon — events for the Python SDK
+from microsandbox import Sandbox
+
+sb = await (await Sandbox.get("worker")).start()
+
+sub = sb.on_event("task.progress", lambda event: (
+    print(f"[{event.data['percent']}%] {event.data['message']}")
+))
 ```
 
 </CodeGroup>
@@ -76,7 +82,10 @@ await sb.emit("task.start", {
 ```
 
 ```python Python
-# Coming soon — events for the Python SDK
+await sb.emit("task.start", {
+    "input_file": "/data/input.txt",
+    "output_dir": "/data/output",
+})
 ```
 
 </CodeGroup>

@@ -269,7 +269,15 @@ const reattached = await sb.session(sessionId)
 ```
 
 ```python Python
-# Coming soon — sessions for the Python SDK
+# Start a background process and capture its session ID
+handle = await sb.exec_stream("python", ["server.py"])
+session_id = handle.id
+
+# List active sessions
+sessions = await sb.sessions()
+
+# Reattach to a session by ID
+reattached = await sb.session(session_id)
 ```
 
 </CodeGroup>

@@ -158,7 +158,19 @@ const sb = await Sandbox.create({
 ```
 
 ```python Python
-# Coming soon — filesystem hooks for the Python SDK
+from microsandbox import Sandbox, Volume
+
+key = get_encryption_key()
+sb = await Sandbox.create(
+    "encrypted",
+    image="python",
+    volumes={
+        "/secrets": Volume.bind("/data/secrets",
+            on_read=lambda path, data: decrypt(data, key),
+            on_write=lambda path, data: encrypt(data, key),
+        ),
+    },
+)
 ```
 
 </CodeGroup>
@@ -211,7 +223,19 @@ const sb = await Sandbox.create({
 ```
 
 ```python Python
-# Coming soon — custom filesystem backends for the Python SDK
+from microsandbox import FsBackend, Sandbox, Volume
+
+# Implement the FsBackend interface
+class EncryptedFs(FsBackend):
+    # ... implement read, write, and other required methods
+    pass
+
+sb = await Sandbox.create(
+    "custom",
+    volumes={
+        "/secrets": Volume.backend(EncryptedFs(key, "/data")),
+    },
+)
 ```
 
 </CodeGroup>

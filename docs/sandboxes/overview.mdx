@@ -338,7 +338,17 @@ const sb = await Sandbox.create(config)
 ```
 
 ```python Python
-# Coming soon — config inspection for the Python SDK
+import json
+from microsandbox import Sandbox
+
+config = Sandbox.build_config(
+    "preview",
+    image="python",
+    memory=1024,
+)
+
+print(json.dumps(config, indent=2))
+sb = await Sandbox.create(config)
 ```
 
 </CodeGroup>

@@ -154,7 +154,18 @@ const sb = await Sandbox.create({
 ```
 
 ```python Python
-# Coming soon — allowlist policies for the Python SDK
+from microsandbox import Network, NetworkPolicy, Rule, Sandbox
+
+sb = await Sandbox.create(
+    "sandbox",
+    image="python",
+    network=Network(
+        policy=NetworkPolicy(rules=(
+            Rule.allow(destination="api.openai.com"),
+            Rule.allow(destination="pypi.org"),
+        )),
+    ),
+)
 ```
 
 </CodeGroup>
@@ -192,7 +203,19 @@ const sb = await Sandbox.create({
 ```
 
 ```python Python
-# Coming soon — filesystem hooks for the Python SDK
+from microsandbox import Sandbox, Volume
+
+key = get_encryption_key()
+sb = await Sandbox.create(
+    "encrypted",
+    image="python",
+    volumes={
+        "/secrets": Volume.bind("/data/secrets",
+            on_read=lambda path, data: decrypt(data, key),
+            on_write=lambda path, data: encrypt(data, key),
+        ),
+    },
+)
 ```
 
 </CodeGroup>
@@ -232,7 +255,18 @@ const workers = await Promise.all(
 ```
 
 ```python Python
-# Coming soon — snapshots for the Python SDK
+import asyncio
+from microsandbox import Sandbox
+
+sb = await Sandbox.create("base", image="python")
+await sb.exec("pip", ["install", "-r", "requirements.txt"])
+
+snapshot = await sb.snapshot()
+
+# Fork 10 workers (skips pip install entirely)
+workers = await asyncio.gather(
+    *(snapshot.restore(f"worker-{i}") for i in range(10))
+)
 ```
 
 </CodeGroup>
@@ -278,7 +312,16 @@ await sb.emit("task.start", { inputFile: "/data/input.txt", options: ["--verbose
 ```
 
 ```python Python
-# Coming soon — events for the Python SDK
+# Receive events from guest
+sub = sb.on_event("task.progress", lambda event: (
+    print(f"[{event.data['percent']}%] {event.data['message']}")
+))
+
+# Send events to guest
+await sb.emit("task.start", {
+    "input_file": "/data/input.txt",
+    "output_dir": "/data/output",
+})
 ```
 
 </CodeGroup>
