@@ -349,6 +349,8 @@ jobs:
     name: Python SDK Tests
     needs: check
     runs-on: self-hosted-ubuntu-2404-x64
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
