@@ -597,6 +597,81 @@ fn parse_log_level(s: &str) -> anyhow::Result<microsandbox::LogLevel> {
     }
 }
 
+/// Resolve the command to run following OCI semantics.
+///
+/// Returns `(Some(cmd), args)` or `(None, _)` when no command is available.
+///
+/// Resolution order when the user supplies no explicit command:
+/// 1. Image entrypoint [+ cmd]
+/// 2. Image cmd alone
+/// 3. `config.shell` (interactive only)
+/// 4. `/bin/sh` (interactive only)
+pub fn resolve_command(
+    config: &microsandbox::sandbox::SandboxConfig,
+    user_command: Vec<String>,
+    interactive: bool,
+) -> anyhow::Result<(Option<String>, Vec<String>)> {
+    // User supplied an explicit command — prepend entrypoint if set.
+    if !user_command.is_empty() {
+        return match &config.entrypoint {
+            Some(ep) if !ep.is_empty() => {
+                let bin = ep[0].clone();
+                let args = ep[1..].iter().cloned().chain(user_command).collect();
+                Ok((Some(bin), args))
+            }
+            _ => {
+                let mut parts = user_command;
+                let cmd = parts.remove(0);
+                Ok((Some(cmd), parts))
+            }
+        };
+    }
+
+    // No user command — try the image's entrypoint/cmd.
+    if let Some((cmd, cmd_args)) = resolve_image_command(config) {
+        return Ok((Some(cmd), cmd_args));
+    }
+
+    // Fall back to configured shell (or /bin/sh) in interactive mode.
+    if interactive {
+        let shell = config.shell.as_deref().unwrap_or("/bin/sh");
+        return Ok((Some(shell.to_string()), vec![]));
+    }
+
+    // Non-interactive with nothing to run.
+    ui::warn("no command provided and stdin is not a terminal");
+    Ok((None, vec![]))
+}
+
+/// Resolve the default process from OCI image config.
+///
+/// Follows OCI semantics:
+/// - `entrypoint` + `cmd`: entrypoint is the binary, cmd provides default arguments.
+/// - `entrypoint` only: entrypoint is the full command.
+/// - `cmd` only: cmd[0] is the binary, cmd[1..] are arguments.
+/// - Neither set: returns `None`.
+fn resolve_image_command(
+    config: &microsandbox::sandbox::SandboxConfig,
+) -> Option<(String, Vec<String>)> {
+    match (&config.entrypoint, &config.cmd) {
+        (Some(ep), cmd) if !ep.is_empty() => {
+            let bin = ep[0].clone();
+            let args = ep[1..]
+                .iter()
+                .chain(cmd.iter().flatten())
+                .cloned()
+                .collect();
+            Some((bin, args))
+        }
+        (_, Some(cmd)) if !cmd.is_empty() => {
+            let bin = cmd[0].clone();
+            let args = cmd[1..].to_vec();
+            Some((bin, args))
+        }
+        _ => None,
+    }
+}
+
 /// Parse an rlimit spec: `RESOURCE=LIMIT` or `RESOURCE=SOFT:HARD`.
 pub fn parse_rlimit(
     spec: &str,

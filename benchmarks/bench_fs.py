@@ -23,8 +23,8 @@ from typing import Any
 #--------------------------------------------------------------------------------------------------
 
 DEFAULT_IMAGE = "python:3.12-slim"
-DEFAULT_ITERATIONS = 5
-DEFAULT_TIMEOUT = 120
+DEFAULT_ITERATIONS = 100
+DEFAULT_TIMEOUT = 3600
 OUTPUT_DIR = Path("build/bench/fs")
 SCHEMA_VERSION = 2
 

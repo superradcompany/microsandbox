@@ -4,7 +4,7 @@
 //! `~/.microsandbox/volumes/<name>/` with metadata tracked in the database.
 
 pub mod fs;
-pub use fs::{VolumeFsReadStream, VolumeFsWriteSink};
+pub use fs::{VolumeFs, VolumeFsReadStream, VolumeFsWriteSink};
 
 use std::path::PathBuf;
 

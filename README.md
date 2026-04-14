@@ -25,21 +25,18 @@
 
 <br />
 
-## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package/ffffff" alt="package-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/package/000000" alt="package"></a>&nbsp;&nbsp;Microsandbox
+**Microsandbox** spins up **lightweight VMs in milliseconds** from our SDKs. Runs locally on your machine. No server to set up. No lingering daemon. It is all embedded and rootless!
 
-Microsandbox spins up **lightweight VMs in milliseconds** from our SDKs. Runs locally on your machine. No server to set up. No lingering daemon. It is all embedded and rootless!
+##
 
-Today, AI agents operate with whatever permissions you give them, and that's usually _too much_. They can see _API keys_ in the environment, reach the network without restriction, and a single prompt injection _can execute destructive commands_ on your host. Containers help, but they share the host kernel, making _namespace escapes_ a known risk. Microsandbox solves this with **hardware-level VM isolation** that boots in milliseconds.
+- <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hardware-level isolation with microVM technology.
+- <img height="14" src="https://octicons-col.vercel.app/zap/A770EF"> **Instant Startup**: Average boot times under 100 milliseconds.
+- <img height="14" src="https://octicons-col.vercel.app/plug/A770EF"> **Embeddable**: Spawn VMs right within your code. No setup server. No long-running daemon.
+- <img height="14" src="https://octicons-col.vercel.app/lock/A770EF"> **Secrets That Can't Leak**: Unexploitable secret keys that never enter the VM.
+- <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
+- <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **Long-Running**: Sandboxes can run in detached mode. Great for long-lived sessions.
+- <img height="14" src="https://octicons-col.vercel.app/terminal/A770EF"> **Agent-Ready**: Your agents can create their own sandboxes with our [Agent Skills](https://github.com/superradcompany/skills) and [MCP server](https://github.com/superradcompany/microsandbox-mcp).
 
-- <img height="15" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hypervisor-level isolation with microVM technology.
-- <img height="15" src="https://octicons-col.vercel.app/zap/A770EF"> **Instant Startup**: Boot times under 100 milliseconds.
-- <img height="15" src="https://octicons-col.vercel.app/plug/A770EF"> **Embeddable**: Spawn VMs right within your code. No setup server. No long-running daemon.
-- <img height="15" src="https://octicons-col.vercel.app/lock/A770EF"> **Secrets That Can't Leak**: Secret keys never enter the VM. The guest VM only sees placeholders.
-- <img height="15" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
-- <img height="15" src="https://octicons-col.vercel.app/database/A770EF"> **Long-Running**: Sandboxes can run in detached mode. They are great for long-lived sessions.
-- <img height="15" src="https://octicons-col.vercel.app/terminal/A770EF"> **Agent-Ready**: Your agents can create their own sandboxes with our [Agent Skills](https://github.com/superradcompany/skills) and [MCP server](https://github.com/superradcompany/microsandbox-mcp).
-
-> Microsandbox is still **beta software**. Expect breaking changes, missing features, and rough edges.
 
 <br />
 
@@ -48,21 +45,25 @@ Today, AI agents operate with whatever permissions you give them, and that's usu
 #### <img height="14" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;Install the SDK
 
 > ```sh
-> cargo add microsandbox    # Rust
+> cargo add microsandbox    # 🦀 Rust
 > ```
 > ```sh
-> npm i microsandbox        # TypeScript
+> uv add microsandbox       # 🐍 Python
+> ```
+> ```sh
+> npm i microsandbox        # 🟦 TypeScript
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI **(Optional)**
-
-The SDK works on its own without the CLI. The `msb` CLI is a separate tool for managing sandboxes, images, and volumes from the terminal, and for giving AI agents direct access to microsandbox:
 
 > ```sh
 > curl -fsSL https://install.microsandbox.dev | sh
 > ```
 
-> **Requirements**: Linux with KVM enabled, or macOS with Apple Silicon.
+##
+
+> **Requirements**: Linux with KVM enabled, or macOS with Apple Silicon.<br />
+> **Warning**: Microsandbox is still **beta software**. Expect breaking changes, missing features, and rough edges.
 
 <br />
 
@@ -84,7 +85,9 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >         .create()
 >         .await?;
 >
->     let output = sandbox.shell("print('Hello from a microVM!')").await?;
+>     let output = sandbox
+>         .exec("python", ["-c", "print('Hello from a microVM!')"])
+>         .await?;
 >     println!("{}", output.stdout()?);
 >
 >     sandbox.stop_and_wait().await?;
@@ -92,9 +95,51 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > }
 > ```
 >
-> <div align="left">
->   <a href="./typescript_examples.md#run-code-in-a-sandbox"><img src="https://img.shields.io/badge/-→ Typescript-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript"></a>&nbsp;<a href="./python_examples.md"><img src="https://img.shields.io/badge/-→ Python-FFD43B?style=flat-square&logo=python&logoColor=306998" alt="Python"></a>
-> </div>
+> <details>
+> <summary><b>&nbsp;Python Example →</b></summary>
+>
+> ```python
+> import asyncio
+> from microsandbox import Sandbox
+>
+> async def main():
+>     sandbox = await Sandbox.create(
+>         "my-sandbox",
+>         image="python",
+>         cpus=1,
+>         memory=512,
+>     )
+>
+>     output = await sandbox.exec("python", ["-c", "print('Hello from a microVM!')"])
+>     print(output.stdout_text)
+>
+>     await sandbox.stop_and_wait()
+>
+> asyncio.run(main())
+> ```
+>
+> </details>
+>
+> <details>
+> <summary><b>&nbsp;TypeScript Example →</b></summary>
+>
+> ```typescript
+> import { Sandbox } from "microsandbox";
+>
+> const sandbox = await Sandbox.create({
+>   name: "my-sandbox",
+>   image: "python",
+>   cpus: 1,
+>   memoryMib: 512,
+> });
+>
+> const output = await sandbox.exec("python", ["-c", "print('Hello from a microVM!')"]);
+> console.log(output.stdout());
+>
+> await sandbox.stopAndWait();
+> ```
+>
+> </details>
 
 
 > The first call to `create()` pulls the image if it isn't cached locally, so it may take longer depending on your connection. Subsequent runs reuse the cache.
