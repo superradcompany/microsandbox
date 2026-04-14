@@ -1,0 +1,16 @@
+{
+  "samples": 7,
+  "warmups": 1,
+  "baseline_ms": {
+    "enter_to_boot": 70.0,
+    "boot_to_init": 16.0
+  },
+  "max_regression_ms": {
+    "enter_to_boot": 20.0,
+    "boot_to_init": 8.0
+  },
+  "max_threshold_ms": {
+    "enter_to_boot": 100.0,
+    "boot_to_init": 30.0
+  }
+}

@@ -355,7 +355,7 @@ jobs:
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
           python3 scripts/ci/check_boot_timings.py \
             --binary target/release/boot-timing-ci \
-            --config ci/boot-timing-thresholds.json \
+            --config scripts/ci/boot-timing-thresholds.json \
             --output boot-timing-results.json
 
       - name: Upload boot timing results
