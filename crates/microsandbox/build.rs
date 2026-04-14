@@ -54,8 +54,8 @@ fn main() {
     fs::create_dir_all(&bin_dir).expect("failed to create bin dir");
     fs::create_dir_all(&lib_dir).expect("failed to create lib dir");
 
-    if install_ci_local_bundle(&bin_dir, &lib_dir, &libkrunfw_name)
-        .expect("failed to install CI local microsandbox bundle")
+    if install_local_bundle(&bin_dir, &lib_dir, &libkrunfw_name)
+        .expect("failed to install local microsandbox bundle")
     {
         return;
     }
@@ -128,15 +128,11 @@ fn installed_msb_version(path: &Path) -> Option<String> {
         .map(std::string::ToString::to_string)
 }
 
-fn install_ci_local_bundle(
+fn install_local_bundle(
     bin_dir: &Path,
     lib_dir: &Path,
     libkrunfw_name: &str,
 ) -> io::Result<bool> {
-    if std::env::var_os("CI").is_none() {
-        return Ok(false);
-    }
-
     let Some(build_dir) = workspace_build_dir() else {
         return Ok(false);
     };
@@ -161,7 +157,7 @@ fn install_ci_local_bundle(
     }
 
     create_symlinks(lib_dir, libkrunfw_name);
-    println!("cargo:warning=installed microsandbox runtime dependencies from local CI build/");
+    println!("cargo:warning=installed microsandbox runtime dependencies from local build/");
     Ok(true)
 }
 

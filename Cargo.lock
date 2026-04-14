@@ -502,6 +502,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "boot-timing-ci"
+version = "0.1.0"
+dependencies = [
+ "microsandbox",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

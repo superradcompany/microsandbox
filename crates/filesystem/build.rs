@@ -29,13 +29,14 @@ fn build_agentd(workspace_root: &Path, out_dir: &Path) {
             return;
         }
 
-        // In CI, prefer the locally-built agentd from workspace build/.
-        if std::env::var_os("CI").is_some() {
-            let local = workspace_root.join("build").join(AGENTD_BINARY);
-            if local.is_file() {
-                std::fs::copy(&local, &dest).expect("failed to copy agentd from build/");
-                return;
-            }
+        let local = workspace_root.join("build").join(AGENTD_BINARY);
+        println!("cargo:rerun-if-changed={}", local.display());
+
+        // When building from the workspace, prefer the locally-built guest
+        // binary from build/ before falling back to release downloads.
+        if local.is_file() {
+            std::fs::copy(&local, &dest).expect("failed to copy agentd from build/");
+            return;
         }
 
         let _ = workspace_root;

@@ -26,5 +26,5 @@ pub use microsandbox_utils::size;
 #[cfg(feature = "net")]
 pub use sandbox::NetworkPolicy;
 pub use sandbox::exec::{ExecEvent, ExecHandle};
-pub use sandbox::{ExecOutput, Sandbox, SandboxConfig};
+pub use sandbox::{BootTimings, ExecOutput, Sandbox, SandboxConfig};
 pub use volume::Volume;
