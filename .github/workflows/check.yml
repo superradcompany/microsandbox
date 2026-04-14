@@ -323,6 +323,7 @@ jobs:
       # -- Install msb + libkrunfw --
       - name: Install msb
         run: |
+          rm -f ~/.microsandbox/db/microsandbox.db
           chmod +x build/msb
           mkdir -p ~/.microsandbox/bin ~/.microsandbox/lib
           install -m755 build/msb ~/.microsandbox/bin/msb
@@ -372,6 +373,7 @@ jobs:
       # -- Install msb + libkrunfw --
       - name: Install msb
         run: |
+          rm -f ~/.microsandbox/db/microsandbox.db
           chmod +x build/msb
           mkdir -p ~/.microsandbox/bin ~/.microsandbox/lib
           install -m755 build/msb ~/.microsandbox/bin/msb
