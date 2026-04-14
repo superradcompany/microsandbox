@@ -784,10 +784,12 @@ export interface TlsConfig {
   interceptedPorts?: Array<number>
   /** Block QUIC on intercepted ports (default: false). */
   blockQuic?: boolean
-  /** Path to custom CA certificate PEM file. */
-  caCert?: string
-  /** Path to custom CA private key PEM file. */
-  caKey?: string
+  /** Path to custom interception CA certificate PEM file. */
+  interceptCaCert?: string
+  /** Path to custom interception CA private key PEM file. */
+  interceptCaKey?: string
+  /** Paths to additional CA certificate PEM files to trust for upstream verification. */
+  upstreamCaCert?: Array<string>
 }
 
 /** Options for tmpfs mounts. */

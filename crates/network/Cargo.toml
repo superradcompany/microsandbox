@@ -24,6 +24,7 @@ msb_krun = { version = "0.1.9", features = ["net"] }
 rcgen = { workspace = true }
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
+rustls-pemfile = "2"
 serde = { workspace = true }
 time = { workspace = true }
 smoltcp = { workspace = true, features = [

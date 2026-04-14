@@ -1,0 +1,23 @@
+# Rust build artifacts
+target/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+
+# Compiled extension (built locally, not committed)
+microsandbox/_microsandbox*.so
+microsandbox/_microsandbox*.pyd
+
+# Bundled runtime (populated by CI, not committed)
+microsandbox/_bundled/bin/
+microsandbox/_bundled/lib/
+
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/

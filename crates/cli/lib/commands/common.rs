@@ -168,12 +168,18 @@ pub struct SandboxOpts {
     /// Use a custom CA certificate for TLS interception (PEM file).
     #[cfg(feature = "net")]
     #[arg(long)]
-    pub tls_ca_cert: Option<PathBuf>,
+    pub tls_intercept_ca_cert: Option<PathBuf>,
 
     /// Use a custom CA private key for TLS interception (PEM file).
     #[cfg(feature = "net")]
     #[arg(long)]
-    pub tls_ca_key: Option<PathBuf>,
+    pub tls_intercept_ca_key: Option<PathBuf>,
+
+    /// Trust an additional CA certificate for upstream server verification (PEM file).
+    /// Can be specified multiple times.
+    #[cfg(feature = "net")]
+    #[arg(long)]
+    pub tls_upstream_ca_cert: Vec<PathBuf>,
 
     // --- Secrets ---
     /// Inject a secret that is only sent to an allowed host (ENV=VALUE@HOST).
@@ -223,8 +229,9 @@ impl SandboxOpts {
             || !self.tls_intercept_port.is_empty()
             || !self.tls_bypass.is_empty()
             || self.no_block_quic
-            || self.tls_ca_cert.is_some()
-            || self.tls_ca_key.is_some()
+            || self.tls_intercept_ca_cert.is_some()
+            || self.tls_intercept_ca_key.is_some()
+            || !self.tls_upstream_ca_cert.is_empty()
             || !self.secret.is_empty()
             || self.on_secret_violation.is_some();
 
@@ -377,8 +384,9 @@ fn apply_network_opts(
         || !opts.tls_intercept_port.is_empty()
         || !opts.tls_bypass.is_empty()
         || opts.no_block_quic
-        || opts.tls_ca_cert.is_some()
-        || opts.tls_ca_key.is_some()
+        || opts.tls_intercept_ca_cert.is_some()
+        || opts.tls_intercept_ca_key.is_some()
+        || !opts.tls_upstream_ca_cert.is_empty()
         || opts.on_secret_violation.is_some();
 
     if has_network_config {
@@ -391,8 +399,9 @@ fn apply_network_opts(
         let tls_ports = opts.tls_intercept_port.clone();
         let tls_bypass = opts.tls_bypass.clone();
         let no_block_quic = opts.no_block_quic;
-        let ca_cert = opts.tls_ca_cert.clone();
-        let ca_key = opts.tls_ca_key.clone();
+        let intercept_ca_cert = opts.tls_intercept_ca_cert.clone();
+        let intercept_ca_key = opts.tls_intercept_ca_key.clone();
+        let upstream_ca_cert = opts.tls_upstream_ca_cert.clone();
         let violation_action = parse_violation_action(&opts.on_secret_violation)?;
 
         builder = builder.network(move |mut n| {
@@ -420,14 +429,16 @@ fn apply_network_opts(
                 || !tls_ports.is_empty()
                 || !tls_bypass.is_empty()
                 || no_block_quic
-                || ca_cert.is_some()
-                || ca_key.is_some();
+                || intercept_ca_cert.is_some()
+                || intercept_ca_key.is_some()
+                || !upstream_ca_cert.is_empty();
 
             if has_tls {
                 let tls_ports = tls_ports.clone();
                 let tls_bypass = tls_bypass.clone();
-                let ca_cert = ca_cert.clone();
-                let ca_key = ca_key.clone();
+                let intercept_ca_cert = intercept_ca_cert.clone();
+                let intercept_ca_key = intercept_ca_key.clone();
+                let upstream_ca_cert = upstream_ca_cert.clone();
                 n = n.tls(move |mut t| {
                     if !tls_ports.is_empty() {
                         t = t.intercepted_ports(tls_ports);
@@ -438,11 +449,14 @@ fn apply_network_opts(
                     if no_block_quic {
                         t = t.block_quic(false);
                     }
-                    if let Some(ref cert) = ca_cert {
-                        t = t.ca_cert(cert);
+                    if let Some(ref cert) = intercept_ca_cert {
+                        t = t.intercept_ca_cert(cert);
                     }
-                    if let Some(ref key) = ca_key {
-                        t = t.ca_key(key);
+                    if let Some(ref key) = intercept_ca_key {
+                        t = t.intercept_ca_key(key);
+                    }
+                    for path in &upstream_ca_cert {
+                        t = t.upstream_ca_cert(path);
                     }
                     t
                 });
@@ -610,6 +624,81 @@ fn parse_log_level(s: &str) -> anyhow::Result<microsandbox::LogLevel> {
         "debug" => Ok(LogLevel::Debug),
         "trace" => Ok(LogLevel::Trace),
         _ => anyhow::bail!("invalid log level: {s} (expected: error, warn, info, debug, trace)"),
+    }
+}
+
+/// Resolve the command to run following OCI semantics.
+///
+/// Returns `(Some(cmd), args)` or `(None, _)` when no command is available.
+///
+/// Resolution order when the user supplies no explicit command:
+/// 1. Image entrypoint [+ cmd]
+/// 2. Image cmd alone
+/// 3. `config.shell` (interactive only)
+/// 4. `/bin/sh` (interactive only)
+pub fn resolve_command(
+    config: &microsandbox::sandbox::SandboxConfig,
+    user_command: Vec<String>,
+    interactive: bool,
+) -> anyhow::Result<(Option<String>, Vec<String>)> {
+    // User supplied an explicit command — prepend entrypoint if set.
+    if !user_command.is_empty() {
+        return match &config.entrypoint {
+            Some(ep) if !ep.is_empty() => {
+                let bin = ep[0].clone();
+                let args = ep[1..].iter().cloned().chain(user_command).collect();
+                Ok((Some(bin), args))
+            }
+            _ => {
+                let mut parts = user_command;
+                let cmd = parts.remove(0);
+                Ok((Some(cmd), parts))
+            }
+        };
+    }
+
+    // No user command — try the image's entrypoint/cmd.
+    if let Some((cmd, cmd_args)) = resolve_image_command(config) {
+        return Ok((Some(cmd), cmd_args));
+    }
+
+    // Fall back to configured shell (or /bin/sh) in interactive mode.
+    if interactive {
+        let shell = config.shell.as_deref().unwrap_or("/bin/sh");
+        return Ok((Some(shell.to_string()), vec![]));
+    }
+
+    // Non-interactive with nothing to run.
+    ui::warn("no command provided and stdin is not a terminal");
+    Ok((None, vec![]))
+}
+
+/// Resolve the default process from OCI image config.
+///
+/// Follows OCI semantics:
+/// - `entrypoint` + `cmd`: entrypoint is the binary, cmd provides default arguments.
+/// - `entrypoint` only: entrypoint is the full command.
+/// - `cmd` only: cmd[0] is the binary, cmd[1..] are arguments.
+/// - Neither set: returns `None`.
+fn resolve_image_command(
+    config: &microsandbox::sandbox::SandboxConfig,
+) -> Option<(String, Vec<String>)> {
+    match (&config.entrypoint, &config.cmd) {
+        (Some(ep), cmd) if !ep.is_empty() => {
+            let bin = ep[0].clone();
+            let args = ep[1..]
+                .iter()
+                .chain(cmd.iter().flatten())
+                .cloned()
+                .collect();
+            Some((bin, args))
+        }
+        (_, Some(cmd)) if !cmd.is_empty() => {
+            let bin = cmd[0].clone();
+            let args = cmd[1..].to_vec();
+            Some((bin, args))
+        }
+        _ => None,
     }
 }
 

@@ -28,8 +28,9 @@
             "group": "Getting Started",
             "icon": "rocket",
             "pages": [
-              "introduction",
-              "quickstart"
+              "getting-started/introduction",
+              "getting-started/quickstart",
+              "getting-started/agents"
             ]
           },
           {
@@ -42,10 +43,10 @@
               "sandboxes/filesystem",
               "sandboxes/volumes",
               "sandboxes/secrets",
+              "sandboxes/customization",
+              "sandboxes/metrics",
               "sandboxes/snapshots",
-              "sandboxes/events",
-              "sandboxes/scripts",
-              "sandboxes/metrics"
+              "sandboxes/events"
             ]
           },
           {

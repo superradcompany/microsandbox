@@ -210,15 +210,24 @@ impl TlsBuilder {
         self
     }
 
-    /// Set a custom CA certificate PEM file path.
-    pub fn ca_cert(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.ca.cert_path = Some(path.into());
+    /// Add a CA certificate PEM file to trust for upstream server verification.
+    ///
+    /// Useful when the upstream server uses a self-signed or private CA certificate.
+    /// Can be called multiple times to add several CAs.
+    pub fn upstream_ca_cert(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.upstream_ca_cert.push(path.into());
         self
     }
 
-    /// Set a custom CA private key PEM file path.
-    pub fn ca_key(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.ca.key_path = Some(path.into());
+    /// Set a custom interception CA certificate PEM file path.
+    pub fn intercept_ca_cert(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.intercept_ca.cert_path = Some(path.into());
+        self
+    }
+
+    /// Set a custom interception CA private key PEM file path.
+    pub fn intercept_ca_key(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.intercept_ca.key_path = Some(path.into());
         self
     }
 

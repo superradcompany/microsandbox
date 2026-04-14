@@ -1,0 +1,23 @@
+[package]
+name = "net-secrets-body"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "net-secrets-body"
+path = "bin/main.rs"
+
+[dependencies]
+microsandbox = { path = "../../../crates/microsandbox" }
+microsandbox-network = { path = "../../../crates/network" }
+tokio = { version = "1.42", features = ["full"] }
+axum = "0.7"
+rcgen = "0.13"
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pki-types = "1"
+hyper = { version = "1", features = ["server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1"] }
+tower = "0.5"
+serde_json = "1"

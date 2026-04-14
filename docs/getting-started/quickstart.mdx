@@ -4,8 +4,14 @@ description: Get a sandbox running in under 5 minutes
 icon: "bolt"
 ---
 
+<Note>
+  microsandbox requires **Linux with KVM** enabled, or **macOS with Apple Silicon** (M-series chip). Both use hardware virtualization.
+</Note>
+
 <Steps>
-  <Step title="Install the SDK">
+  <Step title="Install microsandbox">
+    The SDK **embeds the runtime directly**, so no separate server process is needed. Only install the `msb` CLI if you want to manage images, volumes, and sandboxes from the terminal.
+
     <CodeGroup>
     ```bash Rust
     cargo add microsandbox
@@ -15,23 +21,11 @@ icon: "bolt"
     npm install microsandbox
     ```
 
-    </CodeGroup>
-
-    <Tip>
-      There are SDKs for many other languages as well. Check the [SDK reference](/sdk/rust) for the full list.
-    </Tip>
-  </Step>
-
-  <Step title="Install the CLI">
-    The SDK embeds the runtime directly, so no separate server process is needed. Install the `msb` CLI to manage images, volumes, and sandboxes from the terminal.
-
-    ```bash
+    ```bash CLI
     curl -fsSL https://install.microsandbox.dev | sh
     ```
 
-    <Note>
-      microsandbox requires Linux with KVM enabled, or macOS with Apple Silicon (M-series chip). Both use hardware virtualization.
-    </Note>
+    </CodeGroup>
   </Step>
 
   <Step title="Run code in a sandbox">
@@ -70,6 +64,10 @@ icon: "bolt"
     console.log(output.stdout()) // Hello from a microVM!
 
     await sb.stop()
+    ```
+
+    ```bash CLI
+    msb run python -- python3 -c "print('Hello from a microVM!')"
     ```
 
     </CodeGroup>

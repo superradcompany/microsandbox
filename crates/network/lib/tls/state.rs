@@ -23,8 +23,8 @@ use crate::secrets::config::SecretsConfig;
 /// Holds the CA, per-domain certificate cache, upstream TLS connector,
 /// and configuration. Shared across all TLS proxy tasks via `Arc`.
 pub struct TlsState {
-    /// Certificate authority for signing per-domain certs.
-    pub ca: CertAuthority,
+    /// Interception CA for signing per-domain certs presented to the guest.
+    pub intercept_ca: CertAuthority,
     /// LRU cache of generated domain certificates.
     cert_cache: Mutex<LruCache<String, Arc<DomainCert>>>,
     /// TLS connector for upstream (real server) connections.
@@ -59,7 +59,7 @@ impl TlsState {
     /// Create TLS state from configuration.
     ///
     /// CA resolution order:
-    /// 1. User-provided paths (`config.ca.cert_path` + `config.ca.key_path`)
+    /// 1. User-provided paths (`config.intercept_ca.cert_path` + `config.intercept_ca.key_path`)
     /// 2. Default persistence path (`~/.microsandbox/tls/ca.{crt,key}`)
     /// 3. Auto-generate and persist to default path
     pub fn new(config: TlsConfig, secrets: SecretsConfig) -> Self {
@@ -90,7 +90,7 @@ impl TlsState {
             .collect();
 
         Self {
-            ca,
+            intercept_ca: ca,
             cert_cache,
             connector,
             config,
@@ -108,7 +108,7 @@ impl TlsState {
 
         let cert = Arc::new(certgen::generate_domain_cert(
             domain,
-            &self.ca,
+            &self.intercept_ca,
             self.config.cache.validity_hours,
         ));
         cache.put(domain.to_string(), cert.clone());
@@ -128,7 +128,7 @@ impl TlsState {
 
     /// Get the CA certificate PEM bytes for guest installation.
     pub fn ca_cert_pem(&self) -> Vec<u8> {
-        self.ca.cert_pem()
+        self.intercept_ca.cert_pem()
     }
 }
 
@@ -206,6 +206,33 @@ fn build_upstream_connector(config: &TlsConfig) -> TlsConnector {
         if added == 0 {
             tracing::error!("no native root certificates loaded — all upstream TLS will fail");
         }
+
+        // Load extra CA certificates from user-provided PEM files.
+        for path in &config.upstream_ca_cert {
+            match std::fs::read(path) {
+                Ok(pem_data) => {
+                    let mut extra_added = 0usize;
+                    for cert in rustls_pemfile::certs(&mut pem_data.as_slice()).flatten() {
+                        if root_store.add(cert).is_ok() {
+                            extra_added += 1;
+                        }
+                    }
+                    tracing::info!(
+                        path = %path.display(),
+                        count = extra_added,
+                        "loaded upstream CA certificates"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        path = %path.display(),
+                        error = %e,
+                        "failed to read upstream CA certificate file"
+                    );
+                }
+            }
+        }
+
         rustls::ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth()
@@ -227,14 +254,17 @@ fn build_upstream_connector(config: &TlsConfig) -> TlsConnector {
 /// 3. Auto-generate and persist to default path
 fn load_or_generate_ca(config: &TlsConfig) -> CertAuthority {
     // Warn if only one of cert_path/key_path is set (likely a config error).
-    if config.ca.cert_path.is_some() != config.ca.key_path.is_some() {
+    if config.intercept_ca.cert_path.is_some() != config.intercept_ca.key_path.is_some() {
         tracing::warn!(
             "incomplete CA config: both cert_path and key_path must be set together, ignoring"
         );
     }
 
     // 1. Try user-provided paths.
-    if let (Some(cert_path), Some(key_path)) = (&config.ca.cert_path, &config.ca.key_path) {
+    if let (Some(cert_path), Some(key_path)) = (
+        &config.intercept_ca.cert_path,
+        &config.intercept_ca.key_path,
+    ) {
         match (std::fs::read(cert_path), std::fs::read(key_path)) {
             (Ok(cert_pem), Ok(key_pem)) => match CertAuthority::load(&cert_pem, &key_pem) {
                 Ok(ca) => {

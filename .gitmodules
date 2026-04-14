@@ -20,3 +20,9 @@
 [submodule "skills"]
 	path = skills
 	url = https://github.com/superradcompany/skills.git
+[submodule "examples/python/root-bind/rootfs-alpine"]
+	path = examples/python/root-bind/rootfs-alpine
+	url = https://github.com/superradcompany/rootfs-alpine
+[submodule "examples/python/root-block/qcow2-alpine"]
+	path = examples/python/root-block/qcow2-alpine
+	url = https://github.com/superradcompany/qcow2-alpine

@@ -56,3 +56,15 @@ repos:
         language: system
         pass_filenames: false
         files: \.(rs|toml)$
+      - id: python-sdk-ruff
+        name: ruff check (Python SDK)
+        entry: bash -lc 'cd sdk/python && uv run ruff check .'
+        language: system
+        pass_filenames: false
+        files: ^sdk/python/.*\.py$
+      - id: python-sdk-build
+        name: cargo check (Python SDK)
+        entry: bash -lc 'cargo check -p microsandbox-py'
+        language: system
+        pass_filenames: false
+        files: ^sdk/python/.*\.(rs|toml)$

@@ -56,7 +56,7 @@ impl<'a> VolumeFs<'a> {
     }
 
     /// Create a volume filesystem handle from an owned path.
-    pub(crate) fn from_path(path: PathBuf) -> Self {
+    pub fn from_path(path: PathBuf) -> Self {
         Self {
             root: VolumeRoot::Owned(path),
         }

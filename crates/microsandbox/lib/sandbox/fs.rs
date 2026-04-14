@@ -101,7 +101,7 @@ pub struct FsWriteSink {
 
 impl<'a> SandboxFs<'a> {
     /// Create a new filesystem handle.
-    pub(crate) fn new(client: &'a Arc<AgentClient>) -> Self {
+    pub fn new(client: &'a Arc<AgentClient>) -> Self {
         Self { client }
     }
 

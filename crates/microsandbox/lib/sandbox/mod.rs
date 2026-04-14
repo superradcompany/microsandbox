@@ -454,6 +454,11 @@ impl Sandbox {
         &self.client
     }
 
+    /// Get a cloneable reference to the agent client.
+    pub fn client_arc(&self) -> Arc<AgentClient> {
+        Arc::clone(&self.client)
+    }
+
     /// Returns `true` if this sandbox handle owns the process lifecycle.
     ///
     /// When `true`, dropping this handle or calling [`stop`](Self::stop)

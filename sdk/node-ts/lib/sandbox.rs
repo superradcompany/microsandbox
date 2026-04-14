@@ -556,11 +556,16 @@ fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
                     if let Some(block) = tls.block_quic {
                         t = t.block_quic(block);
                     }
-                    if let Some(ref path) = tls.ca_cert {
-                        t = t.ca_cert(path);
+                    if let Some(ref path) = tls.intercept_ca_cert {
+                        t = t.intercept_ca_cert(path);
                     }
-                    if let Some(ref path) = tls.ca_key {
-                        t = t.ca_key(path);
+                    if let Some(ref path) = tls.intercept_ca_key {
+                        t = t.intercept_ca_key(path);
+                    }
+                    if let Some(ref paths) = tls.upstream_ca_cert {
+                        for path in paths {
+                            t = t.upstream_ca_cert(path);
+                        }
                     }
                     t
                 });

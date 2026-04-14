@@ -35,8 +35,9 @@ const CA_BUNDLE_PATHS: &[&str] = &[
 /// Fallback path to create if no existing bundle is found.
 const FALLBACK_BUNDLE_PATH: &str = "/etc/ssl/certs/ca-certificates.crt";
 
-/// Filename for the CA cert when copied to distro trust directories.
-const CA_CERT_FILENAME: &str = "microsandbox-ca.pem";
+/// Filenames for the CA cert when copied to distro trust directories.
+/// Both extensions for broad tool compatibility (`.crt` for `update-ca-certificates`).
+const CA_CERT_FILENAMES: &[&str] = &["microsandbox-ca.pem", "microsandbox-ca.crt"];
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -87,10 +88,12 @@ fn copy_to_trust_dirs(ca_pem: &str) {
     for &dir in CA_TRUST_DIRS {
         let dir_path = Path::new(dir);
         if dir_path.is_dir() {
-            let dest = dir_path.join(CA_CERT_FILENAME);
-            match std::fs::write(&dest, ca_pem) {
-                Ok(()) => eprintln!("tls: copied CA cert to {}", dest.display()),
-                Err(e) => eprintln!("tls: failed to copy CA cert to {}: {e}", dest.display()),
+            for &filename in CA_CERT_FILENAMES {
+                let dest = dir_path.join(filename);
+                match std::fs::write(&dest, ca_pem) {
+                    Ok(()) => eprintln!("tls: copied CA cert to {}", dest.display()),
+                    Err(e) => eprintln!("tls: failed to copy CA cert to {}: {e}", dest.display()),
+                }
             }
         }
     }
@@ -119,4 +122,15 @@ fn append_to_bundle(ca_pem: &str) -> AgentdResult<String> {
     }
     std::fs::write(FALLBACK_BUNDLE_PATH, ca_pem)?;
     Ok(FALLBACK_BUNDLE_PATH.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ca_cert_filenames_cover_both_extensions() {
+        assert!(CA_CERT_FILENAMES.contains(&"microsandbox-ca.pem"));
+        assert!(CA_CERT_FILENAMES.contains(&"microsandbox-ca.crt"));
+    }
 }

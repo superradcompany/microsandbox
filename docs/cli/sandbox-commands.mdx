@@ -66,8 +66,9 @@ msb run -d --name worker python -- python worker.py
 | `--tls-intercept-port` | TCP port to apply TLS interception on (default: 443) |
 | `--tls-bypass` | Skip TLS interception for a domain (e.g. `*.internal.com`) |
 | `--no-block-quic` | Allow QUIC/HTTP3 traffic (blocked by default when TLS interception is on) |
-| `--tls-ca-cert` | Use a custom CA certificate for TLS interception (PEM file) |
-| `--tls-ca-key` | Use a custom CA private key for TLS interception (PEM file) |
+| `--tls-intercept-ca-cert` | Use a custom CA certificate for TLS interception (PEM file) |
+| `--tls-intercept-ca-key` | Use a custom CA private key for TLS interception (PEM file) |
+| `--tls-upstream-ca-cert` | Trust an additional CA certificate for upstream server verification (PEM file). Can be specified multiple times |
 
 When no `--` command is given, the image's `entrypoint` and `cmd` are used as the default process. If the image has neither, an interactive shell is started. When a command is given via `--`, it replaces the image `cmd` but the `entrypoint` is preserved. See [Image config inheritance](/images/overview#image-config-inheritance) for details.
 
