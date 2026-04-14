@@ -260,6 +260,9 @@ jobs:
     name: Node.js SDK Tests
     needs: check
     runs-on: self-hosted-ubuntu-2404-x64
+    container:
+      image: ubuntu:24.04
+      options: --device /dev/kvm
     steps:
       - name: Clean workspace
         run: rm -rf "${{ github.workspace }}"/{sdk,build}
