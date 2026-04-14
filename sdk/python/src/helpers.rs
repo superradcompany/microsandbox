@@ -541,10 +541,10 @@ fn apply_network(
                     t = t.block_quic(b);
                 }
                 if let Some(ref cert) = ca_cert {
-                    t = t.ca_cert(cert);
+                    t = t.intercept_ca_cert(cert);
                 }
                 if let Some(ref key) = ca_key {
-                    t = t.ca_key(key);
+                    t = t.intercept_ca_key(key);
                 }
                 t
             })
