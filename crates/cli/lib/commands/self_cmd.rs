@@ -255,7 +255,12 @@ struct SigintGuard {
 
 impl SigintGuard {
     fn install() -> Self {
-        let prev = unsafe { libc::signal(libc::SIGINT, sigint_show_cursor as libc::sighandler_t) };
+        let prev = unsafe {
+            libc::signal(
+                libc::SIGINT,
+                sigint_show_cursor as *const () as libc::sighandler_t,
+            )
+        };
         Self { prev }
     }
 }
