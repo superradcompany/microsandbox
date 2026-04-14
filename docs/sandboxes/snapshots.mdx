@@ -39,6 +39,10 @@ const snapshot = await sb.snapshot()
 await sb.resume()
 ```
 
+```python Python
+# Coming soon — snapshots for the Python SDK
+```
+
 </CodeGroup>
 
 ## Save and load named snapshots
@@ -68,6 +72,10 @@ await snapshot.saveNamed("after-pip-install")
 const saved = await Snapshot.get("after-pip-install")
 ```
 
+```python Python
+# Coming soon — snapshots for the Python SDK
+```
+
 </CodeGroup>
 
 ## Fork workers
@@ -93,6 +101,10 @@ const saved = await Snapshot.get("after-pip-install")
 const workers = await Promise.all(
     Array.from({ length: 10 }, (_, i) => saved.restore(`worker-${i}`))
 )
+```
+
+```python Python
+# Coming soon — snapshots for the Python SDK
 ```
 
 </CodeGroup>
@@ -125,6 +137,10 @@ const custom = await saved.restore("custom", {
 })
 ```
 
+```python Python
+# Coming soon — snapshots for the Python SDK
+```
+
 </CodeGroup>
 
 ## List and delete snapshots
@@ -142,6 +158,10 @@ import { Snapshot } from 'microsandbox'
 
 const snapshots = await Snapshot.list()
 await Snapshot.delete("old-snapshot")
+```
+
+```python Python
+# Coming soon — snapshots for the Python SDK
 ```
 
 </CodeGroup>

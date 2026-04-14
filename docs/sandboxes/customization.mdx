@@ -50,6 +50,22 @@ await sb.shell("setup")
 const output = await sb.shell("run")
 ```
 
+```python Python
+from microsandbox import Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="ubuntu",
+    scripts={
+        "setup": "#!/bin/bash\napt-get update && apt-get install -y python3 curl",
+        "start": "#!/bin/bash\nexec python3 /app/main.py",
+    },
+)
+
+await sb.shell("setup")
+output = await sb.shell("start")
+```
+
 </CodeGroup>
 
 ## Patches
@@ -95,6 +111,23 @@ const sb = await Sandbox.create({
         Patch.append("/etc/hosts", "127.0.0.1 myapp.local\n"),
     ],
 })
+```
+
+```python Python
+from microsandbox import Patch, Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="alpine",
+    patches=[
+        Patch.text("/etc/greeting.txt", "Hello from a patched rootfs!\n"),
+        Patch.text("/etc/motd", "Custom message of the day.\n", replace=True),
+        Patch.mkdir("/app", mode=0o755),
+        Patch.text("/app/config.json", '{"debug": true}', mode=0o644),
+        Patch.copy_file("./cert.pem", "/etc/ssl/cert.pem"),
+        Patch.append("/etc/hosts", "127.0.0.1 myapp.local\n"),
+    ],
+)
 ```
 
 </CodeGroup>

@@ -55,6 +55,14 @@ const sb = await Sandbox.create({ name: "worker", image: "python" })
 const sb = await Sandbox.createDetached({ name: "worker", image: "python" })
 ```
 
+```python Python
+# Attached: sandbox stops when your process exits
+sb = await Sandbox.create("worker", image="python")
+
+# Detached: sandbox survives after your process exits
+sb = await Sandbox.create("worker", image="python", detached=True)
+```
+
 ```bash CLI
 # Attached
 msb create python --name worker
@@ -83,6 +91,13 @@ await sb.stop()
 const sb = await Sandbox.start("worker")
 ```
 
+```python Python
+await sb.stop()
+
+# Later, resume where you left off
+sb = await Sandbox.start("worker")
+```
+
 ```bash CLI
 msb stop worker
 
@@ -102,6 +117,10 @@ sb.kill().await?;
 ```
 
 ```typescript TypeScript
+await sb.kill()
+```
+
+```python Python
 await sb.kill()
 ```
 
@@ -126,6 +145,10 @@ await sb.pause()
 await sb.resume()
 ```
 
+```python Python
+# Coming soon — pause/resume for the Python SDK
+```
+
 </CodeGroup>
 
 ## Detach
@@ -138,6 +161,10 @@ sb.detach().await;
 ```
 
 ```typescript TypeScript
+await sb.detach()
+```
+
+```python Python
 await sb.detach()
 ```
 
@@ -160,6 +187,10 @@ sb.drain().await?;
 await sb.drain()
 ```
 
+```python Python
+await sb.drain()
+```
+
 </CodeGroup>
 
 ## Wait
@@ -175,6 +206,10 @@ let exit_status = sb.wait().await?;
 const exitStatus = await sb.wait()
 ```
 
+```python Python
+code, success = await sb.wait()
+```
+
 </CodeGroup>
 
 ## Remove
@@ -187,6 +222,10 @@ Sandbox::remove("worker").await?;
 ```
 
 ```typescript TypeScript
+await Sandbox.remove("worker")
+```
+
+```python Python
 await Sandbox.remove("worker")
 ```
 
@@ -213,6 +252,14 @@ for (const info of sandboxes) {
 
 const handle = await Sandbox.get("worker")
 console.log(handle.status) // "Running" | "Stopped" | ...
+```
+
+```python Python
+for handle in await Sandbox.list():
+    print(f"{handle.name}: {handle.status}")
+
+handle = await Sandbox.get("worker")
+print(handle.status)  # "running" | "stopped" | ...
 ```
 
 ```bash CLI
@@ -290,6 +337,18 @@ try {
 }
 ```
 
+```python Python
+import asyncio
+from microsandbox import Sandbox
+
+handle = await Sandbox.get("worker")
+sb = await handle.connect()
+try:
+    await asyncio.wait_for(sb.stop(), timeout=30)
+except asyncio.TimeoutError:
+    await sb.kill()
+```
+
 </CodeGroup>
 
 ## Sandbox Process Policies
@@ -312,6 +371,15 @@ const sb = await Sandbox.create({
     image: "python",
     maxDurationSecs: 3600,  // maximum sandbox lifetime in seconds
 })
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    max_duration=3600,
+    idle_timeout=300,
+)
 ```
 
 </CodeGroup>

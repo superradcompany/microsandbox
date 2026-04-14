@@ -45,6 +45,25 @@ const sb = await Sandbox.create({
 })
 ```
 
+```python Python
+import os
+from microsandbox import Network, Sandbox, Secret
+
+sb = await Sandbox.create(
+    "sandbox",
+    image="python",
+    memory=512,
+    cpus=2,
+    secrets=[
+        Secret.env("OPENAI_API_KEY",
+            value=os.environ["OPENAI_API_KEY"],
+            allow_hosts=["api.openai.com"],
+        ),
+    ],
+    network=Network.public_only(),
+)
+```
+
 </CodeGroup>
 
 <Callout icon="bolt" color="#7C3AED">
@@ -93,6 +112,19 @@ const sb = await Sandbox.create({
 })
 ```
 
+```python Python
+sb = await Sandbox.create(
+    "sandbox",
+    image="python",
+    secrets=[
+        Secret.env("OPENAI_API_KEY",
+            value=os.environ["OPENAI_API_KEY"],
+            allow_hosts=["api.openai.com"],
+        ),
+    ],
+)
+```
+
 </CodeGroup>
 
 ### Programmable network layer <sup><sup>coming soon</sup></sup>
@@ -119,6 +151,10 @@ const sb = await Sandbox.create({
     image: "python",
     network: NetworkPolicy.allowlist(["api.openai.com", "pypi.org"]),
 })
+```
+
+```python Python
+# Coming soon — allowlist policies for the Python SDK
 ```
 
 </CodeGroup>
@@ -155,6 +191,10 @@ const sb = await Sandbox.create({
 })
 ```
 
+```python Python
+# Coming soon — filesystem hooks for the Python SDK
+```
+
 </CodeGroup>
 
 ### Snapshot, fork, restore <sup><sup>coming soon</sup></sup>
@@ -189,6 +229,10 @@ const snapshot = await sb.snapshot()
 const workers = await Promise.all(
     Array.from({ length: 10 }, (_, i) => snapshot.restore(`worker-${i}`))
 )
+```
+
+```python Python
+# Coming soon — snapshots for the Python SDK
 ```
 
 </CodeGroup>
@@ -231,6 +275,10 @@ const sub = sb.onEvent("task.progress", (event: EventData) => {
 
 // Send events to guest
 await sb.emit("task.start", { inputFile: "/data/input.txt", options: ["--verbose"] })
+```
+
+```python Python
+# Coming soon — events for the Python SDK
 ```
 
 </CodeGroup>

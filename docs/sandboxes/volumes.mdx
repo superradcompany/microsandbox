@@ -35,6 +35,19 @@ const sb = await Sandbox.create({
 })
 ```
 
+```python Python
+from microsandbox import Sandbox, Volume
+
+sb = await Sandbox.create(
+    "dev",
+    image="python",
+    volumes={
+        "/app/src": Volume.bind("./src", readonly=True),
+        "/app/data": Volume.bind("./data"),
+    },
+)
+```
+
 ```bash CLI
 msb create python --name dev \
   -v ./src:/app/src:ro \
@@ -59,6 +72,10 @@ let cache = Volume::builder("pip-cache")
 
 ```typescript TypeScript
 const cache = await Volume.create({ name: "pip-cache", quotaMib: 1024 })
+```
+
+```python Python
+cache = await Volume.create("pip-cache", quota_mib=1024)
 ```
 
 ```bash CLI
@@ -86,6 +103,16 @@ const sb = await Sandbox.create({
         "/root/.cache/pip": Mount.named(cache.name),
     },
 })
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    volumes={
+        "/root/.cache/pip": Volume.named(cache.name),
+    },
+)
 ```
 
 ```bash CLI
@@ -138,6 +165,25 @@ const output = await reader.exec("cat", ["/data/message.txt"])
 // => "hello"
 ```
 
+```python Python
+# Writer
+writer = await Sandbox.create(
+    "writer",
+    image="alpine",
+    volumes={"/data": Volume.named("shared-data")},
+)
+await writer.shell("echo 'hello' > /data/message.txt")
+
+# Reader (read-only)
+reader = await Sandbox.create(
+    "reader",
+    image="alpine",
+    volumes={"/data": Volume.named("shared-data", readonly=True)},
+)
+output = await reader.exec("cat", ["/data/message.txt"])
+# => "hello"
+```
+
 </CodeGroup>
 
 <Tip>
@@ -158,6 +204,11 @@ vol.fs().write("/requirements.txt", "requests==2.28.0").await?;
 // Coming soon — host-side filesystem access for volumes
 ```
 
+```python Python
+vol = await Volume.get("pip-cache")
+await vol.fs.write("/requirements.txt", b"requests==2.28.0")
+```
+
 </CodeGroup>
 
 ### Manage volumes
@@ -170,6 +221,11 @@ Volume::remove("old-cache").await?;
 
 ```typescript TypeScript
 const volumes = await Volume.list()
+await Volume.remove("old-cache")
+```
+
+```python Python
+volumes = await Volume.list()
 await Volume.remove("old-cache")
 ```
 
@@ -201,6 +257,16 @@ const sb = await Sandbox.create({
         "/tmp/scratch": Mount.tmpfs({ sizeMib: 100 }),
     },
 })
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="alpine",
+    volumes={
+        "/tmp/scratch": Volume.tmpfs(size_mib=100),
+    },
+)
 ```
 
 ```bash CLI
