@@ -301,7 +301,9 @@ jobs:
     runs-on: self-hosted-ubuntu-2404-x64
     steps:
       - name: Clean workspace
-        run: rm -rf "${{ github.workspace }}"/{sdk,build}
+        run: |
+          rm -rf "${{ github.workspace }}"/{sdk,build}
+          rm -rf ~/.microsandbox
 
       - uses: actions/setup-node@v4
         with:
