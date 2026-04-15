@@ -991,13 +991,13 @@ mod tests {
         });
 
         let limits = ResourceLimits::default();
-        let tree = ingest_tar(std::io::Cursor::new(data), &limits)
+        let tree = ingest_tar(std::io::Cursor::new(data), &limits, None)
             .await
             .unwrap();
 
         match tree.get(b"foo.txt").unwrap() {
             TreeNode::RegularFile(f) => {
-                assert_eq!(f.data, b"hello world");
+                assert_eq!(f.data, FileData::Memory(b"hello world".to_vec()));
                 assert_eq!(f.metadata.uid, 1000);
                 assert_eq!(f.metadata.gid, 1000);
                 assert_eq!(f.metadata.mode, 0o644);
@@ -1021,7 +1021,7 @@ mod tests {
         });
 
         let limits = ResourceLimits::default();
-        let tree = ingest_tar(std::io::Cursor::new(data), &limits)
+        let tree = ingest_tar(std::io::Cursor::new(data), &limits, None)
             .await
             .unwrap();
 
@@ -1047,7 +1047,7 @@ mod tests {
         });
 
         let limits = ResourceLimits::default();
-        let tree = ingest_tar(std::io::Cursor::new(data), &limits)
+        let tree = ingest_tar(std::io::Cursor::new(data), &limits, None)
             .await
             .unwrap();
 
@@ -1083,21 +1083,21 @@ mod tests {
         });
 
         let limits = ResourceLimits::default();
-        let tree = ingest_tar(std::io::Cursor::new(data), &limits)
+        let tree = ingest_tar(std::io::Cursor::new(data), &limits, None)
             .await
             .unwrap();
 
         // Both should exist with the same data and nlink=2.
         match tree.get(b"original.txt").unwrap() {
             TreeNode::RegularFile(f) => {
-                assert_eq!(f.data, b"shared data");
+                assert_eq!(f.data, FileData::Memory(b"shared data".to_vec()));
                 assert_eq!(f.nlink, 2);
             }
             _ => panic!("expected regular file"),
         }
         match tree.get(b"hardlink.txt").unwrap() {
             TreeNode::RegularFile(f) => {
-                assert_eq!(f.data, b"shared data");
+                assert_eq!(f.data, FileData::Memory(b"shared data".to_vec()));
                 assert_eq!(f.nlink, 2);
             }
             _ => panic!("expected regular file"),
@@ -1117,7 +1117,7 @@ mod tests {
         });
 
         let limits = ResourceLimits::default();
-        let result = ingest_tar(std::io::Cursor::new(data), &limits).await;
+        let result = ingest_tar(std::io::Cursor::new(data), &limits, None).await;
         assert!(matches!(result, Err(IngestError::HardlinkTarget(_))));
     }
 
@@ -1135,7 +1135,7 @@ mod tests {
         });
 
         let limits = ResourceLimits::default();
-        let tree = ingest_tar(std::io::Cursor::new(data), &limits)
+        let tree = ingest_tar(std::io::Cursor::new(data), &limits, None)
             .await
             .unwrap();
 
@@ -1175,7 +1175,7 @@ mod tests {
         });
 
         let limits = ResourceLimits::default();
-        let tree = ingest_tar(std::io::Cursor::new(data), &limits)
+        let tree = ingest_tar(std::io::Cursor::new(data), &limits, None)
             .await
             .unwrap();
 
@@ -1210,7 +1210,7 @@ mod tests {
         });
 
         let limits = ResourceLimits::default();
-        let tree = ingest_tar(std::io::Cursor::new(data), &limits)
+        let tree = ingest_tar(std::io::Cursor::new(data), &limits, None)
             .await
             .unwrap();
         assert!(matches!(
@@ -1249,13 +1249,13 @@ mod tests {
         });
 
         let limits = ResourceLimits::default();
-        let tree = ingest_tar(std::io::Cursor::new(data), &limits)
+        let tree = ingest_tar(std::io::Cursor::new(data), &limits, None)
             .await
             .unwrap();
 
         match tree.get(b"nix/store/link.txt").unwrap() {
             TreeNode::RegularFile(f) => {
-                assert_eq!(f.data, b"shared data");
+                assert_eq!(f.data, FileData::Memory(b"shared data".to_vec()));
                 assert_eq!(f.nlink, 2);
             }
             _ => panic!("expected regular file"),
@@ -1280,7 +1280,7 @@ mod tests {
             max_entry_count: 3,
             ..ResourceLimits::default()
         };
-        let result = ingest_tar(std::io::Cursor::new(data), &limits).await;
+        let result = ingest_tar(std::io::Cursor::new(data), &limits, None).await;
         assert!(matches!(result, Err(IngestError::EntryCountExceeded)));
     }
 
@@ -1301,7 +1301,7 @@ mod tests {
             max_file_size: 512,
             ..ResourceLimits::default()
         };
-        let result = ingest_tar(std::io::Cursor::new(data), &limits).await;
+        let result = ingest_tar(std::io::Cursor::new(data), &limits, None).await;
         assert!(matches!(result, Err(IngestError::FileTooLarge(_))));
     }
 
@@ -1319,7 +1319,7 @@ mod tests {
         });
 
         let limits = ResourceLimits::default();
-        let tree = ingest_tar(std::io::Cursor::new(data), &limits)
+        let tree = ingest_tar(std::io::Cursor::new(data), &limits, None)
             .await
             .unwrap();
 
@@ -1351,7 +1351,7 @@ mod tests {
         });
 
         let limits = ResourceLimits::default();
-        let tree = ingest_tar(std::io::Cursor::new(data), &limits)
+        let tree = ingest_tar(std::io::Cursor::new(data), &limits, None)
             .await
             .unwrap();
 

@@ -45,6 +45,28 @@ pub enum FileData {
     },
 }
 
+impl std::fmt::Debug for FileData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FileData::Memory(data) => f.debug_tuple("Memory").field(&data.len()).finish(),
+            FileData::Spool { offset, len, .. } => f
+                .debug_struct("Spool")
+                .field("offset", offset)
+                .field("len", len)
+                .finish(),
+        }
+    }
+}
+
+impl PartialEq for FileData {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (FileData::Memory(a), FileData::Memory(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 /// Threshold below which file data is kept in memory (64 KiB).
 /// Files at or above this size are spooled to disk during tar ingestion.
 pub const SPOOL_THRESHOLD: u64 = u64::MAX; // TODO: restore to 64 * 1024 after debugging
@@ -572,7 +594,7 @@ mod tests {
         TreeNode::RegularFile(RegularFileNode {
             metadata: InodeMetadata::default(),
             xattrs: Vec::new(),
-            data: data.to_vec(),
+            data: FileData::Memory(data.to_vec()),
             nlink: 1,
         })
     }
@@ -608,7 +630,9 @@ mod tests {
 
         let node = tree.get(b"hello.txt").unwrap();
         match node {
-            TreeNode::RegularFile(f) => assert_eq!(f.data, b"hello world"),
+            TreeNode::RegularFile(f) => {
+                assert_eq!(f.data, FileData::Memory(b"hello world".to_vec()))
+            }
             _ => panic!("expected regular file"),
         }
     }
@@ -654,7 +678,7 @@ mod tests {
         base.merge_layer(layer);
 
         match base.get(b"config.txt").unwrap() {
-            TreeNode::RegularFile(f) => assert_eq!(f.data, b"new"),
+            TreeNode::RegularFile(f) => assert_eq!(f.data, FileData::Memory(b"new".to_vec())),
             _ => panic!("expected regular file"),
         }
     }
@@ -699,7 +723,7 @@ mod tests {
         assert!(base.get(b"dir/b.txt").is_none());
         // New entry should be present.
         match base.get(b"dir/c.txt").unwrap() {
-            TreeNode::RegularFile(f) => assert_eq!(f.data, b"c"),
+            TreeNode::RegularFile(f) => assert_eq!(f.data, FileData::Memory(b"c".to_vec())),
             _ => panic!("expected regular file"),
         }
     }
