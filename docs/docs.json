@@ -112,6 +112,20 @@
               "sdk/typescript/snapshots",
               "sdk/typescript/events"
             ]
+          },
+          {
+            "group": "Python SDK",
+            "icon": "python",
+            "pages": [
+              "sdk/python/sandbox",
+              "sdk/python/execution",
+              "sdk/python/filesystem",
+              "sdk/python/volumes",
+              "sdk/python/networking",
+              "sdk/python/secrets",
+              "sdk/python/snapshots",
+              "sdk/python/events"
+            ]
           }
         ]
       },

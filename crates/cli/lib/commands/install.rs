@@ -121,7 +121,7 @@ pub async fn run(args: InstallArgs) -> anyhow::Result<()> {
     // PATH hint.
     if !is_in_path(&bin_dir) {
         eprintln!(
-            "\n  Add to your shell profile:\n    export PATH=\"{}:$PATH\"\n",
+            "  Add to your shell profile:\n    export PATH=\"{}:$PATH\"",
             bin_dir.display()
         );
     }

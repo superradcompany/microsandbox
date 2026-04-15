@@ -2559,7 +2559,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "bytes",
  "chrono",
@@ -2597,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-cli"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2622,14 +2622,14 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-db"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "sea-orm",
 ]
 
 [[package]]
 name = "microsandbox-filesystem"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "libc",
  "microsandbox-utils",
@@ -2642,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-image"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "astral-tokio-tar",
  "async-compression",
@@ -2667,14 +2667,14 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-migration"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "sea-orm-migration",
 ]
 
 [[package]]
 name = "microsandbox-network"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "bytes",
  "crossbeam-queue",
@@ -2700,7 +2700,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-node"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "bytes",
  "chrono",
@@ -2716,7 +2716,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-protocol"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "chrono",
  "ciborium",
@@ -2728,7 +2728,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-py"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "futures",
  "ipnetwork",
@@ -2741,7 +2741,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-runtime"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "bytes",
  "chrono",
@@ -2767,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-utils"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "libc",
  "scopeguard",

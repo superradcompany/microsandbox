@@ -60,6 +60,16 @@ const sb2 = await Sandbox.create({
     memoryMib: 512,
 })
 ```
+
+```python Python
+from microsandbox import Image, Sandbox
+
+# Auto-detect format from file extension
+sb = await Sandbox.create("custom-vm", image="./ubuntu-22.04.qcow2", cpus=2, memory=2048)
+
+# Explicit filesystem type
+sb2 = await Sandbox.create("custom-vm", image=Image.disk("./alpine.raw", fstype="ext4"), cpus=1, memory=512)
+```
 </CodeGroup>
 
 <Note>

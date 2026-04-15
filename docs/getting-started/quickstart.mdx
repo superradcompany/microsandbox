@@ -21,6 +21,10 @@ icon: "bolt"
     npm install microsandbox
     ```
 
+    ```bash Python
+    pip install microsandbox
+    ```
+
     ```bash CLI
     curl -fsSL https://install.microsandbox.dev | sh
     ```
@@ -64,6 +68,25 @@ icon: "bolt"
     console.log(output.stdout()) // Hello from a microVM!
 
     await sb.stop()
+    ```
+
+    ```python Python
+    import asyncio
+    from microsandbox import Sandbox
+
+    async def main():
+        sb = await Sandbox.create(
+            "hello",
+            image="python",
+            memory=512,
+        )
+
+        output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"])
+        print(output.stdout_text)  # Hello from a microVM!
+
+        await sb.stop()
+
+    asyncio.run(main())
     ```
 
     ```bash CLI
