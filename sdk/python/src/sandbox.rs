@@ -853,43 +853,57 @@ fn convert_pull_progress(event: microsandbox::sandbox::PullProgress) -> PyPullEv
             downloaded_bytes: Some(downloaded_bytes as i64),
             ..Default::default()
         },
-        PullProgress::LayerExtractStarted {
+        PullProgress::LayerDownloadVerifying {
+            layer_index,
+            digest,
+        } => PyPullEvent {
+            event_type: "layer_download_verifying",
+            layer_index: Some(layer_index as u32),
+            digest: Some(digest.to_string()),
+            ..Default::default()
+        },
+        PullProgress::LayerMaterializeStarted {
             layer_index,
             diff_id,
         } => PyPullEvent {
-            event_type: "layer_extract_started",
+            event_type: "layer_materialize_started",
             layer_index: Some(layer_index as u32),
             diff_id: Some(diff_id.to_string()),
             ..Default::default()
         },
-        PullProgress::LayerExtractProgress {
+        PullProgress::LayerMaterializeProgress {
             layer_index,
             bytes_read,
             total_bytes,
         } => PyPullEvent {
-            event_type: "layer_extract_progress",
+            event_type: "layer_materialize_progress",
             layer_index: Some(layer_index as u32),
             bytes_read: Some(bytes_read as i64),
             total_bytes: Some(total_bytes as i64),
             ..Default::default()
         },
-        PullProgress::LayerExtractComplete {
+        PullProgress::LayerMaterializeWriting { layer_index } => PyPullEvent {
+            event_type: "layer_materialize_writing",
+            layer_index: Some(layer_index as u32),
+            ..Default::default()
+        },
+        PullProgress::LayerMaterializeComplete {
             layer_index,
             diff_id,
         } => PyPullEvent {
-            event_type: "layer_extract_complete",
+            event_type: "layer_materialize_complete",
             layer_index: Some(layer_index as u32),
             diff_id: Some(diff_id.to_string()),
             ..Default::default()
         },
-        PullProgress::LayerIndexStarted { layer_index } => PyPullEvent {
-            event_type: "layer_index_started",
-            layer_index: Some(layer_index as u32),
+        PullProgress::FlatMergeStarted { layer_count } => PyPullEvent {
+            event_type: "flat_merge_started",
+            layer_count: Some(layer_count as u32),
             ..Default::default()
         },
-        PullProgress::LayerIndexComplete { layer_index } => PyPullEvent {
-            event_type: "layer_index_complete",
-            layer_index: Some(layer_index as u32),
+        PullProgress::FlatMergeComplete { manifest_digest } => PyPullEvent {
+            event_type: "flat_merge_complete",
+            manifest_digest: Some(manifest_digest.to_string()),
             ..Default::default()
         },
         PullProgress::Complete {
