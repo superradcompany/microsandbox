@@ -120,13 +120,15 @@ mod tests {
 
     #[test]
     fn test_crc32c_known_value() {
+        use crate::crc32c::crc32c_raw;
+
         // CRC32C of empty data with ~0 seed should be ~0 (no bytes processed)
-        let crc = crc32c(0xFFFF_FFFF, &[]);
+        let crc = crc32c_raw(0xFFFF_FFFF, &[]);
         assert_eq!(crc, 0xFFFF_FFFF);
 
         // Standard CRC32C of "123456789" is 0xE3069283
         let data = b"123456789";
-        let crc = crc32c(0xFFFF_FFFF, data) ^ 0xFFFF_FFFF;
+        let crc = crc32c_raw(0xFFFF_FFFF, data) ^ 0xFFFF_FFFF;
         assert_eq!(crc, 0xE306_9283);
     }
 }
