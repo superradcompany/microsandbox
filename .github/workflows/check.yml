@@ -344,3 +344,65 @@ jobs:
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
           npm test
+
+  # ---------------------------------------------------------------------------
+  # Boot timing regression gate (requires KVM)
+  # ---------------------------------------------------------------------------
+  boot-timing:
+    name: Boot Timing
+    needs: check
+    runs-on: self-hosted-ubuntu-2404-x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools libdbus-1-dev
+
+      - name: Build agentd
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+          mkdir -p build
+          cp crates/agentd/target/x86_64-unknown-linux-musl/release/agentd build/agentd
+
+      - name: Build libkrunfw
+        run: |
+          cd vendor/libkrunfw
+          make -j$(nproc)
+          cd ../..
+          mkdir -p build
+          cp vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} build/
+          cd build
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
+
+      - name: Build msb
+        run: |
+          cargo build --release --no-default-features --features net -p microsandbox-cli
+          mkdir -p build
+          cp target/release/msb build/msb
+
+      - name: Build boot timing benchmark
+        run: cargo build --release -p boot-timing-ci
+
+      - name: Check boot timing thresholds
+        run: |
+          export MSB_PATH="${{ github.workspace }}/build/msb"
+          export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
+          python3 scripts/ci/check_boot_timings.py \
+            --binary target/release/boot-timing-ci \
+            --config scripts/ci/boot-timing-thresholds.json \
+            --output boot-timing-results.json
+
+      - name: Upload boot timing results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-timing-results
+          path: boot-timing-results.json

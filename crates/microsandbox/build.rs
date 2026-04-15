@@ -60,6 +60,7 @@ fn main() {
         return;
     }
 
+
     let url = bundle_url();
     println!(
         "cargo:warning=downloading microsandbox runtime dependencies (v{PREBUILT_VERSION})..."
@@ -136,7 +137,6 @@ fn install_ci_local_bundle(
     if std::env::var_os("CI").is_none() {
         return Ok(false);
     }
-
     let Some(build_dir) = workspace_build_dir() else {
         return Ok(false);
     };
@@ -161,7 +161,7 @@ fn install_ci_local_bundle(
     }
 
     create_symlinks(lib_dir, libkrunfw_name);
-    println!("cargo:warning=installed microsandbox runtime dependencies from local CI build/");
+    println!("cargo:warning=installed microsandbox runtime dependencies from local build/");
     Ok(true)
 }
 

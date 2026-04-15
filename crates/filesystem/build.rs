@@ -29,7 +29,7 @@ fn build_agentd(workspace_root: &Path, out_dir: &Path) {
             return;
         }
 
-        // In CI, prefer the locally-built agentd from workspace build/.
+       // In CI, prefer the locally-built agentd from workspace build/.
         if std::env::var_os("CI").is_some() {
             let local = workspace_root.join("build").join(AGENTD_BINARY);
             if local.is_file() {
@@ -37,7 +37,6 @@ fn build_agentd(workspace_root: &Path, out_dir: &Path) {
                 return;
             }
         }
-
         let _ = workspace_root;
         let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
         let url = agentd_download_url(PREBUILT_VERSION, &arch);

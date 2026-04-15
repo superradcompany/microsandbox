@@ -80,6 +80,33 @@ pub struct Sandbox {
     client: Arc<AgentClient>,
 }
 
+/// Boot timing data reported by the guest in `core.ready`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BootTimings {
+    /// Guest `CLOCK_BOOTTIME` at the start of `agentd::main()`.
+    ///
+    /// In practice this tracks the time from VM entry until the guest reaches
+    /// userspace and starts `agentd`.
+    pub enter_to_boot_ns: u64,
+    /// Nanoseconds spent in synchronous guest init before the async agent loop.
+    pub boot_to_init_ns: u64,
+    /// Nanoseconds from `agentd::main()` start until `core.ready` was sent.
+    pub boot_to_ready_ns: u64,
+    /// Total guest time from kernel boot until `core.ready`.
+    pub enter_to_ready_ns: u64,
+}
+
+impl BootTimings {
+    fn from_ready(ready: &microsandbox_protocol::core::Ready) -> Self {
+        Self {
+            enter_to_boot_ns: ready.boot_time_ns,
+            boot_to_init_ns: ready.init_time_ns,
+            boot_to_ready_ns: ready.ready_time_ns.saturating_sub(ready.boot_time_ns),
+            enter_to_ready_ns: ready.ready_time_ns,
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods: Static
 //--------------------------------------------------------------------------------------------------
@@ -425,6 +452,11 @@ impl Sandbox {
     /// Operations go through the guest agent (agentd).
     pub fn fs(&self) -> fs::SandboxFs<'_> {
         fs::SandboxFs::new(&self.client)
+    }
+
+    /// Return the cached guest boot timing snapshot captured during startup.
+    pub fn boot_timings(&self) -> BootTimings {
+        BootTimings::from_ready(self.client.ready())
     }
 
     /// Stop the sandbox gracefully by sending `core.shutdown` to agentd.
@@ -1711,11 +1743,12 @@ mod tests {
         image as image_entity, run as run_entity, sandbox_image as sandbox_image_entity,
     };
     use microsandbox_migration::{Migrator, MigratorTrait};
+    use microsandbox_protocol::core::Ready;
     use sea_orm::{ColumnTrait, ConnectOptions, Database, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
     use super::{
-        RootfsSource, SandboxConfig, SandboxStatus, insert_sandbox_record,
+        BootTimings, RootfsSource, SandboxConfig, SandboxStatus, insert_sandbox_record,
         persist_oci_manifest_pin, prepare_create_target, reconcile_sandbox_runtime_state,
         remove_dir_if_exists, validate_rootfs_source,
     };
@@ -1803,6 +1836,20 @@ mod tests {
             0,
             "dup'd tty fd should remain blocking"
         );
+    }
+
+    #[test]
+    fn test_boot_timings_from_ready() {
+        let timings = BootTimings::from_ready(&Ready {
+            boot_time_ns: 70_000_000,
+            init_time_ns: 15_000_000,
+            ready_time_ns: 92_000_000,
+        });
+
+        assert_eq!(timings.enter_to_boot_ns, 70_000_000);
+        assert_eq!(timings.boot_to_init_ns, 15_000_000);
+        assert_eq!(timings.boot_to_ready_ns, 22_000_000);
+        assert_eq!(timings.enter_to_ready_ns, 92_000_000);
     }
 
     #[test]

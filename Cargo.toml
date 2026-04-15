@@ -11,6 +11,7 @@ members = [
     "crates/protocol",
     "crates/runtime",
     "crates/utils",
+    "examples/rust/boot-timing-ci",
     "examples/rust/fs-read-stream",
     "examples/rust/shell-attach",
     "examples/rust/metrics-stream",
