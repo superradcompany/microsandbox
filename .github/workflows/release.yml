@@ -249,7 +249,7 @@ jobs:
           command: build
           args: --release --out dist
           manylinux: ${{ matrix.os == 'linux' && '2_28' || 'off' }}
-          before-script-linux: dnf install -y dbus-devel
+          before-script-linux: dnf install -y dbus-devel libcap-ng-devel
 
       - name: Upload Python SDK wheel
         uses: actions/upload-artifact@v4
