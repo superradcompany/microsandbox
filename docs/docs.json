@@ -143,6 +143,18 @@
             ]
           }
         ]
+      },
+      {
+        "tab": "Recipes",
+        "groups": [
+          {
+            "group": "Container Integration",
+            "icon": "docker",
+            "pages": [
+              "recipes/docker"
+            ]
+          }
+        ]
       }
     ]
   },
