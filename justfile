@@ -261,6 +261,112 @@ uninstall:
     rm -f ~/.microsandbox/lib/libkrunfw*
     echo "Removed msb and libkrunfw from ~/.microsandbox/"
 
+# Build a local Linux package from the current build outputs.
+[linux]
+package-local format=DEFAULT_PACKAGE_FORMAT revision="1": (build-msb "release") build-libkrunfw
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    arch="$(uname -m)"
+    package_format="{{ format }}"
+    revision="{{ revision }}"
+    version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+    output_dir="{{ LOCAL_PACKAGE_DIST_DIR }}/$package_format"
+
+    test -n "$version" || { echo "error: could not determine workspace version from Cargo.toml"; exit 1; }
+
+    case "$package_format" in
+        deb)
+            echo "==> Packaging {{ LINUX_PACKAGE_NAME }} $version-$revision as $package_format..."
+            bash scripts/package-deb.sh \
+                --arch "$arch" \
+                --version "$version" \
+                --revision "$revision" \
+                --msb "build/msb" \
+                --libkrunfw "build/libkrunfw.so.{{ LIBKRUNFW_VERSION }}" \
+                --output-dir "$output_dir"
+            ;;
+        *)
+            echo "error: unsupported local package format: $package_format" >&2
+            echo "supported formats: deb" >&2
+            exit 1
+            ;;
+    esac
+
+# Build the local Linux package and install it with the matching system tool.
+[linux]
+install-package-local format=DEFAULT_PACKAGE_FORMAT revision="1": (package-local format revision)
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    package_format="{{ format }}"
+    revision="{{ revision }}"
+    version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+    test -n "$version" || { echo "error: could not determine workspace version from Cargo.toml"; exit 1; }
+
+    case "$package_format" in
+        deb)
+            case "$(uname -m)" in
+                x86_64)
+                    package_arch="amd64"
+                    ;;
+                aarch64)
+                    package_arch="arm64"
+                    ;;
+                *)
+                    echo "error: unsupported Debian architecture: $(uname -m)" >&2
+                    exit 1
+                    ;;
+            esac
+            package_path="$PWD/{{ LOCAL_PACKAGE_DIST_DIR }}/$package_format/{{ LINUX_PACKAGE_NAME }}_${version}-${revision}_${package_arch}.deb"
+            ;;
+        *)
+            echo "error: unsupported local package format: $package_format" >&2
+            echo "supported formats: deb" >&2
+            exit 1
+            ;;
+    esac
+
+    test -f "$package_path" || { echo "error: package not found: $package_path"; exit 1; }
+    stage_dir="$(mktemp -d /tmp/microsandbox-package.XXXXXX)"
+    stage_package="$stage_dir/$(basename "$package_path")"
+    trap 'rm -rf "$stage_dir"' EXIT
+
+    chmod 755 "$stage_dir"
+    install -m644 "$package_path" "$stage_package"
+
+    case "$package_format" in
+        deb)
+            echo "==> Installing $stage_package..."
+            sudo apt-get update
+            sudo apt install --reinstall -y "$stage_package"
+            ;;
+    esac
+
+# Remove the locally installed Linux package with the matching system tool.
+[linux]
+uninstall-package-local format=DEFAULT_PACKAGE_FORMAT:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    package_format="{{ format }}"
+
+    case "$package_format" in
+        deb)
+            if dpkg-query -W -f='${Status}' "{{ LINUX_PACKAGE_NAME }}" 2>/dev/null | grep -q "install ok installed"; then
+                echo "==> Removing {{ LINUX_PACKAGE_NAME }}..."
+                sudo apt remove -y "{{ LINUX_PACKAGE_NAME }}"
+            else
+                echo "{{ LINUX_PACKAGE_NAME }} is not installed."
+            fi
+            ;;
+        *)
+            echo "error: unsupported local package format: $package_format" >&2
+            echo "supported formats: deb" >&2
+            exit 1
+            ;;
+    esac
+
 # Clean build artifacts.
 clean:
     rm -rf build
