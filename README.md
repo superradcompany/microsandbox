@@ -65,6 +65,16 @@
 > Or install the `msb` command globally:
 >
 > ```sh
+> # Debian / Ubuntu
+> curl -fsSL https://apt.microsandbox.dev/microsandbox-archive-keyring.gpg \
+>   | sudo tee /usr/share/keyrings/microsandbox-archive-keyring.gpg >/dev/null
+> echo "deb [signed-by=/usr/share/keyrings/microsandbox-archive-keyring.gpg] https://apt.microsandbox.dev stable main" \
+>   | sudo tee /etc/apt/sources.list.d/microsandbox.list >/dev/null
+> sudo apt update
+> sudo apt install microsandbox
+> ```
+> ```sh
+> # Fallback installer (other Linux / macOS)
 > curl -fsSL https://install.microsandbox.dev | sh
 > ```
 >

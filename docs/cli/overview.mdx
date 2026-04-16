@@ -9,6 +9,17 @@ The `msb` CLI lets you create, manage, and interact with sandboxes from the term
 ## Install
 
 ```bash
+# Debian / Ubuntu
+curl -fsSL https://apt.microsandbox.dev/microsandbox-archive-keyring.gpg \
+  | sudo tee /usr/share/keyrings/microsandbox-archive-keyring.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/microsandbox-archive-keyring.gpg] https://apt.microsandbox.dev stable main" \
+  | sudo tee /etc/apt/sources.list.d/microsandbox.list >/dev/null
+sudo apt update
+sudo apt install microsandbox
+```
+
+```bash
+# Fallback installer (other Linux / macOS)
 curl -fsSL https://install.microsandbox.dev | sh
 ```
 
@@ -59,8 +70,8 @@ msb install ubuntu       # Install as 'ubuntu' command
 msb uninstall ubuntu     # Remove installed command
 
 # Self-management
-msb self update          # Update msb to latest
-msb self uninstall       # Remove msb
+msb self update          # Update msb to latest (APT installs redirect to apt upgrade)
+msb self uninstall       # Remove msb (APT installs redirect to apt remove)
 ```
 
 <Tip>
