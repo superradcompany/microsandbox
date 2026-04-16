@@ -1,0 +1,7 @@
+APT::FTPArchive::Release::Origin "@ORIGIN@";
+APT::FTPArchive::Release::Label "@LABEL@";
+APT::FTPArchive::Release::Suite "@SUITE@";
+APT::FTPArchive::Release::Codename "@CODENAME@";
+APT::FTPArchive::Release::Architectures "@ARCHITECTURES@";
+APT::FTPArchive::Release::Components "@COMPONENTS@";
+APT::FTPArchive::Release::Description "@DESCRIPTION@";
