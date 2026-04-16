@@ -1,6 +1,9 @@
 # Version constants for libkrunfw. Keep in sync with microsandbox-utils/lib/lib.rs.
 LIBKRUNFW_ABI := "5"
 LIBKRUNFW_VERSION := "5.2.1"
+DEFAULT_PACKAGE_FORMAT := "deb"
+LOCAL_PACKAGE_DIST_DIR := "dist/packages"
+LINUX_PACKAGE_NAME := "microsandbox"
 
 # Set up the development environment, build, and install. Prerequisites: just, git (+ Docker on macOS).
 setup: _install-dev-deps
@@ -127,9 +130,35 @@ _ensure-libkrunfw:
 
 # Build libkrunfw on Linux. Requires: kernel build dependencies (gcc, make, flex, bison, etc.).
 [linux]
-build-libkrunfw:
+_require-libkrunfw-build-tools:
     #!/usr/bin/env bash
     set -euo pipefail
+    missing=()
+
+    for cmd in bc bison flex gcc make python3; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing+=("$cmd")
+        fi
+    done
+
+    if [ "${#missing[@]}" -gt 0 ]; then
+        echo "error: missing build tools for libkrunfw: ${missing[*]}" >&2
+        echo "hint: install them with: sudo apt-get install -y bc bison flex gcc make libelf-dev python3-pyelftools libcap-ng-dev" >&2
+        exit 1
+    fi
+
+[linux]
+build-libkrunfw: _require-libkrunfw-build-tools
+    #!/usr/bin/env bash
+    set -euo pipefail
+    kernel_version="$(sed -n 's/^KERNEL_VERSION = //p' vendor/libkrunfw/Makefile | head -n1)"
+    kernel_tarball="vendor/libkrunfw/tarballs/${kernel_version}.tar.xz"
+
+    if [ -f "$kernel_tarball" ] && ! tar -tf "$kernel_tarball" >/dev/null 2>&1; then
+        echo "Removing corrupt kernel tarball: $kernel_tarball"
+        rm -f "$kernel_tarball"
+    fi
+
     cd vendor/libkrunfw
     make -j$(nproc)
     cd ../..
