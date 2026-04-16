@@ -8,20 +8,63 @@ env:
   CARGO_TERM_COLOR: always
   LIBKRUNFW_VERSION: "5.2.1"
   LIBKRUNFW_ABI: "5"
+  APT_REPO_DOMAIN: "apt.microsandbox.dev"
 
 permissions:
+  actions: read
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Prepare release context from the successful Check workflow run
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: Prepare Release Context
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.context.outputs.release_tag }}
+      source_sha: ${{ steps.context.outputs.source_sha }}
+    steps:
+      - name: Resolve release tag
+        id: context
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SOURCE_SHA="${{ github.event.workflow_run.head_sha }}"
+          RELEASE_TAG=""
+
+          mkdir -p release-metadata
+          if gh run download "${{ github.event.workflow_run.id }}" \
+            --repo "${{ github.repository }}" \
+            --name release-metadata \
+            --dir release-metadata; then
+            RELEASE_TAG="$(tr -d '\n' < release-metadata/release-tag.txt)"
+          fi
+
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$RELEASE_TAG" ]; then
+            echo "Preparing release for $RELEASE_TAG from Check run ${{ github.event.workflow_run.id }}"
+          else
+            echo "Check succeeded without release metadata; skipping release workflow."
+          fi
+
   # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
   # ---------------------------------------------------------------------------
   build-kernel:
     name: Build kernel.c (aarch64)
+    needs: prepare
+    if: needs.prepare.outputs.release_tag != ''
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
           submodules: true
 
       - name: Cache kernel.c
@@ -52,10 +95,13 @@ jobs:
   # ---------------------------------------------------------------------------
   build-agentd-aarch64:
     name: Build agentd (aarch64-linux-musl)
+    needs: prepare
+    if: needs.prepare.outputs.release_tag != ''
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
           submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
@@ -79,12 +125,12 @@ jobs:
           path: build/agentd
 
   # ---------------------------------------------------------------------------
-  # Build
+  # Build release artifacts
   # ---------------------------------------------------------------------------
   build:
     name: Build (${{ matrix.target }})
-    needs: [build-kernel, build-agentd-aarch64]
-    if: always()
+    needs: [prepare, build-kernel, build-agentd-aarch64]
+    if: needs.prepare.outputs.release_tag != ''
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -124,6 +170,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
           submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
@@ -284,14 +331,141 @@ jobs:
           path: artifacts/
 
   # ---------------------------------------------------------------------------
+  # Package Debian artifacts for release
+  # ---------------------------------------------------------------------------
+  apt-package:
+    name: Package APT (${{ matrix.target }})
+    needs: prepare
+    if: needs.prepare.outputs.release_tag != ''
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-latest
+            arch: x86_64
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: Install APT packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils gnupg
+
+      - name: Build baseline APT artifacts
+        run: |
+          bash scripts/build-apt-baseline-artifacts.sh \
+            --output-dir build/apt/${{ matrix.arch }}
+
+      - name: Package Debian archive
+        run: |
+          bash scripts/package-deb.sh \
+            --arch "${{ matrix.arch }}" \
+            --version "${{ needs.prepare.outputs.release_tag }}" \
+            --revision 1 \
+            --msb build/apt/${{ matrix.arch }}/msb \
+            --libkrunfw build/apt/${{ matrix.arch }}/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} \
+            --output-dir dist
+
+      - name: Upload Debian package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apt-${{ matrix.target }}
+          path: dist/*.deb
+
+  # ---------------------------------------------------------------------------
+  # Build and sign the APT repository
+  # ---------------------------------------------------------------------------
+  apt-repo:
+    name: Build APT Repository
+    needs: [prepare, apt-package]
+    if: needs.prepare.outputs.release_tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: Install APT repository tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils gnupg
+
+      - name: Download Debian packages
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          pattern: release-apt-*
+          merge-multiple: true
+
+      - name: Import APT signing key
+        id: apt-key
+        env:
+          GNUPGHOME: ${{ runner.temp }}/apt-gnupg
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PRIVATE_KEY_BASE64: ${{ secrets.APT_GPG_PRIVATE_KEY_BASE64 }}
+        run: |
+          mkdir -p "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
+          KEY_ID="$(bash scripts/import-apt-signing-key.sh --gnupg-home "$GNUPGHOME")"
+          echo "key_id=$KEY_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Build signed APT repository
+        env:
+          GNUPGHOME: ${{ runner.temp }}/apt-gnupg
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          bash scripts/build-apt-repo.sh \
+            --input-dir release-artifacts \
+            --output-dir apt-repo \
+            --gpg-key-id "${{ steps.apt-key.outputs.key_id }}"
+
+          printf '%s\n' "${{ env.APT_REPO_DOMAIN }}" > apt-repo/CNAME
+
+      - name: Upload APT repository artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apt-repo
+          path: apt-repo/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apt-repo/
+
+  # ---------------------------------------------------------------------------
+  # Publish APT repository to GitHub Pages
+  # ---------------------------------------------------------------------------
+  deploy-apt-repo:
+    name: Deploy APT Repository
+    needs: [prepare, apt-repo]
+    if: needs.prepare.outputs.release_tag != ''
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  # ---------------------------------------------------------------------------
   # Assemble: collect all artifacts, generate checksums, create GitHub release
   # ---------------------------------------------------------------------------
   assemble:
     name: Assemble Release
-    needs: build
+    needs: [prepare, build, apt-package, deploy-apt-repo]
+    if: needs.prepare.outputs.release_tag != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -312,8 +486,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
+          gh release create "${{ needs.prepare.outputs.release_tag }}" \
+            --title "${{ needs.prepare.outputs.release_tag }}" \
             --generate-notes \
             release-artifacts/*
 
@@ -322,10 +496,13 @@ jobs:
   # ---------------------------------------------------------------------------
   npm-publish:
     name: Publish npm packages
-    needs: build
+    needs: [prepare, build]
+    if: needs.prepare.outputs.release_tag != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -375,11 +552,13 @@ jobs:
   # ---------------------------------------------------------------------------
   mcp-publish:
     name: Publish MCP server
-    needs: npm-publish
+    needs: [prepare, npm-publish]
+    if: needs.prepare.outputs.release_tag != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
           submodules: true
 
       - uses: actions/setup-node@v4
@@ -402,11 +581,13 @@ jobs:
   # ---------------------------------------------------------------------------
   crates-publish:
     name: Publish crates
-    needs: build
+    needs: [prepare, build]
+    if: needs.prepare.outputs.release_tag != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
           submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
@@ -436,15 +617,20 @@ jobs:
   # ---------------------------------------------------------------------------
   pypi-publish:
     name: Publish Python SDK
-    needs: build
+    needs: [prepare, build]
+    if: needs.prepare.outputs.release_tag != ''
     runs-on: ubuntu-latest
     permissions:
+      actions: read
+      contents: read
       id-token: write
     environment:
       name: pypi
       url: https://pypi.org/p/microsandbox
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - uses: astral-sh/setup-uv@v3
 

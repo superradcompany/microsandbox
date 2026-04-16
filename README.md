@@ -57,6 +57,16 @@
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI **(Optional)**
 
 > ```sh
+> # Debian / Ubuntu
+> curl -fsSL https://apt.microsandbox.dev/microsandbox-archive-keyring.gpg \
+>   | sudo tee /usr/share/keyrings/microsandbox-archive-keyring.gpg >/dev/null
+> echo "deb [signed-by=/usr/share/keyrings/microsandbox-archive-keyring.gpg] https://apt.microsandbox.dev stable main" \
+>   | sudo tee /etc/apt/sources.list.d/microsandbox.list >/dev/null
+> sudo apt update
+> sudo apt install microsandbox
+> ```
+> ```sh
+> # Fallback installer (other Linux / macOS)
 > curl -fsSL https://install.microsandbox.dev | sh
 > ```
 

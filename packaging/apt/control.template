@@ -1,0 +1,14 @@
+Package: @PACKAGE@
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: @ARCH@
+Installed-Size: @INSTALLED_SIZE@
+Maintainer: Super Rad Company <development@superrad.company>
+Depends: @DEPENDS@
+Homepage: https://github.com/superradcompany/microsandbox
+Description: Lightweight microVM sandbox CLI
+ Microsandbox spins up lightweight, hardware-isolated microVMs from a local
+ CLI. This package installs the `msb` command and the private `libkrunfw`
+ runtime library used to boot and manage microsandbox environments on Debian
+ and Ubuntu systems.

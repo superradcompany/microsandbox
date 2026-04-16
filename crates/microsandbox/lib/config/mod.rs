@@ -548,8 +548,9 @@ pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
 /// Resolution order:
 /// 1. `config().paths.libkrunfw`
 /// 2. A sibling of the resolved `msb` binary (for `build/msb`)
-/// 3. `../lib/` next to the resolved `msb` binary (for installed layouts)
-/// 4. `{home}/lib/libkrunfw.{so,dylib}`
+/// 3. `../lib/microsandbox/` next to the resolved `msb` binary
+/// 4. `../lib/` next to the resolved `msb` binary (for installed layouts)
+/// 5. `{home}/lib/libkrunfw.{so,dylib}`
 pub fn resolve_libkrunfw_path() -> MicrosandboxResult<PathBuf> {
     if let Some(path) = &config().paths.libkrunfw {
         if path.is_file() {
@@ -578,9 +579,9 @@ pub fn resolve_libkrunfw_path() -> MicrosandboxResult<PathBuf> {
     }
     candidates.push(home_fallback);
 
-    if let Some(path) = candidates.iter().find(|path| path.is_file()) {
+    if let Some(path) = first_existing_path(&candidates) {
         tracing::debug!(path = %path.display(), "resolved libkrunfw path");
-        return Ok(path.clone());
+        return Ok(path);
     }
 
     let searched = candidates
@@ -599,6 +600,17 @@ fn libkrunfw_candidates_from_msb(msb_path: &Path, filename: &str) -> Vec<PathBuf
     if let Some(msb_dir) = msb_path.parent() {
         candidates.push(msb_dir.join(filename));
 
+        if msb_dir.file_name().and_then(|name| name.to_str()) == Some("bin")
+            && let Some(parent) = msb_dir.parent()
+        {
+            candidates.push(
+                parent
+                    .join(microsandbox_utils::LIB_SUBDIR)
+                    .join("microsandbox")
+                    .join(filename),
+            );
+        }
+
         if let Some(parent) = msb_dir.parent() {
             candidates.push(parent.join(microsandbox_utils::LIB_SUBDIR).join(filename));
         }
@@ -612,6 +624,10 @@ fn libkrunfw_candidates_from_msb(msb_path: &Path, filename: &str) -> Vec<PathBuf
     }
 
     deduped
+}
+
+fn first_existing_path(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates.iter().find(|path| path.is_file()).cloned()
 }
 
 fn dev_msb_candidates_from(start: &Path) -> Vec<PathBuf> {
@@ -903,6 +919,51 @@ mod tests {
             PathBuf::from("/repo/target/lib/libkrunfw.5.dylib")
         );
         assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn test_libkrunfw_candidates_for_packaged_msb() {
+        let msb = PathBuf::from("/usr/bin/msb");
+        let paths = libkrunfw_candidates_from_msb(&msb, "libkrunfw.so.5.2.1");
+        assert_eq!(paths[0], PathBuf::from("/usr/bin/libkrunfw.so.5.2.1"));
+        assert_eq!(
+            paths[1],
+            PathBuf::from("/usr/lib/microsandbox/libkrunfw.so.5.2.1")
+        );
+        assert_eq!(paths[2], PathBuf::from("/usr/lib/libkrunfw.so.5.2.1"));
+        assert_eq!(paths.len(), 3);
+    }
+
+    #[test]
+    fn test_first_existing_path_prefers_packaged_layout_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let packaged = temp.path().join("usr/lib/microsandbox/libkrunfw.so.5.2.1");
+        let home = temp
+            .path()
+            .join("home/.microsandbox/lib/libkrunfw.so.5.2.1");
+
+        std::fs::create_dir_all(packaged.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(home.parent().unwrap()).unwrap();
+        std::fs::write(&packaged, b"packaged").unwrap();
+        std::fs::write(&home, b"home").unwrap();
+
+        let resolved = first_existing_path(&[packaged.clone(), home.clone()]);
+        assert_eq!(resolved, Some(packaged));
+    }
+
+    #[test]
+    fn test_first_existing_path_falls_back_when_packaged_candidate_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("usr/lib/microsandbox/libkrunfw.so.5.2.1");
+        let home = temp
+            .path()
+            .join("home/.microsandbox/lib/libkrunfw.so.5.2.1");
+
+        std::fs::create_dir_all(home.parent().unwrap()).unwrap();
+        std::fs::write(&home, b"home").unwrap();
+
+        let resolved = first_existing_path(&[missing, home.clone()]);
+        assert_eq!(resolved, Some(home));
     }
 
     #[test]
