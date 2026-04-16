@@ -304,6 +304,19 @@ jobs:
             sdk/node-ts/tsconfig.json
             sdk/node-ts/vitest.config.ts
 
+      - name: Write release metadata
+        if: matrix.target == 'linux-x86_64' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          mkdir -p release-metadata
+          printf '%s\n' "${GITHUB_REF_NAME}" > release-metadata/release-tag.txt
+
+      - name: Upload release metadata
+        if: matrix.target == 'linux-x86_64' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-metadata
+          path: release-metadata/release-tag.txt
+
       # -- Checks (MCP server) --
       - name: Build MCP server
         working-directory: mcp
