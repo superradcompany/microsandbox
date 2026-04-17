@@ -16,7 +16,8 @@ name = "microsandbox"
 path = "bin/main.rs"
 
 [features]
-default = ["prebuilt", "net"]
+default = ["prebuilt", "net", "keyring"]
+keyring = ["dep:keyring", "dep:dbus"]
 prebuilt = ["microsandbox-filesystem/prebuilt", "microsandbox-runtime/prebuilt"]
 net = ["dep:microsandbox-network", "microsandbox-runtime/net"]
 
@@ -61,13 +62,13 @@ ureq.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3.6.3", features = ["apple-native"] }
+keyring = { version = "3.6.3", features = ["apple-native"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "3.6.3", features = ["windows-native"] }
+keyring = { version = "3.6.3", features = ["windows-native"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Transitive dep via keyring's Secret Service backend; declared here only to force the `vendored` feature
 # so libdbus is built from source and statically linked (avoids needing libdbus-1-dev at build time).
-dbus = { version = "0.9.10", features = ["vendored"] }
-keyring = { version = "3.6.3", features = ["linux-native-sync-persistent", "crypto-rust"] }
+dbus = { version = "0.9.10", features = ["vendored"], optional = true }
+keyring = { version = "3.6.3", features = ["linux-native-sync-persistent", "crypto-rust"], optional = true }
