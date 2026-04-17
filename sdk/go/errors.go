@@ -3,87 +3,84 @@ package microsandbox
 import (
 	"errors"
 	"fmt"
+
+	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
 // ErrorKind identifies the specific type of microsandbox error.
 type ErrorKind int
 
 const (
-	// ErrUnknown is the default error kind when no specific type matches.
+	// ErrUnknown is the fallback when the Rust side reports a kind this
+	// version of the SDK does not recognize.
 	ErrUnknown ErrorKind = iota
 
 	// ErrSandboxNotFound indicates the requested sandbox does not exist.
 	ErrSandboxNotFound
 
-	// ErrSandboxAlreadyExists indicates a sandbox with the given name already exists.
-	ErrSandboxAlreadyExists
-
-	// ErrExecTimeout indicates an execution exceeded its timeout.
-	ErrExecTimeout
-
-	// ErrExecFailed indicates a command execution failed (non-zero exit).
-	ErrExecFailed
+	// ErrSandboxStillRunning indicates a sandbox cannot be removed while
+	// it is still running.
+	ErrSandboxStillRunning
 
 	// ErrVolumeNotFound indicates the requested volume does not exist.
 	ErrVolumeNotFound
 
-	// ErrVolumeAlreadyExists indicates a volume with the given name already exists.
+	// ErrVolumeAlreadyExists indicates a volume with the given name
+	// already exists.
 	ErrVolumeAlreadyExists
 
-	// ErrNetworkDenied indicates a network request was blocked by policy.
-	ErrNetworkDenied
+	// ErrExecTimeout indicates a command execution exceeded its timeout.
+	ErrExecTimeout
 
-	// ErrSecretNotFound indicates a requested secret was not found.
-	ErrSecretNotFound
-
-	// ErrInvalidConfig indicates invalid configuration options were provided.
+	// ErrInvalidConfig indicates the sandbox or volume configuration was
+	// rejected by the runtime.
 	ErrInvalidConfig
 
-	// ErrResourceExhausted indicates insufficient resources (memory, CPU, disk).
-	ErrResourceExhausted
+	// ErrInvalidArgument indicates a malformed argument was passed across
+	// the FFI boundary (typically an SDK bug or a caller passing bad JSON).
+	ErrInvalidArgument
 
-	// ErrPermissionDenied indicates insufficient permissions for the operation.
-	ErrPermissionDenied
+	// ErrInvalidHandle indicates the sandbox handle is stale, closed, or
+	// was never valid.
+	ErrInvalidHandle
 
-	// ErrInternal indicates an internal SDK or microsandbox error.
+	// ErrBufferTooSmall indicates the FFI response exceeded the fixed
+	// output buffer. For file reads, stream instead.
+	ErrBufferTooSmall
+
+	// ErrInternal is every other error from the runtime.
 	ErrInternal
 )
 
 func (k ErrorKind) String() string {
 	switch k {
-	case ErrUnknown:
-		return "Unknown"
 	case ErrSandboxNotFound:
 		return "SandboxNotFound"
-	case ErrSandboxAlreadyExists:
-		return "SandboxAlreadyExists"
-	case ErrExecTimeout:
-		return "ExecTimeout"
-	case ErrExecFailed:
-		return "ExecFailed"
+	case ErrSandboxStillRunning:
+		return "SandboxStillRunning"
 	case ErrVolumeNotFound:
 		return "VolumeNotFound"
 	case ErrVolumeAlreadyExists:
 		return "VolumeAlreadyExists"
-	case ErrNetworkDenied:
-		return "NetworkDenied"
-	case ErrSecretNotFound:
-		return "SecretNotFound"
+	case ErrExecTimeout:
+		return "ExecTimeout"
 	case ErrInvalidConfig:
 		return "InvalidConfig"
-	case ErrResourceExhausted:
-		return "ResourceExhausted"
-	case ErrPermissionDenied:
-		return "PermissionDenied"
+	case ErrInvalidArgument:
+		return "InvalidArgument"
+	case ErrInvalidHandle:
+		return "InvalidHandle"
+	case ErrBufferTooSmall:
+		return "BufferTooSmall"
 	case ErrInternal:
 		return "Internal"
 	default:
-		return fmt.Sprintf("Unknown(%d)", k)
+		return "Unknown"
 	}
 }
 
 // Error is the standard error type returned by microsandbox operations.
-// Use errors.As() to extract detailed error information.
+// Use errors.As to extract detailed information.
 type Error struct {
 	Kind    ErrorKind
 	Message string
@@ -98,68 +95,54 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("microsandbox.%s: %s", e.Kind, e.Message)
 }
 
-// Unwrap returns the underlying cause, enabling errors.Is() and errors.As().
-func (e *Error) Unwrap() error {
-	return e.Cause
-}
+// Unwrap supports errors.Is / errors.As.
+func (e *Error) Unwrap() error { return e.Cause }
 
-// NewError creates a new microsandbox Error with the given kind and message.
-func NewError(kind ErrorKind, message string) *Error {
-	return &Error{
-		Kind:    kind,
-		Message: message,
-	}
-}
-
-// NewErrorf creates a new microsandbox Error with formatted message.
-func NewErrorf(kind ErrorKind, format string, args ...interface{}) *Error {
-	return &Error{
-		Kind:    kind,
-		Message: fmt.Sprintf(format, args...),
-	}
-}
-
-// WrapError wraps an existing error with a microsandbox error kind.
-func WrapError(kind ErrorKind, cause error, message string) *Error {
-	return &Error{
-		Kind:    kind,
-		Message: message,
-		Cause:   cause,
-	}
-}
-
-// WrapErrorf wraps an existing error with a formatted message.
-func WrapErrorf(kind ErrorKind, cause error, format string, args ...interface{}) *Error {
-	return &Error{
-		Kind:    kind,
-		Message: fmt.Sprintf(format, args...),
-		Cause:   cause,
-	}
-}
-
-// IsSandboxNotFound returns true if the error indicates a sandbox was not found.
-func IsSandboxNotFound(err error) bool {
-	return IsKind(err, ErrSandboxNotFound)
-}
-
-// IsExecTimeout returns true if the error indicates an execution timeout.
-func IsExecTimeout(err error) bool {
-	return IsKind(err, ErrExecTimeout)
-}
-
-// IsExecFailed returns true if the error indicates a command execution failed.
-func IsExecFailed(err error) bool {
-	return IsKind(err, ErrExecFailed)
-}
-
-// IsKind checks if the error (or any wrapped error) matches the given kind.
+// IsKind reports whether err (or any wrapped error) is a microsandbox.Error
+// with the given kind.
 func IsKind(err error, kind ErrorKind) bool {
-	if err == nil {
-		return false
-	}
-	var msbErr *Error
-	if errors.As(err, &msbErr) {
-		return msbErr.Kind == kind
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Kind == kind
 	}
 	return false
+}
+
+// wrapFFI converts an error returned by the internal/ffi package into a
+// typed *microsandbox.Error. Non-ffi errors (e.g. context cancellation,
+// JSON parsing) are wrapped with ErrInternal. Returns nil for a nil err.
+func wrapFFI(err error) error {
+	if err == nil {
+		return nil
+	}
+	var fe *ffi.Error
+	if errors.As(err, &fe) {
+		return &Error{Kind: kindFromFFI(fe.Kind), Message: fe.Message}
+	}
+	return &Error{Kind: ErrInternal, Message: err.Error(), Cause: err}
+}
+
+func kindFromFFI(kind string) ErrorKind {
+	switch kind {
+	case ffi.KindSandboxNotFound:
+		return ErrSandboxNotFound
+	case ffi.KindSandboxStillRunning:
+		return ErrSandboxStillRunning
+	case ffi.KindVolumeNotFound:
+		return ErrVolumeNotFound
+	case ffi.KindVolumeAlreadyExists:
+		return ErrVolumeAlreadyExists
+	case ffi.KindExecTimeout:
+		return ErrExecTimeout
+	case ffi.KindInvalidConfig:
+		return ErrInvalidConfig
+	case ffi.KindInvalidArgument:
+		return ErrInvalidArgument
+	case ffi.KindInvalidHandle:
+		return ErrInvalidHandle
+	case ffi.KindBufferTooSmall:
+		return ErrBufferTooSmall
+	default:
+		return ErrInternal
+	}
 }

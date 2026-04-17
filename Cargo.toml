@@ -28,6 +28,7 @@ members = [
     "examples/rust/volume-named",
     "sdk/node-ts",
     "sdk/python",
+    "sdk/go-ffi",
 ]
 
 [workspace.package]
@@ -46,6 +47,7 @@ panic = "abort"
 [workspace.dependencies]
 anyhow = "1.0"
 astral-tokio-tar = "0.6"
+base64 = "0.22"
 async-compression = "0.4"
 bytes = "1.9"
 crc32c = "0.6"

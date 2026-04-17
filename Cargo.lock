@@ -2644,6 +2644,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "microsandbox-go-ffi"
+version = "0.3.13"
+dependencies = [
+ "base64 0.22.1",
+ "libc",
+ "microsandbox",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "microsandbox-image"
 version = "0.3.13"
 dependencies = [
