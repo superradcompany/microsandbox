@@ -162,7 +162,7 @@ fn run_list(_args: RegistryListArgs) -> anyhow::Result<()> {
     }
 
     let mut entries: Vec<_> = config.registries.auth.iter().collect();
-    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    entries.sort_by_key(|(name, _)| *name);
 
     let mut table = ui::Table::new(&["REGISTRY", "USERNAME", "SOURCE"]);
     for (registry, entry) in entries {
