@@ -112,6 +112,20 @@
               "sdk/typescript/snapshots",
               "sdk/typescript/events"
             ]
+          },
+          {
+            "group": "Python SDK",
+            "icon": "python",
+            "pages": [
+              "sdk/python/sandbox",
+              "sdk/python/execution",
+              "sdk/python/filesystem",
+              "sdk/python/volumes",
+              "sdk/python/networking",
+              "sdk/python/secrets",
+              "sdk/python/snapshots",
+              "sdk/python/events"
+            ]
           }
         ]
       },
@@ -126,6 +140,18 @@
               "cli/sandbox-commands",
               "cli/volume-commands",
               "cli/image-commands"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Recipes",
+        "groups": [
+          {
+            "group": "Container Integration",
+            "icon": "docker",
+            "pages": [
+              "recipes/docker"
             ]
           }
         ]

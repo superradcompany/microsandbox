@@ -30,7 +30,9 @@ fn build_agentd(workspace_root: &Path, out_dir: &Path) {
         }
 
         // In CI, prefer the locally-built agentd from workspace build/.
-        if std::env::var_os("CI").is_some() {
+        // Check both CI (standard) and GITHUB_ACTIONS (set inside maturin Docker containers
+        // where CI is not forwarded).
+        if std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some() {
             let local = workspace_root.join("build").join(AGENTD_BINARY);
             if local.is_file() {
                 std::fs::copy(&local, &dest).expect("failed to copy agentd from build/");

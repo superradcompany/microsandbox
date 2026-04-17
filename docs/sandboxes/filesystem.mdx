@@ -19,6 +19,10 @@ sb.fs().write("/app/config.json", r#"{"debug": true}"#).await?;
 await sb.fs().write("/app/config.json", '{"debug": true}')
 ```
 
+```python Python
+await sb.fs.write("/app/config.json", b'{"debug": true}')
+```
+
 </CodeGroup>
 
 ## Read a file
@@ -30,6 +34,10 @@ let content = sb.fs().read_to_string("/app/config.json").await?;
 
 ```typescript TypeScript
 const content = await sb.fs().readString("/app/config.json")
+```
+
+```python Python
+content = await sb.fs.read_text("/app/config.json")
 ```
 
 </CodeGroup>
@@ -49,6 +57,12 @@ const entries = await sb.fs().list("/app")
 for (const entry of entries) {
     console.log(`${entry.path}: ${entry.kind}`)
 }
+```
+
+```python Python
+entries = await sb.fs.list("/app")
+for entry in entries:
+    print(f"{entry.path}: {entry.kind}")
 ```
 
 </CodeGroup>
@@ -72,6 +86,12 @@ for await (const chunk of stream) {
 }
 ```
 
+```python Python
+stream = await sb.fs.read_stream("/app/data.bin")
+async for chunk in stream:
+    process(chunk)
+```
+
 </CodeGroup>
 
 ## Copy from host
@@ -85,6 +105,10 @@ sb.fs().copy_from_host("./local-file.txt", "/app/remote-file.txt").await?;
 
 ```typescript TypeScript
 await sb.fs().copyFromHost("./local-file.txt", "/app/remote-file.txt")
+```
+
+```python Python
+await sb.fs.copy_from_host("./local-file.txt", "/app/remote-file.txt")
 ```
 
 </CodeGroup>
@@ -131,6 +155,22 @@ const sb = await Sandbox.create({
         }),
     },
 })
+```
+
+```python Python
+from microsandbox import Sandbox, Volume
+
+key = get_encryption_key()
+sb = await Sandbox.create(
+    "encrypted",
+    image="python",
+    volumes={
+        "/secrets": Volume.bind("/data/secrets",
+            on_read=lambda path, data: decrypt(data, key),
+            on_write=lambda path, data: encrypt(data, key),
+        ),
+    },
+)
 ```
 
 </CodeGroup>
@@ -180,6 +220,22 @@ const sb = await Sandbox.create({
         "/secrets": Mount.backend(new EncryptedFs(key, "/data")),
     },
 })
+```
+
+```python Python
+from microsandbox import FsBackend, Sandbox, Volume
+
+# Implement the FsBackend interface
+class EncryptedFs(FsBackend):
+    # ... implement read, write, and other required methods
+    pass
+
+sb = await Sandbox.create(
+    "custom",
+    volumes={
+        "/secrets": Volume.backend(EncryptedFs(key, "/data")),
+    },
+)
 ```
 
 </CodeGroup>

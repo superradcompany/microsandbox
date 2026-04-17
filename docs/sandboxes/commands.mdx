@@ -26,6 +26,13 @@ console.log(output.success)   // true
 console.log(output.code)      // 0
 ```
 
+```python Python
+output = await sb.exec("python", ["-c", "print('hello')"])
+print(output.stdout_text)     # "hello\n"
+print(output.success)         # True
+print(output.exit_code)       # 0
+```
+
 ```bash CLI
 msb exec worker -- python -c "print('hello')"
 ```
@@ -57,6 +64,18 @@ const output = await sb.execWithConfig({
 })
 ```
 
+```python Python
+from microsandbox import ExecOptions, Rlimit
+
+output = await sb.exec("python", ExecOptions(
+    args=("compute.py",),
+    cwd="/app",
+    env={"PYTHONPATH": "/app/lib"},
+    timeout=30.0,
+    rlimits=(Rlimit.nofile(1024),),
+))
+```
+
 ```bash CLI
 msb exec worker \
   -w /app \
@@ -79,6 +98,10 @@ let output = sb.shell("ls -la /app && echo done").await?;
 
 ```typescript TypeScript
 const output = await sb.shell("ls -la /app && echo done")
+```
+
+```python Python
+output = await sb.shell("ls -la /app && echo done")
 ```
 
 ```bash CLI
@@ -118,6 +141,16 @@ while ((event = await handle.recv()) !== null) {
 }
 ```
 
+```python Python
+handle = await sb.exec_stream("tail", ["-f", "/var/log/app.log"])
+
+async for event in handle:
+    match event.event_type:
+        case "stdout": print(event.data.decode(), end="")
+        case "stderr": print(event.data.decode(), end="", file=sys.stderr)
+        case "exited": print(f"Exited: {event.code}")
+```
+
 </CodeGroup>
 
 ## Interactive attach
@@ -141,6 +174,20 @@ const exitCode = await sb.attach()
 
 // Attach to a specific command with custom detach keys
 await sb.attach("bash", a => a.env("DEBUG", "1").cwd("/app").detachKeys("ctrl-q"))
+```
+
+```python Python
+from microsandbox import AttachOptions
+
+# Attach to the default shell
+exit_code = await sb.attach_shell()
+
+# Attach to a specific command with custom detach keys
+exit_code = await sb.attach("python", AttachOptions(
+    env={"DEBUG": "1"},
+    cwd="/app",
+    detach_keys="ctrl-q",
+))
 ```
 
 ```bash CLI
@@ -179,6 +226,17 @@ await stdin.close()
 await handle.wait()
 ```
 
+```python Python
+from microsandbox import ExecOptions, Stdin
+
+handle = await sb.exec_stream("python", ExecOptions(stdin=Stdin.pipe(), tty=True))
+stdin = handle.take_stdin()
+await stdin.write(b"print('hello')\n")
+await stdin.write(b"exit()\n")
+await stdin.close()
+await handle.wait()
+```
+
 </CodeGroup>
 
 ## Sessions <sup><sup>coming soon</sup></sup>
@@ -208,6 +266,18 @@ const sessions = await sb.sessions()
 
 // Reattach to a session by ID
 const reattached = await sb.session(sessionId)
+```
+
+```python Python
+# Start a background process and capture its session ID
+handle = await sb.exec_stream("python", ["server.py"])
+session_id = handle.id
+
+# List active sessions
+sessions = await sb.sessions()
+
+# Reattach to a session by ID
+reattached = await sb.session(session_id)
 ```
 
 </CodeGroup>

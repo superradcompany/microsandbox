@@ -49,6 +49,19 @@ const sb3 = await Sandbox.create({
 })
 ```
 
+```python Python
+from microsandbox import Network, Sandbox
+
+# No network access
+sb1 = await Sandbox.create("isolated", image="python", network=Network.none())
+
+# Public internet only (default, blocks private ranges)
+sb2 = await Sandbox.create("web-agent", image="python", network=Network.public_only())
+
+# Unrestricted access
+sb3 = await Sandbox.create("dev", image="python", network=Network.allow_all())
+```
+
 ```bash CLI
 # No network access
 msb create python --name isolated --no-network
@@ -121,6 +134,26 @@ const sb = await Sandbox.create({
 })
 ```
 
+```python Python
+from microsandbox import Action, Network, NetworkPolicy, Protocol, Rule, Sandbox
+
+sb = await Sandbox.create(
+    "secure-agent",
+    image="alpine",
+    network=Network(
+        policy=NetworkPolicy(
+            default_action=Action.DENY,
+            rules=(
+                Rule.allow(protocol=Protocol.TCP, port=443),
+                Rule.allow(protocol=Protocol.UDP, port=53),
+                Rule.deny(destination="metadata"),
+                Rule.deny(destination="private"),
+            ),
+        ),
+    ),
+)
+```
+
 </CodeGroup>
 
 ## Port mapping
@@ -147,6 +180,14 @@ const sb = await Sandbox.create({
     ports: { "8080": 80 },
     network: NetworkPolicy.publicOnly(),
 })
+```
+
+```python Python
+sb = await Sandbox.create(
+    "api",
+    image="python",
+    ports={8080: 80},
+)
 ```
 
 ```bash CLI
@@ -186,6 +227,19 @@ const sb = await Sandbox.create({
         blockDomainSuffixes: [".tracking.com"],
     },
 })
+```
+
+```python Python
+from microsandbox import Network, Sandbox
+
+sb = await Sandbox.create(
+    "safe-agent",
+    image="python",
+    network=Network(
+        block_domains=("malware.example.com",),
+        block_domain_suffixes=(".tracking.com",),
+    ),
+)
 ```
 
 ```bash CLI

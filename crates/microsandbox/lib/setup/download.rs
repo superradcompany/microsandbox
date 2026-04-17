@@ -231,7 +231,7 @@ async fn install_ci_local_bundle(
     lib_dir: &Path,
     libkrunfw_name: &str,
 ) -> MicrosandboxResult<bool> {
-    if std::env::var_os("CI").is_none() {
+    if std::env::var_os("CI").is_none() && std::env::var_os("GITHUB_ACTIONS").is_none() {
         return Ok(false);
     }
 
