@@ -1,7 +1,7 @@
 //! Binary entry point for `microsandbox-agentd`.
 //!
-//! Runs as PID 1 inside the microVM guest. Performs synchronous init
-//! (mount filesystems, prepare runtime directories), then enters the async agent loop.
+//! Runs as PID 1 inside the microVM guest. Applies inherited resource limits,
+//! performs synchronous init, then enters the async agent loop.
 
 //--------------------------------------------------------------------------------------------------
 // Functions: main
@@ -18,12 +18,13 @@ fn main() {
     // Capture CLOCK_BOOTTIME immediately — this represents kernel boot duration.
     let boot_time_ns = microsandbox_agentd::clock::boottime_ns();
 
+    // Phase 1: Apply sandbox-wide resource limits before other guest work starts.
     if let Err(e) = microsandbox_agentd::init::apply_rlimits() {
         eprintln!("agentd: failed to apply rlimits: {e}");
         std::process::exit(1);
     }
 
-    // Phase 1: Synchronous init (mount filesystems, prepare runtime directories).
+    // Phase 2: Synchronous init (mount filesystems, prepare runtime directories).
     let init_start = microsandbox_agentd::clock::boottime_ns();
     if let Err(e) = microsandbox_agentd::init::init() {
         eprintln!("agentd: init failed: {e}");
@@ -31,7 +32,7 @@ fn main() {
     }
     let init_time_ns = microsandbox_agentd::clock::boottime_ns() - init_start;
 
-    // Phase 2: Build a single-threaded tokio runtime and run the agent loop.
+    // Phase 3: Build a single-threaded tokio runtime and run the agent loop.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

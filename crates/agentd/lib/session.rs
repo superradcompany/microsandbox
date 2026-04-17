@@ -18,7 +18,7 @@ use tokio::{
     sync::mpsc,
 };
 
-use microsandbox_protocol::exec::ExecRequest;
+use microsandbox_protocol::exec::{ExecRequest, ExecRlimit};
 
 use crate::error::{AgentdError, AgentdResult};
 
@@ -227,7 +227,7 @@ impl ExecSession {
             .transpose()?;
 
         // Pre-parse rlimits before fork (no allocations in child).
-        let parsed_rlimits = parse_rlimits(req);
+        let parsed_rlimits = parse_rlimits(&req.rlimits);
 
         // Fork.
         let pid = unsafe { libc::fork() };
@@ -369,7 +369,7 @@ impl ExecSession {
         }
 
         // Apply resource limits in the child before exec.
-        let parsed_rlimits = parse_rlimits(req);
+        let parsed_rlimits = parse_rlimits(&req.rlimits);
         if resolved_user.is_some() || !parsed_rlimits.is_empty() {
             unsafe {
                 cmd.pre_exec(move || {
@@ -415,7 +415,7 @@ impl ExecSession {
 /// Parses a resource limit name into the corresponding `RLIMIT_*` constant.
 ///
 /// Uses raw constants for Linux-specific limits that aren't in libc's cross-platform API.
-fn parse_rlimit_resource(name: &str) -> Option<libc::c_int> {
+pub(crate) fn parse_rlimit_resource(name: &str) -> Option<libc::c_int> {
     // Linux x86_64 RLIMIT_* values for resources not exposed by libc on all platforms.
     const RLIMIT_LOCKS: libc::c_int = 10;
     const RLIMIT_SIGPENDING: libc::c_int = 11;
@@ -447,8 +447,8 @@ fn parse_rlimit_resource(name: &str) -> Option<libc::c_int> {
 
 /// Pre-parses rlimits from the exec request into `(resource_id, rlimit)` tuples
 /// that can be applied in the child process via `setrlimit()`.
-fn parse_rlimits(req: &ExecRequest) -> Vec<(libc::c_int, libc::rlimit)> {
-    req.rlimits
+pub(crate) fn parse_rlimits(rlimits: &[ExecRlimit]) -> Vec<(libc::c_int, libc::rlimit)> {
+    rlimits
         .iter()
         .filter_map(|rl| {
             let resource = parse_rlimit_resource(&rl.resource)?;

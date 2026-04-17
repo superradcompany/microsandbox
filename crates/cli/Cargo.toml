@@ -31,6 +31,7 @@ libc.workspace = true
 microsandbox = { version = "0.3.12", path = "../microsandbox", default-features = false }
 microsandbox-image = { version = "0.3.12", path = "../image" }
 microsandbox-network = { version = "0.3.12", path = "../network", optional = true }
+microsandbox-protocol = { version = "0.3.12", path = "../protocol" }
 microsandbox-runtime = { version = "0.3.12", path = "../runtime", default-features = false }
 microsandbox-utils = { version = "0.3.12", path = "../utils" }
 rand.workspace = true

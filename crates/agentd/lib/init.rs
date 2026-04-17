@@ -1,7 +1,7 @@
 //! PID 1 init: mount filesystems, apply tmpfs mounts, prepare runtime directories.
 
 use crate::error::{AgentdError, AgentdResult};
-use microsandbox_protocol::ENV_RLIMITS;
+use microsandbox_protocol::{ENV_RLIMITS, exec::ExecRlimit};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -76,40 +76,36 @@ pub fn apply_rlimits() -> AgentdResult<()> {
         return Ok(());
     };
 
-    for entry in spec
+    let rlimits: Vec<_> = spec
         .to_string_lossy()
         .split(';')
         .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            entry
+                .parse::<ExecRlimit>()
+                .map_err(|err| AgentdError::Init(format!("{ENV_RLIMITS} entry {entry}: {err}")))
+        })
+        .collect::<AgentdResult<_>>()?;
+
+    for rlimit in &rlimits {
+        if crate::session::parse_rlimit_resource(&rlimit.resource).is_none() {
+            return Err(AgentdError::Init(format!(
+                "{ENV_RLIMITS} has unknown resource: {}",
+                rlimit.resource
+            )));
+        }
+    }
+
+    for (rlimit, (resource, limit)) in rlimits
+        .iter()
+        .zip(crate::session::parse_rlimits(&rlimits).into_iter())
     {
-        let (resource_name, limit_spec) = entry.split_once('=').ok_or_else(|| {
-            AgentdError::Init(format!(
-                "{ENV_RLIMITS} entry must be resource=soft[:hard], got: {entry}"
-            ))
-        })?;
-
-        let resource = parse_rlimit_resource(resource_name).ok_or_else(|| {
-            AgentdError::Init(format!(
-                "{ENV_RLIMITS} has unknown resource: {resource_name}"
-            ))
-        })?;
-
-        let (soft, hard) = parse_rlimit_pair(limit_spec).map_err(|err| {
-            AgentdError::Init(format!(
-                "{ENV_RLIMITS} has invalid limit for {resource_name}: {err}"
-            ))
-        })?;
-
-        let limit = libc::rlimit {
-            rlim_cur: soft as libc::rlim_t,
-            rlim_max: hard as libc::rlim_t,
-        };
-
-        // Edge case: we intentionally apply guest-wide defaults in PID 1
-        // rather than at per-exec call sites so bootstrap daemons inherit the
-        // raised soft limit before they open large descriptor sets.
         if unsafe { libc::setrlimit(resource as _, &limit) } != 0 {
             return Err(AgentdError::Init(format!(
-                "failed to apply {ENV_RLIMITS} entry {entry}: {}",
+                "failed to apply {ENV_RLIMITS} entry {}={}:{}: {}",
+                rlimit.resource,
+                rlimit.soft,
+                rlimit.hard,
                 std::io::Error::last_os_error()
             )));
         }
@@ -299,61 +295,6 @@ fn ensure_scripts_profile_block(profile: &str) -> String {
     }
     updated.push_str(BLOCK);
     updated
-}
-
-fn parse_rlimit_pair(value: &str) -> Result<(u64, u64), String> {
-    let mut parts = value.split(':');
-    let soft = parts
-        .next()
-        .ok_or_else(|| "missing soft limit".to_string())?
-        .parse::<u64>()
-        .map_err(|err| format!("invalid soft limit: {err}"))?;
-    let hard = match parts.next() {
-        Some(value) => value
-            .parse::<u64>()
-            .map_err(|err| format!("invalid hard limit: {err}"))?,
-        None => soft,
-    };
-
-    if parts.next().is_some() {
-        return Err("too many ':' separators".into());
-    }
-
-    if soft > hard {
-        return Err("soft limit cannot exceed hard limit".into());
-    }
-
-    Ok((soft, hard))
-}
-
-fn parse_rlimit_resource(name: &str) -> Option<libc::c_int> {
-    // Linux x86_64 RLIMIT_* values for resources not exposed by libc on all platforms.
-    const RLIMIT_LOCKS: libc::c_int = 10;
-    const RLIMIT_SIGPENDING: libc::c_int = 11;
-    const RLIMIT_MSGQUEUE: libc::c_int = 12;
-    const RLIMIT_NICE: libc::c_int = 13;
-    const RLIMIT_RTPRIO: libc::c_int = 14;
-    const RLIMIT_RTTIME: libc::c_int = 15;
-
-    match name.to_ascii_lowercase().as_str() {
-        "cpu" => Some(libc::RLIMIT_CPU as _),
-        "fsize" => Some(libc::RLIMIT_FSIZE as _),
-        "data" => Some(libc::RLIMIT_DATA as _),
-        "stack" => Some(libc::RLIMIT_STACK as _),
-        "core" => Some(libc::RLIMIT_CORE as _),
-        "rss" => Some(libc::RLIMIT_RSS as _),
-        "nproc" => Some(libc::RLIMIT_NPROC as _),
-        "nofile" => Some(libc::RLIMIT_NOFILE as _),
-        "memlock" => Some(libc::RLIMIT_MEMLOCK as _),
-        "as" => Some(libc::RLIMIT_AS as _),
-        "locks" => Some(RLIMIT_LOCKS),
-        "sigpending" => Some(RLIMIT_SIGPENDING),
-        "msgqueue" => Some(RLIMIT_MSGQUEUE),
-        "nice" => Some(RLIMIT_NICE),
-        "rtprio" => Some(RLIMIT_RTPRIO),
-        "rttime" => Some(RLIMIT_RTTIME),
-        _ => None,
-    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1067,31 +1008,4 @@ mod tests {
         assert_eq!(profile, updated);
     }
 
-    #[test]
-    fn test_parse_rlimit_pair_uses_soft_for_hard_when_omitted() {
-        assert_eq!(parse_rlimit_pair("65535").unwrap(), (65_535, 65_535));
-    }
-
-    #[test]
-    fn test_parse_rlimit_pair_parses_soft_and_hard() {
-        assert_eq!(parse_rlimit_pair("4096:65535").unwrap(), (4_096, 65_535));
-    }
-
-    #[test]
-    fn test_parse_rlimit_pair_rejects_soft_above_hard() {
-        let err = parse_rlimit_pair("65535:4096").unwrap_err();
-        assert!(err.contains("soft limit cannot exceed hard limit"));
-    }
-
-    #[test]
-    fn test_parse_rlimit_resource_supports_nofile() {
-        assert_eq!(
-            parse_rlimit_resource("nofile"),
-            Some(libc::RLIMIT_NOFILE as _)
-        );
-        assert_eq!(
-            parse_rlimit_resource("NOFILE"),
-            Some(libc::RLIMIT_NOFILE as _)
-        );
-    }
 }

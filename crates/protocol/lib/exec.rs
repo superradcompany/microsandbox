@@ -1,5 +1,7 @@
 //! Exec-related protocol message payloads.
 
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
 //--------------------------------------------------------------------------------------------------
@@ -46,7 +48,7 @@ pub struct ExecRequest {
 }
 
 /// A POSIX resource limit to apply to a spawned process.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecRlimit {
     /// Resource name (lowercase): "nofile", "nproc", "as", "cpu", etc.
     pub resource: String,
@@ -123,4 +125,80 @@ fn default_rows() -> u16 {
 
 fn default_cols() -> u16 {
     80
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl FromStr for ExecRlimit {
+    type Err = String;
+
+    fn from_str(spec: &str) -> Result<Self, Self::Err> {
+        let (resource, limit) = spec
+            .split_once('=')
+            .ok_or_else(|| "rlimit must be in format RESOURCE=LIMIT".to_string())?;
+
+        let mut parts = limit.split(':');
+        let soft = parts
+            .next()
+            .ok_or_else(|| "missing soft limit".to_string())?
+            .parse::<u64>()
+            .map_err(|err| format!("invalid soft limit: {err}"))?;
+        let hard = match parts.next() {
+            Some(value) => value
+                .parse::<u64>()
+                .map_err(|err| format!("invalid hard limit: {err}"))?,
+            None => soft,
+        };
+
+        if parts.next().is_some() {
+            return Err("too many ':' separators".into());
+        }
+
+        if soft > hard {
+            return Err("soft limit cannot exceed hard limit".into());
+        }
+
+        Ok(Self {
+            resource: resource.to_ascii_lowercase(),
+            soft,
+            hard,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExecRlimit;
+
+    #[test]
+    fn test_exec_rlimit_from_str_uses_soft_for_hard_when_omitted() {
+        assert_eq!(
+            "NOFILE=65535".parse::<ExecRlimit>().unwrap(),
+            ExecRlimit {
+                resource: "nofile".to_string(),
+                soft: 65_535,
+                hard: 65_535,
+            }
+        );
+    }
+
+    #[test]
+    fn test_exec_rlimit_from_str_parses_soft_and_hard() {
+        assert_eq!(
+            "nofile=4096:65535".parse::<ExecRlimit>().unwrap(),
+            ExecRlimit {
+                resource: "nofile".to_string(),
+                soft: 4_096,
+                hard: 65_535,
+            }
+        );
+    }
+
+    #[test]
+    fn test_exec_rlimit_from_str_rejects_soft_above_hard() {
+        let err = "nofile=65535:4096".parse::<ExecRlimit>().unwrap_err();
+        assert_eq!(err, "soft limit cannot exceed hard limit");
+    }
 }

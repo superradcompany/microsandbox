@@ -380,6 +380,7 @@ fn push_file_mounts_spec(
     }
 }
 
+/// Encodes sandbox-wide rlimits for the guest init environment.
 fn encode_rlimits(rlimits: &[Rlimit]) -> String {
     rlimits
         .iter()
