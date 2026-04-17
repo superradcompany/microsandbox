@@ -1,6 +1,6 @@
 {
   "name": "microsandbox",
-  "version": "0.3.13",
+  "version": "0.3.14",
   "main": "index.cjs",
   "module": "index.mjs",
   "types": "index.d.cts",
@@ -32,9 +32,9 @@
     "vitest": "^4.1"
   },
   "optionalDependencies": {
-    "@superradcompany/microsandbox-darwin-arm64": "0.3.13",
-    "@superradcompany/microsandbox-linux-arm64-gnu": "0.3.13",
-    "@superradcompany/microsandbox-linux-x64-gnu": "0.3.13"
+    "@superradcompany/microsandbox-darwin-arm64": "0.3.14",
+    "@superradcompany/microsandbox-linux-arm64-gnu": "0.3.14",
+    "@superradcompany/microsandbox-linux-x64-gnu": "0.3.14"
   },
   "files": [
     "index.cjs",
