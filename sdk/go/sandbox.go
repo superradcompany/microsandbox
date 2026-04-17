@@ -3,7 +3,7 @@ package microsandbox
 import (
 	"context"
 
-	"github.com/Khrees2412/microsandbox/sdk/go/internal/ffi"
+	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
 // Sandbox represents a running microsandbox instance.

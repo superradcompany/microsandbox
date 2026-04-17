@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/Khrees2412/microsandbox/sdk/go/internal/ffi"
+	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
 // ExecOutput holds the result of a command execution.
