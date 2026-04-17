@@ -2,199 +2,128 @@ package microsandbox
 
 import (
 	"context"
+	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
-// Sandbox represents a running microsandbox instance.
-// It provides methods for execution, filesystem access, and lifecycle management.
+// Sandbox represents a live microsandbox VM. It holds a Rust-side handle
+// that must be released with Close.
+//
+// Sandbox is safe for concurrent use from multiple goroutines.
 type Sandbox struct {
-	name   string
-	ffi    ffi.FFI
-	handle ffi.SandboxHandle
+	inner *ffi.Sandbox
 }
 
-// NewSandbox creates and boots a new sandbox with the given name and options.
-// The sandbox will be stopped when the parent process exits unless created in detached mode.
+// NewSandbox creates and boots a new sandbox. The returned Sandbox owns the
+// VM process — call Close (or StopAndWait + Close) when done.
+//
+// ctx controls the boot operation only; cancelling ctx after this function
+// returns has no effect on the running sandbox.
 func NewSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error) {
-	return newSandboxInternal(ctx, ffi.NewRealFFI(), name, opts...)
-}
-
-// NewSandboxDetached creates a sandbox in detached mode that survives the parent process.
-// Use GetSandbox() to reconnect to a detached sandbox.
-func NewSandboxDetached(ctx context.Context, name string, opts ...SandboxOption) (*Sandbox, error) {
-	opts = append(opts, WithDetached())
-	return newSandboxInternal(ctx, ffi.NewRealFFI(), name, opts...)
-}
-
-func newSandboxInternal(ctx context.Context, f ffi.FFI, name string, opts ...SandboxOption) (*Sandbox, error) {
-	options := &SandboxOptions{}
+	o := SandboxOptions{}
 	for _, opt := range opts {
-		opt(options)
+		opt(&o)
 	}
-
-	handle, err := f.SandboxCreate(ctx, name, ffi.SandboxOptions{
-		Image:   options.Image,
-		Memory:  options.MemoryMiB,
-		CPUs:    options.CPUs,
-		Workdir: options.Workdir,
-		Env:     options.Env,
+	inner, err := ffi.CreateSandbox(ctx, name, ffi.CreateOptions{
+		Image:     o.Image,
+		MemoryMiB: o.MemoryMiB,
+		CPUs:      o.CPUs,
+		Workdir:   o.Workdir,
+		Env:       o.Env,
 	})
 	if err != nil {
-		return nil, WrapErrorf(ErrInternal, err, "failed to create sandbox %q", name)
+		return nil, wrapFFI(err)
 	}
-
-	return &Sandbox{
-		name:   name,
-		ffi:    f,
-		handle: handle,
-	}, nil
+	return &Sandbox{inner: inner}, nil
 }
 
-// GetSandbox reconnects to an existing detached sandbox by name.
-// Returns ErrSandboxNotFound if the sandbox does not exist.
+// GetSandbox reattaches to an existing sandbox by name. Returns an error
+// with Kind==ErrSandboxNotFound if no such sandbox exists.
 func GetSandbox(ctx context.Context, name string) (*Sandbox, error) {
-	return getSandboxInternal(ctx, ffi.NewRealFFI(), name)
-}
-
-func getSandboxInternal(ctx context.Context, f ffi.FFI, name string) (*Sandbox, error) {
-	handle, err := f.GetSandbox(ctx, name)
+	inner, err := ffi.GetSandbox(ctx, name)
 	if err != nil {
-		return nil, WrapErrorf(ErrSandboxNotFound, err, "sandbox %q not found", name)
+		return nil, wrapFFI(err)
 	}
-
-	return &Sandbox{
-		name:   name,
-		ffi:    f,
-		handle: handle,
-	}, nil
+	return &Sandbox{inner: inner}, nil
 }
 
-// ListSandboxes returns the names of all running sandboxes.
+// ListSandboxes returns the names of all known sandboxes.
 func ListSandboxes(ctx context.Context) ([]string, error) {
-	return listSandboxesInternal(ctx, ffi.NewRealFFI())
-}
-
-func listSandboxesInternal(ctx context.Context, f ffi.FFI) ([]string, error) {
-	names, err := f.ListSandboxes(ctx)
+	names, err := ffi.ListSandboxes(ctx)
 	if err != nil {
-		return nil, WrapError(ErrInternal, err, "failed to list sandboxes")
+		return nil, wrapFFI(err)
 	}
 	return names, nil
 }
 
-// RemoveSandbox removes a sandbox by name.
-// The sandbox must be stopped first.
+// RemoveSandbox removes a stopped sandbox's persisted state by name.
 func RemoveSandbox(ctx context.Context, name string) error {
-	return removeSandboxInternal(ctx, ffi.NewRealFFI(), name)
+	return wrapFFI(ffi.RemoveSandbox(ctx, name))
 }
 
-func removeSandboxInternal(ctx context.Context, f ffi.FFI, name string) error {
-	err := f.RemoveSandbox(ctx, name)
-	if err != nil {
-		return WrapErrorf(ErrInternal, err, "failed to remove sandbox %q", name)
-	}
-	return nil
-}
+// Name returns the sandbox's name.
+func (s *Sandbox) Name() string { return s.inner.Name() }
 
-// Name returns the sandbox name.
-func (s *Sandbox) Name() string {
-	return s.name
-}
-
-// Stop gracefully stops the sandbox.
+// Stop gracefully stops the sandbox. It does not wait for the VM process
+// to exit — use StopAndWait for that.
 func (s *Sandbox) Stop(ctx context.Context) error {
-	err := s.ffi.SandboxStop(ctx, s.handle)
-	if err != nil {
-		return WrapErrorf(ErrInternal, err, "failed to stop sandbox %q", s.name)
-	}
-	return nil
+	return wrapFFI(s.inner.Stop(ctx))
 }
 
-// Kill immediately terminates the sandbox without graceful shutdown.
+// StopAndWait stops the sandbox and waits for its VM process to exit.
+// Returns the exit code (-1 if the guest didn't report one).
+func (s *Sandbox) StopAndWait(ctx context.Context) (int, error) {
+	code, err := s.inner.StopAndWait(ctx)
+	return code, wrapFFI(err)
+}
+
+// Kill terminates the sandbox immediately.
 func (s *Sandbox) Kill(ctx context.Context) error {
-	return s.Stop(ctx)
+	return wrapFFI(s.inner.Kill(ctx))
 }
 
-// Detach hands off the sandbox to run in the background.
-// After detaching, use GetSandbox() to reconnect.
-func (s *Sandbox) Detach(_ context.Context) error {
-	return nil
+// Close releases the Rust-side handle. Safe to call multiple times; the
+// second call returns ErrInvalidHandle.
+//
+// Close does NOT stop the sandbox. For a running sandbox you own, call
+// StopAndWait first. For a sandbox you attached to via GetSandbox and
+// want to leave running, Close is enough.
+func (s *Sandbox) Close() error {
+	return wrapFFI(s.inner.Close())
 }
 
-// StopAndWait stops the sandbox and blocks until it is fully stopped.
-func (s *Sandbox) StopAndWait(ctx context.Context) error {
-	return s.Stop(ctx)
-}
-
-// FS returns a filesystem accessor for the sandbox.
+// FS returns a filesystem accessor for this sandbox.
 func (s *Sandbox) FS() *SandboxFs {
 	return &SandboxFs{sandbox: s}
 }
 
-// =============================================================================
-// Metrics
-// =============================================================================
-
-// Metrics represents resource usage for a sandbox.
-type Metrics struct {
-	CPU       float64
-	MemoryMiB uint64
-	DiskRead  uint64
-	DiskWrite uint64
-	NetRx     uint64
-	NetTx     uint64
-}
-
 // Metrics returns the current resource usage for this sandbox.
 func (s *Sandbox) Metrics(ctx context.Context) (*Metrics, error) {
-	m, err := s.ffi.SandboxMetrics(ctx, s.handle)
+	m, err := s.inner.Metrics(ctx)
 	if err != nil {
-		return nil, WrapErrorf(ErrInternal, err, "failed to get metrics for sandbox %q", s.name)
+		return nil, wrapFFI(err)
 	}
-
 	return &Metrics{
-		CPU:       m.CPU,
-		MemoryMiB: m.MemoryMiB,
-		DiskRead:  m.DiskRead,
-		DiskWrite: m.DiskWrite,
-		NetRx:     m.NetRx,
-		NetTx:     m.NetTx,
+		CPUPercent:       m.CPUPercent,
+		MemoryBytes:      m.MemoryBytes,
+		MemoryLimitBytes: m.MemoryLimitBytes,
+		DiskReadBytes:    m.DiskReadBytes,
+		DiskWriteBytes:   m.DiskWriteBytes,
+		NetRxBytes:       m.NetRxBytes,
+		NetTxBytes:       m.NetTxBytes,
+		Uptime:           m.Uptime,
 	}, nil
 }
 
-// AllSandboxMetrics returns metrics for all running sandboxes.
-func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error) {
-	return allSandboxMetricsInternal(ctx, ffi.NewRealFFI())
-}
-
-func allSandboxMetricsInternal(ctx context.Context, f ffi.FFI) (map[string]*Metrics, error) {
-	names, err := f.ListSandboxes(ctx)
-	if err != nil {
-		return nil, WrapError(ErrInternal, err, "failed to list sandboxes for metrics")
-	}
-
-	result := make(map[string]*Metrics)
-	for _, name := range names {
-		handle, err := f.GetSandbox(ctx, name)
-		if err != nil {
-			continue
-		}
-
-		m, err := f.SandboxMetrics(ctx, handle)
-		if err != nil {
-			continue
-		}
-
-		result[name] = &Metrics{
-			CPU:       m.CPU,
-			MemoryMiB: m.MemoryMiB,
-			DiskRead:  m.DiskRead,
-			DiskWrite: m.DiskWrite,
-			NetRx:     m.NetRx,
-			NetTx:     m.NetTx,
-		}
-	}
-
-	return result, nil
+// Metrics is a snapshot of sandbox resource usage.
+type Metrics struct {
+	CPUPercent       float64
+	MemoryBytes      uint64
+	MemoryLimitBytes uint64
+	DiskReadBytes    uint64
+	DiskWriteBytes   uint64
+	NetRxBytes       uint64
+	NetTxBytes       uint64
+	Uptime           time.Duration
 }

@@ -1,0 +1,20 @@
+[package]
+name = "microsandbox-go-ffi"
+description = "C-ABI FFI layer exposing microsandbox to the Go SDK via CGO."
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[lib]
+name = "microsandbox_go_ffi"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+microsandbox = { version = "0.3.13", path = "../../crates/microsandbox" }
+tokio.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+libc.workspace = true
+base64.workspace = true
