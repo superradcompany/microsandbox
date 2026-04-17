@@ -57,8 +57,20 @@
 
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI **(Optional)**
 
+> Boot a  microVM in one command.
+>
+> ```sh
+> npx microsandbox run debian
+> ```
+>
+> Or install the `msb` command globally:
+>
 > ```sh
 > curl -fsSL https://install.microsandbox.dev | sh
+> ```
+>
+> ```sh
+> msb run debian
 > ```
 
 ##
