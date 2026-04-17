@@ -11,6 +11,10 @@ edition.workspace = true
 name = "microsandbox"
 path = "lib/lib.rs"
 
+[[bin]]
+name = "microsandbox"
+path = "bin/main.rs"
+
 [features]
 default = ["prebuilt", "net"]
 prebuilt = ["microsandbox-filesystem/prebuilt", "microsandbox-runtime/prebuilt"]
