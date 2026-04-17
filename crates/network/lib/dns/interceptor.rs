@@ -13,6 +13,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use hickory_proto::op::ResponseCode;
+use hickory_proto::rr::Record;
+use hickory_proto::rr::rdata::SOA;
 use smoltcp::iface::SocketSet;
 use smoltcp::socket::udp;
 use smoltcp::storage::PacketMetadata;
@@ -85,6 +88,26 @@ struct DnsResponse {
     data: Bytes,
     /// Destination endpoint (guest IP:port).
     dest: IpEndpoint,
+}
+
+/// Outcome of resolving a single DNS query. Maps to the on-the-wire RCODE
+/// in [`dns_resolver_task`]: `Answer` is sent verbatim, `Empty` becomes
+/// NoData/NXDOMAIN, `ServerFailure` becomes SERVFAIL, `Blocked` becomes
+/// REFUSED.
+enum ResolveOutcome {
+    /// Successful lookup with one or more answer records.
+    Answer(Bytes),
+    /// Upstream returned NoData (NOERROR + empty answer) or NXDOMAIN. The
+    /// optional SOA is propagated to the authority section so the client
+    /// can negative-cache.
+    Empty {
+        rcode: ResponseCode,
+        soa: Option<Box<Record<SOA>>>,
+    },
+    /// Upstream resolution failed for transport/timeout reasons.
+    ServerFailure,
+    /// Query was blocked locally (block list or rebind protection).
+    Blocked,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -224,68 +247,73 @@ async fn dns_resolver_task(
 
         // Spawn a task per query for concurrency.
         tokio::spawn(async move {
-            let result = resolve_query(&query.data, &dns_config, &resolver).await;
-            match result {
-                Some(response_data) => {
-                    let response = DnsResponse {
-                        data: response_data,
-                        dest: query.source,
-                    };
-                    if response_tx.send(response).await.is_ok() {
-                        shared.proxy_wake.wake();
-                    }
+            let outcome = resolve_query(&query.data, &dns_config, &resolver).await;
+            let response_bytes = match outcome {
+                ResolveOutcome::Answer(data) => Some(data),
+                ResolveOutcome::Empty { rcode, soa } => {
+                    build_empty_response(&query.data, rcode, soa)
                 }
-                None => {
-                    // Query was blocked or failed — send REFUSED.
-                    if let Some(servfail) = build_refused(&query.data) {
-                        let response = DnsResponse {
-                            data: servfail,
-                            dest: query.source,
-                        };
-                        if response_tx.send(response).await.is_ok() {
-                            shared.proxy_wake.wake();
-                        }
-                    }
+                ResolveOutcome::ServerFailure => {
+                    build_status_response(&query.data, ResponseCode::ServFail)
+                }
+                ResolveOutcome::Blocked => {
+                    build_status_response(&query.data, ResponseCode::Refused)
+                }
+            };
+            if let Some(data) = response_bytes {
+                let response = DnsResponse {
+                    data,
+                    dest: query.source,
+                };
+                if response_tx.send(response).await.is_ok() {
+                    shared.proxy_wake.wake();
                 }
             }
         });
     }
 }
 
-/// Resolve a single DNS query. Returns `None` if the domain is blocked
-/// or contains rebind-protected addresses.
+/// Resolve a single DNS query and decide what kind of response to send
+/// back. See [`ResolveOutcome`] for the variant-to-RCODE mapping.
 async fn resolve_query(
     raw_query: &[u8],
     dns_config: &NormalizedDnsConfig,
     resolver: &hickory_resolver::TokioResolver,
-) -> Option<Bytes> {
+) -> ResolveOutcome {
     use hickory_proto::op::Message;
     use hickory_proto::rr::RData;
     use hickory_proto::serialize::binary::BinDecodable;
 
     // Parse the DNS query.
-    let query_msg = Message::from_bytes(raw_query).ok()?;
+    let Ok(query_msg) = Message::from_bytes(raw_query) else {
+        return ResolveOutcome::ServerFailure;
+    };
     let query_id = query_msg.id();
 
     // Extract the queried domain name.
-    let question = query_msg.queries().first()?;
+    let Some(question) = query_msg.queries().first() else {
+        return ResolveOutcome::ServerFailure;
+    };
     let domain = question.name().to_string();
     let domain = domain.trim_end_matches('.');
 
     // Check domain block lists.
     if is_domain_blocked(domain, dns_config) {
         tracing::debug!(domain = %domain, "DNS query blocked");
-        return None;
+        return ResolveOutcome::Blocked;
     }
 
     // Forward the raw query to the host resolver by performing a lookup.
     // We use the parsed question to do a proper lookup via hickory-resolver.
     let record_type = question.query_type();
 
-    let lookup = resolver
+    let lookup = match resolver
         .lookup(question.name().clone(), record_type)
         .await
-        .ok()?;
+    {
+        Ok(lookup) => lookup,
+        Err(err) => return classify_lookup_error(&err, domain, record_type),
+    };
 
     // DNS rebind protection: reject responses containing private/reserved IPs.
     if dns_config.rebind_protection {
@@ -300,9 +328,19 @@ async fn resolve_query(
                     domain = %domain,
                     "DNS rebind protection: response contains private IP"
                 );
-                return None;
+                return ResolveOutcome::Blocked;
             }
         }
+    }
+
+    // Defensive: hickory normally surfaces NoData via NoRecordsFound, but a
+    // zero-answer Ok needs the same NoData treatment.
+    let answers: Vec<_> = lookup.records().to_vec();
+    if answers.is_empty() {
+        return ResolveOutcome::Empty {
+            rcode: ResponseCode::NoError,
+            soa: None,
+        };
     }
 
     // Build a fresh DNS response (avoids cloning the entire query message).
@@ -310,20 +348,97 @@ async fn resolve_query(
     response_msg.set_id(query_id);
     response_msg.set_message_type(hickory_proto::op::MessageType::Response);
     response_msg.set_op_code(query_msg.op_code());
-    response_msg.set_response_code(hickory_proto::op::ResponseCode::NoError);
+    response_msg.set_response_code(ResponseCode::NoError);
     response_msg.set_recursion_desired(query_msg.recursion_desired());
     response_msg.set_recursion_available(true);
     response_msg.add_query(question.clone());
-
-    // Add answer records.
-    let answers: Vec<_> = lookup.records().to_vec();
     response_msg.insert_answers(answers);
 
     // Serialize the response.
     use hickory_proto::serialize::binary::BinEncodable;
-    let response_bytes = response_msg.to_bytes().ok()?;
+    let Ok(response_bytes) = response_msg.to_bytes() else {
+        return ResolveOutcome::ServerFailure;
+    };
 
-    Some(Bytes::from(response_bytes))
+    ResolveOutcome::Answer(Bytes::from(response_bytes))
+}
+
+/// Map a hickory [`ResolveError`] to a [`ResolveOutcome`].
+///
+/// Hickory wraps *any* non-successful upstream response in
+/// `ProtoErrorKind::NoRecordsFound { response_code, .. }` (see
+/// `ResolveError::from_response` in hickory-proto), not just NOERROR/NXDOMAIN.
+/// We therefore branch on the wrapped `response_code` so the client sees the
+/// RCODE the upstream actually sent, rather than collapsing every failure
+/// mode into NoData.
+///
+/// [`ResolveError`]: hickory_resolver::ResolveError
+fn classify_lookup_error(
+    err: &hickory_resolver::ResolveError,
+    domain: &str,
+    record_type: hickory_proto::rr::RecordType,
+) -> ResolveOutcome {
+    use hickory_proto::ProtoErrorKind;
+
+    if let Some(proto) = err.proto()
+        && let ProtoErrorKind::NoRecordsFound {
+            response_code, soa, ..
+        } = proto.kind()
+    {
+        match *response_code {
+            ResponseCode::NoError => {
+                tracing::debug!(
+                    domain = %domain,
+                    record_type = ?record_type,
+                    "DNS upstream NoData (NOERROR, no records)",
+                );
+                return ResolveOutcome::Empty {
+                    rcode: ResponseCode::NoError,
+                    soa: soa.clone(),
+                };
+            }
+            ResponseCode::NXDomain => {
+                tracing::debug!(
+                    domain = %domain,
+                    record_type = ?record_type,
+                    "DNS upstream NXDOMAIN",
+                );
+                return ResolveOutcome::Empty {
+                    rcode: ResponseCode::NXDomain,
+                    soa: soa.clone(),
+                };
+            }
+            ResponseCode::Refused => {
+                tracing::debug!(
+                    domain = %domain,
+                    record_type = ?record_type,
+                    "DNS upstream REFUSED",
+                );
+                return ResolveOutcome::Blocked;
+            }
+            other => {
+                // ServFail, FormErr, NotImp, YXDomain, BADVERS, BADCOOKIE, …
+                // All represent transient/protocol server errors → SERVFAIL
+                // so the client can retry rather than mistake them for NoData.
+                tracing::warn!(
+                    domain = %domain,
+                    record_type = ?record_type,
+                    rcode = ?other,
+                    "DNS upstream returned server error",
+                );
+                return ResolveOutcome::ServerFailure;
+            }
+        }
+    }
+
+    // Transport failure, timeout, IO error, Hickory access-check refusal, etc.
+    tracing::warn!(
+        domain = %domain,
+        record_type = ?record_type,
+        error = %err,
+        "DNS upstream lookup failed",
+    );
+    ResolveOutcome::ServerFailure
 }
 
 /// Check if an IPv4 address is in a private/reserved range (for rebind protection).
@@ -373,12 +488,11 @@ fn is_domain_blocked(domain: &str, config: &NormalizedDnsConfig) -> bool {
     false
 }
 
-/// Build a REFUSED response for a query that was blocked by policy.
-///
-/// Uses REFUSED (RCODE 5) instead of SERVFAIL (RCODE 2) because the
-/// refusal is a policy decision, not a server failure. Most stub resolvers
-/// do not retry REFUSED, avoiding unnecessary latency.
-fn build_refused(raw_query: &[u8]) -> Option<Bytes> {
+/// Build a status-only response (no answers, no authority) with the given
+/// RCODE. Used for REFUSED (policy block) and SERVFAIL (upstream transport
+/// failure). REFUSED is reserved for policy refusals because stub resolvers
+/// do not retry it; SERVFAIL invites the caller to retry.
+fn build_status_response(raw_query: &[u8], rcode: ResponseCode) -> Option<Bytes> {
     use hickory_proto::op::Message;
     use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 
@@ -389,8 +503,44 @@ fn build_refused(raw_query: &[u8]) -> Option<Bytes> {
         response.add_query(q.clone());
     }
     response.set_message_type(hickory_proto::op::MessageType::Response);
-    response.set_response_code(hickory_proto::op::ResponseCode::Refused);
+    response.set_response_code(rcode);
     response.set_recursion_available(true);
+
+    let bytes = response.to_bytes().ok()?;
+    Some(Bytes::from(bytes))
+}
+
+/// Build a NoData/NXDOMAIN response with an empty answer section and the
+/// optional SOA placed in the authority section so the client can
+/// negative-cache. `rcode` must be `NoError` (NoData) or `NXDomain`.
+fn build_empty_response(
+    raw_query: &[u8],
+    rcode: ResponseCode,
+    soa: Option<Box<Record<SOA>>>,
+) -> Option<Bytes> {
+    use hickory_proto::op::Message;
+    use hickory_proto::rr::RData;
+    use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
+
+    let query_msg = Message::from_bytes(raw_query).ok()?;
+    let mut response = Message::new();
+    response.set_id(query_msg.id());
+    for q in query_msg.queries() {
+        response.add_query(q.clone());
+    }
+    response.set_message_type(hickory_proto::op::MessageType::Response);
+    response.set_response_code(rcode);
+    response.set_recursion_available(true);
+
+    if let Some(soa_record) = soa {
+        let mut authority = Record::from_rdata(
+            soa_record.name().clone(),
+            soa_record.ttl(),
+            RData::SOA(soa_record.data().clone()),
+        );
+        authority.set_dns_class(soa_record.dns_class());
+        response.insert_name_servers(vec![authority]);
+    }
 
     let bytes = response.to_bytes().ok()?;
     Some(Bytes::from(bytes))
@@ -443,5 +593,167 @@ mod tests {
     fn test_no_blocks_nothing_blocked() {
         let config = normalized(vec![], vec![]);
         assert!(!is_domain_blocked("anything.com", &config));
+    }
+
+    use hickory_proto::op::{Message, Query};
+    use hickory_proto::rr::{Name, RecordType};
+    use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
+
+    fn make_raw_query(name: &str, qtype: RecordType) -> Vec<u8> {
+        let mut msg = Message::new();
+        msg.set_id(0x4242);
+        msg.set_message_type(hickory_proto::op::MessageType::Query);
+        msg.set_op_code(hickory_proto::op::OpCode::Query);
+        msg.set_recursion_desired(true);
+        let parsed = Name::from_ascii(name).expect("valid dns name");
+        let mut q = Query::new();
+        q.set_name(parsed);
+        q.set_query_type(qtype);
+        q.set_query_class(hickory_proto::rr::DNSClass::IN);
+        msg.add_query(q);
+        msg.to_bytes().expect("serializable query")
+    }
+
+    #[test]
+    fn build_status_response_preserves_id_and_question() {
+        let raw = make_raw_query("slack.com.", RecordType::AAAA);
+        let bytes = build_status_response(&raw, ResponseCode::Refused).expect("response built");
+        let msg = Message::from_bytes(&bytes).expect("parse response");
+        assert_eq!(msg.id(), 0x4242);
+        assert_eq!(msg.response_code(), ResponseCode::Refused);
+        assert_eq!(msg.message_type(), hickory_proto::op::MessageType::Response);
+        assert_eq!(msg.queries().len(), 1);
+        assert_eq!(msg.queries()[0].query_type(), RecordType::AAAA);
+        assert_eq!(msg.answers().len(), 0);
+        assert!(msg.recursion_available());
+    }
+
+    #[test]
+    fn build_status_response_for_servfail() {
+        let raw = make_raw_query("example.com.", RecordType::A);
+        let bytes =
+            build_status_response(&raw, ResponseCode::ServFail).expect("response built");
+        let msg = Message::from_bytes(&bytes).expect("parse response");
+        assert_eq!(msg.response_code(), ResponseCode::ServFail);
+        assert_eq!(msg.answers().len(), 0);
+    }
+
+    #[test]
+    fn build_empty_response_nodata_without_soa() {
+        let raw = make_raw_query("slack.com.", RecordType::AAAA);
+        let bytes = build_empty_response(&raw, ResponseCode::NoError, None).expect("built");
+        let msg = Message::from_bytes(&bytes).expect("parse response");
+        assert_eq!(msg.id(), 0x4242);
+        assert_eq!(msg.response_code(), ResponseCode::NoError);
+        assert_eq!(msg.answers().len(), 0);
+        assert_eq!(msg.name_servers().len(), 0);
+        assert_eq!(msg.queries().len(), 1);
+        assert_eq!(msg.queries()[0].query_type(), RecordType::AAAA);
+    }
+
+    #[test]
+    fn build_empty_response_nxdomain_includes_soa_when_provided() {
+        use hickory_proto::rr::DNSClass;
+        let mname = Name::from_ascii("ns.example.com.").unwrap();
+        let rname = Name::from_ascii("hostmaster.example.com.").unwrap();
+        let soa = SOA::new(mname, rname, 1, 3600, 600, 86400, 60);
+        let owner = Name::from_ascii("example.com.").unwrap();
+        let mut soa_record = Record::from_rdata(owner, 60, hickory_proto::rr::RData::SOA(soa));
+        soa_record.set_dns_class(DNSClass::IN);
+
+        let typed_soa: Record<SOA> = match soa_record.data() {
+            hickory_proto::rr::RData::SOA(s) => Record::from_rdata(
+                soa_record.name().clone(),
+                soa_record.ttl(),
+                s.clone(),
+            ),
+            _ => unreachable!(),
+        };
+
+        let raw = make_raw_query("does-not-exist.example.com.", RecordType::A);
+        let bytes = build_empty_response(&raw, ResponseCode::NXDomain, Some(Box::new(typed_soa)))
+            .expect("response built");
+        let msg = Message::from_bytes(&bytes).expect("parse response");
+        assert_eq!(msg.response_code(), ResponseCode::NXDomain);
+        assert_eq!(msg.answers().len(), 0);
+        assert_eq!(
+            msg.name_servers().len(),
+            1,
+            "SOA should be in authority section for negative caching"
+        );
+        assert_eq!(msg.name_servers()[0].record_type(), RecordType::SOA);
+    }
+
+    #[test]
+    fn build_status_response_returns_none_for_garbage() {
+        assert!(build_status_response(&[0, 1, 2], ResponseCode::Refused).is_none());
+    }
+
+    fn make_nx_error(response_code: ResponseCode) -> hickory_resolver::ResolveError {
+        let query = Query::new();
+        let proto = hickory_proto::ProtoError::nx_error(
+            Box::new(query),
+            None,
+            None,
+            None,
+            response_code,
+            false,
+            None,
+        );
+        hickory_resolver::ResolveError::from(proto)
+    }
+
+    #[test]
+    fn classify_nodata_returns_empty_noerror() {
+        let err = make_nx_error(ResponseCode::NoError);
+        match classify_lookup_error(&err, "slack.com", RecordType::AAAA) {
+            ResolveOutcome::Empty { rcode, .. } => assert_eq!(rcode, ResponseCode::NoError),
+            other => panic!("expected Empty{{NoError}}, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn classify_nxdomain_returns_empty_nxdomain() {
+        let err = make_nx_error(ResponseCode::NXDomain);
+        match classify_lookup_error(&err, "nope.example.com", RecordType::A) {
+            ResolveOutcome::Empty { rcode, .. } => assert_eq!(rcode, ResponseCode::NXDomain),
+            other => panic!("expected Empty{{NXDomain}}, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn classify_upstream_refused_returns_blocked() {
+        let err = make_nx_error(ResponseCode::Refused);
+        assert!(matches!(
+            classify_lookup_error(&err, "slack.com", RecordType::A),
+            ResolveOutcome::Blocked
+        ));
+    }
+
+    #[test]
+    fn classify_upstream_servfail_returns_server_failure() {
+        let err = make_nx_error(ResponseCode::ServFail);
+        assert!(matches!(
+            classify_lookup_error(&err, "slack.com", RecordType::A),
+            ResolveOutcome::ServerFailure
+        ));
+    }
+
+    #[test]
+    fn classify_upstream_formerr_returns_server_failure() {
+        let err = make_nx_error(ResponseCode::FormErr);
+        assert!(matches!(
+            classify_lookup_error(&err, "slack.com", RecordType::A),
+            ResolveOutcome::ServerFailure
+        ));
+    }
+
+    #[test]
+    fn classify_non_norecordsfound_returns_server_failure() {
+        let err = hickory_resolver::ResolveError::from("arbitrary non-proto error");
+        assert!(matches!(
+            classify_lookup_error(&err, "slack.com", RecordType::A),
+            ResolveOutcome::ServerFailure
+        ));
     }
 }
