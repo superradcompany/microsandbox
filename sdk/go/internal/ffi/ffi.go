@@ -39,6 +39,7 @@ void     msb_cancel_unregister(uint64_t id);
 char *msb_sandbox_create(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
 char *msb_sandbox_get(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 char *msb_sandbox_close(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+char *msb_sandbox_detach(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 char *msb_sandbox_stop(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 char *msb_sandbox_stop_and_wait(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 char *msb_sandbox_kill(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
@@ -318,6 +319,19 @@ func (s *Sandbox) Close() error {
 func (s *Sandbox) CloseCtx(ctx context.Context) error {
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.msb_sandbox_close(cancelID, s.handle, buf, bufLen)
+	})
+	return err
+}
+
+// Detach releases the Rust-side sandbox handle without stopping the VM.
+// Use this on sandboxes created with detached: true when the caller is
+// done with the handle but the sandbox should keep running.
+//
+// After Detach returns, the handle is invalid and any further call on it
+// returns KindInvalidHandle — the same invariant as Close.
+func (s *Sandbox) Detach(ctx context.Context) error {
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_sandbox_detach(cancelID, s.handle, buf, bufLen)
 	})
 	return err
 }

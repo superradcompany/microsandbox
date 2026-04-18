@@ -158,11 +158,22 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 // Close releases the Rust-side handle. Safe to call multiple times; the
 // second call returns ErrInvalidHandle.
 //
-// Close does NOT stop the sandbox. For a running sandbox you own, call
-// StopAndWait first. For a sandbox you attached to via GetSandbox and
-// want to leave running, Close is enough.
+// For a sandbox created with WithDetached(), Close will stop the VM —
+// use Detach instead if the intent is to leave the sandbox running.
+// For an attached sandbox the caller typically calls StopAndWait first;
+// for a handle obtained via GetSandbox, Close alone is enough.
 func (s *Sandbox) Close() error {
 	return wrapFFI(s.inner.Close())
+}
+
+// Detach releases the Rust-side handle without stopping the VM. Use this
+// on sandboxes created with WithDetached() once the caller is done with
+// the handle but the sandbox should continue running in the background.
+//
+// After Detach, the handle is invalid; a subsequent Close returns
+// ErrInvalidHandle.
+func (s *Sandbox) Detach(ctx context.Context) error {
+	return wrapFFI(s.inner.Detach(ctx))
 }
 
 // FS returns a filesystem accessor for this sandbox.

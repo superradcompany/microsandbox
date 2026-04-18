@@ -928,6 +928,42 @@ pub extern "C" fn msb_sandbox_close(
 }
 
 // ---------------------------------------------------------------------------
+// Sandbox — detach
+//
+// Disarm the SIGTERM safety net so the sandbox keeps running after the
+// handle is released. This is the counterpart to `close` for sandboxes
+// created with `detached: true`: the caller calls `detach` before dropping
+// the handle so the VM survives. After this call the handle is invalid.
+// Output: {"ok":true}
+// ---------------------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "C" fn msb_sandbox_detach(
+    cancel_id: u64,
+    handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let arc = remove(handle)?.ok_or_else(|| FfiError::invalid_handle(handle))?;
+        // Unwrap the Arc so we can call `detach(self)`. This fails only if
+        // another caller is still holding a clone (e.g. a concurrent FFI
+        // call that cloned the Arc out of the registry). Detaching while
+        // another op is in flight is a misuse — the SIGTERM safety net
+        // would still fire when the last clone drops.
+        Ok(Box::pin(async move {
+            let sb = std::sync::Arc::try_unwrap(arc).map_err(|_| {
+                FfiError::internal(
+                    "detach while another sandbox operation is in flight on the same handle",
+                )
+            })?;
+            sb.detach().await;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Sandbox — stop (graceful) and stop_and_wait
 // ---------------------------------------------------------------------------
 
