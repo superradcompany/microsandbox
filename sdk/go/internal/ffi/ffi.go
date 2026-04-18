@@ -459,7 +459,7 @@ func call(ctx context.Context, fn func(cancelID C.uint64_t, buf *C.uint8_t, bufL
 // Sandbox lifecycle
 // =============================================================================
 
-// CreateOptions mirrors the JSON schema expected by msb_sandbox_create.
+// CreateOptions matches the JSON payload shape expected by msb_sandbox_create.
 // Zero-valued fields are omitted; the Rust side applies defaults.
 type CreateOptions struct {
 	Image     string            `json:"image,omitempty"`

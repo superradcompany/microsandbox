@@ -21,16 +21,16 @@ import (
 
 // sdkVersion is the microsandbox release that this SDK binds to. The
 // EnsureInstalled downloader fetches runtime artefacts (msb + libkrunfw +
-// libmicrosandbox_go_ffi) from the matching GitHub release. Bump in lockstep
-// with the workspace Cargo.toml version and with sdk/node-ts/package.json.
+// libmicrosandbox_go_ffi) from the matching GitHub release. Bump when cutting
+// a new SDK release so it matches published artefacts.
 const sdkVersion = "0.3.13"
 
 // libkrunfwABI is the major SONAME version of libkrunfw that msb links
-// against. Mirrors LIBKRUNFW_ABI in sdk/node-ts/postinstall.js.
+// against.
 const libkrunfwABI = "5"
 
 // libkrunfwVersion is the full version of the prebuilt libkrunfw shipped in
-// each release tarball. Mirrors LIBKRUNFW_VERSION in postinstall.js.
+// each release tarball.
 const libkrunfwVersion = "5.2.1"
 
 // githubOrg / githubRepo locate the GitHub release assets.
@@ -182,7 +182,7 @@ func bundleInstalled(binDir, libDir string) bool {
 }
 
 // installedMsbVersion runs `msb --version` and returns the version string,
-// or "" on any error. Matches installedMsbVersion in postinstall.js.
+// or "" on any error.
 func installedMsbVersion(msbPath string) string {
 	out, err := exec.Command(msbPath, "--version").Output()
 	if err != nil {
@@ -212,9 +212,9 @@ func libkrunfwFilename() string {
 	return fmt.Sprintf("libkrunfw.so.%s", libkrunfwVersion)
 }
 
-// libkrunfwSymlinks returns (linkName, target) pairs mirroring
-// libkrunfwSymlinks() in postinstall.js. Without these symlinks the dynamic
-// linker cannot resolve the libkrunfw SONAME that msb was built against.
+// libkrunfwSymlinks returns (linkName, target) pairs for the libkrunfw SONAME
+// layout. Without these symlinks the dynamic linker cannot resolve the
+// libkrunfw SONAME that msb was built against.
 func libkrunfwSymlinks() [][2]string {
 	full := libkrunfwFilename()
 	if runtime.GOOS == "darwin" {
@@ -293,9 +293,8 @@ func downloadAndExtract(ctx context.Context, baseDir string) error {
 	}
 
 	client := &http.Client{
-		// http.Client follows up to 10 redirects by default, which matches
-		// the behaviour in postinstall.js (GitHub release assets issue a
-		// 302 to the CDN).
+		// Default redirect follow limit (10) is enough for GitHub release
+		// assets (302 to CDN).
 		Timeout: httpTimeout,
 	}
 	resp, err := client.Do(req)
