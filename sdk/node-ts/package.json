@@ -42,6 +42,7 @@
     "index.d.cts",
     "postinstall.js",
     "bin/microsandbox.js",
+    "lib/install.js",
     "README.md"
   ]
 }
