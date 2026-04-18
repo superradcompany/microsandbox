@@ -198,6 +198,17 @@ jobs:
           mkdir -p build
           cp target/release/msb build/msb
 
+      # -- Go FFI cdylib --
+      - name: Build microsandbox-go-ffi
+        run: |
+          cargo build --release -p microsandbox-go-ffi
+          mkdir -p build
+          if [ "${{ matrix.os }}" = "darwin" ]; then
+            cp target/release/libmicrosandbox_go_ffi.dylib build/
+          else
+            cp target/release/libmicrosandbox_go_ffi.so build/
+          fi
+
       # -- macOS codesign --
       - name: Codesign msb
         if: matrix.os == 'darwin'
@@ -274,9 +285,14 @@ jobs:
             cp build/agentd artifacts/agentd-${{ matrix.arch }}
           fi
 
-          # Bundle: msb + libkrunfw
+          # Bundle: msb + libkrunfw + Go FFI cdylib
+          if [ "${{ matrix.os }}" = "darwin" ]; then
+            go_ffi_file=libmicrosandbox_go_ffi.dylib
+          else
+            go_ffi_file=libmicrosandbox_go_ffi.so
+          fi
           tar -czf artifacts/microsandbox-${{ matrix.target }}.tar.gz \
-            -C build msb ${{ matrix.libkrunfw_file }}
+            -C build msb ${{ matrix.libkrunfw_file }} $go_ffi_file
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

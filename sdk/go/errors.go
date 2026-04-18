@@ -52,6 +52,10 @@ const (
 	// context before the Rust runtime completed it.
 	ErrCancelled
 
+	// ErrLibraryNotLoaded indicates the microsandbox library has not been
+	// loaded. Call EnsureInstalled() before using any SDK functions.
+	ErrLibraryNotLoaded
+
 	// ErrInternal is every other error from the runtime.
 	ErrInternal
 )
@@ -78,6 +82,8 @@ func (k ErrorKind) String() string {
 		return "BufferTooSmall"
 	case ErrCancelled:
 		return "Cancelled"
+	case ErrLibraryNotLoaded:
+		return "LibraryNotLoaded"
 	case ErrInternal:
 		return "Internal"
 	default:
@@ -150,6 +156,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrBufferTooSmall
 	case ffi.KindCancelled:
 		return ErrCancelled
+	case ffi.KindLibraryNotLoaded:
+		return ErrLibraryNotLoaded
 	default:
 		return ErrInternal
 	}

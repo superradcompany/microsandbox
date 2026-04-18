@@ -5,11 +5,8 @@
 //
 // Build: from sdk/go, run
 //
-//	cargo build -p microsandbox-go-ffi
-//	CGO_LDFLAGS="-L$(git rev-parse --show-toplevel)/target/debug" \
-//	  go run ./examples/streaming
+//	go run ./examples/streaming
 //
-// Requires a running microsandbox daemon.
 package main
 
 import (
@@ -26,6 +23,10 @@ import (
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+
+	if err := microsandbox.EnsureInstalled(ctx); err != nil {
+		log.Fatalf("EnsureInstalled: %v", err)
+	}
 
 	name := fmt.Sprintf("go-sdk-stream-%d", time.Now().Unix())
 	log.Printf("creating sandbox %q", name)

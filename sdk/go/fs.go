@@ -90,4 +90,3 @@ func (fs *SandboxFs) CopyFromHost(ctx context.Context, hostPath, guestPath strin
 func (fs *SandboxFs) CopyToHost(ctx context.Context, guestPath, hostPath string) error {
 	return wrapFFI(fs.sandbox.inner.FsCopyToHost(ctx, guestPath, hostPath))
 }
-
