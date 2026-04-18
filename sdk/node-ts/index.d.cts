@@ -235,6 +235,16 @@ export declare class Sandbox {
   execWithConfig(config: ExecConfig): Promise<ExecOutput>
   /** Execute a command with streaming I/O. */
   execStream(cmd: string, args?: Array<string> | undefined | null): Promise<ExecHandle>
+  /**
+   * Execute a command with streaming I/O and full configuration.
+   *
+   * Unlike `execStream`, this accepts an `ExecConfig` so callers can enable
+   * a piped stdin (`stdin: "pipe"`), set a TTY, pass env vars, etc. Required
+   * for bidirectional streaming protocols where the host writes to the
+   * running process's stdin via `ExecHandle.takeStdin()` while concurrently
+   * reading events via `ExecHandle.recv()`.
+   */
+  execStreamWithConfig(config: ExecConfig): Promise<ExecHandle>
   /** Execute a shell command using the sandbox's configured shell. */
   shell(script: string): Promise<ExecOutput>
   /** Execute a shell command with streaming I/O. */

@@ -614,6 +614,7 @@ fn libkrunfw_candidates_from_msb(msb_path: &Path, filename: &str) -> Vec<PathBuf
     deduped
 }
 
+#[cfg(debug_assertions)]
 fn dev_msb_candidates_from(start: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
@@ -629,6 +630,7 @@ fn dev_msb_candidates_from(start: &Path) -> Vec<PathBuf> {
     candidates
 }
 
+#[cfg(debug_assertions)]
 fn dedupe_paths(paths: &mut Vec<PathBuf>) {
     let mut deduped = Vec::new();
     for path in paths.drain(..) {
