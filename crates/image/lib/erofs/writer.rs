@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::crc32c;
 use crate::filetree::{DirectoryNode, FileTree, InodeMetadata, TreeNode, Xattr};
@@ -31,6 +31,18 @@ pub enum ErofsError {
     Io(io::Error),
     NidOverflow,
     UnsupportedXattrPrefix,
+}
+
+/// Data layout map returned by [`write_erofs()`].
+///
+/// Records where each file's data blocks were placed in the output image,
+/// consumed by the fsmeta writer to build chunk-based inodes.
+#[derive(Debug, Clone)]
+pub struct ErofsDataMap {
+    /// For each file path: `(start_block, size_bytes)` within the output image.
+    pub file_blocks: HashMap<PathBuf, (u32, u64)>,
+    /// Total block count of the output image.
+    pub total_blocks: u32,
 }
 
 #[allow(dead_code)]
@@ -107,7 +119,7 @@ impl From<io::Error> for ErofsError {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub fn write_erofs(tree: &FileTree, output: &Path) -> Result<(), ErofsError> {
+pub fn write_erofs(tree: &FileTree, output: &Path) -> Result<ErofsDataMap, ErofsError> {
     let mut file = BufWriter::new(std::fs::File::create(output)?);
     let mut state = LayoutState::new();
 
@@ -115,8 +127,9 @@ pub fn write_erofs(tree: &FileTree, output: &Path) -> Result<(), ErofsError> {
     plan_directory(&tree.root, 0, &mut state, true)?;
     state.root_nid = state.plans[0].nid;
 
-    // Phase 3: Write data blocks.
-    write_data_blocks(&mut file, &state, tree)?;
+    // Phase 3: Write data blocks and collect data map.
+    let mut data_map = HashMap::new();
+    write_data_blocks(&mut file, &state, tree, &mut data_map)?;
 
     // Phase 4: Write metadata.
     write_metadata(&mut file, &state, tree)?;
@@ -141,7 +154,15 @@ pub fn write_erofs(tree: &FileTree, output: &Path) -> Result<(), ErofsError> {
         file.write_all(&[0u8])?;
         file.flush()?;
     }
-    Ok(())
+
+    // Compute total blocks from the final file size.
+    let final_len = file.seek(SeekFrom::End(0))?;
+    let total_blocks = (final_len / EROFS_BLKSIZ as u64) as u32;
+
+    Ok(ErofsDataMap {
+        file_blocks: data_map,
+        total_blocks,
+    })
 }
 
 fn compute_xattr_ibody_size(xattrs: &[Xattr]) -> Result<u32, ErofsError> {
@@ -183,11 +204,17 @@ struct DataLayoutDecision {
 /// the inode metadata, saving a data block. Falls back to FLAT_PLAIN
 /// (with a padded last block) if the tail doesn't fit in the current
 /// metadata block alongside the inode.
+///
+/// `allow_inline` must be false for regular files — the fsmeta references
+/// each full block via a chunk index by block address, so the tail must
+/// live in a real data block (padded) rather than being inlined in the
+/// per-layer EROFS metadata area, which fsmeta cannot reach.
 fn decide_data_layout(
     data_size: u64,
     inode_fixed_size: u32,
     meta_offset: u64,
     current_data_block: &mut u32,
+    allow_inline: bool,
 ) -> DataLayoutDecision {
     let blksiz = EROFS_BLKSIZ as u64;
     let tail_size = data_size % blksiz;
@@ -209,7 +236,7 @@ fn decide_data_layout(
             block_count: full_blocks as u32,
             block_start: start,
         }
-    } else {
+    } else if allow_inline {
         let inode_pos_in_block = meta_offset % blksiz;
         let remaining_in_block = blksiz - inode_pos_in_block;
         let needed = inode_fixed_size as u64 + tail_size;
@@ -238,6 +265,15 @@ fn decide_data_layout(
                 block_start: start,
             }
         }
+    } else {
+        let start = *current_data_block;
+        *current_data_block += (full_blocks + 1) as u32;
+        DataLayoutDecision {
+            layout: EROFS_INODE_FLAT_PLAIN,
+            inline_tail_size: 0,
+            block_count: (full_blocks + 1) as u32,
+            block_start: start,
+        }
     }
 }
 
@@ -252,6 +288,8 @@ fn compute_dir_data_size(dir: &DirectoryNode) -> u32 {
     for name in dir.entries.keys() {
         names.push(name.as_bytes());
     }
+    // EROFS requires dirents sorted by name in byte order.
+    names.sort();
 
     // Pack entries into blocks. Each block is EROFS_BLKSIZ bytes.
     // Block layout: dirents first, then names.
@@ -344,6 +382,9 @@ fn serialize_dir_blocks(
             file_type: dirent_file_type(child),
         });
     }
+
+    // EROFS requires dirents sorted by name in byte order (memcmp).
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
 
     let blksiz = EROFS_BLKSIZ as usize;
     let mut result = Vec::new();
@@ -506,6 +547,7 @@ fn plan_directory(
         inode_fixed_size,
         state.current_meta_offset,
         &mut state.current_data_block,
+        true, // directories: fsmeta builds its own, layer dir data is unreferenced
     );
     let (data_layout, inline_tail_size, data_block_count, data_block_start) =
         (d.layout, d.inline_tail_size, d.block_count, d.block_start);
@@ -585,11 +627,16 @@ fn plan_leaf_node(node: &TreeNode, state: &mut LayoutState) -> Result<u32, Erofs
 
     let nid = (aligned_offset / EROFS_ISLOT_SIZE as u64) as u32;
 
+    // Regular files must use FLAT_PLAIN so every block is addressable by
+    // fsmeta chunk indexes. Symlinks/devices/fifos/sockets can still inline
+    // since fsmeta reads their content from the tree directly.
+    let allow_inline = !matches!(node, TreeNode::RegularFile(_));
     let d = decide_data_layout(
         data_size,
         inode_fixed_size,
         state.current_meta_offset,
         &mut state.current_data_block,
+        allow_inline,
     );
     let (data_layout, inline_tail_size, data_block_count, data_block_start) =
         (d.layout, d.inline_tail_size, d.block_count, d.block_start);
@@ -619,6 +666,7 @@ fn write_data_blocks(
     file: &mut (impl Write + Seek),
     state: &LayoutState,
     tree: &FileTree,
+    data_map: &mut HashMap<PathBuf, (u32, u64)>,
 ) -> Result<(), ErofsError> {
     // Compute where data area starts: after the metadata area
     // The metadata area ends at current_meta_offset, rounded up to block boundary
@@ -638,7 +686,16 @@ fn write_data_blocks(
     // relative to the data area. We need to add the data_start_block offset.
 
     // Write data blocks for each plan that has data blocks
-    write_data_for_tree(file, state, &tree.root, data_start_block, &mut 0)?;
+    let current_path = PathBuf::new();
+    write_data_for_tree(
+        file,
+        state,
+        &tree.root,
+        data_start_block,
+        &mut 0,
+        &current_path,
+        data_map,
+    )?;
 
     Ok(())
 }
@@ -649,6 +706,8 @@ fn write_data_for_tree(
     dir: &DirectoryNode,
     data_start_block: u32,
     plan_idx: &mut usize,
+    current_path: &Path,
+    data_map: &mut HashMap<PathBuf, (u32, u64)>,
 ) -> Result<(), ErofsError> {
     let blksiz = EROFS_BLKSIZ as u64;
     let plan = &state.plans[*plan_idx];
@@ -674,14 +733,32 @@ fn write_data_for_tree(
     }
 
     // Recurse into children in BTreeMap order
-    for child in dir.entries.values() {
+    for (name, child) in &dir.entries {
+        let child_path = current_path.join(name);
         match child {
             TreeNode::Directory(child_dir) => {
-                write_data_for_tree(file, state, child_dir, data_start_block, plan_idx)?;
+                write_data_for_tree(
+                    file,
+                    state,
+                    child_dir,
+                    data_start_block,
+                    plan_idx,
+                    &child_path,
+                    data_map,
+                )?;
             }
             TreeNode::RegularFile(f) => {
                 let child_plan = &state.plans[*plan_idx];
                 *plan_idx += 1;
+
+                // Record block address for this file in the data map.
+                if child_plan.data_block_start != EROFS_NULL_ADDR {
+                    let abs_block = data_start_block + child_plan.data_block_start;
+                    data_map.insert(child_path, (abs_block, f.data.len() as u64));
+                } else {
+                    // Empty file — record with NULL_ADDR.
+                    data_map.insert(child_path, (EROFS_NULL_ADDR, 0));
+                }
 
                 if child_plan.data_block_count > 0 {
                     let abs_block = data_start_block + child_plan.data_block_start;

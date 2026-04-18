@@ -19,8 +19,11 @@ use crate::{
 /// Subdirectory for per-layer EROFS images (keyed by diff_id).
 const LAYERS_DIR: &str = "layers";
 
-/// Subdirectory for flat-mode merged EROFS images (keyed by manifest digest).
-const FLAT_DIR: &str = "flat";
+/// Subdirectory for fsmeta EROFS images (keyed by manifest digest).
+const FSMETA_DIR: &str = "fsmeta";
+
+/// Subdirectory for VMDK descriptors (keyed by manifest digest).
+const VMDK_DIR: &str = "vmdk";
 
 /// Subdirectory for cached manifest + config metadata.
 const MANIFESTS_DIR: &str = "manifests";
@@ -43,17 +46,22 @@ const EROFS_ALIGNMENT_BYTES: u64 = 4096;
 /// ~/.microsandbox/cache/tmp/<blob>.part                      # partial downloads
 /// ~/.microsandbox/cache/tmp/<blob>.download.lock             # download flock files
 /// ~/.microsandbox/cache/tmp/<blob>.work/                     # materialization work dirs
-/// ~/.microsandbox/cache/layers/<diff_id_safe>.erofs          # per-layer EROFS (layered mode)
+/// ~/.microsandbox/cache/layers/<diff_id_safe>.erofs          # per-layer EROFS
 /// ~/.microsandbox/cache/layers/<diff_id_safe>.erofs.lock     # materialization flock
-/// ~/.microsandbox/cache/flat/<manifest_safe>.erofs           # merged EROFS (flat mode)
-/// ~/.microsandbox/cache/flat/<manifest_safe>.erofs.lock      # materialization flock
+/// ~/.microsandbox/cache/fsmeta/<manifest_safe>.erofs         # fsmeta EROFS (fsmerge metadata)
+/// ~/.microsandbox/cache/fsmeta/<manifest_safe>.erofs.lock    # materialization flock
+/// ~/.microsandbox/cache/vmdk/<manifest_safe>.vmdk            # VMDK descriptor
+/// ~/.microsandbox/cache/vmdk/<manifest_safe>.vmdk.lock       # materialization flock
 /// ```
 pub struct GlobalCache {
     /// Root of the layer EROFS cache (`~/.microsandbox/cache/layers/`).
     layers_dir: PathBuf,
 
-    /// Root of the flat EROFS cache (`~/.microsandbox/cache/flat/`).
-    flat_dir: PathBuf,
+    /// Root of the fsmeta EROFS cache (`~/.microsandbox/cache/fsmeta/`).
+    fsmeta_dir: PathBuf,
+
+    /// Root of the VMDK descriptor cache (`~/.microsandbox/cache/vmdk/`).
+    vmdk_dir: PathBuf,
 
     /// Root of the manifest metadata cache (`~/.microsandbox/cache/manifests/`).
     manifests_dir: PathBuf,
@@ -98,11 +106,18 @@ impl GlobalCache {
     /// Creates all subdirectories if they don't exist.
     pub fn new(cache_dir: &Path) -> ImageResult<Self> {
         let layers_dir = cache_dir.join(LAYERS_DIR);
-        let flat_dir = cache_dir.join(FLAT_DIR);
+        let fsmeta_dir = cache_dir.join(FSMETA_DIR);
+        let vmdk_dir = cache_dir.join(VMDK_DIR);
         let manifests_dir = cache_dir.join(MANIFESTS_DIR);
         let tmp_dir = cache_dir.join(TMP_DIR);
 
-        for dir in [&layers_dir, &flat_dir, &manifests_dir, &tmp_dir] {
+        for dir in [
+            &layers_dir,
+            &fsmeta_dir,
+            &vmdk_dir,
+            &manifests_dir,
+            &tmp_dir,
+        ] {
             std::fs::create_dir_all(dir).map_err(|e| ImageError::Cache {
                 path: dir.clone(),
                 source: e,
@@ -111,7 +126,40 @@ impl GlobalCache {
 
         Ok(Self {
             layers_dir,
-            flat_dir,
+            fsmeta_dir,
+            vmdk_dir,
+            manifests_dir,
+            tmp_dir,
+        })
+    }
+
+    /// Create a new GlobalCache using async filesystem operations.
+    pub async fn new_async(cache_dir: &Path) -> ImageResult<Self> {
+        let layers_dir = cache_dir.join(LAYERS_DIR);
+        let fsmeta_dir = cache_dir.join(FSMETA_DIR);
+        let vmdk_dir = cache_dir.join(VMDK_DIR);
+        let manifests_dir = cache_dir.join(MANIFESTS_DIR);
+        let tmp_dir = cache_dir.join(TMP_DIR);
+
+        for dir in [
+            &layers_dir,
+            &fsmeta_dir,
+            &vmdk_dir,
+            &manifests_dir,
+            &tmp_dir,
+        ] {
+            tokio::fs::create_dir_all(dir)
+                .await
+                .map_err(|e| ImageError::Cache {
+                    path: dir.clone(),
+                    source: e,
+                })?;
+        }
+
+        Ok(Self {
+            layers_dir,
+            fsmeta_dir,
+            vmdk_dir,
             manifests_dir,
             tmp_dir,
         })
@@ -146,28 +194,52 @@ impl GlobalCache {
         diff_ids.iter().all(|d| self.is_layer_materialized(d))
     }
 
-    // ── Flat EROFS paths (keyed by manifest digest) ──────────────────
+    // ── fsmeta EROFS paths (keyed by manifest digest) ─────────────────
 
-    /// Root flat EROFS cache directory.
-    pub fn flat_dir(&self) -> &Path {
-        &self.flat_dir
+    /// Root fsmeta EROFS cache directory.
+    pub fn fsmeta_dir(&self) -> &Path {
+        &self.fsmeta_dir
     }
 
-    /// Path to the flat merged EROFS image for a given manifest digest.
-    pub fn flat_erofs_path(&self, manifest_digest: &Digest) -> PathBuf {
-        self.flat_dir
+    /// Path to the fsmeta EROFS image for a given manifest digest.
+    pub fn fsmeta_erofs_path(&self, manifest_digest: &Digest) -> PathBuf {
+        self.fsmeta_dir
             .join(format!("{}.erofs", manifest_digest.to_path_safe()))
     }
 
-    /// Path to the materialization lock for a flat EROFS image.
-    pub fn flat_erofs_lock_path(&self, manifest_digest: &Digest) -> PathBuf {
-        self.flat_dir
+    /// Path to the materialization lock for a fsmeta EROFS image.
+    pub fn fsmeta_erofs_lock_path(&self, manifest_digest: &Digest) -> PathBuf {
+        self.fsmeta_dir
             .join(format!("{}.erofs.lock", manifest_digest.to_path_safe()))
     }
 
-    /// Check if a flat EROFS image exists.
-    pub fn is_flat_materialized(&self, manifest_digest: &Digest) -> bool {
-        is_valid_erofs_artifact(&self.flat_erofs_path(manifest_digest))
+    /// Check if a fsmeta EROFS image exists.
+    pub fn is_fsmeta_materialized(&self, manifest_digest: &Digest) -> bool {
+        is_valid_erofs_artifact(&self.fsmeta_erofs_path(manifest_digest))
+    }
+
+    // ── VMDK descriptor paths (keyed by manifest digest) ────────────
+
+    /// Root VMDK cache directory.
+    pub fn vmdk_dir(&self) -> &Path {
+        &self.vmdk_dir
+    }
+
+    /// Path to the VMDK descriptor for a given manifest digest.
+    pub fn vmdk_path(&self, manifest_digest: &Digest) -> PathBuf {
+        self.vmdk_dir
+            .join(format!("{}.vmdk", manifest_digest.to_path_safe()))
+    }
+
+    /// Path to the materialization lock for a VMDK descriptor.
+    pub fn vmdk_lock_path(&self, manifest_digest: &Digest) -> PathBuf {
+        self.vmdk_dir
+            .join(format!("{}.vmdk.lock", manifest_digest.to_path_safe()))
+    }
+
+    /// Check if a VMDK descriptor exists for a given manifest digest.
+    pub fn is_vmdk_materialized(&self, manifest_digest: &Digest) -> bool {
+        self.vmdk_path(manifest_digest).exists()
     }
 
     // ── Staging/tmp paths (downloads, work dirs) ─────────────────────
@@ -220,16 +292,27 @@ impl GlobalCache {
             Err(e) => return Err(ImageError::Cache { path, source: e }),
         };
 
-        match serde_json::from_str::<CachedImageMetadata>(&data) {
-            Ok(metadata) => Ok(Some(metadata)),
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "corrupt image metadata cache, ignoring");
-                Ok(None)
-            }
-        }
+        parse_cached_image_metadata(&path, &data)
+    }
+
+    /// Read cached metadata for an image reference using async filesystem I/O.
+    pub async fn read_image_metadata_async(
+        &self,
+        reference: &Reference,
+    ) -> ImageResult<Option<CachedImageMetadata>> {
+        let path = self.image_metadata_path(reference);
+
+        let data = match tokio::fs::read_to_string(&path).await {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(ImageError::Cache { path, source: e }),
+        };
+
+        parse_cached_image_metadata(&path, &data)
     }
 
     /// Write cached metadata for an image reference.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn write_image_metadata(
         &self,
         reference: &Reference,
@@ -250,10 +333,45 @@ impl GlobalCache {
         Ok(())
     }
 
+    /// Write cached metadata for an image reference using async filesystem I/O.
+    pub(crate) async fn write_image_metadata_async(
+        &self,
+        reference: &Reference,
+        metadata: &CachedImageMetadata,
+    ) -> ImageResult<()> {
+        let path = self.image_metadata_path(reference);
+        let temp_path = path.with_extension("json.part");
+        let payload = serde_json::to_vec(metadata).map_err(|e| {
+            ImageError::ConfigParse(format!("failed to serialize cached image metadata: {e}"))
+        })?;
+
+        tokio::fs::write(&temp_path, payload)
+            .await
+            .map_err(|e| ImageError::Cache {
+                path: temp_path.clone(),
+                source: e,
+            })?;
+        tokio::fs::rename(&temp_path, &path)
+            .await
+            .map_err(|e| ImageError::Cache { path, source: e })?;
+
+        Ok(())
+    }
+
     /// Delete cached metadata for an image reference.
     pub fn delete_image_metadata(&self, reference: &Reference) -> ImageResult<()> {
         let path = self.image_metadata_path(reference);
         match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(ImageError::Cache { path, source: e }),
+        }
+    }
+
+    /// Delete cached metadata for an image reference using async filesystem I/O.
+    pub async fn delete_image_metadata_async(&self, reference: &Reference) -> ImageResult<()> {
+        let path = self.image_metadata_path(reference);
+        match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(ImageError::Cache { path, source: e }),
@@ -285,8 +403,35 @@ fn image_cache_key(reference: &Reference) -> String {
     hex::encode(hasher.finalize())
 }
 
+fn parse_cached_image_metadata(
+    path: &Path,
+    data: &str,
+) -> ImageResult<Option<CachedImageMetadata>> {
+    match serde_json::from_str::<CachedImageMetadata>(data) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "corrupt image metadata cache, ignoring"
+            );
+            Ok(None)
+        }
+    }
+}
+
 pub(crate) fn is_valid_erofs_artifact(path: &Path) -> bool {
     match std::fs::metadata(path) {
+        Ok(meta) => {
+            let len = meta.len();
+            len > 0 && len % EROFS_ALIGNMENT_BYTES == 0
+        }
+        Err(_) => false,
+    }
+}
+
+pub(crate) async fn is_valid_erofs_artifact_async(path: &Path) -> bool {
+    match tokio::fs::metadata(path).await {
         Ok(meta) => {
             let len = meta.len();
             len > 0 && len % EROFS_ALIGNMENT_BYTES == 0

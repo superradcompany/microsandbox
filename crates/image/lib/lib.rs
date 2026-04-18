@@ -25,6 +25,7 @@ mod pull;
 mod registry;
 mod store;
 pub mod tar_ingest;
+pub mod vmdk;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
@@ -37,6 +38,6 @@ pub use error::{ImageError, ImageResult};
 pub use oci_client::Reference;
 pub use platform::{Arch, Os, Platform};
 pub use progress::{PullProgress, PullProgressHandle, PullProgressSender, progress_channel};
-pub use pull::{LayerMode, PullOptions, PullPolicy, PullResult};
+pub use pull::{PullOptions, PullPolicy, PullResult};
 pub use registry::Registry;
 pub use store::{CachedImageMetadata, CachedLayerMetadata, GlobalCache};

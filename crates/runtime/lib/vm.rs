@@ -104,9 +104,11 @@ pub struct VmConfig {
     /// Whether the disk image is read-only.
     pub rootfs_disk_readonly: bool,
 
-    /// Ordered list of block device paths for EROFS OCI rootfs.
-    /// Attached in order: lower EROFS layers first, then upper.ext4 last.
-    pub rootfs_disks: Vec<PathBuf>,
+    /// VMDK descriptor path for EROFS fsmerge OCI rootfs (read-only).
+    pub rootfs_vmdk: Option<PathBuf>,
+
+    /// Upper ext4 disk path for writable overlay (paired with rootfs_vmdk).
+    pub rootfs_upper: Option<PathBuf>,
 
     /// Additional mounts as `tag:host_path[:ro]` strings.
     pub mounts: Vec<String>,
@@ -167,6 +169,8 @@ impl std::fmt::Debug for VmConfig {
             .field("vcpus", &self.vcpus)
             .field("memory_mib", &self.memory_mib)
             .field("rootfs_path", &self.rootfs_path)
+            .field("rootfs_vmdk", &self.rootfs_vmdk)
+            .field("rootfs_upper", &self.rootfs_upper)
             .field("rootfs_disk", &self.rootfs_disk)
             .field("rootfs_disk_format", &self.rootfs_disk_format)
             .field("rootfs_disk_readonly", &self.rootfs_disk_readonly)
@@ -225,22 +229,21 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         .build()
         .map_err(|e| RuntimeError::Custom(format!("tokio runtime: {e}")))?;
 
-    // Create agent relay (bind agent.sock).
-    let mut relay = tokio_rt.block_on(AgentRelay::new(
-        &config.agent_sock_path,
-        Arc::clone(&shared),
-    ))?;
-
     // Set up runtime directory.
     std::fs::create_dir_all(&config.runtime_dir)?;
     std::fs::create_dir_all(config.runtime_dir.join("scripts"))?;
 
-    // Connect to DB and insert records.
-    let db = tokio_rt.block_on(connect_db(
-        &config.sandbox_db_path,
-        config.sandbox_db_connect_timeout_secs,
-    ))?;
-    let run_db_id = tokio_rt.block_on(insert_run(&db, config.sandbox_id, pid))?;
+    // Create the relay and persist the run record with a single runtime hop.
+    let (mut relay, db, run_db_id) = tokio_rt.block_on(async {
+        let relay = AgentRelay::new(&config.agent_sock_path, Arc::clone(&shared));
+        let db = connect_db(
+            &config.sandbox_db_path,
+            config.sandbox_db_connect_timeout_secs,
+        );
+        let (relay, db) = tokio::try_join!(relay, db)?;
+        let run_db_id = insert_run(&db, config.sandbox_id, pid).await?;
+        Ok::<_, RuntimeError>((relay, db, run_db_id))
+    })?;
 
     // Shared termination reason — background tasks store the reason before
     // triggering exit; the exit observer reads it for the DB update.
@@ -452,8 +455,8 @@ fn build_vm(
         let backend =
             PassthroughFs::new(cfg).map_err(|e| RuntimeError::Custom(format!("rootfs: {e}")))?;
         builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
-    } else if !vm.rootfs_disks.is_empty() {
-        // EROFS OCI rootfs: attach trampoline virtiofs + ordered block devices.
+    } else if let Some(ref vmdk_path) = vm.rootfs_vmdk {
+        // EROFS fsmerge OCI rootfs: VMDK (read-only) + upper.ext4 (writable).
         let empty_trampoline = tempfile::tempdir()?;
         let cfg = PassthroughConfig {
             root_dir: empty_trampoline.path().to_path_buf(),
@@ -463,19 +466,25 @@ fn build_vm(
             .map_err(|e| RuntimeError::Custom(format!("trampoline rootfs: {e}")))?;
         builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
 
-        // Attach each disk in order (lower layers first, upper.ext4 last).
-        for disk_path in &vm.rootfs_disks {
-            let disk_path = disk_path.clone();
-            // Last disk (upper.ext4) is writable, EROFS layers are read-only.
-            let readonly = disk_path.extension().is_some_and(|ext| ext == "erofs");
+        // Attach VMDK as read-only VMDK-format block device.
+        let vmdk = vmdk_path.clone();
+        builder = builder.disk(move |d| {
+            d.path(&vmdk)
+                .format(msb_krun::DiskImageFormat::Vmdk)
+                .read_only(true)
+        });
+
+        // Attach upper.ext4 as writable raw block device.
+        if let Some(ref upper) = vm.rootfs_upper {
+            let upper = upper.clone();
             builder = builder.disk(move |d| {
-                d.path(&disk_path)
+                d.path(&upper)
                     .format(msb_krun::DiskImageFormat::Raw)
-                    .read_only(readonly)
+                    .read_only(false)
             });
         }
 
-        // MSB_BLOCK_ROOT env var is set by the caller (spawn_sandbox) with device names.
+        // MSB_BLOCK_ROOT env var is set by the caller (spawn_sandbox).
         let _ = empty_trampoline.keep();
     } else if let Some(ref disk_path) = vm.rootfs_disk {
         let empty_trampoline = tempfile::tempdir()?;

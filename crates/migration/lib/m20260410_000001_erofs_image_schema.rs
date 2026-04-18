@@ -121,25 +121,12 @@ enum ManifestLayer {
 }
 
 #[derive(Iden)]
-enum FlatRootfs {
-    Table,
-    Id,
-    ManifestId,
-    State,
-    SizeBytes,
-    Pinned,
-    LastUsedAt,
-    CreatedAt,
-}
-
-#[derive(Iden)]
 enum SandboxRootfs {
     Table,
     Id,
     SandboxId,
     ManifestId,
     Mode,
-    FlatRootfsId,
     UpperFstype,
     CreatedAt,
 }
@@ -378,40 +365,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // flat_rootfs
-        manager
-            .create_table(
-                Table::create()
-                    .table(FlatRootfs::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(FlatRootfs::Id)
-                            .integer()
-                            .not_null()
-                            .auto_increment()
-                            .primary_key(),
-                    )
-                    .col(ColumnDef::new(FlatRootfs::ManifestId).integer().not_null())
-                    .col(ColumnDef::new(FlatRootfs::State).text().not_null())
-                    .col(ColumnDef::new(FlatRootfs::SizeBytes).big_integer())
-                    .col(
-                        ColumnDef::new(FlatRootfs::Pinned)
-                            .boolean()
-                            .not_null()
-                            .default(false),
-                    )
-                    .col(ColumnDef::new(FlatRootfs::LastUsedAt).date_time())
-                    .col(ColumnDef::new(FlatRootfs::CreatedAt).date_time())
-                    .foreign_key(
-                        ForeignKey::create()
-                            .from(FlatRootfs::Table, FlatRootfs::ManifestId)
-                            .to(Manifest::Table, Manifest::Id)
-                            .on_delete(ForeignKeyAction::Cascade),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-
         // sandbox_rootfs
         manager
             .create_table(
@@ -433,7 +386,6 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(SandboxRootfs::ManifestId).integer())
                     .col(ColumnDef::new(SandboxRootfs::Mode).text().not_null())
-                    .col(ColumnDef::new(SandboxRootfs::FlatRootfsId).integer())
                     .col(ColumnDef::new(SandboxRootfs::UpperFstype).text())
                     .col(ColumnDef::new(SandboxRootfs::CreatedAt).date_time())
                     .foreign_key(
@@ -448,12 +400,6 @@ impl MigrationTrait for Migration {
                             .to(Manifest::Table, Manifest::Id)
                             .on_delete(ForeignKeyAction::Restrict),
                     )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .from(SandboxRootfs::Table, SandboxRootfs::FlatRootfsId)
-                            .to(FlatRootfs::Table, FlatRootfs::Id)
-                            .on_delete(ForeignKeyAction::SetNull),
-                    )
                     .to_owned(),
             )
             .await?;
@@ -464,9 +410,6 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .drop_table(Table::drop().table(SandboxRootfs::Table).to_owned())
-            .await?;
-        manager
-            .drop_table(Table::drop().table(FlatRootfs::Table).to_owned())
             .await?;
         manager
             .drop_table(Table::drop().table(ManifestLayer::Table).to_owned())

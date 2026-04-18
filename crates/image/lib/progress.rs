@@ -98,17 +98,20 @@ pub enum PullProgress {
         diff_id: Arc<str>,
     },
 
-    /// Flat mode: layer merge started.
-    FlatMergeStarted {
+    /// Merging per-layer trees into the unified rootfs view.
+    StitchMergingTrees {
         /// Number of layers being merged.
         layer_count: usize,
     },
 
-    /// Flat mode: flat.erofs written.
-    FlatMergeComplete {
-        /// Manifest digest of the flat image.
-        manifest_digest: Arc<str>,
-    },
+    /// Writing the fsmeta EROFS image (metadata-only merged view).
+    StitchWritingFsmeta,
+
+    /// Writing the VMDK descriptor that stitches fsmeta + layer EROFSes.
+    StitchWritingVmdk,
+
+    /// Stitching phase finished — fsmeta + VMDK are on disk.
+    StitchComplete,
 
     /// Entire image pull completed.
     Complete {

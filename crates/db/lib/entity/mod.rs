@@ -1,7 +1,6 @@
 //! SeaORM entity definitions for all microsandbox database tables.
 
 pub mod config;
-pub mod flat_rootfs;
 pub mod image_ref;
 pub mod layer;
 pub mod manifest;

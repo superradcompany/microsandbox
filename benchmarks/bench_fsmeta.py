@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Docker vs Microsandbox filesystem benchmarks."""
+"""Docker vs Microsandbox fsmeta-focused filesystem benchmarks."""
 
 from __future__ import annotations
 
@@ -22,12 +22,12 @@ from typing import Any
 # Constants
 #--------------------------------------------------------------------------------------------------
 
-DEFAULT_IMAGE = "python:3.12-slim"
+DEFAULT_IMAGE = "python:3.12"
 DEFAULT_ITERATIONS = 100
 DEFAULT_TIMEOUT = 3600
-OUTPUT_DIR = Path("build/bench/fs")
-SCHEMA_VERSION = 3
-DOCKER_TMPFS_MOUNTS = ("/tmp",)
+OUTPUT_DIR = Path("build/bench/fsmeta")
+SCHEMA_VERSION = 1
+LAYER_HINT_THRESHOLD = 8
 
 # Guest-side harness. Workloads define `run_once() -> dict` and optionally
 # `setup()` (called once) and `before_each()` (called before every iteration).
@@ -52,336 +52,196 @@ _GUEST_SUFFIX = textwrap.dedent("""\
     print(json.dumps({"times": _times, **(_meta or {})}))
 """)
 
+_STDLIB_TREE_HELPERS = textwrap.dedent("""\
+    import sysconfig
+    _root = sysconfig.get_paths()["stdlib"]
+    _dirs = []
+    _py_files = []
+    _hit_targets = []
+    _iter = 0
+
+    def _ensure_tree():
+        if _dirs:
+            return
+
+        stack = [_root]
+        while stack:
+            path = stack.pop()
+            _dirs.append(path)
+            first_file = None
+
+            try:
+                with os.scandir(path) as it:
+                    for entry in it:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            if first_file is None:
+                                first_file = entry.path
+                            if entry.name.endswith(".py"):
+                                _py_files.append(entry.path)
+            except (PermissionError, OSError):
+                pass
+
+            if first_file is not None:
+                _hit_targets.append((path, first_file))
+
+    def setup():
+        _ensure_tree()
+
+    def before_each():
+        global _iter
+        _iter += 1
+
+    def _miss_path(path, idx):
+        return os.path.join(path, f".__msb_fsmeta_missing__{_iter:05d}_{idx:06d}")
+""")
+
 WORKLOADS: dict[str, str] = {
-    # -- Rootfs / read-only -----------------------------------------------
-
-    "metadata_scan_stdlib": textwrap.dedent("""\
-        import sysconfig
-        _root = sysconfig.get_paths()["stdlib"]
-
+    "metadata_scan_stdlib": _STDLIB_TREE_HELPERS + textwrap.dedent("""\
         def run_once():
-            count = 0
-            stack = [_root]
-            while stack:
-                for entry in os.scandir(stack.pop()):
-                    count += 1
-                    entry.stat(follow_symlinks=False)
-                    if entry.is_dir(follow_symlinks=False):
-                        stack.append(entry.path)
-            return {"entries": count}
+            entries = 0
+            for path in _dirs:
+                try:
+                    with os.scandir(path) as it:
+                        for entry in it:
+                            entries += 1
+                            entry.stat(follow_symlinks=False)
+                except (PermissionError, OSError):
+                    pass
+            return {"dirs": len(_dirs), "entries": entries}
     """),
 
-    "read_all_py_stdlib": textwrap.dedent("""\
-        import sysconfig
-        _root = sysconfig.get_paths()["stdlib"]
+    "readdir_rescan_stdlib": _STDLIB_TREE_HELPERS + textwrap.dedent("""\
+        _passes = 10
 
         def run_once():
-            files, total = 0, 0
-            stack = [_root]
-            while stack:
-                for entry in os.scandir(stack.pop()):
-                    if entry.is_dir(follow_symlinks=False):
-                        stack.append(entry.path)
-                    elif entry.is_file(follow_symlinks=False) and entry.name.endswith(".py"):
-                        files += 1
-                        with open(entry.path, "rb") as f:
-                            total += len(f.read())
+            entries = 0
+            for _ in range(_passes):
+                for path in _dirs:
+                    try:
+                        with os.scandir(path) as it:
+                            for entry in it:
+                                entries += 1
+                                entry.is_dir(follow_symlinks=False)
+                    except (PermissionError, OSError):
+                        pass
+            return {"dirs": len(_dirs), "entries": entries, "passes": _passes}
+    """),
+
+    "negative_lookup_stdlib": _STDLIB_TREE_HELPERS + textwrap.dedent("""\
+        def run_once():
+            misses = 0
+            for idx, path in enumerate(_dirs):
+                try:
+                    os.stat(_miss_path(path, idx))
+                except FileNotFoundError:
+                    misses += 1
+                except (PermissionError, OSError):
+                    pass
+            return {"dirs": len(_dirs), "misses": misses}
+    """),
+
+    "hit_miss_mix_stdlib": _STDLIB_TREE_HELPERS + textwrap.dedent("""\
+        def run_once():
+            hits = 0
+            misses = 0
+            for idx, (parent, hit_path) in enumerate(_hit_targets):
+                try:
+                    os.stat(hit_path)
+                    hits += 1
+                except (PermissionError, OSError):
+                    pass
+
+                try:
+                    os.stat(_miss_path(parent, idx))
+                except FileNotFoundError:
+                    misses += 1
+                except (PermissionError, OSError):
+                    pass
+            return {"targets": len(_hit_targets), "hits": hits, "misses": misses}
+    """),
+
+    "read_all_py_stdlib": _STDLIB_TREE_HELPERS + textwrap.dedent("""\
+        def run_once():
+            total = 0
+            files = 0
+            for path in _py_files:
+                try:
+                    with open(path, "rb") as f:
+                        total += len(f.read())
+                    files += 1
+                except (PermissionError, OSError):
+                    pass
             return {"files": files, "bytes": total}
     """),
 
-    "deep_tree_traverse": textwrap.dedent("""\
-        import tempfile
+    "concurrent_negative_lookup_4t": _STDLIB_TREE_HELPERS + textwrap.dedent("""\
+        import threading
 
-        _base = None
-
-        def _make_tree(path, depth, width, files_per):
-            for i in range(files_per):
-                with open(os.path.join(path, f"f{i}.dat"), "wb") as f:
-                    f.write(b"x" * 512)
-            if depth > 0:
-                for d in range(width):
-                    sub = os.path.join(path, f"d{d}")
-                    os.mkdir(sub)
-                    _make_tree(sub, depth - 1, width, files_per)
-
-        def setup():
-            global _base
-            _base = tempfile.mkdtemp(dir="/tmp")
-            _make_tree(_base, depth=3, width=8, files_per=5)
-
-        def run_once():
-            count = 0
-            for root, dirs, files in os.walk(_base):
-                for name in files:
-                    os.stat(os.path.join(root, name))
-                    count += 1
-            return {"files": count}
-    """),
-
-    "random_read_stdlib": textwrap.dedent("""\
-        import random, sysconfig
-        _root = sysconfig.get_paths()["stdlib"]
-        _files = []
-
-        def setup():
-            for root, dirs, files in os.walk(_root):
-                for f in files:
-                    _files.append(os.path.join(root, f))
-
-        def run_once():
-            total = 0
-            indices = random.sample(range(len(_files)), min(200, len(_files)))
-            for i in indices:
+        def _probe_chunk(paths, base_idx, result, idx):
+            misses = 0
+            for offset, path in enumerate(paths):
                 try:
-                    with open(_files[i], "rb") as f:
-                        total += len(f.read())
+                    os.stat(_miss_path(path, base_idx + offset))
+                except FileNotFoundError:
+                    misses += 1
                 except (PermissionError, OSError):
                     pass
-            return {"files": len(indices), "bytes": total}
-    """),
-
-    # -- Write path -------------------------------------------------------
-
-    "small_file_create_1k": textwrap.dedent("""\
-        import shutil, tempfile
-        _payload = b"x" * 4096
+            result[idx] = misses
 
         def run_once():
-            base = tempfile.mkdtemp(dir="/tmp")
-            try:
-                for i in range(1000):
-                    with open(os.path.join(base, f"f{i:05d}.dat"), "wb") as f:
-                        f.write(_payload)
-                return {"files": 1000, "bytes": 1000 * len(_payload)}
-            finally:
-                shutil.rmtree(base)
-    """),
-
-    "mid_file_create_100": textwrap.dedent("""\
-        import shutil, tempfile
-        _payload = b"x" * (64 * 1024)
-
-        def run_once():
-            base = tempfile.mkdtemp(dir="/tmp")
-            try:
-                for i in range(100):
-                    with open(os.path.join(base, f"f{i:05d}.dat"), "wb") as f:
-                        f.write(_payload)
-                return {"files": 100, "bytes": 100 * len(_payload)}
-            finally:
-                shutil.rmtree(base)
-    """),
-
-    "seq_write_fsync_16m": textwrap.dedent("""\
-        import tempfile
-        _size = 16 * 1024 * 1024
-        _chunk = b"x" * (1024 * 1024)
-
-        def run_once():
-            fd, path = tempfile.mkstemp(dir="/tmp")
-            try:
-                with os.fdopen(fd, "wb", closefd=True) as f:
-                    remaining = _size
-                    while remaining:
-                        f.write(_chunk[:min(len(_chunk), remaining)])
-                        remaining -= min(len(_chunk), remaining)
-                    f.flush()
-                    os.fsync(f.fileno())
-                return {"bytes": _size}
-            finally:
-                try:
-                    os.unlink(path)
-                except FileNotFoundError:
-                    pass
-    """),
-
-    "shm_write_fsync_16m": textwrap.dedent("""\
-        import tempfile
-        _size = 16 * 1024 * 1024
-        _chunk = b"x" * (1024 * 1024)
-
-        def run_once():
-            fd, path = tempfile.mkstemp(dir="/dev/shm")
-            try:
-                with os.fdopen(fd, "wb", closefd=True) as f:
-                    remaining = _size
-                    while remaining:
-                        f.write(_chunk[:min(len(_chunk), remaining)])
-                        remaining -= min(len(_chunk), remaining)
-                    f.flush()
-                    os.fsync(f.fileno())
-                return {"bytes": _size}
-            finally:
-                try:
-                    os.unlink(path)
-                except FileNotFoundError:
-                    pass
-    """),
-
-    # -- Read-back --------------------------------------------------------
-
-    "seq_read_16m": textwrap.dedent("""\
-        import tempfile
-        _size = 16 * 1024 * 1024
-        _path = None
-
-        def setup():
-            global _path
-            fd, _path = tempfile.mkstemp(dir="/tmp")
-            with os.fdopen(fd, "wb") as f:
-                remaining = _size
-                chunk = b"x" * (1024 * 1024)
-                while remaining:
-                    n = min(len(chunk), remaining)
-                    f.write(chunk[:n])
-                    remaining -= n
-
-        def run_once():
-            total = 0
-            with open(_path, "rb") as f:
-                while True:
-                    data = f.read(1024 * 1024)
-                    if not data:
-                        break
-                    total += len(data)
-            return {"bytes": total}
-    """),
-
-    "mmap_read_16m": textwrap.dedent("""\
-        import mmap, tempfile
-        _size = 16 * 1024 * 1024
-        _path = None
-
-        def setup():
-            global _path
-            fd, _path = tempfile.mkstemp(dir="/tmp")
-            with os.fdopen(fd, "wb") as f:
-                remaining = _size
-                chunk = b"x" * (1024 * 1024)
-                while remaining:
-                    n = min(len(chunk), remaining)
-                    f.write(chunk[:n])
-                    remaining -= n
-
-        def run_once():
-            with open(_path, "rb") as f:
-                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
-                    total, offset = 0, 0
-                    while offset < len(m):
-                        end = min(offset + 1024 * 1024, len(m))
-                        total += len(m[offset:end])
-                        offset = end
-            return {"bytes": total}
-    """),
-
-    # -- Lifecycle --------------------------------------------------------
-
-    "file_delete_1k": textwrap.dedent("""\
-        import tempfile
-        _base = None
-        _payload = b"x" * 4096
-
-        def before_each():
-            global _base
-            _base = tempfile.mkdtemp(dir="/tmp")
-            for i in range(1000):
-                with open(os.path.join(_base, f"f{i:05d}.dat"), "wb") as f:
-                    f.write(_payload)
-
-        def run_once():
-            count = 0
-            for entry in os.scandir(_base):
-                os.unlink(entry.path)
-                count += 1
-            os.rmdir(_base)
-            return {"files": count}
-    """),
-
-    "rename_1k": textwrap.dedent("""\
-        import shutil, tempfile
-        _base = None
-        _payload = b"x" * 4096
-
-        def before_each():
-            global _base
-            if _base:
-                shutil.rmtree(_base, ignore_errors=True)
-            _base = tempfile.mkdtemp(dir="/tmp")
-            for i in range(1000):
-                with open(os.path.join(_base, f"f{i:05d}.dat"), "wb") as f:
-                    f.write(_payload)
-
-        def run_once():
-            count = 0
-            for entry in os.scandir(_base):
-                os.rename(entry.path, entry.path + ".renamed")
-                count += 1
-            return {"files": count}
-    """),
-
-    # -- Mixed / concurrent -----------------------------------------------
-
-    "mixed_read_write": textwrap.dedent("""\
-        import sysconfig, tempfile, shutil
-        _root = sysconfig.get_paths()["stdlib"]
-        _py_files = []
-
-        def setup():
-            for root, dirs, files in os.walk(_root):
-                for f in files:
-                    if f.endswith(".py"):
-                        _py_files.append(os.path.join(root, f))
-
-        def run_once():
-            reads, writes = 0, 0
-            base = tempfile.mkdtemp(dir="/tmp")
-            try:
-                for i in range(500):
-                    with open(_py_files[i % len(_py_files)], "rb") as f:
-                        data = f.read()
-                    reads += 1
-                    with open(os.path.join(base, f"w{i:05d}.dat"), "wb") as f:
-                        f.write(data[:4096] if len(data) > 4096 else data)
-                    writes += 1
-                return {"reads": reads, "writes": writes}
-            finally:
-                shutil.rmtree(base)
-    """),
-
-    "concurrent_read_4t": textwrap.dedent("""\
-        import sysconfig, threading
-        _root = sysconfig.get_paths()["stdlib"]
-        _files = []
-
-        def setup():
-            for root, dirs, files in os.walk(_root):
-                for f in files:
-                    if f.endswith(".py"):
-                        _files.append(os.path.join(root, f))
-
-        def _read_chunk(paths, result, idx):
-            total = 0
-            for p in paths:
-                try:
-                    with open(p, "rb") as f:
-                        total += len(f.read())
-                except (PermissionError, OSError):
-                    pass
-            result[idx] = total
-
-        def run_once():
-            n = len(_files)
-            chunk_size = (n + 3) // 4
-            chunks = [_files[i:i+chunk_size] for i in range(0, n, chunk_size)]
+            n = len(_dirs)
+            chunk_size = max(1, (n + 3) // 4)
+            chunks = [_dirs[i:i+chunk_size] for i in range(0, n, chunk_size)]
             results = [0] * len(chunks)
             threads = []
+
             for i, chunk in enumerate(chunks):
-                t = threading.Thread(target=_read_chunk, args=(chunk, results, i))
+                t = threading.Thread(
+                    target=_probe_chunk,
+                    args=(chunk, i * chunk_size, results, i),
+                )
                 threads.append(t)
                 t.start()
+
             for t in threads:
                 t.join()
-            return {"files": n, "bytes": sum(results), "threads": len(chunks)}
+
+            return {"dirs": n, "misses": sum(results), "threads": len(chunks)}
+    """),
+
+    "concurrent_readdir_4t": _STDLIB_TREE_HELPERS + textwrap.dedent("""\
+        import threading
+
+        def _scan_chunk(paths, result, idx):
+            entries = 0
+            for path in paths:
+                try:
+                    with os.scandir(path) as it:
+                        for entry in it:
+                            entries += 1
+                            entry.is_dir(follow_symlinks=False)
+                except (PermissionError, OSError):
+                    pass
+            result[idx] = entries
+
+        def run_once():
+            n = len(_dirs)
+            chunk_size = max(1, (n + 3) // 4)
+            chunks = [_dirs[i:i+chunk_size] for i in range(0, n, chunk_size)]
+            results = [0] * len(chunks)
+            threads = []
+
+            for i, chunk in enumerate(chunks):
+                t = threading.Thread(target=_scan_chunk, args=(chunk, results, i))
+                threads.append(t)
+                t.start()
+
+            for t in threads:
+                t.join()
+
+            return {"dirs": n, "entries": sum(results), "threads": len(chunks)}
     """),
 }
 
@@ -434,12 +294,17 @@ def summarize(payload: dict[str, Any], wall_seconds: float) -> dict[str, Any]:
     }
 
 
-def docker_run_cmd(docker: str, name: str, image: str) -> list[str]:
-    cmd = [docker, "run", "-d", "--name", name]
-    for mount in DOCKER_TMPFS_MOUNTS:
-        cmd.extend(["--tmpfs", mount])
-    cmd.extend([image, "sleep", "infinity"])
-    return cmd
+def inspect_image(reference: str, msb: str, timeout: int) -> dict[str, Any]:
+    proc = run_cmd([msb, "image", "inspect", reference, "--format", "json"], timeout=timeout)
+    if proc.returncode != 0:
+        return {"error": proc.stderr.strip() or proc.stdout.strip()}
+
+    payload = json.loads(proc.stdout)
+    return {
+        "digest": payload.get("digest"),
+        "layer_count": payload.get("layer_count"),
+        "size_bytes": payload.get("size_bytes"),
+    }
 
 
 #--------------------------------------------------------------------------------------------------
@@ -483,7 +348,7 @@ def run_workload(
     result: dict[str, Any] = {}
     try:
         run_cmd(
-            docker_run_cmd(docker, dkr_name, image),
+            [docker, "run", "-d", "--name", dkr_name, image, "sleep", "infinity"],
             timeout=timeout,
             check=True,
         )
@@ -553,9 +418,10 @@ def print_report(doc: dict[str, Any]) -> None:
     config = doc["config"]
     versions = doc["versions"]
     images = config["images"]
+    image_details = doc.get("image_details", {})
 
     print()
-    print("Docker vs Microsandbox \u2014 Filesystem Benchmark")
+    print("Docker vs Microsandbox \u2014 fsmeta Benchmark")
     if len(images) == 1:
         print(f"  Image:      {images[0]}")
     else:
@@ -563,11 +429,19 @@ def print_report(doc: dict[str, Any]) -> None:
     print(f"  Iterations: {config['iterations']}")
     print(f"  Docker:     {versions['docker']}")
     print(f"  msb:        {versions['msb']}")
-    if config.get("docker_tmpfs"):
-        print(f"  Docker tmpfs: {', '.join(config['docker_tmpfs'])}")
 
     for image, workloads in doc["results"].items():
         print(f"\n  {image}")
+
+        detail = image_details.get(image, {})
+        if "layer_count" in detail and detail["layer_count"] is not None:
+            print(f"  Layers:     {detail['layer_count']}")
+            if detail["layer_count"] < LAYER_HINT_THRESHOLD:
+                print(
+                    "  Note:       Flat image; use 8+ layers for a stronger merged-view signal"
+                )
+        elif "error" in detail:
+            print(f"  Image info:  {detail['error']}")
 
         rows: list[list[str]] = []
         for name, data in workloads.items():
@@ -654,7 +528,7 @@ def print_comparison(current: dict[str, Any], baseline: dict[str, Any]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Docker vs Microsandbox filesystem benchmarks")
+    p = argparse.ArgumentParser(description="Docker vs Microsandbox fsmeta-focused benchmarks")
     p.add_argument("--image", action="append", default=None)
     p.add_argument("--iterations", type=int, default=DEFAULT_ITERATIONS)
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
@@ -673,7 +547,7 @@ def main() -> int:
     msb = require_bin(args.msb_bin, "msb")
     docker = require_bin(args.docker_bin, "docker")
 
-    run_name = args.run_name or "bench"
+    run_name = args.run_name or "bench-fsmeta"
     images = args.image or [DEFAULT_IMAGE]
     workload_names = args.workload or list(WORKLOADS)
 
@@ -700,10 +574,11 @@ def main() -> int:
             "iterations": args.iterations,
             "timeout": args.timeout,
             "workloads": workload_names,
-            "docker_tmpfs": list(DOCKER_TMPFS_MOUNTS),
+            "layer_hint_threshold": LAYER_HINT_THRESHOLD,
         },
         "versions": {"msb": msb_ver, "docker": docker_ver},
         "pull": None,
+        "image_details": {},
         "results": {},
     }
 
@@ -717,6 +592,7 @@ def main() -> int:
             doc["results"][image][name] = run_workload(
                 name, code, args.iterations, image, msb, docker, args.timeout,
             )
+        doc["image_details"][image] = inspect_image(image, msb, args.timeout)
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, indent=2) + "\n")

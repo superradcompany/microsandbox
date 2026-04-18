@@ -18,22 +18,14 @@ struct TmpfsSpec<'a> {
 /// Parsed block root specification with kind-based dispatch.
 #[derive(Debug)]
 enum BlockRootSpec<'a> {
-    /// Single disk image (replaces legacy MSB_BLOCK_ROOT format).
+    /// Single disk image.
     DiskImage {
         device: &'a str,
         fstype: Option<&'a str>,
     },
-    /// OCI layered: N EROFS lower devices + ext4 upper + guest overlayfs.
-    OciLayered {
-        lowers: Vec<&'a str>,
-        lower_fstype: &'a str,
-        upper: &'a str,
-        upper_fstype: &'a str,
-    },
-    /// OCI flat: 1 merged EROFS lower + ext4 upper + guest overlayfs.
-    OciFlat {
+    /// OCI EROFS: merged EROFS lower + writable upper + guest overlayfs.
+    OciErofs {
         lower: &'a str,
-        lower_fstype: &'a str,
         upper: &'a str,
         upper_fstype: &'a str,
     },
@@ -126,9 +118,7 @@ fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec<'_>> {
 ///
 /// Supports:
 /// - `kind=disk-image,device=/dev/vda[,fstype=ext4]`
-/// - `kind=oci-layered,lowers=/dev/vdb;/dev/vdc,lower_fstype=erofs,upper=/dev/vde,upper_fstype=ext4`
-/// - `kind=oci-flat,lower=/dev/vdb,lower_fstype=erofs,upper=/dev/vdc,upper_fstype=ext4`
-/// - Legacy: `/dev/vda[,fstype=ext4]` (no `kind=`, treated as disk-image)
+/// - `kind=oci-erofs,lower=/dev/vdb,upper=/dev/vdc,upper_fstype=ext4`
 fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec<'_>> {
     let mut kv: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for part in val.split(',') {
@@ -150,33 +140,12 @@ fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec<'_>> {
             let fstype = kv.get("fstype").filter(|v| !v.is_empty()).copied();
             Ok(BlockRootSpec::DiskImage { device, fstype })
         }
-        Some("oci-layered") => {
-            let lowers_str = kv.get("lowers").copied().ok_or_else(|| {
-                AgentdError::Init("MSB_BLOCK_ROOT kind=oci-layered missing 'lowers' key".into())
-            })?;
-            let lowers: Vec<&str> = if lowers_str.is_empty() {
-                Vec::new()
-            } else {
-                lowers_str.split(';').collect()
-            };
-            let lower_fstype = get("lower_fstype")?;
-            let upper = get("upper")?;
-            let upper_fstype = get("upper_fstype")?;
-            Ok(BlockRootSpec::OciLayered {
-                lowers,
-                lower_fstype,
-                upper,
-                upper_fstype,
-            })
-        }
-        Some("oci-flat") => {
+        Some("oci-erofs") => {
             let lower = get("lower")?;
-            let lower_fstype = get("lower_fstype")?;
             let upper = get("upper")?;
             let upper_fstype = get("upper_fstype")?;
-            Ok(BlockRootSpec::OciFlat {
+            Ok(BlockRootSpec::OciErofs {
                 lower,
-                lower_fstype,
                 upper,
                 upper_fstype,
             })
@@ -184,32 +153,9 @@ fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec<'_>> {
         Some(other) => Err(AgentdError::Init(format!(
             "MSB_BLOCK_ROOT unknown kind: {other}"
         ))),
-        None => {
-            // Legacy format: device[,fstype=TYPE]
-            let mut parts = val.split(',');
-            let device = parts.next().unwrap();
-            if device.is_empty() {
-                return Err(AgentdError::Init(
-                    "MSB_BLOCK_ROOT has empty device path".into(),
-                ));
-            }
-            let mut fstype = None;
-            for opt in parts {
-                if let Some(v) = opt.strip_prefix("fstype=") {
-                    if v.is_empty() {
-                        return Err(AgentdError::Init(
-                            "MSB_BLOCK_ROOT has empty fstype value".into(),
-                        ));
-                    }
-                    fstype = Some(v);
-                } else {
-                    return Err(AgentdError::Init(format!(
-                        "unknown MSB_BLOCK_ROOT option: {opt}"
-                    )));
-                }
-            }
-            Ok(BlockRootSpec::DiskImage { device, fstype })
-        }
+        None => Err(AgentdError::Init(
+            "MSB_BLOCK_ROOT missing 'kind' key".into(),
+        )),
     }
 }
 
@@ -440,8 +386,7 @@ mod linux {
     ///
     /// Dispatches to the appropriate handler based on `kind`:
     /// - `disk-image`: single device mount + pivot
-    /// - `oci-layered`: N EROFS lowers + ext4 upper + guest overlayfs + pivot
-    /// - `oci-flat`: 1 EROFS lower + ext4 upper + guest overlayfs + pivot
+    /// - `oci-erofs`: merged EROFS lower + writable upper + guest overlayfs + pivot
     pub fn mount_block_root() -> AgentdResult<()> {
         let val = match std::env::var(microsandbox_protocol::ENV_BLOCK_ROOT) {
             Ok(v) if !v.is_empty() => v,
@@ -455,21 +400,12 @@ mod linux {
             super::BlockRootSpec::DiskImage { device, fstype } => {
                 mount_disk_image(device, fstype)?;
             }
-            super::BlockRootSpec::OciLayered {
-                lowers,
-                lower_fstype,
-                upper,
-                upper_fstype,
-            } => {
-                mount_oci_overlay(&lowers, lower_fstype, upper, upper_fstype)?;
-            }
-            super::BlockRootSpec::OciFlat {
+            super::BlockRootSpec::OciErofs {
                 lower,
-                lower_fstype,
                 upper,
                 upper_fstype,
             } => {
-                mount_oci_overlay(&[lower], lower_fstype, upper, upper_fstype)?;
+                mount_oci_erofs(lower, upper, upper_fstype)?;
             }
         }
 
@@ -500,50 +436,38 @@ mod linux {
         Ok(())
     }
 
-    /// Mount EROFS lower layers + ext4 upper + overlayfs at /newroot.
-    ///
-    /// Works for both layered (N lowers) and flat (1 lower) modes.
-    fn mount_oci_overlay(
-        lowers: &[&str],
-        lower_fstype: &str,
+    /// Mount merged EROFS lower + writable upper + overlayfs at /newroot.
+    fn mount_oci_erofs(
+        lower_device: &str,
         upper_device: &str,
         upper_fstype: &str,
     ) -> AgentdResult<()> {
-        let rootfs_base = "/.msb/rootfs";
-        std::fs::create_dir_all(rootfs_base)
-            .map_err(|e| AgentdError::Init(format!("failed to create {rootfs_base}: {e}")))?;
+        // Mount the EROFS lower device read-only.
+        let lower_dir = "/.msb/rootfs/lower";
+        mkdir_ignore_exists("/.msb/rootfs")?;
+        mkdir_ignore_exists("/.msb/rootfs/lower")?;
+        mount(
+            Some(lower_device),
+            lower_dir,
+            Some("erofs"),
+            MsFlags::MS_RDONLY,
+            None::<&str>,
+        )
+        .map_err(|e| AgentdError::Init(format!("mount {lower_device} at {lower_dir}: {e}")))?;
 
-        // Mount each lower EROFS device.
-        let mut lower_dirs = Vec::with_capacity(lowers.len());
-        for (i, device) in lowers.iter().enumerate() {
-            let mount_point = format!("{rootfs_base}/layers/{i}");
-            std::fs::create_dir_all(&mount_point)
-                .map_err(|e| AgentdError::Init(format!("mkdir {mount_point}: {e}")))?;
-            mount(
-                Some(*device),
-                mount_point.as_str(),
-                Some(lower_fstype),
-                MsFlags::MS_RDONLY,
-                None::<&str>,
-            )
-            .map_err(|e| AgentdError::Init(format!("mount {device} at {mount_point}: {e}")))?;
-            lower_dirs.push(mount_point);
-        }
-
-        // Mount the ext4 upper device.
-        let upperfs_dir = format!("{rootfs_base}/upperfs");
-        std::fs::create_dir_all(&upperfs_dir)
-            .map_err(|e| AgentdError::Init(format!("mkdir {upperfs_dir}: {e}")))?;
+        // Mount the writable upper device.
+        let upperfs_dir = "/.msb/rootfs/upperfs";
+        mkdir_ignore_exists("/.msb/rootfs/upperfs")?;
         mount(
             Some(upper_device),
-            upperfs_dir.as_str(),
+            upperfs_dir,
             Some(upper_fstype),
             MsFlags::empty(),
             None::<&str>,
         )
         .map_err(|e| AgentdError::Init(format!("mount {upper_device} at {upperfs_dir}: {e}")))?;
 
-        // Create upper and work subdirs on the ext4 device.
+        // Create upper and work subdirs on the writable device.
         let upper_dir = format!("{upperfs_dir}/upper");
         let work_dir = format!("{upperfs_dir}/work");
         std::fs::create_dir_all(&upper_dir)
@@ -551,21 +475,8 @@ mod linux {
         std::fs::create_dir_all(&work_dir)
             .map_err(|e| AgentdError::Init(format!("mkdir {work_dir}: {e}")))?;
 
-        // Build overlayfs lowerdir option: top layer first (reverse of OCI order).
-        let lowerdir = if lower_dirs.is_empty() {
-            String::new()
-        } else {
-            let mut reversed = lower_dirs.clone();
-            reversed.reverse();
-            reversed.join(":")
-        };
-
-        // Assemble overlayfs mount options.
-        let mount_data = if lowerdir.is_empty() {
-            format!("upperdir={upper_dir},workdir={work_dir}")
-        } else {
-            format!("lowerdir={lowerdir},upperdir={upper_dir},workdir={work_dir}")
-        };
+        // Assemble overlayfs mount.
+        let mount_data = format!("lowerdir={lower_dir},upperdir={upper_dir},workdir={work_dir}");
 
         mount(
             Some("overlay"),
@@ -1049,46 +960,6 @@ mod tests {
         assert!(err.to_string().contains("empty path"));
     }
 
-    // ── Legacy format tests ───────────────────────────────────────────
-
-    #[test]
-    fn test_parse_block_root_legacy_device_only() {
-        let spec = parse_block_root("/dev/vda").unwrap();
-        let BlockRootSpec::DiskImage { device, fstype } = spec else {
-            panic!("expected DiskImage");
-        };
-        assert_eq!(device, "/dev/vda");
-        assert_eq!(fstype, None);
-    }
-
-    #[test]
-    fn test_parse_block_root_legacy_with_fstype() {
-        let spec = parse_block_root("/dev/vda,fstype=ext4").unwrap();
-        let BlockRootSpec::DiskImage { device, fstype } = spec else {
-            panic!("expected DiskImage");
-        };
-        assert_eq!(device, "/dev/vda");
-        assert_eq!(fstype, Some("ext4"));
-    }
-
-    #[test]
-    fn test_parse_block_root_legacy_empty_device_errors() {
-        let err = parse_block_root(",fstype=ext4").unwrap_err();
-        assert!(err.to_string().contains("empty device path"));
-    }
-
-    #[test]
-    fn test_parse_block_root_legacy_unknown_option_errors() {
-        let err = parse_block_root("/dev/vda,bogus=42").unwrap_err();
-        assert!(err.to_string().contains("unknown MSB_BLOCK_ROOT option"));
-    }
-
-    #[test]
-    fn test_parse_block_root_legacy_empty_fstype_errors() {
-        let err = parse_block_root("/dev/vda,fstype=").unwrap_err();
-        assert!(err.to_string().contains("empty fstype"));
-    }
-
     // ── kind=disk-image tests ────────────────────────────────────────
 
     #[test]
@@ -1101,67 +972,38 @@ mod tests {
         assert_eq!(fstype, Some("ext4"));
     }
 
-    // ── kind=oci-layered tests ───────────────────────────────────────
+    // ── kind=oci-erofs tests ─────────────────────────────────────────
 
     #[test]
-    fn test_parse_block_root_oci_layered() {
-        let spec = parse_block_root(
-            "kind=oci-layered,lowers=/dev/vdb;/dev/vdc,lower_fstype=erofs,upper=/dev/vdd,upper_fstype=ext4"
-        ).unwrap();
-        let BlockRootSpec::OciLayered {
-            lowers,
-            lower_fstype,
-            upper,
-            upper_fstype,
-        } = spec
-        else {
-            panic!("expected OciLayered");
-        };
-        assert_eq!(lowers, vec!["/dev/vdb", "/dev/vdc"]);
-        assert_eq!(lower_fstype, "erofs");
-        assert_eq!(upper, "/dev/vdd");
-        assert_eq!(upper_fstype, "ext4");
-    }
-
-    #[test]
-    fn test_parse_block_root_oci_layered_empty_lowers() {
-        let spec = parse_block_root(
-            "kind=oci-layered,lowers=,lower_fstype=erofs,upper=/dev/vdb,upper_fstype=ext4",
-        )
-        .unwrap();
-        let BlockRootSpec::OciLayered { lowers, .. } = spec else {
-            panic!("expected OciLayered");
-        };
-        assert!(lowers.is_empty());
-    }
-
-    // ── kind=oci-flat tests ──────────────────────────────────────────
-
-    #[test]
-    fn test_parse_block_root_oci_flat() {
-        let spec = parse_block_root(
-            "kind=oci-flat,lower=/dev/vdb,lower_fstype=erofs,upper=/dev/vdc,upper_fstype=ext4",
-        )
-        .unwrap();
-        let BlockRootSpec::OciFlat {
+    fn test_parse_block_root_oci_erofs() {
+        let spec =
+            parse_block_root("kind=oci-erofs,lower=/dev/vda,upper=/dev/vdb,upper_fstype=ext4")
+                .unwrap();
+        let BlockRootSpec::OciErofs {
             lower,
-            lower_fstype,
             upper,
             upper_fstype,
         } = spec
         else {
-            panic!("expected OciFlat");
+            panic!("expected OciErofs");
         };
-        assert_eq!(lower, "/dev/vdb");
-        assert_eq!(lower_fstype, "erofs");
-        assert_eq!(upper, "/dev/vdc");
+        assert_eq!(lower, "/dev/vda");
+        assert_eq!(upper, "/dev/vdb");
         assert_eq!(upper_fstype, "ext4");
     }
+
+    // ── error tests ─────────────────────────────────────────────────
 
     #[test]
     fn test_parse_block_root_unknown_kind_errors() {
         let err = parse_block_root("kind=bogus,device=/dev/vda").unwrap_err();
         assert!(err.to_string().contains("unknown kind"));
+    }
+
+    #[test]
+    fn test_parse_block_root_missing_kind_errors() {
+        let err = parse_block_root("/dev/vda").unwrap_err();
+        assert!(err.to_string().contains("missing 'kind' key"));
     }
 
     #[test]

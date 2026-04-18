@@ -1,8 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 //--------------------------------------------------------------------------------------------------
@@ -32,6 +33,7 @@ pub(crate) const OPAQUE_XATTR_VALUE: &[u8] = b"y";
 
 /// File content storage — either in-memory for small files or spooled to
 /// disk for large files to keep memory usage bounded.
+#[derive(Clone)]
 pub enum FileData {
     /// Small file content held in memory.
     Memory(Vec<u8>),
@@ -69,7 +71,7 @@ impl PartialEq for FileData {
 
 /// Threshold below which file data is kept in memory (64 KiB).
 /// Files at or above this size are spooled to disk during tar ingestion.
-pub const SPOOL_THRESHOLD: u64 = u64::MAX; // TODO: restore to 64 * 1024 after debugging
+pub const SPOOL_THRESHOLD: u64 = 64 * 1024;
 
 /// A writable spool file for large file data during tar ingestion.
 pub struct DataSpool {
@@ -87,6 +89,7 @@ pub struct ResourceLimits {
     pub max_symlink_target: usize,
 }
 
+#[derive(Clone)]
 pub struct InodeMetadata {
     pub uid: u32,
     pub gid: u32,
@@ -95,11 +98,13 @@ pub struct InodeMetadata {
     pub mtime_nsec: u32,
 }
 
+#[derive(Clone)]
 pub struct Xattr {
     pub name: Vec<u8>,
     pub value: Vec<u8>,
 }
 
+#[derive(Clone)]
 pub enum TreeNode {
     RegularFile(RegularFileNode),
     Directory(DirectoryNode),
@@ -110,6 +115,7 @@ pub enum TreeNode {
     Socket(InodeMetadata),
 }
 
+#[derive(Clone)]
 pub struct RegularFileNode {
     pub metadata: InodeMetadata,
     pub xattrs: Vec<Xattr>,
@@ -117,23 +123,27 @@ pub struct RegularFileNode {
     pub nlink: u32,
 }
 
+#[derive(Clone)]
 pub struct DirectoryNode {
     pub metadata: InodeMetadata,
     pub xattrs: Vec<Xattr>,
     pub entries: BTreeMap<OsString, TreeNode>,
 }
 
+#[derive(Clone)]
 pub struct SymlinkNode {
     pub metadata: InodeMetadata,
     pub target: Vec<u8>,
 }
 
+#[derive(Clone)]
 pub struct DeviceNode {
     pub metadata: InodeMetadata,
     pub major: u32,
     pub minor: u32,
 }
 
+#[derive(Clone)]
 pub struct FileTree {
     pub root: DirectoryNode,
 }
@@ -432,6 +442,15 @@ impl FileTree {
     pub fn merge_layer(&mut self, layer: FileTree) {
         merge_directory(&mut self.root, layer.root);
     }
+
+    /// Strip file data from this tree, keeping only directory structure and metadata.
+    ///
+    /// After calling this, all `RegularFile` nodes have empty `FileData::Memory(Vec::new())`.
+    /// Used to reduce memory after writing a per-layer EROFS while retaining the tree
+    /// for fsmeta merge.
+    pub fn strip_file_data(&mut self) {
+        strip_data_in_dir(&mut self.root);
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -531,6 +550,140 @@ fn data_size_in_dir(dir: &DirectoryNode) -> u64 {
         }
     }
     size
+}
+
+fn strip_data_in_dir(dir: &mut DirectoryNode) {
+    for node in dir.entries.values_mut() {
+        match node {
+            TreeNode::RegularFile(f) => {
+                f.data = FileData::Memory(Vec::new());
+            }
+            TreeNode::Directory(d) => {
+                strip_data_in_dir(d);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Merge multiple layer trees into a single tree with provenance tracking.
+///
+/// Applies layers bottom-to-top, handling whiteouts and opaque directories.
+/// Unlike `merge_layer()`, whiteout entries and opaque xattrs are consumed
+/// and NOT propagated — the output is the clean final state.
+///
+/// Returns the merged tree and a map from file path to source layer index
+/// (0-based, bottom-to-top).
+pub fn merge_layers_with_provenance(layers: Vec<FileTree>) -> (FileTree, HashMap<PathBuf, usize>) {
+    let mut merged = FileTree::new();
+    let mut provenance: HashMap<PathBuf, usize> = HashMap::new();
+
+    for (layer_idx, layer) in layers.into_iter().enumerate() {
+        let path = PathBuf::new();
+        merge_directory_with_provenance(
+            &mut merged.root,
+            layer.root,
+            layer_idx,
+            &path,
+            &mut provenance,
+        );
+    }
+
+    // Strip opaque xattrs from the final merged tree — they are overlayfs
+    // directives consumed by the merge, not meaningful in fsmeta.
+    strip_opaque_xattrs(&mut merged.root);
+
+    (merged, provenance)
+}
+
+fn merge_directory_with_provenance(
+    base: &mut DirectoryNode,
+    layer: DirectoryNode,
+    layer_idx: usize,
+    current_path: &Path,
+    provenance: &mut HashMap<PathBuf, usize>,
+) {
+    for (name, layer_node) in layer.entries {
+        let child_path = current_path.join(&name);
+
+        // Whiteout: remove target from merged tree and its provenance.
+        if is_whiteout_device(&layer_node) {
+            // Remove provenance entries for the deleted item and all its descendants.
+            base.entries.remove(&name);
+            provenance.retain(|k, _| !k.starts_with(&child_path));
+            continue;
+        }
+
+        match layer_node {
+            TreeNode::Directory(layer_dir) => {
+                let opaque = has_opaque_xattr(&layer_dir);
+
+                match base.entries.get_mut(&name) {
+                    Some(TreeNode::Directory(base_dir)) => {
+                        if opaque {
+                            // Remove all provenance for entries under this directory.
+                            provenance.retain(|k, _| !k.starts_with(&child_path));
+                            base_dir.entries.clear();
+                        }
+                        base_dir.metadata = layer_dir.metadata;
+                        base_dir.xattrs = layer_dir.xattrs;
+                        merge_directory_with_provenance(
+                            base_dir,
+                            DirectoryNode {
+                                metadata: InodeMetadata::default(),
+                                xattrs: Vec::new(),
+                                entries: layer_dir.entries,
+                            },
+                            layer_idx,
+                            &child_path,
+                            provenance,
+                        );
+                    }
+                    _ => {
+                        // New directory replaces whatever was there.
+                        provenance.retain(|k, _| !k.starts_with(&child_path));
+                        // Record provenance for all entries in the new directory.
+                        record_provenance_recursive(&layer_dir, layer_idx, &child_path, provenance);
+                        base.entries.insert(name, TreeNode::Directory(layer_dir));
+                    }
+                }
+            }
+            other => {
+                // Non-directory entry: record provenance.
+                provenance.insert(child_path, layer_idx);
+                base.entries.insert(name, other);
+            }
+        }
+    }
+}
+
+fn record_provenance_recursive(
+    dir: &DirectoryNode,
+    layer_idx: usize,
+    current_path: &Path,
+    provenance: &mut HashMap<PathBuf, usize>,
+) {
+    for (name, child) in &dir.entries {
+        let child_path = current_path.join(name);
+        match child {
+            TreeNode::Directory(child_dir) => {
+                record_provenance_recursive(child_dir, layer_idx, &child_path, provenance);
+            }
+            _ => {
+                provenance.insert(child_path, layer_idx);
+            }
+        }
+    }
+}
+
+fn strip_opaque_xattrs(dir: &mut DirectoryNode) {
+    dir.xattrs
+        .retain(|x| !(x.name == OPAQUE_XATTR_NAME && x.value == OPAQUE_XATTR_VALUE));
+    for node in dir.entries.values_mut() {
+        if let TreeNode::Directory(child_dir) = node {
+            strip_opaque_xattrs(child_dir);
+        }
+    }
 }
 
 fn is_whiteout_device(node: &TreeNode) -> bool {

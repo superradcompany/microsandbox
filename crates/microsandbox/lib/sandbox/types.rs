@@ -86,6 +86,7 @@ pub trait IntoImage {
 }
 
 /// A volume mount specification for a sandbox.
+#[derive(Clone)]
 pub enum VolumeMount {
     /// Bind mount a host directory into the guest.
     Bind {

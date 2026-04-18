@@ -1,6 +1,6 @@
 //! Fluent builder for [`SandboxConfig`].
 
-use microsandbox_image::{LayerMode, PullPolicy, PullProgressHandle, RegistryAuth};
+use microsandbox_image::{PullPolicy, PullProgressHandle, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
 #[cfg(feature = "net")]
@@ -169,15 +169,6 @@ impl SandboxBuilder {
     /// Set the pull policy for OCI images.
     pub fn pull_policy(mut self, policy: PullPolicy) -> Self {
         self.config.pull_policy = policy;
-        self
-    }
-
-    /// Set how OCI image layers are assembled.
-    ///
-    /// `Layered` (default) produces one EROFS image per OCI layer.
-    /// `Flat` merges all layers into a single EROFS image.
-    pub fn layer_mode(mut self, mode: LayerMode) -> Self {
-        self.config.layer_mode = mode;
         self
     }
 

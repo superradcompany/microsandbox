@@ -1,7 +1,6 @@
 //! Entity definition for the `sandbox_rootfs` table.
 //!
-//! Pins each sandbox to a manifest digest and runtime mode, replacing the
-//! old `sandbox_image` join table.
+//! Pins each sandbox to a manifest digest and runtime mode.
 
 use sea_orm::entity::prelude::*;
 
@@ -19,7 +18,6 @@ pub struct Model {
     pub sandbox_id: i32,
     pub manifest_id: Option<i32>,
     pub mode: String,
-    pub flat_rootfs_id: Option<i32>,
     pub upper_fstype: Option<String>,
     pub created_at: Option<DateTime>,
 }
@@ -27,10 +25,8 @@ pub struct Model {
 /// Rootfs source mode stored in the `sandbox_rootfs.mode` column.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxRootfsMode {
-    /// Per-layer EROFS block devices + guest overlayfs.
-    LayeredErofs,
-    /// Single merged EROFS block device + guest overlayfs.
-    FlatErofs,
+    /// EROFS fsmerge + VMDK (always 2 block devices).
+    Erofs,
     /// Host directory bind mount.
     Bind,
     /// Pre-existing disk image (qcow2/raw/vmdk).
@@ -45,8 +41,7 @@ impl SandboxRootfsMode {
     /// Database string representation.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::LayeredErofs => "layered_erofs",
-            Self::FlatErofs => "flat_erofs",
+            Self::Erofs => "erofs",
             Self::Bind => "bind",
             Self::DiskImage => "disk_image",
         }
@@ -55,8 +50,7 @@ impl SandboxRootfsMode {
     /// Parse from database string.
     pub fn parse_str(s: &str) -> Option<Self> {
         match s {
-            "layered_erofs" => Some(Self::LayeredErofs),
-            "flat_erofs" => Some(Self::FlatErofs),
+            "erofs" => Some(Self::Erofs),
             "bind" => Some(Self::Bind),
             "disk_image" => Some(Self::DiskImage),
             _ => None,
@@ -88,15 +82,6 @@ pub enum Relation {
         on_delete = "Restrict"
     )]
     Manifest,
-
-    /// References a flat rootfs (nullable).
-    #[sea_orm(
-        belongs_to = "super::flat_rootfs::Entity",
-        from = "Column::FlatRootfsId",
-        to = "super::flat_rootfs::Column::Id",
-        on_delete = "SetNull"
-    )]
-    FlatRootfs,
 }
 
 impl Related<super::sandbox::Entity> for Entity {
@@ -108,12 +93,6 @@ impl Related<super::sandbox::Entity> for Entity {
 impl Related<super::manifest::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Manifest.def()
-    }
-}
-
-impl Related<super::flat_rootfs::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::FlatRootfs.def()
     }
 }
 

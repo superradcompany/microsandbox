@@ -967,6 +967,7 @@ mod tests {
     // The parent module aliases `tokio_tar` as `tar`, so we use the explicit
     // crate path here to avoid ambiguity.
     use ::tar as sync_tar;
+    use tempfile::tempdir;
 
     fn build_tar(build: impl FnOnce(&mut sync_tar::Builder<Vec<u8>>)) -> Vec<u8> {
         let mut builder = sync_tar::Builder::new(Vec::new());
@@ -1003,6 +1004,36 @@ mod tests {
                 assert_eq!(f.metadata.mode, 0o644);
                 assert_eq!(f.metadata.mtime, 1234567890);
                 assert_eq!(f.nlink, 1);
+            }
+            _ => panic!("expected regular file"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_large_file_spools_to_disk() {
+        let content = vec![b'x'; SPOOL_THRESHOLD as usize + 1];
+        let data = build_tar(|b| {
+            let mut header = sync_tar::Header::new_gnu();
+            header.set_path("large.bin").unwrap();
+            header.set_size(content.len() as u64);
+            header.set_entry_type(sync_tar::EntryType::Regular);
+            header.set_mode(0o644);
+            header.set_cksum();
+            b.append(&header, content.as_slice()).unwrap();
+        });
+
+        let tempdir = tempdir().unwrap();
+        let spool_path = tempdir.path().join("layer.spool");
+        let mut spool = DataSpool::new(&spool_path).unwrap();
+        let limits = ResourceLimits::default();
+        let tree = ingest_tar(std::io::Cursor::new(data), &limits, Some(&mut spool))
+            .await
+            .unwrap();
+
+        match tree.get(b"large.bin").unwrap() {
+            TreeNode::RegularFile(f) => {
+                assert!(matches!(f.data, FileData::Spool { .. }));
+                assert_eq!(f.data.read_all().unwrap(), content);
             }
             _ => panic!("expected regular file"),
         }

@@ -42,6 +42,13 @@ pub const EROFS_XATTR_INDEX_SECURITY: u8 = 6;
 
 pub const EROFS_INODE_FLAT_PLAIN: u8 = 0;
 pub const EROFS_INODE_FLAT_INLINE: u8 = 2;
+pub const EROFS_INODE_CHUNK_BASED: u8 = 4;
+
+pub const EROFS_CHUNK_FORMAT_INDEXES: u16 = 0x0020;
+pub const EROFS_FEATURE_INCOMPAT_CHUNKED_FILE: u32 = 0x04;
+pub const EROFS_FEATURE_INCOMPAT_DEVICE_TABLE: u32 = 0x08;
+pub const EROFS_DEVICE_SLOT_SIZE: u32 = 128;
+pub const EROFS_CHUNK_INDEX_SIZE: u32 = 8;
 
 //--------------------------------------------------------------------------------------------------
 // Functions

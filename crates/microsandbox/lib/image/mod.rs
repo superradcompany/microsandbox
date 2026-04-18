@@ -10,16 +10,15 @@ use sea_orm::{
 };
 
 use microsandbox_image::{
-    CachedImageMetadata, CachedLayerMetadata, Digest, GlobalCache, ImageConfig, LayerMode,
-    Platform, Reference,
+    CachedImageMetadata, CachedLayerMetadata, Digest, GlobalCache, ImageConfig, Platform, Reference,
 };
 
 use crate::{
     MicrosandboxError, MicrosandboxResult,
     db::entity::{
-        config as config_entity, flat_rootfs as flat_rootfs_entity, image_ref as image_ref_entity,
-        layer as layer_entity, manifest as manifest_entity,
-        manifest_layer as manifest_layer_entity, sandbox_rootfs as sandbox_rootfs_entity,
+        config as config_entity, image_ref as image_ref_entity, layer as layer_entity,
+        manifest as manifest_entity, manifest_layer as manifest_layer_entity,
+        sandbox_rootfs as sandbox_rootfs_entity,
     },
 };
 
@@ -155,16 +154,11 @@ impl Image {
     pub async fn persist(
         reference: &str,
         metadata: CachedImageMetadata,
-        layer_mode: LayerMode,
     ) -> MicrosandboxResult<i32> {
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
         let reference = reference.to_string();
-        let flat_size_bytes = match layer_mode {
-            LayerMode::Flat => flat_erofs_size_bytes(&metadata.manifest_digest),
-            LayerMode::Layered => None,
-        };
 
         db.transaction::<_, i32, MicrosandboxError>(|txn| {
             Box::pin(async move {
@@ -199,25 +193,24 @@ impl Image {
                     .await?;
 
                 // 4. Upsert layers and insert junction records.
+                let mut manifest_layers = Vec::with_capacity(metadata.layers.len());
                 for (position, layer_meta) in metadata.layers.iter().enumerate() {
                     let layer_id = upsert_layer_record(txn, layer_meta).await?;
-                    manifest_layer_entity::Entity::insert(manifest_layer_entity::ActiveModel {
+                    manifest_layers.push(manifest_layer_entity::ActiveModel {
                         manifest_id: Set(manifest_id),
                         layer_id: Set(layer_id),
                         position: Set(position as i32),
                         ..Default::default()
-                    })
-                    .exec(txn)
-                    .await?;
+                    });
+                }
+                if !manifest_layers.is_empty() {
+                    manifest_layer_entity::Entity::insert_many(manifest_layers)
+                        .exec(txn)
+                        .await?;
                 }
 
                 // 5. Upsert image_ref record.
                 let image_ref_id = upsert_image_ref_record(txn, &reference, manifest_id).await?;
-
-                // 6. Track flat-mode artifact state for GC/pinning.
-                if layer_mode == LayerMode::Flat {
-                    upsert_flat_rootfs_record(txn, manifest_id, flat_size_bytes).await?;
-                }
 
                 Ok(image_ref_id)
             })
@@ -234,13 +227,18 @@ impl Image {
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
-        let image_ref_model = image_ref_entity::Entity::find()
+        let (image_ref_model, manifest) = image_ref_entity::Entity::find()
             .filter(image_ref_entity::Column::Reference.eq(reference))
+            .find_also_related(manifest_entity::Entity)
             .one(db)
             .await?
             .ok_or_else(|| MicrosandboxError::ImageNotFound(reference.into()))?;
 
-        build_handle(db, image_ref_model).await
+        Ok(build_handle_from_parts(
+            &image_ref_model,
+            manifest.as_ref(),
+            None,
+        ))
     }
 
     /// List all cached images, ordered by creation time (newest first).
@@ -250,12 +248,13 @@ impl Image {
 
         let models = image_ref_entity::Entity::find()
             .order_by_desc(image_ref_entity::Column::CreatedAt)
+            .find_also_related(manifest_entity::Entity)
             .all(db)
             .await?;
 
         let mut handles = Vec::with_capacity(models.len());
-        for model in models {
-            handles.push(build_handle(db, model).await?);
+        for (model, manifest) in models {
+            handles.push(build_handle_from_parts(&model, manifest.as_ref(), None));
         }
         Ok(handles)
     }
@@ -319,15 +318,13 @@ impl Image {
             let ml_rows = manifest_layer_entity::Entity::find()
                 .filter(manifest_layer_entity::Column::ManifestId.eq(manifest.id))
                 .order_by_asc(manifest_layer_entity::Column::Position)
+                .find_also_related(layer_entity::Entity)
                 .all(db)
                 .await?;
 
             let mut layers = Vec::with_capacity(ml_rows.len());
-            for ml in ml_rows {
-                if let Some(layer) = layer_entity::Entity::find_by_id(ml.layer_id)
-                    .one(db)
-                    .await?
-                {
+            for (ml, layer) in ml_rows {
+                if let Some(layer) = layer {
                     layers.push(ImageLayerDetail {
                         diff_id: layer.diff_id,
                         blob_digest: layer.blob_digest,
@@ -344,7 +341,8 @@ impl Image {
             (None, Vec::new())
         };
 
-        let handle = build_handle_from_parts(&image_ref_model, manifest.as_ref(), layers.len());
+        let handle =
+            build_handle_from_parts(&image_ref_model, manifest.as_ref(), Some(layers.len()));
 
         Ok(ImageDetail {
             handle,
@@ -467,8 +465,10 @@ impl Image {
             if let Some(manifest_digest) = flat_manifest_digest
                 && let Ok(digest) = manifest_digest.parse::<Digest>()
             {
-                let _ = tokio::fs::remove_file(cache.flat_erofs_path(&digest)).await;
-                let _ = tokio::fs::remove_file(cache.flat_erofs_lock_path(&digest)).await;
+                let _ = tokio::fs::remove_file(cache.fsmeta_erofs_path(&digest)).await;
+                let _ = tokio::fs::remove_file(cache.fsmeta_erofs_lock_path(&digest)).await;
+                let _ = tokio::fs::remove_file(cache.vmdk_path(&digest)).await;
+                let _ = tokio::fs::remove_file(cache.vmdk_lock_path(&digest)).await;
             }
 
             if let Ok(image_ref) = reference.parse::<Reference>() {
@@ -516,75 +516,9 @@ impl Image {
         Ok(removed)
     }
 
-    /// Garbage-collect flat EROFS images that are not pinned and have no
-    /// sandbox_rootfs references.
-    ///
-    /// Returns the number of flat images removed.
-    pub async fn gc_flat() -> MicrosandboxResult<u32> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
-
-        // Find unpinned flat_rootfs entries with no sandbox_rootfs references.
-        let candidates: Vec<flat_rootfs_entity::Model> = flat_rootfs_entity::Entity::find()
-            .filter(flat_rootfs_entity::Column::Pinned.eq(false))
-            .all(db)
-            .await?;
-
-        let cache_dir = crate::config::config().cache_dir();
-        let cache = GlobalCache::new(&cache_dir).ok();
-        let mut removed = 0u32;
-
-        for candidate in &candidates {
-            // Check-then-delete inside a transaction to prevent TOCTOU races
-            // with concurrent sandbox creation that might pin this flat image.
-            let deleted = db
-                .transaction::<_, bool, MicrosandboxError>(|txn| {
-                    let candidate_id = candidate.id;
-                    Box::pin(async move {
-                        let refs = sandbox_rootfs_entity::Entity::find()
-                            .filter(sandbox_rootfs_entity::Column::FlatRootfsId.eq(candidate_id))
-                            .count(txn)
-                            .await?;
-                        if refs > 0 {
-                            return Ok(false);
-                        }
-                        flat_rootfs_entity::Entity::delete_by_id(candidate_id)
-                            .exec(txn)
-                            .await?;
-                        Ok(true)
-                    })
-                })
-                .await
-                .map_err(|err| match err {
-                    sea_orm::TransactionError::Connection(db_err) => db_err.into(),
-                    sea_orm::TransactionError::Transaction(err) => err,
-                })?;
-
-            if !deleted {
-                continue;
-            }
-
-            // Best-effort on-disk cleanup.
-            if let Some(ref cache) = cache
-                && let Some(manifest) = manifest_entity::Entity::find_by_id(candidate.manifest_id)
-                    .one(db)
-                    .await?
-                && let Ok(digest) = manifest.digest.parse::<Digest>()
-            {
-                let _ = tokio::fs::remove_file(cache.flat_erofs_path(&digest)).await;
-                let _ = tokio::fs::remove_file(cache.flat_erofs_lock_path(&digest)).await;
-            }
-            removed += 1;
-        }
-
-        Ok(removed)
-    }
-
-    /// Run full garbage collection: orphaned layers + unpinned flat images.
-    pub async fn gc() -> MicrosandboxResult<(u32, u32)> {
-        let layers = Self::gc_layers().await?;
-        let flat = Self::gc_flat().await?;
-        Ok((layers, flat))
+    /// Run full garbage collection: orphaned layers.
+    pub async fn gc() -> MicrosandboxResult<u32> {
+        Self::gc_layers().await
     }
 }
 
@@ -592,36 +526,11 @@ impl Image {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Build an [`ImageHandle`] from an image_ref model by fetching related data.
-async fn build_handle<C: ConnectionTrait>(
-    db: &C,
-    model: image_ref_entity::Model,
-) -> MicrosandboxResult<ImageHandle> {
-    let manifest = manifest_entity::Entity::find_by_id(model.manifest_id)
-        .one(db)
-        .await?;
-
-    let layer_count = if let Some(ref m) = manifest {
-        manifest_layer_entity::Entity::find()
-            .filter(manifest_layer_entity::Column::ManifestId.eq(m.id))
-            .count(db)
-            .await? as usize
-    } else {
-        0
-    };
-
-    Ok(build_handle_from_parts(
-        &model,
-        manifest.as_ref(),
-        layer_count,
-    ))
-}
-
 /// Build an [`ImageHandle`] from pre-fetched parts.
 fn build_handle_from_parts(
     model: &image_ref_entity::Model,
     manifest: Option<&manifest_entity::Model>,
-    layer_count: usize,
+    layer_count: Option<usize>,
 ) -> ImageHandle {
     ImageHandle {
         db_id: model.id,
@@ -629,19 +538,15 @@ fn build_handle_from_parts(
         manifest_digest: manifest.map(|m| m.digest.clone()),
         architecture: manifest.and_then(|m| m.architecture.clone()),
         os: manifest.and_then(|m| m.os.clone()),
-        layer_count,
+        layer_count: layer_count
+            .or_else(|| {
+                manifest.and_then(|m| usize::try_from(m.layer_count.unwrap_or_default()).ok())
+            })
+            .unwrap_or_default(),
         total_size_bytes: manifest.and_then(|m| m.total_size_bytes),
         created_at: model.created_at.map(|dt| dt.and_utc()),
         updated_at: model.updated_at.map(|dt| dt.and_utc()),
     }
-}
-
-fn flat_erofs_size_bytes(manifest_digest: &str) -> Option<i64> {
-    let digest = manifest_digest.parse::<Digest>().ok()?;
-    let cache = GlobalCache::new(&crate::config::config().cache_dir()).ok()?;
-    std::fs::metadata(cache.flat_erofs_path(&digest))
-        .ok()
-        .and_then(|meta| i64::try_from(meta.len()).ok())
 }
 
 /// Upsert an image_ref record by reference. Returns the image_ref ID.
@@ -722,45 +627,6 @@ async fn upsert_manifest_record<C: ConnectionTrait>(
         .ok_or_else(|| {
             crate::MicrosandboxError::Custom(format!("manifest '{}' missing after upsert", digest))
         })
-}
-
-async fn upsert_flat_rootfs_record<C: ConnectionTrait>(
-    db: &C,
-    manifest_id: i32,
-    size_bytes: Option<i64>,
-) -> MicrosandboxResult<i32> {
-    let now = chrono::Utc::now().naive_utc();
-
-    if let Some(existing) = flat_rootfs_entity::Entity::find()
-        .filter(flat_rootfs_entity::Column::ManifestId.eq(manifest_id))
-        .one(db)
-        .await?
-    {
-        flat_rootfs_entity::Entity::update(flat_rootfs_entity::ActiveModel {
-            id: Set(existing.id),
-            state: Set("ready".to_string()),
-            size_bytes: Set(size_bytes),
-            last_used_at: Set(Some(now)),
-            ..Default::default()
-        })
-        .exec(db)
-        .await?;
-        return Ok(existing.id);
-    }
-
-    let result = flat_rootfs_entity::Entity::insert(flat_rootfs_entity::ActiveModel {
-        manifest_id: Set(manifest_id),
-        state: Set("ready".to_string()),
-        size_bytes: Set(size_bytes),
-        pinned: Set(false),
-        last_used_at: Set(Some(now)),
-        created_at: Set(Some(now)),
-        ..Default::default()
-    })
-    .exec(db)
-    .await?;
-
-    Ok(result.last_insert_id)
 }
 
 /// Upsert a config record for a manifest.

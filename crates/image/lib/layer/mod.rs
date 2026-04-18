@@ -1,14 +1,15 @@
 //! Layer download and blob-cache management.
 
 use std::{
-    fs::{File, OpenOptions},
-    io::{self, Read, Write},
+    fs::File,
+    io::{self, Read},
     path::{Path, PathBuf},
     time::Instant,
 };
 
 use oci_client::client::{BlobResponse, SizedStream};
 use sha2::{Digest as Sha2Digest, Sha256};
+use tokio::io::AsyncWriteExt;
 
 use crate::{
     digest::Digest,
@@ -103,14 +104,11 @@ impl Layer {
         let digest_str: std::sync::Arc<str> = digest_display.as_str().into();
 
         // Re-check after lock — another process may have completed the download.
-        if tar_path.exists() {
-            let already_complete = if let Some(expected) = expected_size {
-                matches!(std::fs::metadata(tar_path), Ok(meta) if meta.len() == expected)
-            } else {
-                matches!(std::fs::metadata(tar_path), Ok(meta) if meta.len() > 0)
-            };
-
-            if already_complete {
+        match tokio::fs::metadata(tar_path).await {
+            Ok(meta)
+                if expected_size.is_some_and(|expected| meta.len() == expected)
+                    || (expected_size.is_none() && meta.len() > 0) =>
+            {
                 if let Some(p) = progress {
                     p.send(crate::progress::PullProgress::LayerDownloadComplete {
                         layer_index,
@@ -126,6 +124,7 @@ impl Layer {
                 );
                 return Ok(());
             }
+            Ok(_) | Err(_) => {}
         }
 
         // Stream the blob to a .part file.
@@ -140,10 +139,12 @@ impl Layer {
         .await
         .map_err(|e| ImageError::Io(io::Error::other(e)))??;
         if matches!(download_start, DownloadStart::Complete) {
-            std::fs::rename(part_path, tar_path).map_err(|e| ImageError::Cache {
-                path: tar_path.clone(),
-                source: e,
-            })?;
+            tokio::fs::rename(part_path, tar_path)
+                .await
+                .map_err(|e| ImageError::Cache {
+                    path: tar_path.clone(),
+                    source: e,
+                })?;
 
             if let Some(p) = progress {
                 p.send(crate::progress::PullProgress::LayerDownloadComplete {
@@ -163,89 +164,83 @@ impl Layer {
             return Ok(());
         }
 
-        let (mut stream, mut file, mut downloaded): (SizedStream, File, u64) = match download_start
-        {
-            DownloadStart::Fresh => {
-                let stream = client
-                    .pull_blob_stream(image_ref, digest_display.as_str())
-                    .await?;
-                let file = OpenOptions::new()
-                    .create(true)
-                    .truncate(true)
-                    .write(true)
-                    .open(part_path)
-                    .map_err(|e| ImageError::Cache {
-                        path: part_path.clone(),
-                        source: e,
-                    })?;
-                (stream, file, 0)
-            }
-            DownloadStart::Resume(offset) => {
-                let blob = client
-                    .pull_blob_stream_partial(image_ref, digest_display.as_str(), offset, None)
-                    .await?;
+        let (mut stream, mut file, mut downloaded): (SizedStream, tokio::fs::File, u64) =
+            match download_start {
+                DownloadStart::Fresh => {
+                    let stream = client
+                        .pull_blob_stream(image_ref, digest_display.as_str())
+                        .await?;
+                    let file = tokio::fs::OpenOptions::new()
+                        .create(true)
+                        .truncate(true)
+                        .write(true)
+                        .open(part_path)
+                        .await
+                        .map_err(|e| ImageError::Cache {
+                            path: part_path.clone(),
+                            source: e,
+                        })?;
+                    (stream, file, 0)
+                }
+                DownloadStart::Resume(offset) => {
+                    let blob = client
+                        .pull_blob_stream_partial(image_ref, digest_display.as_str(), offset, None)
+                        .await?;
 
-                match blob {
-                    BlobResponse::Partial(stream) => {
-                        let file = OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(part_path)
-                            .map_err(|e| ImageError::Cache {
-                                path: part_path.clone(),
-                                source: e,
-                            })?;
-                        (stream, file, offset)
-                    }
-                    BlobResponse::Full(stream) => {
-                        let file = OpenOptions::new()
-                            .create(true)
-                            .truncate(true)
-                            .write(true)
-                            .open(part_path)
-                            .map_err(|e| ImageError::Cache {
-                                path: part_path.clone(),
-                                source: e,
-                            })?;
-                        (stream, file, 0)
+                    match blob {
+                        BlobResponse::Partial(stream) => {
+                            let file = tokio::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(part_path)
+                                .await
+                                .map_err(|e| ImageError::Cache {
+                                    path: part_path.clone(),
+                                    source: e,
+                                })?;
+                            (stream, file, offset)
+                        }
+                        BlobResponse::Full(stream) => {
+                            let file = tokio::fs::OpenOptions::new()
+                                .create(true)
+                                .truncate(true)
+                                .write(true)
+                                .open(part_path)
+                                .await
+                                .map_err(|e| ImageError::Cache {
+                                    path: part_path.clone(),
+                                    source: e,
+                                })?;
+                            (stream, file, 0)
+                        }
                     }
                 }
-            }
-            DownloadStart::Complete => unreachable!(),
-        };
+                DownloadStart::Complete => unreachable!(),
+            };
         let mut last_progress_bytes = downloaded;
 
         // Compute SHA-256 incrementally during download — avoids re-reading
         // the entire blob from disk for post-download verification.
         // For resumed downloads, we must hash the existing bytes first.
-        let mut hasher = Sha256::new();
-        if downloaded > 0 {
-            // Hash the existing portion of the .part file before appending.
-            let mut existing = File::open(part_path).map_err(|e| ImageError::Cache {
-                path: part_path.clone(),
-                source: e,
-            })?;
-            let mut buf = [0u8; 65536];
-            loop {
-                let n = existing.read(&mut buf).map_err(|e| ImageError::Cache {
-                    path: part_path.clone(),
-                    source: e,
-                })?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-            }
-        }
+        let mut hasher = if downloaded > 0 {
+            let part_path = part_path.clone();
+            tokio::task::spawn_blocking(move || hash_file_hasher(&part_path))
+                .await
+                .map_err(|e| ImageError::Io(io::Error::other(e)))??
+        } else {
+            Sha256::new()
+        };
 
         use futures::StreamExt;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             hasher.update(&chunk);
-            file.write_all(&chunk).map_err(|e| ImageError::Cache {
-                path: part_path.clone(),
-                source: e,
-            })?;
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| ImageError::Cache {
+                    path: part_path.clone(),
+                    source: e,
+                })?;
             downloaded += chunk.len() as u64;
 
             let should_emit_progress = downloaded.saturating_sub(last_progress_bytes)
@@ -264,7 +259,7 @@ impl Layer {
                 last_progress_bytes = downloaded;
             }
         }
-        file.flush().map_err(|e| ImageError::Cache {
+        file.flush().await.map_err(|e| ImageError::Cache {
             path: part_path.clone(),
             source: e,
         })?;
@@ -273,7 +268,7 @@ impl Layer {
         // Verify compressed digest from the incremental hash.
         let actual_hash = hex::encode(hasher.finalize());
         if actual_hash != expected_hex {
-            let _ = std::fs::remove_file(part_path);
+            let _ = tokio::fs::remove_file(part_path).await;
             return Err(ImageError::DigestMismatch {
                 digest: digest_display,
                 expected: expected_hex.to_string(),
@@ -282,10 +277,12 @@ impl Layer {
         }
 
         // Atomic rename .part -> final.
-        std::fs::rename(part_path, tar_path).map_err(|e| ImageError::Cache {
-            path: tar_path.clone(),
-            source: e,
-        })?;
+        tokio::fs::rename(part_path, tar_path)
+            .await
+            .map_err(|e| ImageError::Cache {
+                path: tar_path.clone(),
+                source: e,
+            })?;
 
         if let Some(p) = progress {
             p.send(crate::progress::PullProgress::LayerDownloadComplete {
@@ -313,6 +310,10 @@ impl Layer {
 
 /// Compute the SHA-256 hex digest of a file.
 fn compute_sha256_file(path: &Path) -> ImageResult<String> {
+    Ok(hex::encode(hash_file_hasher(path)?.finalize()))
+}
+
+fn hash_file_hasher(path: &Path) -> ImageResult<Sha256> {
     let mut file = File::open(path).map_err(|e| ImageError::Cache {
         path: path.to_path_buf(),
         source: e,
@@ -329,7 +330,7 @@ fn compute_sha256_file(path: &Path) -> ImageResult<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hex::encode(hasher.finalize()))
+    Ok(hasher)
 }
 
 fn remove_file_if_exists(path: &Path) -> ImageResult<()> {

@@ -440,7 +440,9 @@ impl PullProgressDisplay {
         let is_tty = !quiet && std::io::stderr().is_terminal();
 
         let mp = MultiProgress::new();
-        if !is_tty {
+        if is_tty {
+            mp.set_draw_target(ProgressDrawTarget::stderr_with_hz(10));
+        } else {
             mp.set_draw_target(ProgressDrawTarget::hidden());
         }
 
@@ -561,17 +563,26 @@ impl PullProgressDisplay {
                     pb.tick();
                 }
             }
-            PullProgress::FlatMergeStarted { .. } => {
+            PullProgress::StitchMergingTrees { layer_count } => {
                 self.header.set_message(format!(
-                    "{:<12} {} (merging flat image)",
-                    "Pulling", self.reference
+                    "{:<12} {} ({} layer{})",
+                    "Merging",
+                    self.reference,
+                    layer_count,
+                    if layer_count == 1 { "" } else { "s" }
                 ));
             }
-            PullProgress::FlatMergeComplete { .. } => {
-                self.header.set_message(format!(
-                    "{:<12} {} (flat image ready)",
-                    "Pulling", self.reference
-                ));
+            PullProgress::StitchWritingFsmeta => {
+                self.header
+                    .set_message(format!("{:<12} {}", "Writing fsmeta", self.reference));
+            }
+            PullProgress::StitchWritingVmdk => {
+                self.header
+                    .set_message(format!("{:<12} {}", "Writing vmdk", self.reference));
+            }
+            PullProgress::StitchComplete => {
+                self.header
+                    .set_message(format!("{:<12} {}", "Stitched", self.reference));
             }
             PullProgress::Complete { .. } => {}
         }

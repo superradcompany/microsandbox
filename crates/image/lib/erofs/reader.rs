@@ -6,8 +6,9 @@
 //! - Sorted directory entries (binary search)
 //! - No shared xattrs, no compression, no chunks
 
-use std::io::{self, Read, Seek, SeekFrom};
+use std::os::unix::fs::FileExt;
 use std::path::Path;
+use std::{fs::File, io};
 
 use super::format::{
     EROFS_BLKSIZ, EROFS_DIRENT_SIZE, EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE,
@@ -21,8 +22,8 @@ use super::format::{
 //--------------------------------------------------------------------------------------------------
 
 /// A handle to an open EROFS image for reading.
-pub struct ErofsReader<R> {
-    reader: R,
+pub struct ErofsReader {
+    file: File,
     meta_blkaddr: u32,
     root_nid: u32,
 }
@@ -49,12 +50,11 @@ pub struct ErofsEntryInfo {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl<R: Read + Seek> ErofsReader<R> {
+impl ErofsReader {
     /// Open an EROFS image by parsing the superblock.
-    pub fn new(mut reader: R) -> io::Result<Self> {
-        reader.seek(SeekFrom::Start(EROFS_SUPER_OFFSET))?;
+    pub fn new(file: File) -> io::Result<Self> {
         let mut sb = [0u8; 128];
-        reader.read_exact(&mut sb)?;
+        read_exact_at(&file, EROFS_SUPER_OFFSET, &mut sb)?;
 
         let magic = u32::from_le_bytes([sb[0], sb[1], sb[2], sb[3]]);
         if magic != 0xE0F5_E1E2 {
@@ -68,7 +68,7 @@ impl<R: Read + Seek> ErofsReader<R> {
         let meta_blkaddr = u32::from_le_bytes([sb[0x28], sb[0x29], sb[0x2A], sb[0x2B]]);
 
         Ok(Self {
-            reader,
+            file,
             meta_blkaddr,
             root_nid,
         })
@@ -81,6 +81,18 @@ impl<R: Read + Seek> ErofsReader<R> {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "target is not a regular file",
+            ));
+        }
+        self.read_inode_data(&target_inode)
+    }
+
+    /// Read a symlink target by path from the EROFS image.
+    pub fn read_link(&mut self, path: &str) -> io::Result<Vec<u8>> {
+        let target_inode = self.lookup_path(path)?;
+        if (target_inode.mode & S_IFMT) != S_IFLNK {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "target is not a symlink",
             ));
         }
         self.read_inode_data(&target_inode)
@@ -109,10 +121,9 @@ impl<R: Read + Seek> ErofsReader<R> {
 
     fn read_inode(&mut self, nid: u32) -> io::Result<InodeInfo> {
         let offset = self.inode_offset(nid);
-        self.reader.seek(SeekFrom::Start(offset))?;
 
         let mut buf = [0u8; EROFS_INODE_EXTENDED_SIZE as usize];
-        self.reader.read_exact(&mut buf)?;
+        read_exact_at(&self.file, offset, &mut buf)?;
 
         let i_format = u16::from_le_bytes([buf[0], buf[1]]);
         let i_xattr_icount = u16::from_le_bytes([buf[2], buf[3]]);
@@ -192,61 +203,34 @@ impl<R: Read + Seek> ErofsReader<R> {
     fn lookup_in_dir(&mut self, dir_inode: &InodeInfo, name: &str) -> io::Result<u32> {
         let dir_data = self.read_inode_data(dir_inode)?;
         let blksiz = EROFS_BLKSIZ as usize;
+        let target = name.as_bytes();
+        let block_count = dir_data.len().div_ceil(blksiz);
+        let mut left = 0usize;
+        let mut right = block_count;
 
-        let mut offset = 0;
-        while offset < dir_data.len() {
-            let block_end = (offset + blksiz).min(dir_data.len());
-            let block = &dir_data[offset..block_end];
+        while left < right {
+            let mid = (left + right) / 2;
+            let block = dir_block(&dir_data, mid, blksiz);
+            let dirent_count = dir_block_dirent_count(block)?;
+            let first_name = dirent_name(block, 0, dirent_count)?;
+            let last_name = dirent_name(block, dirent_count - 1, dirent_count)?;
 
-            if block.len() < EROFS_DIRENT_SIZE as usize {
-                break;
+            if target < first_name {
+                right = mid;
+                continue;
             }
 
-            // dirent[0].nameoff / 12 = number of dirents in this block.
-            let first_nameoff = u16::from_le_bytes([block[8], block[9]]) as usize;
-            let dirent_count = first_nameoff / (EROFS_DIRENT_SIZE as usize);
-
-            for i in 0..dirent_count {
-                let de_off = i * (EROFS_DIRENT_SIZE as usize);
-                if de_off + 12 > block.len() {
-                    break;
-                }
-
-                let nid = u64::from_le_bytes([
-                    block[de_off],
-                    block[de_off + 1],
-                    block[de_off + 2],
-                    block[de_off + 3],
-                    block[de_off + 4],
-                    block[de_off + 5],
-                    block[de_off + 6],
-                    block[de_off + 7],
-                ]);
-                let nameoff = u16::from_le_bytes([block[de_off + 8], block[de_off + 9]]) as usize;
-
-                // Name length: for intermediate entries, the next dirent's nameoff
-                // marks where this name ends. For the last entry, scan to end of
-                // valid data (names are NOT null-terminated in EROFS).
-                let name_end = if i + 1 < dirent_count {
-                    let next_off = (i + 1) * (EROFS_DIRENT_SIZE as usize);
-                    u16::from_le_bytes([block[next_off + 8], block[next_off + 9]]) as usize
-                } else {
-                    let mut end = nameoff;
-                    while end < block.len() && block[end] != 0 {
-                        end += 1;
-                    }
-                    end
-                };
-
-                if nameoff <= block.len() && name_end <= block.len() {
-                    let entry_name = &block[nameoff..name_end];
-                    if entry_name == name.as_bytes() {
-                        return Ok(nid as u32);
-                    }
-                }
+            if target > last_name {
+                left = mid + 1;
+                continue;
             }
 
-            offset += blksiz;
+            return lookup_in_dir_block(block, dirent_count, target)?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("entry '{name}' not found in directory"),
+                )
+            });
         }
 
         Err(io::Error::new(
@@ -269,9 +253,8 @@ impl<R: Read + Seek> ErofsReader<R> {
                     return Ok(Vec::new());
                 }
                 let data_offset = (inode.startblk_lo as u64) * (EROFS_BLKSIZ as u64);
-                self.reader.seek(SeekFrom::Start(data_offset))?;
                 let mut data = vec![0u8; size];
-                self.reader.read_exact(&mut data)?;
+                read_exact_at(&self.file, data_offset, &mut data)?;
                 Ok(data)
             }
             EROFS_INODE_FLAT_INLINE => {
@@ -282,9 +265,8 @@ impl<R: Read + Seek> ErofsReader<R> {
                 // Read full blocks from data area.
                 if full_blocks > 0 && inode.startblk_lo != EROFS_NULL_ADDR {
                     let data_offset = (inode.startblk_lo as u64) * (EROFS_BLKSIZ as u64);
-                    self.reader.seek(SeekFrom::Start(data_offset))?;
                     let mut block_data = vec![0u8; full_blocks * blksiz];
-                    self.reader.read_exact(&mut block_data)?;
+                    read_exact_at(&self.file, data_offset, &mut block_data)?;
                     data.extend_from_slice(&block_data);
                 }
 
@@ -293,9 +275,8 @@ impl<R: Read + Seek> ErofsReader<R> {
                     let inline_offset = self.inode_offset(inode.nid)
                         + EROFS_INODE_EXTENDED_SIZE as u64
                         + inode.xattr_ibody_size as u64;
-                    self.reader.seek(SeekFrom::Start(inline_offset))?;
                     let mut tail = vec![0u8; tail_size];
-                    self.reader.read_exact(&mut tail)?;
+                    read_exact_at(&self.file, inline_offset, &mut tail)?;
                     data.extend_from_slice(&tail);
                 }
 
@@ -345,9 +326,8 @@ impl<R: Read + Seek> ErofsReader<R> {
                 ));
             }
 
-            self.reader.seek(SeekFrom::Start(offset))?;
             let mut entry = [0u8; 4];
-            self.reader.read_exact(&mut entry)?;
+            read_exact_at(&self.file, offset, &mut entry)?;
 
             let name_len = entry[0] as usize;
             let name_index = entry[1];
@@ -363,9 +343,9 @@ impl<R: Read + Seek> ErofsReader<R> {
             }
 
             let mut suffix = vec![0u8; name_len];
-            self.reader.read_exact(&mut suffix)?;
+            read_exact_at(&self.file, offset + 4, &mut suffix)?;
             let mut value = vec![0u8; value_len];
-            self.reader.read_exact(&mut value)?;
+            read_exact_at(&self.file, offset + 4 + name_len as u64, &mut value)?;
 
             let name = match name_index {
                 EROFS_XATTR_INDEX_USER => [b"user.".as_slice(), suffix.as_slice()].concat(),
@@ -406,6 +386,133 @@ struct InodeInfo {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+fn read_exact_at(file: &File, offset: u64, mut buf: &mut [u8]) -> io::Result<()> {
+    let mut current_offset = offset;
+    while !buf.is_empty() {
+        let read = file.read_at(buf, current_offset)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "unexpected EOF",
+            ));
+        }
+        current_offset += read as u64;
+        buf = &mut buf[read..];
+    }
+
+    Ok(())
+}
+
+fn dir_block(dir_data: &[u8], block_idx: usize, blksiz: usize) -> &[u8] {
+    let offset = block_idx * blksiz;
+    let end = (offset + blksiz).min(dir_data.len());
+    &dir_data[offset..end]
+}
+
+fn dir_block_dirent_count(block: &[u8]) -> io::Result<usize> {
+    if block.len() < EROFS_DIRENT_SIZE as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "directory block smaller than one dirent",
+        ));
+    }
+
+    let first_nameoff = u16::from_le_bytes([block[8], block[9]]) as usize;
+    let dirent_size = EROFS_DIRENT_SIZE as usize;
+    if first_nameoff < dirent_size
+        || !first_nameoff.is_multiple_of(dirent_size)
+        || first_nameoff > block.len()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid first dirent name offset",
+        ));
+    }
+
+    Ok(first_nameoff / dirent_size)
+}
+
+fn dirent_name(block: &[u8], idx: usize, dirent_count: usize) -> io::Result<&[u8]> {
+    let dirent_size = EROFS_DIRENT_SIZE as usize;
+    let dirent_off = idx
+        .checked_mul(dirent_size)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "dirent offset overflow"))?;
+
+    if idx >= dirent_count || dirent_off + dirent_size > block.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "dirent index out of bounds",
+        ));
+    }
+
+    let nameoff = u16::from_le_bytes([block[dirent_off + 8], block[dirent_off + 9]]) as usize;
+    let mut name_end = if idx + 1 < dirent_count {
+        let next_off = dirent_off + dirent_size;
+        u16::from_le_bytes([block[next_off + 8], block[next_off + 9]]) as usize
+    } else {
+        block.len()
+    };
+
+    if nameoff > name_end || name_end > block.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "dirent name range out of bounds",
+        ));
+    }
+
+    while name_end > nameoff && block[name_end - 1] == 0 {
+        name_end -= 1;
+    }
+
+    Ok(&block[nameoff..name_end])
+}
+
+fn dirent_nid(block: &[u8], idx: usize) -> io::Result<u32> {
+    let dirent_size = EROFS_DIRENT_SIZE as usize;
+    let dirent_off = idx
+        .checked_mul(dirent_size)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "dirent offset overflow"))?;
+    if dirent_off + dirent_size > block.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "dirent NID out of bounds",
+        ));
+    }
+
+    let nid = u64::from_le_bytes([
+        block[dirent_off],
+        block[dirent_off + 1],
+        block[dirent_off + 2],
+        block[dirent_off + 3],
+        block[dirent_off + 4],
+        block[dirent_off + 5],
+        block[dirent_off + 6],
+        block[dirent_off + 7],
+    ]);
+    u32::try_from(nid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "dirent NID overflow"))
+}
+
+fn lookup_in_dir_block(
+    block: &[u8],
+    dirent_count: usize,
+    target: &[u8],
+) -> io::Result<Option<u32>> {
+    let mut left = 0usize;
+    let mut right = dirent_count;
+
+    while left < right {
+        let mid = (left + right) / 2;
+        match target.cmp(dirent_name(block, mid, dirent_count)?) {
+            std::cmp::Ordering::Less => right = mid,
+            std::cmp::Ordering::Greater => left = mid + 1,
+            std::cmp::Ordering::Equal => return dirent_nid(block, mid).map(Some),
+        }
+    }
+
+    Ok(None)
+}
+
 fn inode_kind(inode: &InodeInfo) -> io::Result<ErofsEntryKind> {
     match inode.mode & S_IFMT {
         S_IFREG => Ok(ErofsEntryKind::RegularFile),
@@ -425,12 +532,67 @@ fn inode_kind(inode: &InodeInfo) -> io::Result<ErofsEntryKind> {
 /// Read a file from an EROFS image file on disk.
 pub fn read_file_from_erofs(image_path: &Path, file_path: &str) -> io::Result<Vec<u8>> {
     let file = std::fs::File::open(image_path)?;
-    let mut reader = ErofsReader::new(io::BufReader::new(file))?;
+    let mut reader = ErofsReader::new(file)?;
     reader.read_file(file_path)
 }
 
 pub fn entry_info_from_erofs(image_path: &Path, file_path: &str) -> io::Result<ErofsEntryInfo> {
     let file = std::fs::File::open(image_path)?;
-    let mut reader = ErofsReader::new(io::BufReader::new(file))?;
+    let mut reader = ErofsReader::new(file)?;
     reader.entry_info(file_path)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, io};
+
+    use tempfile::tempdir;
+
+    use super::ErofsReader;
+    use crate::{
+        erofs::write_erofs,
+        filetree::{FileData, FileTree, InodeMetadata, RegularFileNode, TreeNode},
+    };
+
+    fn make_regular_file(data: &[u8]) -> TreeNode {
+        TreeNode::RegularFile(RegularFileNode {
+            metadata: InodeMetadata::default(),
+            xattrs: Vec::new(),
+            data: FileData::Memory(data.to_vec()),
+            nlink: 1,
+        })
+    }
+
+    #[test]
+    fn lookup_path_resolves_large_multi_block_directory() {
+        let mut tree = FileTree::new();
+        for i in 0..5000 {
+            let path = format!("dir/file-{i:04}.txt");
+            tree.insert(path.as_bytes(), make_regular_file(b"x"))
+                .expect("insert file");
+        }
+
+        let output_dir = tempdir().expect("tempdir");
+        let output = output_dir.path().join("large-dir.erofs");
+        write_erofs(&tree, &output).expect("write erofs");
+
+        let file = File::open(&output).expect("open erofs");
+        let mut reader = ErofsReader::new(file).expect("reader");
+
+        assert_eq!(reader.read_file("/dir/file-0000.txt").expect("first"), b"x");
+        assert_eq!(
+            reader.read_file("/dir/file-2500.txt").expect("middle"),
+            b"x"
+        );
+        assert_eq!(reader.read_file("/dir/file-4999.txt").expect("last"), b"x");
+
+        let err = reader
+            .entry_info("/dir/file-9999.txt")
+            .expect_err("missing entry should fail");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
 }
