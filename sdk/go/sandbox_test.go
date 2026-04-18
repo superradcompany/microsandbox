@@ -239,14 +239,17 @@ func TestFsStat(t *testing.T) {
 }
 
 // TestMetrics verifies that Metrics returns a non-zero uptime after exec.
+// The runtime metrics sampler persists its initial sample at boot (wall
+// time 0) and subsequent samples every 1s, so we wait past the first
+// resample before asserting a positive uptime.
 func TestMetrics(t *testing.T) {
 	sb := newTestSandbox(t)
 	ctx := integrationCtx(t)
 
-	// Run something so there is uptime to report.
 	if _, err := sb.Shell(ctx, "true"); err != nil {
 		t.Fatalf("Shell: %v", err)
 	}
+	time.Sleep(1200 * time.Millisecond)
 	m, err := sb.Metrics(ctx)
 	if err != nil {
 		t.Fatalf("Metrics: %v", err)
@@ -350,7 +353,7 @@ func TestExecCtxCancel(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestDetachedSandboxOutlivesHandle verifies that a detached sandbox is still
-// listed after its handle is closed, and can be reattached via GetSandbox.
+// listed after its handle is released, and can be reattached via GetSandbox.
 func TestDetachedSandboxOutlivesHandle(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-detached-" + t.Name()
@@ -362,9 +365,10 @@ func TestDetachedSandboxOutlivesHandle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSandbox detached: %v", err)
 	}
-	// Close the handle — sandbox should keep running.
-	if err := sb.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	// Detach the handle — sandbox should keep running. (Close would fire
+	// the SIGTERM safety net and stop the VM.)
+	if err := sb.Detach(ctx); err != nil {
+		t.Fatalf("Detach: %v", err)
 	}
 
 	// Reattach and confirm it is still alive.
@@ -460,7 +464,9 @@ func dialWithRetry(addr string, attempts int, delay time.Duration) (net.Conn, er
 // ---------------------------------------------------------------------------
 
 // TestNetworkPolicyNone verifies that a sandbox with policy "none" cannot
-// reach external hosts. We attempt a DNS lookup; it should fail or time out.
+// reach external hosts. The policy gates outbound connections, not DNS
+// resolution (the guest's local resolver still answers), so we assert on
+// an actual outbound connection attempt rather than a name lookup.
 func TestNetworkPolicyNone(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-netpolicy-" + t.Name()
@@ -479,19 +485,14 @@ func TestNetworkPolicyNone(t *testing.T) {
 		_ = sb.Close()
 	})
 
-	// nslookup should fail when there is no network.
-	out, err := sb.Shell(ctx, "nslookup example.com; true",
+	// ping should fail when the policy denies all outbound traffic.
+	out, err := sb.Shell(ctx, "ping -c 1 -W 3 1.1.1.1",
 		microsandbox.WithExecTimeout(10*time.Second))
 	if err != nil {
 		t.Fatalf("Shell: %v", err)
 	}
-	// Either a non-zero exit or an error message in stderr/stdout.
-	combined := out.Stdout() + out.Stderr()
-	if out.Success() && !strings.Contains(combined, "SERVFAIL") &&
-		!strings.Contains(combined, "connection refused") &&
-		!strings.Contains(combined, "timed out") &&
-		!strings.Contains(combined, "can't resolve") {
-		t.Errorf("expected DNS failure with policy=none, got stdout=%q stderr=%q",
+	if out.Success() {
+		t.Errorf("expected ping to fail with policy=none, got stdout=%q stderr=%q",
 			out.Stdout(), out.Stderr())
 	}
 }
@@ -562,6 +563,7 @@ func TestDNSBlockDomain(t *testing.T) {
 	combined := out.Stdout() + out.Stderr()
 	if out.Success() && !strings.Contains(combined, "NXDOMAIN") &&
 		!strings.Contains(combined, "SERVFAIL") &&
+		!strings.Contains(combined, "REFUSED") &&
 		!strings.Contains(combined, "can't resolve") {
 		t.Errorf("expected DNS block, got stdout=%q stderr=%q", out.Stdout(), out.Stderr())
 	}
@@ -598,6 +600,7 @@ func TestDNSBlockDomainSuffix(t *testing.T) {
 	combined := out.Stdout() + out.Stderr()
 	if out.Success() && !strings.Contains(combined, "NXDOMAIN") &&
 		!strings.Contains(combined, "SERVFAIL") &&
+		!strings.Contains(combined, "REFUSED") &&
 		!strings.Contains(combined, "can't resolve") {
 		t.Errorf("expected DNS block for suffix, got stdout=%q stderr=%q",
 			out.Stdout(), out.Stderr())
@@ -670,15 +673,18 @@ func TestPatchMkdir(t *testing.T) {
 	}
 }
 
-// TestPatchAppend verifies that an append patch adds content to an existing file.
+// TestPatchAppend verifies that an append patch adds content to an existing
+// file. We target /etc/profile because agentd rewrites /etc/hosts and
+// /etc/hostname at boot, which would erase a patch applied to those files.
 func TestPatchAppend(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-patch-append-" + t.Name()
 
+	const marker = "go-sdk-append-marker"
 	sb, err := microsandbox.NewSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
 		microsandbox.WithPatches(
-			microsandbox.PatchAppend("/etc/hosts", "192.0.2.1 go-sdk-test.local\n"),
+			microsandbox.PatchAppend("/etc/profile", "\n# "+marker+"\n"),
 		),
 	)
 	if err != nil {
@@ -691,12 +697,12 @@ func TestPatchAppend(t *testing.T) {
 		_ = sb.Close()
 	})
 
-	out, err := sb.Shell(ctx, "grep go-sdk-test.local /etc/hosts")
+	out, err := sb.Shell(ctx, "cat /etc/profile")
 	if err != nil {
 		t.Fatalf("Shell: %v", err)
 	}
-	if !strings.Contains(out.Stdout(), "go-sdk-test.local") {
-		t.Errorf("expected appended line in /etc/hosts, stdout=%q", out.Stdout())
+	if !strings.Contains(out.Stdout(), marker) {
+		t.Errorf("expected appended marker in /etc/profile, stdout=%q", out.Stdout())
 	}
 }
 
