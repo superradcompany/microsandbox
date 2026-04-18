@@ -268,9 +268,11 @@ def run_cmd(
 
 
 def try_cleanup(cmd: list[str], timeout: int = 30) -> None:
+    # Best-effort teardown: swallow subprocess/OS failures (already torn down,
+    # permission issues, timeouts) so benchmark runs don't abort on cleanup.
     try:
         subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         pass
 
 
