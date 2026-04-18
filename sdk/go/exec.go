@@ -2,9 +2,21 @@ package microsandbox
 
 import (
 	"context"
+	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
+
+// timeoutSecsCeil rounds a Duration up to whole seconds. The FFI boundary
+// carries timeouts as uint64 seconds, so any positive sub-second Duration
+// must round to at least 1 — truncation would drop it to 0, which the Rust
+// side interprets as "no timeout" (the opposite of the caller's intent).
+func timeoutSecsCeil(d time.Duration) uint64 {
+	if d <= 0 {
+		return 0
+	}
+	return uint64((d + time.Second - 1) / time.Second)
+}
 
 // ExecOutput is the collected result of a command execution.
 //
@@ -47,7 +59,7 @@ func (s *Sandbox) Exec(ctx context.Context, cmd string, args []string, opts ...E
 
 	ffiOpts := ffi.ExecOptions{Args: args, Cwd: o.Cwd}
 	if o.Timeout > 0 {
-		ffiOpts.TimeoutSecs = uint64(o.Timeout.Seconds())
+		ffiOpts.TimeoutSecs = timeoutSecsCeil(o.Timeout)
 	}
 
 	res, err := s.inner.Exec(ctx, cmd, ffiOpts)
@@ -64,4 +76,101 @@ func (s *Sandbox) Exec(ctx context.Context, cmd string, args []string, opts ...E
 // Shell runs `/bin/sh -c command` in the sandbox.
 func (s *Sandbox) Shell(ctx context.Context, command string, opts ...ExecOption) (*ExecOutput, error) {
 	return s.Exec(ctx, "/bin/sh", []string{"-c", command}, opts...)
+}
+
+// ExecEventKind identifies what an ExecEvent carries.
+type ExecEventKind = ffi.ExecEventKind
+
+const (
+	// ExecEventStarted is sent once when the guest process starts.
+	ExecEventStarted ExecEventKind = ffi.ExecEventStarted
+	// ExecEventStdout carries a chunk of standard output.
+	ExecEventStdout ExecEventKind = ffi.ExecEventStdout
+	// ExecEventStderr carries a chunk of standard error.
+	ExecEventStderr ExecEventKind = ffi.ExecEventStderr
+	// ExecEventExited is sent when the process exits. ExitCode is valid.
+	ExecEventExited ExecEventKind = ffi.ExecEventExited
+	// ExecEventDone signals that all events have been consumed.
+	ExecEventDone ExecEventKind = ffi.ExecEventDone
+)
+
+// ExecEvent is one event from a streaming exec session.
+type ExecEvent struct {
+	// Kind identifies which fields are populated.
+	Kind ExecEventKind
+
+	// PID is the guest process ID. Populated on ExecEventStarted.
+	PID uint32
+
+	// Data is a chunk of stdout or stderr bytes. Populated on ExecEventStdout
+	// and ExecEventStderr.
+	Data []byte
+
+	// ExitCode is the process exit code. Populated on ExecEventExited.
+	ExitCode int
+}
+
+// ExecHandle is a live streaming exec session. Obtain via Sandbox.ExecStream.
+// Call Close when done to release Rust-side resources.
+//
+// ExecHandle is NOT safe for concurrent use from multiple goroutines.
+type ExecHandle struct {
+	inner *ffi.ExecStreamHandle
+}
+
+// Recv blocks until the next event arrives or the stream ends. Returns an
+// event with Kind==ExecEventDone when all events have been consumed.
+//
+// ctx controls the wait; cancellation causes Recv to return ctx.Err()
+// immediately. The underlying Rust call may continue to completion in the
+// background (same semantics as all blocking FFI calls).
+func (h *ExecHandle) Recv(ctx context.Context) (*ExecEvent, error) {
+	ev, err := h.inner.Recv(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &ExecEvent{
+		Kind:     ev.Kind,
+		PID:      ev.PID,
+		Data:     ev.Data,
+		ExitCode: ev.ExitCode,
+	}, nil
+}
+
+// Signal sends a Unix signal to the running process (e.g. syscall.SIGTERM).
+func (h *ExecHandle) Signal(ctx context.Context, signal int) error {
+	return wrapFFI(h.inner.Signal(ctx, signal))
+}
+
+// Close releases the Rust-side exec handle. Does not kill the running process;
+// call Signal(ctx, 9) first if you need to terminate it. Safe to call after
+// ExecEventDone has been received.
+func (h *ExecHandle) Close() error {
+	return wrapFFI(h.inner.Close())
+}
+
+// ExecStream starts a streaming exec session and returns an ExecHandle.
+// The handle MUST be closed with Close when the stream is no longer needed.
+//
+// ctx controls only the start handshake; individual Recv calls take their
+// own ctx. Non-zero exit codes are NOT errors — inspect ExecEventExited.
+func (s *Sandbox) ExecStream(ctx context.Context, cmd string, args []string, opts ...ExecOption) (*ExecHandle, error) {
+	o := ExecOptions{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	ffiOpts := ffi.ExecOptions{Args: args, Cwd: o.Cwd}
+	if o.Timeout > 0 {
+		ffiOpts.TimeoutSecs = timeoutSecsCeil(o.Timeout)
+	}
+	h, err := s.inner.ExecStream(ctx, cmd, ffiOpts)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &ExecHandle{inner: h}, nil
+}
+
+// ShellStream runs `/bin/sh -c command` with streaming output.
+func (s *Sandbox) ShellStream(ctx context.Context, command string, opts ...ExecOption) (*ExecHandle, error) {
+	return s.ExecStream(ctx, "/bin/sh", []string{"-c", command}, opts...)
 }

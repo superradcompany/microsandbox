@@ -48,6 +48,10 @@ const (
 	// output buffer. For file reads, stream instead.
 	ErrBufferTooSmall
 
+	// ErrCancelled indicates the operation was cancelled by the caller's
+	// context before the Rust runtime completed it.
+	ErrCancelled
+
 	// ErrInternal is every other error from the runtime.
 	ErrInternal
 )
@@ -72,6 +76,8 @@ func (k ErrorKind) String() string {
 		return "InvalidHandle"
 	case ErrBufferTooSmall:
 		return "BufferTooSmall"
+	case ErrCancelled:
+		return "Cancelled"
 	case ErrInternal:
 		return "Internal"
 	default:
@@ -142,6 +148,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrInvalidHandle
 	case ffi.KindBufferTooSmall:
 		return ErrBufferTooSmall
+	case ffi.KindCancelled:
+		return ErrCancelled
 	default:
 		return ErrInternal
 	}

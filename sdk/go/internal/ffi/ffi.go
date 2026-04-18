@@ -31,29 +31,37 @@ package ffi
 #include <stdlib.h>
 #include <stdint.h>
 
-void  msb_free_string(char *ptr);
+void     msb_free_string(char *ptr);
+uint64_t msb_cancel_alloc(void);
+void     msb_cancel_trigger(uint64_t id);
+void     msb_cancel_unregister(uint64_t id);
 
-char *msb_sandbox_create(const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
-char *msb_sandbox_get(const char *name, uint8_t *buf, size_t buf_len);
-char *msb_sandbox_close(uint64_t handle, uint8_t *buf, size_t buf_len);
-char *msb_sandbox_stop(uint64_t handle, uint8_t *buf, size_t buf_len);
-char *msb_sandbox_stop_and_wait(uint64_t handle, uint8_t *buf, size_t buf_len);
-char *msb_sandbox_kill(uint64_t handle, uint8_t *buf, size_t buf_len);
-char *msb_sandbox_list(uint8_t *buf, size_t buf_len);
-char *msb_sandbox_remove(const char *name, uint8_t *buf, size_t buf_len);
-char *msb_sandbox_exec(uint64_t handle, const char *cmd, const char *exec_opts_json, uint8_t *buf, size_t buf_len);
-char *msb_sandbox_metrics(uint64_t handle, uint8_t *buf, size_t buf_len);
+char *msb_sandbox_create(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
+char *msb_sandbox_get(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+char *msb_sandbox_close(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+char *msb_sandbox_stop(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+char *msb_sandbox_stop_and_wait(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+char *msb_sandbox_kill(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+char *msb_sandbox_list(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
+char *msb_sandbox_remove(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+char *msb_sandbox_exec(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *exec_opts_json, uint8_t *buf, size_t buf_len);
+char *msb_sandbox_exec_stream(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *exec_opts_json, uint8_t *buf, size_t buf_len);
+char *msb_sandbox_metrics(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 
-char *msb_fs_read(uint64_t handle, const char *path, uint8_t *buf, size_t buf_len);
-char *msb_fs_write(uint64_t handle, const char *path, const char *data_b64, uint8_t *buf, size_t buf_len);
-char *msb_fs_list(uint64_t handle, const char *path, uint8_t *buf, size_t buf_len);
-char *msb_fs_stat(uint64_t handle, const char *path, uint8_t *buf, size_t buf_len);
-char *msb_fs_copy_from_host(uint64_t handle, const char *host_path, const char *guest_path, uint8_t *buf, size_t buf_len);
-char *msb_fs_copy_to_host(uint64_t handle, const char *guest_path, const char *host_path, uint8_t *buf, size_t buf_len);
+char *msb_exec_recv(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len);
+char *msb_exec_close(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len);
+char *msb_exec_signal(uint64_t cancel_id, uint64_t exec_handle, int32_t signal, uint8_t *buf, size_t buf_len);
 
-char *msb_volume_create(const char *name, uint32_t quota_mib, uint8_t *buf, size_t buf_len);
-char *msb_volume_remove(const char *name, uint8_t *buf, size_t buf_len);
-char *msb_volume_list(uint8_t *buf, size_t buf_len);
+char *msb_fs_read(uint64_t cancel_id, uint64_t handle, const char *path, uint8_t *buf, size_t buf_len);
+char *msb_fs_write(uint64_t cancel_id, uint64_t handle, const char *path, const char *data_b64, uint8_t *buf, size_t buf_len);
+char *msb_fs_list(uint64_t cancel_id, uint64_t handle, const char *path, uint8_t *buf, size_t buf_len);
+char *msb_fs_stat(uint64_t cancel_id, uint64_t handle, const char *path, uint8_t *buf, size_t buf_len);
+char *msb_fs_copy_from_host(uint64_t cancel_id, uint64_t handle, const char *host_path, const char *guest_path, uint8_t *buf, size_t buf_len);
+char *msb_fs_copy_to_host(uint64_t cancel_id, uint64_t handle, const char *guest_path, const char *host_path, uint8_t *buf, size_t buf_len);
+
+char *msb_volume_create(uint64_t cancel_id, const char *name, uint32_t quota_mib, uint8_t *buf, size_t buf_len);
+char *msb_volume_remove(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+char *msb_volume_list(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 */
 import "C"
 
@@ -92,6 +100,7 @@ const (
 	KindInvalidArgument      = "invalid_argument"
 	KindInvalidHandle        = "invalid_handle"
 	KindBufferTooSmall       = "buffer_too_small"
+	KindCancelled            = "cancelled"
 	KindInternal             = "internal"
 )
 
@@ -109,18 +118,21 @@ func (s *Sandbox) Handle() uint64 { return uint64(s.handle) }
 // Name returns the sandbox name as provided at creation time.
 func (s *Sandbox) Name() string { return s.name }
 
-// call invokes fn with a fresh 1 MiB buffer, selects on ctx.Done while the
-// CGO call runs on a helper goroutine, and returns the null-terminated
-// buffer contents on success or the parsed FFI error on failure.
+// call invokes fn with a fresh 1 MiB buffer and a Rust-side cancellation
+// token. It selects on ctx.Done while the CGO call runs on a helper goroutine;
+// if the context is cancelled, it fires the Rust token (causing the in-flight
+// async operation to abort at the next tokio::select! point) and waits for
+// the goroutine to finish before returning.
 //
-// # Cancellation semantics
+// The wait after cancellation is critical: callers allocate C strings with
+// `defer C.free(...)`, so returning early would let those frees race with
+// Rust still dereferencing the pointers. Rust's run_c select!s on the cancel
+// token, so the wait is bounded by one poll of the underlying future.
 //
-// If ctx is cancelled while the Rust side is still working, call returns
-// ctx.Err() immediately. The Rust work continues to completion on a Tokio
-// worker thread — callers MUST assume side effects may still land. We do
-// not currently propagate cancellation into Rust; that requires a per-call
-// cancellation token, which is a follow-up.
-func call(ctx context.Context, fn func(buf *C.uint8_t, bufLen C.size_t) *C.char) (string, error) {
+// Rust's run_c (and the manual paths in close / exec_close / exec_recv /
+// exec_signal) are responsible for calling msb_cancel_unregister; nothing
+// to do here.
+func call(ctx context.Context, fn func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char) (string, error) {
 	type res struct {
 		out string
 		err error
@@ -128,8 +140,10 @@ func call(ctx context.Context, fn func(buf *C.uint8_t, bufLen C.size_t) *C.char)
 	done := make(chan res, 1)
 	buf := make([]byte, defaultBufSize)
 
+	cancelID := C.msb_cancel_alloc()
+
 	go func() {
-		errPtr := fn((*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+		errPtr := fn(cancelID, (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
 		if errPtr != nil {
 			msg := C.GoString(errPtr)
 			C.msb_free_string(errPtr)
@@ -151,6 +165,10 @@ func call(ctx context.Context, fn func(buf *C.uint8_t, bufLen C.size_t) *C.char)
 	case r := <-done:
 		return r.out, r.err
 	case <-ctx.Done():
+		C.msb_cancel_trigger(cancelID)
+		// Wait for the goroutine to finish so the caller's defer C.free on
+		// any CStrings passed to fn does not race with Rust reading them.
+		<-done
 		return "", ctx.Err()
 	}
 }
@@ -168,6 +186,72 @@ type CreateOptions struct {
 	CPUs      uint8             `json:"cpus,omitempty"`
 	Workdir   string            `json:"workdir,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
+	Detached  bool              `json:"detached,omitempty"`
+	// Top-level ports shorthand: host_port → guest_port (TCP).
+	Ports   map[uint16]uint16 `json:"ports,omitempty"`
+	Network *NetworkOptions   `json:"network,omitempty"`
+	Secrets []SecretOptions   `json:"secrets,omitempty"`
+	Patches []PatchOptions    `json:"patches,omitempty"`
+}
+
+// NetworkOptions is the JSON representation of the network config block.
+type NetworkOptions struct {
+	Policy       string                `json:"policy,omitempty"`
+	CustomPolicy *CustomNetworkPolicy  `json:"custom_policy,omitempty"`
+	BlockDomains []string              `json:"block_domains,omitempty"`
+	BlockDomainSuffixes []string       `json:"block_domain_suffixes,omitempty"`
+	DNSRebindProtection *bool          `json:"dns_rebind_protection,omitempty"`
+	TLS          *TLSOptions           `json:"tls,omitempty"`
+	Ports        map[uint16]uint16     `json:"ports,omitempty"`
+}
+
+// CustomNetworkPolicy is an explicit allow/deny rule set.
+type CustomNetworkPolicy struct {
+	DefaultAction string        `json:"default_action,omitempty"`
+	Rules         []NetworkRule `json:"rules,omitempty"`
+}
+
+// NetworkRule is a single firewall rule.
+type NetworkRule struct {
+	Action      string `json:"action"`
+	Direction   string `json:"direction,omitempty"`
+	Destination string `json:"destination,omitempty"`
+	Protocol    string `json:"protocol,omitempty"`
+	Port        uint16 `json:"port,omitempty"`
+}
+
+// TLSOptions configures the transparent HTTPS interception proxy.
+type TLSOptions struct {
+	Bypass           []string `json:"bypass,omitempty"`
+	VerifyUpstream   *bool    `json:"verify_upstream,omitempty"`
+	InterceptedPorts []uint16 `json:"intercepted_ports,omitempty"`
+	BlockQUIC        *bool    `json:"block_quic,omitempty"`
+	CACert           string   `json:"ca_cert,omitempty"`
+	CAKey            string   `json:"ca_key,omitempty"`
+}
+
+// SecretOptions is the JSON representation of a single credential.
+type SecretOptions struct {
+	EnvVar            string   `json:"env_var"`
+	Value             string   `json:"value"`
+	AllowHosts        []string `json:"allow_hosts,omitempty"`
+	AllowHostPatterns []string `json:"allow_host_patterns,omitempty"`
+	Placeholder       string   `json:"placeholder,omitempty"`
+	RequireTLS        *bool    `json:"require_tls,omitempty"`
+}
+
+// PatchOptions is the JSON representation of a single rootfs patch.
+// The Kind field drives which other fields are required.
+type PatchOptions struct {
+	Kind    string  `json:"kind"`
+	Path    string  `json:"path,omitempty"`
+	Content string  `json:"content,omitempty"`
+	Mode    *uint32 `json:"mode,omitempty"`
+	Replace bool    `json:"replace,omitempty"`
+	Src     string  `json:"src,omitempty"`
+	Dst     string  `json:"dst,omitempty"`
+	Target  string  `json:"target,omitempty"`
+	Link    string  `json:"link,omitempty"`
 }
 
 // CreateSandbox creates and boots a sandbox, returning a handle the caller
@@ -186,8 +270,8 @@ func CreateSandbox(ctx context.Context, name string, opts CreateOptions) (*Sandb
 	cOpts := C.CString(string(optsJSON))
 	defer C.free(unsafe.Pointer(cOpts))
 
-	out, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_sandbox_create(cName, cOpts, buf, bufLen)
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_sandbox_create(cancelID, cName, cOpts, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -207,8 +291,8 @@ func GetSandbox(ctx context.Context, name string) (*Sandbox, error) {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 
-	out, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_sandbox_get(cName, buf, bufLen)
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_sandbox_get(cancelID, cName, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -232,16 +316,16 @@ func (s *Sandbox) Close() error {
 
 // CloseCtx is Close with a caller-controlled context.
 func (s *Sandbox) CloseCtx(ctx context.Context) error {
-	_, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_sandbox_close(s.handle, buf, bufLen)
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_sandbox_close(cancelID, s.handle, buf, bufLen)
 	})
 	return err
 }
 
 // Stop gracefully stops the sandbox without waiting for exit.
 func (s *Sandbox) Stop(ctx context.Context) error {
-	_, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_sandbox_stop(s.handle, buf, bufLen)
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_sandbox_stop(cancelID, s.handle, buf, bufLen)
 	})
 	return err
 }
@@ -250,8 +334,8 @@ func (s *Sandbox) Stop(ctx context.Context) error {
 // returned int is the exit code, or -1 if unknown (e.g. killed by signal
 // with no code reported).
 func (s *Sandbox) StopAndWait(ctx context.Context) (int, error) {
-	out, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_sandbox_stop_and_wait(s.handle, buf, bufLen)
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_sandbox_stop_and_wait(cancelID, s.handle, buf, bufLen)
 	})
 	if err != nil {
 		return 0, err
@@ -270,16 +354,16 @@ func (s *Sandbox) StopAndWait(ctx context.Context) (int, error) {
 
 // Kill terminates the sandbox immediately (SIGKILL).
 func (s *Sandbox) Kill(ctx context.Context) error {
-	_, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_sandbox_kill(s.handle, buf, bufLen)
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_sandbox_kill(cancelID, s.handle, buf, bufLen)
 	})
 	return err
 }
 
 // ListSandboxes returns the names of all known sandboxes (running or not).
 func ListSandboxes(ctx context.Context) ([]string, error) {
-	out, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_sandbox_list(buf, bufLen)
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_sandbox_list(cancelID, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -296,8 +380,8 @@ func RemoveSandbox(ctx context.Context, name string) error {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 
-	_, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_sandbox_remove(cName, buf, bufLen)
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_sandbox_remove(cancelID, cName, buf, bufLen)
 	})
 	return err
 }
@@ -320,6 +404,143 @@ type ExecResult struct {
 	ExitCode int // -1 if the guest did not return a code.
 }
 
+// =============================================================================
+// Exec handle (streaming)
+// =============================================================================
+
+// ExecStreamHandle is an opaque reference to a running streaming exec session.
+// Every call takes the ExecStreamHandle's u64 token and looks it up on the
+// Rust side. Call Close to release; ownership: Go side owns the u64, Rust owns
+// the channel resources until Close is called.
+type ExecStreamHandle struct {
+	handle C.uint64_t
+}
+
+// ExecEventKind identifies what an ExecEvent carries.
+type ExecEventKind int
+
+const (
+	ExecEventStarted ExecEventKind = iota
+	ExecEventStdout
+	ExecEventStderr
+	ExecEventExited
+	ExecEventDone // stream ended; no more events
+)
+
+// ExecStreamEvent is one event received from a streaming exec session.
+type ExecStreamEvent struct {
+	Kind     ExecEventKind
+	PID      uint32 // ExecEventStarted
+	Data     []byte // ExecEventStdout / ExecEventStderr
+	ExitCode int    // ExecEventExited
+}
+
+// ExecStream starts a streaming exec session and returns a handle. The handle
+// MUST be closed with (*ExecStreamHandle).Close when the stream ends or is no
+// longer needed.
+//
+// Ownership: the u64 handle is registered on the Rust side and removed on
+// Close. Rust owns the channel; Go owns the u64. Do not pass the u64 to C
+// after Close.
+func (s *Sandbox) ExecStream(ctx context.Context, cmd string, opts ExecOptions) (*ExecStreamHandle, error) {
+	optsJSON, err := json.Marshal(opts)
+	if err != nil {
+		return nil, fmt.Errorf("marshal exec opts: %w", err)
+	}
+	cCmd := C.CString(cmd)
+	defer C.free(unsafe.Pointer(cCmd))
+	cOpts := C.CString(string(optsJSON))
+	defer C.free(unsafe.Pointer(cOpts))
+
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_sandbox_exec_stream(cancelID, s.handle, cCmd, cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		ExecHandle uint64 `json:"exec_handle"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, fmt.Errorf("parse exec_stream response: %w", err)
+	}
+	return &ExecStreamHandle{handle: C.uint64_t(resp.ExecHandle)}, nil
+}
+
+// Recv blocks until the next event arrives or the stream ends. ctx controls
+// the wait; cancellation returns ctx.Err() immediately (the Rust work
+// continues in background — same semantics as call()).
+//
+// Returns ExecEventDone when all events have been consumed.
+func (h *ExecStreamHandle) Recv(ctx context.Context) (*ExecStreamEvent, error) {
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_exec_recv(cancelID, h.handle, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var raw struct {
+		Event string `json:"event"`
+		PID   uint32 `json:"pid"`
+		Data  string `json:"data"` // base64
+		Code  int    `json:"code"`
+	}
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		return nil, fmt.Errorf("parse exec event: %w", err)
+	}
+
+	ev := &ExecStreamEvent{}
+	switch raw.Event {
+	case "started":
+		ev.Kind = ExecEventStarted
+		ev.PID = raw.PID
+	case "stdout":
+		ev.Kind = ExecEventStdout
+		ev.Data, err = base64.StdEncoding.DecodeString(raw.Data)
+		if err != nil {
+			return nil, fmt.Errorf("decode stdout: %w", err)
+		}
+	case "stderr":
+		ev.Kind = ExecEventStderr
+		ev.Data, err = base64.StdEncoding.DecodeString(raw.Data)
+		if err != nil {
+			return nil, fmt.Errorf("decode stderr: %w", err)
+		}
+	case "exited":
+		ev.Kind = ExecEventExited
+		ev.ExitCode = raw.Code
+	case "done":
+		ev.Kind = ExecEventDone
+	default:
+		return nil, fmt.Errorf("unknown exec event: %q", raw.Event)
+	}
+	return ev, nil
+}
+
+// Signal sends a Unix signal to the running process.
+// signal is a standard Unix signal number (e.g. 15 = SIGTERM, 9 = SIGKILL).
+func (h *ExecStreamHandle) Signal(ctx context.Context, signal int) error {
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_exec_signal(cancelID, h.handle, C.int32_t(signal), buf, bufLen)
+	})
+	return err
+}
+
+// Close releases the Rust-side exec handle. Does not kill the process; use
+// Signal(ctx, 9) first if you need to terminate it.
+// Close uses context.Background so resource cleanup cannot be cancelled.
+func (h *ExecStreamHandle) Close() error {
+	_, err := call(context.Background(), func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_exec_close(cancelID, h.handle, buf, bufLen)
+	})
+	return err
+}
+
+// =============================================================================
+// Exec (blocking, collected output)
+// =============================================================================
+
 // Exec runs cmd in the sandbox and collects its output.
 func (s *Sandbox) Exec(ctx context.Context, cmd string, opts ExecOptions) (*ExecResult, error) {
 	optsJSON, err := json.Marshal(opts)
@@ -331,8 +552,8 @@ func (s *Sandbox) Exec(ctx context.Context, cmd string, opts ExecOptions) (*Exec
 	cOpts := C.CString(string(optsJSON))
 	defer C.free(unsafe.Pointer(cOpts))
 
-	out, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_sandbox_exec(s.handle, cCmd, cOpts, buf, bufLen)
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_sandbox_exec(cancelID, s.handle, cCmd, cOpts, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -371,8 +592,8 @@ type Metrics struct {
 
 // Metrics fetches a snapshot of this sandbox's resource usage.
 func (s *Sandbox) Metrics(ctx context.Context) (*Metrics, error) {
-	out, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_sandbox_metrics(s.handle, buf, bufLen)
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_sandbox_metrics(cancelID, s.handle, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -425,8 +646,8 @@ func (s *Sandbox) FsRead(ctx context.Context, path string) ([]byte, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	out, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_fs_read(s.handle, cPath, buf, bufLen)
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_fs_read(cancelID, s.handle, cPath, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -447,8 +668,8 @@ func (s *Sandbox) FsWrite(ctx context.Context, path string, data []byte) error {
 	cData := C.CString(base64.StdEncoding.EncodeToString(data))
 	defer C.free(unsafe.Pointer(cData))
 
-	_, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_fs_write(s.handle, cPath, cData, buf, bufLen)
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_fs_write(cancelID, s.handle, cPath, cData, buf, bufLen)
 	})
 	return err
 }
@@ -458,8 +679,8 @@ func (s *Sandbox) FsList(ctx context.Context, path string) ([]FsEntry, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	out, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_fs_list(s.handle, cPath, buf, bufLen)
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_fs_list(cancelID, s.handle, cPath, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -476,8 +697,8 @@ func (s *Sandbox) FsStat(ctx context.Context, path string) (*FsStat, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	out, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_fs_stat(s.handle, cPath, buf, bufLen)
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_fs_stat(cancelID, s.handle, cPath, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -496,8 +717,8 @@ func (s *Sandbox) FsCopyFromHost(ctx context.Context, hostPath, guestPath string
 	cGuest := C.CString(guestPath)
 	defer C.free(unsafe.Pointer(cGuest))
 
-	_, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_fs_copy_from_host(s.handle, cHost, cGuest, buf, bufLen)
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_fs_copy_from_host(cancelID, s.handle, cHost, cGuest, buf, bufLen)
 	})
 	return err
 }
@@ -509,8 +730,8 @@ func (s *Sandbox) FsCopyToHost(ctx context.Context, guestPath, hostPath string) 
 	cHost := C.CString(hostPath)
 	defer C.free(unsafe.Pointer(cHost))
 
-	_, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_fs_copy_to_host(s.handle, cGuest, cHost, buf, bufLen)
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_fs_copy_to_host(cancelID, s.handle, cGuest, cHost, buf, bufLen)
 	})
 	return err
 }
@@ -525,8 +746,8 @@ func CreateVolume(ctx context.Context, name string, quotaMiB uint32) error {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 
-	_, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_volume_create(cName, C.uint32_t(quotaMiB), buf, bufLen)
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_volume_create(cancelID, cName, C.uint32_t(quotaMiB), buf, bufLen)
 	})
 	return err
 }
@@ -536,16 +757,16 @@ func RemoveVolume(ctx context.Context, name string) error {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 
-	_, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_volume_remove(cName, buf, bufLen)
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_volume_remove(cancelID, cName, buf, bufLen)
 	})
 	return err
 }
 
 // ListVolumes returns the names of all volumes.
 func ListVolumes(ctx context.Context) ([]string, error) {
-	out, err := call(ctx, func(buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.msb_volume_list(buf, bufLen)
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.msb_volume_list(cancelID, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
