@@ -26,7 +26,7 @@ use crate::MicrosandboxResult;
 /// Avoids repeatedly opening, parsing the superblock, and closing each
 /// `.erofs` file on every path lookup during patch resolution.
 struct LowerLayers {
-    readers: Vec<ErofsReader<std::io::BufReader<std::fs::File>>>,
+    readers: Vec<ErofsReader>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -43,7 +43,7 @@ impl LowerLayers {
                     path.display()
                 ))
             })?;
-            let reader = ErofsReader::new(std::io::BufReader::new(file)).map_err(|e| {
+            let reader = ErofsReader::new(file).map_err(|e| {
                 crate::MicrosandboxError::PatchFailed(format!(
                     "failed to parse EROFS image {}: {e}",
                     path.display()

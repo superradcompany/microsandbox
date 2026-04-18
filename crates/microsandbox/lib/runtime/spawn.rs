@@ -19,7 +19,7 @@ use serde::Deserialize;
 use tempfile::TempDir;
 use tokio::{io::AsyncBufReadExt, process::Command};
 
-use microsandbox_image::LayerMode;
+use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_protocol::{
     ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_FILE_MOUNTS, ENV_HOSTNAME, ENV_TMPFS, ENV_USER,
 };
@@ -446,36 +446,28 @@ fn sandbox_cli_args(
             args.push(path.as_os_str().to_os_string());
         }
         RootfsSource::Oci(_) => {
-            // EROFS block device path: attach each disk in order.
-            for disk in &config.resolved_erofs_disks {
+            // Derive VMDK + upper paths from the stored manifest digest.
+            if let Some(ref digest_str) = config.manifest_digest {
+                let cache_dir = config::config().cache_dir();
+                let cache = GlobalCache::new(&cache_dir).expect("cache init");
+                let digest: Digest = digest_str.parse().expect("invalid manifest digest");
+                let vmdk_path = cache.vmdk_path(&digest);
+
+                let sandbox_dir = config::config().sandboxes_dir().join(&config.name);
+                let upper_path = sandbox_dir.join("upper.ext4");
+
+                // VMDK (fsmeta + layers) as read-only block device.
+                args.push(OsString::from("--rootfs-disk"));
+                args.push(vmdk_path.as_os_str().to_os_string());
+                args.push(OsString::from("--rootfs-disk-format"));
+                args.push(OsString::from("vmdk"));
+
+                // upper.ext4 as writable block device.
                 args.push(OsString::from("--rootfs-blk"));
-                args.push(disk.as_os_str().to_os_string());
-            }
+                args.push(upper_path.as_os_str().to_os_string());
 
-            // Build MSB_BLOCK_ROOT env var with device names.
-            let disk_count = config.resolved_erofs_disks.len();
-            if disk_count > 0 {
-                let lower_count = disk_count - 1; // last disk is upper.ext4
-                let lowers: Vec<String> = (0..lower_count).map(virtio_blk_dev_path).collect();
-                let upper_dev = virtio_blk_dev_path(lower_count);
-
-                let block_root = match config.layer_mode {
-                    LayerMode::Layered => format!(
-                        "kind=oci-layered,lowers={},lower_fstype=erofs,upper={upper_dev},upper_fstype=ext4",
-                        lowers.join(";")
-                    ),
-                    LayerMode::Flat => {
-                        debug_assert_eq!(
-                            lower_count, 1,
-                            "flat OCI rootfs must provide exactly one lower disk, got {lower_count}"
-                        );
-                        format!(
-                            "kind=oci-flat,lower={},lower_fstype=erofs,upper={upper_dev},upper_fstype=ext4",
-                            lowers[0]
-                        )
-                    }
-                };
-
+                // MSB_BLOCK_ROOT: always 2 devices.
+                let block_root = "kind=oci-erofs,lower=/dev/vda,upper=/dev/vdb,upper_fstype=ext4";
                 args.push(OsString::from("--env"));
                 args.push(OsString::from(format!("{}={block_root}", ENV_BLOCK_ROOT)));
             }
@@ -607,22 +599,6 @@ fn sandbox_cli_args(
 /// 0 → /dev/vda, 1 → /dev/vdb, ..., 25 → /dev/vdz, 26 → /dev/vdaa, etc.
 /// This follows the same bijective base-26 scheme the kernel uses for
 /// virtio-blk device naming.
-fn virtio_blk_dev_path(index: usize) -> String {
-    let mut n = index;
-    let mut suffix = String::new();
-
-    loop {
-        suffix.push((b'a' + (n % 26) as u8) as char);
-        if n < 26 {
-            break;
-        }
-        n = (n / 26) - 1;
-    }
-
-    let suffix: String = suffix.chars().rev().collect();
-    format!("/dev/vd{suffix}")
-}
-
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -632,7 +608,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
-    use super::{sandbox_cli_args, virtio_blk_dev_path};
+    use super::sandbox_cli_args;
     use crate::{
         LogLevel,
         sandbox::{RootfsSource, SandboxBuilder, SandboxConfig},
@@ -757,118 +733,15 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_cli_args_use_block_root_for_layered_oci_rootfs() {
-        let mut config = SandboxBuilder::new("test").image("alpine").build().unwrap();
-        assert!(matches!(config.image, RootfsSource::Oci(_)));
-        config.resolved_erofs_disks = vec![
-            "/tmp/layer0.erofs".into(),
-            "/tmp/layer1.erofs".into(),
-            "/tmp/upper.ext4".into(),
-        ];
-
-        let rendered = render_args(&config);
-        assert!(rendered.contains(&"--rootfs-blk".to_string()));
-        assert!(rendered.contains(&"/tmp/layer0.erofs".to_string()));
-        assert!(rendered.contains(&"/tmp/layer1.erofs".to_string()));
-        assert!(rendered.contains(&"/tmp/upper.ext4".to_string()));
-        assert!(
-            rendered.contains(
-                &"MSB_BLOCK_ROOT=kind=oci-layered,lowers=/dev/vda;/dev/vdb,lower_fstype=erofs,upper=/dev/vdc,upper_fstype=ext4"
-                    .to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn test_sandbox_cli_args_use_block_root_for_single_lower_oci_rootfs() {
-        let mut config = SandboxBuilder::new("test").image("alpine").build().unwrap();
-        assert!(matches!(config.image, RootfsSource::Oci(_)));
-        config.resolved_erofs_disks = vec!["/tmp/layer0.erofs".into(), "/tmp/upper.ext4".into()];
-
-        let rendered = render_args(&config);
-        assert!(!rendered.contains(&"--rootfs-path".to_string()));
-        assert!(rendered.contains(&"--rootfs-blk".to_string()));
-        assert!(rendered.contains(&"/tmp/layer0.erofs".to_string()));
-        assert!(rendered.contains(&"/tmp/upper.ext4".to_string()));
-        assert!(
-            rendered.contains(
-                &"MSB_BLOCK_ROOT=kind=oci-layered,lowers=/dev/vda,lower_fstype=erofs,upper=/dev/vdb,upper_fstype=ext4"
-                    .to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn test_sandbox_cli_args_use_block_root_for_flat_oci_rootfs() {
-        let mut config = SandboxBuilder::new("test")
-            .image("alpine")
-            .layer_mode(LayerMode::Flat)
-            .build()
-            .unwrap();
-        assert!(matches!(config.image, RootfsSource::Oci(_)));
-        config.resolved_erofs_disks = vec!["/tmp/flat.erofs".into(), "/tmp/upper.ext4".into()];
-
-        let rendered = render_args(&config);
-        assert!(rendered.contains(&"--rootfs-blk".to_string()));
-        assert!(rendered.contains(&"/tmp/flat.erofs".to_string()));
-        assert!(rendered.contains(&"/tmp/upper.ext4".to_string()));
-        assert!(
-            rendered.contains(
-                &"MSB_BLOCK_ROOT=kind=oci-flat,lower=/dev/vda,lower_fstype=erofs,upper=/dev/vdb,upper_fstype=ext4"
-                    .to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn test_virtio_blk_dev_path_rolls_over_after_z() {
-        assert_eq!(virtio_blk_dev_path(0), "/dev/vda");
-        assert_eq!(virtio_blk_dev_path(25), "/dev/vdz");
-        assert_eq!(virtio_blk_dev_path(26), "/dev/vdaa");
-        assert_eq!(virtio_blk_dev_path(27), "/dev/vdab");
-        assert_eq!(virtio_blk_dev_path(35), "/dev/vdaj");
-    }
-
-    #[test]
-    fn test_sandbox_cli_args_use_ascii_device_names_for_many_layer_disks() {
-        let mut config = SandboxBuilder::new("test").image("alpine").build().unwrap();
+    fn test_sandbox_cli_args_oci_without_manifest_digest_emits_no_block_root() {
+        let config = SandboxBuilder::new("test").image("alpine").build().unwrap();
         assert!(matches!(config.image, RootfsSource::Oci(_)));
 
-        config.resolved_erofs_disks = (0..35)
-            .map(|i| PathBuf::from(format!("/tmp/layer-{i}.erofs")))
-            .chain(std::iter::once(PathBuf::from("/tmp/upper.ext4")))
-            .collect();
-
         let rendered = render_args(&config);
-        let block_root = rendered
-            .iter()
-            .find(|arg| arg.starts_with("MSB_BLOCK_ROOT="))
-            .expect("missing MSB_BLOCK_ROOT");
-
-        assert!(block_root.contains("/dev/vdz"));
-        assert!(block_root.contains("/dev/vdaa"));
-        assert!(block_root.contains("/dev/vdaj"));
-        assert!(block_root.chars().all(|ch| (' '..='~').contains(&ch)));
-    }
-
-    #[test]
-    fn test_sandbox_cli_args_use_block_root_for_scratch_oci_rootfs() {
-        let mut config = SandboxBuilder::new("test")
-            .image("scratch")
-            .build()
-            .unwrap();
-        config.resolved_erofs_disks = vec!["/tmp/upper.ext4".into()];
-
-        let rendered = render_args(&config);
-        assert!(!rendered.contains(&"--rootfs-path".to_string()));
-        assert!(rendered.contains(&"--rootfs-blk".to_string()));
-        assert!(rendered.contains(&"/tmp/upper.ext4".to_string()));
-        assert!(
-            rendered.contains(
-                &"MSB_BLOCK_ROOT=kind=oci-layered,lowers=,lower_fstype=erofs,upper=/dev/vda,upper_fstype=ext4"
-                    .to_string()
-            )
-        );
+        // Without a manifest_digest set, no block root args should be emitted.
+        assert!(!rendered.contains(&"--rootfs-blk".to_string()));
+        assert!(!rendered.contains(&"--rootfs-disk".to_string()));
+        assert!(!rendered.iter().any(|a| a.starts_with("MSB_BLOCK_ROOT=")));
     }
 
     #[test]
@@ -883,6 +756,24 @@ mod tests {
         let rendered = render_args(&config);
 
         assert!(rendered.contains(&"MSB_TMPFS=/tmp,size=256;/var/tmp".to_string()));
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_apply_default_oci_tmpfs() {
+        let mut config = SandboxConfig {
+            name: "test".into(),
+            image: RootfsSource::Oci("alpine".into()),
+            memory_mib: 1024,
+            manifest_digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            ),
+            ..Default::default()
+        };
+        config.apply_runtime_defaults();
+
+        let rendered = render_args(&config);
+
+        assert!(rendered.contains(&"MSB_TMPFS=/tmp,size=256".to_string()));
     }
 
     #[test]

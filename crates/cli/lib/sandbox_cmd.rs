@@ -88,9 +88,9 @@ pub struct SandboxArgs {
     #[arg(long)]
     pub rootfs_disk_readonly: bool,
 
-    /// Block device files for EROFS OCI rootfs (repeatable, order matters).
+    /// Writable upper ext4 block device for OCI rootfs overlay.
     #[arg(long = "rootfs-blk")]
-    pub rootfs_disks: Vec<PathBuf>,
+    pub rootfs_upper: Option<PathBuf>,
 
     /// Additional mounts as `tag:host_path` (repeatable).
     #[arg(long)]
@@ -133,15 +133,25 @@ pub struct SandboxArgs {
 
 /// Run the sandbox process. This function **never returns**.
 pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
+    let is_vmdk = args.rootfs_disk_format.as_deref() == Some("vmdk");
     let vm_config = VmConfig {
         libkrunfw_path: args.libkrunfw_path,
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,
         rootfs_path: args.rootfs_path,
-        rootfs_disk: args.rootfs_disk,
-        rootfs_disk_format: args.rootfs_disk_format,
+        rootfs_vmdk: if is_vmdk {
+            args.rootfs_disk.clone()
+        } else {
+            None
+        },
+        rootfs_upper: args.rootfs_upper,
+        rootfs_disk: if is_vmdk { None } else { args.rootfs_disk },
+        rootfs_disk_format: if is_vmdk {
+            None
+        } else {
+            args.rootfs_disk_format
+        },
         rootfs_disk_readonly: args.rootfs_disk_readonly,
-        rootfs_disks: args.rootfs_disks,
         mounts: args.mount,
         backends: vec![],
         init_path: args.init_path,

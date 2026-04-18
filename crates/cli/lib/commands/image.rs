@@ -91,7 +91,6 @@ pub async fn run(args: ImageArgs) -> anyhow::Result<()> {
             run_pull_inner(
                 args.reference,
                 args.force,
-                args.layer_mode.into(),
                 args.quiet,
                 microsandbox_image::PullPolicy::IfMissing,
             )
@@ -108,7 +107,6 @@ pub async fn run_pull(args: pull::PullArgs) -> anyhow::Result<()> {
     run_pull_inner(
         args.reference,
         args.force,
-        args.layer_mode.into(),
         args.quiet,
         microsandbox_image::PullPolicy::IfMissing,
     )
@@ -119,7 +117,6 @@ pub async fn run_pull(args: pull::PullArgs) -> anyhow::Result<()> {
 async fn run_pull_inner(
     reference: String,
     force: bool,
-    layer_mode: microsandbox_image::LayerMode,
     quiet: bool,
     pull_policy: microsandbox_image::PullPolicy,
 ) -> anyhow::Result<()> {
@@ -132,16 +129,12 @@ async fn run_pull_inner(
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid image reference: {e}"))?;
 
-    let options = microsandbox_image::PullOptions {
-        pull_policy,
-        force,
-        layer_mode,
-    };
+    let options = microsandbox_image::PullOptions { pull_policy, force };
 
     if let Some((result, metadata)) =
         microsandbox_image::Registry::pull_cached(&cache, &image_ref, &options)?
     {
-        if let Err(e) = Image::persist(&reference, metadata, result.mode).await {
+        if let Err(e) = Image::persist(&reference, metadata).await {
             tracing::warn!(error = %e, "failed to persist image metadata to database");
         }
 
@@ -175,18 +168,10 @@ async fn run_pull_inner(
 
         let _ = display_ready_tx.send(());
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| anyhow::anyhow!("failed to build progress runtime: {e}"))?;
-
         let mut receiver = progress.into_receiver();
-        let display = runtime.block_on(async move {
-            while let Some(event) = receiver.recv().await {
-                display.handle_event(event);
-            }
-            display
-        });
+        while let Some(event) = receiver.blocking_recv() {
+            display.handle_event(event);
+        }
 
         display.finish();
         Ok(())
@@ -227,7 +212,7 @@ async fn run_pull_inner(
     let cache = microsandbox_image::GlobalCache::new(&global.cache_dir())?;
     match cache.read_image_metadata(&image_ref) {
         Ok(Some(metadata)) => {
-            if let Err(e) = Image::persist(&reference, metadata, result.mode).await {
+            if let Err(e) = Image::persist(&reference, metadata).await {
                 tracing::warn!(error = %e, "failed to persist image metadata to database");
             }
         }
@@ -263,19 +248,39 @@ async fn run_pull_inner(
 
 /// Pull an image if not already cached.
 ///
-/// Uses `PullPolicy::Missing` — skips the pull entirely when the image is
-/// already in the local cache (no network call).  Returns `Ok(())` silently
-/// if the reference is not a valid OCI image (e.g. a local directory path).
+/// Used as a pre-flight check (e.g. before starting an OCI-backed sandbox).
+/// When everything is cached, returns silently — no "already cached" line is
+/// printed, because the caller already has its own UI (e.g. the Starting
+/// spinner in `resolve_and_start`). Only falls through to the full pull UI
+/// when there's actual work to do.
 pub(crate) async fn pull_if_missing(reference: &str, quiet: bool) -> anyhow::Result<()> {
     // Local paths (directories, disk images) are not pullable.
     if reference.starts_with('.') || reference.starts_with('/') {
         return Ok(());
     }
 
+    let global = microsandbox::config::config();
+    let cache = microsandbox_image::GlobalCache::new(&global.cache_dir())?;
+    let image_ref: microsandbox_image::Reference = reference
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid image reference: {e}"))?;
+    let options = microsandbox_image::PullOptions {
+        pull_policy: microsandbox_image::PullPolicy::IfMissing,
+        force: false,
+    };
+
+    if let Some((_, metadata)) =
+        microsandbox_image::Registry::pull_cached(&cache, &image_ref, &options)?
+    {
+        if let Err(e) = Image::persist(reference, metadata).await {
+            tracing::warn!(error = %e, "failed to persist image metadata to database");
+        }
+        return Ok(());
+    }
+
     run_pull_inner(
         reference.to_string(),
         false,
-        microsandbox_image::LayerMode::Layered,
         quiet,
         microsandbox_image::PullPolicy::IfMissing,
     )

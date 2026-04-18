@@ -43,10 +43,6 @@ pub enum Relation {
     #[sea_orm(has_many = "super::manifest_layer::Entity")]
     ManifestLayer,
 
-    /// A manifest may have a flat rootfs.
-    #[sea_orm(has_many = "super::flat_rootfs::Entity")]
-    FlatRootfs,
-
     /// A manifest may be referenced by sandbox_rootfs entries.
     #[sea_orm(has_many = "super::sandbox_rootfs::Entity")]
     SandboxRootfs,
@@ -67,12 +63,6 @@ impl Related<super::config::Entity> for Entity {
 impl Related<super::manifest_layer::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::ManifestLayer.def()
-    }
-}
-
-impl Related<super::flat_rootfs::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::FlatRootfs.def()
     }
 }
 

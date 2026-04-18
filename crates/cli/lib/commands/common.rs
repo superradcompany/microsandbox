@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, ValueEnum};
+use clap::Args;
 use microsandbox::sandbox::SandboxBuilder;
 
 use crate::ui;
@@ -10,15 +10,6 @@ use crate::ui;
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
-
-/// Rootfs materialization mode for sandbox commands.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub enum CliLayerMode {
-    /// Materialize one EROFS image per OCI layer.
-    Layered,
-    /// Materialize one merged EROFS image per manifest.
-    Flat,
-}
 
 /// Common sandbox configuration flags shared between `msb run` and `msb create`.
 #[derive(Debug, Args)]
@@ -84,10 +75,6 @@ pub struct SandboxOpts {
     /// When to pull the image: always, if-missing (default), never.
     #[arg(long)]
     pub pull: Option<String>,
-
-    /// Rootfs materialization mode for OCI images.
-    #[arg(long, value_enum)]
-    pub layer_mode: Option<CliLayerMode>,
 
     /// Log verbosity for the sandbox runtime (error, warn, info, debug, trace).
     #[arg(long)]
@@ -212,7 +199,6 @@ impl SandboxOpts {
             || self.hostname.is_some()
             || self.user.is_some()
             || self.pull.is_some()
-            || self.layer_mode.is_some()
             || self.log_level.is_some()
             || self.max_duration.is_some()
             || self.idle_timeout.is_some();
@@ -307,9 +293,6 @@ pub fn apply_sandbox_opts(
     }
     if let Some(ref pull) = opts.pull {
         builder = builder.pull_policy(parse_pull_policy(pull)?);
-    }
-    if let Some(layer_mode) = opts.layer_mode {
-        builder = builder.layer_mode(layer_mode.into());
     }
 
     // --- Log level ---
@@ -604,15 +587,6 @@ fn parse_pull_policy(s: &str) -> anyhow::Result<microsandbox::sandbox::PullPolic
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
-
-impl From<CliLayerMode> for microsandbox::sandbox::LayerMode {
-    fn from(value: CliLayerMode) -> Self {
-        match value {
-            CliLayerMode::Layered => Self::Layered,
-            CliLayerMode::Flat => Self::Flat,
-        }
-    }
-}
 
 /// Parse a log level string.
 fn parse_log_level(s: &str) -> anyhow::Result<microsandbox::LogLevel> {

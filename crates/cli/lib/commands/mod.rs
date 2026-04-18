@@ -1,6 +1,6 @@
 //! CLI command implementations.
 
-use microsandbox::sandbox::{Sandbox, SandboxStatus};
+use microsandbox::sandbox::{RootfsSource, Sandbox, SandboxStatus};
 
 use crate::ui;
 
@@ -46,6 +46,10 @@ pub async fn maybe_stop(sandbox: &Sandbox) {
 ///
 /// If the sandbox is already running, connects to the existing sandbox process
 /// via the agent relay socket. If stopped or crashed, starts it with a spinner.
+///
+/// For OCI-backed sandboxes that are being (re)started, runs a pull-if-missing
+/// pass first so any cache artifacts deleted since the last run (layer EROFS,
+/// fsmeta, VMDK) are regenerated before the VM tries to use them.
 pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbox> {
     let handle = Sandbox::get(name).await?;
 
@@ -55,6 +59,12 @@ pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbo
             Ok(handle.connect().await?)
         }
         SandboxStatus::Stopped | SandboxStatus::Crashed => {
+            if let Ok(config) = handle.config()
+                && let RootfsSource::Oci(ref reference) = config.image
+            {
+                image::pull_if_missing(reference, quiet).await?;
+            }
+
             let spinner = if quiet {
                 ui::Spinner::quiet()
             } else {

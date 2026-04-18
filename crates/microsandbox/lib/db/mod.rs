@@ -186,7 +186,6 @@ mod tests {
 
         let expected = vec![
             "config",
-            "flat_rootfs",
             "image_ref",
             "layer",
             "manifest",
