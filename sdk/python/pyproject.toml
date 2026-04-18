@@ -26,6 +26,9 @@ classifiers = [
 ]
 keywords = ["sandbox", "microvm", "isolation", "security", "vm"]
 
+[project.scripts]
+microsandbox = "microsandbox._cli:main"
+
 [project.urls]
 Homepage = "https://github.com/superradcompany/microsandbox"
 Documentation = "https://docs.microsandbox.dev"

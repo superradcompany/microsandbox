@@ -72,8 +72,8 @@ sb = await Sandbox.create(
 
 ## The basics
 
-- **Under 100ms boot.** Sandboxes share the same kernel in memory. No QEMU, no disk images to load.
-- **No daemon.** The runtime spawns directly as a child process of whatever application creates the sandbox. No root process, no socket, no background service.
+- **Under 100ms boot.** Sandboxes boot in under 100 milliseconds.
+- **No daemon.** The runtime spawns directly as a child process of whatever application creates the sandbox. No root, no server, no background service.
 - **Any OCI image.** Docker Hub, GHCR, ECR, GCR, or any OCI-compatible registry. Shared layers are deduplicated and only stored once.
 - **Cross-platform.** Native on macOS (Apple Silicon) and Linux (KVM). Same CLI, same SDKs.
 - **Multi-language SDKs.** Rust, TypeScript, and Python, all with consistent APIs.

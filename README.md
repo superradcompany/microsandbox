@@ -21,6 +21,7 @@
   <a href="https://github.com/superradcompany/microsandbox/releases"><img src="https://img.shields.io/github/v/release/superradcompany/microsandbox?include_prereleases&style=for-the-badge" alt="GitHub release"></a>
   <a href="https://discord.gg/T95Y3XnEAK"><img src="https://img.shields.io/discord/1315784565562019870?label=Discord&logo=discord&logoColor=white&color=5865F2&style=for-the-badge" alt="Discord"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache 2.0-blue.svg?style=for-the-badge" alt="Apache 2.0 License"></a>
+  <a href="https://www.ycombinator.com/"><img src="https://img.shields.io/badge/BACKED%20BY-Y%20COMBINATOR-F26522?style=for-the-badge&logo=ycombinator&logoColor=white" alt="Backed by Y Combinator"></a>
 </div>
 
 <br />
@@ -56,8 +57,20 @@
 
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI **(Optional)**
 
+> Boot a  microVM in one command.
+>
+> ```sh
+> npx microsandbox run debian
+> ```
+>
+> Or install the `msb` command globally:
+>
 > ```sh
 > curl -fsSL https://install.microsandbox.dev | sh
+> ```
+>
+> ```sh
+> msb run debian
 > ```
 
 ##
