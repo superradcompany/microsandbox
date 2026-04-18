@@ -4,13 +4,28 @@ package microsandbox_test
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	microsandbox "github.com/superradcompany/microsandbox/sdk/go"
 )
+
+// TestMain ensures the microsandbox runtime is loaded once before any
+// integration test runs. Without this every test would fail with
+// ErrLibraryNotLoaded.
+func TestMain(m *testing.M) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := microsandbox.EnsureInstalled(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "microsandbox: EnsureInstalled: %v\n", err)
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
 
 // integrationCtx returns a context with a generous timeout for VM boot.
 func integrationCtx(t *testing.T) context.Context {

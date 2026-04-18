@@ -5,11 +5,8 @@
 //
 // Build: from sdk/go, run
 //
-//	cargo build -p microsandbox-go-ffi
-//	CGO_LDFLAGS="-L$(git rev-parse --show-toplevel)/target/debug" \
-//	  go run ./examples/volumes
+//	go run ./examples/volumes
 //
-// Requires a running microsandbox daemon.
 package main
 
 import (
@@ -24,6 +21,10 @@ import (
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+
+	if err := microsandbox.EnsureInstalled(ctx); err != nil {
+		log.Fatalf("EnsureInstalled: %v", err)
+	}
 
 	name := fmt.Sprintf("go-sdk-vol-%d", time.Now().Unix())
 	log.Printf("creating volume %q (64 MiB quota)", name)

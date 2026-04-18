@@ -213,8 +213,6 @@ type PatchOptions struct {
 	Link    string
 }
 
-func ptrUint32(v uint32) *uint32 { return &v }
-
 // PatchText writes text to a file, creating or replacing it.
 func PatchText(path, content string, mode *uint32, replace bool) PatchOptions {
 	return PatchOptions{Kind: "text", Path: path, Content: content, Mode: mode, Replace: replace}
