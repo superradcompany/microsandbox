@@ -12,9 +12,15 @@ name = "microsandbox_go_ffi"
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
-microsandbox = { version = "0.3.13", path = "../../crates/microsandbox" }
+microsandbox = { version = "0.3.13", path = "../../crates/microsandbox", features = ["net"] }
+microsandbox-network = { version = "0.3.13", path = "../../crates/network" }
+ipnetwork.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 libc.workspace = true
 base64.workspace = true
+
+[build-dependencies]
+cbindgen = "0.27"

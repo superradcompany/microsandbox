@@ -60,3 +60,44 @@ func TestExecOutputEmptyOutput(t *testing.T) {
 		t.Error("Stderr should be empty string")
 	}
 }
+
+func TestExecEventKindConstants(t *testing.T) {
+	// Verify the constants are distinct — a renumbering would silently break
+	// the event dispatch switch in callers.
+	kinds := []ExecEventKind{
+		ExecEventStarted,
+		ExecEventStdout,
+		ExecEventStderr,
+		ExecEventExited,
+		ExecEventDone,
+	}
+	seen := make(map[ExecEventKind]bool, len(kinds))
+	for _, k := range kinds {
+		if seen[k] {
+			t.Errorf("duplicate ExecEventKind value %d", int(k))
+		}
+		seen[k] = true
+	}
+}
+
+func TestExecEventFields(t *testing.T) {
+	started := ExecEvent{Kind: ExecEventStarted, PID: 42}
+	if started.PID != 42 {
+		t.Errorf("PID: got %d, want 42", started.PID)
+	}
+
+	stdout := ExecEvent{Kind: ExecEventStdout, Data: []byte("hello")}
+	if string(stdout.Data) != "hello" {
+		t.Errorf("Data: got %q", stdout.Data)
+	}
+
+	exited := ExecEvent{Kind: ExecEventExited, ExitCode: 1}
+	if exited.ExitCode != 1 {
+		t.Errorf("ExitCode: got %d, want 1", exited.ExitCode)
+	}
+
+	done := ExecEvent{Kind: ExecEventDone}
+	if done.Kind != ExecEventDone {
+		t.Errorf("Kind: got %d, want ExecEventDone", done.Kind)
+	}
+}

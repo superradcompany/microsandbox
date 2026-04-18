@@ -25,17 +25,89 @@ func NewSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sandb
 	for _, opt := range opts {
 		opt(&o)
 	}
-	inner, err := ffi.CreateSandbox(ctx, name, ffi.CreateOptions{
+
+	ffiOpts := ffi.CreateOptions{
 		Image:     o.Image,
 		MemoryMiB: o.MemoryMiB,
 		CPUs:      o.CPUs,
 		Workdir:   o.Workdir,
 		Env:       o.Env,
-	})
+		Detached:  o.Detached,
+		Ports:     o.Ports,
+	}
+
+	if o.Network != nil {
+		ffiOpts.Network = buildFFINetwork(o.Network)
+	}
+
+	for _, s := range o.Secrets {
+		ffiOpts.Secrets = append(ffiOpts.Secrets, ffi.SecretOptions{
+			EnvVar:            s.EnvVar,
+			Value:             s.Value,
+			AllowHosts:        s.AllowHosts,
+			AllowHostPatterns: s.AllowHostPatterns,
+			Placeholder:       s.Placeholder,
+			RequireTLS:        s.RequireTLS,
+		})
+	}
+
+	for _, p := range o.Patches {
+		ffiOpts.Patches = append(ffiOpts.Patches, ffi.PatchOptions{
+			Kind:    p.Kind,
+			Path:    p.Path,
+			Content: p.Content,
+			Mode:    p.Mode,
+			Replace: p.Replace,
+			Src:     p.Src,
+			Dst:     p.Dst,
+			Target:  p.Target,
+			Link:    p.Link,
+		})
+	}
+
+	inner, err := ffi.CreateSandbox(ctx, name, ffiOpts)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
 	return &Sandbox{inner: inner}, nil
+}
+
+// buildFFINetwork converts a public NetworkOptions into its ffi counterpart.
+func buildFFINetwork(n *NetworkOptions) *ffi.NetworkOptions {
+	out := &ffi.NetworkOptions{
+		Policy:              n.Policy,
+		BlockDomains:        n.BlockDomains,
+		BlockDomainSuffixes: n.BlockDomainSuffixes,
+		DNSRebindProtection: n.DNSRebindProtection,
+		Ports:               n.Ports,
+	}
+
+	if n.CustomPolicy != nil {
+		cp := &ffi.CustomNetworkPolicy{DefaultAction: n.CustomPolicy.DefaultAction}
+		for _, r := range n.CustomPolicy.Rules {
+			cp.Rules = append(cp.Rules, ffi.NetworkRule{
+				Action:      r.Action,
+				Direction:   r.Direction,
+				Destination: r.Destination,
+				Protocol:    r.Protocol,
+				Port:        r.Port,
+			})
+		}
+		out.CustomPolicy = cp
+	}
+
+	if n.TLS != nil {
+		out.TLS = &ffi.TLSOptions{
+			Bypass:           n.TLS.Bypass,
+			VerifyUpstream:   n.TLS.VerifyUpstream,
+			InterceptedPorts: n.TLS.InterceptedPorts,
+			BlockQUIC:        n.TLS.BlockQUIC,
+			CACert:           n.TLS.CACert,
+			CAKey:            n.TLS.CAKey,
+		}
+	}
+
+	return out
 }
 
 // GetSandbox reattaches to an existing sandbox by name. Returns an error
