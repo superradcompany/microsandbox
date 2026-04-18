@@ -201,6 +201,25 @@ impl Sandbox {
         Ok(JsExecHandle::from_rust(handle))
     }
 
+    /// Execute a command with streaming I/O and full configuration.
+    ///
+    /// Unlike `execStream`, this accepts an `ExecConfig` so callers can enable
+    /// a piped stdin (`stdin: "pipe"`), set a TTY, pass env vars, etc. Required
+    /// for bidirectional streaming protocols where the host writes to the
+    /// running process's stdin via `ExecHandle.takeStdin()` while concurrently
+    /// reading events via `ExecHandle.recv()`.
+    #[napi(js_name = "execStreamWithConfig")]
+    pub async fn exec_stream_with_config(&self, config: ExecConfig) -> Result<JsExecHandle> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let f = convert_exec_config(&config);
+        let handle = sb
+            .exec_stream_with(&config.cmd, f)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsExecHandle::from_rust(handle))
+    }
+
     /// Execute a shell command using the sandbox's configured shell.
     #[napi]
     pub async fn shell(&self, script: String) -> Result<ExecOutput> {
