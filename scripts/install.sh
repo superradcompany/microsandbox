@@ -402,6 +402,10 @@ main() {
     mkdir -p "$BIN_DIR"
     install -m 755 msb "$BIN_DIR/msb"
 
+    # Also expose the binary as `microsandbox` so users can invoke it under
+    # either name (matches the entry point shipped by the SDK packages).
+    ln -sf msb "$BIN_DIR/microsandbox"
+
     # Install libkrunfw. Use install(1) on Linux (handles running binaries).
     # On macOS, cp+mv for a fresh inode — macOS caches code signatures on the
     # vnode, so overwriting a running library in-place can cause issues.
@@ -416,6 +420,7 @@ main() {
     fi
 
     success "Installed msb to $BIN_DIR/msb"
+    success "Linked microsandbox -> msb in $BIN_DIR/"
     success "Installed libkrunfw to $LIB_DIR/"
 
     # Configure shell environment
