@@ -18,8 +18,33 @@ repos:
       - id: no-commit-to-branch
         args: [--branch, main]
 
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.11.0
+    hooks:
+      - id: shellcheck
+        args: [-x]
+        files: ^scripts/.*\.sh$
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
   - repo: local
     hooks:
+      - id: apt-common-regression
+        name: apt common regression
+        entry: bash scripts/tests/test-apt-common.sh
+        language: system
+        pass_filenames: false
+        files: ^scripts/(lib/apt-common\.sh|tests/test-apt-common\.sh|.*\.sh)$
+      - id: workflow-regressions
+        name: workflow regression checks
+        entry: python scripts/tests/test-workflows.py
+        language: python
+        additional_dependencies: [PyYAML==6.0.2]
+        pass_filenames: false
+        files: ^(\.github/workflows/.*\.ya?ml|scripts/tests/test-workflows\.py)$
       - id: cargo-fmt-workspace
         name: cargo fmt (workspace)
         entry: cargo fmt --all -- --check
