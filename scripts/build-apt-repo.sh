@@ -1,36 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/apt-common.sh
+source "$SCRIPT_DIR/lib/apt-common.sh"
+
 usage() {
     cat <<'EOF'
 Usage: scripts/build-apt-repo.sh --input-dir <dir> --output-dir <dir> --gpg-key-id <id>
 
 Build and sign a static APT repository from one or more `.deb` files.
 EOF
-}
-
-require_cmd() {
-    command -v "$1" >/dev/null 2>&1 || {
-        echo "error: required command not found: $1" >&2
-        exit 1
-    }
-}
-
-render_template() {
-    local template="$1"
-    shift
-
-    local rendered
-    rendered="$(<"$template")"
-
-    while [[ $# -gt 0 ]]; do
-        local key="$1"
-        local value="$2"
-        rendered="${rendered//${key}/${value}}"
-        shift 2
-    done
-
-    printf '%s' "$rendered"
 }
 
 INPUT_DIR=""
@@ -109,7 +89,7 @@ require_cmd dpkg-scanpackages
 require_cmd gpg
 require_cmd gzip
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEMPLATE_DIR="$REPO_ROOT/packaging/apt"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$REPO_ROOT" log -1 --format=%ct 2>/dev/null || date +%s)}"
 

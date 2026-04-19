@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/apt-common.sh
+source "$SCRIPT_DIR/lib/apt-common.sh"
+
 usage() {
     cat <<'EOF'
 Usage: scripts/import-apt-signing-key.sh --gnupg-home <dir> [--private-key-file <path>]
@@ -41,10 +45,7 @@ done
     exit 1
 }
 
-command -v gpg >/dev/null 2>&1 || {
-    echo "error: required command not found: gpg" >&2
-    exit 1
-}
+require_cmd gpg
 
 mkdir -p "$GNUPG_HOME"
 chmod 700 "$GNUPG_HOME"

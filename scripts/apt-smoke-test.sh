@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/apt-common.sh
+source "$SCRIPT_DIR/lib/apt-common.sh"
+
 usage() {
     cat <<'EOF'
 Usage: scripts/apt-smoke-test.sh --repo-url <url> [--keyring-path <path> | --key-url <url>]
@@ -8,13 +12,6 @@ Usage: scripts/apt-smoke-test.sh --repo-url <url> [--keyring-path <path> | --key
 Install microsandbox from an APT repository and run a short end-to-end CLI smoke
 test on a Linux host with KVM.
 EOF
-}
-
-require_cmd() {
-    command -v "$1" >/dev/null 2>&1 || {
-        echo "error: required command not found: $1" >&2
-        exit 1
-    }
 }
 
 REPO_URL=""

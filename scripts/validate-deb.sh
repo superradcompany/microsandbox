@@ -1,41 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/apt-common.sh
+source "$SCRIPT_DIR/lib/apt-common.sh"
+
 usage() {
     cat <<'EOF'
 Usage: scripts/validate-deb.sh --deb <path> --arch <arch> --version <version>
 
 Run structural validation and lint checks for a microsandbox Debian package.
 EOF
-}
-
-require_cmd() {
-    command -v "$1" >/dev/null 2>&1 || {
-        echo "error: required command not found: $1" >&2
-        exit 1
-    }
-}
-
-map_deb_arch() {
-    case "$1" in
-        amd64 | x86_64) echo "amd64" ;;
-        arm64 | aarch64) echo "arm64" ;;
-        *)
-            echo "error: unsupported Debian architecture: $1" >&2
-            exit 1
-            ;;
-    esac
-}
-
-normalize_version() {
-    local raw="$1"
-    local revision="${2:-1}"
-    local clean="${raw#v}"
-    if [[ "$clean" == *-* ]]; then
-        printf '%s\n' "$clean"
-    else
-        printf '%s-%s\n' "$clean" "$revision"
-    fi
 }
 
 DEB_PATH=""
@@ -89,7 +64,7 @@ require_cmd readlink
 }
 
 EXPECTED_ARCH="$(map_deb_arch "$ARCH")"
-EXPECTED_VERSION="$(normalize_version "$VERSION" "$REVISION")"
+EXPECTED_VERSION="$(normalize_deb_version "$VERSION" "$REVISION")"
 
 [[ "$(dpkg-deb -f "$DEB_PATH" Package)" == "microsandbox" ]]
 [[ "$(dpkg-deb -f "$DEB_PATH" Architecture)" == "$EXPECTED_ARCH" ]]

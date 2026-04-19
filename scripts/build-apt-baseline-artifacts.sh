@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/apt-common.sh
+source "$SCRIPT_DIR/lib/apt-common.sh"
+
 usage() {
     cat <<'EOF'
 Usage: scripts/build-apt-baseline-artifacts.sh --output-dir <dir> [--image <container-image>]
@@ -8,13 +12,6 @@ Usage: scripts/build-apt-baseline-artifacts.sh --output-dir <dir> [--image <cont
 Build the Linux artifacts used for APT packaging on an older Debian baseline so
 the resulting package remains compatible with the supported Debian/Ubuntu matrix.
 EOF
-}
-
-require_cmd() {
-    command -v "$1" >/dev/null 2>&1 || {
-        echo "error: required command not found: $1" >&2
-        exit 1
-    }
 }
 
 OUTPUT_DIR=""
@@ -51,7 +48,7 @@ done
 
 require_cmd "$CONTAINER_RUNTIME"
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_DIR_ABS="$(mkdir -p "$OUTPUT_DIR" && cd "$OUTPUT_DIR" && pwd)"
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
