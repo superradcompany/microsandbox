@@ -3,7 +3,7 @@
 //! Configures the guest network interface using ioctls and netlink, following
 //! the parameters from host.
 
-use crate::config::{NetIpv4Spec, NetIpv6Spec, NetSpec};
+use crate::config::NetConfig;
 use crate::error::AgentdResult;
 
 //--------------------------------------------------------------------------------------------------
@@ -28,18 +28,14 @@ pub(crate) fn apply_hostname(hostname: Option<&str>) -> AgentdResult<()> {
 ///
 /// Always provisions loopback, even when no external network interface is
 /// requested. Missing `net` is not an error (no networking requested).
-pub(crate) fn apply_network_config(
-    net: Option<&NetSpec>,
-    net_ipv4: Option<&NetIpv4Spec>,
-    net_ipv6: Option<&NetIpv6Spec>,
-) -> AgentdResult<()> {
+pub(crate) fn apply_network_config(cfg: NetConfig<'_>) -> AgentdResult<()> {
     linux::configure_loopback()?;
 
-    let Some(net) = net else {
+    let Some(net) = cfg.net else {
         return Ok(());
     };
 
-    linux::configure_interface(net, net_ipv4, net_ipv6)
+    linux::configure_interface(net, cfg.ipv4, cfg.ipv6)
 }
 
 fn hosts_file_contents(hostname: Option<&str>) -> String {

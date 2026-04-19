@@ -18,22 +18,12 @@ pub fn init(config: &AgentdConfig) -> AgentdResult<()> {
     if let Some(spec) = &config.block_root {
         linux::mount_block_root(spec)?;
     }
-    if let Some(specs) = &config.dir_mounts {
-        linux::apply_dir_mounts(specs)?;
-    }
-    if let Some(specs) = &config.file_mounts {
-        linux::apply_file_mounts(specs)?;
-    }
+    linux::apply_dir_mounts(&config.dir_mounts)?;
+    linux::apply_file_mounts(&config.file_mounts)?;
     crate::network::apply_hostname(config.hostname.as_deref())?;
-    if let Some(specs) = &config.tmpfs {
-        linux::apply_tmpfs_mounts(specs)?;
-    }
+    linux::apply_tmpfs_mounts(&config.tmpfs)?;
     linux::ensure_standard_tmp_permissions()?;
-    crate::network::apply_network_config(
-        config.net.as_ref(),
-        config.net_ipv4.as_ref(),
-        config.net_ipv6.as_ref(),
-    )?;
+    crate::network::apply_network_config(config.network())?;
     crate::tls::install_ca_cert()?;
     linux::ensure_scripts_path_in_profile()?;
     linux::create_run_dir()?;
@@ -367,6 +357,10 @@ mod linux {
 
     /// Bind-mounts each file from virtiofs shares.
     pub fn apply_file_mounts(specs: &[FileMountSpec]) -> AgentdResult<()> {
+        if specs.is_empty() {
+            return Ok(());
+        }
+
         // Create the staging root directory.
         std::fs::create_dir_all(microsandbox_protocol::FILE_MOUNTS_DIR).map_err(|e| {
             AgentdError::Init(format!(

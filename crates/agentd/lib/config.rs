@@ -27,14 +27,14 @@ pub struct AgentdConfig {
     /// Parsed `MSB_BLOCK_ROOT` — block device for rootfs switch.
     pub(crate) block_root: Option<BlockRootSpec>,
 
-    /// Parsed `MSB_DIR_MOUNTS` — virtiofs directory mount specs.
-    pub(crate) dir_mounts: Option<Vec<DirMountSpec>>,
+    /// Parsed `MSB_DIR_MOUNTS` — virtiofs directory mount specs (empty when unset).
+    pub(crate) dir_mounts: Vec<DirMountSpec>,
 
-    /// Parsed `MSB_FILE_MOUNTS` — virtiofs file mount specs.
-    pub(crate) file_mounts: Option<Vec<FileMountSpec>>,
+    /// Parsed `MSB_FILE_MOUNTS` — virtiofs file mount specs (empty when unset).
+    pub(crate) file_mounts: Vec<FileMountSpec>,
 
-    /// Parsed `MSB_TMPFS` — tmpfs mount specs.
-    pub(crate) tmpfs: Option<Vec<TmpfsSpec>>,
+    /// Parsed `MSB_TMPFS` — tmpfs mount specs (empty when unset).
+    pub(crate) tmpfs: Vec<TmpfsSpec>,
 
     /// `MSB_HOSTNAME` — guest hostname.
     pub(crate) hostname: Option<String>,
@@ -49,6 +49,8 @@ pub struct AgentdConfig {
     pub(crate) net_ipv6: Option<NetIpv6Spec>,
 
     /// `MSB_USER` — default guest user for exec sessions.
+    ///
+    /// Captured at startup; changes to `MSB_USER` afterward are not observed.
     pub(crate) user: Option<String>,
 }
 
@@ -120,6 +122,16 @@ pub(crate) struct NetIpv6Spec {
     pub dns: Option<Ipv6Addr>,
 }
 
+/// Bundled network configuration: interface + IPv4 + IPv6.
+///
+/// Borrows the three `MSB_NET*` specs so they can travel as one parameter.
+#[derive(Debug)]
+pub(crate) struct NetConfig<'a> {
+    pub net: Option<&'a NetSpec>,
+    pub ipv4: Option<&'a NetIpv4Spec>,
+    pub ipv6: Option<&'a NetIpv6Spec>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Implementations
 //--------------------------------------------------------------------------------------------------
@@ -136,13 +148,16 @@ impl AgentdConfig {
                 .transpose()?,
             dir_mounts: read_env(ENV_DIR_MOUNTS)
                 .map(|v| parse_dir_mounts(&v))
-                .transpose()?,
+                .transpose()?
+                .unwrap_or_default(),
             file_mounts: read_env(ENV_FILE_MOUNTS)
                 .map(|v| parse_file_mounts(&v))
-                .transpose()?,
+                .transpose()?
+                .unwrap_or_default(),
             tmpfs: read_env(ENV_TMPFS)
                 .map(|v| parse_tmpfs_mounts(&v))
-                .transpose()?,
+                .transpose()?
+                .unwrap_or_default(),
             hostname: read_env(ENV_HOSTNAME),
             net: read_env(ENV_NET).map(|v| parse_net(&v)).transpose()?,
             net_ipv4: read_env(ENV_NET_IPV4)
@@ -153,6 +168,15 @@ impl AgentdConfig {
                 .transpose()?,
             user: read_env(ENV_USER),
         })
+    }
+
+    /// Borrows the three `MSB_NET*` specs as a single bundle.
+    pub(crate) fn network(&self) -> NetConfig<'_> {
+        NetConfig {
+            net: self.net.as_ref(),
+            ipv4: self.net_ipv4.as_ref(),
+            ipv6: self.net_ipv6.as_ref(),
+        }
     }
 }
 
@@ -168,8 +192,13 @@ impl AgentdConfig {
 fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec> {
     let mut kv: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for part in val.split(',') {
-        if let Some((k, v)) = part.split_once('=') {
-            kv.insert(k, v);
+        let Some((k, v)) = part.split_once('=') else {
+            continue;
+        };
+        if kv.insert(k, v).is_some() {
+            return Err(AgentdError::Config(format!(
+                "MSB_BLOCK_ROOT duplicate key '{k}'"
+            )));
         }
     }
 
@@ -177,7 +206,7 @@ fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec> {
         kv.get(key)
             .filter(|v| !v.is_empty())
             .map(|v| v.to_string())
-            .ok_or_else(|| AgentdError::Init(format!("MSB_BLOCK_ROOT missing '{key}'")))
+            .ok_or_else(|| AgentdError::Config(format!("MSB_BLOCK_ROOT missing '{key}'")))
     };
 
     match kv.get("kind").copied() {
@@ -199,10 +228,10 @@ fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec> {
                 upper_fstype,
             })
         }
-        Some(other) => Err(AgentdError::Init(format!(
+        Some(other) => Err(AgentdError::Config(format!(
             "MSB_BLOCK_ROOT unknown kind: {other}"
         ))),
-        None => Err(AgentdError::Init(
+        None => Err(AgentdError::Config(
             "MSB_BLOCK_ROOT missing 'kind' key".into(),
         )),
     }
@@ -220,7 +249,7 @@ fn parse_dir_mounts(val: &str) -> AgentdResult<Vec<DirMountSpec>> {
 fn parse_dir_mount_entry(entry: &str) -> AgentdResult<DirMountSpec> {
     let parts: Vec<&str> = entry.split(':').collect();
     if parts.len() < 2 {
-        return Err(AgentdError::Init(format!(
+        return Err(AgentdError::Config(format!(
             "MSB_DIR_MOUNTS entry must be tag:path[:ro], got: {entry}"
         )));
     }
@@ -231,25 +260,25 @@ fn parse_dir_mount_entry(entry: &str) -> AgentdResult<DirMountSpec> {
         Some(&"ro") => true,
         None => false,
         Some(flag) => {
-            return Err(AgentdError::Init(format!(
+            return Err(AgentdError::Config(format!(
                 "MSB_DIR_MOUNTS unknown flag '{flag}' (expected 'ro')"
             )));
         }
     };
 
     if parts.len() > 3 {
-        return Err(AgentdError::Init(format!(
+        return Err(AgentdError::Config(format!(
             "MSB_DIR_MOUNTS entry has too many parts: {entry}"
         )));
     }
 
     if tag.is_empty() {
-        return Err(AgentdError::Init(
+        return Err(AgentdError::Config(
             "MSB_DIR_MOUNTS entry has empty tag".into(),
         ));
     }
     if guest_path.is_empty() || !guest_path.starts_with('/') {
-        return Err(AgentdError::Init(format!(
+        return Err(AgentdError::Config(format!(
             "MSB_DIR_MOUNTS guest path must be absolute: {guest_path}"
         )));
     }
@@ -273,7 +302,7 @@ fn parse_file_mounts(val: &str) -> AgentdResult<Vec<FileMountSpec>> {
 fn parse_file_mount_entry(entry: &str) -> AgentdResult<FileMountSpec> {
     let parts: Vec<&str> = entry.split(':').collect();
     if parts.len() < 3 {
-        return Err(AgentdError::Init(format!(
+        return Err(AgentdError::Config(format!(
             "MSB_FILE_MOUNTS entry must be tag:filename:path[:ro], got: {entry}"
         )));
     }
@@ -285,30 +314,30 @@ fn parse_file_mount_entry(entry: &str) -> AgentdResult<FileMountSpec> {
         Some(&"ro") => true,
         None => false,
         Some(flag) => {
-            return Err(AgentdError::Init(format!(
+            return Err(AgentdError::Config(format!(
                 "MSB_FILE_MOUNTS unknown flag '{flag}' (expected 'ro')"
             )));
         }
     };
 
     if parts.len() > 4 {
-        return Err(AgentdError::Init(format!(
+        return Err(AgentdError::Config(format!(
             "MSB_FILE_MOUNTS entry has too many parts: {entry}"
         )));
     }
 
     if tag.is_empty() {
-        return Err(AgentdError::Init(
+        return Err(AgentdError::Config(
             "MSB_FILE_MOUNTS entry has empty tag".into(),
         ));
     }
     if filename.is_empty() {
-        return Err(AgentdError::Init(
+        return Err(AgentdError::Config(
             "MSB_FILE_MOUNTS entry has empty filename".into(),
         ));
     }
     if guest_path.is_empty() || !guest_path.starts_with('/') {
-        return Err(AgentdError::Init(format!(
+        return Err(AgentdError::Config(format!(
             "MSB_FILE_MOUNTS guest path must be absolute: {guest_path}"
         )));
     }
@@ -336,7 +365,7 @@ fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec> {
     let mut parts = entry.split(',');
     let path = parts.next().unwrap(); // always at least one element
     if path.is_empty() {
-        return Err(AgentdError::Init("tmpfs entry has empty path".into()));
+        return Err(AgentdError::Config("tmpfs entry has empty path".into()));
     }
 
     let mut size_mib = None;
@@ -349,15 +378,15 @@ fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec> {
         } else if let Some(val) = opt.strip_prefix("size=") {
             size_mib = Some(
                 val.parse::<u32>()
-                    .map_err(|_| AgentdError::Init(format!("invalid tmpfs size: {val}")))?,
+                    .map_err(|_| AgentdError::Config(format!("invalid tmpfs size: {val}")))?,
             );
         } else if let Some(val) = opt.strip_prefix("mode=") {
-            mode = Some(
-                u32::from_str_radix(val, 8)
-                    .map_err(|_| AgentdError::Init(format!("invalid octal tmpfs mode: {val}")))?,
-            );
+            mode =
+                Some(u32::from_str_radix(val, 8).map_err(|_| {
+                    AgentdError::Config(format!("invalid octal tmpfs mode: {val}"))
+                })?);
         } else {
-            return Err(AgentdError::Init(format!("unknown tmpfs option: {opt}")));
+            return Err(AgentdError::Config(format!("unknown tmpfs option: {opt}")));
         }
     }
 
@@ -387,14 +416,16 @@ fn parse_net(val: &str) -> AgentdResult<NetSpec> {
         } else if let Some(v) = part.strip_prefix("mtu=") {
             mtu = v
                 .parse()
-                .map_err(|_| AgentdError::Init(format!("invalid MTU: {v}")))?;
+                .map_err(|_| AgentdError::Config(format!("invalid MTU: {v}")))?;
         } else {
-            return Err(AgentdError::Init(format!("unknown MSB_NET option: {part}")));
+            return Err(AgentdError::Config(format!(
+                "unknown MSB_NET option: {part}"
+            )));
         }
     }
 
-    let iface = iface.ok_or_else(|| AgentdError::Init("MSB_NET missing iface=".into()))?;
-    let mac = mac.ok_or_else(|| AgentdError::Init("MSB_NET missing mac=".into()))?;
+    let iface = iface.ok_or_else(|| AgentdError::Config("MSB_NET missing iface=".into()))?;
+    let mac = mac.ok_or_else(|| AgentdError::Config("MSB_NET missing mac=".into()))?;
 
     Ok(NetSpec { iface, mac, mtu })
 }
@@ -414,24 +445,25 @@ fn parse_net_ipv4(val: &str) -> AgentdResult<NetIpv4Spec> {
         } else if let Some(v) = part.strip_prefix("gw=") {
             gateway = Some(
                 v.parse::<Ipv4Addr>()
-                    .map_err(|_| AgentdError::Init(format!("invalid IPv4 gateway: {v}")))?,
+                    .map_err(|_| AgentdError::Config(format!("invalid IPv4 gateway: {v}")))?,
             );
         } else if let Some(v) = part.strip_prefix("dns=") {
             dns = Some(
                 v.parse::<Ipv4Addr>()
-                    .map_err(|_| AgentdError::Init(format!("invalid IPv4 DNS: {v}")))?,
+                    .map_err(|_| AgentdError::Config(format!("invalid IPv4 DNS: {v}")))?,
             );
         } else {
-            return Err(AgentdError::Init(format!(
+            return Err(AgentdError::Config(format!(
                 "unknown MSB_NET_IPV4 option: {part}"
             )));
         }
     }
 
-    let address = address.ok_or_else(|| AgentdError::Init("MSB_NET_IPV4 missing addr=".into()))?;
+    let address =
+        address.ok_or_else(|| AgentdError::Config("MSB_NET_IPV4 missing addr=".into()))?;
     let prefix_len =
-        prefix_len.ok_or_else(|| AgentdError::Init("MSB_NET_IPV4 missing addr=".into()))?;
-    let gateway = gateway.ok_or_else(|| AgentdError::Init("MSB_NET_IPV4 missing gw=".into()))?;
+        prefix_len.ok_or_else(|| AgentdError::Config("MSB_NET_IPV4 missing addr=".into()))?;
+    let gateway = gateway.ok_or_else(|| AgentdError::Config("MSB_NET_IPV4 missing gw=".into()))?;
 
     Ok(NetIpv4Spec {
         address,
@@ -456,24 +488,25 @@ fn parse_net_ipv6(val: &str) -> AgentdResult<NetIpv6Spec> {
         } else if let Some(v) = part.strip_prefix("gw=") {
             gateway = Some(
                 v.parse::<Ipv6Addr>()
-                    .map_err(|_| AgentdError::Init(format!("invalid IPv6 gateway: {v}")))?,
+                    .map_err(|_| AgentdError::Config(format!("invalid IPv6 gateway: {v}")))?,
             );
         } else if let Some(v) = part.strip_prefix("dns=") {
             dns = Some(
                 v.parse::<Ipv6Addr>()
-                    .map_err(|_| AgentdError::Init(format!("invalid IPv6 DNS: {v}")))?,
+                    .map_err(|_| AgentdError::Config(format!("invalid IPv6 DNS: {v}")))?,
             );
         } else {
-            return Err(AgentdError::Init(format!(
+            return Err(AgentdError::Config(format!(
                 "unknown MSB_NET_IPV6 option: {part}"
             )));
         }
     }
 
-    let address = address.ok_or_else(|| AgentdError::Init("MSB_NET_IPV6 missing addr=".into()))?;
+    let address =
+        address.ok_or_else(|| AgentdError::Config("MSB_NET_IPV6 missing addr=".into()))?;
     let prefix_len =
-        prefix_len.ok_or_else(|| AgentdError::Init("MSB_NET_IPV6 missing addr=".into()))?;
-    let gateway = gateway.ok_or_else(|| AgentdError::Init("MSB_NET_IPV6 missing gw=".into()))?;
+        prefix_len.ok_or_else(|| AgentdError::Config("MSB_NET_IPV6 missing addr=".into()))?;
+    let gateway = gateway.ok_or_else(|| AgentdError::Config("MSB_NET_IPV6 missing gw=".into()))?;
 
     Ok(NetIpv6Spec {
         address,
@@ -489,14 +522,14 @@ fn parse_mac(s: &str) -> AgentdResult<[u8; 6]> {
     let mut len = 0usize;
     for (i, part) in s.split(':').enumerate() {
         if i >= 6 {
-            return Err(AgentdError::Init(format!("invalid MAC address: {s}")));
+            return Err(AgentdError::Config(format!("invalid MAC address: {s}")));
         }
         mac[i] = u8::from_str_radix(part, 16)
-            .map_err(|_| AgentdError::Init(format!("invalid MAC octet: {part}")))?;
+            .map_err(|_| AgentdError::Config(format!("invalid MAC octet: {part}")))?;
         len = i + 1;
     }
     if len != 6 {
-        return Err(AgentdError::Init(format!("invalid MAC address: {s}")));
+        return Err(AgentdError::Config(format!("invalid MAC address: {s}")));
     }
     Ok(mac)
 }
@@ -505,15 +538,15 @@ fn parse_mac(s: &str) -> AgentdResult<[u8; 6]> {
 fn parse_cidr_v4(s: &str) -> AgentdResult<(Ipv4Addr, u8)> {
     let (addr_str, prefix_str) = s
         .split_once('/')
-        .ok_or_else(|| AgentdError::Init(format!("invalid IPv4 CIDR (missing /): {s}")))?;
+        .ok_or_else(|| AgentdError::Config(format!("invalid IPv4 CIDR (missing /): {s}")))?;
     let addr = addr_str
         .parse::<Ipv4Addr>()
-        .map_err(|_| AgentdError::Init(format!("invalid IPv4 address: {addr_str}")))?;
+        .map_err(|_| AgentdError::Config(format!("invalid IPv4 address: {addr_str}")))?;
     let prefix = prefix_str
         .parse::<u8>()
-        .map_err(|_| AgentdError::Init(format!("invalid IPv4 prefix length: {prefix_str}")))?;
+        .map_err(|_| AgentdError::Config(format!("invalid IPv4 prefix length: {prefix_str}")))?;
     if prefix > 32 {
-        return Err(AgentdError::Init(format!(
+        return Err(AgentdError::Config(format!(
             "IPv4 prefix length out of range (0-32): {prefix}"
         )));
     }
@@ -524,15 +557,15 @@ fn parse_cidr_v4(s: &str) -> AgentdResult<(Ipv4Addr, u8)> {
 fn parse_cidr_v6(s: &str) -> AgentdResult<(Ipv6Addr, u8)> {
     let (addr_str, prefix_str) = s
         .rsplit_once('/')
-        .ok_or_else(|| AgentdError::Init(format!("invalid IPv6 CIDR (missing /): {s}")))?;
+        .ok_or_else(|| AgentdError::Config(format!("invalid IPv6 CIDR (missing /): {s}")))?;
     let addr = addr_str
         .parse::<Ipv6Addr>()
-        .map_err(|_| AgentdError::Init(format!("invalid IPv6 address: {addr_str}")))?;
+        .map_err(|_| AgentdError::Config(format!("invalid IPv6 address: {addr_str}")))?;
     let prefix = prefix_str
         .parse::<u8>()
-        .map_err(|_| AgentdError::Init(format!("invalid IPv6 prefix length: {prefix_str}")))?;
+        .map_err(|_| AgentdError::Config(format!("invalid IPv6 prefix length: {prefix_str}")))?;
     if prefix > 128 {
-        return Err(AgentdError::Init(format!(
+        return Err(AgentdError::Config(format!(
             "IPv6 prefix length out of range (0-128): {prefix}"
         )));
     }
@@ -621,6 +654,12 @@ mod tests {
     fn test_parse_block_root_oci_erofs_missing_upper_errors() {
         let err = parse_block_root("kind=oci-erofs,lower=/dev/vda,upper_fstype=ext4").unwrap_err();
         assert!(err.to_string().contains("missing 'upper'"));
+    }
+
+    #[test]
+    fn test_parse_block_root_duplicate_key_errors() {
+        let err = parse_block_root("kind=disk-image,device=/dev/vda,device=/dev/vdb").unwrap_err();
+        assert!(err.to_string().contains("duplicate key 'device'"));
     }
 
     // ── File Mounts ────────────────────────────────────────────────────
