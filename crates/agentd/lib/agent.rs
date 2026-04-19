@@ -21,6 +21,7 @@ use microsandbox_protocol::{
 };
 
 use crate::{
+    config::AgentdConfig,
     error::{AgentdError, AgentdResult},
     fs::FsWriteSession,
     heartbeat::{heartbeat_dir_exists, write_heartbeat},
@@ -55,7 +56,7 @@ const MAX_INPUT_BUF_SIZE: usize = MAX_FRAME_SIZE as usize + 4;
 ///
 /// - `boot_time_ns`: `CLOCK_BOOTTIME` at `main()` start (kernel boot duration).
 /// - `init_time_ns`: nanoseconds spent in `init::init()`.
-pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
+pub async fn run(boot_time_ns: u64, init_time_ns: u64, config: &AgentdConfig) -> AgentdResult<()> {
     // Discover serial port.
     let port_path = find_serial_port(AGENT_PORT_NAME)?;
 
@@ -140,6 +141,7 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
                                     &mut write_sessions,
                                     &session_tx,
                                     &mut serial_out_buf,
+                                    config,
                                 ).await?;
                             }
 
@@ -214,6 +216,7 @@ async fn handle_message(
     write_sessions: &mut HashMap<u32, FsWriteSession>,
     session_tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
     out_buf: &mut Vec<u8>,
+    config: &AgentdConfig,
 ) -> AgentdResult<()> {
     match msg.t {
         MessageType::ExecRequest => {
@@ -221,7 +224,7 @@ async fn handle_message(
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode exec request: {e}")))?;
             prepend_scripts_to_path(&mut req);
-            match ExecSession::spawn(msg.id, &req, session_tx.clone()) {
+            match ExecSession::spawn(msg.id, &req, session_tx.clone(), config.user.as_deref()) {
                 Ok(session) => {
                     let reply = Message::with_payload(
                         MessageType::ExecStarted,

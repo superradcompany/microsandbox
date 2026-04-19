@@ -1,52 +1,7 @@
 //! PID 1 init: mount filesystems, apply tmpfs mounts, prepare runtime directories.
 
-use crate::error::{AgentdError, AgentdResult};
-
-//--------------------------------------------------------------------------------------------------
-// Types
-//--------------------------------------------------------------------------------------------------
-
-/// Parsed tmpfs mount specification.
-#[derive(Debug)]
-struct TmpfsSpec<'a> {
-    path: &'a str,
-    size_mib: Option<u32>,
-    mode: Option<u32>,
-    noexec: bool,
-}
-
-/// Parsed block root specification with kind-based dispatch.
-#[derive(Debug)]
-enum BlockRootSpec<'a> {
-    /// Single disk image.
-    DiskImage {
-        device: &'a str,
-        fstype: Option<&'a str>,
-    },
-    /// OCI EROFS: merged EROFS lower + writable upper + guest overlayfs.
-    OciErofs {
-        lower: &'a str,
-        upper: &'a str,
-        upper_fstype: &'a str,
-    },
-}
-
-/// Parsed virtiofs directory volume mount specification.
-#[derive(Debug)]
-struct DirMountSpec<'a> {
-    tag: &'a str,
-    guest_path: &'a str,
-    readonly: bool,
-}
-
-/// Parsed virtiofs file volume mount specification.
-#[derive(Debug)]
-struct FileMountSpec<'a> {
-    tag: &'a str,
-    filename: &'a str,
-    guest_path: &'a str,
-    readonly: bool,
-}
+use crate::config::AgentdConfig;
+use crate::error::AgentdResult;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -54,206 +9,35 @@ struct FileMountSpec<'a> {
 
 /// Performs synchronous PID 1 initialization.
 ///
-/// Mounts essential filesystems, applies directory mounts from
-/// `MSB_DIR_MOUNTS`, file mounts from `MSB_FILE_MOUNTS`, and tmpfs mounts
-/// from `MSB_TMPFS`. Configures networking from `MSB_NET*` env vars and
-/// prepares runtime directories.
-pub fn init() -> AgentdResult<()> {
+/// Mounts essential filesystems, applies directory mounts, file mounts, and
+/// tmpfs mounts from the parsed config. Configures networking and prepares
+/// runtime directories.
+pub fn init(config: &AgentdConfig) -> AgentdResult<()> {
     linux::mount_filesystems()?;
     linux::mount_runtime()?;
-    linux::mount_block_root()?;
-    linux::apply_dir_mounts()?;
-    linux::apply_file_mounts()?;
-    crate::network::apply_hostname()?;
-    linux::apply_tmpfs_mounts()?;
+    if let Some(spec) = &config.block_root {
+        linux::mount_block_root(spec)?;
+    }
+    if let Some(specs) = &config.dir_mounts {
+        linux::apply_dir_mounts(specs)?;
+    }
+    if let Some(specs) = &config.file_mounts {
+        linux::apply_file_mounts(specs)?;
+    }
+    crate::network::apply_hostname(config.hostname.as_deref())?;
+    if let Some(specs) = &config.tmpfs {
+        linux::apply_tmpfs_mounts(specs)?;
+    }
     linux::ensure_standard_tmp_permissions()?;
-    crate::network::apply_network_config()?;
+    crate::network::apply_network_config(
+        config.net.as_ref(),
+        config.net_ipv4.as_ref(),
+        config.net_ipv6.as_ref(),
+    )?;
     crate::tls::install_ca_cert()?;
     linux::ensure_scripts_path_in_profile()?;
     linux::create_run_dir()?;
     Ok(())
-}
-
-/// Parses a single tmpfs entry: `path[,size=N][,mode=N][,noexec]`
-///
-/// Mode is parsed as octal (e.g. `mode=1777`).
-fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec<'_>> {
-    let mut parts = entry.split(',');
-    let path = parts.next().unwrap(); // always at least one element
-    if path.is_empty() {
-        return Err(AgentdError::Init("tmpfs entry has empty path".into()));
-    }
-
-    let mut size_mib = None;
-    let mut mode = None;
-    let mut noexec = false;
-
-    for opt in parts {
-        if opt == "noexec" {
-            noexec = true;
-        } else if let Some(val) = opt.strip_prefix("size=") {
-            size_mib = Some(
-                val.parse::<u32>()
-                    .map_err(|_| AgentdError::Init(format!("invalid tmpfs size: {val}")))?,
-            );
-        } else if let Some(val) = opt.strip_prefix("mode=") {
-            mode = Some(
-                u32::from_str_radix(val, 8)
-                    .map_err(|_| AgentdError::Init(format!("invalid octal tmpfs mode: {val}")))?,
-            );
-        } else {
-            return Err(AgentdError::Init(format!("unknown tmpfs option: {opt}")));
-        }
-    }
-
-    Ok(TmpfsSpec {
-        path,
-        size_mib,
-        mode,
-        noexec,
-    })
-}
-
-/// Parses MSB_BLOCK_ROOT into a kind-based spec.
-///
-/// Supports:
-/// - `kind=disk-image,device=/dev/vda[,fstype=ext4]`
-/// - `kind=oci-erofs,lower=/dev/vdb,upper=/dev/vdc,upper_fstype=ext4`
-fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec<'_>> {
-    let mut kv: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
-    for part in val.split(',') {
-        if let Some((k, v)) = part.split_once('=') {
-            kv.insert(k, v);
-        }
-    }
-
-    let get = |key: &str| -> AgentdResult<&str> {
-        kv.get(key)
-            .filter(|v| !v.is_empty())
-            .copied()
-            .ok_or_else(|| AgentdError::Init(format!("MSB_BLOCK_ROOT missing '{key}'")))
-    };
-
-    match kv.get("kind").copied() {
-        Some("disk-image") => {
-            let device = get("device")?;
-            let fstype = kv.get("fstype").filter(|v| !v.is_empty()).copied();
-            Ok(BlockRootSpec::DiskImage { device, fstype })
-        }
-        Some("oci-erofs") => {
-            let lower = get("lower")?;
-            let upper = get("upper")?;
-            let upper_fstype = get("upper_fstype")?;
-            Ok(BlockRootSpec::OciErofs {
-                lower,
-                upper,
-                upper_fstype,
-            })
-        }
-        Some(other) => Err(AgentdError::Init(format!(
-            "MSB_BLOCK_ROOT unknown kind: {other}"
-        ))),
-        None => Err(AgentdError::Init(
-            "MSB_BLOCK_ROOT missing 'kind' key".into(),
-        )),
-    }
-}
-
-/// Parses a single virtiofs directory volume mount entry: `tag:guest_path[:ro]`
-fn parse_dir_mount_entry(entry: &str) -> AgentdResult<DirMountSpec<'_>> {
-    let parts: Vec<&str> = entry.split(':').collect();
-    if parts.len() < 2 {
-        return Err(AgentdError::Init(format!(
-            "MSB_DIR_MOUNTS entry must be tag:path[:ro], got: {entry}"
-        )));
-    }
-
-    let tag = parts[0];
-    let guest_path = parts[1];
-    let readonly = match parts.get(2) {
-        Some(&"ro") => true,
-        None => false,
-        Some(flag) => {
-            return Err(AgentdError::Init(format!(
-                "MSB_DIR_MOUNTS unknown flag '{flag}' (expected 'ro')"
-            )));
-        }
-    };
-
-    if parts.len() > 3 {
-        return Err(AgentdError::Init(format!(
-            "MSB_DIR_MOUNTS entry has too many parts: {entry}"
-        )));
-    }
-
-    if tag.is_empty() {
-        return Err(AgentdError::Init(
-            "MSB_DIR_MOUNTS entry has empty tag".into(),
-        ));
-    }
-    if guest_path.is_empty() || !guest_path.starts_with('/') {
-        return Err(AgentdError::Init(format!(
-            "MSB_DIR_MOUNTS guest path must be absolute: {guest_path}"
-        )));
-    }
-
-    Ok(DirMountSpec {
-        tag,
-        guest_path,
-        readonly,
-    })
-}
-
-/// Parses a single virtiofs file volume mount entry: `tag:filename:guest_path[:ro]`
-fn parse_file_mount_entry(entry: &str) -> AgentdResult<FileMountSpec<'_>> {
-    let parts: Vec<&str> = entry.split(':').collect();
-    if parts.len() < 3 {
-        return Err(AgentdError::Init(format!(
-            "MSB_FILE_MOUNTS entry must be tag:filename:path[:ro], got: {entry}"
-        )));
-    }
-
-    let tag = parts[0];
-    let filename = parts[1];
-    let guest_path = parts[2];
-    let readonly = match parts.get(3) {
-        Some(&"ro") => true,
-        None => false,
-        Some(flag) => {
-            return Err(AgentdError::Init(format!(
-                "MSB_FILE_MOUNTS unknown flag '{flag}' (expected 'ro')"
-            )));
-        }
-    };
-
-    if parts.len() > 4 {
-        return Err(AgentdError::Init(format!(
-            "MSB_FILE_MOUNTS entry has too many parts: {entry}"
-        )));
-    }
-
-    if tag.is_empty() {
-        return Err(AgentdError::Init(
-            "MSB_FILE_MOUNTS entry has empty tag".into(),
-        ));
-    }
-    if filename.is_empty() {
-        return Err(AgentdError::Init(
-            "MSB_FILE_MOUNTS entry has empty filename".into(),
-        ));
-    }
-    if guest_path.is_empty() || !guest_path.starts_with('/') {
-        return Err(AgentdError::Init(format!(
-            "MSB_FILE_MOUNTS guest path must be absolute: {guest_path}"
-        )));
-    }
-
-    Ok(FileMountSpec {
-        tag,
-        filename,
-        guest_path,
-        readonly,
-    })
 }
 
 fn ensure_scripts_profile_block(profile: &str) -> String {
@@ -289,9 +73,8 @@ mod linux {
         unistd::{chdir, chroot, mkdir},
     };
 
+    use crate::config::{BlockRootSpec, DirMountSpec, FileMountSpec, TmpfsSpec};
     use crate::error::{AgentdError, AgentdResult};
-
-    use super::TmpfsSpec;
 
     /// Mounts essential Linux filesystems.
     pub fn mount_filesystems() -> AgentdResult<()> {
@@ -382,25 +165,17 @@ mod linux {
         Ok(())
     }
 
-    /// Assembles the root filesystem based on `MSB_BLOCK_ROOT`, if set.
+    /// Assembles the root filesystem from the parsed block-root spec.
     ///
-    /// Dispatches to the appropriate handler based on `kind`:
-    /// - `disk-image`: single device mount + pivot
-    /// - `oci-erofs`: merged EROFS lower + writable upper + guest overlayfs + pivot
-    pub fn mount_block_root() -> AgentdResult<()> {
-        let val = match std::env::var(microsandbox_protocol::ENV_BLOCK_ROOT) {
-            Ok(v) if !v.is_empty() => v,
-            _ => return Ok(()),
-        };
-
-        let spec = super::parse_block_root(&val)?;
+    /// Dispatches on the spec variant, then pivots `/newroot` into `/`.
+    pub fn mount_block_root(spec: &BlockRootSpec) -> AgentdResult<()> {
         mkdir_ignore_exists("/newroot")?;
 
         match spec {
-            super::BlockRootSpec::DiskImage { device, fstype } => {
-                mount_disk_image(device, fstype)?;
+            BlockRootSpec::DiskImage { device, fstype } => {
+                mount_disk_image(device, fstype.as_deref())?;
             }
-            super::BlockRootSpec::OciErofs {
+            BlockRootSpec::OciErofs {
                 lower,
                 upper,
                 upper_fstype,
@@ -409,7 +184,6 @@ mod linux {
             }
         }
 
-        // Common tail: bind-mount /.msb, pivot, re-mount essentials.
         pivot_to_newroot()?;
 
         Ok(())
@@ -553,35 +327,17 @@ mod linux {
         )))
     }
 
-    /// Reads `MSB_DIR_MOUNTS` env var and mounts each virtiofs directory volume.
-    ///
-    /// For each entry, creates the guest mount point directory and mounts the
-    /// virtiofs share using the tag provided by the host. If the entry
-    /// specifies `:ro`, the mount is made read-only via `MS_RDONLY`.
-    ///
-    /// Missing env var is not an error (no directory volume mounts requested).
-    /// Parse failures and mount failures are hard errors.
-    pub fn apply_dir_mounts() -> AgentdResult<()> {
-        let val = match std::env::var(microsandbox_protocol::ENV_DIR_MOUNTS) {
-            Ok(v) if !v.is_empty() => v,
-            _ => return Ok(()),
-        };
-
-        for entry in val.split(';') {
-            if entry.is_empty() {
-                continue;
-            }
-
-            let spec = super::parse_dir_mount_entry(entry)?;
-            mount_dir(&spec)?;
+    /// Mounts each virtiofs directory volume from the parsed specs.
+    pub fn apply_dir_mounts(specs: &[DirMountSpec]) -> AgentdResult<()> {
+        for spec in specs {
+            mount_dir(spec)?;
         }
-
         Ok(())
     }
 
     /// Mounts a single virtiofs directory share from a parsed spec.
-    fn mount_dir(spec: &super::DirMountSpec<'_>) -> AgentdResult<()> {
-        let path = spec.guest_path;
+    fn mount_dir(spec: &DirMountSpec) -> AgentdResult<()> {
+        let path = spec.guest_path.as_str();
 
         // Create the mount point directory.
         std::fs::create_dir_all(path)
@@ -592,7 +348,14 @@ mod linux {
             flags |= MsFlags::MS_RDONLY;
         }
 
-        mount(Some(spec.tag), path, Some("virtiofs"), flags, None::<&str>).map_err(|e| {
+        mount(
+            Some(spec.tag.as_str()),
+            path,
+            Some("virtiofs"),
+            flags,
+            None::<&str>,
+        )
+        .map_err(|e| {
             AgentdError::Init(format!(
                 "failed to mount virtiofs tag '{}' at {path}: {e}",
                 spec.tag
@@ -602,16 +365,8 @@ mod linux {
         Ok(())
     }
 
-    /// Reads `MSB_FILE_MOUNTS` env var and bind-mounts each file.
-    ///
-    /// Missing env var is not an error (no file mounts requested).
-    /// Parse failures and mount failures are hard errors.
-    pub fn apply_file_mounts() -> AgentdResult<()> {
-        let val = match std::env::var(microsandbox_protocol::ENV_FILE_MOUNTS) {
-            Ok(v) if !v.is_empty() => v,
-            _ => return Ok(()),
-        };
-
+    /// Bind-mounts each file from virtiofs shares.
+    pub fn apply_file_mounts(specs: &[FileMountSpec]) -> AgentdResult<()> {
         // Create the staging root directory.
         std::fs::create_dir_all(microsandbox_protocol::FILE_MOUNTS_DIR).map_err(|e| {
             AgentdError::Init(format!(
@@ -620,13 +375,8 @@ mod linux {
             ))
         })?;
 
-        for entry in val.split(';') {
-            if entry.is_empty() {
-                continue;
-            }
-
-            let spec = super::parse_file_mount_entry(entry)?;
-            mount_file(&spec)?;
+        for spec in specs {
+            mount_file(spec)?;
         }
 
         // Best-effort cleanup of the staging root (succeeds only if all
@@ -637,7 +387,7 @@ mod linux {
     }
 
     /// Mounts a single file from a virtiofs share via bind mount.
-    fn mount_file(spec: &super::FileMountSpec<'_>) -> AgentdResult<()> {
+    fn mount_file(spec: &FileMountSpec) -> AgentdResult<()> {
         let staging_path = format!("{}/{}", microsandbox_protocol::FILE_MOUNTS_DIR, spec.tag);
 
         // 1. Create the staging mount point directory.
@@ -652,7 +402,7 @@ mod linux {
         }
 
         mount(
-            Some(spec.tag),
+            Some(spec.tag.as_str()),
             staging_path.as_str(),
             Some("virtiofs"),
             flags,
@@ -666,7 +416,7 @@ mod linux {
         })?;
 
         // 3. Create parent directories for the guest path.
-        let guest = Path::new(spec.guest_path);
+        let guest = Path::new(&spec.guest_path);
         if let Some(parent) = guest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 AgentdError::Init(format!(
@@ -681,7 +431,7 @@ mod linux {
             .create(true)
             .truncate(false)
             .write(true)
-            .open(spec.guest_path)
+            .open(&spec.guest_path)
             .map_err(|e| {
                 AgentdError::Init(format!(
                     "failed to create bind target {}: {e}",
@@ -693,7 +443,7 @@ mod linux {
         let source_path = format!("{staging_path}/{}", spec.filename);
         mount(
             Some(source_path.as_str()),
-            spec.guest_path,
+            spec.guest_path.as_str(),
             None::<&str>,
             MsFlags::MS_BIND,
             None::<&str>,
@@ -709,7 +459,7 @@ mod linux {
         if spec.readonly {
             mount(
                 None::<&str>,
-                spec.guest_path,
+                spec.guest_path.as_str(),
                 None::<&str>,
                 MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
                 None::<&str>,
@@ -731,25 +481,11 @@ mod linux {
         Ok(())
     }
 
-    /// Reads `MSB_TMPFS` env var and mounts each tmpfs entry.
-    ///
-    /// Missing env var is not an error (no tmpfs mounts requested).
-    /// Parse failures and mount failures are hard errors.
-    pub fn apply_tmpfs_mounts() -> AgentdResult<()> {
-        let val = match std::env::var(microsandbox_protocol::ENV_TMPFS) {
-            Ok(v) if !v.is_empty() => v,
-            _ => return Ok(()),
-        };
-
-        for entry in val.split(';') {
-            if entry.is_empty() {
-                continue;
-            }
-
-            let spec = super::parse_tmpfs_entry(entry)?;
-            mount_tmpfs(&spec)?;
+    /// Mounts each tmpfs from the parsed specs.
+    pub fn apply_tmpfs_mounts(specs: &[TmpfsSpec]) -> AgentdResult<()> {
+        for spec in specs {
+            mount_tmpfs(spec)?;
         }
-
         Ok(())
     }
 
@@ -761,8 +497,8 @@ mod linux {
     }
 
     /// Mounts a single tmpfs from a parsed spec.
-    fn mount_tmpfs(spec: &TmpfsSpec<'_>) -> AgentdResult<()> {
-        let path = spec.path;
+    fn mount_tmpfs(spec: &TmpfsSpec) -> AgentdResult<()> {
+        let path = spec.path.as_str();
 
         // Determine the permission mode.
         let mode = spec
@@ -894,162 +630,6 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_path_only() {
-        let spec = parse_tmpfs_entry("/tmp").unwrap();
-        assert_eq!(spec.path, "/tmp");
-        assert_eq!(spec.size_mib, None);
-        assert_eq!(spec.mode, None);
-        assert!(!spec.noexec);
-    }
-
-    #[test]
-    fn test_parse_with_size() {
-        let spec = parse_tmpfs_entry("/tmp,size=256").unwrap();
-        assert_eq!(spec.path, "/tmp");
-        assert_eq!(spec.size_mib, Some(256));
-    }
-
-    #[test]
-    fn test_parse_with_noexec() {
-        let spec = parse_tmpfs_entry("/tmp,noexec").unwrap();
-        assert_eq!(spec.path, "/tmp");
-        assert!(spec.noexec);
-    }
-
-    #[test]
-    fn test_parse_with_octal_mode() {
-        let spec = parse_tmpfs_entry("/tmp,mode=1777").unwrap();
-        assert_eq!(spec.mode, Some(0o1777));
-
-        let spec = parse_tmpfs_entry("/data,mode=755").unwrap();
-        assert_eq!(spec.mode, Some(0o755));
-    }
-
-    #[test]
-    fn test_parse_multi_options() {
-        let spec = parse_tmpfs_entry("/tmp,size=256,mode=1777,noexec").unwrap();
-        assert_eq!(spec.path, "/tmp");
-        assert_eq!(spec.size_mib, Some(256));
-        assert_eq!(spec.mode, Some(0o1777));
-        assert!(spec.noexec);
-    }
-
-    #[test]
-    fn test_parse_unknown_option_errors() {
-        let err = parse_tmpfs_entry("/tmp,bogus=42").unwrap_err();
-        assert!(err.to_string().contains("unknown tmpfs option"));
-    }
-
-    #[test]
-    fn test_parse_invalid_size_errors() {
-        let err = parse_tmpfs_entry("/tmp,size=abc").unwrap_err();
-        assert!(err.to_string().contains("invalid tmpfs size"));
-    }
-
-    #[test]
-    fn test_parse_invalid_mode_errors() {
-        let err = parse_tmpfs_entry("/tmp,mode=zzz").unwrap_err();
-        assert!(err.to_string().contains("invalid octal tmpfs mode"));
-    }
-
-    #[test]
-    fn test_parse_empty_path_errors() {
-        let err = parse_tmpfs_entry(",size=256").unwrap_err();
-        assert!(err.to_string().contains("empty path"));
-    }
-
-    // ── kind=disk-image tests ────────────────────────────────────────
-
-    #[test]
-    fn test_parse_block_root_disk_image() {
-        let spec = parse_block_root("kind=disk-image,device=/dev/vda,fstype=ext4").unwrap();
-        let BlockRootSpec::DiskImage { device, fstype } = spec else {
-            panic!("expected DiskImage");
-        };
-        assert_eq!(device, "/dev/vda");
-        assert_eq!(fstype, Some("ext4"));
-    }
-
-    // ── kind=oci-erofs tests ─────────────────────────────────────────
-
-    #[test]
-    fn test_parse_block_root_oci_erofs() {
-        let spec =
-            parse_block_root("kind=oci-erofs,lower=/dev/vda,upper=/dev/vdb,upper_fstype=ext4")
-                .unwrap();
-        let BlockRootSpec::OciErofs {
-            lower,
-            upper,
-            upper_fstype,
-        } = spec
-        else {
-            panic!("expected OciErofs");
-        };
-        assert_eq!(lower, "/dev/vda");
-        assert_eq!(upper, "/dev/vdb");
-        assert_eq!(upper_fstype, "ext4");
-    }
-
-    // ── error tests ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_parse_block_root_unknown_kind_errors() {
-        let err = parse_block_root("kind=bogus,device=/dev/vda").unwrap_err();
-        assert!(err.to_string().contains("unknown kind"));
-    }
-
-    #[test]
-    fn test_parse_block_root_missing_kind_errors() {
-        let err = parse_block_root("/dev/vda").unwrap_err();
-        assert!(err.to_string().contains("missing 'kind' key"));
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_basic() {
-        let spec = parse_file_mount_entry("fm_config:app.conf:/etc/app.conf").unwrap();
-        assert_eq!(spec.tag, "fm_config");
-        assert_eq!(spec.filename, "app.conf");
-        assert_eq!(spec.guest_path, "/etc/app.conf");
-        assert!(!spec.readonly);
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_readonly() {
-        let spec = parse_file_mount_entry("fm_config:app.conf:/etc/app.conf:ro").unwrap();
-        assert!(spec.readonly);
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_too_few_parts() {
-        assert!(parse_file_mount_entry("fm_config:/etc/app.conf").is_err());
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_empty_filename() {
-        assert!(parse_file_mount_entry("fm_config::/etc/app.conf").is_err());
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_relative_path() {
-        assert!(parse_file_mount_entry("fm_config:app.conf:relative/path").is_err());
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_too_many_parts() {
-        assert!(parse_file_mount_entry("fm_config:app.conf:/etc/app.conf:ro:extra").is_err());
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_unknown_flag() {
-        assert!(parse_file_mount_entry("fm_config:app.conf:/etc/app.conf:rw").is_err());
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_empty_tag() {
-        assert!(parse_file_mount_entry(":app.conf:/etc/app.conf").is_err());
-    }
 
     #[test]
     fn test_ensure_scripts_profile_block_appends_block() {

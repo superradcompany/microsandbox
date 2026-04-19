@@ -18,9 +18,18 @@ fn main() {
     // Capture CLOCK_BOOTTIME immediately — this represents kernel boot duration.
     let boot_time_ns = microsandbox_agentd::clock::boottime_ns();
 
+    // Read all MSB_* environment variables once at startup and parse.
+    let config = match microsandbox_agentd::AgentdConfig::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("agentd: config parse failed: {e}");
+            std::process::exit(1);
+        }
+    };
+
     // Phase 1: Synchronous init (mount filesystems, prepare runtime directories).
     let init_start = microsandbox_agentd::clock::boottime_ns();
-    if let Err(e) = microsandbox_agentd::init::init() {
+    if let Err(e) = microsandbox_agentd::init::init(&config) {
         eprintln!("agentd: init failed: {e}");
         std::process::exit(1);
     }
@@ -33,7 +42,7 @@ fn main() {
         .expect("agentd: failed to build tokio runtime");
 
     rt.block_on(async {
-        match microsandbox_agentd::agent::run(boot_time_ns, init_time_ns).await {
+        match microsandbox_agentd::agent::run(boot_time_ns, init_time_ns, &config).await {
             Ok(()) => {}
             Err(microsandbox_agentd::AgentdError::Shutdown) => {}
             Err(e) => {

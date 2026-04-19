@@ -6,6 +6,7 @@
 #![cfg(target_os = "linux")]
 #![warn(missing_docs)]
 
+mod config;
 mod error;
 
 //--------------------------------------------------------------------------------------------------
@@ -22,4 +23,5 @@ pub mod serial;
 pub mod session;
 pub mod tls;
 
+pub use config::AgentdConfig;
 pub use error::*;

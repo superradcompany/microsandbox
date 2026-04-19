@@ -96,11 +96,12 @@ impl ExecSession {
         id: u32,
         req: &ExecRequest,
         tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+        default_user: Option<&str>,
     ) -> AgentdResult<Self> {
         if req.tty {
-            Self::spawn_pty(id, req, tx)
+            Self::spawn_pty(id, req, tx, default_user)
         } else {
-            Self::spawn_pipe(id, req, tx)
+            Self::spawn_pipe(id, req, tx, default_user)
         }
     }
 
@@ -160,6 +161,7 @@ impl ExecSession {
         id: u32,
         req: &ExecRequest,
         tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+        default_user: Option<&str>,
     ) -> AgentdResult<Self> {
         let pty = openpty(None, None)?;
         let err_pipe = new_exec_error_pipe()?;
@@ -216,7 +218,7 @@ impl ExecSession {
             .transpose()
             .map_err(|e| AgentdError::ExecSession(format!("invalid cwd: {e}")))?;
 
-        let resolved_user = resolve_requested_user(req)?;
+        let resolved_user = resolve_requested_user(req, default_user)?;
         let default_home = default_home_dir(req, resolved_user.as_ref()).map(CStr::to_owned);
         let home_key = default_home
             .as_ref()
@@ -346,6 +348,7 @@ impl ExecSession {
         id: u32,
         req: &ExecRequest,
         tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+        default_user: Option<&str>,
     ) -> AgentdResult<Self> {
         let mut cmd = Command::new(&req.cmd);
         cmd.args(&req.args)
@@ -363,7 +366,7 @@ impl ExecSession {
             cmd.current_dir(dir);
         }
 
-        let resolved_user = resolve_requested_user(req)?;
+        let resolved_user = resolve_requested_user(req, default_user)?;
         if let Some(home) = default_home_dir(req, resolved_user.as_ref()) {
             cmd.env("HOME", home.to_string_lossy().into_owned());
         }
@@ -509,13 +512,18 @@ fn wait_for_exec_failure_child(pid: i32) -> AgentdResult<()> {
     Ok(())
 }
 
-fn resolve_requested_user(req: &ExecRequest) -> AgentdResult<Option<ResolvedUser>> {
-    req.user
+fn resolve_requested_user(
+    req: &ExecRequest,
+    default_user: Option<&str>,
+) -> AgentdResult<Option<ResolvedUser>> {
+    let requested = req
+        .user
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(resolve_user_spec)
-        .transpose()
+        .or(default_user);
+
+    requested.map(resolve_user_spec).transpose()
 }
 
 fn resolve_user_spec(spec: &str) -> AgentdResult<ResolvedUser> {
@@ -931,7 +939,7 @@ mod tests {
             rlimits: Vec::new(),
         };
 
-        let session = ExecSession::spawn(7, &req, tx).expect("spawn pty session");
+        let session = ExecSession::spawn(7, &req, tx, None).expect("spawn pty session");
         let mut stdout = Vec::new();
         let mut exit = None;
 
@@ -976,6 +984,47 @@ mod tests {
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
         let resolved = resolve_user_spec(&format!("{uid}:{gid}")).expect("resolve numeric user");
+        assert_eq!(resolved.uid, uid);
+        assert_eq!(resolved.gid, gid);
+    }
+
+    #[test]
+    fn test_request_user_overrides_config_default() {
+        let req = ExecRequest {
+            cmd: "/bin/true".to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            user: Some("1:1".to_string()),
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        };
+
+        let resolved = resolve_requested_user(&req, Some("0:0")).expect("resolve requested user");
+        assert_eq!(resolved.unwrap().uid, 1);
+    }
+
+    #[test]
+    fn test_config_default_user_used_when_request_has_none() {
+        let req = ExecRequest {
+            cmd: "/bin/true".to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        };
+
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let resolved = resolve_requested_user(&req, Some(&format!("{uid}:{gid}")))
+            .expect("resolve with config default");
+        let resolved = resolved.expect("should resolve to a user");
         assert_eq!(resolved.uid, uid);
         assert_eq!(resolved.gid, gid);
     }
@@ -1044,7 +1093,7 @@ mod tests {
             rlimits: Vec::new(),
         };
 
-        let err = ExecSession::spawn(9, &req, tx).expect_err("spawn should fail");
+        let err = ExecSession::spawn(9, &req, tx, None).expect_err("spawn should fail");
         let message = err.to_string();
 
         assert!(message.contains("spawn pipe"));
