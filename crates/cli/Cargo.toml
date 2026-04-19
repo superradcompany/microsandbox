@@ -16,7 +16,8 @@ name = "microsandbox_cli"
 path = "lib/lib.rs"
 
 [features]
-default = ["net", "prebuilt"]
+default = ["net", "prebuilt", "keyring"]
+keyring = ["microsandbox/keyring"]
 prebuilt = ["microsandbox-runtime/prebuilt", "microsandbox/prebuilt"]
 net = [
     "dep:microsandbox-network",
