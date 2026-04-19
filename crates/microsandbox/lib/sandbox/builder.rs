@@ -1,6 +1,6 @@
 //! Fluent builder for [`SandboxConfig`].
 
-use microsandbox_image::RegistryAuth;
+use microsandbox_image::{PullPolicy, PullProgressHandle, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
 #[cfg(feature = "net")]
@@ -168,7 +168,7 @@ impl SandboxBuilder {
     }
 
     /// Set the pull policy for OCI images.
-    pub fn pull_policy(mut self, policy: microsandbox_image::PullPolicy) -> Self {
+    pub fn pull_policy(mut self, policy: PullPolicy) -> Self {
         self.config.pull_policy = policy;
         self
     }
@@ -391,9 +391,9 @@ impl SandboxBuilder {
 
     /// Apply rootfs patches using a builder closure.
     ///
-    /// Patches are applied before VM start. Only works with OverlayFs and
-    /// PassthroughFs roots. Returns an error at create time if used with
-    /// block device roots (Qcow2, Raw).
+    /// Patches are applied before VM start. OCI roots bake patches into
+    /// `upper.ext4`; bind roots patch the host directory directly. Returns an
+    /// error at create time if used with block device roots (Qcow2, Raw).
     ///
     /// ```ignore
     /// .patch(|p| p
@@ -435,11 +435,11 @@ impl SandboxBuilder {
     ///
     /// Returns a progress handle for per-layer pull events and a task handle
     /// for the sandbox creation result. Useful for CLI commands that want to
-    /// display per-layer download/extraction progress during sandbox creation.
+    /// display per-layer download/materialization progress during sandbox creation.
     pub fn create_with_pull_progress(
         self,
     ) -> crate::MicrosandboxResult<(
-        microsandbox_image::PullProgressHandle,
+        PullProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
     )> {
         let config = self.build()?;
@@ -453,7 +453,7 @@ impl SandboxBuilder {
     pub fn create_detached_with_pull_progress(
         self,
     ) -> crate::MicrosandboxResult<(
-        microsandbox_image::PullProgressHandle,
+        PullProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
     )> {
         let config = self.build()?;

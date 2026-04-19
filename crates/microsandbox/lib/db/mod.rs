@@ -6,7 +6,10 @@
 
 pub use microsandbox_db::entity;
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use microsandbox_migration::{Migrator, MigratorTrait};
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
@@ -45,6 +48,7 @@ pub async fn init_global(
             connect_and_migrate(
                 &db_dir,
                 max_connections.unwrap_or(crate::config::DEFAULT_MAX_CONNECTIONS),
+                crate::config::config().database.connect_timeout_secs,
             )
             .await
         })
@@ -71,6 +75,7 @@ pub async fn init_project(
             let conn = connect_and_migrate(
                 &db_dir,
                 max_connections.unwrap_or(crate::config::DEFAULT_MAX_CONNECTIONS),
+                crate::config::config().database.connect_timeout_secs,
             )
             .await?;
             Ok::<_, crate::MicrosandboxError>((requested.clone(), conn))
@@ -110,6 +115,7 @@ pub fn project() -> Option<&'static DatabaseConnection> {
 async fn connect_and_migrate(
     db_dir: &Path,
     max_connections: u32,
+    connect_timeout_secs: u64,
 ) -> MicrosandboxResult<DatabaseConnection> {
     tokio::fs::create_dir_all(db_dir).await?;
 
@@ -123,9 +129,22 @@ async fn connect_and_migrate(
     let db_url = format!("sqlite://{db_path_str}?mode=rwc");
 
     let mut opts = ConnectOptions::new(&db_url);
-    opts.max_connections(max_connections);
+    opts.max_connections(max_connections)
+        .connect_timeout(Duration::from_secs(connect_timeout_secs))
+        .sqlx_logging(false);
 
     let conn = Database::connect(opts).await?;
+
+    // Enable WAL journal mode, busy timeout, and foreign key enforcement.
+    // WAL prevents SQLITE_BUSY when multiple processes (CLI + sandbox runtimes)
+    // access the same database concurrently.
+    use sea_orm::ConnectionTrait;
+    conn.execute(sea_orm::Statement::from_string(
+        sea_orm::DatabaseBackend::Sqlite,
+        microsandbox_utils::SQLITE_PRAGMAS,
+    ))
+    .await?;
+
     Migrator::up(&conn, None).await?;
 
     Ok(conn)
@@ -137,7 +156,7 @@ async fn connect_and_migrate(
 
 #[cfg(test)]
 mod tests {
-    use sea_orm::{ConnectionTrait, Statement};
+    use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
 
     use super::*;
 
@@ -146,12 +165,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_dir = tmp.path().join("db");
 
-        let conn = connect_and_migrate(&db_dir, 1).await.unwrap();
+        let conn = connect_and_migrate(&db_dir, 1, 1).await.unwrap();
 
         // DB file should exist on disk.
         assert!(db_dir.join(microsandbox_utils::DB_FILENAME).exists());
 
-        // All 13 tables should be present.
+        // All 12 tables should be present.
         let rows = conn
             .query_all(Statement::from_string(
                 sea_orm::DatabaseBackend::Sqlite,
@@ -167,15 +186,14 @@ mod tests {
 
         let expected = vec![
             "config",
-            "image",
-            "index",
+            "image_ref",
             "layer",
             "manifest",
             "manifest_layer",
             "run",
             "sandbox",
-            "sandbox_image",
             "sandbox_metric",
+            "sandbox_rootfs",
             "snapshot",
             "volume",
         ];
@@ -188,9 +206,115 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_dir = tmp.path().join("db");
 
-        let conn1 = connect_and_migrate(&db_dir, 1).await.unwrap();
+        let conn1 = connect_and_migrate(&db_dir, 1, 1).await.unwrap();
 
         // Running migrations again on the same DB should succeed.
         Migrator::up(&conn1, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_connect_and_migrate_recovers_from_partial_storage_migration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        tokio::fs::create_dir_all(&db_dir).await.unwrap();
+
+        let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+
+        let conn = Database::connect(&db_url).await.unwrap();
+
+        conn.execute(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "PRAGMA foreign_keys = ON;",
+        ))
+        .await
+        .unwrap();
+
+        // Apply only migrations 1 and 2 so migration 3 is still pending.
+        Migrator::up(&conn, Some(2)).await.unwrap();
+
+        // Simulate a half-applied migration 3: the storage tables and the first
+        // snapshot index exist, but migration 3 itself was never recorded.
+        conn.execute(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "CREATE TABLE IF NOT EXISTS volume (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                quota_mib INTEGER,
+                size_bytes BIGINT,
+                labels TEXT,
+                created_at DATETIME,
+                updated_at DATETIME
+            )",
+        ))
+        .await
+        .unwrap();
+
+        conn.execute(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "CREATE TABLE IF NOT EXISTS snapshot (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                sandbox_id INTEGER,
+                size_bytes BIGINT,
+                description TEXT,
+                created_at DATETIME,
+                FOREIGN KEY (sandbox_id) REFERENCES sandbox(id) ON DELETE SET NULL
+            )",
+        ))
+        .await
+        .unwrap();
+
+        conn.execute(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "CREATE UNIQUE INDEX idx_snapshots_name_sandbox_unique ON snapshot (name, sandbox_id)",
+        ))
+        .await
+        .unwrap();
+
+        let pending_before = conn
+            .query_one(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT COUNT(*) FROM seaql_migrations WHERE version = 'm20260305_000003_create_storage_tables'",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by_index::<i64>(0)
+            .unwrap();
+        assert_eq!(pending_before, 0);
+
+        drop(conn);
+
+        let recovered = connect_and_migrate(&db_dir, 1, 1).await.unwrap();
+
+        let migration_row_count = recovered
+            .query_one(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT COUNT(*) FROM seaql_migrations WHERE version = 'm20260305_000003_create_storage_tables'",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by_index::<i64>(0)
+            .unwrap();
+        assert_eq!(migration_row_count, 1);
+
+        let index_count = recovered
+            .query_one(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index'
+                   AND name IN (
+                       'idx_snapshots_name_sandbox_unique',
+                       'idx_snapshots_name_unique_no_sandbox'
+                   )",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by_index::<i64>(0)
+            .unwrap();
+        assert_eq!(index_count, 2);
     }
 }

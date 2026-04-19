@@ -584,6 +584,10 @@ fn parse_pull_policy(s: &str) -> anyhow::Result<microsandbox::sandbox::PullPolic
     }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
 /// Parse a log level string.
 fn parse_log_level(s: &str) -> anyhow::Result<microsandbox::LogLevel> {
     use microsandbox::LogLevel;

@@ -1,9 +1,6 @@
 //! Sandbox configuration.
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-};
+use std::collections::{HashMap, HashSet};
 
 use microsandbox_runtime::{logging::LogLevel, policy::SandboxPolicy};
 use serde::{Deserialize, Serialize};
@@ -18,6 +15,10 @@ use super::{
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
+
+const DEFAULT_OCI_TMPFS_PATH: &str = "/tmp";
+const DEFAULT_OCI_TMPFS_MAX_SIZE_MIB: u32 = 512;
+const DEFAULT_OCI_TMPFS_MEMORY_DIVISOR: u32 = 4;
 
 fn default_cpus() -> u8 {
     crate::config::config().sandbox_defaults.cpus
@@ -39,7 +40,7 @@ fn default_log_level() -> Option<LogLevel> {
 ///
 /// All config structs derive `Default` for direct construction and
 /// `Serialize`/`Deserialize` for file-based configuration.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// Unique sandbox name (required).
     pub name: String,
@@ -90,7 +91,10 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub mounts: Vec<VolumeMount>,
 
-    /// Rootfs patches applied as overlay layers before VM start.
+    /// Rootfs patches applied before VM start.
+    ///
+    /// OCI roots bake patches into `upper.ext4`; bind roots patch the host
+    /// directory directly.
     #[serde(default)]
     pub patches: Vec<Patch>,
 
@@ -155,14 +159,12 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub replace_existing: bool,
 
-    /// Resolved rootfs lower layer paths (populated at create time for OCI images).
+    /// Manifest digest for the resolved OCI image.
     ///
-    /// Sidecar indexes are discovered by naming convention in the runtime as
-    /// `<lower>.index`, so only the lower directory path is carried here.
-    /// Persisted so existing sandboxes can reuse the pinned lower stack
-    /// without re-resolving a mutable OCI reference.
+    /// Set at create time. Used by spawn to derive VMDK and fsmeta paths
+    /// from the global cache. `None` for non-OCI rootfs sources.
     #[serde(default)]
-    pub(crate) resolved_rootfs_layers: Vec<PathBuf>,
+    pub(crate) manifest_digest: Option<String>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -210,6 +212,27 @@ impl SandboxConfig {
         merged.extend(self.labels.drain());
         self.labels = merged;
     }
+
+    /// Apply runtime defaults that should exist for OCI sandboxes unless the
+    /// user explicitly overrode them.
+    pub(crate) fn apply_runtime_defaults(&mut self) {
+        if !matches!(self.image, RootfsSource::Oci(_)) {
+            return;
+        }
+
+        if self
+            .mounts
+            .iter()
+            .any(|mount| guest_mount_is(mount, DEFAULT_OCI_TMPFS_PATH))
+        {
+            return;
+        }
+
+        self.mounts.push(VolumeMount::Tmpfs {
+            guest: DEFAULT_OCI_TMPFS_PATH.to_string(),
+            size_mib: Some(default_oci_tmpfs_size_mib(self.memory_mib)),
+        });
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -250,6 +273,25 @@ fn merge_env(image_env: &[String], user_env: &[(String, String)]) -> Vec<(String
     merge_env_pairs(&base, user_env)
 }
 
+fn default_oci_tmpfs_size_mib(memory_mib: u32) -> u32 {
+    (memory_mib / DEFAULT_OCI_TMPFS_MEMORY_DIVISOR).clamp(1, DEFAULT_OCI_TMPFS_MAX_SIZE_MIB)
+}
+
+fn guest_mount_is(mount: &VolumeMount, path: &str) -> bool {
+    match mount {
+        VolumeMount::Bind { guest, .. }
+        | VolumeMount::Named { guest, .. }
+        | VolumeMount::Tmpfs { guest, .. } => {
+            normalized_guest_path(guest) == normalized_guest_path(path)
+        }
+    }
+}
+
+fn normalized_guest_path(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() { "/" } else { trimmed }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -283,7 +325,7 @@ impl Default for SandboxConfig {
             policy: SandboxPolicy::default(),
             registry_auth: None,
             replace_existing: false,
-            resolved_rootfs_layers: Vec::new(),
+            manifest_digest: None,
         }
     }
 }
@@ -296,7 +338,9 @@ impl Default for SandboxConfig {
 mod tests {
     use std::collections::HashMap;
 
-    use microsandbox_image::{ImageConfig, RegistryAuth};
+    use microsandbox_image::ImageConfig;
+
+    use crate::sandbox::{RootfsSource, VolumeMount};
 
     use super::{SandboxConfig, merge_env};
 
@@ -444,29 +488,76 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_config_serializes_pinned_rootfs_layers_but_redacts_registry_auth() {
+    fn test_sandbox_config_serializes_manifest_digest_but_redacts_registry_auth() {
         let mut config = SandboxConfig {
             name: "persisted".into(),
             ..Default::default()
         };
-        config.registry_auth = Some(RegistryAuth::Basic {
-            username: "alice".into(),
-            password: "secret".into(),
-        });
         config.replace_existing = true;
-        config.resolved_rootfs_layers = vec!["/tmp/layer0".into(), "/tmp/layer1".into()];
+        config.manifest_digest = Some("sha256:abc123".into());
 
         let json = serde_json::to_string(&config).unwrap();
         assert!(!json.contains("registry_auth"));
         assert!(!json.contains("replace_existing"));
-        assert!(json.contains("resolved_rootfs_layers"));
+        assert!(json.contains("manifest_digest"));
+        assert!(json.contains("sha256:abc123"));
 
         let decoded: SandboxConfig = serde_json::from_str(&json).unwrap();
         assert!(decoded.registry_auth.is_none());
         assert!(!decoded.replace_existing);
-        assert_eq!(
-            decoded.resolved_rootfs_layers,
-            config.resolved_rootfs_layers
-        );
+        assert_eq!(decoded.manifest_digest, config.manifest_digest);
+    }
+
+    #[test]
+    fn test_apply_runtime_defaults_adds_tmpfs_for_oci_tmp() {
+        let mut config = SandboxConfig {
+            image: RootfsSource::Oci("python:3.12".into()),
+            memory_mib: 2048,
+            ..Default::default()
+        };
+
+        config.apply_runtime_defaults();
+
+        assert_eq!(config.mounts.len(), 1);
+        match &config.mounts[0] {
+            VolumeMount::Tmpfs { guest, size_mib } => {
+                assert_eq!(guest, "/tmp");
+                assert_eq!(*size_mib, Some(512));
+            }
+            mount => panic!("expected tmpfs mount, got {mount:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_runtime_defaults_preserves_explicit_tmp_mount() {
+        let mut config = SandboxConfig {
+            image: RootfsSource::Oci("python:3.12".into()),
+            mounts: vec![VolumeMount::Bind {
+                host: "/host/tmp".into(),
+                guest: "/tmp/".into(),
+                readonly: false,
+            }],
+            ..Default::default()
+        };
+
+        config.apply_runtime_defaults();
+
+        assert_eq!(config.mounts.len(), 1);
+        match &config.mounts[0] {
+            VolumeMount::Bind { guest, .. } => assert_eq!(guest, "/tmp/"),
+            mount => panic!("expected bind mount, got {mount:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_runtime_defaults_skips_non_oci_roots() {
+        let mut config = SandboxConfig {
+            image: RootfsSource::Bind("/tmp/rootfs".into()),
+            ..Default::default()
+        };
+
+        config.apply_runtime_defaults();
+
+        assert!(config.mounts.is_empty());
     }
 }

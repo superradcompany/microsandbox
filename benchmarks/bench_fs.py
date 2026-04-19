@@ -26,7 +26,8 @@ DEFAULT_IMAGE = "python:3.12-slim"
 DEFAULT_ITERATIONS = 100
 DEFAULT_TIMEOUT = 3600
 OUTPUT_DIR = Path("build/bench/fs")
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+DOCKER_TMPFS_MOUNTS = ("/tmp",)
 
 # Guest-side harness. Workloads define `run_once() -> dict` and optionally
 # `setup()` (called once) and `before_each()` (called before every iteration).
@@ -433,6 +434,14 @@ def summarize(payload: dict[str, Any], wall_seconds: float) -> dict[str, Any]:
     }
 
 
+def docker_run_cmd(docker: str, name: str, image: str) -> list[str]:
+    cmd = [docker, "run", "-d", "--name", name]
+    for mount in DOCKER_TMPFS_MOUNTS:
+        cmd.extend(["--tmpfs", mount])
+    cmd.extend([image, "sleep", "infinity"])
+    return cmd
+
+
 #--------------------------------------------------------------------------------------------------
 # Functions: Benchmark
 #--------------------------------------------------------------------------------------------------
@@ -474,7 +483,7 @@ def run_workload(
     result: dict[str, Any] = {}
     try:
         run_cmd(
-            [docker, "run", "-d", "--name", dkr_name, image, "sleep", "infinity"],
+            docker_run_cmd(docker, dkr_name, image),
             timeout=timeout,
             check=True,
         )
@@ -554,6 +563,8 @@ def print_report(doc: dict[str, Any]) -> None:
     print(f"  Iterations: {config['iterations']}")
     print(f"  Docker:     {versions['docker']}")
     print(f"  msb:        {versions['msb']}")
+    if config.get("docker_tmpfs"):
+        print(f"  Docker tmpfs: {', '.join(config['docker_tmpfs'])}")
 
     for image, workloads in doc["results"].items():
         print(f"\n  {image}")
@@ -563,7 +574,7 @@ def print_report(doc: dict[str, Any]) -> None:
             d = data.get("docker", {})
             m = data.get("microsandbox", {})
             if "median_s" in d and "median_s" in m:
-                ratio = m["median_s"] / d["median_s"]
+                ratio = d["median_s"] / m["median_s"]
                 rows.append([
                     name,
                     fmt_time(d["median_s"]),
@@ -578,7 +589,7 @@ def print_report(doc: dict[str, Any]) -> None:
 
         if rows:
             print_table(
-                ["Workload", "Docker (med)", "msb (med)", "msb/docker", "msb \u03c3"],
+                ["Workload", "Docker (med)", "msb (med)", "docker/msb", "msb \u03c3"],
                 rows,
                 "lrrrr",
             )
@@ -689,6 +700,7 @@ def main() -> int:
             "iterations": args.iterations,
             "timeout": args.timeout,
             "workloads": workload_names,
+            "docker_tmpfs": list(DOCKER_TMPFS_MOUNTS),
         },
         "versions": {"msb": msb_ver, "docker": docker_ver},
         "pull": None,

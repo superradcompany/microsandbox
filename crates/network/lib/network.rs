@@ -1,7 +1,7 @@
 //! `SmoltcpNetwork` — orchestration type that ties [`NetworkConfig`] to the
 //! smoltcp engine.
 //!
-//! This is the networking analog to `OverlayFs` for filesystems — the single
+//! This is the networking analog to `PassthroughFs`/`MemFs` on the filesystem side — the single
 //! type the runtime creates from config, wires into the VM builder, and starts
 //! the networking stack.
 

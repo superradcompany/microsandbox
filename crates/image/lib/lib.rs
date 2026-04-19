@@ -1,22 +1,31 @@
-//! OCI image pulling, layer extraction, and caching for microsandbox.
+//! OCI image pulling, EROFS materialization, and caching for microsandbox.
 //!
 //! This crate implements the OCI image lifecycle:
 //! - Registry communication (pull, auth, platform resolution)
 //! - Layer caching with content-addressable dedup
-//! - Layer extraction (async tar pipeline, stat virtualization, whiteouts)
-//! - Binary sidecar index generation for OverlayFs acceleration
+//! - Tar ingestion into in-memory file trees
+//! - EROFS filesystem image generation (per-layer and flat modes)
+//! - ext4 upper disk formatting for writable overlay upper layer
+//! - Minimal EROFS reader for Append patches
 
 mod auth;
 mod config;
+pub(crate) mod crc32c;
 mod digest;
+pub mod erofs;
 mod error;
+pub mod ext4;
+pub mod filetree;
 pub(crate) mod layer;
+pub(crate) mod lock;
 mod manifest;
 mod platform;
 mod progress;
 mod pull;
 mod registry;
 mod store;
+pub mod tar_ingest;
+pub mod vmdk;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports

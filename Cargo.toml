@@ -12,19 +12,19 @@ members = [
     "crates/runtime",
     "crates/utils",
     "examples/rust/fs-read-stream",
-    "examples/rust/shell-attach",
     "examples/rust/metrics-stream",
     "examples/rust/net-basic",
     "examples/rust/net-dns",
     "examples/rust/net-policy",
-    "examples/rust/net-secrets-body",
     "examples/rust/net-ports",
     "examples/rust/net-secrets",
+    "examples/rust/net-secrets-body",
     "examples/rust/net-tls",
     "examples/rust/root-bind",
     "examples/rust/root-block",
     "examples/rust/root-oci",
     "examples/rust/rootfs-patch",
+    "examples/rust/shell-attach",
     "examples/rust/volume-named",
     "sdk/node-ts",
     "sdk/python",
@@ -33,7 +33,7 @@ members = [
 [workspace.package]
 authors = ["Super Rad Company <development@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.3.13"
+version = "0.3.14"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -48,7 +48,6 @@ anyhow = "1.0"
 astral-tokio-tar = "0.6"
 async-compression = "0.4"
 bytes = "1.9"
-crc32c = "0.6"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
 clap = { version = "4.5", features = ["color", "derive"] }

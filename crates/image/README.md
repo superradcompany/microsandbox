@@ -1,12 +1,11 @@
 # microsandbox-image
 
-Pull OCI container images, extract their layers, and cache everything locally. This crate handles the full image lifecycle for [microsandbox](https://github.com/superradcompany/microsandbox) — from resolving a multi-platform manifest to producing ready-to-mount layer directories.
+Pull OCI container images and cache ready-to-mount filesystem artifacts locally. This crate handles the full image lifecycle for [microsandbox](https://github.com/superradcompany/microsandbox) — from resolving a multi-platform manifest to producing EROFS layer images plus writable ext4 uppers.
 
 - **Multi-platform resolution** — automatically picks the right manifest for your OS and architecture
 - **Parallel downloads** — all layers download and extract concurrently with SHA256 verification
 - **Content-addressable caching** — duplicate layers across images are stored once, with cross-process safety via `flock()`
 - **Progress streaming** — real-time events for download, extraction, and indexing stages
-- **Sidecar indexes** — builds binary indexes per layer for fast OverlayFs lookups at runtime
 
 ## Quick Start
 
@@ -20,9 +19,9 @@ let registry = Registry::new(platform, cache)?;
 let reference = "docker.io/library/alpine".parse()?;
 let result = registry.pull(&reference, &PullOptions::default()).await?;
 
-// Extracted layer directories, bottom-to-top
-for layer_path in &result.layers {
-    println!("{}", layer_path.display());
+// Materialized layer diff_ids, bottom-to-top
+for diff_id in &result.layer_diff_ids {
+    println!("{diff_id}");
 }
 
 // Parsed image config (env, cmd, entrypoint, user, etc.)

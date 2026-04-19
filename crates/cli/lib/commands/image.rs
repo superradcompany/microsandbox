@@ -1,5 +1,6 @@
 //! `msb image` command — manage OCI images.
 
+use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use clap::{Args, Subcommand};
@@ -91,7 +92,7 @@ pub async fn run(args: ImageArgs) -> anyhow::Result<()> {
                 args.reference,
                 args.force,
                 args.quiet,
-                microsandbox_image::PullPolicy::Always,
+                microsandbox_image::PullPolicy::IfMissing,
             )
             .await
         }
@@ -107,7 +108,7 @@ pub async fn run_pull(args: pull::PullArgs) -> anyhow::Result<()> {
         args.reference,
         args.force,
         args.quiet,
-        microsandbox_image::PullPolicy::Always,
+        microsandbox_image::PullPolicy::IfMissing,
     )
     .await
 }
@@ -128,42 +129,84 @@ async fn run_pull_inner(
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid image reference: {e}"))?;
 
+    let options = microsandbox_image::PullOptions { pull_policy, force };
+
+    if let Some((result, metadata)) =
+        microsandbox_image::Registry::pull_cached(&cache, &image_ref, &options)?
+    {
+        if let Err(e) = Image::persist(&reference, metadata).await {
+            tracing::warn!(error = %e, "failed to persist image metadata to database");
+        }
+
+        if !quiet {
+            eprintln!(
+                "   {} {:<12} {}{}",
+                style("✓").green(),
+                "Pulled",
+                reference,
+                style(" (already cached)").dim()
+            );
+        }
+
+        debug_assert!(result.cached);
+        return Ok(());
+    }
+
+    let (progress, sender) = microsandbox_image::progress_channel();
+    let display_reference = reference.clone();
+    let (display_ready_tx, display_ready_rx) = mpsc::sync_channel(1);
+    let display_thread = std::thread::spawn(move || -> anyhow::Result<()> {
+        let mut display = if quiet {
+            ui::PullProgressDisplay::quiet(&display_reference)
+        } else {
+            ui::PullProgressDisplay::new(&display_reference)
+        };
+
+        display.handle_event(microsandbox_image::PullProgress::Resolving {
+            reference: Arc::<str>::from(display_reference.clone()),
+        });
+
+        let _ = display_ready_tx.send(());
+
+        let mut receiver = progress.into_receiver();
+        while let Some(event) = receiver.blocking_recv() {
+            display.handle_event(event);
+        }
+
+        display.finish();
+        Ok(())
+    });
+
+    let _ = display_ready_rx.recv();
+
     let auth = global.resolve_registry_auth(image_ref.registry())?;
     let registry = microsandbox_image::Registry::with_auth(platform, cache, auth)?;
 
-    let options = microsandbox_image::PullOptions {
-        pull_policy,
-        force,
-        ..Default::default()
-    };
-
-    let (mut progress, task) = registry.pull_with_progress(&image_ref, &options);
-
-    let mut display = if quiet {
-        ui::PullProgressDisplay::quiet(&reference)
-    } else {
-        ui::PullProgressDisplay::new(&reference)
-    };
-
-    while let Some(event) = progress.recv().await {
-        display.handle_event(event);
-    }
+    let task = registry.pull_with_sender(&image_ref, &options, sender);
 
     let result = match task.await {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
-            display.finish();
+            let _ = display_thread.join();
             pull_failure_line(quiet, &reference);
             return Err(e.into());
         }
         Err(e) => {
-            display.finish();
+            let _ = display_thread.join();
             pull_failure_line(quiet, &reference);
             return Err(anyhow::anyhow!("pull task panicked: {e}"));
         }
     };
 
-    display.finish();
+    match display_thread.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "failed to render pull progress");
+        }
+        Err(_) => {
+            tracing::warn!("pull progress thread panicked");
+        }
+    }
 
     // Persist to database.
     let cache = microsandbox_image::GlobalCache::new(&global.cache_dir())?;
@@ -205,12 +248,33 @@ async fn run_pull_inner(
 
 /// Pull an image if not already cached.
 ///
-/// Uses `PullPolicy::Missing` — skips the pull entirely when the image is
-/// already in the local cache (no network call).  Returns `Ok(())` silently
-/// if the reference is not a valid OCI image (e.g. a local directory path).
+/// Used as a pre-flight check (e.g. before starting an OCI-backed sandbox).
+/// When everything is cached, returns silently — no "already cached" line is
+/// printed, because the caller already has its own UI (e.g. the Starting
+/// spinner in `resolve_and_start`). Only falls through to the full pull UI
+/// when there's actual work to do.
 pub(crate) async fn pull_if_missing(reference: &str, quiet: bool) -> anyhow::Result<()> {
     // Local paths (directories, disk images) are not pullable.
     if reference.starts_with('.') || reference.starts_with('/') {
+        return Ok(());
+    }
+
+    let global = microsandbox::config::config();
+    let cache = microsandbox_image::GlobalCache::new(&global.cache_dir())?;
+    let image_ref: microsandbox_image::Reference = reference
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid image reference: {e}"))?;
+    let options = microsandbox_image::PullOptions {
+        pull_policy: microsandbox_image::PullPolicy::IfMissing,
+        force: false,
+    };
+
+    if let Some((_, metadata)) =
+        microsandbox_image::Registry::pull_cached(&cache, &image_ref, &options)?
+    {
+        if let Err(e) = Image::persist(reference, metadata).await {
+            tracing::warn!(error = %e, "failed to persist image metadata to database");
+        }
         return Ok(());
     }
 
@@ -292,10 +356,11 @@ pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
             .iter()
             .map(|l| {
                 serde_json::json!({
-                    "digest": l.digest,
                     "diff_id": l.diff_id,
+                    "blob_digest": l.blob_digest,
                     "media_type": l.media_type,
-                    "size_bytes": l.size_bytes,
+                    "compressed_size_bytes": l.compressed_size_bytes,
+                    "erofs_size_bytes": l.erofs_size_bytes,
                     "position": l.position,
                 })
             })
@@ -304,15 +369,13 @@ pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
         let config_json = detail.config.as_ref().map(|c| {
             serde_json::json!({
                 "digest": c.digest,
-                "architecture": c.architecture,
-                "os": c.os,
                 "env": c.env,
                 "cmd": c.cmd,
                 "entrypoint": c.entrypoint,
                 "working_dir": c.working_dir,
                 "user": c.user,
-                "exposed_ports": c.exposed_ports,
-                "volumes": c.volumes,
+                "labels": c.labels,
+                "stop_signal": c.stop_signal,
             })
         });
 
@@ -387,11 +450,11 @@ pub async fn run_inspect(args: ImageInspectArgs) -> anyhow::Result<()> {
         ui::detail_header(&format!("Layers ({})", detail.layers.len()));
         for layer in &detail.layers {
             let size = layer
-                .size_bytes
+                .compressed_size_bytes
                 .map(format_bytes)
                 .unwrap_or_else(|| "-".to_string());
             let media = layer.media_type.as_deref().unwrap_or("-");
-            let short_digest = truncate_digest(&layer.digest);
+            let short_digest = truncate_digest(&layer.blob_digest);
             println!(
                 "  {:<4}{:<16}{:<10}{}",
                 layer.position + 1,
@@ -443,16 +506,7 @@ pub async fn run_remove(args: ImageRemoveArgs) -> anyhow::Result<()> {
 
 /// Format bytes as a human-readable string.
 fn format_bytes(bytes: i64) -> String {
-    let bytes = bytes as f64;
-    if bytes < 1024.0 {
-        format!("{} B", bytes as i64)
-    } else if bytes < 1024.0 * 1024.0 {
-        format!("{:.1} KB", bytes / 1024.0)
-    } else if bytes < 1024.0 * 1024.0 * 1024.0 {
-        format!("{:.1} MB", bytes / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} GB", bytes / (1024.0 * 1024.0 * 1024.0))
-    }
+    super::ui::format_bytes(bytes.max(0) as u64)
 }
 
 /// Print the pull failure indicator line to stderr.

@@ -29,6 +29,9 @@ const DEFAULT_MEMORY_MIB: u32 = 512;
 /// Default database max connections.
 pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 5;
 
+/// Default database connection acquisition timeout in seconds.
+pub(crate) const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
+
 /// Service name for microsandbox-managed registry credentials in the OS keyring.
 const REGISTRY_KEYRING_SERVICE: &str = "dev.microsandbox.registry";
 
@@ -72,6 +75,9 @@ pub struct DatabaseConfig {
 
     /// Maximum connection pool size.
     pub max_connections: u32,
+
+    /// Timeout when acquiring a database connection from the pool.
+    pub connect_timeout_secs: u64,
 }
 
 /// Path overrides for runtime binaries and data directories.
@@ -328,6 +334,7 @@ impl Default for DatabaseConfig {
         Self {
             url: None,
             max_connections: DEFAULT_MAX_CONNECTIONS,
+            connect_timeout_secs: DEFAULT_CONNECT_TIMEOUT_SECS,
         }
     }
 }
@@ -614,6 +621,7 @@ fn libkrunfw_candidates_from_msb(msb_path: &Path, filename: &str) -> Vec<PathBuf
     deduped
 }
 
+#[cfg(debug_assertions)]
 fn dev_msb_candidates_from(start: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
@@ -629,6 +637,7 @@ fn dev_msb_candidates_from(start: &Path) -> Vec<PathBuf> {
     candidates
 }
 
+#[cfg(debug_assertions)]
 fn dedupe_paths(paths: &mut Vec<PathBuf>) {
     let mut deduped = Vec::new();
     for path in paths.drain(..) {
@@ -781,6 +790,7 @@ mod tests {
         assert_eq!(cfg.sandbox_defaults.shell, "/bin/sh");
         assert_eq!(cfg.log_level, None);
         assert_eq!(cfg.database.max_connections, 5);
+        assert_eq!(cfg.database.connect_timeout_secs, 30);
     }
 
     #[test]
@@ -803,6 +813,19 @@ mod tests {
         let json = r#"{"log_level":"debug"}"#;
         let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.log_level, Some(LogLevel::Debug));
+    }
+
+    #[test]
+    fn test_deserialize_database_config() {
+        let json = r#"{
+            "database": {
+                "max_connections": 9,
+                "connect_timeout_secs": 7
+            }
+        }"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.database.max_connections, 9);
+        assert_eq!(cfg.database.connect_timeout_secs, 7);
     }
 
     #[test]
