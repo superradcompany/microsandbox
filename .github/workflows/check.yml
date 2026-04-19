@@ -293,7 +293,7 @@ jobs:
           npm run build
 
   # ---------------------------------------------------------------------------
-  # Node.js SDK smoke tests (requires KVM)
+  # Node.js SDK smoke tests and Enforce Boot and Init Time(requires KVM)
   # ---------------------------------------------------------------------------
   node-sdk-test:
     name: Node.js SDK Tests
@@ -344,3 +344,8 @@ jobs:
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
           npm test
+      - name: Enforce Boot and Init Time
+        run: |
+          chmod +x scripts/check-boot-and-init-performance.sh
+          LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib" \
+            ./scripts/check-boot-and-performance.sh

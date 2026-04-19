@@ -84,8 +84,9 @@ impl AgentClient {
             .map_err(|e| crate::MicrosandboxError::Runtime(format!("decode ready payload: {e}")))?;
 
         tracing::info!(
-            "agent client: connected to relay, id_offset={id_offset}, boot_time={}ns",
-            ready.boot_time_ns
+            "agent client: connected to relay, id_offset={id_offset}, boot_time={}ns, init_time={}ns",
+            ready.boot_time_ns,
+            ready.init_time_ns
         );
 
         let pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Message>>>> =
