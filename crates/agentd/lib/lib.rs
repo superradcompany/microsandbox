@@ -24,5 +24,5 @@ pub mod serial;
 pub mod session;
 pub mod tls;
 
-pub use config::AgentdConfig;
+pub use config::{AgentdConfig, BootParams};
 pub use error::*;

@@ -6,7 +6,7 @@
 use std::process;
 
 #[cfg(target_os = "linux")]
-use microsandbox_agentd::{AgentdConfig, AgentdError, agent, clock, init};
+use microsandbox_agentd::{AgentdConfig, AgentdError, BootParams, agent, clock, init};
 
 //--------------------------------------------------------------------------------------------------
 // Functions: main
@@ -23,7 +23,16 @@ fn main() {
     // Capture CLOCK_BOOTTIME immediately — this represents kernel boot duration.
     let boot_time_ns = clock::boottime_ns();
 
-    // Read all MSB_* environment variables once at startup and parse.
+    // Read all MSB_* environment variables once at startup. `BootParams`
+    // carries the one-shot init data; `AgentdConfig` carries the runtime
+    // config that outlives init.
+    let boot = match BootParams::from_env() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("agentd: config parse failed: {e}");
+            process::exit(1);
+        }
+    };
     let config = match AgentdConfig::from_env() {
         Ok(c) => c,
         Err(e) => {
@@ -34,7 +43,7 @@ fn main() {
 
     // Phase 1: Synchronous init (mount filesystems, prepare runtime directories).
     let init_start = clock::boottime_ns();
-    if let Err(e) = init::init(&config) {
+    if let Err(e) = init::init(boot) {
         eprintln!("agentd: init failed: {e}");
         process::exit(1);
     }

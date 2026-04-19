@@ -39,7 +39,7 @@ pub(crate) fn to_libc(rlimits: &[ExecRlimit]) -> Vec<(libc::c_int, libc::rlimit)
 /// started through the per-exec API.
 ///
 /// Callers must have validated resource names upfront (e.g. via
-/// [`AgentdConfig::from_env`](crate::config::AgentdConfig::from_env)); unknown
+/// [`BootParams::from_env`](crate::config::BootParams::from_env)); unknown
 /// names here produce an [`AgentdError::Init`] rather than silently skipping.
 pub(crate) fn apply_baseline(rlimits: &[ExecRlimit]) -> AgentdResult<()> {
     for rlimit in rlimits {

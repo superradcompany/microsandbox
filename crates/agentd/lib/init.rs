@@ -1,6 +1,6 @@
 //! PID 1 init: mount filesystems, apply tmpfs mounts, prepare runtime directories.
 
-use crate::config::AgentdConfig;
+use crate::config::BootParams;
 use crate::error::AgentdResult;
 use crate::{network, rlimit, tls};
 
@@ -12,21 +12,24 @@ use crate::{network, rlimit, tls};
 ///
 /// Applies sandbox-wide resource limits first so every later guest process
 /// inherits the raised baseline, then mounts filesystems, applies directory
-/// mounts, file mounts, and tmpfs mounts from the parsed config. Configures
+/// mounts, file mounts, and tmpfs mounts from the parsed params. Configures
 /// networking and prepares runtime directories.
-pub fn init(config: &AgentdConfig) -> AgentdResult<()> {
-    rlimit::apply_baseline(&config.rlimits)?;
+///
+/// Consumes the [`BootParams`] by value — the data is one-shot and not
+/// needed after init returns.
+pub fn init(params: BootParams) -> AgentdResult<()> {
+    rlimit::apply_baseline(&params.rlimits)?;
     linux::mount_filesystems()?;
     linux::mount_runtime()?;
-    if let Some(spec) = &config.block_root {
+    if let Some(spec) = &params.block_root {
         linux::mount_block_root(spec)?;
     }
-    linux::apply_dir_mounts(&config.dir_mounts)?;
-    linux::apply_file_mounts(&config.file_mounts)?;
-    network::apply_hostname(config.hostname.as_deref())?;
-    linux::apply_tmpfs_mounts(&config.tmpfs)?;
+    linux::apply_dir_mounts(&params.dir_mounts)?;
+    linux::apply_file_mounts(&params.file_mounts)?;
+    network::apply_hostname(params.hostname.as_deref())?;
+    linux::apply_tmpfs_mounts(&params.tmpfs)?;
     linux::ensure_standard_tmp_permissions()?;
-    network::apply_network_config(config.network())?;
+    network::apply_network_config(params.network())?;
     tls::install_ca_cert()?;
     linux::ensure_scripts_path_in_profile()?;
     linux::create_run_dir()?;

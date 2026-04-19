@@ -1,9 +1,17 @@
 //! Agentd configuration, read once from environment variables at startup.
 //!
-//! [`AgentdConfig::from_env`] reads all `MSB_*` environment variables and
-//! parses them into their respective types in a single step. Downstream
-//! functions receive the config by reference, avoiding repeated env var reads
-//! and repeated parsing.
+//! Split into two structs with different lifetimes:
+//!
+//! - [`BootParams`] — one-shot MSB_* env vars consumed by [`init::init`] and
+//!   dropped once init completes.
+//! - [`AgentdConfig`] — runtime config that outlives init (currently just
+//!   the default guest user), passed by reference to the agent loop.
+//!
+//! Each struct owns its own [`from_env`](BootParams::from_env) constructor
+//! so reading is centralised and validation failures abort boot with a
+//! single clean error before any side effects begin.
+//!
+//! [`init::init`]: crate::init::init
 
 use std::env;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -20,12 +28,15 @@ use crate::rlimit;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Parsed configuration for agentd.
+/// One-shot MSB_* env vars consumed by [`init::init`] and dropped afterward.
 ///
-/// All `MSB_*` environment variables are read and parsed into their respective
-/// types during construction via [`AgentdConfig::from_env`].
+/// Moved by value into init; owning the data (rather than borrowing) makes
+/// the "consumed once" lifetime explicit in the signature and prevents
+/// accidental reads after init completes.
+///
+/// [`init::init`]: crate::init::init
 #[derive(Debug)]
-pub struct AgentdConfig {
+pub struct BootParams {
     /// Parsed `MSB_BLOCK_ROOT` — block device for rootfs switch.
     pub(crate) block_root: Option<BlockRootSpec>,
 
@@ -50,14 +61,21 @@ pub struct AgentdConfig {
     /// Parsed `MSB_NET_IPV6` — IPv6 config.
     pub(crate) net_ipv6: Option<NetIpv6Spec>,
 
+    /// Parsed `MSB_RLIMITS` — sandbox-wide resource limits applied to PID 1
+    /// so every guest process inherits the raised baseline (empty when unset).
+    pub(crate) rlimits: Vec<ExecRlimit>,
+}
+
+/// Runtime configuration surviving past init; referenced by the agent loop.
+///
+/// Currently holds only the default guest user used when an exec request
+/// does not specify its own.
+#[derive(Debug)]
+pub struct AgentdConfig {
     /// `MSB_USER` — default guest user for exec sessions.
     ///
     /// Captured at startup; changes to `MSB_USER` afterward are not observed.
     pub(crate) user: Option<String>,
-
-    /// Parsed `MSB_RLIMITS` — sandbox-wide resource limits applied to PID 1
-    /// so every guest process inherits the raised baseline (empty when unset).
-    pub(crate) rlimits: Vec<ExecRlimit>,
 }
 
 /// Parsed tmpfs mount specification.
@@ -142,8 +160,8 @@ pub(crate) struct NetConfig<'a> {
 // Implementations
 //--------------------------------------------------------------------------------------------------
 
-impl AgentdConfig {
-    /// Reads all `MSB_*` environment variables and parses them into the config.
+impl BootParams {
+    /// Reads and parses the boot-time `MSB_*` environment variables.
     ///
     /// Empty or whitespace-only values are treated as absent (`None`).
     /// Returns an error if any present value fails to parse.
@@ -172,7 +190,6 @@ impl AgentdConfig {
             net_ipv6: read_env(ENV_NET_IPV6)
                 .map(|v| parse_net_ipv6(&v))
                 .transpose()?,
-            user: read_env(ENV_USER),
             rlimits: read_env(ENV_RLIMITS)
                 .map(|v| parse_rlimits(&v))
                 .transpose()?
@@ -187,6 +204,17 @@ impl AgentdConfig {
             ipv4: self.net_ipv4.as_ref(),
             ipv6: self.net_ipv6.as_ref(),
         }
+    }
+}
+
+impl AgentdConfig {
+    /// Reads the runtime-config `MSB_*` environment variables.
+    ///
+    /// Empty or whitespace-only values are treated as absent (`None`).
+    pub fn from_env() -> AgentdResult<Self> {
+        Ok(Self {
+            user: read_env(ENV_USER),
+        })
     }
 }
 
