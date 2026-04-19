@@ -35,6 +35,41 @@ jobs:
               - '!docs/**'
 
   # ---------------------------------------------------------------------------
+  # Lint workflow and packaging tooling
+  # ---------------------------------------------------------------------------
+  tooling-lint:
+    name: Tooling Lint
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Install workflow and shell lint dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml shellcheck
+
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      - name: Run shared packaging helper regression test
+        run: bash scripts/tests/test-apt-common.sh
+
+      - name: Run workflow structure regression test
+        run: python3 scripts/tests/test-workflows.py
+
+      - name: Lint shell scripts
+        run: PATH="$HOME/go/bin:$PATH" shellcheck -x scripts/*.sh scripts/lib/*.sh scripts/tests/*.sh
+
+      - name: Lint GitHub Actions workflows
+        run: PATH="$HOME/go/bin:$PATH" actionlint
+
+  # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
   # ---------------------------------------------------------------------------
   build-kernel:
@@ -108,7 +143,7 @@ jobs:
   # ---------------------------------------------------------------------------
   check:
     name: Check (${{ matrix.target }})
-    needs: [build-kernel, build-agentd-aarch64, changes]
+    needs: [tooling-lint, build-kernel, build-agentd-aarch64, changes]
     if: always() && needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -304,19 +339,6 @@ jobs:
             sdk/node-ts/tsconfig.json
             sdk/node-ts/vitest.config.ts
 
-      - name: Write release metadata
-        if: matrix.target == 'linux-x86_64' && startsWith(github.ref, 'refs/tags/v')
-        run: |
-          mkdir -p release-metadata
-          printf '%s\n' "${GITHUB_REF_NAME}" > release-metadata/release-tag.txt
-
-      - name: Upload release metadata
-        if: matrix.target == 'linux-x86_64' && startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-metadata
-          path: release-metadata/release-tag.txt
-
       # -- Checks (MCP server) --
       - name: Build MCP server
         working-directory: mcp
@@ -353,6 +375,8 @@ jobs:
             upload_kvm_repo: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Install APT packaging dependencies
         run: |
