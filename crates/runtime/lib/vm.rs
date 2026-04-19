@@ -436,11 +436,7 @@ fn build_vm(
     let vm = &config.vm;
 
     let mut builder = VmBuilder::new()
-        .machine(|m| {
-            m.vcpus(vm.vcpus)
-                .memory_mib(vm.memory_mib as usize)
-                .split_irqchip(true)
-        })
+        .machine(|m| m.vcpus(vm.vcpus).memory_mib(vm.memory_mib as usize))
         .kernel(|k| {
             let k = k.krunfw_path(&vm.libkrunfw_path);
             if let Some(ref init_path) = vm.init_path {

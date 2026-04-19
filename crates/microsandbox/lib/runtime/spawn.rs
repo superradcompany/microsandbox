@@ -483,7 +483,7 @@ fn sandbox_cli_args(
             args.push(OsString::from(format.as_str()));
 
             // Build MSB_BLOCK_ROOT env var value.
-            let mut block_root_val = String::from("/dev/vda");
+            let mut block_root_val = String::from("kind=disk-image,device=/dev/vda");
             if let Some(ft) = fstype {
                 block_root_val.push_str(&format!(",fstype={ft}"));
             }
@@ -803,7 +803,11 @@ mod tests {
         assert!(rendered.contains(&"/tmp/ubuntu.qcow2".to_string()));
         assert!(rendered.contains(&"--rootfs-disk-format".to_string()));
         assert!(rendered.contains(&"qcow2".to_string()));
-        assert!(rendered.contains(&"MSB_BLOCK_ROOT=/dev/vda,fstype=ext4".to_string()));
+        assert!(
+            rendered.contains(
+                &"MSB_BLOCK_ROOT=kind=disk-image,device=/dev/vda,fstype=ext4".to_string()
+            )
+        );
 
         // Should not contain bind or overlay args.
         assert!(!rendered.contains(&"--rootfs-path".to_string()));
@@ -827,7 +831,7 @@ mod tests {
         assert!(rendered.contains(&"/tmp/alpine.raw".to_string()));
         assert!(rendered.contains(&"--rootfs-disk-format".to_string()));
         assert!(rendered.contains(&"raw".to_string()));
-        assert!(rendered.contains(&"MSB_BLOCK_ROOT=/dev/vda".to_string()));
+        assert!(rendered.contains(&"MSB_BLOCK_ROOT=kind=disk-image,device=/dev/vda".to_string()));
 
         // Should not contain bind or overlay args.
         assert!(!rendered.contains(&"--rootfs-path".to_string()));

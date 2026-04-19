@@ -22,6 +22,7 @@ sdk/
 **/*.swp
 **/*.swo
 target/
+**/target/
 
 # Specific files that aren't needed
 **/*.log
