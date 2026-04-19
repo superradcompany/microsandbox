@@ -580,7 +580,7 @@ impl Sandbox {
         cmd: impl Into<String>,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecHandle> {
-        let opts = f(ExecOptionsBuilder::default()).build();
+        let opts = f(ExecOptionsBuilder::default()).build()?;
         self.exec_stream_inner(cmd.into(), opts).await
     }
 
@@ -690,7 +690,7 @@ impl Sandbox {
         cmd: impl Into<String>,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecOutput> {
-        let opts = f(ExecOptionsBuilder::default()).build();
+        let opts = f(ExecOptionsBuilder::default()).build()?;
         self.exec_with_opts(cmd.into(), opts).await
     }
 
@@ -781,7 +781,7 @@ impl Sandbox {
         cmd: impl Into<String>,
         f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
     ) -> MicrosandboxResult<i32> {
-        let opts = f(AttachOptionsBuilder::default()).build();
+        let opts = f(AttachOptionsBuilder::default()).build()?;
         self.attach_inner(cmd.into(), opts).await
     }
 

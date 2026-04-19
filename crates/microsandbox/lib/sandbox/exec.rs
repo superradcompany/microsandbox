@@ -7,6 +7,8 @@ use microsandbox_protocol::{
     exec::{ExecSignal, ExecStdin},
     message::{Message, MessageType},
 };
+
+pub use microsandbox_protocol::exec::RlimitResource;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -143,43 +145,6 @@ pub struct Rlimit {
     pub hard: u64,
 }
 
-/// POSIX resource limit identifiers (maps to `RLIMIT_*` constants).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RlimitResource {
-    /// Max CPU time in seconds (`RLIMIT_CPU`).
-    Cpu,
-    /// Max file size in bytes (`RLIMIT_FSIZE`).
-    Fsize,
-    /// Max data segment size (`RLIMIT_DATA`).
-    Data,
-    /// Max stack size (`RLIMIT_STACK`).
-    Stack,
-    /// Max core file size (`RLIMIT_CORE`).
-    Core,
-    /// Max resident set size (`RLIMIT_RSS`).
-    Rss,
-    /// Max number of processes (`RLIMIT_NPROC`).
-    Nproc,
-    /// Max open file descriptors (`RLIMIT_NOFILE`).
-    Nofile,
-    /// Max locked memory (`RLIMIT_MEMLOCK`).
-    Memlock,
-    /// Max address space size (`RLIMIT_AS`).
-    As,
-    /// Max file locks (`RLIMIT_LOCKS`).
-    Locks,
-    /// Max pending signals (`RLIMIT_SIGPENDING`).
-    Sigpending,
-    /// Max bytes in POSIX message queues (`RLIMIT_MSGQUEUE`).
-    Msgqueue,
-    /// Max nice priority (`RLIMIT_NICE`).
-    Nice,
-    /// Max real-time priority (`RLIMIT_RTPRIO`).
-    Rtprio,
-    /// Max real-time timeout (`RLIMIT_RTTIME`).
-    Rttime,
-}
-
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -280,9 +245,27 @@ impl ExecOptionsBuilder {
     }
 
     /// Finalize the options. Called automatically when using the closure form.
-    pub fn build(self) -> ExecOptions {
-        self.options
+    ///
+    /// Returns an error if any rlimit entry has `soft > hard`.
+    pub fn build(self) -> MicrosandboxResult<ExecOptions> {
+        validate_rlimits(&self.options.rlimits)?;
+        Ok(self.options)
     }
+}
+
+/// Validates that every rlimit has `soft <= hard`.
+pub(crate) fn validate_rlimits(rlimits: &[Rlimit]) -> MicrosandboxResult<()> {
+    for rlimit in rlimits {
+        if rlimit.soft > rlimit.hard {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "rlimit {}: soft ({}) must not exceed hard ({})",
+                rlimit.resource.as_str(),
+                rlimit.soft,
+                rlimit.hard
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl ExecOutput {
@@ -433,62 +416,5 @@ impl ExecSink {
         let payload = ExecStdin { data: Vec::new() };
         let msg = Message::with_payload(MessageType::ExecStdin, self.id, &payload)?;
         self.client.send(&msg).await
-    }
-}
-
-impl RlimitResource {
-    /// Returns the lowercase string representation used in the protocol.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Cpu => "cpu",
-            Self::Fsize => "fsize",
-            Self::Data => "data",
-            Self::Stack => "stack",
-            Self::Core => "core",
-            Self::Rss => "rss",
-            Self::Nproc => "nproc",
-            Self::Nofile => "nofile",
-            Self::Memlock => "memlock",
-            Self::As => "as",
-            Self::Locks => "locks",
-            Self::Sigpending => "sigpending",
-            Self::Msgqueue => "msgqueue",
-            Self::Nice => "nice",
-            Self::Rtprio => "rtprio",
-            Self::Rttime => "rttime",
-        }
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Trait Implementations
-//--------------------------------------------------------------------------------------------------
-
-/// String to `RlimitResource` conversion.
-///
-/// Accepts: `"nofile"`, `"as"`, `"nproc"`, `"cpu"`, etc. (case-insensitive).
-impl TryFrom<&str> for RlimitResource {
-    type Error = String;
-
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
-        match s.to_lowercase().as_str() {
-            "cpu" => Ok(Self::Cpu),
-            "fsize" => Ok(Self::Fsize),
-            "data" => Ok(Self::Data),
-            "stack" => Ok(Self::Stack),
-            "core" => Ok(Self::Core),
-            "rss" => Ok(Self::Rss),
-            "nproc" => Ok(Self::Nproc),
-            "nofile" => Ok(Self::Nofile),
-            "memlock" => Ok(Self::Memlock),
-            "as" => Ok(Self::As),
-            "locks" => Ok(Self::Locks),
-            "sigpending" => Ok(Self::Sigpending),
-            "msgqueue" => Ok(Self::Msgqueue),
-            "nice" => Ok(Self::Nice),
-            "rtprio" => Ok(Self::Rtprio),
-            "rttime" => Ok(Self::Rttime),
-            _ => Err(format!("unknown rlimit resource: {s}")),
-        }
     }
 }

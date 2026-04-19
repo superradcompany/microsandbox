@@ -9,6 +9,7 @@
 //!    so that common runtimes trust the microsandbox CA.
 
 use std::path::Path;
+use std::{env, fs};
 
 use crate::AgentdResult;
 
@@ -52,7 +53,7 @@ pub fn install_ca_cert() -> AgentdResult<()> {
         return Ok(());
     }
 
-    let ca_pem = std::fs::read_to_string(ca_path)?;
+    let ca_pem = fs::read_to_string(ca_path)?;
     eprintln!(
         "tls: CA cert found at {}, installing into guest trust store",
         ca_path.display()
@@ -67,11 +68,11 @@ pub fn install_ca_cert() -> AgentdResult<()> {
     // Set environment variables for common runtimes.
     // SAFETY: agentd is PID 1, single-threaded at this point in init.
     unsafe {
-        std::env::set_var("SSL_CERT_FILE", &bundle_path);
-        std::env::set_var("REQUESTS_CA_BUNDLE", &bundle_path);
-        std::env::set_var("CURL_CA_BUNDLE", &bundle_path);
+        env::set_var("SSL_CERT_FILE", &bundle_path);
+        env::set_var("REQUESTS_CA_BUNDLE", &bundle_path);
+        env::set_var("CURL_CA_BUNDLE", &bundle_path);
         // Node.js appends (does not replace), so point at the raw CA PEM.
-        std::env::set_var(
+        env::set_var(
             "NODE_EXTRA_CA_CERTS",
             microsandbox_protocol::GUEST_TLS_CA_PATH,
         );
@@ -90,7 +91,7 @@ fn copy_to_trust_dirs(ca_pem: &str) {
         if dir_path.is_dir() {
             for &filename in CA_CERT_FILENAMES {
                 let dest = dir_path.join(filename);
-                match std::fs::write(&dest, ca_pem) {
+                match fs::write(&dest, ca_pem) {
                     Ok(()) => eprintln!("tls: copied CA cert to {}", dest.display()),
                     Err(e) => eprintln!("tls: failed to copy CA cert to {}: {e}", dest.display()),
                 }
@@ -105,22 +106,22 @@ fn copy_to_trust_dirs(ca_pem: &str) {
 fn append_to_bundle(ca_pem: &str) -> AgentdResult<String> {
     for &path in CA_BUNDLE_PATHS {
         if Path::new(path).exists() {
-            let mut contents = std::fs::read_to_string(path)?;
+            let mut contents = fs::read_to_string(path)?;
             // Ensure a newline before appending.
             if !contents.ends_with('\n') {
                 contents.push('\n');
             }
             contents.push_str(ca_pem);
-            std::fs::write(path, contents)?;
+            fs::write(path, contents)?;
             return Ok(path.to_string());
         }
     }
 
     // No existing bundle found — create the fallback.
     if let Some(parent) = Path::new(FALLBACK_BUNDLE_PATH).parent() {
-        std::fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent)?;
     }
-    std::fs::write(FALLBACK_BUNDLE_PATH, ca_pem)?;
+    fs::write(FALLBACK_BUNDLE_PATH, ca_pem)?;
     Ok(FALLBACK_BUNDLE_PATH.to_string())
 }
 

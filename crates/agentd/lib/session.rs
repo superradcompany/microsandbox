@@ -1,26 +1,22 @@
 //! Exec session management: spawning processes with PTY or pipe I/O.
 
-use std::{
-    ffi::{CStr, CString},
-    mem::MaybeUninit,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
-    process::Stdio,
-};
+use std::ffi::{CStr, CString};
+use std::mem::MaybeUninit;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::process::Stdio;
+use std::{iter, mem, ptr};
 
-use nix::{
-    pty::openpty,
-    sys::signal::{Signal, kill},
-    unistd::Pid,
-};
-use tokio::{
-    io::AsyncReadExt,
-    process::{Child, Command},
-    sync::mpsc,
-};
+use nix::pty;
+use nix::sys::signal::{self, Signal};
+use nix::unistd::Pid;
+use tokio::io::AsyncReadExt;
+use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
 
-use microsandbox_protocol::exec::{ExecRequest, ExecRlimit};
+use microsandbox_protocol::exec::ExecRequest;
 
 use crate::error::{AgentdError, AgentdResult};
+use crate::rlimit;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -96,11 +92,12 @@ impl ExecSession {
         id: u32,
         req: &ExecRequest,
         tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+        default_user: Option<&str>,
     ) -> AgentdResult<Self> {
         if req.tty {
-            Self::spawn_pty(id, req, tx)
+            Self::spawn_pty(id, req, tx, default_user)
         } else {
-            Self::spawn_pipe(id, req, tx)
+            Self::spawn_pipe(id, req, tx, default_user)
         }
     }
 
@@ -138,10 +135,10 @@ impl ExecSession {
     }
 
     /// Sends a signal to the spawned process.
-    pub fn send_signal(&self, signal: i32) -> AgentdResult<()> {
-        let sig = Signal::try_from(signal)
-            .map_err(|e| AgentdError::ExecSession(format!("invalid signal {signal}: {e}")))?;
-        kill(Pid::from_raw(self.pid), sig)?;
+    pub fn send_signal(&self, signum: i32) -> AgentdResult<()> {
+        let sig = Signal::try_from(signum)
+            .map_err(|e| AgentdError::ExecSession(format!("invalid signal {signum}: {e}")))?;
+        signal::kill(Pid::from_raw(self.pid), sig)?;
         Ok(())
     }
 
@@ -160,8 +157,9 @@ impl ExecSession {
         id: u32,
         req: &ExecRequest,
         tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+        default_user: Option<&str>,
     ) -> AgentdResult<Self> {
-        let pty = openpty(None, None)?;
+        let pty = pty::openpty(None, None)?;
         let err_pipe = new_exec_error_pipe()?;
 
         // Set initial window size.
@@ -193,7 +191,7 @@ impl ExecSession {
         let argv_ptrs: Vec<*const libc::c_char> = c_args
             .iter()
             .map(|s| s.as_ptr())
-            .chain(std::iter::once(std::ptr::null()))
+            .chain(iter::once(ptr::null()))
             .collect();
 
         // Pre-parse environment variables into CStrings.
@@ -216,7 +214,7 @@ impl ExecSession {
             .transpose()
             .map_err(|e| AgentdError::ExecSession(format!("invalid cwd: {e}")))?;
 
-        let resolved_user = resolve_requested_user(req)?;
+        let resolved_user = resolve_requested_user(req, default_user)?;
         let default_home = default_home_dir(req, resolved_user.as_ref()).map(CStr::to_owned);
         let home_key = default_home
             .as_ref()
@@ -227,7 +225,7 @@ impl ExecSession {
             .transpose()?;
 
         // Pre-parse rlimits before fork (no allocations in child).
-        let parsed_rlimits = parse_rlimits(&req.rlimits);
+        let parsed_rlimits = rlimit::to_libc(&req.rlimits);
 
         // Fork.
         let pid = unsafe { libc::fork() };
@@ -346,6 +344,7 @@ impl ExecSession {
         id: u32,
         req: &ExecRequest,
         tx: mpsc::UnboundedSender<(u32, SessionOutput)>,
+        default_user: Option<&str>,
     ) -> AgentdResult<Self> {
         let mut cmd = Command::new(&req.cmd);
         cmd.args(&req.args)
@@ -363,13 +362,13 @@ impl ExecSession {
             cmd.current_dir(dir);
         }
 
-        let resolved_user = resolve_requested_user(req)?;
+        let resolved_user = resolve_requested_user(req, default_user)?;
         if let Some(home) = default_home_dir(req, resolved_user.as_ref()) {
             cmd.env("HOME", home.to_string_lossy().into_owned());
         }
 
         // Apply resource limits in the child before exec.
-        let parsed_rlimits = parse_rlimits(&req.rlimits);
+        let parsed_rlimits = rlimit::to_libc(&req.rlimits);
         if resolved_user.is_some() || !parsed_rlimits.is_empty() {
             unsafe {
                 cmd.pre_exec(move || {
@@ -412,57 +411,6 @@ impl ExecSession {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Parses a resource limit name into the corresponding `RLIMIT_*` constant.
-///
-/// Uses raw constants for Linux-specific limits that aren't in libc's cross-platform API.
-pub(crate) fn parse_rlimit_resource(name: &str) -> Option<libc::c_int> {
-    // Linux x86_64 RLIMIT_* values for resources not exposed by libc on all platforms.
-    const RLIMIT_LOCKS: libc::c_int = 10;
-    const RLIMIT_SIGPENDING: libc::c_int = 11;
-    const RLIMIT_MSGQUEUE: libc::c_int = 12;
-    const RLIMIT_NICE: libc::c_int = 13;
-    const RLIMIT_RTPRIO: libc::c_int = 14;
-    const RLIMIT_RTTIME: libc::c_int = 15;
-
-    match name {
-        "cpu" => Some(libc::RLIMIT_CPU as _),
-        "fsize" => Some(libc::RLIMIT_FSIZE as _),
-        "data" => Some(libc::RLIMIT_DATA as _),
-        "stack" => Some(libc::RLIMIT_STACK as _),
-        "core" => Some(libc::RLIMIT_CORE as _),
-        "rss" => Some(libc::RLIMIT_RSS as _),
-        "nproc" => Some(libc::RLIMIT_NPROC as _),
-        "nofile" => Some(libc::RLIMIT_NOFILE as _),
-        "memlock" => Some(libc::RLIMIT_MEMLOCK as _),
-        "as" => Some(libc::RLIMIT_AS as _),
-        "locks" => Some(RLIMIT_LOCKS),
-        "sigpending" => Some(RLIMIT_SIGPENDING),
-        "msgqueue" => Some(RLIMIT_MSGQUEUE),
-        "nice" => Some(RLIMIT_NICE),
-        "rtprio" => Some(RLIMIT_RTPRIO),
-        "rttime" => Some(RLIMIT_RTTIME),
-        _ => None,
-    }
-}
-
-/// Pre-parses rlimits from the exec request into `(resource_id, rlimit)` tuples
-/// that can be applied in the child process via `setrlimit()`.
-pub(crate) fn parse_rlimits(rlimits: &[ExecRlimit]) -> Vec<(libc::c_int, libc::rlimit)> {
-    rlimits
-        .iter()
-        .filter_map(|rl| {
-            let resource = parse_rlimit_resource(&rl.resource)?;
-            Some((
-                resource,
-                libc::rlimit {
-                    rlim_cur: rl.soft,
-                    rlim_max: rl.hard,
-                },
-            ))
-        })
-        .collect()
-}
-
 fn new_exec_error_pipe() -> AgentdResult<ExecErrorPipe> {
     let mut fds = [0; 2];
     let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
@@ -484,7 +432,7 @@ fn write_exec_error_and_exit(err_fd: RawFd) -> ! {
 }
 
 fn read_exec_error(err_fd: RawFd) -> AgentdResult<Option<i32>> {
-    let mut buf = [0u8; std::mem::size_of::<i32>()];
+    let mut buf = [0u8; mem::size_of::<i32>()];
     let n = unsafe { libc::read(err_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
     if n < 0 {
         return Err(std::io::Error::last_os_error().into());
@@ -502,28 +450,25 @@ fn read_exec_error(err_fd: RawFd) -> AgentdResult<Option<i32>> {
 }
 
 fn wait_for_exec_failure_child(pid: i32) -> AgentdResult<()> {
-    let ret = unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+    let ret = unsafe { libc::waitpid(pid, ptr::null_mut(), 0) };
     if ret < 0 {
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())
 }
 
-fn resolve_requested_user(req: &ExecRequest) -> AgentdResult<Option<ResolvedUser>> {
+fn resolve_requested_user(
+    req: &ExecRequest,
+    default_user: Option<&str>,
+) -> AgentdResult<Option<ResolvedUser>> {
     let requested = req
         .user
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            std::env::var(microsandbox_protocol::ENV_USER)
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        });
+        .or(default_user);
 
-    requested.as_deref().map(resolve_user_spec).transpose()
+    requested.map(resolve_user_spec).transpose()
 }
 
 fn resolve_user_spec(spec: &str) -> AgentdResult<ResolvedUser> {
@@ -608,7 +553,7 @@ fn lookup_passwd_by_name(name: &str) -> AgentdResult<Option<PasswdEntry>> {
     let name = CString::new(name)
         .map_err(|e| AgentdError::ExecSession(format!("invalid guest user name: {e}")))?;
     let mut pwd = MaybeUninit::<libc::passwd>::uninit();
-    let mut result = std::ptr::null_mut();
+    let mut result = ptr::null_mut();
     let mut buf = vec![0u8; lookup_buffer_len()];
     let rc = unsafe {
         libc::getpwnam_r(
@@ -646,7 +591,7 @@ fn lookup_passwd_by_name(name: &str) -> AgentdResult<Option<PasswdEntry>> {
 
 fn lookup_passwd_by_uid(uid: libc::uid_t) -> AgentdResult<ResolvedUserLookup> {
     let mut pwd = MaybeUninit::<libc::passwd>::uninit();
-    let mut result = std::ptr::null_mut();
+    let mut result = ptr::null_mut();
     let mut buf = vec![0u8; lookup_buffer_len()];
     let rc = unsafe {
         libc::getpwuid_r(
@@ -686,7 +631,7 @@ fn lookup_group_by_name(name: &str) -> AgentdResult<Option<GroupEntry>> {
     let name = CString::new(name)
         .map_err(|e| AgentdError::ExecSession(format!("invalid guest group name: {e}")))?;
     let mut grp = MaybeUninit::<libc::group>::uninit();
-    let mut result = std::ptr::null_mut();
+    let mut result = ptr::null_mut();
     let mut buf = vec![0u8; lookup_buffer_len()];
     let rc = unsafe {
         libc::getgrnam_r(
@@ -721,7 +666,7 @@ fn apply_resolved_user(user: &ResolvedUser) -> AgentdResult<()> {
         if unsafe { libc::initgroups(name.as_ptr(), user.gid) } != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
-    } else if unsafe { libc::setgroups(0, std::ptr::null()) } != 0 {
+    } else if unsafe { libc::setgroups(0, ptr::null()) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
 
@@ -914,7 +859,7 @@ async fn wait_for_pid(pid: i32) -> i32 {
 mod tests {
     use std::time::Duration;
 
-    use tokio::time::timeout;
+    use tokio::time;
 
     use microsandbox_protocol::exec::ExecRequest;
 
@@ -939,11 +884,11 @@ mod tests {
             rlimits: Vec::new(),
         };
 
-        let session = ExecSession::spawn(7, &req, tx).expect("spawn pty session");
+        let session = ExecSession::spawn(7, &req, tx, None).expect("spawn pty session");
         let mut stdout = Vec::new();
         let mut exit = None;
 
-        let recv_result = timeout(Duration::from_secs(15), async {
+        let recv_result = time::timeout(Duration::from_secs(15), async {
             while let Some((id, output)) = rx.recv().await {
                 assert_eq!(id, 7);
                 match output {
@@ -989,11 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn test_request_user_overrides_env_default() {
-        unsafe {
-            std::env::set_var(microsandbox_protocol::ENV_USER, "0:0");
-        }
-
+    fn test_request_user_overrides_config_default() {
         let req = ExecRequest {
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
@@ -1006,12 +947,31 @@ mod tests {
             rlimits: Vec::new(),
         };
 
-        let resolved = resolve_requested_user(&req).expect("resolve requested user");
+        let resolved = resolve_requested_user(&req, Some("0:0")).expect("resolve requested user");
         assert_eq!(resolved.unwrap().uid, 1);
+    }
 
-        unsafe {
-            std::env::remove_var(microsandbox_protocol::ENV_USER);
-        }
+    #[test]
+    fn test_config_default_user_used_when_request_has_none() {
+        let req = ExecRequest {
+            cmd: "/bin/true".to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        };
+
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let resolved = resolve_requested_user(&req, Some(&format!("{uid}:{gid}")))
+            .expect("resolve with config default");
+        let resolved = resolved.expect("should resolve to a user");
+        assert_eq!(resolved.uid, uid);
+        assert_eq!(resolved.gid, gid);
     }
 
     #[test]
@@ -1078,7 +1038,7 @@ mod tests {
             rlimits: Vec::new(),
         };
 
-        let err = ExecSession::spawn(9, &req, tx).expect_err("spawn should fail");
+        let err = ExecSession::spawn(9, &req, tx, None).expect_err("spawn should fail");
         let message = err.to_string();
 
         assert!(message.contains("spawn pipe"));

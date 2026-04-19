@@ -1,32 +1,29 @@
 //! Main agent loop: serial I/O, session management, heartbeat.
 
-use std::{collections::HashMap, fs::OpenOptions, os::fd::AsRawFd};
+use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::os::fd::AsRawFd;
+use std::{env, ptr};
 
 use chrono::Utc;
-use tokio::{
-    io::unix::AsyncFd,
-    sync::mpsc,
-    time::{Duration, interval},
-};
+use tokio::io::unix::AsyncFd;
+use tokio::sync::mpsc;
+use tokio::time::{self, Duration};
 
-use microsandbox_protocol::{
-    codec::{MAX_FRAME_SIZE, encode_to_buf, try_decode_from_buf},
-    core::Ready,
-    exec::{
-        ExecExited, ExecRequest, ExecResize, ExecSignal, ExecStarted, ExecStderr, ExecStdin,
-        ExecStdout,
-    },
-    fs::{FsData, FsRequest},
-    message::{Message, MessageType},
+use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
+use microsandbox_protocol::core::Ready;
+use microsandbox_protocol::exec::{
+    ExecExited, ExecRequest, ExecResize, ExecSignal, ExecStarted, ExecStderr, ExecStdin, ExecStdout,
 };
+use microsandbox_protocol::fs::{FsData, FsRequest};
+use microsandbox_protocol::message::{Message, MessageType};
 
-use crate::{
-    error::{AgentdError, AgentdResult},
-    fs::FsWriteSession,
-    heartbeat::{heartbeat_dir_exists, write_heartbeat},
-    serial::{AGENT_PORT_NAME, find_serial_port},
-    session::{ExecSession, SessionOutput},
-};
+use crate::config::AgentdConfig;
+use crate::error::{AgentdError, AgentdResult};
+use crate::fs::FsWriteSession;
+use crate::serial::AGENT_PORT_NAME;
+use crate::session::{ExecSession, SessionOutput};
+use crate::{clock, fs, heartbeat, serial};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -55,9 +52,9 @@ const MAX_INPUT_BUF_SIZE: usize = MAX_FRAME_SIZE as usize + 4;
 ///
 /// - `boot_time_ns`: `CLOCK_BOOTTIME` at `main()` start (kernel boot duration).
 /// - `init_time_ns`: nanoseconds spent in `init::init()`.
-pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
+pub async fn run(boot_time_ns: u64, init_time_ns: u64, config: &AgentdConfig) -> AgentdResult<()> {
     // Discover serial port.
-    let port_path = find_serial_port(AGENT_PORT_NAME)?;
+    let port_path = serial::find_serial_port(AGENT_PORT_NAME)?;
 
     // Open the port once with read+write. Virtio-console multiport devices
     // only allow a single open; a second open returns EBUSY.
@@ -86,10 +83,10 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
 
     // Heartbeat state.
     let mut last_activity = Utc::now();
-    let mut heartbeat_timer = interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+    let mut heartbeat_timer = time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
 
     // Send core.ready with boot timing data.
-    let ready_time_ns = crate::clock::boottime_ns();
+    let ready_time_ns = clock::boottime_ns();
     let ready_msg = Message::with_payload(
         MessageType::Ready,
         0,
@@ -100,7 +97,7 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
-    encode_to_buf(&ready_msg, &mut serial_out_buf)
+    codec::encode_to_buf(&ready_msg, &mut serial_out_buf)
         .map_err(|e| AgentdError::ExecSession(format!("encode ready frame: {e}")))?;
     flush_write_buf(&async_port, &mut serial_out_buf).await?;
 
@@ -131,7 +128,7 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
                             }
 
                             // Try to parse complete messages.
-                            while let Some(msg) = try_decode_from_buf(&mut serial_in_buf)
+                            while let Some(msg) = codec::try_decode_from_buf(&mut serial_in_buf)
                                 .map_err(|e| AgentdError::ExecSession(format!("decode: {e}")))?
                             {
                                 handle_message(
@@ -140,6 +137,7 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
                                     &mut write_sessions,
                                     &session_tx,
                                     &mut serial_out_buf,
+                                    config,
                                 ).await?;
                             }
 
@@ -161,19 +159,19 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
                     SessionOutput::Stdout(data) => {
                         let msg = Message::with_payload(MessageType::ExecStdout, id, &ExecStdout { data })
                             .map_err(|e| AgentdError::ExecSession(format!("encode stdout: {e}")))?;
-                        encode_to_buf(&msg, &mut serial_out_buf)
+                        codec::encode_to_buf(&msg, &mut serial_out_buf)
                             .map_err(|e| AgentdError::ExecSession(format!("encode stdout frame: {e}")))?;
                     }
                     SessionOutput::Stderr(data) => {
                         let msg = Message::with_payload(MessageType::ExecStderr, id, &ExecStderr { data })
                             .map_err(|e| AgentdError::ExecSession(format!("encode stderr: {e}")))?;
-                        encode_to_buf(&msg, &mut serial_out_buf)
+                        codec::encode_to_buf(&msg, &mut serial_out_buf)
                             .map_err(|e| AgentdError::ExecSession(format!("encode stderr frame: {e}")))?;
                     }
                     SessionOutput::Exited(code) => {
                         let msg = Message::with_payload(MessageType::ExecExited, id, &ExecExited { code })
                             .map_err(|e| AgentdError::ExecSession(format!("encode exited: {e}")))?;
-                        encode_to_buf(&msg, &mut serial_out_buf)
+                        codec::encode_to_buf(&msg, &mut serial_out_buf)
                             .map_err(|e| AgentdError::ExecSession(format!("encode exited frame: {e}")))?;
                         sessions.remove(&id);
                     }
@@ -190,8 +188,8 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64) -> AgentdResult<()> {
 
             // Heartbeat tick.
             _ = heartbeat_timer.tick() => {
-                if heartbeat_dir_exists() {
-                    let _ = write_heartbeat(
+                if heartbeat::heartbeat_dir_exists() {
+                    let _ = heartbeat::write_heartbeat(
                         sessions.len() as u32,
                         last_activity,
                     ).await;
@@ -214,6 +212,7 @@ async fn handle_message(
     write_sessions: &mut HashMap<u32, FsWriteSession>,
     session_tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
     out_buf: &mut Vec<u8>,
+    config: &AgentdConfig,
 ) -> AgentdResult<()> {
     match msg.t {
         MessageType::ExecRequest => {
@@ -221,7 +220,7 @@ async fn handle_message(
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode exec request: {e}")))?;
             prepend_scripts_to_path(&mut req);
-            match ExecSession::spawn(msg.id, &req, session_tx.clone()) {
+            match ExecSession::spawn(msg.id, &req, session_tx.clone(), config.user.as_deref()) {
                 Ok(session) => {
                     let reply = Message::with_payload(
                         MessageType::ExecStarted,
@@ -229,7 +228,7 @@ async fn handle_message(
                         &ExecStarted { pid: session.pid() },
                     )
                     .map_err(|e| AgentdError::ExecSession(format!("encode started: {e}")))?;
-                    encode_to_buf(&reply, out_buf).map_err(|e| {
+                    codec::encode_to_buf(&reply, out_buf).map_err(|e| {
                         AgentdError::ExecSession(format!("encode started frame: {e}"))
                     })?;
                     sessions.insert(msg.id, session);
@@ -242,7 +241,7 @@ async fn handle_message(
                         &ExecExited { code: -1 },
                     )
                     .map_err(|e| AgentdError::ExecSession(format!("encode exited: {e}")))?;
-                    encode_to_buf(&reply, out_buf).map_err(|e| {
+                    codec::encode_to_buf(&reply, out_buf).map_err(|e| {
                         AgentdError::ExecSession(format!("encode exited frame: {e}"))
                     })?;
                     eprintln!("failed to spawn exec session {}: {e}", msg.id);
@@ -286,7 +285,7 @@ async fn handle_message(
             let req: FsRequest = msg
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode fs request: {e}")))?;
-            match crate::fs::handle_fs_request(msg.id, req, out_buf, session_tx).await {
+            match fs::handle_fs_request(msg.id, req, out_buf, session_tx).await {
                 Ok(Some(ws)) => {
                     write_sessions.insert(msg.id, ws);
                 }
@@ -302,7 +301,7 @@ async fn handle_message(
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode fs data: {e}")))?;
             if let Some(session) = write_sessions.get_mut(&msg.id) {
-                match crate::fs::handle_fs_data(msg.id, data, session, out_buf).await {
+                match fs::handle_fs_data(msg.id, data, session, out_buf).await {
                     Ok(true) => {
                         // Session complete — remove it.
                         write_sessions.remove(&msg.id);
@@ -322,7 +321,7 @@ async fn handle_message(
                 };
                 let reply = Message::with_payload(MessageType::FsResponse, msg.id, &resp)
                     .map_err(|e| AgentdError::ExecSession(format!("encode fs error: {e}")))?;
-                encode_to_buf(&reply, out_buf)
+                codec::encode_to_buf(&reply, out_buf)
                     .map_err(|e| AgentdError::ExecSession(format!("encode fs error frame: {e}")))?;
             }
         }
@@ -365,7 +364,7 @@ fn prepend_scripts_to_path(req: &mut microsandbox_protocol::exec::ExecRequest) {
     } else {
         // Inherit from agentd's process environment, falling back to a
         // sensible default since PID 1 in a minimal guest may not have PATH.
-        let inherited = std::env::var("PATH").unwrap_or_else(|_| DEFAULT_GUEST_PATH.to_string());
+        let inherited = env::var("PATH").unwrap_or_else(|_| DEFAULT_GUEST_PATH.to_string());
         req.env.push(format!("PATH={scripts}:{inherited}"));
     }
 }
@@ -442,11 +441,11 @@ fn remount_root_readonly() -> AgentdResult<()> {
     let target = std::ffi::CString::new("/").expect("static path contains no NUL");
     let ret = unsafe {
         libc::mount(
-            std::ptr::null(),
+            ptr::null(),
             target.as_ptr(),
-            std::ptr::null(),
+            ptr::null(),
             (libc::MS_REMOUNT | libc::MS_RDONLY) as libc::c_ulong,
-            std::ptr::null(),
+            ptr::null(),
         )
     };
 

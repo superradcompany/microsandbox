@@ -380,18 +380,23 @@ fn push_file_mounts_spec(
 
 /// Encodes sandbox-wide rlimits for the guest init environment.
 fn encode_rlimits(rlimits: &[Rlimit]) -> String {
-    rlimits
-        .iter()
-        .map(|rlimit| {
-            format!(
-                "{}={}:{}",
-                rlimit.resource.as_str(),
-                rlimit.soft,
-                rlimit.hard
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(";")
+    use std::fmt::Write;
+
+    let mut out = String::with_capacity(rlimits.len() * 32);
+    for (i, rlimit) in rlimits.iter().enumerate() {
+        if i > 0 {
+            out.push(';');
+        }
+        write!(
+            out,
+            "{}={}:{}",
+            rlimit.resource.as_str(),
+            rlimit.soft,
+            rlimit.hard
+        )
+        .expect("writing to String cannot fail");
+    }
+    out
 }
 
 /// Generate a virtiofs tag from a guest mount path.
@@ -499,7 +504,7 @@ fn sandbox_cli_args(
             args.push(OsString::from(format.as_str()));
 
             // Build MSB_BLOCK_ROOT env var value.
-            let mut block_root_val = String::from("/dev/vda");
+            let mut block_root_val = String::from("kind=disk-image,device=/dev/vda");
             if let Some(ft) = fstype {
                 block_root_val.push_str(&format!(",fstype={ft}"));
             }
@@ -636,7 +641,7 @@ mod tests {
     use super::sandbox_cli_args;
     use crate::{
         LogLevel,
-        sandbox::{RlimitResource, RootfsSource, SandboxBuilder, SandboxConfig},
+        sandbox::{Rlimit, RlimitResource, RootfsSource, SandboxBuilder, SandboxConfig},
     };
 
     //----------------------------------------------------------------------------------------------
@@ -758,6 +763,38 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_rlimits_round_trips_through_protocol_parser() {
+        use microsandbox_protocol::exec::ExecRlimit;
+
+        let rlimits = vec![
+            Rlimit {
+                resource: RlimitResource::Nofile,
+                soft: 4096,
+                hard: 65_535,
+            },
+            Rlimit {
+                resource: RlimitResource::Nproc,
+                soft: 1024,
+                hard: 1024,
+            },
+        ];
+
+        let encoded = super::encode_rlimits(&rlimits);
+        let parsed: Vec<ExecRlimit> = encoded
+            .split(';')
+            .map(|entry| entry.parse::<ExecRlimit>().unwrap())
+            .collect();
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].resource, "nofile");
+        assert_eq!(parsed[0].soft, 4096);
+        assert_eq!(parsed[0].hard, 65_535);
+        assert_eq!(parsed[1].resource, "nproc");
+        assert_eq!(parsed[1].soft, 1024);
+        assert_eq!(parsed[1].hard, 1024);
+    }
+
+    #[test]
     fn test_sandbox_cli_args_include_db_connect_timeout() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
@@ -859,7 +896,11 @@ mod tests {
         assert!(rendered.contains(&"/tmp/ubuntu.qcow2".to_string()));
         assert!(rendered.contains(&"--rootfs-disk-format".to_string()));
         assert!(rendered.contains(&"qcow2".to_string()));
-        assert!(rendered.contains(&"MSB_BLOCK_ROOT=/dev/vda,fstype=ext4".to_string()));
+        assert!(
+            rendered.contains(
+                &"MSB_BLOCK_ROOT=kind=disk-image,device=/dev/vda,fstype=ext4".to_string()
+            )
+        );
 
         // Should not contain bind or overlay args.
         assert!(!rendered.contains(&"--rootfs-path".to_string()));
@@ -883,7 +924,7 @@ mod tests {
         assert!(rendered.contains(&"/tmp/alpine.raw".to_string()));
         assert!(rendered.contains(&"--rootfs-disk-format".to_string()));
         assert!(rendered.contains(&"raw".to_string()));
-        assert!(rendered.contains(&"MSB_BLOCK_ROOT=/dev/vda".to_string()));
+        assert!(rendered.contains(&"MSB_BLOCK_ROOT=kind=disk-image,device=/dev/vda".to_string()));
 
         // Should not contain bind or overlay args.
         assert!(!rendered.contains(&"--rootfs-path".to_string()));

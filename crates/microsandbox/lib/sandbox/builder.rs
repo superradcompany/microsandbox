@@ -489,6 +489,17 @@ impl SandboxBuilder {
             _ => {}
         }
 
+        for rlimit in &self.config.rlimits {
+            if rlimit.soft > rlimit.hard {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "rlimit {}: soft ({}) must not exceed hard ({})",
+                    rlimit.resource.as_str(),
+                    rlimit.soft,
+                    rlimit.hard
+                )));
+            }
+        }
+
         Ok(())
     }
 }
