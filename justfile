@@ -33,7 +33,7 @@ _install-dev-deps:
 
     echo "==> Installing system dependencies..."
     sudo apt install build-essential musl-tools flex bison libelf-dev \
-        python3-pyelftools pkg-config libdbus-1-dev libcap-ng-dev pre-commit
+        python3-pyelftools pkg-config libcap-ng-dev pre-commit
 
     echo "==> Checking Rust toolchain..."
     if ! command -v rustup &>/dev/null; then

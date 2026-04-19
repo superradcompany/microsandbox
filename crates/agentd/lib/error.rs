@@ -36,6 +36,10 @@ pub enum AgentdError {
     #[error("exec session error: {0}")]
     ExecSession(String),
 
+    /// A config parse error at startup (malformed `MSB_*` env var).
+    #[error("config error: {0}")]
+    Config(String),
+
     /// An init error.
     #[error("init error: {0}")]
     Init(String),

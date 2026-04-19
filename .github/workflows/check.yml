@@ -121,7 +121,7 @@ jobs:
       # -- Linux build deps --
       - name: Install build deps (Linux)
         if: matrix.os == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools libdbus-1-dev
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
 
       # -- agentd (Linux: native musl) --
       - name: Build agentd (musl)

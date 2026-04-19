@@ -33,6 +33,10 @@ pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 5;
 pub(crate) const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
 
 /// Service name for microsandbox-managed registry credentials in the OS keyring.
+#[cfg(all(
+    feature = "keyring",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
 const REGISTRY_KEYRING_SERVICE: &str = "dev.microsandbox.registry";
 
 //--------------------------------------------------------------------------------------------------
@@ -232,18 +236,21 @@ impl GlobalConfig {
     /// Resolve registry authentication for a given hostname.
     ///
     /// Resolution order:
-    /// 1. OS keyring (interactive CLI login)
+    /// 1. OS keyring (interactive CLI login, when the `keyring` feature is enabled)
     /// 2. `registries.auth` in global config
     /// 3. Docker credential store/config
     /// 4. Anonymous
     ///
     /// Returns `Anonymous` if no entry matches.
     pub fn resolve_registry_auth(&self, hostname: &str) -> MicrosandboxResult<RegistryAuth> {
-        match lookup_registry_keyring_auth(hostname) {
-            Ok(Some(auth)) => return Ok(auth),
-            Ok(None) => {}
-            Err(error) => {
-                tracing::debug!(registry = hostname, error = %error, "failed to resolve registry auth from OS keyring");
+        #[cfg(feature = "keyring")]
+        {
+            match lookup_registry_keyring_auth(hostname) {
+                Ok(Some(auth)) => return Ok(auth),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(registry = hostname, error = %error, "failed to resolve registry auth from OS keyring");
+                }
             }
         }
 
@@ -690,7 +697,10 @@ fn load_config_from(path: &Path) -> Option<GlobalConfig> {
     serde_json::from_str(&content).ok()
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(all(
+    feature = "keyring",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
 fn store_registry_keyring_auth(
     hostname: &str,
     username: &str,
@@ -710,18 +720,22 @@ fn store_registry_keyring_auth(
         .map_err(|e| format!("failed to store OS credential for `{hostname}`: {e}"))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(not(all(
+    feature = "keyring",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+)))]
 fn store_registry_keyring_auth(
     hostname: &str,
     _username: &str,
     _password: &str,
 ) -> Result<(), String> {
-    Err(format!(
-        "secure OS credential storage is not supported on this platform for `{hostname}`"
-    ))
+    Err(keyring_unavailable_message(hostname))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(all(
+    feature = "keyring",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
 fn load_keyring_registry_credential(
     hostname: &str,
 ) -> Result<Option<KeyringRegistryCredential>, String> {
@@ -743,16 +757,20 @@ fn load_keyring_registry_credential(
         .map_err(|e| format!("failed to decode OS credential for `{hostname}`: {e}"))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(not(all(
+    feature = "keyring",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+)))]
 fn load_keyring_registry_credential(
     hostname: &str,
 ) -> Result<Option<KeyringRegistryCredential>, String> {
-    Err(format!(
-        "secure OS credential storage is not supported on this platform for `{hostname}`"
-    ))
+    Err(keyring_unavailable_message(hostname))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(all(
+    feature = "keyring",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
 fn remove_registry_keyring_auth(hostname: &str) -> Result<(), String> {
     let entry = keyring::Entry::new(REGISTRY_KEYRING_SERVICE, hostname)
         .map_err(|e| format!("failed to open OS credential store entry for `{hostname}`: {e}"))?;
@@ -765,11 +783,31 @@ fn remove_registry_keyring_auth(hostname: &str) -> Result<(), String> {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(not(all(
+    feature = "keyring",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+)))]
 fn remove_registry_keyring_auth(hostname: &str) -> Result<(), String> {
-    Err(format!(
-        "secure OS credential storage is not supported on this platform for `{hostname}`"
-    ))
+    Err(keyring_unavailable_message(hostname))
+}
+
+#[cfg(not(all(
+    feature = "keyring",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+)))]
+fn keyring_unavailable_message(hostname: &str) -> String {
+    #[cfg(not(feature = "keyring"))]
+    {
+        return format!(
+            "secure OS credential storage is disabled; enable the `keyring` feature to use it for `{hostname}`"
+        );
+    }
+
+    #[cfg(all(
+        feature = "keyring",
+        not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+    ))]
+    format!("secure OS credential storage is not supported on this platform for `{hostname}`")
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -998,6 +1036,28 @@ mod tests {
                 .to_string()
                 .contains("entry defines multiple credential sources")
         );
+    }
+
+    #[cfg(not(feature = "keyring"))]
+    #[test]
+    fn test_resolve_configured_registry_auth_reports_disabled_keyring() {
+        let cfg = GlobalConfig {
+            registries: RegistriesConfig {
+                auth: HashMap::from([(
+                    "ghcr.io".to_string(),
+                    RegistryAuthEntry {
+                        username: "user".to_string(),
+                        store: Some(RegistryCredentialStore::Keyring),
+                        password_env: None,
+                        secret_name: None,
+                    },
+                )]),
+            },
+            ..Default::default()
+        };
+
+        let error = cfg.resolve_configured_registry_auth("ghcr.io").unwrap_err();
+        assert!(error.to_string().contains("enable the `keyring` feature"));
     }
 
     #[test]

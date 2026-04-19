@@ -209,13 +209,7 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 > ```sh
 > msb install ubuntu               # Install ubuntu sandbox as 'ubuntu' command
 > ubuntu                           # Opens Ubuntu in a microVM
-> ```
-
-> ```sh
-> msb install --name nodebox node  # Custom command name
-> msb install --tmp alpine         # Ephemeral: fresh sandbox every run
-> msb install --list               # List installed commands
-> msb uninstall nodebox            # Remove an installed command
+> msb uninstall ubuntu             # Uninstall the ubuntu sandbox
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/list-unordered/A770EF">&nbsp;&nbsp;Status & Inspection

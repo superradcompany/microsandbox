@@ -3,91 +3,39 @@
 //! Configures the guest network interface using ioctls and netlink, following
 //! the parameters from host.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
-
-use crate::error::{AgentdError, AgentdResult};
-
-//--------------------------------------------------------------------------------------------------
-// Types
-//--------------------------------------------------------------------------------------------------
-
-/// Parsed `MSB_NET` specification.
-#[derive(Debug)]
-struct NetSpec<'a> {
-    iface: &'a str,
-    mac: [u8; 6],
-    mtu: u16,
-}
-
-/// Parsed `MSB_NET_IPV4` specification.
-#[derive(Debug)]
-struct NetIpv4Spec {
-    address: Ipv4Addr,
-    prefix_len: u8,
-    gateway: Ipv4Addr,
-    dns: Option<Ipv4Addr>,
-}
-
-/// Parsed `MSB_NET_IPV6` specification.
-#[derive(Debug)]
-struct NetIpv6Spec {
-    address: Ipv6Addr,
-    prefix_len: u8,
-    gateway: Ipv6Addr,
-    dns: Option<Ipv6Addr>,
-}
+use crate::config::NetConfig;
+use crate::error::AgentdResult;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Sets the guest hostname from `MSB_HOSTNAME`.
+/// Sets the guest hostname.
 ///
 /// Calls `sethostname()`, writes `/etc/hostname`, and provisions
 /// `/etc/hosts` with localhost aliases and the hostname entry.
-pub fn apply_hostname() -> AgentdResult<()> {
-    let hostname = match std::env::var(microsandbox_protocol::ENV_HOSTNAME) {
-        Ok(v) if !v.is_empty() => Some(v),
-        _ => None,
-    };
+pub(crate) fn apply_hostname(hostname: Option<&str>) -> AgentdResult<()> {
+    linux::write_hosts_file(hostname)?;
 
-    linux::write_hosts_file(hostname.as_deref())?;
-
-    if let Some(ref name) = hostname {
+    if let Some(name) = hostname {
         linux::set_hostname(name)?;
     }
 
     Ok(())
 }
 
-/// Applies network configuration from `MSB_NET*` environment variables.
+/// Applies network configuration.
 ///
 /// Always provisions loopback, even when no external network interface is
-/// requested. Missing `MSB_NET` is not an error (no networking requested).
-/// Parse failures and configuration failures are hard errors.
-pub fn apply_network_config() -> AgentdResult<()> {
+/// requested. Missing `net` is not an error (no networking requested).
+pub(crate) fn apply_network_config(cfg: NetConfig<'_>) -> AgentdResult<()> {
     linux::configure_loopback()?;
 
-    let val = match std::env::var(microsandbox_protocol::ENV_NET) {
-        Ok(v) if !v.is_empty() => v,
-        _ => return Ok(()),
+    let Some(net) = cfg.net else {
+        return Ok(());
     };
 
-    let net = parse_net(&val)?;
-
-    // Parse optional IPv4 config.
-    let ipv4 = match std::env::var(microsandbox_protocol::ENV_NET_IPV4) {
-        Ok(v) if !v.is_empty() => Some(parse_net_ipv4(&v)?),
-        _ => None,
-    };
-
-    // Parse optional IPv6 config.
-    let ipv6 = match std::env::var(microsandbox_protocol::ENV_NET_IPV6) {
-        Ok(v) if !v.is_empty() => Some(parse_net_ipv6(&v)?),
-        _ => None,
-    };
-
-    linux::configure_interface(&net, ipv4.as_ref(), ipv6.as_ref())
+    linux::configure_interface(net, cfg.ipv4, cfg.ipv6)
 }
 
 fn hosts_file_contents(hostname: Option<&str>) -> String {
@@ -112,182 +60,18 @@ fn hosts_file_contents(hostname: Option<&str>) -> String {
     s
 }
 
-/// Parses `MSB_NET` value: `iface=NAME,mac=AA:BB:CC:DD:EE:FF,mtu=N`
-fn parse_net(val: &str) -> AgentdResult<NetSpec<'_>> {
-    let mut iface = None;
-    let mut mac = None;
-    let mut mtu = 1500u16;
-
-    for part in val.split(',') {
-        if let Some(v) = part.strip_prefix("iface=") {
-            iface = Some(v);
-        } else if let Some(v) = part.strip_prefix("mac=") {
-            mac = Some(parse_mac(v)?);
-        } else if let Some(v) = part.strip_prefix("mtu=") {
-            mtu = v
-                .parse()
-                .map_err(|_| AgentdError::Init(format!("invalid MTU: {v}")))?;
-        } else {
-            return Err(AgentdError::Init(format!("unknown MSB_NET option: {part}")));
-        }
-    }
-
-    let iface = iface.ok_or_else(|| AgentdError::Init("MSB_NET missing iface=".into()))?;
-    let mac = mac.ok_or_else(|| AgentdError::Init("MSB_NET missing mac=".into()))?;
-
-    Ok(NetSpec { iface, mac, mtu })
-}
-
-/// Parses `MSB_NET_IPV4` value: `addr=A.B.C.D/N,gw=A.B.C.D[,dns=A.B.C.D]`
-fn parse_net_ipv4(val: &str) -> AgentdResult<NetIpv4Spec> {
-    let mut address = None;
-    let mut prefix_len = None;
-    let mut gateway = None;
-    let mut dns = None;
-
-    for part in val.split(',') {
-        if let Some(v) = part.strip_prefix("addr=") {
-            let (addr, prefix) = parse_cidr_v4(v)?;
-            address = Some(addr);
-            prefix_len = Some(prefix);
-        } else if let Some(v) = part.strip_prefix("gw=") {
-            gateway = Some(
-                v.parse::<Ipv4Addr>()
-                    .map_err(|_| AgentdError::Init(format!("invalid IPv4 gateway: {v}")))?,
-            );
-        } else if let Some(v) = part.strip_prefix("dns=") {
-            dns = Some(
-                v.parse::<Ipv4Addr>()
-                    .map_err(|_| AgentdError::Init(format!("invalid IPv4 DNS: {v}")))?,
-            );
-        } else {
-            return Err(AgentdError::Init(format!(
-                "unknown MSB_NET_IPV4 option: {part}"
-            )));
-        }
-    }
-
-    let address = address.ok_or_else(|| AgentdError::Init("MSB_NET_IPV4 missing addr=".into()))?;
-    let prefix_len =
-        prefix_len.ok_or_else(|| AgentdError::Init("MSB_NET_IPV4 missing addr=".into()))?;
-    let gateway = gateway.ok_or_else(|| AgentdError::Init("MSB_NET_IPV4 missing gw=".into()))?;
-
-    Ok(NetIpv4Spec {
-        address,
-        prefix_len,
-        gateway,
-        dns,
-    })
-}
-
-/// Parses `MSB_NET_IPV6` value: `addr=ADDR/N,gw=ADDR[,dns=ADDR]`
-fn parse_net_ipv6(val: &str) -> AgentdResult<NetIpv6Spec> {
-    let mut address = None;
-    let mut prefix_len = None;
-    let mut gateway = None;
-    let mut dns = None;
-
-    for part in val.split(',') {
-        if let Some(v) = part.strip_prefix("addr=") {
-            let (addr, prefix) = parse_cidr_v6(v)?;
-            address = Some(addr);
-            prefix_len = Some(prefix);
-        } else if let Some(v) = part.strip_prefix("gw=") {
-            gateway = Some(
-                v.parse::<Ipv6Addr>()
-                    .map_err(|_| AgentdError::Init(format!("invalid IPv6 gateway: {v}")))?,
-            );
-        } else if let Some(v) = part.strip_prefix("dns=") {
-            dns = Some(
-                v.parse::<Ipv6Addr>()
-                    .map_err(|_| AgentdError::Init(format!("invalid IPv6 DNS: {v}")))?,
-            );
-        } else {
-            return Err(AgentdError::Init(format!(
-                "unknown MSB_NET_IPV6 option: {part}"
-            )));
-        }
-    }
-
-    let address = address.ok_or_else(|| AgentdError::Init("MSB_NET_IPV6 missing addr=".into()))?;
-    let prefix_len =
-        prefix_len.ok_or_else(|| AgentdError::Init("MSB_NET_IPV6 missing addr=".into()))?;
-    let gateway = gateway.ok_or_else(|| AgentdError::Init("MSB_NET_IPV6 missing gw=".into()))?;
-
-    Ok(NetIpv6Spec {
-        address,
-        prefix_len,
-        gateway,
-        dns,
-    })
-}
-
-/// Parses a MAC address string like `02:5a:7b:13:01:02`.
-fn parse_mac(s: &str) -> AgentdResult<[u8; 6]> {
-    let mut mac = [0u8; 6];
-    let mut len = 0usize;
-    for (i, part) in s.split(':').enumerate() {
-        if i >= 6 {
-            return Err(AgentdError::Init(format!("invalid MAC address: {s}")));
-        }
-        mac[i] = u8::from_str_radix(part, 16)
-            .map_err(|_| AgentdError::Init(format!("invalid MAC octet: {part}")))?;
-        len = i + 1;
-    }
-    if len != 6 {
-        return Err(AgentdError::Init(format!("invalid MAC address: {s}")));
-    }
-    Ok(mac)
-}
-
-/// Parses an IPv4 CIDR like `100.96.1.2/30`.
-fn parse_cidr_v4(s: &str) -> AgentdResult<(Ipv4Addr, u8)> {
-    let (addr_str, prefix_str) = s
-        .split_once('/')
-        .ok_or_else(|| AgentdError::Init(format!("invalid IPv4 CIDR (missing /): {s}")))?;
-    let addr = addr_str
-        .parse::<Ipv4Addr>()
-        .map_err(|_| AgentdError::Init(format!("invalid IPv4 address: {addr_str}")))?;
-    let prefix = prefix_str
-        .parse::<u8>()
-        .map_err(|_| AgentdError::Init(format!("invalid IPv4 prefix length: {prefix_str}")))?;
-    if prefix > 32 {
-        return Err(AgentdError::Init(format!(
-            "IPv4 prefix length out of range (0-32): {prefix}"
-        )));
-    }
-    Ok((addr, prefix))
-}
-
-/// Parses an IPv6 CIDR like `fd42:6d73:62:2a::2/64`.
-fn parse_cidr_v6(s: &str) -> AgentdResult<(Ipv6Addr, u8)> {
-    let (addr_str, prefix_str) = s
-        .rsplit_once('/')
-        .ok_or_else(|| AgentdError::Init(format!("invalid IPv6 CIDR (missing /): {s}")))?;
-    let addr = addr_str
-        .parse::<Ipv6Addr>()
-        .map_err(|_| AgentdError::Init(format!("invalid IPv6 address: {addr_str}")))?;
-    let prefix = prefix_str
-        .parse::<u8>()
-        .map_err(|_| AgentdError::Init(format!("invalid IPv6 prefix length: {prefix_str}")))?;
-    if prefix > 128 {
-        return Err(AgentdError::Init(format!(
-            "IPv6 prefix length out of range (0-128): {prefix}"
-        )));
-    }
-    Ok((addr, prefix))
-}
-
 //--------------------------------------------------------------------------------------------------
 // Modules
 //--------------------------------------------------------------------------------------------------
 
 mod linux {
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::{fs, io, mem, ptr};
 
+    use nix::unistd;
+
+    use crate::config::{NetIpv4Spec, NetIpv6Spec, NetSpec};
     use crate::error::{AgentdError, AgentdResult};
-
-    use super::{NetIpv4Spec, NetIpv6Spec, NetSpec};
 
     //----------------------------------------------------------------------------------------------
     // Types
@@ -330,14 +114,14 @@ mod linux {
     /// 7. Add IPv6 default route via netlink `RTM_NEWROUTE`
     /// 8. Write `/etc/resolv.conf`
     pub fn configure_interface(
-        net: &NetSpec<'_>,
+        net: &NetSpec,
         ipv4: Option<&NetIpv4Spec>,
         ipv6: Option<&NetIpv6Spec>,
     ) -> AgentdResult<()> {
-        let ifindex = get_ifindex(net.iface)?;
+        let ifindex = get_ifindex(&net.iface)?;
 
-        set_mac_address(net.iface, &net.mac)?;
-        set_mtu(net.iface, net.mtu)?;
+        set_mac_address(&net.iface, &net.mac)?;
+        set_mtu(&net.iface, net.mtu)?;
 
         if let Some(v4) = ipv4 {
             add_address_v4(ifindex, v4.address, v4.prefix_len)?;
@@ -346,7 +130,7 @@ mod linux {
             add_address_v6(ifindex, v6.address, v6.prefix_len)?;
         }
 
-        bring_interface_up(net.iface)?;
+        bring_interface_up(&net.iface)?;
 
         if let Some(v4) = ipv4 {
             add_default_route_v4(v4.gateway)?;
@@ -376,7 +160,7 @@ mod linux {
     /// Gets the interface index for a given interface name.
     fn get_ifindex(ifname: &str) -> AgentdResult<u32> {
         unsafe {
-            let mut ifr: libc::ifreq = std::mem::zeroed();
+            let mut ifr: libc::ifreq = mem::zeroed();
             copy_ifname(&mut ifr, ifname)?;
 
             let sock = socket_fd()?;
@@ -384,7 +168,7 @@ mod linux {
                 libc::close(sock);
                 return Err(AgentdError::Init(format!(
                     "SIOCGIFINDEX failed for {ifname}: {}",
-                    std::io::Error::last_os_error()
+                    io::Error::last_os_error()
                 )));
             }
             libc::close(sock);
@@ -396,7 +180,7 @@ mod linux {
     /// Sets the MAC address on an interface.
     fn set_mac_address(ifname: &str, mac: &[u8; 6]) -> AgentdResult<()> {
         unsafe {
-            let mut ifr: libc::ifreq = std::mem::zeroed();
+            let mut ifr: libc::ifreq = mem::zeroed();
             copy_ifname(&mut ifr, ifname)?;
 
             ifr.ifr_ifru.ifru_hwaddr.sa_family = libc::ARPHRD_ETHER;
@@ -407,7 +191,7 @@ mod linux {
                 libc::close(sock);
                 return Err(AgentdError::Init(format!(
                     "SIOCSIFHWADDR failed for {ifname}: {}",
-                    std::io::Error::last_os_error()
+                    io::Error::last_os_error()
                 )));
             }
             libc::close(sock);
@@ -418,7 +202,7 @@ mod linux {
     /// Sets the MTU on an interface.
     fn set_mtu(ifname: &str, mtu: u16) -> AgentdResult<()> {
         unsafe {
-            let mut ifr: libc::ifreq = std::mem::zeroed();
+            let mut ifr: libc::ifreq = mem::zeroed();
             copy_ifname(&mut ifr, ifname)?;
             ifr.ifr_ifru.ifru_mtu = mtu as libc::c_int;
 
@@ -427,7 +211,7 @@ mod linux {
                 libc::close(sock);
                 return Err(AgentdError::Init(format!(
                     "SIOCSIFMTU failed for {ifname}: {}",
-                    std::io::Error::last_os_error()
+                    io::Error::last_os_error()
                 )));
             }
             libc::close(sock);
@@ -438,7 +222,7 @@ mod linux {
     /// Brings an interface up.
     fn bring_interface_up(ifname: &str) -> AgentdResult<()> {
         unsafe {
-            let mut ifr: libc::ifreq = std::mem::zeroed();
+            let mut ifr: libc::ifreq = mem::zeroed();
             copy_ifname(&mut ifr, ifname)?;
 
             let sock = socket_fd()?;
@@ -448,7 +232,7 @@ mod linux {
                 libc::close(sock);
                 return Err(AgentdError::Init(format!(
                     "SIOCGIFFLAGS failed for {ifname}: {}",
-                    std::io::Error::last_os_error()
+                    io::Error::last_os_error()
                 )));
             }
 
@@ -459,7 +243,7 @@ mod linux {
                 libc::close(sock);
                 return Err(AgentdError::Init(format!(
                     "SIOCSIFFLAGS (UP) failed for {ifname}: {}",
-                    std::io::Error::last_os_error()
+                    io::Error::last_os_error()
                 )));
             }
             libc::close(sock);
@@ -537,12 +321,7 @@ mod linux {
     ///
     /// For IPv4: emits both `IFA_ADDRESS` and `IFA_LOCAL` (kernel expects both).
     /// For IPv6: emits only `IFA_ADDRESS` (no `IFA_LOCAL` semantics for IPv6).
-    fn netlink_newaddr(
-        ifindex: u32,
-        family: u8,
-        prefix_len: u8,
-        addr: &[u8],
-    ) -> std::io::Result<()> {
+    fn netlink_newaddr(ifindex: u32, family: u8, prefix_len: u8, addr: &[u8]) -> io::Result<()> {
         let addr_len = addr.len();
         let is_ipv4 = family == libc::AF_INET as u8;
 
@@ -586,7 +365,7 @@ mod linux {
     }
 
     /// Sends a netlink RTM_NEWROUTE message for a default route.
-    fn netlink_newroute(family: u8, gateway: &[u8]) -> std::io::Result<()> {
+    fn netlink_newroute(family: u8, gateway: &[u8]) -> io::Result<()> {
         let gw_len = gateway.len();
 
         // nlmsghdr + rtmsg + RTA_GATEWAY(rta_header + addr)
@@ -627,30 +406,30 @@ mod linux {
     }
 
     /// Opens a netlink socket, sends a message, and waits for the ACK.
-    fn netlink_send(msg: &[u8]) -> std::io::Result<()> {
+    fn netlink_send(msg: &[u8]) -> io::Result<()> {
         unsafe {
             let sock = libc::socket(libc::AF_NETLINK, libc::SOCK_DGRAM, libc::NETLINK_ROUTE);
             if sock < 0 {
-                return Err(std::io::Error::last_os_error());
+                return Err(io::Error::last_os_error());
             }
 
             // Bind to kernel.
-            let mut sa: libc::sockaddr_nl = std::mem::zeroed();
+            let mut sa: libc::sockaddr_nl = mem::zeroed();
             sa.nl_family = libc::AF_NETLINK as u16;
             if libc::bind(
                 sock,
                 (&sa as *const libc::sockaddr_nl).cast(),
-                std::mem::size_of::<libc::sockaddr_nl>() as u32,
+                mem::size_of::<libc::sockaddr_nl>() as u32,
             ) < 0
             {
                 libc::close(sock);
-                return Err(std::io::Error::last_os_error());
+                return Err(io::Error::last_os_error());
             }
 
             // Send.
             if libc::send(sock, msg.as_ptr().cast(), msg.len(), 0) < 0 {
                 libc::close(sock);
-                return Err(std::io::Error::last_os_error());
+                return Err(io::Error::last_os_error());
             }
 
             // Read ACK.
@@ -659,7 +438,7 @@ mod linux {
             libc::close(sock);
 
             if n < 0 {
-                return Err(std::io::Error::last_os_error());
+                return Err(io::Error::last_os_error());
             }
 
             // Check for error in the ACK (using from_ne_bytes to avoid
@@ -671,7 +450,7 @@ mod linux {
                         ack_buf[NLMSG_HDRLEN..NLMSG_HDRLEN + 4].try_into().unwrap(),
                     );
                     if err < 0 {
-                        return Err(std::io::Error::from_raw_os_error(-err));
+                        return Err(io::Error::from_raw_os_error(-err));
                     }
                 }
             }
@@ -684,12 +463,12 @@ mod linux {
 
     /// Sets the kernel hostname via `sethostname()` and writes `/etc/hostname`.
     pub fn set_hostname(name: &str) -> AgentdResult<()> {
-        nix::unistd::sethostname(name)
+        unistd::sethostname(name)
             .map_err(|e| AgentdError::Init(format!("sethostname({name}): {e}")))?;
 
-        std::fs::create_dir_all("/etc")
+        fs::create_dir_all("/etc")
             .map_err(|e| AgentdError::Init(format!("failed to create /etc: {e}")))?;
-        std::fs::write("/etc/hostname", format!("{name}\n"))
+        fs::write("/etc/hostname", format!("{name}\n"))
             .map_err(|e| AgentdError::Init(format!("failed to write /etc/hostname: {e}")))?;
 
         Ok(())
@@ -697,9 +476,9 @@ mod linux {
 
     /// Writes `/etc/hosts` with localhost aliases and an optional hostname entry.
     pub fn write_hosts_file(hostname: Option<&str>) -> AgentdResult<()> {
-        std::fs::create_dir_all("/etc")
+        fs::create_dir_all("/etc")
             .map_err(|e| AgentdError::Init(format!("failed to create /etc: {e}")))?;
-        std::fs::write("/etc/hosts", super::hosts_file_contents(hostname))
+        fs::write("/etc/hosts", super::hosts_file_contents(hostname))
             .map_err(|e| AgentdError::Init(format!("failed to write /etc/hosts: {e}")))?;
         Ok(())
     }
@@ -718,7 +497,7 @@ mod linux {
             content.push_str(&format!("nameserver {dns}\n"));
         }
 
-        std::fs::write("/etc/resolv.conf", &content)
+        fs::write("/etc/resolv.conf", &content)
             .map_err(|e| AgentdError::Init(format!("failed to write /etc/resolv.conf: {e}")))?;
 
         Ok(())
@@ -732,7 +511,7 @@ mod linux {
         if fd < 0 {
             return Err(AgentdError::Init(format!(
                 "failed to create socket: {}",
-                std::io::Error::last_os_error()
+                io::Error::last_os_error()
             )));
         }
         Ok(fd)
@@ -747,7 +526,7 @@ mod linux {
             )));
         }
         unsafe {
-            std::ptr::copy_nonoverlapping(
+            ptr::copy_nonoverlapping(
                 bytes.as_ptr(),
                 ifr.ifr_name.as_mut_ptr().cast(),
                 bytes.len(),
@@ -764,9 +543,9 @@ mod linux {
     const RTA_HDRLEN: usize = 4;
 
     // Compile-time assertions: catch layout mismatches across platforms.
-    const _: () = assert!(std::mem::size_of::<libc::nlmsghdr>() == NLMSG_HDRLEN);
-    const _: () = assert!(std::mem::size_of::<IfAddrMsg>() == IFADDRMSG_LEN);
-    const _: () = assert!(std::mem::size_of::<RtMsg>() == RTMSG_LEN);
+    const _: () = assert!(mem::size_of::<libc::nlmsghdr>() == NLMSG_HDRLEN);
+    const _: () = assert!(mem::size_of::<IfAddrMsg>() == IFADDRMSG_LEN);
+    const _: () = assert!(mem::size_of::<RtMsg>() == RTMSG_LEN);
 
     fn nlmsg_align(len: usize) -> usize {
         (len + 3) & !3
@@ -792,99 +571,6 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_net_full() {
-        let spec = parse_net("iface=eth0,mac=02:5a:7b:13:01:02,mtu=1500").unwrap();
-        assert_eq!(spec.iface, "eth0");
-        assert_eq!(spec.mac, [0x02, 0x5a, 0x7b, 0x13, 0x01, 0x02]);
-        assert_eq!(spec.mtu, 1500);
-    }
-
-    #[test]
-    fn test_parse_net_default_mtu() {
-        let spec = parse_net("iface=eth0,mac=02:00:00:00:00:01").unwrap();
-        assert_eq!(spec.mtu, 1500);
-    }
-
-    #[test]
-    fn test_parse_net_missing_iface() {
-        assert!(parse_net("mac=02:00:00:00:00:01").is_err());
-    }
-
-    #[test]
-    fn test_parse_net_missing_mac() {
-        assert!(parse_net("iface=eth0").is_err());
-    }
-
-    #[test]
-    fn test_parse_net_unknown_option() {
-        assert!(parse_net("iface=eth0,mac=02:00:00:00:00:01,bogus=42").is_err());
-    }
-
-    #[test]
-    fn test_parse_net_ipv4() {
-        let spec = parse_net_ipv4("addr=100.96.1.2/30,gw=100.96.1.1,dns=100.96.1.1").unwrap();
-        assert_eq!(spec.address, Ipv4Addr::new(100, 96, 1, 2));
-        assert_eq!(spec.prefix_len, 30);
-        assert_eq!(spec.gateway, Ipv4Addr::new(100, 96, 1, 1));
-        assert_eq!(spec.dns, Some(Ipv4Addr::new(100, 96, 1, 1)));
-    }
-
-    #[test]
-    fn test_parse_net_ipv4_no_dns() {
-        let spec = parse_net_ipv4("addr=10.0.0.2/24,gw=10.0.0.1").unwrap();
-        assert_eq!(spec.dns, None);
-    }
-
-    #[test]
-    fn test_parse_net_ipv4_missing_addr() {
-        assert!(parse_net_ipv4("gw=10.0.0.1").is_err());
-    }
-
-    #[test]
-    fn test_parse_net_ipv6() {
-        let spec = parse_net_ipv6(
-            "addr=fd42:6d73:62:2a::2/64,gw=fd42:6d73:62:2a::1,dns=fd42:6d73:62:2a::1",
-        )
-        .unwrap();
-        assert_eq!(
-            spec.address,
-            "fd42:6d73:62:2a::2".parse::<Ipv6Addr>().unwrap()
-        );
-        assert_eq!(spec.prefix_len, 64);
-        assert_eq!(
-            spec.gateway,
-            "fd42:6d73:62:2a::1".parse::<Ipv6Addr>().unwrap()
-        );
-        assert!(spec.dns.is_some());
-    }
-
-    #[test]
-    fn test_parse_mac_valid() {
-        let mac = parse_mac("02:5a:7b:13:01:02").unwrap();
-        assert_eq!(mac, [0x02, 0x5a, 0x7b, 0x13, 0x01, 0x02]);
-    }
-
-    #[test]
-    fn test_parse_mac_invalid() {
-        assert!(parse_mac("02:5a:7b").is_err());
-        assert!(parse_mac("zz:00:00:00:00:00").is_err());
-    }
-
-    #[test]
-    fn test_parse_cidr_v4() {
-        let (addr, prefix) = parse_cidr_v4("100.96.1.2/30").unwrap();
-        assert_eq!(addr, Ipv4Addr::new(100, 96, 1, 2));
-        assert_eq!(prefix, 30);
-    }
-
-    #[test]
-    fn test_parse_cidr_v6() {
-        let (addr, prefix) = parse_cidr_v6("fd42:6d73:62:2a::2/64").unwrap();
-        assert_eq!(addr, "fd42:6d73:62:2a::2".parse::<Ipv6Addr>().unwrap());
-        assert_eq!(prefix, 64);
-    }
 
     #[test]
     fn test_hosts_file_without_hostname() {

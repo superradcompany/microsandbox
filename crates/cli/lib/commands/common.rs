@@ -719,27 +719,11 @@ pub fn parse_rlimit(
     spec: &str,
 ) -> anyhow::Result<(microsandbox::sandbox::RlimitResource, u64, u64)> {
     use microsandbox::sandbox::RlimitResource;
+    use microsandbox_protocol::exec::ExecRlimit;
 
-    let (res_str, limit_str) = spec
-        .split_once('=')
-        .ok_or_else(|| anyhow::anyhow!("rlimit must be in format RESOURCE=LIMIT"))?;
+    let rlimit = spec.parse::<ExecRlimit>().map_err(anyhow::Error::msg)?;
+    let resource =
+        RlimitResource::try_from(rlimit.resource.as_str()).map_err(anyhow::Error::msg)?;
 
-    let resource = RlimitResource::try_from(res_str).map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    let (soft, hard) = if let Some((s, h)) = limit_str.split_once(':') {
-        let soft = s
-            .parse::<u64>()
-            .map_err(|e| anyhow::anyhow!("invalid soft limit: {e}"))?;
-        let hard = h
-            .parse::<u64>()
-            .map_err(|e| anyhow::anyhow!("invalid hard limit: {e}"))?;
-        (soft, hard)
-    } else {
-        let limit = limit_str
-            .parse::<u64>()
-            .map_err(|e| anyhow::anyhow!("invalid limit: {e}"))?;
-        (limit, limit)
-    };
-
-    Ok((resource, soft, hard))
+    Ok((resource, rlimit.soft, rlimit.hard))
 }

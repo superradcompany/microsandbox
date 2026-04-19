@@ -16,9 +16,14 @@ name = "microsandbox_cli"
 path = "lib/lib.rs"
 
 [features]
-default = ["prebuilt", "net"]
-prebuilt = ["microsandbox/prebuilt", "microsandbox-runtime/prebuilt"]
-net = ["dep:microsandbox-network", "microsandbox/net", "microsandbox-runtime/net"]
+default = ["net", "prebuilt", "keyring"]
+keyring = ["microsandbox/keyring"]
+prebuilt = ["microsandbox-runtime/prebuilt", "microsandbox/prebuilt"]
+net = [
+    "dep:microsandbox-network",
+    "microsandbox-runtime/net",
+    "microsandbox/net",
+]
 
 [dependencies]
 anyhow.workspace = true
@@ -31,6 +36,7 @@ libc.workspace = true
 microsandbox = { version = "0.3.14", path = "../microsandbox", default-features = false }
 microsandbox-image = { version = "0.3.14", path = "../image" }
 microsandbox-network = { version = "0.3.14", path = "../network", optional = true }
+microsandbox-protocol = { version = "0.3.14", path = "../protocol" }
 microsandbox-runtime = { version = "0.3.14", path = "../runtime", default-features = false }
 microsandbox-utils = { version = "0.3.14", path = "../utils" }
 rand.workspace = true

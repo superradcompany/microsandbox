@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use microsandbox_image::{ImageConfig, PullPolicy, RegistryAuth};
 
-use super::types::{Patch, RootfsSource, SecretsConfig, SshConfig, VolumeMount};
+use super::{
+    exec::Rlimit,
+    types::{Patch, RootfsSource, SecretsConfig, SshConfig, VolumeMount},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -75,6 +78,14 @@ pub struct SandboxConfig {
     /// Environment variables.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+
+    /// Sandbox-wide resource limits inherited by guest processes.
+    ///
+    /// Unlike per-exec rlimits, these are applied by agentd during PID 1
+    /// startup so long-lived daemons and bootstrap scripts inherit the same
+    /// raised baseline automatically.
+    #[serde(default)]
+    pub rlimits: Vec<Rlimit>,
 
     /// Volume mounts.
     #[serde(default)]
@@ -297,6 +308,7 @@ impl Default for SandboxConfig {
             shell: None,
             scripts: HashMap::new(),
             env: Vec::new(),
+            rlimits: Vec::new(),
             mounts: Vec::new(),
             patches: Vec::new(),
             #[cfg(feature = "net")]
