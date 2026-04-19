@@ -261,19 +261,48 @@ uninstall:
     rm -f ~/.microsandbox/lib/libkrunfw*
     echo "Removed msb and libkrunfw from ~/.microsandbox/"
 
-# Build a local Linux package from the current build outputs.
+# Lint shell tooling and run the shared APT helper regression check.
+lint-shell:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v pre-commit >/dev/null || { echo "error: pre-commit not found. Run 'just setup' first."; exit 1; }
+    pre-commit run shellcheck --all-files
+    pre-commit run apt-common-regression --all-files
+
+# Lint GitHub Actions workflows and run workflow regression checks.
+lint-workflows:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v pre-commit >/dev/null || { echo "error: pre-commit not found. Run 'just setup' first."; exit 1; }
+    pre-commit run actionlint --all-files
+    pre-commit run workflow-regressions --all-files
+
+# Run the repository's shell and workflow lint suite.
+lint-tooling: lint-shell lint-workflows
+
+# Build a local Linux package from baseline-compatible APT artifacts.
 [linux]
-package-local format=DEFAULT_PACKAGE_FORMAT revision="1": (build-msb "release") build-libkrunfw
+package-local format=DEFAULT_PACKAGE_FORMAT revision="1" image="":
     #!/usr/bin/env bash
     set -euo pipefail
 
     arch="$(uname -m)"
     package_format="{{ format }}"
     revision="{{ revision }}"
+    baseline_image="{{ image }}"
     version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
     output_dir="{{ LOCAL_PACKAGE_DIST_DIR }}/$package_format"
+    artifacts_dir="build/apt/$arch"
 
     test -n "$version" || { echo "error: could not determine workspace version from Cargo.toml"; exit 1; }
+
+    baseline_cmd=(bash scripts/build-apt-baseline-artifacts.sh --output-dir "$artifacts_dir")
+    if [ -n "$baseline_image" ]; then
+        baseline_cmd+=(--image "$baseline_image")
+    fi
+
+    echo "==> Building baseline-compatible APT artifacts for $arch..."
+    "${baseline_cmd[@]}"
 
     case "$package_format" in
         deb)
@@ -282,8 +311,8 @@ package-local format=DEFAULT_PACKAGE_FORMAT revision="1": (build-msb "release") 
                 --arch "$arch" \
                 --version "$version" \
                 --revision "$revision" \
-                --msb "build/msb" \
-                --libkrunfw "build/libkrunfw.so.{{ LIBKRUNFW_VERSION }}" \
+                --msb "$artifacts_dir/msb" \
+                --libkrunfw "$artifacts_dir/libkrunfw.so.{{ LIBKRUNFW_VERSION }}" \
                 --output-dir "$output_dir"
             ;;
         *)
