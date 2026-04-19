@@ -518,13 +518,41 @@ class TlsConfig:
         return d
 
 @dataclass(frozen=True, slots=True)
+class DnsConfig:
+    """DNS interception configuration."""
+    block_domains: tuple[str, ...] = ()
+    """Block DNS lookups for exact domains (returns REFUSED)."""
+    block_domain_suffixes: tuple[str, ...] = ()
+    """Block DNS lookups for all subdomains of a suffix."""
+    rebind_protection: bool = True
+    """Block DNS responses resolving to private IPs. Default: True."""
+    nameservers: tuple[str, ...] = ()
+    """Nameservers to forward queries to. Accepts IP, IP:PORT, HOST, or
+    HOST:PORT. When set, overrides the host's /etc/resolv.conf."""
+    query_timeout_ms: int | None = None
+    """Per-DNS-query timeout in milliseconds. Default: 5000."""
+
+    def _to_dict(self) -> dict:
+        d: dict = {}
+        if self.block_domains:
+            d["blocked_domains"] = list(self.block_domains)
+        if self.block_domain_suffixes:
+            d["blocked_suffixes"] = list(self.block_domain_suffixes)
+        if not self.rebind_protection:
+            d["rebind_protection"] = False
+        if self.nameservers:
+            d["nameservers"] = list(self.nameservers)
+        if self.query_timeout_ms is not None:
+            d["query_timeout_ms"] = self.query_timeout_ms
+        return d
+
+
+@dataclass(frozen=True, slots=True)
 class Network:
     """Network configuration for a sandbox."""
     policy: str | NetworkPolicy | None = None
     ports: Mapping[int, int] = field(default_factory=dict)
-    block_domains: tuple[str, ...] = ()
-    block_domain_suffixes: tuple[str, ...] = ()
-    dns_rebind_protection: bool = True
+    dns: DnsConfig | None = None
     tls: TlsConfig | None = None
     max_connections: int | None = None
 
@@ -549,12 +577,10 @@ class Network:
             d["custom_policy"] = self.policy._to_dict()
         if self.ports:
             d["ports"] = dict(self.ports)
-        if self.block_domains:
-            d["block_domains"] = list(self.block_domains)
-        if self.block_domain_suffixes:
-            d["block_domain_suffixes"] = list(self.block_domain_suffixes)
-        if not self.dns_rebind_protection:
-            d["dns_rebind_protection"] = False
+        if self.dns is not None:
+            dns_dict = self.dns._to_dict()
+            if dns_dict:
+                d["dns"] = dns_dict
         if self.tls is not None:
             d["tls"] = self.tls._to_dict()
         if self.max_connections is not None:

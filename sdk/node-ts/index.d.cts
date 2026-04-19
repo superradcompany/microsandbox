@@ -423,6 +423,24 @@ export interface AttachConfig {
   detachKeys?: string
 }
 
+/** DNS interception configuration. */
+export interface DnsConfig {
+  /** Block specific domains (returns REFUSED). */
+  blockDomains?: Array<string>
+  /** Block domain suffixes (returns REFUSED). */
+  blockDomainSuffixes?: Array<string>
+  /** Enable DNS rebinding protection (default: true). */
+  rebindProtection?: boolean
+  /**
+   * Nameservers to forward queries to. Accepts `IP`, `IP:PORT`,
+   * `HOST`, or `HOST:PORT`. When set, overrides the host's
+   * /etc/resolv.conf.
+   */
+  nameservers?: Array<string>
+  /** Per-DNS-query timeout in milliseconds (default: 5000). */
+  queryTimeoutMs?: number
+}
+
 /** Configuration for command execution. */
 export interface ExecConfig {
   /** Command to execute. */
@@ -544,12 +562,8 @@ export interface NetworkConfig {
   rules?: Array<PolicyRule>
   /** Default action when no rule matches: "allow" or "deny". */
   defaultAction?: string
-  /** Block specific domains via DNS interception. */
-  blockDomains?: Array<string>
-  /** Block domain suffixes via DNS interception. */
-  blockDomainSuffixes?: Array<string>
-  /** Enable DNS rebinding protection (default: true). */
-  dnsRebindProtection?: boolean
+  /** DNS interception configuration. */
+  dns?: DnsConfig
   /** TLS interception configuration. */
   tls?: TlsConfig
   /** Max concurrent connections (default: 256). */

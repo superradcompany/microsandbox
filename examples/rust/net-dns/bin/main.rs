@@ -12,8 +12,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cpus(1)
         .memory(512)
         .network(|n| {
-            n.block_domain("blocked.example.com")
-                .block_domain_suffix(".evil.com")
+            n.dns(|d| {
+                d.block_domain("blocked.example.com")
+                    .block_domain_suffix(".evil.com")
+            })
         })
         .replace()
         .create()

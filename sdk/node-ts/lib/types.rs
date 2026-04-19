@@ -116,16 +116,29 @@ pub struct NetworkConfig {
     pub rules: Option<Vec<PolicyRule>>,
     /// Default action when no rule matches: "allow" or "deny".
     pub default_action: Option<String>,
-    /// Block specific domains via DNS interception.
-    pub block_domains: Option<Vec<String>>,
-    /// Block domain suffixes via DNS interception.
-    pub block_domain_suffixes: Option<Vec<String>>,
-    /// Enable DNS rebinding protection (default: true).
-    pub dns_rebind_protection: Option<bool>,
+    /// DNS interception configuration.
+    pub dns: Option<DnsConfig>,
     /// TLS interception configuration.
     pub tls: Option<TlsConfig>,
     /// Max concurrent connections (default: 256).
     pub max_connections: Option<u32>,
+}
+
+/// DNS interception configuration.
+#[napi(object)]
+pub struct DnsConfig {
+    /// Block specific domains (returns REFUSED).
+    pub block_domains: Option<Vec<String>>,
+    /// Block domain suffixes (returns REFUSED).
+    pub block_domain_suffixes: Option<Vec<String>>,
+    /// Enable DNS rebinding protection (default: true).
+    pub rebind_protection: Option<bool>,
+    /// Nameservers to forward queries to. Accepts `IP`, `IP:PORT`,
+    /// `HOST`, or `HOST:PORT`. When set, overrides the host's
+    /// /etc/resolv.conf.
+    pub nameservers: Option<Vec<String>>,
+    /// Per-DNS-query timeout in milliseconds (default: 5000).
+    pub query_timeout_ms: Option<u32>,
 }
 
 /// A network policy rule.

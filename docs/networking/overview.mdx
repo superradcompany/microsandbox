@@ -210,8 +210,10 @@ let sb = Sandbox::builder("safe-agent")
     .image("python")
     .network(|n| n
         .policy(NetworkPolicy::public_only())
-        .block_domain("malware.example.com")
-        .block_domain_suffix(".tracking.com")
+        .dns(|d| d
+            .block_domain("malware.example.com")
+            .block_domain_suffix(".tracking.com")
+        )
     )
     .create()
     .await?;
@@ -223,21 +225,25 @@ const sb = await Sandbox.create({
     image: "python",
     network: {
         ...NetworkPolicy.publicOnly(),
-        blockDomains: ["malware.example.com"],
-        blockDomainSuffixes: [".tracking.com"],
+        dns: {
+            blockDomains: ["malware.example.com"],
+            blockDomainSuffixes: [".tracking.com"],
+        },
     },
 })
 ```
 
 ```python Python
-from microsandbox import Network, Sandbox
+from microsandbox import DnsConfig, Network, Sandbox
 
 sb = await Sandbox.create(
     "safe-agent",
     image="python",
     network=Network(
-        block_domains=("malware.example.com",),
-        block_domain_suffixes=(".tracking.com",),
+        dns=DnsConfig(
+            block_domains=("malware.example.com",),
+            block_domain_suffixes=(".tracking.com",),
+        ),
     ),
 )
 ```
@@ -246,6 +252,64 @@ sb = await Sandbox.create(
 msb create python --name safe-agent \
   --dns-block-domain malware.example.com \
   --dns-block-suffix .tracking.com
+```
+
+</CodeGroup>
+
+### Pinning DNS nameservers
+
+By default the sandbox forwards DNS queries to whatever nameservers are listed in the host's `/etc/resolv.conf`. Override this with `nameservers` to pin specific resolvers (e.g. `1.1.1.1`, `dns.google`) or to work around split-DNS setups on VPNs where `/etc/resolv.conf` doesn't reflect the real resolver table. Accepts IPs, `IP:PORT`, hostnames, and `HOST:PORT` — hostnames are resolved once at startup via the host's OS resolver.
+
+<CodeGroup>
+
+```rust Rust
+use microsandbox_network::dns::NameserverSpec;
+
+let sb = Sandbox::builder("safe-agent")
+    .image("python")
+    .network(|n| n
+        .dns(|d| d
+            .nameservers([
+                "1.1.1.1".parse::<NameserverSpec>()?,
+                "1.0.0.1".parse::<NameserverSpec>()?,
+            ])
+            .query_timeout_ms(3000)
+        )
+    )
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create("safe-agent", {
+    image: "python",
+    network: {
+        dns: {
+            nameservers: ["1.1.1.1", "1.0.0.1"],
+            queryTimeoutMs: 3000,
+        },
+    },
+})
+```
+
+```python Python
+sb = await Sandbox.create(
+    "safe-agent",
+    image="python",
+    network=Network(
+        dns=DnsConfig(
+            nameservers=("1.1.1.1", "1.0.0.1"),
+            query_timeout_ms=3000,
+        ),
+    ),
+)
+```
+
+```bash CLI
+msb create python --name safe-agent \
+  --dns-nameserver 1.1.1.1 \
+  --dns-nameserver 1.0.0.1 \
+  --dns-query-timeout-ms 3000
 ```
 
 </CodeGroup>

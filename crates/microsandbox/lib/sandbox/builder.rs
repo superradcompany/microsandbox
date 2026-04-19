@@ -194,7 +194,7 @@ impl SandboxBuilder {
     /// .network(|n| n
     ///     .port(8080, 80)
     ///     .policy(NetworkPolicy::public_only())
-    ///     .block_domain("evil.com")
+    ///     .dns(|d| d.block_domain("evil.com"))
     ///     .tls(|t| t.bypass("*.internal.com"))
     /// )
     /// ```

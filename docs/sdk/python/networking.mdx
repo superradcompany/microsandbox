@@ -14,9 +14,7 @@ Frozen dataclass for sandbox network configuration. Use the class method presets
 Network(
     policy: str | NetworkPolicy | None = None,
     ports: Mapping[int, int] = {},
-    block_domains: tuple[str, ...] = (),
-    block_domain_suffixes: tuple[str, ...] = (),
-    dns_rebind_protection: bool = True,
+    dns: DnsConfig | None = None,
     tls: TlsConfig | None = None,
     max_connections: int | None = None,
 )
@@ -26,11 +24,31 @@ Network(
 |-------|------|---------|-------------|
 | policy | `str \| NetworkPolicy \| None` | `None` | Preset name or custom [`NetworkPolicy`](#networkpolicy) |
 | ports | `Mapping[int, int]` | `{}` | Port mappings from host to guest |
-| block_domains | `tuple[str, ...]` | `()` | Block DNS for exact domains (returns NXDOMAIN) |
-| block_domain_suffixes | `tuple[str, ...]` | `()` | Block DNS for all subdomains of a suffix |
-| dns_rebind_protection | `bool` | `True` | Block DNS responses resolving to private IPs |
+| dns | [`DnsConfig`](#dnsconfig) ` \| None` | `None` | DNS interception configuration |
 | tls | [`TlsConfig`](#tlsconfig) ` \| None` | `None` | TLS interception configuration |
 | max_connections | `int \| None` | `None` | Maximum concurrent connections |
+
+### DnsConfig
+
+Frozen dataclass for DNS interception settings.
+
+```python
+DnsConfig(
+    block_domains: tuple[str, ...] = (),
+    block_domain_suffixes: tuple[str, ...] = (),
+    rebind_protection: bool = True,
+    nameservers: tuple[str, ...] = (),
+    query_timeout_ms: int | None = None,
+)
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| block_domains | `tuple[str, ...]` | `()` | Block DNS for exact domains (returns REFUSED) |
+| block_domain_suffixes | `tuple[str, ...]` | `()` | Block DNS for all subdomains of a suffix |
+| rebind_protection | `bool` | `True` | Block DNS responses resolving to private IPs |
+| nameservers | `tuple[str, ...]` | `()` | Nameservers (`IP`, `IP:PORT`, `HOST`, or `HOST:PORT`). Overrides the host's `/etc/resolv.conf` when set. Hostnames are resolved once at startup via the host's OS resolver |
+| query_timeout_ms | `int \| None` | `None` | Per-DNS-query timeout in milliseconds (default: 5000) |
 
 ---
 

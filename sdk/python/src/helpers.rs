@@ -476,31 +476,49 @@ fn apply_network(
         builder = builder.network(|n| n.policy(policy));
     }
 
-    // Block domains.
-    if let Some(domains) = extract_opt::<Vec<String>>(net, "block_domains")? {
-        builder = builder.network(|n| {
-            let mut n = n;
-            for d in &domains {
-                n = n.block_domain(d);
-            }
-            n
-        });
-    }
+    // DNS configuration (nested `dns` dict).
+    if let Some(dns) = net.get_item("dns")?
+        && !dns.is_none()
+    {
+        let dns = as_dict(&dns)?;
 
-    // Block domain suffixes.
-    if let Some(suffixes) = extract_opt::<Vec<String>>(net, "block_domain_suffixes")? {
-        builder = builder.network(|n| {
-            let mut n = n;
-            for s in &suffixes {
-                n = n.block_domain_suffix(s);
-            }
-            n
-        });
-    }
+        let block_domains = extract_opt::<Vec<String>>(&dns, "blocked_domains")?;
+        let block_suffixes = extract_opt::<Vec<String>>(&dns, "blocked_suffixes")?;
+        let rebind = extract_opt::<bool>(&dns, "rebind_protection")?;
+        let nameservers_raw = extract_opt::<Vec<String>>(&dns, "nameservers")?;
+        let query_timeout_ms = extract_opt::<u64>(&dns, "query_timeout_ms")?;
 
-    // DNS rebind protection.
-    if let Some(rebind) = extract_opt::<bool>(net, "dns_rebind_protection")? {
-        builder = builder.network(|n| n.dns_rebind_protection(rebind));
+        let nameserver_specs: Vec<microsandbox_network::dns::NameserverSpec> = nameservers_raw
+            .unwrap_or_default()
+            .iter()
+            .map(|s| microsandbox_network::dns::parse_nameserver(s))
+            .collect::<Result<_, _>>()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+        builder = builder.network(move |n| {
+            n.dns(move |mut d| {
+                if let Some(domains) = block_domains {
+                    for item in &domains {
+                        d = d.block_domain(item);
+                    }
+                }
+                if let Some(suffixes) = block_suffixes {
+                    for item in &suffixes {
+                        d = d.block_domain_suffix(item);
+                    }
+                }
+                if let Some(r) = rebind {
+                    d = d.rebind_protection(r);
+                }
+                if !nameserver_specs.is_empty() {
+                    d = d.nameservers(nameserver_specs);
+                }
+                if let Some(ms) = query_timeout_ms {
+                    d = d.query_timeout_ms(ms);
+                }
+                d
+            })
+        });
     }
 
     // Max connections.

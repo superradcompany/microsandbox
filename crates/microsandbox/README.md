@@ -35,10 +35,10 @@ microsandbox = "0.3"
 
 ### Cargo Features
 
-| Feature | Default | Description |
-|---------|---------|-------------|
-| `prebuilt` | yes | Use pre-built runtime binaries |
-| `net` | yes | Networking: port publishing, policies, TLS, secrets |
+| Feature    | Default | Description                                         |
+| ---------- | ------- | --------------------------------------------------- |
+| `prebuilt` | yes     | Use pre-built runtime binaries                      |
+| `net`      | yes     | Networking: port publishing, policies, TLS, secrets |
 
 To disable networking:
 
@@ -165,8 +165,9 @@ let sandbox = Sandbox::builder("isolated")
 let sandbox = Sandbox::builder("filtered")
     .image("alpine")
     .network(|n| {
-        n.block_domain("blocked.example.com")
-         .block_domain_suffix(".evil.com")
+        n.dns(|d| d
+            .block_domain("blocked.example.com")
+            .block_domain_suffix(".evil.com"))
     })
     .create()
     .await?;
@@ -249,46 +250,46 @@ Sandbox::builder("c").image_with(|img| img.disk("/path/to/disk.qcow2").fstype("e
 
 ### Core Types
 
-| Type | Description |
-|------|-------------|
-| `Sandbox` | Live handle to a running sandbox — lifecycle, execution, filesystem |
-| `SandboxBuilder` | Fluent builder for configuring and creating sandboxes |
-| `SandboxConfig` | Serializable sandbox configuration |
-| `SandboxHandle` | Lightweight metadata handle from the database |
-| `Volume` | Persistent named volume |
-| `VolumeBuilder` | Fluent builder for creating volumes |
-| `Image` | OCI image metadata and inspection |
+| Type             | Description                                                         |
+| ---------------- | ------------------------------------------------------------------- |
+| `Sandbox`        | Live handle to a running sandbox — lifecycle, execution, filesystem |
+| `SandboxBuilder` | Fluent builder for configuring and creating sandboxes               |
+| `SandboxConfig`  | Serializable sandbox configuration                                  |
+| `SandboxHandle`  | Lightweight metadata handle from the database                       |
+| `Volume`         | Persistent named volume                                             |
+| `VolumeBuilder`  | Fluent builder for creating volumes                                 |
+| `Image`          | OCI image metadata and inspection                                   |
 
 ### Execution Types
 
-| Type | Description |
-|------|-------------|
-| `ExecOutput` | Captured stdout/stderr with exit status |
-| `ExecHandle` | Streaming execution handle with event channel |
+| Type                                 | Description                                                |
+| ------------------------------------ | ---------------------------------------------------------- |
+| `ExecOutput`                         | Captured stdout/stderr with exit status                    |
+| `ExecHandle`                         | Streaming execution handle with event channel              |
 | `ExecOptions` / `ExecOptionsBuilder` | Execution configuration (args, env, cwd, timeout, rlimits) |
-| `ExecEvent` | Stream event: `Started`, `Stdout`, `Stderr`, `Exited` |
-| `ExecSink` | Writable stdin channel for streaming exec |
-| `ExitStatus` | Exit code and success flag |
+| `ExecEvent`                          | Stream event: `Started`, `Stdout`, `Stderr`, `Exited`      |
+| `ExecSink`                           | Writable stdin channel for streaming exec                  |
+| `ExitStatus`                         | Exit code and success flag                                 |
 
 ### Filesystem Types
 
-| Type | Description |
-|------|-------------|
-| `SandboxFs` | Gateway for guest filesystem operations |
-| `FsEntry` | Directory entry (name, kind, size, mode) |
-| `FsMetadata` | File metadata (size, mode, timestamps) |
+| Type         | Description                              |
+| ------------ | ---------------------------------------- |
+| `SandboxFs`  | Gateway for guest filesystem operations  |
+| `FsEntry`    | Directory entry (name, kind, size, mode) |
+| `FsMetadata` | File metadata (size, mode, timestamps)   |
 
 ### Configuration Types
 
-| Type | Description |
-|------|-------------|
-| `RootfsSource` | Image source: `Oci`, `Bind`, or `DiskImage` |
-| `VolumeMount` | Mount type: `Bind`, `Named`, or `Tmpfs` |
-| `Patch` / `PatchBuilder` | Pre-boot filesystem modifications |
-| `NetworkPolicy` | Network access control (requires `net` feature) |
-| `RegistryAuth` | Docker registry credentials |
-| `PullPolicy` | Image pull strategy: `Always`, `IfMissing`, `Never` |
-| `LogLevel` | Logging verbosity |
+| Type                     | Description                                         |
+| ------------------------ | --------------------------------------------------- |
+| `RootfsSource`           | Image source: `Oci`, `Bind`, or `DiskImage`         |
+| `VolumeMount`            | Mount type: `Bind`, `Named`, or `Tmpfs`             |
+| `Patch` / `PatchBuilder` | Pre-boot filesystem modifications                   |
+| `NetworkPolicy`          | Network access control (requires `net` feature)     |
+| `RegistryAuth`           | Docker registry credentials                         |
+| `PullPolicy`             | Image pull strategy: `Always`, `IfMissing`, `Never` |
+| `LogLevel`               | Logging verbosity                                   |
 
 ### Error Handling
 

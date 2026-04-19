@@ -5,6 +5,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use microsandbox::sandbox::{NetworkPolicy, PullPolicy, SandboxConfig as RustSandboxConfig};
 use microsandbox::{LogLevel, RegistryAuth};
+use microsandbox_network::dns;
 use microsandbox_network::policy::{
     Action, Destination, DestinationGroup, Direction, PortRange, Protocol, Rule,
 };
@@ -525,6 +526,19 @@ fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
         }
     }
     if let Some(ref network) = config.network {
+        let dns_nameserver_specs: Vec<dns::NameserverSpec> = if let Some(ref dns) = network.dns
+            && let Some(ref nameservers) = dns.nameservers
+        {
+            nameservers
+                .iter()
+                .map(|s| {
+                    dns::parse_nameserver(s).map_err(|e| napi::Error::from_reason(e.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+
         builder = builder.network(|mut n| {
             // Policy: preset or custom rules
             if let Some(ref rules) = network.rules {
@@ -545,18 +559,33 @@ fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
                 });
             }
             // DNS
-            if let Some(ref domains) = network.block_domains {
-                for domain in domains {
-                    n = n.block_domain(domain);
-                }
-            }
-            if let Some(ref suffixes) = network.block_domain_suffixes {
-                for suffix in suffixes {
-                    n = n.block_domain_suffix(suffix);
-                }
-            }
-            if let Some(rebind) = network.dns_rebind_protection {
-                n = n.dns_rebind_protection(rebind);
+            if let Some(ref dns) = network.dns {
+                let block_domains = dns.block_domains.clone();
+                let block_domain_suffixes = dns.block_domain_suffixes.clone();
+                let rebind_protection = dns.rebind_protection;
+                let query_timeout_ms = dns.query_timeout_ms;
+                n = n.dns(move |mut d| {
+                    if let Some(domains) = block_domains {
+                        for domain in &domains {
+                            d = d.block_domain(domain);
+                        }
+                    }
+                    if let Some(suffixes) = block_domain_suffixes {
+                        for suffix in &suffixes {
+                            d = d.block_domain_suffix(suffix);
+                        }
+                    }
+                    if let Some(rebind) = rebind_protection {
+                        d = d.rebind_protection(rebind);
+                    }
+                    if !dns_nameserver_specs.is_empty() {
+                        d = d.nameservers(dns_nameserver_specs);
+                    }
+                    if let Some(ms) = query_timeout_ms {
+                        d = d.query_timeout_ms(u64::from(ms));
+                    }
+                    d
+                });
             }
             // TLS
             if let Some(ref tls) = network.tls {
