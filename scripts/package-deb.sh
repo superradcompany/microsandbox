@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/apt-common.sh
+source "$SCRIPT_DIR/lib/apt-common.sh"
+
 usage() {
     cat <<'EOF'
 Usage: scripts/package-deb.sh --arch <arch> --version <version> --msb <path> \
@@ -8,54 +12,6 @@ Usage: scripts/package-deb.sh --arch <arch> --version <version> --msb <path> \
 
 Build a Debian package for microsandbox from Linux release artifacts.
 EOF
-}
-
-require_cmd() {
-    command -v "$1" >/dev/null 2>&1 || {
-        echo "error: required command not found: $1" >&2
-        exit 1
-    }
-}
-
-map_deb_arch() {
-    case "$1" in
-        amd64 | x86_64) echo "amd64" ;;
-        arm64 | aarch64) echo "arm64" ;;
-        *)
-            echo "error: unsupported Debian architecture: $1" >&2
-            exit 1
-            ;;
-    esac
-}
-
-normalize_version() {
-    local raw="$1"
-    local revision="$2"
-    local clean="${raw#v}"
-
-    if [[ "$clean" == *-* ]]; then
-        printf '%s\n' "$clean"
-        return
-    fi
-
-    printf '%s-%s\n' "$clean" "$revision"
-}
-
-render_template() {
-    local template="$1"
-    shift
-
-    local rendered
-    rendered="$(<"$template")"
-
-    while [[ $# -gt 0 ]]; do
-        local key="$1"
-        local value="$2"
-        rendered="${rendered//${key}/${value}}"
-        shift 2
-    done
-
-    printf '%s' "$rendered"
 }
 
 PACKAGE_NAME="microsandbox"
@@ -130,7 +86,7 @@ require_cmd sed
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEMPLATE_DIR="$REPO_ROOT/packaging/apt"
 DEB_ARCH="$(map_deb_arch "$ARCH")"
-DEB_VERSION="$(normalize_version "$VERSION" "$REVISION")"
+DEB_VERSION="$(normalize_deb_version "$VERSION" "$REVISION")"
 LIBKRUNFW_BASENAME="$(basename "$LIBKRUNFW_PATH")"
 if [[ "$LIBKRUNFW_BASENAME" =~ ^libkrunfw\.so\.([0-9]+)\..+$ ]]; then
     LIBKRUNFW_ABI="${BASH_REMATCH[1]}"

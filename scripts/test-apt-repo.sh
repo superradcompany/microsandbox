@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/apt-common.sh
+source "$SCRIPT_DIR/lib/apt-common.sh"
+
 usage() {
     cat <<'EOF'
 Usage: scripts/test-apt-repo.sh --repo-v1 <dir> --repo-v2 <dir> --keyring <path> \
@@ -9,13 +13,6 @@ Usage: scripts/test-apt-repo.sh --repo-v1 <dir> --repo-v2 <dir> --keyring <path>
 Validate install, reinstall, upgrade, remove, purge, and signature failures
 against a local signed APT repository inside Debian/Ubuntu containers.
 EOF
-}
-
-require_cmd() {
-    command -v "$1" >/dev/null 2>&1 || {
-        echo "error: required command not found: $1" >&2
-        exit 1
-    }
 }
 
 canonical_path() {
