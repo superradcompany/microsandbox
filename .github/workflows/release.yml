@@ -11,7 +11,6 @@ env:
   APT_REPO_DOMAIN: "apt.microsandbox.dev"
 
 permissions:
-  actions: read
   contents: write
   packages: write
   pages: write
@@ -19,53 +18,14 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Prepare release context from the successful Check workflow run
-  # ---------------------------------------------------------------------------
-  prepare:
-    name: Prepare Release Context
-    if: github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
-    outputs:
-      release_tag: ${{ steps.context.outputs.release_tag }}
-      source_sha: ${{ steps.context.outputs.source_sha }}
-    steps:
-      - name: Resolve release tag
-        id: context
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          SOURCE_SHA="${{ github.event.workflow_run.head_sha }}"
-          RELEASE_TAG=""
-
-          mkdir -p release-metadata
-          if gh run download "${{ github.event.workflow_run.id }}" \
-            --repo "${{ github.repository }}" \
-            --name release-metadata \
-            --dir release-metadata; then
-            RELEASE_TAG="$(tr -d '\n' < release-metadata/release-tag.txt)"
-          fi
-
-          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-
-          if [ -n "$RELEASE_TAG" ]; then
-            echo "Preparing release for $RELEASE_TAG from Check run ${{ github.event.workflow_run.id }}"
-          else
-            echo "Check succeeded without release metadata; skipping release workflow."
-          fi
-
-  # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
   # ---------------------------------------------------------------------------
   build-kernel:
     name: Build kernel.c (aarch64)
-    needs: prepare
-    if: needs.prepare.outputs.release_tag != ''
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
           submodules: true
 
       - name: Cache kernel.c
@@ -96,13 +56,10 @@ jobs:
   # ---------------------------------------------------------------------------
   build-agentd-aarch64:
     name: Build agentd (aarch64-linux-musl)
-    needs: prepare
-    if: needs.prepare.outputs.release_tag != ''
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
           submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
@@ -130,8 +87,8 @@ jobs:
   # ---------------------------------------------------------------------------
   build:
     name: Build (${{ matrix.target }})
-    needs: [prepare, build-kernel, build-agentd-aarch64]
-    if: needs.prepare.outputs.release_tag != ''
+    needs: [build-kernel, build-agentd-aarch64]
+    if: always()
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -171,7 +128,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
           submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
@@ -340,8 +296,6 @@ jobs:
   # ---------------------------------------------------------------------------
   apt-package:
     name: Package APT (${{ matrix.target }})
-    needs: prepare
-    if: needs.prepare.outputs.release_tag != ''
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -356,7 +310,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
+          submodules: true
 
       - name: Install APT packaging dependencies
         run: |
@@ -372,7 +326,7 @@ jobs:
         run: |
           bash scripts/package-deb.sh \
             --arch "${{ matrix.arch }}" \
-            --version "${{ needs.prepare.outputs.release_tag }}" \
+            --version "${{ github.ref_name }}" \
             --revision 1 \
             --msb build/apt/${{ matrix.arch }}/msb \
             --libkrunfw build/apt/${{ matrix.arch }}/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} \
@@ -389,13 +343,10 @@ jobs:
   # ---------------------------------------------------------------------------
   apt-repo:
     name: Build APT Repository
-    needs: [prepare, apt-package]
-    if: needs.prepare.outputs.release_tag != ''
+    needs: [apt-package]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Install APT repository tooling
         run: |
@@ -449,8 +400,7 @@ jobs:
   # ---------------------------------------------------------------------------
   deploy-apt-repo:
     name: Deploy APT Repository
-    needs: [prepare, apt-repo]
-    if: needs.prepare.outputs.release_tag != ''
+    needs: [apt-repo]
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -464,13 +414,10 @@ jobs:
   # ---------------------------------------------------------------------------
   assemble:
     name: Assemble Release
-    needs: [prepare, build, apt-package, deploy-apt-repo]
-    if: needs.prepare.outputs.release_tag != ''
+    needs: [build, apt-package, deploy-apt-repo]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -491,8 +438,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ needs.prepare.outputs.release_tag }}" \
-            --title "${{ needs.prepare.outputs.release_tag }}" \
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
             --generate-notes \
             release-artifacts/*
 
@@ -516,13 +463,10 @@ jobs:
   # ---------------------------------------------------------------------------
   npm-publish:
     name: Publish npm packages
-    needs: [prepare, build]
-    if: needs.prepare.outputs.release_tag != ''
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -625,13 +569,11 @@ jobs:
   # ---------------------------------------------------------------------------
   mcp-publish:
     name: Publish MCP server
-    needs: [prepare, npm-publish]
-    if: needs.prepare.outputs.release_tag != ''
+    needs: [npm-publish]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
           submodules: true
 
       - uses: actions/setup-node@v4
@@ -654,13 +596,11 @@ jobs:
   # ---------------------------------------------------------------------------
   crates-publish:
     name: Publish crates
-    needs: [prepare, build]
-    if: needs.prepare.outputs.release_tag != ''
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
           submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
@@ -690,8 +630,7 @@ jobs:
   # ---------------------------------------------------------------------------
   pypi-publish:
     name: Publish Python SDK
-    needs: [prepare, build]
-    if: needs.prepare.outputs.release_tag != ''
+    needs: [build]
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -702,8 +641,6 @@ jobs:
       url: https://pypi.org/p/microsandbox
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - uses: astral-sh/setup-uv@v3
 
