@@ -67,5 +67,7 @@ keyring = { version = "3.6.3", features = ["apple-native"] }
 keyring = { version = "3.6.3", features = ["windows-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-dbus = { version = "0.9.10", features = ["vendored"]}
+# Transitive dep via keyring's Secret Service backend; declared here only to force the `vendored` feature
+# so libdbus is built from source and statically linked (avoids needing libdbus-1-dev at build time).
+dbus = { version = "0.9.10", features = ["vendored"] }
 keyring = { version = "3.6.3", features = ["linux-native-sync-persistent", "crypto-rust"] }
