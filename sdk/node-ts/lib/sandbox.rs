@@ -3,8 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use microsandbox::sandbox::{NetworkPolicy, PullPolicy, SandboxConfig as RustSandboxConfig};
-use microsandbox::{LogLevel, RegistryAuth as RustRegistryAuth};
+use microsandbox::sandbox::{
+    NetworkPolicy, PullPolicy, PullProgress, PullProgressHandle,
+    SandboxConfig as RustSandboxConfig,
+};
+use microsandbox::{LogLevel, MicrosandboxResult, RegistryAuth as RustRegistryAuth};
 use microsandbox_network::dns;
 use microsandbox_network::policy::{
     Action, Destination, DestinationGroup, Direction, PortRange, Protocol, Rule,
@@ -47,6 +50,34 @@ pub struct JsMetricsStream {
     rx: Arc<Mutex<tokio::sync::mpsc::Receiver<napi::Result<SandboxMetrics>>>>,
 }
 
+/// A session combining pull-progress events and a pending sandbox creation.
+///
+/// Created via `Sandbox.createWithProgress()` or
+/// `Sandbox.createDetachedWithProgress()`. Iterate the session to observe
+/// image pull and materialize events, then call `result()` to obtain the
+/// live `Sandbox`. The iterator ends when the pull finishes (successfully
+/// or not); `result()` resolves with the sandbox or rejects with the
+/// creation error.
+///
+/// ```js
+/// const session = await Sandbox.createWithProgress({
+///   name: "my-sb",
+///   image: "alpine",
+///   pullPolicy: "always",
+/// });
+/// for await (const ev of session) {
+///   if (ev.eventType === "layer_download_progress") {
+///     console.log(`L${ev.layerIndex}: ${ev.downloadedBytes}/${ev.totalBytes ?? "?"}`);
+///   }
+/// }
+/// const sandbox = await session.result();
+/// ```
+#[napi(async_iterator, js_name = "PullSession")]
+pub struct JsPullSession {
+    rx: Arc<Mutex<tokio::sync::mpsc::Receiver<PullEvent>>>,
+    task: Arc<Mutex<Option<tokio::task::JoinHandle<MicrosandboxResult<microsandbox::sandbox::Sandbox>>>>>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -87,6 +118,29 @@ impl Sandbox {
         Ok(Sandbox {
             inner: Arc::new(Mutex::new(Some(inner))),
         })
+    }
+
+    /// Create a sandbox and observe image pull/materialize progress.
+    ///
+    /// Returns a `PullSession` that yields `PullEvent`s as the image is
+    /// resolved, downloaded, and materialized. Call `session.result()` after
+    /// iteration to obtain the live `Sandbox`.
+    #[napi(js_name = "createWithProgress")]
+    pub async fn create_with_progress(config: SandboxConfig) -> Result<JsPullSession> {
+        let rust_config = convert_config(config).await?;
+        let (handle, task) =
+            microsandbox::sandbox::Sandbox::create_with_pull_progress(rust_config);
+        Ok(JsPullSession::new(handle, task))
+    }
+
+    /// Like `createWithProgress`, but spawns the sandbox in detached mode
+    /// so it survives after the parent process exits.
+    #[napi(js_name = "createDetachedWithProgress")]
+    pub async fn create_detached_with_progress(config: SandboxConfig) -> Result<JsPullSession> {
+        let rust_config = convert_config(config).await?;
+        let (handle, task) =
+            microsandbox::sandbox::Sandbox::create_detached_with_pull_progress(rust_config);
+        Ok(JsPullSession::new(handle, task))
     }
 
     /// Start an existing stopped sandbox (attached mode).
@@ -437,6 +491,298 @@ impl AsyncGenerator for JsMetricsStream {
                 None => Ok(None),
             }
         }
+    }
+}
+
+impl JsPullSession {
+    fn new(
+        mut handle: PullProgressHandle,
+        task: tokio::task::JoinHandle<MicrosandboxResult<microsandbox::sandbox::Sandbox>>,
+    ) -> Self {
+        // Bridge the PullProgress channel into a local PullEvent channel,
+        // matching the pattern used by metrics_stream. The extra hop lets
+        // AsyncGenerator::next yield napi-compatible events without a match
+        // on every recv.
+        let (tx, rx) = tokio::sync::mpsc::channel::<PullEvent>(64);
+        tokio::spawn(async move {
+            while let Some(event) = handle.recv().await {
+                if tx.send(convert_pull_progress(event)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        JsPullSession {
+            rx: Arc::new(Mutex::new(rx)),
+            task: Arc::new(Mutex::new(Some(task))),
+        }
+    }
+}
+
+#[napi]
+impl JsPullSession {
+    /// Receive the next pull progress event. Returns `null` when the stream ends.
+    #[napi]
+    pub async fn recv(&self) -> Result<Option<PullEvent>> {
+        let mut guard = self.rx.lock().await;
+        Ok(guard.recv().await)
+    }
+
+    /// Await the sandbox creation task and return the live `Sandbox`.
+    ///
+    /// Single-shot: a second call throws `Error("result already consumed")`.
+    /// Prefer calling this after the event iterator has finished so the pull
+    /// is definitely complete.
+    #[napi]
+    pub async fn result(&self) -> Result<Sandbox> {
+        let join_handle = {
+            let mut guard = self.task.lock().await;
+            guard
+                .take()
+                .ok_or_else(|| napi::Error::from_reason("result already consumed"))?
+        };
+        let sandbox = join_handle
+            .await
+            .map_err(|e| napi::Error::from_reason(format!("create task panicked: {e}")))?
+            .map_err(to_napi_error)?;
+        Ok(Sandbox::from_rust(sandbox))
+    }
+}
+
+#[napi]
+impl AsyncGenerator for JsPullSession {
+    type Yield = PullEvent;
+    type Next = ();
+    type Return = ();
+
+    fn next(
+        &mut self,
+        _value: Option<Self::Next>,
+    ) -> impl std::future::Future<Output = Result<Option<Self::Yield>>> + Send + 'static {
+        let rx = Arc::clone(&self.rx);
+        async move {
+            let mut guard = rx.lock().await;
+            Ok(guard.recv().await)
+        }
+    }
+}
+
+/// Convert a Rust `PullProgress` variant into the flat `PullEvent` struct
+/// exposed to JavaScript.
+fn convert_pull_progress(event: PullProgress) -> PullEvent {
+    match event {
+        PullProgress::Resolving { reference } => PullEvent {
+            event_type: "resolving".to_string(),
+            reference: Some(reference.to_string()),
+            manifest_digest: None,
+            layer_count: None,
+            total_download_bytes: None,
+            layer_index: None,
+            digest: None,
+            diff_id: None,
+            downloaded_bytes: None,
+            total_bytes: None,
+            bytes_read: None,
+        },
+        PullProgress::Resolved {
+            reference,
+            manifest_digest,
+            layer_count,
+            total_download_bytes,
+        } => PullEvent {
+            event_type: "resolved".to_string(),
+            reference: Some(reference.to_string()),
+            manifest_digest: Some(manifest_digest.to_string()),
+            layer_count: Some(layer_count as u32),
+            total_download_bytes: total_download_bytes.map(|b| b as f64),
+            layer_index: None,
+            digest: None,
+            diff_id: None,
+            downloaded_bytes: None,
+            total_bytes: None,
+            bytes_read: None,
+        },
+        PullProgress::LayerDownloadProgress {
+            layer_index,
+            digest,
+            downloaded_bytes,
+            total_bytes,
+        } => PullEvent {
+            event_type: "layer_download_progress".to_string(),
+            reference: None,
+            manifest_digest: None,
+            layer_count: None,
+            total_download_bytes: None,
+            layer_index: Some(layer_index as u32),
+            digest: Some(digest.to_string()),
+            diff_id: None,
+            downloaded_bytes: Some(downloaded_bytes as f64),
+            total_bytes: total_bytes.map(|b| b as f64),
+            bytes_read: None,
+        },
+        PullProgress::LayerDownloadComplete {
+            layer_index,
+            digest,
+            downloaded_bytes,
+        } => PullEvent {
+            event_type: "layer_download_complete".to_string(),
+            reference: None,
+            manifest_digest: None,
+            layer_count: None,
+            total_download_bytes: None,
+            layer_index: Some(layer_index as u32),
+            digest: Some(digest.to_string()),
+            diff_id: None,
+            downloaded_bytes: Some(downloaded_bytes as f64),
+            total_bytes: None,
+            bytes_read: None,
+        },
+        PullProgress::LayerDownloadVerifying {
+            layer_index,
+            digest,
+        } => PullEvent {
+            event_type: "layer_download_verifying".to_string(),
+            reference: None,
+            manifest_digest: None,
+            layer_count: None,
+            total_download_bytes: None,
+            layer_index: Some(layer_index as u32),
+            digest: Some(digest.to_string()),
+            diff_id: None,
+            downloaded_bytes: None,
+            total_bytes: None,
+            bytes_read: None,
+        },
+        PullProgress::LayerMaterializeStarted {
+            layer_index,
+            diff_id,
+        } => PullEvent {
+            event_type: "layer_materialize_started".to_string(),
+            reference: None,
+            manifest_digest: None,
+            layer_count: None,
+            total_download_bytes: None,
+            layer_index: Some(layer_index as u32),
+            digest: None,
+            diff_id: Some(diff_id.to_string()),
+            downloaded_bytes: None,
+            total_bytes: None,
+            bytes_read: None,
+        },
+        PullProgress::LayerMaterializeProgress {
+            layer_index,
+            bytes_read,
+            total_bytes,
+        } => PullEvent {
+            event_type: "layer_materialize_progress".to_string(),
+            reference: None,
+            manifest_digest: None,
+            layer_count: None,
+            total_download_bytes: None,
+            layer_index: Some(layer_index as u32),
+            digest: None,
+            diff_id: None,
+            downloaded_bytes: None,
+            total_bytes: Some(total_bytes as f64),
+            bytes_read: Some(bytes_read as f64),
+        },
+        PullProgress::LayerMaterializeWriting { layer_index } => PullEvent {
+            event_type: "layer_materialize_writing".to_string(),
+            reference: None,
+            manifest_digest: None,
+            layer_count: None,
+            total_download_bytes: None,
+            layer_index: Some(layer_index as u32),
+            digest: None,
+            diff_id: None,
+            downloaded_bytes: None,
+            total_bytes: None,
+            bytes_read: None,
+        },
+        PullProgress::LayerMaterializeComplete {
+            layer_index,
+            diff_id,
+        } => PullEvent {
+            event_type: "layer_materialize_complete".to_string(),
+            reference: None,
+            manifest_digest: None,
+            layer_count: None,
+            total_download_bytes: None,
+            layer_index: Some(layer_index as u32),
+            digest: None,
+            diff_id: Some(diff_id.to_string()),
+            downloaded_bytes: None,
+            total_bytes: None,
+            bytes_read: None,
+        },
+        PullProgress::StitchMergingTrees { layer_count } => PullEvent {
+            event_type: "stitch_merging_trees".to_string(),
+            reference: None,
+            manifest_digest: None,
+            layer_count: Some(layer_count as u32),
+            total_download_bytes: None,
+            layer_index: None,
+            digest: None,
+            diff_id: None,
+            downloaded_bytes: None,
+            total_bytes: None,
+            bytes_read: None,
+        },
+        PullProgress::StitchWritingFsmeta => PullEvent {
+            event_type: "stitch_writing_fsmeta".to_string(),
+            reference: None,
+            manifest_digest: None,
+            layer_count: None,
+            total_download_bytes: None,
+            layer_index: None,
+            digest: None,
+            diff_id: None,
+            downloaded_bytes: None,
+            total_bytes: None,
+            bytes_read: None,
+        },
+        PullProgress::StitchWritingVmdk => PullEvent {
+            event_type: "stitch_writing_vmdk".to_string(),
+            reference: None,
+            manifest_digest: None,
+            layer_count: None,
+            total_download_bytes: None,
+            layer_index: None,
+            digest: None,
+            diff_id: None,
+            downloaded_bytes: None,
+            total_bytes: None,
+            bytes_read: None,
+        },
+        PullProgress::StitchComplete => PullEvent {
+            event_type: "stitch_complete".to_string(),
+            reference: None,
+            manifest_digest: None,
+            layer_count: None,
+            total_download_bytes: None,
+            layer_index: None,
+            digest: None,
+            diff_id: None,
+            downloaded_bytes: None,
+            total_bytes: None,
+            bytes_read: None,
+        },
+        PullProgress::Complete {
+            reference,
+            layer_count,
+        } => PullEvent {
+            event_type: "complete".to_string(),
+            reference: Some(reference.to_string()),
+            manifest_digest: None,
+            layer_count: Some(layer_count as u32),
+            total_download_bytes: None,
+            layer_index: None,
+            digest: None,
+            diff_id: None,
+            downloaded_bytes: None,
+            total_bytes: None,
+            bytes_read: None,
+        },
     }
 }
 

@@ -282,6 +282,43 @@ pub struct ExecEvent {
     pub code: Option<i32>,
 }
 
+/// Image pull / materialize progress event emitted by `PullSession`.
+///
+/// The `eventType` string is the discriminator; only a subset of the other
+/// fields is populated for each variant. The variants mirror the Rust
+/// `microsandbox_image::PullProgress` enum:
+///
+/// - `"resolving"` — `reference`
+/// - `"resolved"` — `reference`, `manifestDigest`, `layerCount`, `totalDownloadBytes`
+/// - `"layer_download_progress"` — `layerIndex`, `digest`, `downloadedBytes`, `totalBytes`
+/// - `"layer_download_complete"` — `layerIndex`, `digest`, `downloadedBytes`
+/// - `"layer_download_verifying"` — `layerIndex`, `digest`
+/// - `"layer_materialize_started"` — `layerIndex`, `diffId`
+/// - `"layer_materialize_progress"` — `layerIndex`, `bytesRead`, `totalBytes`
+/// - `"layer_materialize_writing"` — `layerIndex`
+/// - `"layer_materialize_complete"` — `layerIndex`, `diffId`
+/// - `"stitch_merging_trees"` — `layerCount`
+/// - `"stitch_writing_fsmeta"` — (no fields)
+/// - `"stitch_writing_vmdk"` — (no fields)
+/// - `"stitch_complete"` — (no fields)
+/// - `"complete"` — `reference`, `layerCount`
+#[napi(object)]
+pub struct PullEvent {
+    pub event_type: String,
+    pub reference: Option<String>,
+    pub manifest_digest: Option<String>,
+    pub layer_count: Option<u32>,
+    /// Sum of compressed layer sizes. `null` if the manifest omits sizes.
+    pub total_download_bytes: Option<f64>,
+    pub layer_index: Option<u32>,
+    pub digest: Option<String>,
+    pub diff_id: Option<String>,
+    pub downloaded_bytes: Option<f64>,
+    /// Total bytes for the current layer. `null` if the manifest omits sizes.
+    pub total_bytes: Option<f64>,
+    pub bytes_read: Option<f64>,
+}
+
 /// Configuration for command execution.
 #[napi(object)]
 pub struct ExecConfig {

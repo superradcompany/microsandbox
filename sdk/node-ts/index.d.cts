@@ -205,6 +205,50 @@ export declare class Patch {
 }
 
 /**
+ * A session combining pull-progress events and a pending sandbox creation.
+ *
+ * Created via `Sandbox.createWithProgress()` or
+ * `Sandbox.createDetachedWithProgress()`. Iterate the session to observe
+ * image pull and materialize events, then call `result()` to obtain the
+ * live `Sandbox`. The iterator ends when the pull finishes (successfully
+ * or not); `result()` resolves with the sandbox or rejects with the
+ * creation error.
+ *
+ * ```js
+ * const session = await Sandbox.createWithProgress({
+ *   name: "my-sb",
+ *   image: "alpine",
+ *   pullPolicy: "always",
+ * });
+ * for await (const ev of session) {
+ *   if (ev.eventType === "layer_download_progress") {
+ *     console.log(`L${ev.layerIndex}: ${ev.downloadedBytes}/${ev.totalBytes ?? "?"}`);
+ *   }
+ * }
+ * const sandbox = await session.result();
+ * ```
+ *
+ * This type implements JavaScript's async iterable protocol.
+ * It can be used with `for await...of` loops.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
+ */
+export declare class PullSession {
+  /** Receive the next pull progress event. Returns `null` when the stream ends. */
+  recv(): Promise<PullEvent | null>
+  /**
+   * Await the sandbox creation task and return the live `Sandbox`.
+   *
+   * Single-shot: a second call throws `Error("result already consumed")`.
+   * Prefer calling this after the event iterator has finished so the pull
+   * is definitely complete.
+   */
+  result(): Promise<Sandbox>
+  [Symbol.asyncIterator](): AsyncGenerator<PullEvent, void, undefined>
+}
+export type JsPullSession = PullSession
+
+/**
  * A running sandbox instance.
  *
  * Created via `Sandbox.create()` or `Sandbox.start()`. Holds a live connection
@@ -215,6 +259,19 @@ export declare class Sandbox {
   static create(config: SandboxConfig): Promise<Sandbox>
   /** Create a sandbox that survives the parent process (detached mode). */
   static createDetached(config: SandboxConfig): Promise<Sandbox>
+  /**
+   * Create a sandbox and observe image pull/materialize progress.
+   *
+   * Returns a `PullSession` that yields `PullEvent`s as the image is
+   * resolved, downloaded, and materialized. Call `session.result()` after
+   * iteration to obtain the live `Sandbox`.
+   */
+  static createWithProgress(config: SandboxConfig): Promise<PullSession>
+  /**
+   * Like `createWithProgress`, but spawns the sandbox in detached mode
+   * so it survives after the parent process exits.
+   */
+  static createDetachedWithProgress(config: SandboxConfig): Promise<PullSession>
   /** Start an existing stopped sandbox (attached mode). */
   static start(name: string): Promise<Sandbox>
   /** Start an existing stopped sandbox (detached mode). */
@@ -647,6 +704,44 @@ export interface PolicyRule {
   port?: string
 }
 
+/**
+ * Image pull / materialize progress event emitted by `PullSession`.
+ *
+ * The `eventType` string is the discriminator; only a subset of the other
+ * fields is populated for each variant. The variants mirror the Rust
+ * `microsandbox_image::PullProgress` enum:
+ *
+ * - `"resolving"` — `reference`
+ * - `"resolved"` — `reference`, `manifestDigest`, `layerCount`, `totalDownloadBytes`
+ * - `"layer_download_progress"` — `layerIndex`, `digest`, `downloadedBytes`, `totalBytes`
+ * - `"layer_download_complete"` — `layerIndex`, `digest`, `downloadedBytes`
+ * - `"layer_download_verifying"` — `layerIndex`, `digest`
+ * - `"layer_materialize_started"` — `layerIndex`, `diffId`
+ * - `"layer_materialize_progress"` — `layerIndex`, `bytesRead`, `totalBytes`
+ * - `"layer_materialize_writing"` — `layerIndex`
+ * - `"layer_materialize_complete"` — `layerIndex`, `diffId`
+ * - `"stitch_merging_trees"` — `layerCount`
+ * - `"stitch_writing_fsmeta"` — (no fields)
+ * - `"stitch_writing_vmdk"` — (no fields)
+ * - `"stitch_complete"` — (no fields)
+ * - `"complete"` — `reference`, `layerCount`
+ */
+export interface PullEvent {
+  eventType: string
+  reference?: string
+  manifestDigest?: string
+  layerCount?: number
+  /** Sum of compressed layer sizes. `null` if the manifest omits sizes. */
+  totalDownloadBytes?: number
+  layerIndex?: number
+  digest?: string
+  diffId?: string
+  downloadedBytes?: number
+  /** Total bytes for the current layer. `null` if the manifest omits sizes. */
+  totalBytes?: number
+  bytesRead?: number
+}
+
 /** Image pull policy. */
 export declare const enum PullPolicy {
   Always = 'always',
@@ -654,10 +749,20 @@ export declare const enum PullPolicy {
   Never = 'never'
 }
 
-/** Registry credentials for pulling private images. */
-export interface RegistryCredentials {
+/** Registry authentication credentials. */
+export interface RegistryAuth {
   username: string
   password: string
+}
+
+/** Registry connection settings. */
+export interface RegistryConfig {
+  /** Authentication credentials. */
+  auth?: RegistryAuth
+  /** Access the registry over plain HTTP instead of HTTPS. */
+  insecure?: boolean
+  /** Path to a PEM file containing additional CA root certificates to trust. */
+  caCertsPath?: string
 }
 
 /** Configuration for creating a sandbox. */
@@ -704,8 +809,8 @@ export interface SandboxConfig {
   stopSignal?: string
   /** Maximum run duration in seconds. */
   maxDurationSecs?: number
-  /** Registry credentials for pulling private images. */
-  registryAuth?: RegistryCredentials
+  /** Registry connection settings (auth, TLS, insecure). */
+  registry?: RegistryConfig
   /** Port mappings: host_port → guest_port (TCP). */
   ports?: Record<string, number>
   /** Network configuration. */

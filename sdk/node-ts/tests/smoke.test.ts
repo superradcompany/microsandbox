@@ -1,6 +1,7 @@
 /// <reference types="node" />
 import { describe, it, expect, afterAll, beforeAll } from "vitest";
 import { Sandbox, isInstalled } from "../index.mjs";
+import type { PullEvent } from "../index.d.cts";
 
 const SANDBOX_NAME = "sdk-smoke-test";
 
@@ -240,4 +241,155 @@ describe("Node.js SDK Smoke Tests", () => {
 		expect(status.code).toBe(0);
 		expect(status.success).toBe(true);
 	});
+});
+
+describe("Node.js SDK Pull Progress", () => {
+	const NAME_ITER = "sdk-smoke-progress-iter";
+	const NAME_RECV = "sdk-smoke-progress-recv";
+	const NAME_DETACHED = "sdk-smoke-progress-detached";
+	const NAME_ERROR = "sdk-smoke-progress-error";
+	const NAME_DOUBLE = "sdk-smoke-progress-double";
+
+	afterAll(async () => {
+		for (const n of [NAME_ITER, NAME_RECV, NAME_DETACHED, NAME_ERROR, NAME_DOUBLE]) {
+			await Sandbox.remove(n).catch(() => {});
+		}
+	});
+
+	it("emits resolving → resolved → complete in order with populated fields", async () => {
+		// pullPolicy:"always" forces a fresh resolve so we reliably see the
+		// resolving→resolved→complete milestone sequence. Layer events may or
+		// may not appear depending on local cache state.
+		const session = await Sandbox.createWithProgress({
+			name: NAME_ITER,
+			image: "alpine",
+			cpus: 1,
+			memoryMib: 512,
+			replace: true,
+			pullPolicy: "always",
+		});
+
+		const events: PullEvent[] = [];
+		for await (const ev of session) events.push(ev);
+
+		expect(events.length).toBeGreaterThan(0);
+
+		// First event is resolving and carries the reference.
+		expect(events[0].eventType).toBe("resolving");
+		expect(events[0].reference).toBeTruthy();
+		const reference = events[0].reference;
+
+		// resolved event appears with manifest + layer info.
+		const resolved = events.find((e) => e.eventType === "resolved");
+		expect(resolved).toBeDefined();
+		expect(resolved!.reference).toBe(reference);
+		expect(resolved!.manifestDigest).toBeTruthy();
+		expect(resolved!.layerCount).toBeGreaterThan(0);
+
+		// Final event is complete with matching reference and layerCount.
+		const last = events[events.length - 1];
+		expect(last.eventType).toBe("complete");
+		expect(last.reference).toBe(reference);
+		expect(last.layerCount).toBe(resolved!.layerCount);
+
+		// Ordering: resolving before resolved before complete.
+		const idx = (t: string) => events.findIndex((e) => e.eventType === t);
+		expect(idx("resolving")).toBeLessThan(idx("resolved"));
+		expect(idx("resolved")).toBeLessThan(idx("complete"));
+
+		// If any layer_download_progress event appears, its fields are populated.
+		const progress = events.find((e) => e.eventType === "layer_download_progress");
+		if (progress) {
+			expect(progress.layerIndex).toBeGreaterThanOrEqual(0);
+			expect(progress.digest).toBeTruthy();
+			expect(progress.downloadedBytes).toBeGreaterThanOrEqual(0);
+		}
+
+		// result() yields the live sandbox.
+		const sb = await session.result();
+		expect(await sb.name).toBe(NAME_ITER);
+		await sb.stopAndWait();
+	}, 180_000);
+
+	it("streams events via recv() without the async iterator", async () => {
+		const session = await Sandbox.createWithProgress({
+			name: NAME_RECV,
+			image: "alpine",
+			cpus: 1,
+			memoryMib: 512,
+			replace: true,
+		});
+
+		const eventTypes: string[] = [];
+		let ev = await session.recv();
+		while (ev !== null) {
+			eventTypes.push(ev.eventType);
+			ev = await session.recv();
+		}
+
+		expect(eventTypes[0]).toBe("resolving");
+		expect(eventTypes[eventTypes.length - 1]).toBe("complete");
+
+		const sb = await session.result();
+		await sb.stopAndWait();
+	}, 120_000);
+
+	it("createDetachedWithProgress yields events and creates a detached sandbox", async () => {
+		const session = await Sandbox.createDetachedWithProgress({
+			name: NAME_DETACHED,
+			image: "alpine",
+			cpus: 1,
+			memoryMib: 512,
+			replace: true,
+		});
+
+		const types: string[] = [];
+		for await (const ev of session) types.push(ev.eventType);
+
+		expect(types).toContain("complete");
+
+		const sb = await session.result();
+		expect(await sb.name).toBe(NAME_DETACHED);
+
+		await sb.stopAndWait();
+	}, 120_000);
+
+	it("result() rejects when the image cannot be pulled", async () => {
+		// pullPolicy:"never" with an image that is not in the local cache
+		// forces a fast failure without hitting any network.
+		const session = await Sandbox.createWithProgress({
+			name: NAME_ERROR,
+			image: "sdk-nonexistent-image-xyz789:never",
+			cpus: 1,
+			memoryMib: 512,
+			replace: true,
+			pullPolicy: "never",
+		});
+
+		// Iterator should terminate cleanly even though creation fails.
+		for await (const _ev of session) {
+			// drain
+		}
+
+		await expect(session.result()).rejects.toThrow();
+	}, 60_000);
+
+	it("result() throws 'already consumed' on the second call", async () => {
+		const session = await Sandbox.createWithProgress({
+			name: NAME_DOUBLE,
+			image: "alpine",
+			cpus: 1,
+			memoryMib: 512,
+			replace: true,
+		});
+
+		for await (const _ev of session) {
+			// drain
+		}
+
+		const sb = await session.result();
+		await expect(session.result()).rejects.toThrow(/already consumed/);
+
+		await sb.stopAndWait();
+	}, 120_000);
 });

@@ -9,6 +9,7 @@ export const {
   MetricsStream,
   Mount,
   NetworkPolicy,
+  PullSession,
   Sandbox,
   SandboxFs,
   SandboxHandle,
