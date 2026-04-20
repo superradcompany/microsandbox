@@ -151,7 +151,8 @@
             "group": "Container Integration",
             "icon": "docker",
             "pages": [
-              "recipes/docker"
+              "recipes/docker",
+              "recipes/local-images"
             ]
           }
         ]

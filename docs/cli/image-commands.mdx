@@ -18,6 +18,8 @@ msb pull ghcr.io/my-org/my-image:v1
 |------|-------------|
 | `-f`, `--force` | Force re-download even if cached |
 | `-q`, `--quiet` | Suppress progress output |
+| `--insecure` | Connect over plain HTTP instead of HTTPS |
+| `--ca-certs <PATH>` | Path to a PEM file with additional CA root certificates |
 
 <Tip>
   Pre-pulling is useful when you want sandbox creation to be instant. Without a pre-pull, the first `Sandbox.create` with a new image will block on the download.
