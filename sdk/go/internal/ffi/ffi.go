@@ -1444,7 +1444,7 @@ type MetricsStreamHandle struct {
 	handle C.uint64_t
 }
 
-// MetricsStreamSandbox starts a metrics stream that emits a snapshot every interval.
+// MetricsStream starts a metrics stream that emits a snapshot every interval.
 // intervalMs==0 uses the minimum interval (1ms). Returns a handle that must be
 // closed with MetricsStreamHandle.Close.
 func (s *Sandbox) MetricsStream(ctx context.Context, intervalMs uint64) (*MetricsStreamHandle, error) {
@@ -2009,7 +2009,7 @@ func (h *FsReadStreamHandle) Recv(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	var resp struct {
-		Done    bool   `json:"done"`
+		Done     bool   `json:"done"`
 		ChunkB64 string `json:"chunk_b64"`
 	}
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {

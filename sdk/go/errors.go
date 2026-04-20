@@ -187,11 +187,24 @@ type Error struct {
 }
 
 // Error implements the error interface.
+//
+// The string form deliberately omits the Kind to avoid duplicating the
+// category when the underlying message already describes it (e.g. a
+// sandbox-not-found kind paired with the runtime message "sandbox not
+// found: foo"). Callers that need to branch on the category should use
+// IsKind or errors.As against *Error — Kind is still preserved on the
+// struct.
 func (e *Error) Error() string {
-	if e.Cause != nil {
-		return fmt.Sprintf("microsandbox.%s: %s: %v", e.Kind, e.Message, e.Cause)
+	switch {
+	case e.Message == "" && e.Cause != nil:
+		return e.Cause.Error()
+	case e.Cause != nil:
+		return fmt.Sprintf("%s: %v", e.Message, e.Cause)
+	case e.Message == "":
+		return e.Kind.String()
+	default:
+		return e.Message
 	}
-	return fmt.Sprintf("microsandbox.%s: %s", e.Kind, e.Message)
 }
 
 // Unwrap supports errors.Is / errors.As.

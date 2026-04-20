@@ -37,7 +37,7 @@ func TestErrorKindString(t *testing.T) {
 func TestErrorError(t *testing.T) {
 	e := &Error{Kind: ErrSandboxNotFound, Message: "no such sandbox"}
 	got := e.Error()
-	want := "microsandbox.SandboxNotFound: no such sandbox"
+	want := "no such sandbox"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -47,11 +47,26 @@ func TestErrorErrorWithCause(t *testing.T) {
 	cause := errors.New("root cause")
 	e := &Error{Kind: ErrInternal, Message: "transport failed", Cause: cause}
 	got := e.Error()
-	if got != "microsandbox.Internal: transport failed: root cause" {
+	if got != "transport failed: root cause" {
 		t.Errorf("unexpected: %q", got)
 	}
 	if !errors.Is(e, cause) {
 		t.Error("errors.Is should unwrap to cause")
+	}
+}
+
+func TestErrorErrorEmptyMessageFallsBackToKind(t *testing.T) {
+	e := &Error{Kind: ErrInvalidHandle}
+	if got := e.Error(); got != "InvalidHandle" {
+		t.Errorf("want kind fallback, got %q", got)
+	}
+}
+
+func TestErrorErrorEmptyMessageWithCauseUsesCause(t *testing.T) {
+	cause := errors.New("dlopen: no such file")
+	e := &Error{Kind: ErrLibraryNotLoaded, Cause: cause}
+	if got := e.Error(); got != "dlopen: no such file" {
+		t.Errorf("want cause passthrough, got %q", got)
 	}
 }
 
