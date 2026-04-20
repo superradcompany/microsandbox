@@ -140,7 +140,7 @@ type NetworkConfig struct {
 	DNSRebindProtection *bool
 
 	// TLS configures the transparent TLS interception proxy.
-	TLS *TlsConfig
+	TLS *TLSConfig
 
 	// Ports publishes host TCP ports into the sandbox (host→guest).
 	Ports map[uint16]uint16
@@ -157,8 +157,8 @@ type PolicyRule struct {
 	Port     uint16 // 0 means any port
 }
 
-// TlsConfig configures the transparent HTTPS inspection proxy.
-type TlsConfig struct {
+// TLSConfig configures the transparent HTTPS inspection proxy.
+type TLSConfig struct {
 	// Bypass is a list of domain patterns (supports "*.suffix") to skip MITM.
 	Bypass []string
 

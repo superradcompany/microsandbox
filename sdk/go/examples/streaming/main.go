@@ -6,7 +6,6 @@
 // Build: from sdk/go, run
 //
 //	go run ./examples/streaming
-//
 package main
 
 import (
@@ -77,7 +76,7 @@ func collectShortCommand(ctx context.Context, sb *microsandbox.Sandbox) error {
 	for {
 		ev, err := h.Recv(ctx)
 		if err != nil {
-			return fmt.Errorf("Recv: %w", err)
+			return fmt.Errorf("recv: %w", err)
 		}
 		switch ev.Kind {
 		case microsandbox.ExecEventStarted:
@@ -117,7 +116,7 @@ func sigtermLongCommand(ctx context.Context, sb *microsandbox.Sandbox) error {
 	for {
 		ev, err := h.Recv(ctx)
 		if err != nil {
-			return fmt.Errorf("Recv (waiting Started): %w", err)
+			return fmt.Errorf("recv (waiting Started): %w", err)
 		}
 		if ev.Kind == microsandbox.ExecEventStarted {
 			fmt.Printf("  started pid=%d\n", ev.PID)
@@ -126,7 +125,7 @@ func sigtermLongCommand(ctx context.Context, sb *microsandbox.Sandbox) error {
 	}
 
 	if err := h.Signal(ctx, int(syscall.SIGTERM)); err != nil {
-		return fmt.Errorf("Signal SIGTERM: %w", err)
+		return fmt.Errorf("signal SIGTERM: %w", err)
 	}
 
 	deadline := time.After(10 * time.Second)
@@ -139,7 +138,7 @@ func sigtermLongCommand(ctx context.Context, sb *microsandbox.Sandbox) error {
 		}
 		ev, err := h.Recv(ctx)
 		if err != nil {
-			return fmt.Errorf("Recv after signal: %w", err)
+			return fmt.Errorf("recv after signal: %w", err)
 		}
 		if ev.Kind == microsandbox.ExecEventExited {
 			gotExited = true
@@ -165,7 +164,7 @@ func cancelDuringRecv(outer context.Context, sb *microsandbox.Sandbox) error {
 	for {
 		ev, err := h.Recv(outer)
 		if err != nil {
-			return fmt.Errorf("Recv Started: %w", err)
+			return fmt.Errorf("recv Started: %w", err)
 		}
 		if ev.Kind == microsandbox.ExecEventStarted {
 			break
@@ -188,7 +187,7 @@ func cancelDuringRecv(outer context.Context, sb *microsandbox.Sandbox) error {
 		}
 		fmt.Printf("  Recv returned promptly after cancel: %v\n", err)
 	case <-time.After(5 * time.Second):
-		return fmt.Errorf("Recv did not return within 5s after cancel")
+		return fmt.Errorf("recv did not return within 5s after cancel")
 	}
 
 	// Terminate the sleep so Close cleans up fast.

@@ -318,7 +318,7 @@ func TestNetworkConfigCustomRules(t *testing.T) {
 
 func TestTlsConfigFields(t *testing.T) {
 	boolTrue := true
-	tls := &TlsConfig{
+	tls := &TLSConfig{
 		Bypass:           []string{"*.internal"},
 		VerifyUpstream:   &boolTrue,
 		InterceptedPorts: []uint16{443, 8443},
