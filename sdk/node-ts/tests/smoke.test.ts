@@ -274,30 +274,26 @@ describe("Node.js SDK Pull Progress", () => {
 
 		expect(events.length).toBeGreaterThan(0);
 
-		// First event is resolving and carries the reference.
 		expect(events[0].eventType).toBe("resolving");
 		expect(events[0].reference).toBeTruthy();
 		const reference = events[0].reference;
 
-		// resolved event appears with manifest + layer info.
 		const resolved = events.find((e) => e.eventType === "resolved");
 		expect(resolved).toBeDefined();
 		expect(resolved!.reference).toBe(reference);
 		expect(resolved!.manifestDigest).toBeTruthy();
 		expect(resolved!.layerCount).toBeGreaterThan(0);
 
-		// Final event is complete with matching reference and layerCount.
 		const last = events[events.length - 1];
 		expect(last.eventType).toBe("complete");
 		expect(last.reference).toBe(reference);
 		expect(last.layerCount).toBe(resolved!.layerCount);
 
-		// Ordering: resolving before resolved before complete.
 		const idx = (t: string) => events.findIndex((e) => e.eventType === t);
 		expect(idx("resolving")).toBeLessThan(idx("resolved"));
 		expect(idx("resolved")).toBeLessThan(idx("complete"));
 
-		// If any layer_download_progress event appears, its fields are populated.
+		// Field population is best-effort — layer events only fire on cache miss.
 		const progress = events.find((e) => e.eventType === "layer_download_progress");
 		if (progress) {
 			expect(progress.layerIndex).toBeGreaterThanOrEqual(0);
@@ -305,7 +301,6 @@ describe("Node.js SDK Pull Progress", () => {
 			expect(progress.downloadedBytes).toBeGreaterThanOrEqual(0);
 		}
 
-		// result() yields the live sandbox.
 		const sb = await session.result();
 		expect(await sb.name).toBe(NAME_ITER);
 		await sb.stopAndWait();
@@ -327,7 +322,9 @@ describe("Node.js SDK Pull Progress", () => {
 			ev = await session.recv();
 		}
 
+		expect(eventTypes.length).toBeGreaterThanOrEqual(3);
 		expect(eventTypes[0]).toBe("resolving");
+		expect(eventTypes).toContain("resolved");
 		expect(eventTypes[eventTypes.length - 1]).toBe("complete");
 
 		const sb = await session.result();
@@ -346,7 +343,9 @@ describe("Node.js SDK Pull Progress", () => {
 		const types: string[] = [];
 		for await (const ev of session) types.push(ev.eventType);
 
-		expect(types).toContain("complete");
+		expect(types[0]).toBe("resolving");
+		expect(types).toContain("resolved");
+		expect(types[types.length - 1]).toBe("complete");
 
 		const sb = await session.result();
 		expect(await sb.name).toBe(NAME_DETACHED);
@@ -366,12 +365,9 @@ describe("Node.js SDK Pull Progress", () => {
 			pullPolicy: "never",
 		});
 
-		// Iterator should terminate cleanly even though creation fails.
-		for await (const _ev of session) {
-			// drain
-		}
+		for await (const _ev of session) {}
 
-		await expect(session.result()).rejects.toThrow();
+		await expect(session.result()).rejects.toThrow(/not.*cache|cached|not found/i);
 	}, 60_000);
 
 	it("result() throws 'already consumed' on the second call", async () => {
@@ -383,11 +379,10 @@ describe("Node.js SDK Pull Progress", () => {
 			replace: true,
 		});
 
-		for await (const _ev of session) {
-			// drain
-		}
+		for await (const _ev of session) {}
 
 		const sb = await session.result();
+		expect(await sb.name).toBe(NAME_DOUBLE);
 		await expect(session.result()).rejects.toThrow(/already consumed/);
 
 		await sb.stopAndWait();
