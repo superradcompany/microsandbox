@@ -350,6 +350,8 @@ fn apply_network_opts(
     mut builder: SandboxBuilder,
     opts: &SandboxOpts,
 ) -> anyhow::Result<SandboxBuilder> {
+    use microsandbox_network::dns::Nameserver;
+
     // Port mappings.
     for port_str in &opts.port {
         let (host, guest, udp) = parse_port(port_str)?;
@@ -395,10 +397,7 @@ fn apply_network_opts(
         let dns_nameservers = opts
             .dns_nameserver
             .iter()
-            .map(|s| {
-                s.parse::<microsandbox_network::dns::Nameserver>()
-                    .map_err(anyhow::Error::from)
-            })
+            .map(|s| s.parse::<Nameserver>().map_err(anyhow::Error::from))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let dns_query_timeout_ms = opts.dns_query_timeout_ms;
         let network_policy = parse_network_policy(opts.network_policy.as_deref())?;
