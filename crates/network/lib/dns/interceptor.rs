@@ -16,7 +16,7 @@ use bytes::Bytes;
 use smoltcp::iface::SocketSet;
 use smoltcp::socket::udp;
 use smoltcp::storage::PacketMetadata;
-use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
+use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
 use tokio::sync::mpsc;
 
 use super::forwarder::{self, NormalizedDnsConfig};
@@ -67,6 +67,12 @@ pub(super) struct DnsQuery {
     pub(super) data: Bytes,
     /// Source endpoint (guest IP:port) for routing the response back.
     pub(super) source: IpEndpoint,
+    /// Original destination IP the guest aimed the query at. The socket
+    /// binds to every local address on port 53 (`addr: None`) so that the
+    /// interceptor also captures `dig @1.1.1.1` and similar; without
+    /// preserving the original destination we'd reply from the gateway
+    /// IP and the guest's resolver would drop the response.
+    pub(super) original_dst: Option<IpAddress>,
 }
 
 /// A forwarded DNS response ready to send back to the guest.
@@ -75,6 +81,9 @@ pub(super) struct DnsResponse {
     pub(super) data: Bytes,
     /// Destination endpoint (guest IP:port).
     pub(super) dest: IpEndpoint,
+    /// Source IP to stamp on the outgoing packet. Echoes the query's
+    /// original destination so replies match what the guest asked.
+    pub(super) source_addr: Option<IpAddress>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -142,6 +151,7 @@ impl DnsInterceptor {
                     let query = DnsQuery {
                         data: Bytes::copy_from_slice(&buf[..n]),
                         source: meta.endpoint,
+                        original_dst: meta.local_address,
                     };
                     if self.query_tx.try_send(query).is_err() {
                         // Channel full — drop query. Guest will retry.
@@ -158,7 +168,12 @@ impl DnsInterceptor {
         while socket.can_send() {
             match self.response_rx.try_recv() {
                 Ok(response) => {
-                    let _ = socket.send_slice(&response.data, response.dest);
+                    let mut meta = udp::UdpMetadata::from(response.dest);
+                    // Stamp the reply with the IP the guest originally
+                    // aimed at; smoltcp uses this as the source IP when
+                    // it dispatches the packet.
+                    meta.local_address = response.source_addr;
+                    let _ = socket.send_slice(&response.data, meta);
                 }
                 Err(_) => break,
             }

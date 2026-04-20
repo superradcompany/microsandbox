@@ -169,6 +169,7 @@ async fn dns_forwarder_task(
                 let response = DnsResponse {
                     data,
                     dest: query.source,
+                    source_addr: query.original_dst,
                 };
                 if response_tx.send(response).await.is_ok() {
                     shared.proxy_wake.wake();
