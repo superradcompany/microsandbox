@@ -122,6 +122,14 @@ type ExecHandle struct {
 	inner *ffi.ExecStreamHandle
 }
 
+// ID returns the unique identifier for this exec session, assigned by the
+// guest agent. Useful for correlating log entries or referencing the session
+// from external tooling.
+func (h *ExecHandle) ID() (string, error) {
+	id, err := h.inner.ID()
+	return id, wrapFFI(err)
+}
+
 // TakeStdin returns the stdin sink for this exec session. Only valid when
 // started with WithExecStdinPipe. Returns nil if stdin was not piped.
 // The caller is responsible for closing the sink when done writing.

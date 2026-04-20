@@ -36,6 +36,19 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 		Ports:     o.Ports,
 	}
 
+	if len(o.Volumes) > 0 {
+		ffiOpts.Volumes = make(map[string]ffi.MountSpec, len(o.Volumes))
+		for guestPath, m := range o.Volumes {
+			ffiOpts.Volumes[guestPath] = ffi.MountSpec{
+				Bind:     m.Bind,
+				Named:    m.Named,
+				Tmpfs:    m.Tmpfs,
+				Readonly: m.Readonly,
+				SizeMiB:  m.SizeMiB,
+			}
+		}
+	}
+
 	if o.Network != nil {
 		ffiOpts.Network = buildFFINetwork(o.Network)
 	}

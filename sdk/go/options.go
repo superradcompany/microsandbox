@@ -18,6 +18,7 @@ type SandboxConfig struct {
 	Network   *NetworkConfig
 	Secrets   []SecretEntry
 	Patches   []PatchConfig
+	Volumes   map[string]MountConfig // guest path → mount config
 }
 
 // SandboxOption is a functional option for configuring a sandbox.
@@ -352,6 +353,65 @@ func WithExecTimeout(d time.Duration) ExecOption {
 // to be written to the process via ExecHandle.TakeStdin.
 func WithExecStdinPipe() ExecOption {
 	return func(o *ExecConfig) { o.StdinPipe = true }
+}
+
+// ---------------------------------------------------------------------------
+// Mounts
+// ---------------------------------------------------------------------------
+
+// MountConfig describes how a host path, named volume, or tmpfs is mounted
+// into the sandbox at a guest path. Construct via the Mount factory:
+//
+//	microsandbox.Mount.Named("my-data")
+//	microsandbox.Mount.Bind("/host/path")
+//	microsandbox.Mount.Tmpfs()
+type MountConfig struct {
+	Bind     string // host path for a bind mount
+	Named    string // volume name for a named volume mount
+	Tmpfs    bool   // true for an in-memory tmpfs mount
+	Readonly bool
+	SizeMiB  uint32 // max size for tmpfs (0 = unlimited)
+}
+
+// mountFactory is the factory namespace for constructing MountConfig values.
+// Invoke through the package-level Mount value.
+type mountFactory struct{}
+
+// Mount is the factory namespace for volume mount configurations.
+//
+//	microsandbox.WithMounts(map[string]microsandbox.MountConfig{
+//	    "/data": microsandbox.Mount.Named("my-vol"),
+//	    "/tmp":  microsandbox.Mount.Tmpfs(),
+//	})
+var Mount mountFactory
+
+// Bind returns a MountConfig that bind-mounts a host directory into the sandbox.
+func (mountFactory) Bind(hostPath string) MountConfig {
+	return MountConfig{Bind: hostPath}
+}
+
+// Named returns a MountConfig that mounts a named persistent volume.
+func (mountFactory) Named(name string) MountConfig {
+	return MountConfig{Named: name}
+}
+
+// Tmpfs returns a MountConfig that mounts an ephemeral in-memory filesystem.
+func (mountFactory) Tmpfs() MountConfig {
+	return MountConfig{Tmpfs: true}
+}
+
+// WithMounts adds volume mount configurations keyed by guest path.
+// Called multiple times, the maps merge; later entries overwrite earlier ones
+// for the same guest path.
+func WithMounts(mounts map[string]MountConfig) SandboxOption {
+	return func(o *SandboxConfig) {
+		if o.Volumes == nil {
+			o.Volumes = make(map[string]MountConfig, len(mounts))
+		}
+		for k, v := range mounts {
+			o.Volumes[k] = v
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
