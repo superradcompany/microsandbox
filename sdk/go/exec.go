@@ -52,7 +52,7 @@ func (e *ExecOutput) Success() bool { return e.exitCode == 0 }
 // The returned error is non-nil only on transport/runtime failures; a
 // non-zero exit code is reported via ExecOutput.ExitCode, not as an error.
 func (s *Sandbox) Exec(ctx context.Context, cmd string, args []string, opts ...ExecOption) (*ExecOutput, error) {
-	o := ExecOptions{}
+	o := ExecConfig{}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -110,12 +110,23 @@ type ExecEvent struct {
 	ExitCode int
 }
 
+// ExecSink is a write-only pipe to a running process's stdin. Obtain via
+// ExecHandle.TakeStdin. Implements io.WriteCloser.
+type ExecSink = ffi.ExecSink
+
 // ExecHandle is a live streaming exec session. Obtain via Sandbox.ExecStream.
 // Call Close when done to release Rust-side resources.
 //
 // ExecHandle is NOT safe for concurrent use from multiple goroutines.
 type ExecHandle struct {
 	inner *ffi.ExecStreamHandle
+}
+
+// TakeStdin returns the stdin sink for this exec session. Only valid when
+// started with WithExecStdinPipe. Returns nil if stdin was not piped.
+// The caller is responsible for closing the sink when done writing.
+func (h *ExecHandle) TakeStdin() *ExecSink {
+	return h.inner.TakeStdin()
 }
 
 // Recv blocks until the next event arrives or the stream ends. Returns an
@@ -137,6 +148,34 @@ func (h *ExecHandle) Recv(ctx context.Context) (*ExecEvent, error) {
 	}, nil
 }
 
+// Collect drains the stream, accumulates all output, and returns it as
+// ExecOutput. Equivalent to calling Recv in a loop and assembling the result.
+// The handle should be closed after Collect returns.
+func (h *ExecHandle) Collect(ctx context.Context) (*ExecOutput, error) {
+	res, err := h.inner.Collect(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &ExecOutput{
+		stdout:   []byte(res.Stdout),
+		stderr:   []byte(res.Stderr),
+		exitCode: res.ExitCode,
+	}, nil
+}
+
+// Wait blocks until the process exits and returns its exit code. Unlike
+// Collect, stdout and stderr are discarded. The handle should be closed after
+// Wait returns.
+func (h *ExecHandle) Wait(ctx context.Context) (int, error) {
+	code, err := h.inner.Wait(ctx)
+	return code, wrapFFI(err)
+}
+
+// Kill sends SIGKILL to the running process.
+func (h *ExecHandle) Kill(ctx context.Context) error {
+	return wrapFFI(h.inner.Kill(ctx))
+}
+
 // Signal sends a Unix signal to the running process (e.g. syscall.SIGTERM).
 func (h *ExecHandle) Signal(ctx context.Context, signal int) error {
 	return wrapFFI(h.inner.Signal(ctx, signal))
@@ -155,11 +194,11 @@ func (h *ExecHandle) Close() error {
 // ctx controls only the start handshake; individual Recv calls take their
 // own ctx. Non-zero exit codes are NOT errors — inspect ExecEventExited.
 func (s *Sandbox) ExecStream(ctx context.Context, cmd string, args []string, opts ...ExecOption) (*ExecHandle, error) {
-	o := ExecOptions{}
+	o := ExecConfig{}
 	for _, opt := range opts {
 		opt(&o)
 	}
-	ffiOpts := ffi.ExecOptions{Args: args, Cwd: o.Cwd}
+	ffiOpts := ffi.ExecOptions{Args: args, Cwd: o.Cwd, StdinPipe: o.StdinPipe}
 	if o.Timeout > 0 {
 		ffiOpts.TimeoutSecs = timeoutSecsCeil(o.Timeout)
 	}

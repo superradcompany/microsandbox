@@ -40,9 +40,9 @@ func newTestSandbox(t *testing.T) *microsandbox.Sandbox {
 	t.Helper()
 	ctx := integrationCtx(t)
 	name := "go-sdk-test-" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
-	sb, err := microsandbox.NewSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
 	if err != nil {
-		t.Fatalf("NewSandbox: %v", err)
+		t.Fatalf("CreateSandbox: %v", err)
 	}
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -53,15 +53,15 @@ func newTestSandbox(t *testing.T) *microsandbox.Sandbox {
 	return sb
 }
 
-// TestNewSandboxAndClose verifies that a sandbox can be created and its handle
+// TestCreateSandboxAndClose verifies that a sandbox can be created and its handle
 // released without error. The name is available in ListSandboxes immediately
 // after creation.
-func TestNewSandboxAndClose(t *testing.T) {
+func TestCreateSandboxAndClose(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-lifecycle-" + t.Name()
-	sb, err := microsandbox.NewSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
 	if err != nil {
-		t.Fatalf("NewSandbox: %v", err)
+		t.Fatalf("CreateSandbox: %v", err)
 	}
 	if sb.Name() != name {
 		t.Errorf("Name() = %q, want %q", sb.Name(), name)
@@ -279,9 +279,9 @@ func TestVolumeLifecycle(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-vol-" + t.Name()
 
-	vol, err := microsandbox.NewVolume(ctx, name)
+	vol, err := microsandbox.CreateVolume(ctx, name)
 	if err != nil {
-		t.Fatalf("NewVolume: %v", err)
+		t.Fatalf("CreateVolume: %v", err)
 	}
 	if vol.Name() != name {
 		t.Errorf("Name() = %q, want %q", vol.Name(), name)
@@ -317,13 +317,13 @@ func TestVolumeAlreadyExists(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-dupvol-" + t.Name()
 
-	vol, err := microsandbox.NewVolume(ctx, name)
+	vol, err := microsandbox.CreateVolume(ctx, name)
 	if err != nil {
-		t.Fatalf("first NewVolume: %v", err)
+		t.Fatalf("first CreateVolume: %v", err)
 	}
 	t.Cleanup(func() { _ = vol.Remove(context.Background()) })
 
-	_, err = microsandbox.NewVolume(ctx, name)
+	_, err = microsandbox.CreateVolume(ctx, name)
 	if err == nil {
 		t.Fatal("expected error for duplicate volume")
 	}
@@ -373,12 +373,12 @@ func TestDetachedSandboxOutlivesHandle(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-detached-" + t.Name()
 
-	sb, err := microsandbox.NewSandbox(ctx, name,
+	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
 		microsandbox.WithDetached(),
 	)
 	if err != nil {
-		t.Fatalf("NewSandbox detached: %v", err)
+		t.Fatalf("CreateSandbox detached: %v", err)
 	}
 	// Detach the handle — sandbox should keep running. (Close would fire
 	// the SIGTERM safety net and stop the VM.)
@@ -386,10 +386,14 @@ func TestDetachedSandboxOutlivesHandle(t *testing.T) {
 		t.Fatalf("Detach: %v", err)
 	}
 
-	// Reattach and confirm it is still alive.
-	sb2, err := microsandbox.GetSandbox(ctx, name)
+	// Look up metadata, then connect to run commands.
+	handle, err := microsandbox.GetSandbox(ctx, name)
 	if err != nil {
 		t.Fatalf("GetSandbox after detach: %v", err)
+	}
+	sb2, err := handle.Connect(ctx)
+	if err != nil {
+		t.Fatalf("Connect after GetSandbox: %v", err)
 	}
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -418,12 +422,12 @@ func TestPortPublishing(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-ports-" + t.Name()
 
-	sb, err := microsandbox.NewSandbox(ctx, name,
+	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
 		microsandbox.WithPorts(map[uint16]uint16{17777: 7777}),
 	)
 	if err != nil {
-		t.Fatalf("NewSandbox with ports: %v", err)
+		t.Fatalf("CreateSandbox with ports: %v", err)
 	}
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -486,12 +490,12 @@ func TestNetworkPolicyNone(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-netpolicy-" + t.Name()
 
-	sb, err := microsandbox.NewSandbox(ctx, name,
+	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
-		microsandbox.WithNetwork(&microsandbox.NetworkOptions{Policy: "none"}),
+		microsandbox.WithNetwork(&microsandbox.NetworkConfig{Policy: "none"}),
 	)
 	if err != nil {
-		t.Fatalf("NewSandbox with network none: %v", err)
+		t.Fatalf("CreateSandbox with network none: %v", err)
 	}
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -518,12 +522,12 @@ func TestNetworkPolicyAllowAll(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-netallow-" + t.Name()
 
-	sb, err := microsandbox.NewSandbox(ctx, name,
+	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
-		microsandbox.WithNetwork(&microsandbox.NetworkOptions{Policy: "allow-all"}),
+		microsandbox.WithNetwork(&microsandbox.NetworkConfig{Policy: "allow-all"}),
 	)
 	if err != nil {
-		t.Fatalf("NewSandbox allow-all: %v", err)
+		t.Fatalf("CreateSandbox allow-all: %v", err)
 	}
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -553,15 +557,15 @@ func TestDNSBlockDomain(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-dns-" + t.Name()
 
-	sb, err := microsandbox.NewSandbox(ctx, name,
+	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
-		microsandbox.WithNetwork(&microsandbox.NetworkOptions{
+		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			Policy:       "allow-all",
 			BlockDomains: []string{"blocked-domain-test.example.com"},
 		}),
 	)
 	if err != nil {
-		t.Fatalf("NewSandbox with block_domains: %v", err)
+		t.Fatalf("CreateSandbox with block_domains: %v", err)
 	}
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -590,15 +594,15 @@ func TestDNSBlockDomainSuffix(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-dnssuffix-" + t.Name()
 
-	sb, err := microsandbox.NewSandbox(ctx, name,
+	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
-		microsandbox.WithNetwork(&microsandbox.NetworkOptions{
+		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			Policy:              "allow-all",
 			BlockDomainSuffixes: []string{".blocked-suffix-test.invalid"},
 		}),
 	)
 	if err != nil {
-		t.Fatalf("NewSandbox with block_domain_suffixes: %v", err)
+		t.Fatalf("CreateSandbox with block_domain_suffixes: %v", err)
 	}
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -632,14 +636,14 @@ func TestPatchText(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-patch-text-" + t.Name()
 
-	sb, err := microsandbox.NewSandbox(ctx, name,
+	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
 		microsandbox.WithPatches(
-			microsandbox.PatchText("/etc/go-sdk-test.conf", "hello-from-patch\n", nil, false),
+			microsandbox.Patch.Text("/etc/go-sdk-test.conf", "hello-from-patch\n", microsandbox.PatchOptions{}),
 		),
 	)
 	if err != nil {
-		t.Fatalf("NewSandbox with patch: %v", err)
+		t.Fatalf("CreateSandbox with patch: %v", err)
 	}
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -663,14 +667,14 @@ func TestPatchMkdir(t *testing.T) {
 	name := "go-sdk-patch-mkdir-" + t.Name()
 
 	mode := uint32(0o755)
-	sb, err := microsandbox.NewSandbox(ctx, name,
+	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
 		microsandbox.WithPatches(
-			microsandbox.PatchMkdir("/opt/go-sdk-dir", &mode),
+			microsandbox.Patch.Mkdir("/opt/go-sdk-dir", microsandbox.PatchOptions{Mode: &mode}),
 		),
 	)
 	if err != nil {
-		t.Fatalf("NewSandbox with mkdir patch: %v", err)
+		t.Fatalf("CreateSandbox with mkdir patch: %v", err)
 	}
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -696,14 +700,14 @@ func TestPatchAppend(t *testing.T) {
 	name := "go-sdk-patch-append-" + t.Name()
 
 	const marker = "go-sdk-append-marker"
-	sb, err := microsandbox.NewSandbox(ctx, name,
+	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
 		microsandbox.WithPatches(
-			microsandbox.PatchAppend("/etc/profile", "\n# "+marker+"\n"),
+			microsandbox.Patch.Append("/etc/profile", "\n# "+marker+"\n"),
 		),
 	)
 	if err != nil {
-		t.Fatalf("NewSandbox with append patch: %v", err)
+		t.Fatalf("CreateSandbox with append patch: %v", err)
 	}
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -726,15 +730,15 @@ func TestPatchSymlink(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-patch-symlink-" + t.Name()
 
-	sb, err := microsandbox.NewSandbox(ctx, name,
+	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
 		microsandbox.WithPatches(
-			microsandbox.PatchText("/tmp/original.txt", "original\n", nil, false),
-			microsandbox.PatchSymlink("/tmp/original.txt", "/tmp/link.txt", false),
+			microsandbox.Patch.Text("/tmp/original.txt", "original\n", microsandbox.PatchOptions{}),
+			microsandbox.Patch.Symlink("/tmp/original.txt", "/tmp/link.txt", microsandbox.PatchOptions{}),
 		),
 	)
 	if err != nil {
-		t.Fatalf("NewSandbox with symlink patch: %v", err)
+		t.Fatalf("CreateSandbox with symlink patch: %v", err)
 	}
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -939,17 +943,19 @@ func TestSecretPlaceholderSubstitution(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-secret-" + t.Name()
 
-	sb, err := microsandbox.NewSandbox(ctx, name,
+	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
-		microsandbox.WithSecrets(microsandbox.SecretOptions{
-			EnvVar:      "MY_API_KEY",
-			Value:       "super-secret-value-xyz",
-			AllowHosts:  []string{"api.example.com"},
-			Placeholder: "$MY_API_KEY_PLACEHOLDER",
-		}),
+		microsandbox.WithSecrets(microsandbox.Secret.Env(
+			"MY_API_KEY",
+			"super-secret-value-xyz",
+			microsandbox.SecretEnvOptions{
+				AllowHosts:  []string{"api.example.com"},
+				Placeholder: "$MY_API_KEY_PLACEHOLDER",
+			},
+		)),
 	)
 	if err != nil {
-		t.Fatalf("NewSandbox with secret: %v", err)
+		t.Fatalf("CreateSandbox with secret: %v", err)
 	}
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -982,9 +988,9 @@ func TestRemoveSandbox(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-remove-" + t.Name()
 
-	sb, err := microsandbox.NewSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
 	if err != nil {
-		t.Fatalf("NewSandbox: %v", err)
+		t.Fatalf("CreateSandbox: %v", err)
 	}
 	if _, err := sb.StopAndWait(ctx); err != nil {
 		t.Fatalf("StopAndWait: %v", err)

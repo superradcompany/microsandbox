@@ -72,7 +72,7 @@ func main() {
         log.Fatal(err)
     }
 
-    sb, err := microsandbox.NewSandbox(ctx, "my-sandbox",
+    sb, err := microsandbox.CreateSandbox(ctx, "my-sandbox",
         microsandbox.WithImage("alpine:3.19"),
         microsandbox.WithMemory(512),
         microsandbox.WithCPUs(1),
@@ -164,7 +164,7 @@ data, err := fs.Read(ctx, "/tmp/binary")
 // List a directory.
 entries, err := fs.List(ctx, "/etc")
 for _, e := range entries {
-    fmt.Printf("%s (%s)\n", e.Path, e.Kind) // Kind: "file"|"dir"|"symlink"|"other"
+    fmt.Printf("%s (%s)\n", e.Path, e.Kind) // Kind: "file"|"directory"|"symlink"|"other"
 }
 
 // File metadata.
@@ -174,13 +174,21 @@ fmt.Printf("size=%d isDir=%v\n", stat.Size, stat.IsDir)
 // Copy between host and guest.
 err = fs.CopyFromHost(ctx, "./local-file.txt", "/tmp/file.txt")
 err = fs.CopyToHost(ctx, "/tmp/output.txt", "./output.txt")
+
+// Directory and file manipulation inside the guest.
+err = fs.Mkdir(ctx, "/app/data")          // creates parents as needed
+err = fs.Copy(ctx, "/etc/hosts", "/tmp/hosts.bak")
+err = fs.Rename(ctx, "/tmp/a.txt", "/tmp/b.txt")
+ok, err := fs.Exists(ctx, "/tmp/b.txt")
+err = fs.Remove(ctx, "/tmp/b.txt")        // single file
+err = fs.RemoveDir(ctx, "/app/data")      // recursive
 ```
 
 ### Named Volumes
 
 ```go
 // Create a 100 MiB named volume.
-vol, err := microsandbox.NewVolume(ctx, "my-data",
+vol, err := microsandbox.CreateVolume(ctx, "my-data",
     microsandbox.WithVolumeQuota(100),
 )
 if err != nil {
@@ -193,7 +201,7 @@ defer microsandbox.RemoveVolume(ctx, "my-data")
 vols, err := microsandbox.ListVolumes(ctx)
 
 // ErrVolumeAlreadyExists on duplicate create.
-_, err = microsandbox.NewVolume(ctx, "my-data")
+_, err = microsandbox.CreateVolume(ctx, "my-data")
 if microsandbox.IsKind(err, microsandbox.ErrVolumeAlreadyExists) {
     // handle
 }
@@ -206,29 +214,27 @@ err = vol.Remove(ctx)
 
 ```go
 // Default: public internet only (blocks RFC-1918 private ranges).
-sb, err := microsandbox.NewSandbox(ctx, "public", microsandbox.WithImage("alpine:3.19"))
+sb, err := microsandbox.CreateSandbox(ctx, "public", microsandbox.WithImage("alpine:3.19"))
 
 // Fully airgapped.
-sb, err = microsandbox.NewSandbox(ctx, "isolated",
+sb, err = microsandbox.CreateSandbox(ctx, "isolated",
     microsandbox.WithImage("alpine:3.19"),
-    microsandbox.WithNetwork(&microsandbox.NetworkOptions{Policy: "none"}),
+    microsandbox.WithNetwork(microsandbox.NetworkPolicy.None()),
 )
 
 // Unrestricted.
-sb, err = microsandbox.NewSandbox(ctx, "open",
+sb, err = microsandbox.CreateSandbox(ctx, "open",
     microsandbox.WithImage("alpine:3.19"),
-    microsandbox.WithNetwork(&microsandbox.NetworkOptions{Policy: "allow-all"}),
+    microsandbox.WithNetwork(microsandbox.NetworkPolicy.AllowAll()),
 )
 
 // Custom rule set.
-sb, err = microsandbox.NewSandbox(ctx, "custom",
+sb, err = microsandbox.CreateSandbox(ctx, "custom",
     microsandbox.WithImage("alpine:3.19"),
-    microsandbox.WithNetwork(&microsandbox.NetworkOptions{
-        CustomPolicy: &microsandbox.CustomNetworkPolicy{
-            DefaultAction: "deny",
-            Rules: []microsandbox.NetworkRule{
-                {Action: "allow", Destination: "api.openai.com", Protocol: "tcp", Port: 443},
-            },
+    microsandbox.WithNetwork(&microsandbox.NetworkConfig{
+        DefaultAction: "deny",
+        Rules: []microsandbox.PolicyRule{
+            {Action: "allow", Destination: "api.openai.com", Protocol: "tcp", Port: 443},
         },
     }),
 )
@@ -237,9 +243,9 @@ sb, err = microsandbox.NewSandbox(ctx, "custom",
 ### DNS Filtering
 
 ```go
-sb, err := microsandbox.NewSandbox(ctx, "filtered",
+sb, err := microsandbox.CreateSandbox(ctx, "filtered",
     microsandbox.WithImage("alpine:3.19"),
-    microsandbox.WithNetwork(&microsandbox.NetworkOptions{
+    microsandbox.WithNetwork(&microsandbox.NetworkConfig{
         BlockDomains:        []string{"blocked.example.com"},
         BlockDomainSuffixes: []string{".ads"},
     }),
@@ -250,7 +256,7 @@ sb, err := microsandbox.NewSandbox(ctx, "filtered",
 
 ```go
 // host:8080 → guest:80
-sb, err := microsandbox.NewSandbox(ctx, "web",
+sb, err := microsandbox.CreateSandbox(ctx, "web",
     microsandbox.WithImage("python:3.12"),
     microsandbox.WithPorts(map[uint16]uint16{8080: 80}),
 )
@@ -261,12 +267,12 @@ sb, err := microsandbox.NewSandbox(ctx, "web",
 Secrets use placeholder substitution — the real value never enters the VM. It is only swapped in at the network layer for HTTPS requests to allowed hosts.
 
 ```go
-sb, err := microsandbox.NewSandbox(ctx, "agent",
+sb, err := microsandbox.CreateSandbox(ctx, "agent",
     microsandbox.WithImage("python:3.12"),
-    microsandbox.WithSecrets(microsandbox.NewSecret(
+    microsandbox.WithSecrets(microsandbox.Secret.Env(
         "OPENAI_API_KEY",
         os.Getenv("OPENAI_API_KEY"),
-        "api.openai.com",
+        microsandbox.SecretEnvOptions{AllowHosts: []string{"api.openai.com"}},
     )),
 )
 
@@ -280,14 +286,14 @@ sb, err := microsandbox.NewSandbox(ctx, "agent",
 Modify the filesystem before the VM boots:
 
 ```go
-sb, err := microsandbox.NewSandbox(ctx, "patched",
+sb, err := microsandbox.CreateSandbox(ctx, "patched",
     microsandbox.WithImage("alpine:3.19"),
     microsandbox.WithPatches(
-        microsandbox.PatchText("/etc/greeting.txt", "Hello!\n", nil, false),
-        microsandbox.PatchMkdir("/app", nil),
-        microsandbox.PatchText("/app/config.json", `{"debug":true}`, nil, false),
-        microsandbox.PatchCopyDir("./scripts", "/app/scripts", false),
-        microsandbox.PatchAppend("/etc/hosts", "127.0.0.1 myapp.local\n"),
+        microsandbox.Patch.Text("/etc/greeting.txt", "Hello!\n", microsandbox.PatchOptions{}),
+        microsandbox.Patch.Mkdir("/app", microsandbox.PatchOptions{}),
+        microsandbox.Patch.Text("/app/config.json", `{"debug":true}`, microsandbox.PatchOptions{}),
+        microsandbox.Patch.CopyDir("./scripts", "/app/scripts", microsandbox.PatchOptions{}),
+        microsandbox.Patch.Append("/etc/hosts", "127.0.0.1 myapp.local\n"),
     ),
 )
 ```
@@ -298,30 +304,34 @@ Sandboxes in detached mode survive the Go process:
 
 ```go
 // Create and detach.
-sb, err := microsandbox.NewSandbox(ctx, "background",
+sb, err := microsandbox.CreateSandbox(ctx, "background",
     microsandbox.WithImage("python:3.12"),
     microsandbox.WithDetached(),
 )
 if err != nil {
     log.Fatal(err)
 }
-sb.Detach() // release local handle; sandbox keeps running
+sb.Detach(ctx) // release local handle; sandbox keeps running
 
-// Later, from another process:
+// Later, from another process — get metadata then connect:
 handle, err := microsandbox.GetSandbox(ctx, "background")
 if err != nil {
     log.Fatal(err)
 }
-out, err := handle.Shell(ctx, "echo reconnected")
+sb2, err := handle.Connect(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+out, err := sb2.Shell(ctx, "echo reconnected")
 ```
 
 ### TLS Interception
 
 ```go
-sb, err := microsandbox.NewSandbox(ctx, "tls-inspect",
+sb, err := microsandbox.CreateSandbox(ctx, "tls-inspect",
     microsandbox.WithImage("python:3.12"),
-    microsandbox.WithNetwork(&microsandbox.NetworkOptions{
-        TLS: &microsandbox.TLSOptions{
+    microsandbox.WithNetwork(&microsandbox.NetworkConfig{
+        TLS: &microsandbox.TlsConfig{
             Bypass:           []string{"*.googleapis.com"},
             InterceptedPorts: []uint16{443},
         },
@@ -340,20 +350,14 @@ if err != nil {
 fmt.Printf("CPU: %.1f%%\n", m.CPUPercent)
 fmt.Printf("Memory: %.1f MiB\n", float64(m.MemoryBytes)/1024/1024)
 fmt.Printf("Uptime: %s\n", m.Uptime)
-
-// All sandboxes at once.
-all, err := microsandbox.AllSandboxMetrics(ctx)
-for name, metrics := range all {
-    fmt.Printf("%s: %.1f%%\n", name, metrics.CPUPercent)
-}
 ```
 
 ### Sandbox Listing
 
 ```go
-sandboxes, err := microsandbox.ListSandboxes(ctx)
-for _, info := range sandboxes {
-    fmt.Printf("%s: %s\n", info.Name, info.Status)
+names, err := microsandbox.ListSandboxes(ctx)
+for _, name := range names {
+    fmt.Println(name)
 }
 ```
 
@@ -364,14 +368,16 @@ for _, info := range sandboxes {
 | Function | Description |
 |----------|-------------|
 | `EnsureInstalled(ctx)` | Download runtime dependencies to `~/.microsandbox/` (idempotent) |
-| `NewSandbox(ctx, name, ...opts)` | Create and start a sandbox |
-| `GetSandbox(ctx, name)` | Reattach to a detached or already-running sandbox |
+| `CreateSandbox(ctx, name, ...opts)` | Create and start a sandbox |
+| `CreateSandboxDetached(ctx, name, ...opts)` | Create a sandbox in detached mode |
+| `StartSandbox(ctx, name)` | Boot a stopped sandbox by name |
+| `StartSandboxDetached(ctx, name)` | Boot a stopped sandbox in detached mode |
+| `GetSandbox(ctx, name)` | Fetch sandbox metadata; returns `*SandboxHandle` |
+| `ListSandboxes(ctx)` | List all known sandbox names |
 | `RemoveSandbox(ctx, name)` | Remove a stopped sandbox by name |
-| `ListSandboxes(ctx)` | List all known sandboxes |
-| `NewVolume(ctx, name, ...opts)` | Create a named persistent volume |
-| `RemoveVolume(ctx, name)` | Remove a named volume |
+| `CreateVolume(ctx, name, ...opts)` | Create a named persistent volume |
 | `ListVolumes(ctx)` | List all named volumes |
-| `AllSandboxMetrics(ctx)` | Get metrics for all running sandboxes |
+| `RemoveVolume(ctx, name)` | Remove a named volume |
 | `IsKind(err, kind)` | Test an error's `ErrorKind` |
 
 ### Types
@@ -379,13 +385,16 @@ for _, info := range sandboxes {
 | Type | Description |
 |------|-------------|
 | `Sandbox` | Live handle to a running sandbox — lifecycle, execution, filesystem |
+| `SandboxHandle` | Lightweight metadata reference; obtain via `GetSandbox`. Methods: `Connect`, `Start`, `StartDetached`, `Stop`, `Kill`, `Remove` |
 | `ExecOutput` | Captured stdout/stderr with exit status; inspect via `Stdout()`, `Stderr()`, `ExitCode()`, `Success()` |
 | `ExecHandle` | Streaming execution handle — call `Recv(ctx)` for events, `Signal(ctx, sig)` to send a signal |
 | `ExecEvent` | Stream event with `Kind`, `PID`, `Data`, `ExitCode` fields |
 | `SandboxFs` | Guest filesystem operations — obtain via `sandbox.FS()` |
 | `Volume` | Named persistent volume |
-| `SandboxInfo` | Sandbox listing info (name, status, timestamps) |
-| `SandboxMetrics` | Resource metrics (CPU %, memory bytes, disk I/O, network I/O, uptime) |
+| `Metrics` | Resource metrics (CPU %, memory bytes, disk I/O, network I/O, uptime) |
+| `SandboxConfig` / `NetworkConfig` / `TlsConfig` / `ExecConfig` / `VolumeConfig` | Configuration structs |
+| `SecretEntry`, `PolicyRule`, `PatchConfig` | Value types for secrets, network rules, and rootfs patches |
+| `Patch`, `Secret`, `NetworkPolicy` | Factory namespaces (`Patch.Text`, `Secret.Env`, `NetworkPolicy.None`, …) |
 
 ### Sandbox Methods
 
@@ -397,9 +406,11 @@ for _, info := range sandboxes {
 | `ShellStream(ctx, cmd)` | Streaming shell; returns `*ExecHandle` |
 | `FS()` | Return a `*SandboxFs` for guest filesystem access |
 | `Metrics(ctx)` | Return current resource metrics |
-| `StopAndWait(ctx)` | Stop the sandbox and wait for it to exit |
-| `Detach()` | Release the local handle; sandbox keeps running |
-| `Close()` | Release local resources (does not stop the VM) |
+| `Stop(ctx)` | Gracefully stop the sandbox (does not wait for VM exit) |
+| `StopAndWait(ctx)` | Stop the sandbox and wait for it to exit; returns the guest exit code |
+| `Kill(ctx)` | Terminate the sandbox immediately |
+| `Detach(ctx)` | Release the local handle; detached sandbox keeps running |
+| `Close()` | Release the Rust-side handle; for detached sandboxes prefer `Detach` |
 
 ### Functional Options
 
@@ -424,11 +435,24 @@ for _, info := range sandboxes {
 | Constant | Meaning |
 |----------|---------|
 | `ErrSandboxNotFound` | No sandbox with that name |
-| `ErrSandboxAlreadyExists` | Sandbox name already in use |
+| `ErrSandboxStillRunning` | Cannot remove a running sandbox |
 | `ErrVolumeNotFound` | No volume with that name |
 | `ErrVolumeAlreadyExists` | Volume name already in use |
 | `ErrExecTimeout` | Command exceeded `WithExecTimeout` |
+| `ErrFilesystem` | Guest filesystem operation failed |
+| `ErrImageNotFound` | OCI image reference did not resolve |
+| `ErrImageInUse` | Image is still referenced by a sandbox |
+| `ErrPatchFailed` | A rootfs patch could not be applied |
+| `ErrIO` | Host-side I/O error |
+| `ErrInvalidConfig` | Configuration rejected by the runtime |
+| `ErrInvalidArgument` | Malformed argument across the FFI boundary |
+| `ErrInvalidHandle` | Handle is stale, closed, or was never valid |
+| `ErrBufferTooSmall` | Response exceeded the fixed output buffer (stream instead) |
+| `ErrCancelled` | Operation cancelled via the caller's context |
 | `ErrLibraryNotLoaded` | `EnsureInstalled` was not called before using the SDK |
+| `ErrInternal` | Catch-all for unrecognised runtime errors |
+
+Additional kinds declared for forward compatibility with the Node/Python SDKs — currently surface as `ErrInternal` / `ErrInvalidConfig` / `ErrFilesystem` / `ErrImageNotFound`: `ErrSandboxNotRunning`, `ErrSandboxAlreadyExists`, `ErrExecFailed`, `ErrPathNotFound`, `ErrImagePullFailed`, `ErrNetworkPolicy`, `ErrSecretViolation`, `ErrTLS`.
 
 Use `microsandbox.IsKind(err, microsandbox.ErrSandboxNotFound)` to test.
 

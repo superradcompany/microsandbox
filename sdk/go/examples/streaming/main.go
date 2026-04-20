@@ -31,9 +31,9 @@ func main() {
 	name := fmt.Sprintf("go-sdk-stream-%d", time.Now().Unix())
 	log.Printf("creating sandbox %q", name)
 
-	sb, err := microsandbox.NewSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
+	sb, err := microsandbox.CreateSandbox(ctx, name, microsandbox.WithImage("alpine:3.19"))
 	if err != nil {
-		log.Fatalf("NewSandbox: %v", err)
+		log.Fatalf("CreateSandbox: %v", err)
 	}
 	defer func() {
 		stopCtx, c := context.WithTimeout(context.Background(), 30*time.Second)

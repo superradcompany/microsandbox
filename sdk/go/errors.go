@@ -8,6 +8,11 @@ import (
 )
 
 // ErrorKind identifies the specific type of microsandbox error.
+//
+// The set of kinds is aligned with the Node.js and Python SDKs so that
+// portable code written against one SDK compiles against another. Some
+// kinds are reserved for error paths that the current Rust runtime does
+// not yet emit; switch statements should include a default case.
 type ErrorKind int
 
 const (
@@ -17,6 +22,15 @@ const (
 
 	// ErrSandboxNotFound indicates the requested sandbox does not exist.
 	ErrSandboxNotFound
+
+	// ErrSandboxNotRunning indicates the sandbox exists but is not running.
+	// Reserved for future use; currently surfaces as ErrInternal.
+	ErrSandboxNotRunning
+
+	// ErrSandboxAlreadyExists indicates a sandbox with the given name
+	// already exists. Reserved for future use; currently surfaces as
+	// ErrInvalidConfig.
+	ErrSandboxAlreadyExists
 
 	// ErrSandboxStillRunning indicates a sandbox cannot be removed while
 	// it is still running.
@@ -31,6 +45,52 @@ const (
 
 	// ErrExecTimeout indicates a command execution exceeded its timeout.
 	ErrExecTimeout
+
+	// ErrExecFailed indicates a command failed for a reason other than a
+	// timeout or non-zero exit (e.g. the guest agent dropped the request).
+	// Reserved for future use; currently surfaces as ErrInternal.
+	ErrExecFailed
+
+	// ErrFilesystem indicates a filesystem operation inside the sandbox
+	// failed (e.g. read/write/list returned an error from the guest).
+	ErrFilesystem
+
+	// ErrPathNotFound indicates a sandbox filesystem path does not exist.
+	// Reserved for future use; currently surfaces as ErrFilesystem.
+	ErrPathNotFound
+
+	// ErrImageNotFound indicates the OCI image reference could not be
+	// resolved.
+	ErrImageNotFound
+
+	// ErrImageInUse indicates the image cannot be removed because one or
+	// more sandboxes are still referencing it.
+	ErrImageInUse
+
+	// ErrImagePullFailed indicates an image pull failed after resolution
+	// succeeded. Reserved for future use; currently surfaces as
+	// ErrImageNotFound.
+	ErrImagePullFailed
+
+	// ErrPatchFailed indicates a rootfs patch could not be applied before
+	// the VM booted.
+	ErrPatchFailed
+
+	// ErrNetworkPolicy indicates a network policy configuration or
+	// runtime violation. Reserved for future use; currently surfaces as
+	// ErrInvalidConfig.
+	ErrNetworkPolicy
+
+	// ErrSecretViolation indicates a secret was sent to a disallowed host.
+	// Reserved for future use; currently surfaces as ErrInternal.
+	ErrSecretViolation
+
+	// ErrTLS indicates a TLS interception error. Reserved for future use;
+	// currently surfaces as ErrInternal.
+	ErrTLS
+
+	// ErrIO indicates a host-side I/O error.
+	ErrIO
 
 	// ErrInvalidConfig indicates the sandbox or volume configuration was
 	// rejected by the runtime.
@@ -64,6 +124,10 @@ func (k ErrorKind) String() string {
 	switch k {
 	case ErrSandboxNotFound:
 		return "SandboxNotFound"
+	case ErrSandboxNotRunning:
+		return "SandboxNotRunning"
+	case ErrSandboxAlreadyExists:
+		return "SandboxAlreadyExists"
 	case ErrSandboxStillRunning:
 		return "SandboxStillRunning"
 	case ErrVolumeNotFound:
@@ -72,6 +136,28 @@ func (k ErrorKind) String() string {
 		return "VolumeAlreadyExists"
 	case ErrExecTimeout:
 		return "ExecTimeout"
+	case ErrExecFailed:
+		return "ExecFailed"
+	case ErrFilesystem:
+		return "Filesystem"
+	case ErrPathNotFound:
+		return "PathNotFound"
+	case ErrImageNotFound:
+		return "ImageNotFound"
+	case ErrImageInUse:
+		return "ImageInUse"
+	case ErrImagePullFailed:
+		return "ImagePullFailed"
+	case ErrPatchFailed:
+		return "PatchFailed"
+	case ErrNetworkPolicy:
+		return "NetworkPolicy"
+	case ErrSecretViolation:
+		return "SecretViolation"
+	case ErrTLS:
+		return "TLS"
+	case ErrIO:
+		return "IO"
 	case ErrInvalidConfig:
 		return "InvalidConfig"
 	case ErrInvalidArgument:
@@ -146,6 +232,16 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrVolumeAlreadyExists
 	case ffi.KindExecTimeout:
 		return ErrExecTimeout
+	case ffi.KindFilesystem:
+		return ErrFilesystem
+	case ffi.KindImageNotFound:
+		return ErrImageNotFound
+	case ffi.KindImageInUse:
+		return ErrImageInUse
+	case ffi.KindPatchFailed:
+		return ErrPatchFailed
+	case ffi.KindIO:
+		return ErrIO
 	case ffi.KindInvalidConfig:
 		return ErrInvalidConfig
 	case ffi.KindInvalidArgument:
