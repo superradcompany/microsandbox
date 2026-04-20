@@ -15,7 +15,7 @@ The knobs below cover the day-to-day controls. For the rebinding and TOCTOU prot
 
 ## Blocking domains
 
-Block lookups by exact match or suffix (e.g. `*.tracking.com`). Blocked queries get a local `REFUSED` response — the upstream resolver never sees them.
+Block lookups by exact match or suffix (e.g. `*.tracking.com`). Blocked queries get a local `REFUSED` response, so the upstream resolver never sees them.
 
 <CodeGroup>
 ```rust Rust
@@ -130,11 +130,11 @@ msb create python --name safe-agent \
 
 ## Domain-based policy rules
 
-Network policy rules can target domains directly (`Destination::Domain`, `Destination::DomainSuffix`). Matching works by observing DNS responses as they flow through the interceptor and tracking which IPs belong to which domains — a connection to `93.184.216.34` is only allowed by a rule targeting `example.com` if that IP actually came back as an answer to a lookup for `example.com` from this sandbox.
+Network policy rules can target domains directly (`Destination::Domain`, `Destination::DomainSuffix`). Matching works by observing DNS responses as they flow through the interceptor and tracking which IPs belong to which domains. A connection to `93.184.216.34` is only allowed by a rule targeting `example.com` if that IP actually came back as an answer to a lookup for `example.com` from this sandbox.
 
 Because of this, domain rules only take effect on connections that are preceded by a DNS lookup from inside the sandbox. An application that connects to a hard-coded IP it didn't resolve through the interceptor won't match any domain rule.
 
 ## See also
 
-- [Security model](/networking/security-model) — rebinding protection and DNS-to-IP binding (TOCTOU defense)
-- [TLS interception](/networking/tls) — domains that get intercepted also go through TLS inspection
+- [Security model](/networking/security-model): rebinding protection and DNS-to-IP binding (TOCTOU defense)
+- [TLS interception](/networking/tls): domains that get intercepted also go through TLS inspection

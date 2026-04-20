@@ -10,7 +10,7 @@ Enable HTTPS traffic inspection so policy rules, logging, and other controls can
 
 When you enable TLS interception:
 
-1. A CA key and certificate are generated for the sandbox at creation time. The CA is scoped to that sandbox — it's not shared across sandboxes or with the host.
+1. A CA key and certificate are generated for the sandbox at creation time. The CA is scoped to that sandbox: it's not shared across sandboxes or with the host.
 2. The guest's trust store is updated to trust this CA.
 3. When the guest opens an HTTPS connection, the host-side proxy intercepts the handshake, generates a leaf certificate for the target domain on the fly, and signs it with the per-sandbox CA.
 4. The proxy opens its own TLS connection to the upstream server and bridges the two.
@@ -72,17 +72,17 @@ msb create python --name agent \
 
 ## Bypass patterns
 
-Some domains don't play well with interception — typically ones whose clients pin a specific certificate or public key instead of trusting the system CA store. Mobile apps talking to their vendor's backend (Apple, Google services) and software update endpoints are the usual suspects. Add them to the bypass list and their traffic flows through as-is, encrypted end-to-end between the guest and the upstream server.
+Some domains don't play well with interception, typically ones whose clients pin a specific certificate or public key instead of trusting the system CA store. Mobile apps talking to their vendor's backend (Apple, Google services) and software update endpoints are the usual suspects. Add them to the bypass list and their traffic flows through as-is, encrypted end-to-end between the guest and the upstream server.
 
 Bypass patterns accept exact matches (`api.example.com`) and wildcards (`*.gov`, `*.apple.com`).
 
 ## Limits
 
-- **Pinned clients bypass the trust store.** Any client that pins the server's certificate or public key — rather than trusting the system CA — will fail TLS interception and needs to be bypassed explicitly.
+- **Pinned clients bypass the trust store.** Any client that pins the server's certificate or public key (rather than trusting the system CA) will fail TLS interception and needs to be bypassed explicitly.
 - **Bypassed traffic is opaque.** Policy checks that depend on inspecting request content (URL-based rules, secret injection with `require_tls_identity`) don't apply on bypassed domains.
 - **Client certificates are not proxied.** mTLS flows where the guest is the one presenting a client certificate aren't supported through interception; add those hosts to the bypass list.
 
 ## See also
 
-- [DNS](/networking/dns) — the DNS interceptor is what makes per-host rules possible
-- [Security model](/networking/security-model) — how TLS interception interacts with secret injection and SSRF defenses
+- [DNS](/networking/dns): the DNS interceptor is what makes per-host rules possible
+- [Security model](/networking/security-model): how TLS interception interacts with secret injection and SSRF defenses

@@ -1,5 +1,5 @@
 ---
-title: Networking
+title: Overview
 description: Control network access and isolation
 icon: "network-wired"
 ---
@@ -155,7 +155,7 @@ sb = await Sandbox.create(
 
 </CodeGroup>
 
-Rules can also target domains directly (`Destination::Domain`, `Destination::DomainSuffix`). Those rely on DNS pinning so the sandbox can map a connection's destination IP back to the domain that resolved to it — see [DNS](/networking/dns) and the [security model](/networking/security-model) for how that works.
+Rules can also target domains directly (`Destination::Domain`, `Destination::DomainSuffix`). Those rely on DNS pinning so the sandbox can map a connection's destination IP back to the domain that resolved to it. See [DNS](/networking/dns) and the [security model](/networking/security-model) for how that works.
 
 ## Port mapping
 
@@ -211,6 +211,6 @@ For most sandboxed workloads, networking behaves the way you'd expect:
 
 ## Next
 
-- [DNS](/networking/dns) — domain blocking, pinned nameservers, query timeouts
-- [TLS interception](/networking/tls) — HTTPS inspection with an auto-generated CA
-- [Security model](/networking/security-model) — how the stack defends against SSRF, rebinding, and metadata exfiltration
+- [DNS](/networking/dns): domain blocking, pinned nameservers, query timeouts
+- [TLS interception](/networking/tls): HTTPS inspection with an auto-generated CA
+- [Security model](/networking/security-model): how the stack defends against SSRF, rebinding, and metadata exfiltration

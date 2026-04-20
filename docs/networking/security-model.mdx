@@ -10,15 +10,15 @@ microsandbox's networking defaults are shaped around giving an AI agent, a scrap
 
 The largest class of real damage comes from workloads reaching things that live *inside* your network: the host machine itself, a local database, another VM on the same subnet. The `public_only` preset (the default) addresses this by dropping any packet whose destination falls in:
 
-- `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` — RFC1918 private ranges
-- `127.0.0.0/8` — loopback
-- `169.254.0.0/16` — link-local
+- `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (RFC1918 private ranges)
+- `127.0.0.0/8` (loopback)
+- `169.254.0.0/16` (link-local)
 
 If an agent runs `curl http://192.168.1.10` or `curl http://localhost:5432`, the packet is dropped before it leaves the host stack. Use `allow_all` only when the workload genuinely needs to reach local services, and `none` when it doesn't need network at all.
 
 ## Cloud metadata endpoints
 
-On AWS, GCP, Azure, and similar platforms, `169.254.169.254` is the instance metadata service — a well-known SSRF target because it hands out temporary credentials to anything that can connect. Because it sits in link-local space, the `public_only` preset already blocks it. For custom policies that start from `allow_all`, `DestinationGroup::Metadata` lets you deny it explicitly:
+On AWS, GCP, Azure, and similar platforms, `169.254.169.254` is the instance metadata service, a well-known SSRF target because it hands out temporary credentials to anything that can connect. Because it sits in link-local space, the `public_only` preset already blocks it. For custom policies that start from `allow_all`, `DestinationGroup::Metadata` lets you deny it explicitly:
 
 ```rust
 Rule::deny_outbound(Destination::Group(DestinationGroup::Metadata)),
@@ -68,5 +68,5 @@ The networking stack doesn't try to defend against:
 
 ## See also
 
-- [DNS](/networking/dns) — the controls that ride on the DNS interceptor
-- [TLS interception](/networking/tls) — plaintext visibility for per-host policy and secret injection
+- [DNS](/networking/dns): the controls that ride on the DNS interceptor
+- [TLS interception](/networking/tls): plaintext visibility for per-host policy and secret injection
