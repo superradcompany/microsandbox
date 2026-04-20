@@ -260,17 +260,14 @@ async fn dns_forwarder_task(
             }
         }
     } else {
-        match read_resolv_conf(Path::new(RESOLV_CONF_PATH)).await {
+        match read_host_dns_servers().await {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => {
-                tracing::error!(
-                    path = RESOLV_CONF_PATH,
-                    "no upstream DNS servers configured"
-                );
+                tracing::error!("no upstream DNS servers discovered from host");
                 return;
             }
             Err(e) => {
-                tracing::error!(path = RESOLV_CONF_PATH, error = %e, "failed to read resolv.conf");
+                tracing::error!(error = %e, "failed to read host DNS configuration");
                 return;
             }
         }
@@ -391,6 +388,43 @@ fn build_status_response(query: &Message, rcode: ResponseCode) -> Option<Bytes> 
         response.add_query(q.clone());
     }
     response.to_bytes().ok().map(Bytes::from)
+}
+
+/// Read the host's configured DNS servers as `SocketAddr`s on port 53.
+///
+/// On macOS the authoritative source is `SystemConfiguration.framework`
+/// (the dynamic store `configd` maintains), not `/etc/resolv.conf` —
+/// VPN + split-DNS setups leave the file either stale or pointing at
+/// only one leg of the resolver table. We query
+/// `State:/Network/Global/DNS` first and only fall back to the file if
+/// the dynamic store is unavailable or reports no servers.
+///
+/// On Linux the file is authoritative.
+async fn read_host_dns_servers() -> std::io::Result<Vec<SocketAddr>> {
+    #[cfg(target_os = "macos")]
+    {
+        match super::scdynamicstore::read_dns_servers() {
+            Ok(servers) if !servers.is_empty() => {
+                tracing::debug!(
+                    count = servers.len(),
+                    "loaded nameservers from SCDynamicStore"
+                );
+                return Ok(servers);
+            }
+            Ok(_) => {
+                tracing::debug!(
+                    "SCDynamicStore returned no nameservers; falling back to /etc/resolv.conf"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "SCDynamicStore lookup failed; falling back to /etc/resolv.conf"
+                );
+            }
+        }
+    }
+    read_resolv_conf(Path::new(RESOLV_CONF_PATH)).await
 }
 
 /// Parse a `resolv.conf`-format file and return the `nameserver` entries

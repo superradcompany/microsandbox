@@ -7,4 +7,7 @@
 pub mod interceptor;
 pub mod parse;
 
+#[cfg(target_os = "macos")]
+pub(crate) mod scdynamicstore;
+
 pub use parse::{NameserverSpec, ParseNameserverError, parse_nameserver};

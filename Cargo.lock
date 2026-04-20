@@ -2664,6 +2664,7 @@ name = "microsandbox-network"
 version = "0.3.14"
 dependencies = [
  "bytes",
+ "core-foundation 0.9.4",
  "crossbeam-queue",
  "dirs",
  "futures",
@@ -2681,6 +2682,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "smoltcp",
+ "system-configuration",
  "thiserror 2.0.18",
  "time",
  "tokio",
