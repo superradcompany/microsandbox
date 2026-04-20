@@ -507,10 +507,7 @@ impl JsPullSession {
         tokio::spawn(async move {
             while let Some(event) = handle.recv().await {
                 match tx.try_send(convert_pull_progress(event)) {
-                    Ok(()) => {}
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        // Drop overflowed progress events.
-                    }
+                    Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
                     Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                 }
             }
