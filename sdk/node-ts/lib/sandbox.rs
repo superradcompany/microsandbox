@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use microsandbox::sandbox::{
-    NetworkPolicy, PullPolicy, PullProgress, PullProgressHandle,
-    SandboxConfig as RustSandboxConfig,
+    NetworkPolicy, PullPolicy, PullProgress, PullProgressHandle, SandboxConfig as RustSandboxConfig,
 };
 use microsandbox::{LogLevel, MicrosandboxResult, RegistryAuth as RustRegistryAuth};
 use microsandbox_network::dns;
@@ -75,7 +74,9 @@ pub struct JsMetricsStream {
 #[napi(async_iterator, js_name = "PullSession")]
 pub struct JsPullSession {
     rx: Arc<Mutex<tokio::sync::mpsc::Receiver<PullEvent>>>,
-    task: Arc<Mutex<Option<tokio::task::JoinHandle<MicrosandboxResult<microsandbox::sandbox::Sandbox>>>>>,
+    task: Arc<
+        Mutex<Option<tokio::task::JoinHandle<MicrosandboxResult<microsandbox::sandbox::Sandbox>>>>,
+    >,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -128,8 +129,7 @@ impl Sandbox {
     #[napi(js_name = "createWithProgress")]
     pub async fn create_with_progress(config: SandboxConfig) -> Result<JsPullSession> {
         let rust_config = convert_config(config).await?;
-        let (handle, task) =
-            microsandbox::sandbox::Sandbox::create_with_pull_progress(rust_config);
+        let (handle, task) = microsandbox::sandbox::Sandbox::create_with_pull_progress(rust_config);
         Ok(JsPullSession::new(handle, task))
     }
 
