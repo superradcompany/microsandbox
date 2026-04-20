@@ -602,6 +602,20 @@ struct SandboxCreateOpts {
     secrets: Vec<SecretOpts>,
     #[serde(default)]
     patches: Vec<PatchOpts>,
+    /// Volume mounts: guest_path → MountSpec.
+    #[serde(default)]
+    volumes: HashMap<String, MountSpec>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct MountSpec {
+    bind: Option<String>,
+    named: Option<String>,
+    #[serde(default)]
+    tmpfs: bool,
+    #[serde(default)]
+    readonly: bool,
+    size_mib: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -831,6 +845,30 @@ fn apply_patch(
     Ok(builder.add_patch(patch))
 }
 
+fn apply_volume(
+    builder: microsandbox::sandbox::SandboxBuilder,
+    guest_path: &str,
+    m: &MountSpec,
+) -> Result<microsandbox::sandbox::SandboxBuilder, FfiError> {
+    Ok(builder.volume(guest_path, |mb| {
+        let mb = if let Some(ref host) = m.bind {
+            mb.bind(host)
+        } else if let Some(ref name) = m.named {
+            mb.named(name)
+        } else if m.tmpfs {
+            mb.tmpfs()
+        } else {
+            mb
+        };
+        let mb = if m.readonly { mb.readonly() } else { mb };
+        if let Some(siz) = m.size_mib {
+            mb.size(siz)
+        } else {
+            mb
+        }
+    }))
+}
+
 fn parse_action(
     s: &str,
 ) -> Result<microsandbox_network::policy::Action, FfiError> {
@@ -909,6 +947,10 @@ pub extern "C" fn msb_sandbox_create(
             // Patches.
             for p in &opts.patches {
                 builder = apply_patch(builder, p)?;
+            }
+            // Volume mounts.
+            for (guest_path, mount) in &opts.volumes {
+                builder = apply_volume(builder, guest_path, mount)?;
             }
 
             let config = builder.build()?;
@@ -1956,6 +1998,24 @@ pub extern "C" fn msb_exec_close(
     })
 }
 
+/// Return the internal protocol ID for an exec session. Synchronous.
+/// Returns `{"id":"<string>"}`.
+#[unsafe(no_mangle)]
+pub extern "C" fn msb_exec_id(
+    exec_handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run(buf, buf_len, || {
+        let entry = get_exec(exec_handle)?;
+        let eh = entry
+            .lock()
+            .map_err(|_| FfiError::internal("exec handle mutex poisoned"))?;
+        let id = eh.id();
+        Ok(format!(r#"{{"id":"{id}"}}"#))
+    })
+}
+
 /// Send a Unix signal to the running process.
 /// signal: standard Unix signal number (e.g. 15 = SIGTERM, 9 = SIGKILL).
 #[unsafe(no_mangle)]
@@ -2280,8 +2340,13 @@ pub extern "C" fn msb_volume_get(
                 s.push('}');
                 s
             };
+            let path = microsandbox::config::config()
+                .volumes_dir()
+                .join(vh.name())
+                .to_string_lossy()
+                .into_owned();
             Ok(format!(
-                r#"{{"name":"{name}","quota_mib":{quota},"used_bytes":{used},"labels":{labels},"created_at_unix":{created}}}"#,
+                r#"{{"name":"{name}","path":"{path}","quota_mib":{quota},"used_bytes":{used},"labels":{labels},"created_at_unix":{created}}}"#,
                 name = vh.name(),
                 used = vh.used_bytes(),
                 labels = labels_json,

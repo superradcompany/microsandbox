@@ -81,6 +81,7 @@ typedef char *(*msb_exec_signal_fn)(uint64_t cancel_id, uint64_t exec_handle, in
 typedef char *(*msb_exec_collect_fn)(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_exec_wait_fn)(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_exec_kill_fn)(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_exec_id_fn)(uint64_t exec_handle, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_fs_read_fn)(uint64_t cancel_id, uint64_t handle, const char *path, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_fs_write_fn)(uint64_t cancel_id, uint64_t handle, const char *path, const char *data_b64, uint8_t *buf, size_t buf_len);
@@ -173,6 +174,7 @@ static msb_sandbox_owns_lifecycle_fn ptr_msb_sandbox_owns_lifecycle = NULL;
 static msb_exec_collect_fn         ptr_msb_exec_collect         = NULL;
 static msb_exec_wait_fn            ptr_msb_exec_wait            = NULL;
 static msb_exec_kill_fn            ptr_msb_exec_kill            = NULL;
+static msb_exec_id_fn              ptr_msb_exec_id              = NULL;
 static msb_sandbox_attach_fn      ptr_msb_sandbox_attach      = NULL;
 static msb_sandbox_attach_shell_fn ptr_msb_sandbox_attach_shell = NULL;
 static msb_sandbox_remove_persisted_fn ptr_msb_sandbox_remove_persisted = NULL;
@@ -267,6 +269,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_exec_collect);
 	RESOLVE(msb_exec_wait);
 	RESOLVE(msb_exec_kill);
+	RESOLVE(msb_exec_id);
 	RESOLVE(msb_sandbox_attach);
 	RESOLVE(msb_sandbox_attach_shell);
 	RESOLVE(msb_sandbox_remove_persisted);
@@ -432,6 +435,9 @@ char *call_msb_exec_wait(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf,
 }
 char *call_msb_exec_kill(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_exec_kill ? ptr_msb_exec_kill(cancel_id, exec_handle, buf, buf_len) : NULL;
+}
+char *call_msb_exec_id(uint64_t exec_handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_exec_id ? ptr_msb_exec_id(exec_handle, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_attach(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_attach ? ptr_msb_sandbox_attach(cancel_id, handle, cmd, opts_json, buf, buf_len) : NULL;
@@ -670,16 +676,26 @@ func call(ctx context.Context, fn func(cancelID C.uint64_t, buf *C.uint8_t, bufL
 // CreateOptions matches the JSON payload shape expected by msb_sandbox_create.
 // Zero-valued fields are omitted; the Rust side applies defaults.
 type CreateOptions struct {
-	Image     string            `json:"image,omitempty"`
-	MemoryMiB uint32            `json:"memory_mib,omitempty"`
-	CPUs      uint8             `json:"cpus,omitempty"`
-	Workdir   string            `json:"workdir,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
-	Detached  bool              `json:"detached,omitempty"`
-	Ports     map[uint16]uint16 `json:"ports,omitempty"`
-	Network   *NetworkOptions   `json:"network,omitempty"`
-	Secrets   []SecretOptions   `json:"secrets,omitempty"`
-	Patches   []PatchOptions    `json:"patches,omitempty"`
+	Image     string                `json:"image,omitempty"`
+	MemoryMiB uint32                `json:"memory_mib,omitempty"`
+	CPUs      uint8                 `json:"cpus,omitempty"`
+	Workdir   string                `json:"workdir,omitempty"`
+	Env       map[string]string     `json:"env,omitempty"`
+	Detached  bool                  `json:"detached,omitempty"`
+	Ports     map[uint16]uint16     `json:"ports,omitempty"`
+	Network   *NetworkOptions       `json:"network,omitempty"`
+	Secrets   []SecretOptions       `json:"secrets,omitempty"`
+	Patches   []PatchOptions        `json:"patches,omitempty"`
+	Volumes   map[string]MountSpec  `json:"volumes,omitempty"`
+}
+
+// MountSpec describes a volume mount for a sandbox.
+type MountSpec struct {
+	Bind     string `json:"bind,omitempty"`
+	Named    string `json:"named,omitempty"`
+	Tmpfs    bool   `json:"tmpfs,omitempty"`
+	Readonly bool   `json:"readonly,omitempty"`
+	SizeMiB  uint32 `json:"size_mib,omitempty"`
 }
 
 // NetworkOptions is the JSON representation of the network config block.
@@ -1480,6 +1496,32 @@ func (h *ExecStreamHandle) Wait(ctx context.Context) (int, error) {
 	return resp.ExitCode, nil
 }
 
+// ID returns the internal protocol ID for this exec session.
+func (h *ExecStreamHandle) ID() (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	buf := make([]byte, defaultBufSize)
+	errPtr := C.call_msb_exec_id(h.handle, (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+	if errPtr != nil {
+		msg := C.GoString(errPtr)
+		C.call_msb_free_string(errPtr)
+		var e Error
+		if jerr := json.Unmarshal([]byte(msg), &e); jerr != nil {
+			e = Error{Kind: KindInternal, Message: msg}
+		}
+		return "", &e
+	}
+	out := C.GoString((*C.char)(unsafe.Pointer(&buf[0])))
+	var resp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", fmt.Errorf("parse exec_id: %w", err)
+	}
+	return resp.ID, nil
+}
+
 // Kill sends SIGKILL to the running exec process.
 func (h *ExecStreamHandle) Kill(ctx context.Context) error {
 	if err := ensureLoaded(); err != nil {
@@ -2048,10 +2090,11 @@ func ListVolumes(ctx context.Context) ([]string, error) {
 
 // VolumeHandleInfo carries metadata for a volume returned by GetVolume.
 type VolumeHandleInfo struct {
-	Name         string
-	QuotaMiB     *uint32
-	UsedBytes    uint64
-	Labels       map[string]string
+	Name          string
+	Path          string
+	QuotaMiB      *uint32
+	UsedBytes     uint64
+	Labels        map[string]string
 	CreatedAtUnix *int64
 }
 
@@ -2069,17 +2112,19 @@ func GetVolume(ctx context.Context, name string) (*VolumeHandleInfo, error) {
 		return nil, err
 	}
 	var raw struct {
-		Name         string            `json:"name"`
-		QuotaMiB     *uint32           `json:"quota_mib"`
-		UsedBytes    uint64            `json:"used_bytes"`
-		Labels       map[string]string `json:"labels"`
-		CreatedAtUnix *int64           `json:"created_at_unix"`
+		Name          string            `json:"name"`
+		Path          string            `json:"path"`
+		QuotaMiB      *uint32           `json:"quota_mib"`
+		UsedBytes     uint64            `json:"used_bytes"`
+		Labels        map[string]string `json:"labels"`
+		CreatedAtUnix *int64            `json:"created_at_unix"`
 	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
 		return nil, fmt.Errorf("parse volume_get: %w", err)
 	}
 	return &VolumeHandleInfo{
 		Name:          raw.Name,
+		Path:          raw.Path,
 		QuotaMiB:      raw.QuotaMiB,
 		UsedBytes:     raw.UsedBytes,
 		Labels:        raw.Labels,
