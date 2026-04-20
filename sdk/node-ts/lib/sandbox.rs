@@ -5,7 +5,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use microsandbox::sandbox::{NetworkPolicy, PullPolicy, SandboxConfig as RustSandboxConfig};
 use microsandbox::{LogLevel, RegistryAuth as RustRegistryAuth};
-use microsandbox_network::dns;
+use microsandbox_network::dns::Nameserver;
 use microsandbox_network::policy::{
     Action, Destination, DestinationGroup, Direction, PortRange, Protocol, Rule,
 };
@@ -546,15 +546,10 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
         }
     }
     if let Some(ref network) = config.network {
-        let dns_nameserver_specs: Vec<dns::NameserverSpec> = if let Some(ref dns) = network.dns
+        let dns_nameservers = if let Some(ref dns) = network.dns
             && let Some(ref nameservers) = dns.nameservers
         {
-            nameservers
-                .iter()
-                .map(|s| {
-                    dns::parse_nameserver(s).map_err(|e| napi::Error::from_reason(e.to_string()))
-                })
-                .collect::<Result<Vec<_>, _>>()?
+            parse_nameservers(nameservers)?
         } else {
             Vec::new()
         };
@@ -598,8 +593,8 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
                     if let Some(rebind) = rebind_protection {
                         d = d.rebind_protection(rebind);
                     }
-                    if !dns_nameserver_specs.is_empty() {
-                        d = d.nameservers(dns_nameserver_specs);
+                    if !dns_nameservers.is_empty() {
+                        d = d.nameservers(dns_nameservers);
                     }
                     if let Some(ms) = query_timeout_ms {
                         d = d.query_timeout_ms(u64::from(ms));
@@ -687,6 +682,18 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
     }
 
     builder.build().map_err(to_napi_error)
+}
+
+/// Parse user-supplied nameserver strings into [`Nameserver`]s, wrapping any
+/// parse error in a napi `Error` so it surfaces as a JS exception.
+fn parse_nameservers(nameservers: &[String]) -> Result<Vec<Nameserver>> {
+    nameservers
+        .iter()
+        .map(|s| {
+            s.parse::<Nameserver>()
+                .map_err(|e| napi::Error::from_reason(e.to_string()))
+        })
+        .collect()
 }
 
 fn convert_mount(

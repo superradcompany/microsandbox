@@ -7,7 +7,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use serde::{Deserialize, Serialize};
 
-use crate::dns::NameserverSpec;
+use crate::dns::Nameserver;
 
 use crate::policy::NetworkPolicy;
 use crate::secrets::config::SecretsConfig;
@@ -102,7 +102,7 @@ pub struct DnsConfig {
     /// resolv.conf is incomplete. Accepts IPs, `IP:PORT`, or hostnames
     /// (resolved once at startup via the host's OS resolver).
     #[serde(default)]
-    pub nameservers: Vec<NameserverSpec>,
+    pub nameservers: Vec<Nameserver>,
 
     /// Per-query timeout in milliseconds. Default: 5000.
     #[serde(default = "default_query_timeout_ms")]

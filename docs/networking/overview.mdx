@@ -263,15 +263,15 @@ By default the sandbox forwards DNS queries to whatever nameservers are listed i
 <CodeGroup>
 
 ```rust Rust
-use microsandbox_network::dns::NameserverSpec;
+use microsandbox_network::dns::Nameserver;
 
 let sb = Sandbox::builder("safe-agent")
     .image("python")
     .network(|n| n
         .dns(|d| d
             .nameservers([
-                "1.1.1.1".parse::<NameserverSpec>()?,
-                "1.0.0.1".parse::<NameserverSpec>()?,
+                "1.1.1.1".parse::<Nameserver>()?,
+                "1.0.0.1".parse::<Nameserver>()?,
             ])
             .query_timeout_ms(3000)
         )

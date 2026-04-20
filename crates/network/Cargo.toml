@@ -49,5 +49,7 @@ tracing = { workspace = true }
 # than /etc/resolv.conf. On VPN + split-DNS setups, the file version is
 # stale or incomplete. These deps let us query the live system state.
 [target.'cfg(target_os = "macos")'.dependencies]
+# Pinned to 0.9 to match system-configuration 0.7. Bumping to 0.10 would
+# create two incompatible CFString/CFArray/... types in the build.
 core-foundation = "0.9"
 system-configuration = "0.7"

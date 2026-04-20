@@ -61,7 +61,7 @@ Configure DNS interception via a closure. See [`DnsBuilder`](#dnsbuilder) for th
     .dns(|d| d
         .block_domain("malware.example.com")
         .block_domain_suffix(".tracking.com")
-        .nameservers(["1.1.1.1".parse::<NameserverSpec>()?])
+        .nameservers(["1.1.1.1".parse::<Nameserver>()?])
         .query_timeout_ms(3000)
     )
 )
@@ -190,21 +190,21 @@ When enabled, DNS responses that resolve to private IP addresses are blocked. Th
 #### nameservers()
 
 ```rust
-fn nameservers<I>(self, specs: I) -> Self
+fn nameservers<I>(self, nameservers: I) -> Self
 where
     I: IntoIterator,
-    I::Item: Into<NameserverSpec>,
+    I::Item: Into<Nameserver>,
 ```
 
 Set the upstream nameservers to forward DNS queries to. When one or more are set, the interceptor uses these instead of the nameservers in the host's `/etc/resolv.conf`. Replaces any previously-set nameservers. Useful for pinning specific resolvers (e.g. `1.1.1.1:53`) or working around split-DNS / VPN setups.
 
-Each element is any type convertible into `NameserverSpec` (`SocketAddr`, `IpAddr`, or a parsed string via `"dns.google:53".parse::<NameserverSpec>()?`). Hostnames are resolved once at startup via the host's OS resolver.
+Each element is any type convertible into `Nameserver` (`SocketAddr`, `IpAddr`, or a parsed string via `"dns.google:53".parse::<Nameserver>()?`). Hostnames are resolved once at startup via the host's OS resolver.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
-| specs | `IntoIterator<Item: Into<NameserverSpec>>` | Iterable of nameserver specs |
+| nameservers | `IntoIterator<Item: Into<Nameserver>>` | Iterable of nameservers |
 
 ---
 
