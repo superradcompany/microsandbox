@@ -797,7 +797,15 @@ export interface SandboxConfig {
   patches?: Array<PatchConfig>
   /** Image pull policy: "always", "if-missing", or "never". */
   pullPolicy?: string
-  /** Log level: "trace", "debug", "info", "warn", "error". */
+  /**
+   * Log level for the sandbox supervisor process: "trace", "debug", "info",
+   * "warn", "error".
+   *
+   * Controls verbosity of the spawned `msb` supervisor's own logs, which are
+   * written to its stderr (inherited by the parent Node process). This does
+   * not surface image pull progress or structured events to the SDK — for
+   * pull progress use `Sandbox.createWithProgress`.
+   */
   logLevel?: string
   /** Kill any existing sandbox with the same name before creating. */
   replace?: boolean
