@@ -499,15 +499,19 @@ impl JsPullSession {
         mut handle: PullProgressHandle,
         task: tokio::task::JoinHandle<MicrosandboxResult<microsandbox::sandbox::Sandbox>>,
     ) -> Self {
-        // Bridge the PullProgress channel into a local PullEvent channel,
-        // matching the pattern used by metrics_stream. The extra hop lets
-        // AsyncGenerator::next yield napi-compatible events without a match
-        // on every recv.
-        let (tx, rx) = tokio::sync::mpsc::channel::<PullEvent>(64);
+        // Bridge the PullProgress channel into a local PullEvent channel.
+        // Using try_send matches the upstream PullProgressSender pattern —
+        // events are dropped on overflow rather than blocking the bridge
+        // task if the JS consumer stops draining.
+        let (tx, rx) = tokio::sync::mpsc::channel::<PullEvent>(256);
         tokio::spawn(async move {
             while let Some(event) = handle.recv().await {
-                if tx.send(convert_pull_progress(event)).await.is_err() {
-                    break;
+                match tx.try_send(convert_pull_progress(event)) {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        // Drop overflowed progress events.
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                 }
             }
         });
