@@ -19,7 +19,8 @@ type Volume struct {
 func (v *Volume) Name() string { return v.name }
 
 // Path returns the host filesystem path of the volume's data directory.
-// Empty string if the path was not returned by the runtime (older servers).
+// Always empty for volumes returned by CreateVolume or ListVolumes; use
+// GetVolume to retrieve path metadata.
 func (v *Volume) Path() string { return v.path }
 
 // FS returns a VolumeFs for direct host-side file operations on this volume.

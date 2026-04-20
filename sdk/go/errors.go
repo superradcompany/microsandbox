@@ -1,6 +1,7 @@
 package microsandbox
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -207,8 +208,9 @@ func IsKind(err error, kind ErrorKind) bool {
 }
 
 // wrapFFI converts an error returned by the internal/ffi package into a
-// typed *microsandbox.Error. Non-ffi errors (e.g. context cancellation,
-// JSON parsing) are wrapped with ErrInternal. Returns nil for a nil err.
+// typed *microsandbox.Error. context.Canceled and context.DeadlineExceeded
+// map to ErrCancelled (preserving the original via Cause); other non-ffi
+// errors surface as ErrInternal. Returns nil for a nil err.
 func wrapFFI(err error) error {
 	if err == nil {
 		return nil
@@ -216,6 +218,9 @@ func wrapFFI(err error) error {
 	var fe *ffi.Error
 	if errors.As(err, &fe) {
 		return &Error{Kind: kindFromFFI(fe.Kind), Message: fe.Message}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return &Error{Kind: ErrCancelled, Message: err.Error(), Cause: err}
 	}
 	return &Error{Kind: ErrInternal, Message: err.Error(), Cause: err}
 }
