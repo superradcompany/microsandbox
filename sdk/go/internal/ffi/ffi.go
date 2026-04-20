@@ -496,6 +496,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 )
@@ -611,14 +612,21 @@ const (
 )
 
 // Sandbox is an opaque handle to a Rust-side sandbox. Call Close to release.
-// Safe for concurrent use from multiple goroutines.
+// Safe for concurrent use from multiple goroutines; Close uses an atomic
+// swap so concurrent Close calls produce exactly one Rust-side release.
 type Sandbox struct {
-	handle C.uint64_t
+	handle atomic.Uint64
 	name   string
 }
 
-// Handle returns the underlying integer handle (for debugging only).
-func (s *Sandbox) Handle() uint64 { return uint64(s.handle) }
+// Handle returns the underlying integer handle (for debugging only). Returns
+// 0 after Close.
+func (s *Sandbox) Handle() uint64 { return s.handle.Load() }
+
+// h returns the handle as C.uint64_t for passing to Rust. Callers that must
+// distinguish "handle already closed" from "Rust-side not found" should check
+// for zero before invoking the FFI; otherwise Rust will return InvalidHandle.
+func (s *Sandbox) h() C.uint64_t { return C.uint64_t(s.handle.Load()) }
 
 // Name returns the sandbox name supplied at creation time.
 func (s *Sandbox) Name() string { return s.name }
@@ -667,6 +675,42 @@ func call(ctx context.Context, fn func(cancelID C.uint64_t, buf *C.uint8_t, bufL
 		<-done // wait so caller's deferred C.free doesn't race Rust
 		return "", ctx.Err()
 	}
+}
+
+// salvageHandle attempts a best-effort recovery of the `handle` field from a
+// create/connect response body when strict unmarshalling failed. Returns 0
+// if the handle cannot be recovered. Used to avoid leaking Rust-side state
+// in pathological cases where the Rust response is non-empty but malformed.
+func salvageHandle(body string) uint64 {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		return 0
+	}
+	switch v := m["handle"].(type) {
+	case float64:
+		if v <= 0 {
+			return 0
+		}
+		return uint64(v)
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil || n <= 0 {
+			return 0
+		}
+		return uint64(n)
+	default:
+		return 0
+	}
+}
+
+// releaseHandle best-effort closes a Rust-side sandbox handle without going
+// through a *Sandbox wrapper. Used to clean up after a create/connect
+// response that could not be decoded. Uses context.Background so the
+// caller's cancelled ctx cannot prevent cleanup.
+func releaseHandle(handle uint64) {
+	_, _ = call(context.Background(), func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_close(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
 }
 
 // =============================================================================
@@ -788,9 +832,17 @@ func CreateSandbox(ctx context.Context, name string, opts CreateOptions) (*Sandb
 		Handle uint64 `json:"handle"`
 	}
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		// Rust has allocated a handle we can no longer trust. Best-effort
+		// recover the handle from the response so we can release it;
+		// otherwise the VM and registry entry would leak.
+		if h := salvageHandle(out); h != 0 {
+			releaseHandle(h)
+		}
 		return nil, fmt.Errorf("parse create response: %w", err)
 	}
-	return &Sandbox{handle: C.uint64_t(resp.Handle), name: name}, nil
+	s := &Sandbox{name: name}
+	s.handle.Store(resp.Handle)
+	return s, nil
 }
 
 // ConnectSandbox reattaches to an existing sandbox by name and returns a
@@ -813,9 +865,14 @@ func ConnectSandbox(ctx context.Context, name string) (*Sandbox, error) {
 		Handle uint64 `json:"handle"`
 	}
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		if h := salvageHandle(out); h != 0 {
+			releaseHandle(h)
+		}
 		return nil, fmt.Errorf("parse connect response: %w", err)
 	}
-	return &Sandbox{handle: C.uint64_t(resp.Handle), name: name}, nil
+	s := &Sandbox{name: name}
+	s.handle.Store(resp.Handle)
+	return s, nil
 }
 
 // SandboxHandleInfo is the JSON payload returned by LookupSandbox.
@@ -868,9 +925,14 @@ func StartSandbox(ctx context.Context, name string, detached bool) (*Sandbox, er
 		Handle uint64 `json:"handle"`
 	}
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		if h := salvageHandle(out); h != 0 {
+			releaseHandle(h)
+		}
 		return nil, fmt.Errorf("parse start response: %w", err)
 	}
-	return &Sandbox{handle: C.uint64_t(resp.Handle), name: name}, nil
+	s := &Sandbox{name: name}
+	s.handle.Store(resp.Handle)
+	return s, nil
 }
 
 // StopSandboxByName gracefully stops a sandbox identified by name.
@@ -905,7 +967,7 @@ func (s *Sandbox) Drain(ctx context.Context) error {
 		return err
 	}
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_drain(cancelID, s.handle, buf, bufLen)
+		return C.call_msb_sandbox_drain(cancelID, s.h(), buf, bufLen)
 	})
 	return err
 }
@@ -916,7 +978,7 @@ func (s *Sandbox) Wait(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_wait(cancelID, s.handle, buf, bufLen)
+		return C.call_msb_sandbox_wait(cancelID, s.h(), buf, bufLen)
 	})
 	if err != nil {
 		return 0, err
@@ -940,7 +1002,7 @@ func (s *Sandbox) OwnsLifecycle() (bool, error) {
 		return false, err
 	}
 	buf := make([]byte, defaultBufSize)
-	errPtr := C.call_msb_sandbox_owns_lifecycle(s.handle, (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+	errPtr := C.call_msb_sandbox_owns_lifecycle(s.h(), (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
 	if errPtr != nil {
 		msg := C.GoString(errPtr)
 		C.call_msb_free_string(errPtr)
@@ -964,9 +1026,11 @@ func (s *Sandbox) OwnsLifecycle() (bool, error) {
 }
 
 // Close releases the Rust-side sandbox resources for this handle. Safe to
-// call multiple times — the second returns KindInvalidHandle.
-// Uses context.Background so cleanup cannot be cancelled; use CloseCtx for
-// a caller-controlled timeout.
+// call multiple times and from multiple goroutines — the atomic swap below
+// guarantees exactly one Rust-side release; all other callers get a
+// synthetic KindInvalidHandle without touching Rust. Uses context.Background
+// so cleanup cannot be cancelled; use CloseCtx for a caller-controlled
+// timeout.
 func (s *Sandbox) Close() error {
 	return s.CloseCtx(context.Background())
 }
@@ -976,21 +1040,32 @@ func (s *Sandbox) CloseCtx(ctx context.Context) error {
 	if err := ensureLoaded(); err != nil {
 		return err
 	}
+	// Atomically claim the handle: only the goroutine that observes a
+	// non-zero prior value is allowed to call the Rust destructor.
+	h := s.handle.Swap(0)
+	if h == 0 {
+		return &Error{Kind: KindInvalidHandle, Message: "sandbox handle already closed"}
+	}
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_close(cancelID, s.handle, buf, bufLen)
+		return C.call_msb_sandbox_close(cancelID, C.uint64_t(h), buf, bufLen)
 	})
 	return err
 }
 
 // Detach releases the handle without stopping the VM. Use on sandboxes
 // created with Detached==true when the caller is done but the VM should
-// keep running. After Detach the handle is invalid.
+// keep running. After Detach the handle is invalid. Safe for concurrent
+// use — the atomic swap ensures exactly one call reaches Rust.
 func (s *Sandbox) Detach(ctx context.Context) error {
 	if err := ensureLoaded(); err != nil {
 		return err
 	}
+	h := s.handle.Swap(0)
+	if h == 0 {
+		return &Error{Kind: KindInvalidHandle, Message: "sandbox handle already closed"}
+	}
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_detach(cancelID, s.handle, buf, bufLen)
+		return C.call_msb_sandbox_detach(cancelID, C.uint64_t(h), buf, bufLen)
 	})
 	return err
 }
@@ -1001,7 +1076,7 @@ func (s *Sandbox) Stop(ctx context.Context) error {
 		return err
 	}
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_stop(cancelID, s.handle, buf, bufLen)
+		return C.call_msb_sandbox_stop(cancelID, s.h(), buf, bufLen)
 	})
 	return err
 }
@@ -1013,7 +1088,7 @@ func (s *Sandbox) StopAndWait(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_stop_and_wait(cancelID, s.handle, buf, bufLen)
+		return C.call_msb_sandbox_stop_and_wait(cancelID, s.h(), buf, bufLen)
 	})
 	if err != nil {
 		return 0, err
@@ -1036,7 +1111,7 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 		return err
 	}
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_kill(cancelID, s.handle, buf, bufLen)
+		return C.call_msb_sandbox_kill(cancelID, s.h(), buf, bufLen)
 	})
 	return err
 }
@@ -1109,7 +1184,7 @@ func (s *Sandbox) Exec(ctx context.Context, cmd string, opts ExecOptions) (*Exec
 	defer C.free(unsafe.Pointer(cOpts))
 
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_exec(cancelID, s.handle, cCmd, cOpts, buf, bufLen)
+		return C.call_msb_sandbox_exec(cancelID, s.h(), cCmd, cOpts, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -1228,7 +1303,7 @@ func (s *Sandbox) ExecStream(ctx context.Context, cmd string, opts ExecOptions) 
 	defer C.free(unsafe.Pointer(cOpts))
 
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_exec_stream(cancelID, s.handle, cCmd, cOpts, buf, bufLen)
+		return C.call_msb_sandbox_exec_stream(cancelID, s.h(), cCmd, cOpts, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -1346,7 +1421,7 @@ func (s *Sandbox) Metrics(ctx context.Context) (*Metrics, error) {
 		return nil, err
 	}
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_metrics(cancelID, s.handle, buf, bufLen)
+		return C.call_msb_sandbox_metrics(cancelID, s.h(), buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -1377,7 +1452,7 @@ func (s *Sandbox) MetricsStream(ctx context.Context, intervalMs uint64) (*Metric
 		return nil, err
 	}
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_metrics_stream(cancelID, s.handle, C.uint64_t(intervalMs), buf, bufLen)
+		return C.call_msb_sandbox_metrics_stream(cancelID, s.h(), C.uint64_t(intervalMs), buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -1559,7 +1634,7 @@ func (s *Sandbox) Attach(ctx context.Context, cmd string, args []string) (int, e
 	cOpts := C.CString(string(optsBytes))
 	defer C.free(unsafe.Pointer(cOpts))
 	out, err2 := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_attach(cancelID, s.handle, cCmd, cOpts, buf, bufLen)
+		return C.call_msb_sandbox_attach(cancelID, s.h(), cCmd, cOpts, buf, bufLen)
 	})
 	if err2 != nil {
 		return -1, err2
@@ -1580,7 +1655,7 @@ func (s *Sandbox) AttachShell(ctx context.Context) (int, error) {
 		return -1, err
 	}
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_attach_shell(cancelID, s.handle, buf, bufLen)
+		return C.call_msb_sandbox_attach_shell(cancelID, s.h(), buf, bufLen)
 	})
 	if err != nil {
 		return -1, err
@@ -1636,7 +1711,7 @@ func (s *Sandbox) FsRead(ctx context.Context, path string) ([]byte, error) {
 	defer C.free(unsafe.Pointer(cPath))
 
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_fs_read(cancelID, s.handle, cPath, buf, bufLen)
+		return C.call_msb_fs_read(cancelID, s.h(), cPath, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -1661,7 +1736,7 @@ func (s *Sandbox) FsWrite(ctx context.Context, path string, data []byte) error {
 	defer C.free(unsafe.Pointer(cData))
 
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_fs_write(cancelID, s.handle, cPath, cData, buf, bufLen)
+		return C.call_msb_fs_write(cancelID, s.h(), cPath, cData, buf, bufLen)
 	})
 	return err
 }
@@ -1675,7 +1750,7 @@ func (s *Sandbox) FsList(ctx context.Context, path string) ([]FsEntry, error) {
 	defer C.free(unsafe.Pointer(cPath))
 
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_fs_list(cancelID, s.handle, cPath, buf, bufLen)
+		return C.call_msb_fs_list(cancelID, s.h(), cPath, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -1696,7 +1771,7 @@ func (s *Sandbox) FsStat(ctx context.Context, path string) (*FsStat, error) {
 	defer C.free(unsafe.Pointer(cPath))
 
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_fs_stat(cancelID, s.handle, cPath, buf, bufLen)
+		return C.call_msb_fs_stat(cancelID, s.h(), cPath, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -1719,7 +1794,7 @@ func (s *Sandbox) FsCopyFromHost(ctx context.Context, hostPath, guestPath string
 	defer C.free(unsafe.Pointer(cGuest))
 
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_fs_copy_from_host(cancelID, s.handle, cHost, cGuest, buf, bufLen)
+		return C.call_msb_fs_copy_from_host(cancelID, s.h(), cHost, cGuest, buf, bufLen)
 	})
 	return err
 }
@@ -1735,7 +1810,7 @@ func (s *Sandbox) FsCopyToHost(ctx context.Context, guestPath, hostPath string) 
 	defer C.free(unsafe.Pointer(cHost))
 
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_fs_copy_to_host(cancelID, s.handle, cGuest, cHost, buf, bufLen)
+		return C.call_msb_fs_copy_to_host(cancelID, s.h(), cGuest, cHost, buf, bufLen)
 	})
 	return err
 }
@@ -1749,7 +1824,7 @@ func (s *Sandbox) FsMkdir(ctx context.Context, path string) error {
 	defer C.free(unsafe.Pointer(cPath))
 
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_fs_mkdir(cancelID, s.handle, cPath, buf, bufLen)
+		return C.call_msb_fs_mkdir(cancelID, s.h(), cPath, buf, bufLen)
 	})
 	return err
 }
@@ -1763,7 +1838,7 @@ func (s *Sandbox) FsRemove(ctx context.Context, path string) error {
 	defer C.free(unsafe.Pointer(cPath))
 
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_fs_remove(cancelID, s.handle, cPath, buf, bufLen)
+		return C.call_msb_fs_remove(cancelID, s.h(), cPath, buf, bufLen)
 	})
 	return err
 }
@@ -1777,7 +1852,7 @@ func (s *Sandbox) FsRemoveDir(ctx context.Context, path string) error {
 	defer C.free(unsafe.Pointer(cPath))
 
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_fs_remove_dir(cancelID, s.handle, cPath, buf, bufLen)
+		return C.call_msb_fs_remove_dir(cancelID, s.h(), cPath, buf, bufLen)
 	})
 	return err
 }
@@ -1793,7 +1868,7 @@ func (s *Sandbox) FsCopy(ctx context.Context, src, dst string) error {
 	defer C.free(unsafe.Pointer(cDst))
 
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_fs_copy(cancelID, s.handle, cSrc, cDst, buf, bufLen)
+		return C.call_msb_fs_copy(cancelID, s.h(), cSrc, cDst, buf, bufLen)
 	})
 	return err
 }
@@ -1809,7 +1884,7 @@ func (s *Sandbox) FsRename(ctx context.Context, src, dst string) error {
 	defer C.free(unsafe.Pointer(cDst))
 
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_fs_rename(cancelID, s.handle, cSrc, cDst, buf, bufLen)
+		return C.call_msb_fs_rename(cancelID, s.h(), cSrc, cDst, buf, bufLen)
 	})
 	return err
 }
@@ -1823,7 +1898,7 @@ func (s *Sandbox) FsExists(ctx context.Context, path string) (bool, error) {
 	defer C.free(unsafe.Pointer(cPath))
 
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_fs_exists(cancelID, s.handle, cPath, buf, bufLen)
+		return C.call_msb_fs_exists(cancelID, s.h(), cPath, buf, bufLen)
 	})
 	if err != nil {
 		return false, err
@@ -1848,7 +1923,7 @@ func (s *Sandbox) RemovePersisted(ctx context.Context) error {
 		return err
 	}
 	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_sandbox_remove_persisted(cancelID, s.handle, buf, bufLen)
+		return C.call_msb_sandbox_remove_persisted(cancelID, s.h(), buf, bufLen)
 	})
 	return err
 }
@@ -1977,7 +2052,7 @@ func (s *Sandbox) FsReadStream(ctx context.Context, path string) (*FsReadStreamH
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_fs_read_stream(cancelID, s.handle, cPath, buf, bufLen)
+		return C.call_msb_fs_read_stream(cancelID, s.h(), cPath, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err
@@ -2029,7 +2104,7 @@ func (s *Sandbox) FsWriteStream(ctx context.Context, path string) (*FsWriteStrea
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_fs_write_stream(cancelID, s.handle, cPath, buf, bufLen)
+		return C.call_msb_fs_write_stream(cancelID, s.h(), cPath, buf, bufLen)
 	})
 	if err != nil {
 		return nil, err

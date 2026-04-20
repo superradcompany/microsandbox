@@ -90,9 +90,9 @@ func TestCreateSandboxAndClose(t *testing.T) {
 	}
 }
 
-// TestCloseIdempotent verifies that calling Close twice returns ErrInvalidHandle
-// on the second call, and that the error kind is correct.
-func TestCloseIdempotent(t *testing.T) {
+// TestCloseTwiceReturnsErrInvalidHandle verifies that calling Close a second
+// time after a successful first Close returns ErrInvalidHandle.
+func TestCloseTwiceReturnsErrInvalidHandle(t *testing.T) {
 	sb := newTestSandbox(t)
 	ctx := integrationCtx(t)
 
