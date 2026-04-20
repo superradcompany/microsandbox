@@ -31,6 +31,10 @@ pub struct SandboxArgs {
     #[arg(long = "db-path")]
     pub sandbox_db_path: PathBuf,
 
+    /// Timeout when acquiring a sandbox database connection from the pool.
+    #[arg(long = "db-connect-timeout-secs", default_value_t = 30)]
+    pub sandbox_db_connect_timeout_secs: u64,
+
     /// Directory for log files.
     #[arg(long)]
     pub log_dir: PathBuf,
@@ -72,18 +76,6 @@ pub struct SandboxArgs {
     #[arg(long)]
     pub rootfs_path: Option<PathBuf>,
 
-    /// Root filesystem lower layer paths for OverlayFs (repeatable).
-    #[arg(long)]
-    pub rootfs_lower: Vec<PathBuf>,
-
-    /// Writable upper layer directory for OverlayFs rootfs.
-    #[arg(long)]
-    pub rootfs_upper: Option<PathBuf>,
-
-    /// Staging directory for OverlayFs rootfs.
-    #[arg(long)]
-    pub rootfs_staging: Option<PathBuf>,
-
     /// Disk image file path for virtio-blk rootfs.
     #[arg(long)]
     pub rootfs_disk: Option<PathBuf>,
@@ -95,6 +87,10 @@ pub struct SandboxArgs {
     /// Mount disk image as read-only.
     #[arg(long)]
     pub rootfs_disk_readonly: bool,
+
+    /// Writable upper ext4 block device for OCI rootfs overlay.
+    #[arg(long = "rootfs-blk")]
+    pub rootfs_upper: Option<PathBuf>,
 
     /// Additional mounts as `tag:host_path` (repeatable).
     #[arg(long)]
@@ -137,16 +133,24 @@ pub struct SandboxArgs {
 
 /// Run the sandbox process. This function **never returns**.
 pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
+    let is_vmdk = args.rootfs_disk_format.as_deref() == Some("vmdk");
     let vm_config = VmConfig {
         libkrunfw_path: args.libkrunfw_path,
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,
         rootfs_path: args.rootfs_path,
-        rootfs_lowers: args.rootfs_lower,
+        rootfs_vmdk: if is_vmdk {
+            args.rootfs_disk.clone()
+        } else {
+            None
+        },
         rootfs_upper: args.rootfs_upper,
-        rootfs_staging: args.rootfs_staging,
-        rootfs_disk: args.rootfs_disk,
-        rootfs_disk_format: args.rootfs_disk_format,
+        rootfs_disk: if is_vmdk { None } else { args.rootfs_disk },
+        rootfs_disk_format: if is_vmdk {
+            None
+        } else {
+            args.rootfs_disk_format
+        },
         rootfs_disk_readonly: args.rootfs_disk_readonly,
         mounts: args.mount,
         backends: vec![],
@@ -173,6 +177,7 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
         sandbox_id: args.sandbox_id,
         log_level,
         sandbox_db_path: args.sandbox_db_path,
+        sandbox_db_connect_timeout_secs: args.sandbox_db_connect_timeout_secs,
         log_dir: args.log_dir,
         runtime_dir: args.runtime_dir,
         agent_sock_path: args.agent_sock,

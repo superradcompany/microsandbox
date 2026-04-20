@@ -1,0 +1,57 @@
+---
+title: Running in Docker
+description: Deploy microsandbox as a Docker container on Linux
+icon: "docker"
+---
+
+<Tip>
+  For production use, we recommend [installing microsandbox natively](/getting-started/quickstart).
+</Tip>
+
+microsandbox publishes multi-arch Docker images (amd64/arm64) to GitHub Container Registry. This is an interim solution for environments that require containerized deployment, pending microsandbox implementing the [OCI runtime spec](https://github.com/opencontainers/runtime-spec).
+
+## Prerequisites
+
+- A **Linux** host with KVM support (`/dev/kvm` must be available)
+- Docker installed
+
+## Pull the image
+
+```bash
+docker pull ghcr.io/superradcompany/microsandbox:latest
+```
+
+Or pin to a specific version:
+
+```bash
+docker pull ghcr.io/superradcompany/microsandbox:0.3.14
+```
+
+## Run a sandbox
+
+The container requires `--privileged` and `/dev/kvm` access to run microVMs:
+
+```bash
+docker run --privileged --device /dev/kvm \
+  ghcr.io/superradcompany/microsandbox:latest \
+  run python --name my-sandbox --replace
+```
+
+## Persistent data
+
+By default, sandbox data (images, cache, databases) is stored inside the container and lost when it stops. Mount a volume to persist data across restarts:
+
+```bash
+docker run --privileged --device /dev/kvm \
+  -v microsandbox_data:/root/.microsandbox \
+  ghcr.io/superradcompany/microsandbox:latest \
+  run python --name my-sandbox --replace
+```
+
+## Available tags
+
+| Tag | Description |
+|-----|-------------|
+| `latest` | Latest release |
+| `x.y.z` (e.g. `0.3.14`) | Specific version |
+| `x.y` (e.g. `0.3`) | Latest patch of a minor version |

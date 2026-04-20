@@ -45,9 +45,9 @@ pub enum ImageError {
         actual: String,
     },
 
-    /// Layer extraction failed.
-    #[error("extraction failed for layer {digest}: {message}")]
-    Extraction {
+    /// Layer materialization failed.
+    #[error("materialization failed for layer {digest}: {message}")]
+    Materialize {
         /// The layer digest.
         digest: String,
         /// Error detail.
@@ -56,10 +56,6 @@ pub enum ImageError {
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
-
-    /// Sidecar index generation failed.
-    #[error("index generation failed for layer {0}: {1}")]
-    IndexBuild(String, #[source] std::io::Error),
 
     /// Cache I/O error.
     #[error("cache error at {}: {source}", path.display())]
@@ -77,6 +73,10 @@ pub enum ImageError {
         /// The image reference.
         reference: String,
     },
+
+    /// Invalid PEM certificate data.
+    #[error("invalid PEM certificate: {0}")]
+    InvalidCertificate(String),
 
     /// General I/O error.
     #[error(transparent)]

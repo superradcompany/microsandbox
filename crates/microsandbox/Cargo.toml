@@ -11,8 +11,13 @@ edition.workspace = true
 name = "microsandbox"
 path = "lib/lib.rs"
 
+[[bin]]
+name = "microsandbox"
+path = "bin/main.rs"
+
 [features]
-default = ["prebuilt", "net"]
+default = ["prebuilt", "net", "keyring"]
+keyring = ["dep:keyring", "dep:dbus"]
 prebuilt = ["microsandbox-filesystem/prebuilt", "microsandbox-runtime/prebuilt"]
 net = ["dep:microsandbox-network", "microsandbox-runtime/net"]
 
@@ -25,14 +30,14 @@ dirs.workspace = true
 flate2.workspace = true
 futures.workspace = true
 libc.workspace = true
-microsandbox-db = { version = "0.3.12", path = "../db" }
-microsandbox-filesystem = { version = "0.3.12", path = "../filesystem", default-features = false }
-microsandbox-image = { version = "0.3.12", path = "../image" }
-microsandbox-migration = { version = "0.3.12", path = "../migration" }
-microsandbox-network = { version = "0.3.12", path = "../network", optional = true }
-microsandbox-protocol = { version = "0.3.12", path = "../protocol" }
-microsandbox-runtime = { version = "0.3.12", path = "../runtime", default-features = false }
-microsandbox-utils = { version = "0.3.12", path = "../utils" }
+microsandbox-db = { version = "0.3.14", path = "../db" }
+microsandbox-filesystem = { version = "0.3.14", path = "../filesystem", default-features = false }
+microsandbox-image = { version = "0.3.14", path = "../image" }
+microsandbox-migration = { version = "0.3.14", path = "../migration" }
+microsandbox-network = { version = "0.3.14", path = "../network", optional = true }
+microsandbox-protocol = { version = "0.3.14", path = "../protocol" }
+microsandbox-runtime = { version = "0.3.14", path = "../runtime", default-features = false }
+microsandbox-utils = { version = "0.3.14", path = "../utils" }
 nix = { workspace = true, features = ["process", "signal"] }
 rand.workspace = true
 reqwest.workspace = true
@@ -58,10 +63,13 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3.6.3", features = ["apple-native"] }
+keyring = { version = "3.6.3", features = ["apple-native"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "3.6.3", features = ["windows-native"] }
+keyring = { version = "3.6.3", features = ["windows-native"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3.6.3", features = ["linux-native-sync-persistent", "crypto-rust"] }
+# Transitive dep via keyring's Secret Service backend; declared here only to force the `vendored` feature
+# so libdbus is built from source and statically linked (avoids needing libdbus-1-dev at build time).
+dbus = { version = "0.9.10", features = ["vendored"], optional = true }
+keyring = { version = "3.6.3", features = ["linux-native-sync-persistent", "crypto-rust"], optional = true }

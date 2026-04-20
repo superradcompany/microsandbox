@@ -1,4 +1,4 @@
-//! Entity definition for the `manifest_layers` junction table.
+//! Entity definition for the `manifest_layer` junction table.
 
 use sea_orm::entity::prelude::*;
 
@@ -38,7 +38,7 @@ pub enum Relation {
         belongs_to = "super::layer::Entity",
         from = "Column::LayerId",
         to = "super::layer::Column::Id",
-        on_delete = "Cascade"
+        on_delete = "Restrict"
     )]
     Layer,
 }

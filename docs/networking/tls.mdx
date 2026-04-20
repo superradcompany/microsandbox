@@ -38,6 +38,18 @@ const sb = await Sandbox.create({
 })
 ```
 
+```python Python
+from microsandbox import Network, Sandbox, TlsConfig
+
+sb = await Sandbox.create(
+    "agent",
+    image="python",
+    network=Network(
+        tls=TlsConfig(bypass=("pinned-api.example.com", "*.gov")),
+    ),
+)
+```
+
 ```bash CLI
 msb create python --name agent \
   --tls-intercept \

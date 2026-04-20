@@ -7,6 +7,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use serde::{Deserialize, Serialize};
 
+use crate::dns::NameserverSpec;
+
 use crate::policy::NetworkPolicy;
 use crate::secrets::config::SecretsConfig;
 use crate::tls::TlsConfig;
@@ -92,6 +94,19 @@ pub struct DnsConfig {
     /// Whether DNS rebinding protection is enabled.
     #[serde(default = "default_true")]
     pub rebind_protection: bool,
+
+    /// Nameservers to forward DNS queries to. When empty, fall back to
+    /// the `nameserver` entries in the host's `/etc/resolv.conf`. Set
+    /// this to pin specific resolvers (e.g. `1.1.1.1:53`, `dns.google`)
+    /// or to work around split-DNS / VPN setups where the host's
+    /// resolv.conf is incomplete. Accepts IPs, `IP:PORT`, or hostnames
+    /// (resolved once at startup via the host's OS resolver).
+    #[serde(default)]
+    pub nameservers: Vec<NameserverSpec>,
+
+    /// Per-query timeout in milliseconds. Default: 5000.
+    #[serde(default = "default_query_timeout_ms")]
+    pub query_timeout_ms: u64,
 }
 
 /// A published port mapping between host and guest.
@@ -148,6 +163,8 @@ impl Default for DnsConfig {
             blocked_domains: Vec::new(),
             blocked_suffixes: Vec::new(),
             rebind_protection: true,
+            nameservers: Vec::new(),
+            query_timeout_ms: default_query_timeout_ms(),
         }
     }
 }
@@ -162,4 +179,8 @@ fn default_true() -> bool {
 
 fn default_host_bind() -> IpAddr {
     IpAddr::V4(Ipv4Addr::LOCALHOST)
+}
+
+fn default_query_timeout_ms() -> u64 {
+    5000
 }

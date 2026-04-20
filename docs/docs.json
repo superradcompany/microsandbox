@@ -3,8 +3,8 @@
   "theme": "maple",
   "name": "microsandbox",
   "logo": {
-    "light": "/images/microsandbox-banner-light(1).svg",
-    "dark": "/images/microsandbox-banner-dark(1).svg",
+    "light": "/images/microsandbox-banner-light.svg",
+    "dark": "/images/microsandbox-banner-dark.svg",
     "href": "https://microsandbox.dev"
   },
   "favicon": "/logo/light.svg",
@@ -112,6 +112,20 @@
               "sdk/typescript/snapshots",
               "sdk/typescript/events"
             ]
+          },
+          {
+            "group": "Python SDK",
+            "icon": "python",
+            "pages": [
+              "sdk/python/sandbox",
+              "sdk/python/execution",
+              "sdk/python/filesystem",
+              "sdk/python/volumes",
+              "sdk/python/networking",
+              "sdk/python/secrets",
+              "sdk/python/snapshots",
+              "sdk/python/events"
+            ]
           }
         ]
       },
@@ -126,6 +140,19 @@
               "cli/sandbox-commands",
               "cli/volume-commands",
               "cli/image-commands"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Recipes",
+        "groups": [
+          {
+            "group": "Container Integration",
+            "icon": "docker",
+            "pages": [
+              "recipes/docker",
+              "recipes/local-images"
             ]
           }
         ]
@@ -146,7 +173,7 @@
     "socials": {
       "github": "https://github.com/superradcompany/microsandbox",
       "discord": "https://discord.gg/NQMWDfp7",
-      "linkedin": "https://www.linkedin.com/company/super-rad-company",
+      "linkedin": "https://www.linkedin.com/company/superradcompany",
       "x": "https://x.com/microsandbox"
     }
   }

@@ -1,0 +1,375 @@
+---
+title: Volumes
+description: Python SDK - Volume API reference
+icon: "hard-drive"
+---
+
+See [Volumes](/sandboxes/volumes) for usage examples and patterns.
+
+## Volume
+
+Named volumes are managed by microsandbox and stored at `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox.
+
+## Static methods
+
+---
+
+#### Volume.create()
+
+```python
+async def Volume.create(
+    name: str,
+    *,
+    quota_mib: int | None = None,
+    labels: dict[str, str] | None = None,
+) -> Volume
+```
+
+Create a new named volume.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `str` | Volume name (required) |
+| quota_mib | `int \| None` | Maximum storage size in MiB |
+| labels | `dict[str, str] \| None` | Metadata labels |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Volume` | Created volume with `name` and `path` properties |
+
+---
+
+#### Volume.get()
+
+```python
+async def Volume.get(name: str) -> VolumeHandle
+```
+
+Get a handle to an existing named volume.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `str` | Volume name |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`VolumeHandle`](#volumehandle) | Volume handle |
+
+---
+
+#### Volume.list()
+
+```python
+async def Volume.list() -> list[VolumeHandle]
+```
+
+List all named volumes.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `list[`[`VolumeHandle`](#volumehandle)`]` | All volumes |
+
+---
+
+#### Volume.remove()
+
+```python
+async def Volume.remove(name: str) -> None
+```
+
+Delete a named volume and its contents. Fails if the volume is currently mounted.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `str` | Volume name |
+
+---
+
+## Volume instance properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| name | `str` | Volume name |
+| path | `str` | Host path to the volume directory |
+
+---
+
+## Mount config factories
+
+Static factory methods on `Volume` for creating mount configurations used in sandbox volume config.
+
+---
+
+#### Volume.bind()
+
+```python
+def Volume.bind(path: str, *, readonly: bool = False) -> dict
+```
+
+Mount a host directory into the sandbox. Changes in the guest are reflected on the host and vice versa.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Directory path on the host |
+| readonly | `bool` | Mount as read-only |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `dict` | Mount configuration dictionary |
+
+---
+
+#### Volume.named()
+
+```python
+def Volume.named(name: str, *, readonly: bool = False) -> dict
+```
+
+Mount a named volume. The volume must already exist (create it with [`Volume.create()`](#volumecreate)).
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `str` | Volume name |
+| readonly | `bool` | Mount as read-only |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `dict` | Mount configuration dictionary |
+
+---
+
+#### Volume.tmpfs()
+
+```python
+def Volume.tmpfs(*, size_mib: int | None = None, readonly: bool = False) -> dict
+```
+
+Use an in-memory filesystem. Contents are discarded when the sandbox stops.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| size_mib | `int \| None` | Maximum size in MiB |
+| readonly | `bool` | Mount as read-only |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `dict` | Mount configuration dictionary |
+
+---
+
+## VolumeHandle
+
+Handle to an existing named volume, returned by [`Volume.get()`](#volumeget) and [`Volume.list()`](#volumelist).
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| name | `str` | Volume name |
+| quota_mib | `int \| None` | Storage quota in MiB |
+| used_bytes | `int` | Current disk usage in bytes |
+| labels | `dict[str, str]` | Metadata labels |
+| created_at | `float \| None` | Creation timestamp (ms since epoch) |
+| fs | [`VolumeFs`](#volumefs) | Host-side filesystem handle |
+| remove() | *(async)* `None` | Delete this volume |
+
+---
+
+## VolumeFs
+
+Host-side filesystem operations on a named volume. Obtained via the `fs` property on [`VolumeHandle`](#volumehandle). These operations run directly on the host filesystem - no running sandbox is required.
+
+---
+
+#### read()
+
+```python
+async def read(path: str) -> bytes
+```
+
+Read the entire contents of a file as raw bytes.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Path relative to the volume root |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `bytes` | File contents as raw bytes |
+
+---
+
+#### read_text()
+
+```python
+async def read_text(path: str) -> str
+```
+
+Read the entire contents of a file and decode as UTF-8.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Path relative to the volume root |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `str` | File contents as a string |
+
+---
+
+#### write()
+
+```python
+async def write(path: str, data: bytes) -> None
+```
+
+Write content to a file, creating it if it doesn't exist and overwriting if it does.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Path relative to the volume root |
+| data | `bytes` | File content |
+
+---
+
+#### list()
+
+```python
+async def list(path: str) -> list[FsEntry]
+```
+
+List the entries in a directory.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Path relative to the volume root |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `list[`[`FsEntry`](/sdk/python/filesystem#fsentry)`]` | Directory entries |
+
+---
+
+#### mkdir()
+
+```python
+async def mkdir(path: str) -> None
+```
+
+Create a directory and all parent directories.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Path relative to the volume root |
+
+---
+
+#### remove_file()
+
+```python
+async def remove_file(path: str) -> None
+```
+
+Remove a file.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Path relative to the volume root |
+
+---
+
+#### exists()
+
+```python
+async def exists(path: str) -> bool
+```
+
+Check whether a path exists within the volume.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Path relative to the volume root |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `bool` | `True` if the path exists |
+
+---
+
+## Types
+
+### MountConfig
+
+Frozen dataclass representing a mount configuration.
+
+```python
+MountConfig(
+    kind: MountKind,
+    bind: str | None = None,
+    named: str | None = None,
+    size_mib: int | None = None,
+    readonly: bool = False,
+)
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| kind | [`MountKind`](#mountkind) | - | Type of mount (required) |
+| bind | `str \| None` | `None` | Host path for bind mounts |
+| named | `str \| None` | `None` | Volume name for named mounts |
+| size_mib | `int \| None` | `None` | Size limit for tmpfs mounts |
+| readonly | `bool` | `False` | Whether the mount is read-only |
+
+### MountKind
+
+String enum representing the type of mount.
+
+| Value | Description |
+|-------|-------------|
+| `"bind"` | Host bind mount |
+| `"named"` | Named volume mount |
+| `"tmpfs"` | In-memory filesystem |

@@ -56,8 +56,20 @@
 
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI **(Optional)**
 
+> Boot a  microVM in one command.
+>
+> ```sh
+> npx microsandbox run debian
+> ```
+>
+> Or install the `msb` command globally:
+>
 > ```sh
 > curl -fsSL https://install.microsandbox.dev | sh
+> ```
+>
+> ```sh
+> msb run debian
 > ```
 
 ##
@@ -88,9 +100,11 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >     let output = sandbox
 >         .exec("python", ["-c", "print('Hello from a microVM!')"])
 >         .await?;
+>
 >     println!("{}", output.stdout()?);
 >
 >     sandbox.stop_and_wait().await?;
+>
 >     Ok(())
 > }
 > ```
@@ -111,6 +125,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 >     )
 >
 >     output = await sandbox.exec("python", ["-c", "print('Hello from a microVM!')"])
+>
 >     print(output.stdout_text)
 >
 >     await sandbox.stop_and_wait()
@@ -134,6 +149,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > });
 >
 > const output = await sandbox.exec("python", ["-c", "print('Hello from a microVM!')"]);
+>
 > console.log(output.stdout());
 >
 > await sandbox.stopAndWait();
@@ -193,13 +209,7 @@ The `msb` CLI provides a complete interface for managing sandboxes, images, and 
 > ```sh
 > msb install ubuntu               # Install ubuntu sandbox as 'ubuntu' command
 > ubuntu                           # Opens Ubuntu in a microVM
-> ```
-
-> ```sh
-> msb install --name nodebox node  # Custom command name
-> msb install --tmp alpine         # Ephemeral: fresh sandbox every run
-> msb install --list               # List installed commands
-> msb uninstall nodebox            # Remove an installed command
+> msb uninstall ubuntu             # Uninstall the ubuntu sandbox
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/list-unordered/A770EF">&nbsp;&nbsp;Status & Inspection
@@ -265,3 +275,11 @@ This project is licensed under the [Apache License 2.0](./LICENSE).
 ## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/heart/ffffff" alt="acknowledgements-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/heart/000000" alt="acknowledgements"></a>&nbsp;&nbsp;Acknowledgements
 
 Special thanks to all our contributors, testers, and community members who help make microsandbox better every day! We'd like to thank the following projects and communities that made `microsandbox` possible: [libkrun](https://github.com/containers/libkrun) and [smoltcp](https://github.com/smoltcp-rs/smoltcp)
+
+<br />
+<br />
+<br />
+
+<div align='center'>
+  <a href="https://www.ycombinator.com/"><img src="https://img.shields.io/badge/BACKED%20BY-Y%20COMBINATOR-F26522?style=for-the-badge&logo=ycombinator&logoColor=white" alt="Backed by Y Combinator"></a>
+</div>

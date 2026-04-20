@@ -132,8 +132,11 @@ impl AttachOptionsBuilder {
     }
 
     /// Finalize the options. Called automatically when using the closure form.
-    pub fn build(self) -> AttachOptions {
-        self.options
+    ///
+    /// Returns an error if any rlimit entry has `soft > hard`.
+    pub fn build(self) -> MicrosandboxResult<AttachOptions> {
+        super::exec::validate_rlimits(&self.options.rlimits)?;
+        Ok(self.options)
     }
 }
 

@@ -22,4 +22,12 @@ pub struct PullArgs {
     /// Suppress progress output.
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Connect to the registry over plain HTTP instead of HTTPS.
+    #[arg(long)]
+    pub insecure: bool,
+
+    /// Path to a PEM file containing additional CA root certificates to trust.
+    #[arg(long, value_name = "PATH")]
+    pub ca_certs: Option<String>,
 }

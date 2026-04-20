@@ -1,6 +1,5 @@
 //! Shared constants and utilities for the microsandbox project.
 
-pub mod index;
 pub mod size;
 pub mod wake_pipe;
 
@@ -73,6 +72,14 @@ pub const LIBKRUNFW_ABI: &str = "5";
 
 /// Database filename.
 pub const DB_FILENAME: &str = "msb.db";
+
+/// SQLite PRAGMAs applied to every connection for concurrent-access safety.
+///
+/// - WAL mode prevents `SQLITE_BUSY` when multiple processes access the DB
+/// - 5-second busy timeout retries on transient lock contention
+/// - Foreign key enforcement is off by default in SQLite
+pub const SQLITE_PRAGMAS: &str =
+    "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;";
 
 /// Global configuration filename.
 pub const CONFIG_FILENAME: &str = "config.json";

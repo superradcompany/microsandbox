@@ -5,7 +5,8 @@
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use crate::config::{InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort};
+use crate::config::{DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort};
+use crate::dns::NameserverSpec;
 use crate::policy::NetworkPolicy;
 use crate::secrets::config::{HostPattern, SecretEntry, SecretInjection, ViolationAction};
 use crate::tls::TlsConfig;
@@ -17,6 +18,11 @@ use crate::tls::TlsConfig;
 /// Fluent builder for [`NetworkConfig`].
 pub struct NetworkBuilder {
     config: NetworkConfig,
+}
+
+/// Fluent builder for [`DnsConfig`].
+pub struct DnsBuilder {
+    config: DnsConfig,
 }
 
 /// Fluent builder for [`TlsConfig`].
@@ -91,21 +97,17 @@ impl NetworkBuilder {
         self
     }
 
-    /// Block a specific domain via DNS interception.
-    pub fn block_domain(mut self, domain: impl Into<String>) -> Self {
-        self.config.dns.blocked_domains.push(domain.into());
-        self
-    }
-
-    /// Block a domain suffix via DNS interception.
-    pub fn block_domain_suffix(mut self, suffix: impl Into<String>) -> Self {
-        self.config.dns.blocked_suffixes.push(suffix.into());
-        self
-    }
-
-    /// Enable or disable DNS rebinding protection.
-    pub fn dns_rebind_protection(mut self, enabled: bool) -> Self {
-        self.config.dns.rebind_protection = enabled;
+    /// Configure DNS interception via a closure.
+    ///
+    /// ```ignore
+    /// .dns(|d| d
+    ///     .block_domain("malware.example.com")
+    ///     .block_domain_suffix(".tracking.com")
+    ///     .nameservers(["1.1.1.1".parse::<NameserverSpec>()?])
+    /// )
+    /// ```
+    pub fn dns(mut self, f: impl FnOnce(DnsBuilder) -> DnsBuilder) -> Self {
+        self.config.dns = f(DnsBuilder::new()).build();
         self
     }
 
@@ -172,6 +174,65 @@ impl NetworkBuilder {
     /// Consume the builder and return the configuration.
     pub fn build(self) -> NetworkConfig {
         self.config
+    }
+}
+
+impl DnsBuilder {
+    /// Start building DNS configuration with defaults.
+    pub fn new() -> Self {
+        Self {
+            config: DnsConfig::default(),
+        }
+    }
+
+    /// Block a specific domain via DNS interception (returns REFUSED).
+    pub fn block_domain(mut self, domain: impl Into<String>) -> Self {
+        self.config.blocked_domains.push(domain.into());
+        self
+    }
+
+    /// Block a domain suffix via DNS interception (returns REFUSED).
+    pub fn block_domain_suffix(mut self, suffix: impl Into<String>) -> Self {
+        self.config.blocked_suffixes.push(suffix.into());
+        self
+    }
+
+    /// Enable or disable DNS rebinding protection. Default: true.
+    pub fn rebind_protection(mut self, enabled: bool) -> Self {
+        self.config.rebind_protection = enabled;
+        self
+    }
+
+    /// Set the upstream nameservers to forward queries to. When one or
+    /// more are set, the interceptor uses these instead of the
+    /// nameservers in the host's `/etc/resolv.conf`. Replaces any
+    /// previously-set nameservers. Each element is any type convertible
+    /// into [`NameserverSpec`] (`SocketAddr`, `IpAddr`, or a parsed
+    /// string via `"dns.google:53".parse::<NameserverSpec>()?`).
+    pub fn nameservers<I>(mut self, specs: I) -> Self
+    where
+        I: IntoIterator,
+        I::Item: Into<NameserverSpec>,
+    {
+        self.config.nameservers = specs.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Set the per-DNS-query timeout in milliseconds. Default: 5000.
+    pub fn query_timeout_ms(mut self, ms: u64) -> Self {
+        self.config.query_timeout_ms = ms;
+        self
+    }
+
+    /// Consume the builder and return the configuration.
+    pub fn build(self) -> DnsConfig {
+        self.config
+    }
+}
+
+impl Default for DnsBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

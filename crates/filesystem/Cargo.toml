@@ -12,8 +12,8 @@ path = "lib/lib.rs"
 
 [dependencies]
 libc.workspace = true
-microsandbox-utils = { version = "0.3.12", path = "../utils" }
-msb_krun = "0.1.9"
+microsandbox-utils = { version = "0.3.14", path = "../utils" }
+msb_krun = "0.1.10"
 scopeguard.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
@@ -23,5 +23,5 @@ default = ["prebuilt"]
 prebuilt = ["dep:ureq"]
 
 [build-dependencies]
-microsandbox-utils = { version = "0.3.12", path = "../utils" }
+microsandbox-utils = { version = "0.3.14", path = "../utils" }
 ureq = { workspace = true, optional = true }

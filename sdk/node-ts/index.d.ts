@@ -631,7 +631,18 @@ export declare const enum PullPolicy {
 }
 
 /** Registry credentials for pulling private images. */
-export interface RegistryCredentials {
+/** Registry connection settings. */
+export interface RegistryConfig {
+  /** Authentication credentials. */
+  auth?: RegistryAuth
+  /** Access the registry over plain HTTP instead of HTTPS. */
+  insecure?: boolean
+  /** Path to a PEM file containing additional CA root certificates to trust. */
+  caCertsPath?: string
+}
+
+/** Registry authentication credentials. */
+export interface RegistryAuth {
   username: string
   password: string
 }
@@ -680,8 +691,8 @@ export interface SandboxConfig {
   stopSignal?: string
   /** Maximum run duration in seconds. */
   maxDurationSecs?: number
-  /** Registry credentials for pulling private images. */
-  registryAuth?: RegistryCredentials
+  /** Registry connection settings (auth, TLS, insecure). */
+  registry?: RegistryConfig
   /** Port mappings: host_port → guest_port (TCP). */
   ports?: Record<string, number>
   /** Network configuration. */

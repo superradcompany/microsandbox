@@ -11,6 +11,5 @@ edition.workspace = true
 path = "lib/lib.rs"
 
 [dependencies]
-crc32c.workspace = true
 libc.workspace = true
 scopeguard.workspace = true

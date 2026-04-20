@@ -5,7 +5,7 @@ members = ["."]
 [workspace.package]
 authors = ["Super Rad Company <developemnt@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.3.12"
+version = "0.3.14"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -46,7 +46,7 @@ path = "lib/lib.rs"
 chrono.workspace = true
 ciborium.workspace = true
 libc.workspace = true
-microsandbox-protocol = { version = "0.3.12", path = "../protocol" }
+microsandbox-protocol = { version = "0.3.14", path = "../protocol" }
 nix = { workspace = true, features = [
     "fs",
     "hostname",

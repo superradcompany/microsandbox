@@ -8,6 +8,14 @@ icon: "bolt"
   microsandbox requires **Linux with KVM** enabled, or **macOS with Apple Silicon** (M-series chip). Both use hardware virtualization.
 </Note>
 
+<Tip>
+  Boot a microVM in one command.
+
+  ```bash
+  npx microsandbox run debian
+  ```
+</Tip>
+
 <Steps>
   <Step title="Install microsandbox">
     The SDK **embeds the runtime directly**, so no separate server process is needed. Only install the `msb` CLI if you want to manage images, volumes, and sandboxes from the terminal.
@@ -19,6 +27,10 @@ icon: "bolt"
 
     ```bash TypeScript
     npm install microsandbox
+    ```
+
+    ```bash Python
+    pip install microsandbox
     ```
 
     ```bash CLI
@@ -64,6 +76,25 @@ icon: "bolt"
     console.log(output.stdout()) // Hello from a microVM!
 
     await sb.stop()
+    ```
+
+    ```python Python
+    import asyncio
+    from microsandbox import Sandbox
+
+    async def main():
+        sb = await Sandbox.create(
+            "hello",
+            image="python",
+            memory=512,
+        )
+
+        output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"])
+        print(output.stdout_text)  # Hello from a microVM!
+
+        await sb.stop()
+
+    asyncio.run(main())
     ```
 
     ```bash CLI

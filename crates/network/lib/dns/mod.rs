@@ -5,3 +5,6 @@
 //! host's DNS resolvers, and sends responses back through the smoltcp socket.
 
 pub mod interceptor;
+pub mod parse;
+
+pub use parse::{NameserverSpec, ParseNameserverError, parse_nameserver};

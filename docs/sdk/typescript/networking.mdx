@@ -68,14 +68,24 @@ Network configuration object passed as [`SandboxConfig.network`](/sdk/typescript
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| blockDomains? | `Array<string>` | `[]` | Block DNS for exact domains (returns NXDOMAIN) |
-| blockDomainSuffixes? | `Array<string>` | `[]` | Block DNS for all subdomains of a suffix |
 | defaultAction? | [`PolicyAction`](#policyaction) | `'allow'` | Action when no rule matches |
-| dnsRebindProtection? | `boolean` | `true` | Block DNS responses resolving to private IPs |
+| dns? | [`DnsConfig`](#dnsconfig) | - | DNS interception configuration |
 | maxConnections? | `number` | - | Maximum concurrent connections |
 | policy? | `string` | - | Preset name (set automatically by `NetworkPolicy.*()`) |
 | rules? | `Array<`[`PolicyRule`](#policyrule)`>` | `[]` | Custom rules evaluated first-match-wins |
 | tls? | [`TlsConfig`](#tlsconfig) | - | TLS interception configuration |
+
+### DnsConfig
+
+DNS interception settings.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| blockDomains? | `Array<string>` | `[]` | Block DNS for exact domains (returns REFUSED) |
+| blockDomainSuffixes? | `Array<string>` | `[]` | Block DNS for all subdomains of a suffix |
+| rebindProtection? | `boolean` | `true` | Block DNS responses resolving to private IPs |
+| nameservers? | `Array<string>` | `[]` | Nameservers (`IP`, `IP:PORT`, `HOST`, or `HOST:PORT`). Overrides the host's `/etc/resolv.conf` when set. Hostnames are resolved once at startup via the host's OS resolver |
+| queryTimeoutMs? | `number` | `5000` | Per-DNS-query timeout in milliseconds |
 
 ### PolicyAction
 

@@ -33,6 +33,14 @@ impl PySandbox {
         }
     }
 
+    async fn clone_sandbox(
+        inner: &Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
+    ) -> PyResult<microsandbox::sandbox::Sandbox> {
+        let guard = inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
+        Ok(sb.clone())
+    }
+
     async fn with_sandbox<F, R>(
         inner: &Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
         f: F,
@@ -221,15 +229,15 @@ impl PySandbox {
         let (args, options) = parse_exec_args(args_or_options)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
+            let sandbox = Self::clone_sandbox(&inner).await?;
 
             let output = if let Some(opts) = options {
-                sb.exec_with(&cmd, |e| apply_exec_options(e, opts))
+                sandbox
+                    .exec_with(&cmd, |e| apply_exec_options(e, opts))
                     .await
                     .map_err(to_py_err)?
             } else {
-                sb.exec(&cmd, args).await.map_err(to_py_err)?
+                sandbox.exec(&cmd, args).await.map_err(to_py_err)?
             };
 
             Ok(PyExecOutput::from_rust(output))
@@ -248,15 +256,15 @@ impl PySandbox {
         let (args, options) = parse_exec_args(args_or_options)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
+            let sandbox = Self::clone_sandbox(&inner).await?;
 
             let handle = if let Some(opts) = options {
-                sb.exec_stream_with(&cmd, |e| apply_exec_options(e, opts))
+                sandbox
+                    .exec_stream_with(&cmd, |e| apply_exec_options(e, opts))
                     .await
                     .map_err(to_py_err)?
             } else {
-                sb.exec_stream(&cmd, args).await.map_err(to_py_err)?
+                sandbox.exec_stream(&cmd, args).await.map_err(to_py_err)?
             };
 
             Ok(PyExecHandle::from_rust(handle))
@@ -267,9 +275,8 @@ impl PySandbox {
     fn shell<'py>(&self, py: Python<'py>, script: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
-            let output = sb.shell(&script).await.map_err(to_py_err)?;
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let output = sandbox.shell(&script).await.map_err(to_py_err)?;
             Ok(PyExecOutput::from_rust(output))
         })
     }
@@ -278,9 +285,8 @@ impl PySandbox {
     fn shell_stream<'py>(&self, py: Python<'py>, script: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
-            let handle = sb.shell_stream(&script).await.map_err(to_py_err)?;
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let handle = sandbox.shell_stream(&script).await.map_err(to_py_err)?;
             Ok(PyExecHandle::from_rust(handle))
         })
     }
@@ -303,29 +309,29 @@ impl PySandbox {
         let (args, options) = parse_exec_args(args_or_options)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
+            let sandbox = Self::clone_sandbox(&inner).await?;
             let exit_code = if let Some(opts) = options {
-                sb.attach_with(&cmd, |a| {
-                    let mut a = a.args(args);
-                    if !opts.env.is_empty() {
-                        a = a.envs(opts.env);
-                    }
-                    if let Some(cwd) = opts.cwd {
-                        a = a.cwd(cwd);
-                    }
-                    if let Some(user) = opts.user {
-                        a = a.user(user);
-                    }
-                    if let Some(keys) = opts.detach_keys {
-                        a = a.detach_keys(keys);
-                    }
-                    a
-                })
-                .await
-                .map_err(to_py_err)?
+                sandbox
+                    .attach_with(&cmd, |a| {
+                        let mut a = a.args(args);
+                        if !opts.env.is_empty() {
+                            a = a.envs(opts.env);
+                        }
+                        if let Some(cwd) = opts.cwd {
+                            a = a.cwd(cwd);
+                        }
+                        if let Some(user) = opts.user {
+                            a = a.user(user);
+                        }
+                        if let Some(keys) = opts.detach_keys {
+                            a = a.detach_keys(keys);
+                        }
+                        a
+                    })
+                    .await
+                    .map_err(to_py_err)?
             } else {
-                sb.attach(&cmd, args).await.map_err(to_py_err)?
+                sandbox.attach(&cmd, args).await.map_err(to_py_err)?
             };
             Ok(exit_code)
         })
@@ -335,9 +341,8 @@ impl PySandbox {
     fn attach_shell<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
-            let exit_code = sb.attach_shell().await.map_err(to_py_err)?;
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let exit_code = sandbox.attach_shell().await.map_err(to_py_err)?;
             Ok(exit_code)
         })
     }
@@ -350,9 +355,8 @@ impl PySandbox {
     fn metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
-            let m = sb.metrics().await.map_err(to_py_err)?;
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let m = sandbox.metrics().await.map_err(to_py_err)?;
             Ok(convert_metrics(&m))
         })
     }
@@ -363,9 +367,8 @@ impl PySandbox {
         let inner = self.inner.clone();
         let interval_dur = std::time::Duration::from_secs_f64(interval);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
-            let stream = sb.metrics_stream(interval_dur);
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let stream = sandbox.metrics_stream(interval_dur);
             Ok(PyMetricsStream::new(stream))
         })
     }
@@ -378,9 +381,8 @@ impl PySandbox {
     fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
-            sb.stop().await.map_err(to_py_err)?;
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            sandbox.stop().await.map_err(to_py_err)?;
             Ok(())
         })
     }
@@ -389,9 +391,8 @@ impl PySandbox {
     fn stop_and_wait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
-            let status = sb.stop_and_wait().await.map_err(to_py_err)?;
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let status = sandbox.stop_and_wait().await.map_err(to_py_err)?;
             Ok((status.code().unwrap_or(-1), status.success()))
         })
     }
@@ -400,9 +401,8 @@ impl PySandbox {
     fn kill<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
-            sb.kill().await.map_err(to_py_err)?;
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            sandbox.kill().await.map_err(to_py_err)?;
             Ok(())
         })
     }
@@ -411,9 +411,8 @@ impl PySandbox {
     fn drain<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
-            sb.drain().await.map_err(to_py_err)?;
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            sandbox.drain().await.map_err(to_py_err)?;
             Ok(())
         })
     }
@@ -422,9 +421,8 @@ impl PySandbox {
     fn wait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
-            let status = sb.wait().await.map_err(to_py_err)?;
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let status = sandbox.wait().await.map_err(to_py_err)?;
             Ok((status.code().unwrap_or(-1), status.success()))
         })
     }
@@ -472,11 +470,14 @@ impl PySandbox {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            if let Some(ref sb) = *guard {
+            let sandbox = {
+                let mut guard = inner.lock().await;
+                guard.take()
+            };
+
+            if let Some(sb) = sandbox {
                 let name = sb.name().to_string();
                 let _ = sb.kill().await;
-                drop(guard);
                 let _ = microsandbox::sandbox::Sandbox::remove(&name).await;
             }
             Ok(false) // don't suppress exceptions
@@ -853,43 +854,64 @@ fn convert_pull_progress(event: microsandbox::sandbox::PullProgress) -> PyPullEv
             downloaded_bytes: Some(downloaded_bytes as i64),
             ..Default::default()
         },
-        PullProgress::LayerExtractStarted {
+        PullProgress::LayerDownloadVerifying {
+            layer_index,
+            digest,
+        } => PyPullEvent {
+            event_type: "layer_download_verifying",
+            layer_index: Some(layer_index as u32),
+            digest: Some(digest.to_string()),
+            ..Default::default()
+        },
+        PullProgress::LayerMaterializeStarted {
             layer_index,
             diff_id,
         } => PyPullEvent {
-            event_type: "layer_extract_started",
+            event_type: "layer_materialize_started",
             layer_index: Some(layer_index as u32),
             diff_id: Some(diff_id.to_string()),
             ..Default::default()
         },
-        PullProgress::LayerExtractProgress {
+        PullProgress::LayerMaterializeProgress {
             layer_index,
             bytes_read,
             total_bytes,
         } => PyPullEvent {
-            event_type: "layer_extract_progress",
+            event_type: "layer_materialize_progress",
             layer_index: Some(layer_index as u32),
             bytes_read: Some(bytes_read as i64),
             total_bytes: Some(total_bytes as i64),
             ..Default::default()
         },
-        PullProgress::LayerExtractComplete {
+        PullProgress::LayerMaterializeWriting { layer_index } => PyPullEvent {
+            event_type: "layer_materialize_writing",
+            layer_index: Some(layer_index as u32),
+            ..Default::default()
+        },
+        PullProgress::LayerMaterializeComplete {
             layer_index,
             diff_id,
         } => PyPullEvent {
-            event_type: "layer_extract_complete",
+            event_type: "layer_materialize_complete",
             layer_index: Some(layer_index as u32),
             diff_id: Some(diff_id.to_string()),
             ..Default::default()
         },
-        PullProgress::LayerIndexStarted { layer_index } => PyPullEvent {
-            event_type: "layer_index_started",
-            layer_index: Some(layer_index as u32),
+        PullProgress::StitchMergingTrees { layer_count } => PyPullEvent {
+            event_type: "stitch_merging_trees",
+            layer_count: Some(layer_count as u32),
             ..Default::default()
         },
-        PullProgress::LayerIndexComplete { layer_index } => PyPullEvent {
-            event_type: "layer_index_complete",
-            layer_index: Some(layer_index as u32),
+        PullProgress::StitchWritingFsmeta => PyPullEvent {
+            event_type: "stitch_writing_fsmeta",
+            ..Default::default()
+        },
+        PullProgress::StitchWritingVmdk => PyPullEvent {
+            event_type: "stitch_writing_vmdk",
+            ..Default::default()
+        },
+        PullProgress::StitchComplete => PyPullEvent {
+            event_type: "stitch_complete",
             ..Default::default()
         },
         PullProgress::Complete {

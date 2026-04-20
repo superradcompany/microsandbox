@@ -1,43 +1,8 @@
 //! PID 1 init: mount filesystems, apply tmpfs mounts, prepare runtime directories.
 
-use crate::error::{AgentdError, AgentdResult};
-
-//--------------------------------------------------------------------------------------------------
-// Types
-//--------------------------------------------------------------------------------------------------
-
-/// Parsed tmpfs mount specification.
-#[derive(Debug)]
-struct TmpfsSpec<'a> {
-    path: &'a str,
-    size_mib: Option<u32>,
-    mode: Option<u32>,
-    noexec: bool,
-}
-
-/// Parsed block-device root specification.
-#[derive(Debug)]
-struct BlockRootSpec<'a> {
-    device: &'a str,
-    fstype: Option<&'a str>,
-}
-
-/// Parsed virtiofs directory volume mount specification.
-#[derive(Debug)]
-struct DirMountSpec<'a> {
-    tag: &'a str,
-    guest_path: &'a str,
-    readonly: bool,
-}
-
-/// Parsed virtiofs file volume mount specification.
-#[derive(Debug)]
-struct FileMountSpec<'a> {
-    tag: &'a str,
-    filename: &'a str,
-    guest_path: &'a str,
-    readonly: bool,
-}
+use crate::config::BootParams;
+use crate::error::AgentdResult;
+use crate::{network, rlimit, tls};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -45,190 +10,30 @@ struct FileMountSpec<'a> {
 
 /// Performs synchronous PID 1 initialization.
 ///
-/// Mounts essential filesystems, applies directory mounts from
-/// `MSB_DIR_MOUNTS`, file mounts from `MSB_FILE_MOUNTS`, and tmpfs mounts
-/// from `MSB_TMPFS`. Configures networking from `MSB_NET*` env vars and
-/// prepares runtime directories.
-pub fn init() -> AgentdResult<()> {
+/// Applies sandbox-wide resource limits first so every later guest process
+/// inherits the raised baseline, then mounts filesystems, applies directory
+/// mounts, file mounts, and tmpfs mounts from the parsed params. Configures
+/// networking and prepares runtime directories.
+///
+/// Consumes the [`BootParams`] by value — the data is one-shot and not
+/// needed after init returns.
+pub fn init(params: BootParams) -> AgentdResult<()> {
+    rlimit::apply_baseline(&params.rlimits)?;
     linux::mount_filesystems()?;
     linux::mount_runtime()?;
-    linux::mount_block_root()?;
-    linux::apply_dir_mounts()?;
-    linux::apply_file_mounts()?;
-    crate::network::apply_hostname()?;
-    linux::apply_tmpfs_mounts()?;
+    if let Some(spec) = &params.block_root {
+        linux::mount_block_root(spec)?;
+    }
+    linux::apply_dir_mounts(&params.dir_mounts)?;
+    linux::apply_file_mounts(&params.file_mounts)?;
+    network::apply_hostname(params.hostname.as_deref())?;
+    linux::apply_tmpfs_mounts(&params.tmpfs)?;
     linux::ensure_standard_tmp_permissions()?;
-    crate::network::apply_network_config()?;
-    crate::tls::install_ca_cert()?;
+    network::apply_network_config(params.network())?;
+    tls::install_ca_cert()?;
     linux::ensure_scripts_path_in_profile()?;
     linux::create_run_dir()?;
     Ok(())
-}
-
-/// Parses a single tmpfs entry: `path[,size=N][,mode=N][,noexec]`
-///
-/// Mode is parsed as octal (e.g. `mode=1777`).
-fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec<'_>> {
-    let mut parts = entry.split(',');
-    let path = parts.next().unwrap(); // always at least one element
-    if path.is_empty() {
-        return Err(AgentdError::Init("tmpfs entry has empty path".into()));
-    }
-
-    let mut size_mib = None;
-    let mut mode = None;
-    let mut noexec = false;
-
-    for opt in parts {
-        if opt == "noexec" {
-            noexec = true;
-        } else if let Some(val) = opt.strip_prefix("size=") {
-            size_mib = Some(
-                val.parse::<u32>()
-                    .map_err(|_| AgentdError::Init(format!("invalid tmpfs size: {val}")))?,
-            );
-        } else if let Some(val) = opt.strip_prefix("mode=") {
-            mode = Some(
-                u32::from_str_radix(val, 8)
-                    .map_err(|_| AgentdError::Init(format!("invalid octal tmpfs mode: {val}")))?,
-            );
-        } else {
-            return Err(AgentdError::Init(format!("unknown tmpfs option: {opt}")));
-        }
-    }
-
-    Ok(TmpfsSpec {
-        path,
-        size_mib,
-        mode,
-        noexec,
-    })
-}
-
-/// Parses a block-device root specification: `device[,fstype=TYPE]`
-fn parse_block_root(val: &str) -> AgentdResult<BlockRootSpec<'_>> {
-    let mut parts = val.split(',');
-    let device = parts.next().unwrap();
-    if device.is_empty() {
-        return Err(AgentdError::Init(
-            "MSB_BLOCK_ROOT has empty device path".into(),
-        ));
-    }
-
-    let mut fstype = None;
-    for opt in parts {
-        if let Some(val) = opt.strip_prefix("fstype=") {
-            if val.is_empty() {
-                return Err(AgentdError::Init(
-                    "MSB_BLOCK_ROOT has empty fstype value".into(),
-                ));
-            }
-            fstype = Some(val);
-        } else {
-            return Err(AgentdError::Init(format!(
-                "unknown MSB_BLOCK_ROOT option: {opt}"
-            )));
-        }
-    }
-
-    Ok(BlockRootSpec { device, fstype })
-}
-
-/// Parses a single virtiofs directory volume mount entry: `tag:guest_path[:ro]`
-fn parse_dir_mount_entry(entry: &str) -> AgentdResult<DirMountSpec<'_>> {
-    let parts: Vec<&str> = entry.split(':').collect();
-    if parts.len() < 2 {
-        return Err(AgentdError::Init(format!(
-            "MSB_DIR_MOUNTS entry must be tag:path[:ro], got: {entry}"
-        )));
-    }
-
-    let tag = parts[0];
-    let guest_path = parts[1];
-    let readonly = match parts.get(2) {
-        Some(&"ro") => true,
-        None => false,
-        Some(flag) => {
-            return Err(AgentdError::Init(format!(
-                "MSB_DIR_MOUNTS unknown flag '{flag}' (expected 'ro')"
-            )));
-        }
-    };
-
-    if parts.len() > 3 {
-        return Err(AgentdError::Init(format!(
-            "MSB_DIR_MOUNTS entry has too many parts: {entry}"
-        )));
-    }
-
-    if tag.is_empty() {
-        return Err(AgentdError::Init(
-            "MSB_DIR_MOUNTS entry has empty tag".into(),
-        ));
-    }
-    if guest_path.is_empty() || !guest_path.starts_with('/') {
-        return Err(AgentdError::Init(format!(
-            "MSB_DIR_MOUNTS guest path must be absolute: {guest_path}"
-        )));
-    }
-
-    Ok(DirMountSpec {
-        tag,
-        guest_path,
-        readonly,
-    })
-}
-
-/// Parses a single virtiofs file volume mount entry: `tag:filename:guest_path[:ro]`
-fn parse_file_mount_entry(entry: &str) -> AgentdResult<FileMountSpec<'_>> {
-    let parts: Vec<&str> = entry.split(':').collect();
-    if parts.len() < 3 {
-        return Err(AgentdError::Init(format!(
-            "MSB_FILE_MOUNTS entry must be tag:filename:path[:ro], got: {entry}"
-        )));
-    }
-
-    let tag = parts[0];
-    let filename = parts[1];
-    let guest_path = parts[2];
-    let readonly = match parts.get(3) {
-        Some(&"ro") => true,
-        None => false,
-        Some(flag) => {
-            return Err(AgentdError::Init(format!(
-                "MSB_FILE_MOUNTS unknown flag '{flag}' (expected 'ro')"
-            )));
-        }
-    };
-
-    if parts.len() > 4 {
-        return Err(AgentdError::Init(format!(
-            "MSB_FILE_MOUNTS entry has too many parts: {entry}"
-        )));
-    }
-
-    if tag.is_empty() {
-        return Err(AgentdError::Init(
-            "MSB_FILE_MOUNTS entry has empty tag".into(),
-        ));
-    }
-    if filename.is_empty() {
-        return Err(AgentdError::Init(
-            "MSB_FILE_MOUNTS entry has empty filename".into(),
-        ));
-    }
-    if guest_path.is_empty() || !guest_path.starts_with('/') {
-        return Err(AgentdError::Init(format!(
-            "MSB_FILE_MOUNTS guest path must be absolute: {guest_path}"
-        )));
-    }
-
-    Ok(FileMountSpec {
-        tag,
-        filename,
-        guest_path,
-        readonly,
-    })
 }
 
 fn ensure_scripts_profile_block(profile: &str) -> String {
@@ -253,20 +58,16 @@ fn ensure_scripts_profile_block(profile: &str) -> String {
 //--------------------------------------------------------------------------------------------------
 
 mod linux {
-    use std::{
-        os::unix::fs::{PermissionsExt, symlink},
-        path::Path,
-    };
+    use std::fs;
+    use std::os::unix::fs::{self as unix_fs, PermissionsExt};
+    use std::path::Path;
 
-    use nix::{
-        mount::{MntFlags, MsFlags, mount, umount2},
-        sys::stat::Mode,
-        unistd::{chdir, chroot, mkdir},
-    };
+    use nix::mount::{self, MntFlags, MsFlags};
+    use nix::sys::stat::Mode;
+    use nix::unistd;
 
+    use crate::config::{BlockRootSpec, DirMountSpec, FileMountSpec, TmpfsSpec};
     use crate::error::{AgentdError, AgentdResult};
-
-    use super::TmpfsSpec;
 
     /// Mounts essential Linux filesystems.
     pub fn mount_filesystems() -> AgentdResult<()> {
@@ -337,7 +138,7 @@ mod linux {
 
         // /dev/fd → /proc/self/fd
         if !Path::new("/dev/fd").exists() {
-            symlink("/proc/self/fd", "/dev/fd")
+            unix_fs::symlink("/proc/self/fd", "/dev/fd")
                 .map_err(|e| AgentdError::Init(format!("failed to symlink /dev/fd: {e}")))?;
         }
 
@@ -357,25 +158,35 @@ mod linux {
         Ok(())
     }
 
-    /// Mounts a block device as the new root filesystem, if `MSB_BLOCK_ROOT` is set.
+    /// Assembles the root filesystem from the parsed block-root spec.
     ///
-    /// Steps: mount block device at `/newroot`, bind-mount `/.msb` into it,
-    /// pivot via `MS_MOVE` + `chroot`, then re-mount essential filesystems.
-    pub fn mount_block_root() -> AgentdResult<()> {
-        let val = match std::env::var(microsandbox_protocol::ENV_BLOCK_ROOT) {
-            Ok(v) if !v.is_empty() => v,
-            _ => return Ok(()),
-        };
-
-        let spec = super::parse_block_root(&val)?;
-
-        // Create the temporary mount point.
+    /// Dispatches on the spec variant, then pivots `/newroot` into `/`.
+    pub fn mount_block_root(spec: &BlockRootSpec) -> AgentdResult<()> {
         mkdir_ignore_exists("/newroot")?;
 
-        // Mount the block device.
-        if let Some(fstype) = spec.fstype {
-            mount(
-                Some(spec.device),
+        match spec {
+            BlockRootSpec::DiskImage { device, fstype } => {
+                mount_disk_image(device, fstype.as_deref())?;
+            }
+            BlockRootSpec::OciErofs {
+                lower,
+                upper,
+                upper_fstype,
+            } => {
+                mount_oci_erofs(lower, upper, upper_fstype)?;
+            }
+        }
+
+        pivot_to_newroot()?;
+
+        Ok(())
+    }
+
+    /// Mount a single disk image at /newroot.
+    fn mount_disk_image(device: &str, fstype: Option<&str>) -> AgentdResult<()> {
+        if let Some(fstype) = fstype {
+            mount::mount(
+                Some(device),
                 "/newroot",
                 Some(fstype),
                 MsFlags::empty(),
@@ -383,18 +194,74 @@ mod linux {
             )
             .map_err(|e| {
                 AgentdError::Init(format!(
-                    "failed to mount {} at /newroot as {fstype}: {e}",
-                    spec.device
+                    "failed to mount {device} at /newroot as {fstype}: {e}"
                 ))
             })?;
         } else {
-            try_mount(spec.device, "/newroot")?;
+            try_mount(device, "/newroot")?;
         }
+        Ok(())
+    }
 
-        // Bind-mount the runtime filesystem into the new root.
+    /// Mount merged EROFS lower + writable upper + overlayfs at /newroot.
+    fn mount_oci_erofs(
+        lower_device: &str,
+        upper_device: &str,
+        upper_fstype: &str,
+    ) -> AgentdResult<()> {
+        // Mount the EROFS lower device read-only.
+        let lower_dir = "/.msb/rootfs/lower";
+        mkdir_ignore_exists("/.msb/rootfs")?;
+        mkdir_ignore_exists("/.msb/rootfs/lower")?;
+        mount::mount(
+            Some(lower_device),
+            lower_dir,
+            Some("erofs"),
+            MsFlags::MS_RDONLY,
+            None::<&str>,
+        )
+        .map_err(|e| AgentdError::Init(format!("mount {lower_device} at {lower_dir}: {e}")))?;
+
+        // Mount the writable upper device.
+        let upperfs_dir = "/.msb/rootfs/upperfs";
+        mkdir_ignore_exists("/.msb/rootfs/upperfs")?;
+        mount::mount(
+            Some(upper_device),
+            upperfs_dir,
+            Some(upper_fstype),
+            MsFlags::empty(),
+            None::<&str>,
+        )
+        .map_err(|e| AgentdError::Init(format!("mount {upper_device} at {upperfs_dir}: {e}")))?;
+
+        // Create upper and work subdirs on the writable device.
+        let upper_dir = format!("{upperfs_dir}/upper");
+        let work_dir = format!("{upperfs_dir}/work");
+        fs::create_dir_all(&upper_dir)
+            .map_err(|e| AgentdError::Init(format!("mkdir {upper_dir}: {e}")))?;
+        fs::create_dir_all(&work_dir)
+            .map_err(|e| AgentdError::Init(format!("mkdir {work_dir}: {e}")))?;
+
+        // Assemble overlayfs mount.
+        let mount_data = format!("lowerdir={lower_dir},upperdir={upper_dir},workdir={work_dir}");
+
+        mount::mount(
+            Some("overlay"),
+            "/newroot",
+            Some("overlay"),
+            MsFlags::empty(),
+            Some(mount_data.as_str()),
+        )
+        .map_err(|e| AgentdError::Init(format!("mount overlay at /newroot: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Bind-mount /.msb into /newroot, then MS_MOVE + chroot + re-mount essentials.
+    fn pivot_to_newroot() -> AgentdResult<()> {
         let msb_target = "/newroot/.msb";
         mkdir_ignore_exists(msb_target)?;
-        mount(
+        mount::mount(
             Some(microsandbox_protocol::RUNTIME_MOUNT_POINT),
             msb_target,
             None::<&str>,
@@ -403,19 +270,17 @@ mod linux {
         )
         .map_err(|e| AgentdError::Init(format!("failed to bind-mount /.msb into /newroot: {e}")))?;
 
-        // Pivot: move the new root on top of /.
-        chdir("/newroot")
+        unistd::chdir("/newroot")
             .map_err(|e| AgentdError::Init(format!("failed to chdir /newroot: {e}")))?;
 
-        mount(Some("."), "/", None::<&str>, MsFlags::MS_MOVE, None::<&str>)
+        mount::mount(Some("."), "/", None::<&str>, MsFlags::MS_MOVE, None::<&str>)
             .map_err(|e| AgentdError::Init(format!("failed to MS_MOVE /newroot to /: {e}")))?;
 
-        chroot(".").map_err(|e| AgentdError::Init(format!("failed to chroot: {e}")))?;
+        unistd::chroot(".").map_err(|e| AgentdError::Init(format!("failed to chroot: {e}")))?;
 
-        chdir("/")
+        unistd::chdir("/")
             .map_err(|e| AgentdError::Init(format!("failed to chdir / after chroot: {e}")))?;
 
-        // Re-mount essential filesystems in the new root.
         mount_filesystems()?;
 
         Ok(())
@@ -423,7 +288,7 @@ mod linux {
 
     /// Tries every filesystem type listed in `/proc/filesystems` until one succeeds.
     fn try_mount(device: &str, target: &str) -> AgentdResult<()> {
-        let content = std::fs::read_to_string("/proc/filesystems")
+        let content = fs::read_to_string("/proc/filesystems")
             .map_err(|e| AgentdError::Init(format!("failed to read /proc/filesystems: {e}")))?;
 
         for line in content.lines() {
@@ -437,7 +302,7 @@ mod linux {
                 continue;
             }
 
-            if mount(
+            if mount::mount(
                 Some(device),
                 target,
                 Some(fstype),
@@ -455,38 +320,20 @@ mod linux {
         )))
     }
 
-    /// Reads `MSB_DIR_MOUNTS` env var and mounts each virtiofs directory volume.
-    ///
-    /// For each entry, creates the guest mount point directory and mounts the
-    /// virtiofs share using the tag provided by the host. If the entry
-    /// specifies `:ro`, the mount is made read-only via `MS_RDONLY`.
-    ///
-    /// Missing env var is not an error (no directory volume mounts requested).
-    /// Parse failures and mount failures are hard errors.
-    pub fn apply_dir_mounts() -> AgentdResult<()> {
-        let val = match std::env::var(microsandbox_protocol::ENV_DIR_MOUNTS) {
-            Ok(v) if !v.is_empty() => v,
-            _ => return Ok(()),
-        };
-
-        for entry in val.split(';') {
-            if entry.is_empty() {
-                continue;
-            }
-
-            let spec = super::parse_dir_mount_entry(entry)?;
-            mount_dir(&spec)?;
+    /// Mounts each virtiofs directory volume from the parsed specs.
+    pub fn apply_dir_mounts(specs: &[DirMountSpec]) -> AgentdResult<()> {
+        for spec in specs {
+            mount_dir(spec)?;
         }
-
         Ok(())
     }
 
     /// Mounts a single virtiofs directory share from a parsed spec.
-    fn mount_dir(spec: &super::DirMountSpec<'_>) -> AgentdResult<()> {
-        let path = spec.guest_path;
+    fn mount_dir(spec: &DirMountSpec) -> AgentdResult<()> {
+        let path = spec.guest_path.as_str();
 
         // Create the mount point directory.
-        std::fs::create_dir_all(path)
+        fs::create_dir_all(path)
             .map_err(|e| AgentdError::Init(format!("failed to create directory {path}: {e}")))?;
 
         let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
@@ -494,7 +341,14 @@ mod linux {
             flags |= MsFlags::MS_RDONLY;
         }
 
-        mount(Some(spec.tag), path, Some("virtiofs"), flags, None::<&str>).map_err(|e| {
+        mount::mount(
+            Some(spec.tag.as_str()),
+            path,
+            Some("virtiofs"),
+            flags,
+            None::<&str>,
+        )
+        .map_err(|e| {
             AgentdError::Init(format!(
                 "failed to mount virtiofs tag '{}' at {path}: {e}",
                 spec.tag
@@ -504,46 +358,37 @@ mod linux {
         Ok(())
     }
 
-    /// Reads `MSB_FILE_MOUNTS` env var and bind-mounts each file.
-    ///
-    /// Missing env var is not an error (no file mounts requested).
-    /// Parse failures and mount failures are hard errors.
-    pub fn apply_file_mounts() -> AgentdResult<()> {
-        let val = match std::env::var(microsandbox_protocol::ENV_FILE_MOUNTS) {
-            Ok(v) if !v.is_empty() => v,
-            _ => return Ok(()),
-        };
+    /// Bind-mounts each file from virtiofs shares.
+    pub fn apply_file_mounts(specs: &[FileMountSpec]) -> AgentdResult<()> {
+        if specs.is_empty() {
+            return Ok(());
+        }
 
         // Create the staging root directory.
-        std::fs::create_dir_all(microsandbox_protocol::FILE_MOUNTS_DIR).map_err(|e| {
+        fs::create_dir_all(microsandbox_protocol::FILE_MOUNTS_DIR).map_err(|e| {
             AgentdError::Init(format!(
                 "failed to create file mounts dir {}: {e}",
                 microsandbox_protocol::FILE_MOUNTS_DIR
             ))
         })?;
 
-        for entry in val.split(';') {
-            if entry.is_empty() {
-                continue;
-            }
-
-            let spec = super::parse_file_mount_entry(entry)?;
-            mount_file(&spec)?;
+        for spec in specs {
+            mount_file(spec)?;
         }
 
         // Best-effort cleanup of the staging root (succeeds only if all
         // per-tag subdirs were already removed inside mount_file).
-        let _ = std::fs::remove_dir(microsandbox_protocol::FILE_MOUNTS_DIR);
+        let _ = fs::remove_dir(microsandbox_protocol::FILE_MOUNTS_DIR);
 
         Ok(())
     }
 
     /// Mounts a single file from a virtiofs share via bind mount.
-    fn mount_file(spec: &super::FileMountSpec<'_>) -> AgentdResult<()> {
+    fn mount_file(spec: &FileMountSpec) -> AgentdResult<()> {
         let staging_path = format!("{}/{}", microsandbox_protocol::FILE_MOUNTS_DIR, spec.tag);
 
         // 1. Create the staging mount point directory.
-        std::fs::create_dir_all(&staging_path).map_err(|e| {
+        fs::create_dir_all(&staging_path).map_err(|e| {
             AgentdError::Init(format!("failed to create staging dir {staging_path}: {e}"))
         })?;
 
@@ -553,8 +398,8 @@ mod linux {
             flags |= MsFlags::MS_RDONLY;
         }
 
-        mount(
-            Some(spec.tag),
+        mount::mount(
+            Some(spec.tag.as_str()),
             staging_path.as_str(),
             Some("virtiofs"),
             flags,
@@ -568,9 +413,9 @@ mod linux {
         })?;
 
         // 3. Create parent directories for the guest path.
-        let guest = Path::new(spec.guest_path);
+        let guest = Path::new(&spec.guest_path);
         if let Some(parent) = guest.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+            fs::create_dir_all(parent).map_err(|e| {
                 AgentdError::Init(format!(
                     "failed to create parent dirs for {}: {e}",
                     spec.guest_path
@@ -579,11 +424,11 @@ mod linux {
         }
 
         // 4. Create the target file (touch) as a bind mount target.
-        std::fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(spec.guest_path)
+            .open(&spec.guest_path)
             .map_err(|e| {
                 AgentdError::Init(format!(
                     "failed to create bind target {}: {e}",
@@ -593,9 +438,9 @@ mod linux {
 
         // 5. Bind mount the file from staging to the guest path.
         let source_path = format!("{staging_path}/{}", spec.filename);
-        mount(
+        mount::mount(
             Some(source_path.as_str()),
-            spec.guest_path,
+            spec.guest_path.as_str(),
             None::<&str>,
             MsFlags::MS_BIND,
             None::<&str>,
@@ -609,9 +454,9 @@ mod linux {
 
         // 6. If read-only, remount the bind mount as read-only.
         if spec.readonly {
-            mount(
+            mount::mount(
                 None::<&str>,
-                spec.guest_path,
+                spec.guest_path.as_str(),
                 None::<&str>,
                 MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
                 None::<&str>,
@@ -627,31 +472,17 @@ mod linux {
         // 7. Unmount the staging virtiofs share and remove the directory.
         //    The bind mount keeps the file accessible at the guest path;
         //    removing the share prevents alternate-path access.
-        let _ = umount2(staging_path.as_str(), MntFlags::MNT_DETACH);
-        let _ = std::fs::remove_dir(&staging_path);
+        let _ = mount::umount2(staging_path.as_str(), MntFlags::MNT_DETACH);
+        let _ = fs::remove_dir(&staging_path);
 
         Ok(())
     }
 
-    /// Reads `MSB_TMPFS` env var and mounts each tmpfs entry.
-    ///
-    /// Missing env var is not an error (no tmpfs mounts requested).
-    /// Parse failures and mount failures are hard errors.
-    pub fn apply_tmpfs_mounts() -> AgentdResult<()> {
-        let val = match std::env::var(microsandbox_protocol::ENV_TMPFS) {
-            Ok(v) if !v.is_empty() => v,
-            _ => return Ok(()),
-        };
-
-        for entry in val.split(';') {
-            if entry.is_empty() {
-                continue;
-            }
-
-            let spec = super::parse_tmpfs_entry(entry)?;
-            mount_tmpfs(&spec)?;
+    /// Mounts each tmpfs from the parsed specs.
+    pub fn apply_tmpfs_mounts(specs: &[TmpfsSpec]) -> AgentdResult<()> {
+        for spec in specs {
+            mount_tmpfs(spec)?;
         }
-
         Ok(())
     }
 
@@ -663,8 +494,8 @@ mod linux {
     }
 
     /// Mounts a single tmpfs from a parsed spec.
-    fn mount_tmpfs(spec: &TmpfsSpec<'_>) -> AgentdResult<()> {
-        let path = spec.path;
+    fn mount_tmpfs(spec: &TmpfsSpec) -> AgentdResult<()> {
+        let path = spec.path.as_str();
 
         // Determine the permission mode.
         let mode = spec
@@ -676,7 +507,7 @@ mod linux {
             });
 
         // Create the target directory.
-        std::fs::create_dir_all(path)
+        fs::create_dir_all(path)
             .map_err(|e| AgentdError::Init(format!("failed to create directory {path}: {e}")))?;
 
         // Flags: nosuid + nodev (sensible safety defaults).
@@ -695,7 +526,7 @@ mod linux {
         }
         data.push_str(&format!("mode={mode:o}"));
 
-        mount(
+        mount::mount(
             Some("tmpfs"),
             path,
             Some("tmpfs"),
@@ -716,7 +547,7 @@ mod linux {
     /// Ensure login shells preserve `/.msb/scripts` on PATH.
     pub fn ensure_scripts_path_in_profile() -> AgentdResult<()> {
         let profile_path = Path::new("/etc/profile");
-        let existing = match std::fs::read_to_string(profile_path) {
+        let existing = match fs::read_to_string(profile_path) {
             Ok(contents) => contents,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(err) => {
@@ -730,11 +561,11 @@ mod linux {
         let updated = super::ensure_scripts_profile_block(&existing);
         if updated != existing {
             if let Some(parent) = profile_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|err| {
+                fs::create_dir_all(parent).map_err(|err| {
                     AgentdError::Init(format!("failed to create {}: {err}", parent.display()))
                 })?;
             }
-            std::fs::write(profile_path, updated).map_err(|err| {
+            fs::write(profile_path, updated).map_err(|err| {
                 AgentdError::Init(format!("failed to write {}: {err}", profile_path.display()))
             })?;
         }
@@ -744,7 +575,7 @@ mod linux {
 
     /// Creates a directory, ignoring EEXIST errors.
     fn mkdir_ignore_exists(path: &str) -> AgentdResult<()> {
-        match mkdir(path, Mode::from_bits_truncate(0o755)) {
+        match unistd::mkdir(path, Mode::from_bits_truncate(0o755)) {
             Ok(()) => Ok(()),
             Err(nix::Error::EEXIST) => Ok(()),
             Err(e) => Err(e.into()),
@@ -752,10 +583,10 @@ mod linux {
     }
 
     fn ensure_directory_mode(path: &str, mode: u32) -> AgentdResult<()> {
-        std::fs::create_dir_all(path)
+        fs::create_dir_all(path)
             .map_err(|e| AgentdError::Init(format!("failed to create directory {path}: {e}")))?;
 
-        let metadata = std::fs::metadata(path)
+        let metadata = fs::metadata(path)
             .map_err(|e| AgentdError::Init(format!("failed to stat {path}: {e}")))?;
         if !metadata.is_dir() {
             return Err(AgentdError::Init(format!(
@@ -765,7 +596,7 @@ mod linux {
 
         let current_mode = metadata.permissions().mode() & 0o7777;
         if current_mode != mode {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|e| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|e| {
                 AgentdError::Init(format!("failed to chmod {path} to {mode:o}: {e}"))
             })?;
         }
@@ -781,7 +612,7 @@ mod linux {
         flags: MsFlags,
         data: Option<&str>,
     ) -> AgentdResult<()> {
-        match mount(source, target, fstype, flags, data) {
+        match mount::mount(source, target, fstype, flags, data) {
             Ok(()) => Ok(()),
             Err(nix::Error::EBUSY) => Ok(()),
             Err(e) => Err(AgentdError::Init(format!("failed to mount {target}: {e}"))),
@@ -796,148 +627,6 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_path_only() {
-        let spec = parse_tmpfs_entry("/tmp").unwrap();
-        assert_eq!(spec.path, "/tmp");
-        assert_eq!(spec.size_mib, None);
-        assert_eq!(spec.mode, None);
-        assert!(!spec.noexec);
-    }
-
-    #[test]
-    fn test_parse_with_size() {
-        let spec = parse_tmpfs_entry("/tmp,size=256").unwrap();
-        assert_eq!(spec.path, "/tmp");
-        assert_eq!(spec.size_mib, Some(256));
-    }
-
-    #[test]
-    fn test_parse_with_noexec() {
-        let spec = parse_tmpfs_entry("/tmp,noexec").unwrap();
-        assert_eq!(spec.path, "/tmp");
-        assert!(spec.noexec);
-    }
-
-    #[test]
-    fn test_parse_with_octal_mode() {
-        let spec = parse_tmpfs_entry("/tmp,mode=1777").unwrap();
-        assert_eq!(spec.mode, Some(0o1777));
-
-        let spec = parse_tmpfs_entry("/data,mode=755").unwrap();
-        assert_eq!(spec.mode, Some(0o755));
-    }
-
-    #[test]
-    fn test_parse_multi_options() {
-        let spec = parse_tmpfs_entry("/tmp,size=256,mode=1777,noexec").unwrap();
-        assert_eq!(spec.path, "/tmp");
-        assert_eq!(spec.size_mib, Some(256));
-        assert_eq!(spec.mode, Some(0o1777));
-        assert!(spec.noexec);
-    }
-
-    #[test]
-    fn test_parse_unknown_option_errors() {
-        let err = parse_tmpfs_entry("/tmp,bogus=42").unwrap_err();
-        assert!(err.to_string().contains("unknown tmpfs option"));
-    }
-
-    #[test]
-    fn test_parse_invalid_size_errors() {
-        let err = parse_tmpfs_entry("/tmp,size=abc").unwrap_err();
-        assert!(err.to_string().contains("invalid tmpfs size"));
-    }
-
-    #[test]
-    fn test_parse_invalid_mode_errors() {
-        let err = parse_tmpfs_entry("/tmp,mode=zzz").unwrap_err();
-        assert!(err.to_string().contains("invalid octal tmpfs mode"));
-    }
-
-    #[test]
-    fn test_parse_empty_path_errors() {
-        let err = parse_tmpfs_entry(",size=256").unwrap_err();
-        assert!(err.to_string().contains("empty path"));
-    }
-
-    #[test]
-    fn test_parse_block_root_device_only() {
-        let spec = parse_block_root("/dev/vda").unwrap();
-        assert_eq!(spec.device, "/dev/vda");
-        assert_eq!(spec.fstype, None);
-    }
-
-    #[test]
-    fn test_parse_block_root_with_fstype() {
-        let spec = parse_block_root("/dev/vda,fstype=ext4").unwrap();
-        assert_eq!(spec.device, "/dev/vda");
-        assert_eq!(spec.fstype, Some("ext4"));
-    }
-
-    #[test]
-    fn test_parse_block_root_empty_device_errors() {
-        let err = parse_block_root(",fstype=ext4").unwrap_err();
-        assert!(err.to_string().contains("empty device path"));
-    }
-
-    #[test]
-    fn test_parse_block_root_unknown_option_errors() {
-        let err = parse_block_root("/dev/vda,bogus=42").unwrap_err();
-        assert!(err.to_string().contains("unknown MSB_BLOCK_ROOT option"));
-    }
-
-    #[test]
-    fn test_parse_block_root_empty_fstype_errors() {
-        let err = parse_block_root("/dev/vda,fstype=").unwrap_err();
-        assert!(err.to_string().contains("empty fstype"));
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_basic() {
-        let spec = parse_file_mount_entry("fm_config:app.conf:/etc/app.conf").unwrap();
-        assert_eq!(spec.tag, "fm_config");
-        assert_eq!(spec.filename, "app.conf");
-        assert_eq!(spec.guest_path, "/etc/app.conf");
-        assert!(!spec.readonly);
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_readonly() {
-        let spec = parse_file_mount_entry("fm_config:app.conf:/etc/app.conf:ro").unwrap();
-        assert!(spec.readonly);
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_too_few_parts() {
-        assert!(parse_file_mount_entry("fm_config:/etc/app.conf").is_err());
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_empty_filename() {
-        assert!(parse_file_mount_entry("fm_config::/etc/app.conf").is_err());
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_relative_path() {
-        assert!(parse_file_mount_entry("fm_config:app.conf:relative/path").is_err());
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_too_many_parts() {
-        assert!(parse_file_mount_entry("fm_config:app.conf:/etc/app.conf:ro:extra").is_err());
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_unknown_flag() {
-        assert!(parse_file_mount_entry("fm_config:app.conf:/etc/app.conf:rw").is_err());
-    }
-
-    #[test]
-    fn test_parse_file_mount_entry_empty_tag() {
-        assert!(parse_file_mount_entry(":app.conf:/etc/app.conf").is_err());
-    }
 
     #[test]
     fn test_ensure_scripts_profile_block_appends_block() {

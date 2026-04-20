@@ -19,10 +19,16 @@ use serde::Deserialize;
 use tempfile::TempDir;
 use tokio::{io::AsyncBufReadExt, process::Command};
 
+use microsandbox_image::{Digest, GlobalCache};
+use microsandbox_protocol::{
+    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_FILE_MOUNTS, ENV_HOSTNAME, ENV_TMPFS, ENV_USER,
+};
+use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
+
 use crate::{
     MicrosandboxResult, config,
     runtime::handle::ProcessHandle,
-    sandbox::{RootfsSource, SandboxConfig, VolumeMount},
+    sandbox::{Rlimit, RootfsSource, SandboxConfig, VolumeMount},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -82,19 +88,13 @@ pub async fn spawn_sandbox(
     let log_dir = sandbox_dir.join("logs");
     let runtime_dir = sandbox_dir.join("runtime");
     let scripts_dir = runtime_dir.join("scripts");
-    let empty_rootfs_dir = sandbox_dir.join("rootfs-base");
-    let rw_dir = sandbox_dir.join("rw");
-    let staging_dir = sandbox_dir.join("staging");
-    let db_dir = global.home().join(microsandbox_utils::DB_SUBDIR);
-    let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
+    let db_dir = global.home().join(DB_SUBDIR);
+    let db_path = db_dir.join(DB_FILENAME);
 
     // Create directories concurrently.
     tokio::try_join!(
         tokio::fs::create_dir_all(&log_dir),
         tokio::fs::create_dir_all(&scripts_dir),
-        tokio::fs::create_dir_all(&empty_rootfs_dir),
-        tokio::fs::create_dir_all(&rw_dir),
-        tokio::fs::create_dir_all(&staging_dir),
     )?;
 
     // Write scripts to the runtime scripts directory.
@@ -123,11 +123,9 @@ pub async fn spawn_sandbox(
         config,
         sandbox_id,
         &db_path,
+        global.database.connect_timeout_secs,
         &log_dir,
         &runtime_dir,
-        &empty_rootfs_dir,
-        &rw_dir,
-        &staging_dir,
         &agent_sock_path,
         &libkrunfw_path,
         &staged_file_mounts,
@@ -380,6 +378,27 @@ fn push_file_mounts_spec(
     }
 }
 
+/// Encodes sandbox-wide rlimits for the guest init environment.
+fn encode_rlimits(rlimits: &[Rlimit]) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::with_capacity(rlimits.len() * 32);
+    for (i, rlimit) in rlimits.iter().enumerate() {
+        if i > 0 {
+            out.push(';');
+        }
+        write!(
+            out,
+            "{}={}:{}",
+            rlimit.resource.as_str(),
+            rlimit.soft,
+            rlimit.hard
+        )
+        .expect("writing to String cannot fail");
+    }
+    out
+}
+
 /// Generate a virtiofs tag from a guest mount path.
 ///
 /// Replaces `/` with `_` and strips leading underscores to produce a
@@ -397,11 +416,9 @@ fn sandbox_cli_args(
     config: &SandboxConfig,
     sandbox_id: i32,
     db_path: &Path,
+    db_connect_timeout_secs: u64,
     log_dir: &Path,
     runtime_dir: &Path,
-    empty_rootfs_dir: &Path,
-    rw_dir: &Path,
-    staging_dir: &Path,
     agent_sock_path: &Path,
     libkrunfw_path: &Path,
     staged_file_mounts: &HashMap<String, (PathBuf, String, String)>,
@@ -418,6 +435,8 @@ fn sandbox_cli_args(
     args.push(OsString::from(sandbox_id.to_string()));
     args.push(OsString::from("--db-path"));
     args.push(db_path.as_os_str().to_os_string());
+    args.push(OsString::from("--db-connect-timeout-secs"));
+    args.push(OsString::from(db_connect_timeout_secs.to_string()));
     args.push(OsString::from("--log-dir"));
     args.push(log_dir.as_os_str().to_os_string());
     args.push(OsString::from("--runtime-dir"));
@@ -448,23 +467,30 @@ fn sandbox_cli_args(
             args.push(path.as_os_str().to_os_string());
         }
         RootfsSource::Oci(_) => {
-            args.push(OsString::from("--rootfs-upper"));
-            args.push(rw_dir.as_os_str().to_os_string());
-            args.push(OsString::from("--rootfs-staging"));
-            args.push(staging_dir.as_os_str().to_os_string());
+            // Derive VMDK + upper paths from the stored manifest digest.
+            if let Some(ref digest_str) = config.manifest_digest {
+                let cache_dir = config::config().cache_dir();
+                let cache = GlobalCache::new(&cache_dir).expect("cache init");
+                let digest: Digest = digest_str.parse().expect("invalid manifest digest");
+                let vmdk_path = cache.vmdk_path(&digest);
 
-            // Scratch-style OCI images can legitimately have zero filesystem layers.
-            let synthetic_empty_lower;
-            let lowers: &[PathBuf] = if config.resolved_rootfs_layers.is_empty() {
-                synthetic_empty_lower = vec![empty_rootfs_dir.to_path_buf()];
-                &synthetic_empty_lower
-            } else {
-                &config.resolved_rootfs_layers
-            };
+                let sandbox_dir = config::config().sandboxes_dir().join(&config.name);
+                let upper_path = sandbox_dir.join("upper.ext4");
 
-            for layer_dir in lowers {
-                args.push(OsString::from("--rootfs-lower"));
-                args.push(layer_dir.as_os_str().to_os_string());
+                // VMDK (fsmeta + layers) as read-only block device.
+                args.push(OsString::from("--rootfs-disk"));
+                args.push(vmdk_path.as_os_str().to_os_string());
+                args.push(OsString::from("--rootfs-disk-format"));
+                args.push(OsString::from("vmdk"));
+
+                // upper.ext4 as writable block device.
+                args.push(OsString::from("--rootfs-blk"));
+                args.push(upper_path.as_os_str().to_os_string());
+
+                // MSB_BLOCK_ROOT: always 2 devices.
+                let block_root = "kind=oci-erofs,lower=/dev/vda,upper=/dev/vdb,upper_fstype=ext4";
+                args.push(OsString::from("--env"));
+                args.push(OsString::from(format!("{}={block_root}", ENV_BLOCK_ROOT)));
             }
         }
         RootfsSource::DiskImage {
@@ -478,14 +504,14 @@ fn sandbox_cli_args(
             args.push(OsString::from(format.as_str()));
 
             // Build MSB_BLOCK_ROOT env var value.
-            let mut block_root_val = String::from("/dev/vda");
+            let mut block_root_val = String::from("kind=disk-image,device=/dev/vda");
             if let Some(ft) = fstype {
                 block_root_val.push_str(&format!(",fstype={ft}"));
             }
             args.push(OsString::from("--env"));
             args.push(OsString::from(format!(
                 "{}={block_root_val}",
-                microsandbox_protocol::ENV_BLOCK_ROOT
+                ENV_BLOCK_ROOT
             )));
         }
     }
@@ -533,17 +559,14 @@ fn sandbox_cli_args(
 
     if !tmpfs_val.is_empty() {
         args.push(OsString::from("--env"));
-        args.push(OsString::from(format!(
-            "{}={tmpfs_val}",
-            microsandbox_protocol::ENV_TMPFS
-        )));
+        args.push(OsString::from(format!("{}={tmpfs_val}", ENV_TMPFS)));
     }
 
     if !dir_mounts_val.is_empty() {
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!(
             "{}={dir_mounts_val}",
-            microsandbox_protocol::ENV_DIR_MOUNTS
+            ENV_DIR_MOUNTS
         )));
     }
 
@@ -551,7 +574,16 @@ fn sandbox_cli_args(
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!(
             "{}={file_mounts_val}",
-            microsandbox_protocol::ENV_FILE_MOUNTS
+            ENV_FILE_MOUNTS
+        )));
+    }
+
+    if !config.rlimits.is_empty() {
+        args.push(OsString::from("--env"));
+        args.push(OsString::from(format!(
+            "{}={}",
+            microsandbox_protocol::ENV_RLIMITS,
+            encode_rlimits(&config.rlimits)
         )));
     }
 
@@ -573,20 +605,14 @@ fn sandbox_cli_args(
 
     if let Some(ref user) = config.user {
         args.push(OsString::from("--env"));
-        args.push(OsString::from(format!(
-            "{}={user}",
-            microsandbox_protocol::ENV_USER
-        )));
+        args.push(OsString::from(format!("{}={user}", ENV_USER)));
     }
 
     // Hostname: explicit value or fall back to sandbox name.
     {
         let hostname = config.hostname.as_deref().unwrap_or(&config.name);
         args.push(OsString::from("--env"));
-        args.push(OsString::from(format!(
-            "{}={hostname}",
-            microsandbox_protocol::ENV_HOSTNAME
-        )));
+        args.push(OsString::from(format!("{}={hostname}", ENV_HOSTNAME)));
     }
 
     if let Some(ref workdir) = config.workdir {
@@ -597,6 +623,12 @@ fn sandbox_cli_args(
     args
 }
 
+/// Map a zero-based disk index to a Linux virtio block device path.
+///
+/// libkrun's ordered disk API assigns device names sequentially:
+/// 0 → /dev/vda, 1 → /dev/vdb, ..., 25 → /dev/vdz, 26 → /dev/vdaa, etc.
+/// This follows the same bijective base-26 scheme the kernel uses for
+/// virtio-blk device naming.
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -609,8 +641,49 @@ mod tests {
     use super::sandbox_cli_args;
     use crate::{
         LogLevel,
-        sandbox::{RootfsSource, SandboxBuilder},
+        sandbox::{Rlimit, RlimitResource, RootfsSource, SandboxBuilder, SandboxConfig},
     };
+
+    //----------------------------------------------------------------------------------------------
+    // Functions: Helpers
+    //----------------------------------------------------------------------------------------------
+
+    fn render_args(config: &SandboxConfig) -> Vec<String> {
+        sandbox_cli_args(
+            config,
+            42,
+            Path::new("/tmp/msb.db"),
+            30,
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/agent.sock"),
+            Path::new("/tmp/libkrunfw.dylib"),
+            &HashMap::new(),
+        )
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+    }
+
+    fn render_args_with_file_mounts(
+        config: &SandboxConfig,
+        staged_file_mounts: &HashMap<String, (PathBuf, String, String)>,
+    ) -> Vec<String> {
+        sandbox_cli_args(
+            config,
+            42,
+            Path::new("/tmp/msb.db"),
+            30,
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/agent.sock"),
+            Path::new("/tmp/libkrunfw.dylib"),
+            staged_file_mounts,
+        )
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+    }
 
     #[test]
     fn test_sandbox_cli_args_include_selected_log_level() {
@@ -620,19 +693,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let args = sandbox_cli_args(
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/rootfs-base"),
-            Path::new("/tmp/rw"),
-            Path::new("/tmp/staging"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
-        );
+        let args = render_args(&config);
 
         assert!(args.iter().any(|arg| arg == "--debug"));
     }
@@ -644,24 +705,12 @@ mod tests {
             .build()
             .unwrap();
 
-        let args = sandbox_cli_args(
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/rootfs-base"),
-            Path::new("/tmp/rw"),
-            Path::new("/tmp/staging"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
-        );
+        let args = render_args(&config);
 
         assert!(!args.iter().any(|arg| {
             matches!(
-                arg.to_str(),
-                Some("--error" | "--warn" | "--info" | "--debug" | "--trace")
+                arg.as_str(),
+                "--error" | "--warn" | "--info" | "--debug" | "--trace"
             )
         }));
     }
@@ -673,15 +722,30 @@ mod tests {
             .build()
             .unwrap();
 
+        let rendered = render_args(&config);
+
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair == ["--agent-sock", "/tmp/agent.sock"])
+        );
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_include_rlimits_env() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .rlimit(RlimitResource::Nofile, 65_535)
+            .build()
+            .unwrap();
+
         let args = sandbox_cli_args(
             &config,
             42,
             Path::new("/tmp/msb.db"),
+            30,
             Path::new("/tmp/logs"),
             Path::new("/tmp/runtime"),
-            Path::new("/tmp/rootfs-base"),
-            Path::new("/tmp/rw"),
-            Path::new("/tmp/staging"),
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
@@ -691,10 +755,58 @@ mod tests {
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+
+        assert!(rendered.windows(2).any(|pair| {
+            pair[0] == "--env"
+                && pair[1] == format!("{}=nofile=65535:65535", microsandbox_protocol::ENV_RLIMITS)
+        }));
+    }
+
+    #[test]
+    fn test_encode_rlimits_round_trips_through_protocol_parser() {
+        use microsandbox_protocol::exec::ExecRlimit;
+
+        let rlimits = vec![
+            Rlimit {
+                resource: RlimitResource::Nofile,
+                soft: 4096,
+                hard: 65_535,
+            },
+            Rlimit {
+                resource: RlimitResource::Nproc,
+                soft: 1024,
+                hard: 1024,
+            },
+        ];
+
+        let encoded = super::encode_rlimits(&rlimits);
+        let parsed: Vec<ExecRlimit> = encoded
+            .split(';')
+            .map(|entry| entry.parse::<ExecRlimit>().unwrap())
+            .collect();
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].resource, "nofile");
+        assert_eq!(parsed[0].soft, 4096);
+        assert_eq!(parsed[0].hard, 65_535);
+        assert_eq!(parsed[1].resource, "nproc");
+        assert_eq!(parsed[1].soft, 1024);
+        assert_eq!(parsed[1].hard, 1024);
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_include_db_connect_timeout() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .unwrap();
+
+        let rendered = render_args(&config);
+
         assert!(
             rendered
                 .windows(2)
-                .any(|pair| pair == ["--agent-sock", "/tmp/agent.sock"])
+                .any(|pair| pair == ["--db-connect-timeout-secs", "30"])
         );
     }
 
@@ -705,24 +817,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let args = sandbox_cli_args(
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/rootfs-base"),
-            Path::new("/tmp/rw"),
-            Path::new("/tmp/staging"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
-        );
-
-        let rendered = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
+        let rendered = render_args(&config);
         assert!(rendered.contains(&"--rootfs-path".to_string()));
         assert!(rendered.contains(&"/tmp/rootfs".to_string()));
         assert!(!rendered.contains(&"--rootfs-lower".to_string()));
@@ -731,98 +826,15 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_cli_args_use_overlay_for_oci_rootfs() {
-        let mut config = SandboxBuilder::new("test").image("alpine").build().unwrap();
+    fn test_sandbox_cli_args_oci_without_manifest_digest_emits_no_block_root() {
+        let config = SandboxBuilder::new("test").image("alpine").build().unwrap();
         assert!(matches!(config.image, RootfsSource::Oci(_)));
-        config.resolved_rootfs_layers = vec!["/tmp/layer0".into(), "/tmp/layer1".into()];
 
-        let args = sandbox_cli_args(
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/rootfs-base"),
-            Path::new("/tmp/rw"),
-            Path::new("/tmp/staging"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
-        );
-
-        let rendered = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert!(rendered.contains(&"--rootfs-lower".to_string()));
-        assert!(rendered.contains(&"/tmp/layer0".to_string()));
-        assert!(rendered.contains(&"/tmp/layer1".to_string()));
-        assert!(rendered.contains(&"--rootfs-upper".to_string()));
-        assert!(rendered.contains(&"/tmp/rw".to_string()));
-        assert!(rendered.contains(&"--rootfs-staging".to_string()));
-        assert!(rendered.contains(&"/tmp/staging".to_string()));
-    }
-
-    #[test]
-    fn test_sandbox_cli_args_use_overlay_for_single_oci_lower_without_index_args() {
-        let mut config = SandboxBuilder::new("test").image("alpine").build().unwrap();
-        assert!(matches!(config.image, RootfsSource::Oci(_)));
-        config.resolved_rootfs_layers = vec!["/tmp/layer0".into()];
-
-        let args = sandbox_cli_args(
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/rootfs-base"),
-            Path::new("/tmp/rw"),
-            Path::new("/tmp/staging"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
-        );
-
-        let rendered = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert!(!rendered.contains(&"--rootfs-path".to_string()));
-        assert!(rendered.contains(&"--rootfs-lower".to_string()));
-        assert!(rendered.contains(&"/tmp/layer0".to_string()));
-        assert!(rendered.contains(&"--rootfs-upper".to_string()));
-        assert!(rendered.contains(&"--rootfs-staging".to_string()));
-        assert!(!rendered.iter().any(|arg| arg.ends_with(".index")));
-    }
-
-    #[test]
-    fn test_sandbox_cli_args_use_synthetic_lower_for_zero_layer_oci_rootfs() {
-        let config = SandboxBuilder::new("test")
-            .image("scratch")
-            .build()
-            .unwrap();
-
-        let args = sandbox_cli_args(
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/rootfs-base"),
-            Path::new("/tmp/rw"),
-            Path::new("/tmp/staging"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
-        );
-
-        let rendered = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert!(!rendered.contains(&"--rootfs-path".to_string()));
-        assert!(rendered.contains(&"--rootfs-lower".to_string()));
-        assert!(rendered.contains(&"/tmp/rootfs-base".to_string()));
+        let rendered = render_args(&config);
+        // Without a manifest_digest set, no block root args should be emitted.
+        assert!(!rendered.contains(&"--rootfs-blk".to_string()));
+        assert!(!rendered.contains(&"--rootfs-disk".to_string()));
+        assert!(!rendered.iter().any(|a| a.starts_with("MSB_BLOCK_ROOT=")));
     }
 
     #[test]
@@ -834,26 +846,27 @@ mod tests {
             .build()
             .unwrap();
 
-        let args = sandbox_cli_args(
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/rootfs-base"),
-            Path::new("/tmp/rw"),
-            Path::new("/tmp/staging"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
-        );
-
-        let rendered = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
+        let rendered = render_args(&config);
 
         assert!(rendered.contains(&"MSB_TMPFS=/tmp,size=256;/var/tmp".to_string()));
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_apply_default_oci_tmpfs() {
+        let mut config = SandboxConfig {
+            name: "test".into(),
+            image: RootfsSource::Oci("alpine".into()),
+            memory_mib: 1024,
+            manifest_digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            ),
+            ..Default::default()
+        };
+        config.apply_runtime_defaults();
+
+        let rendered = render_args(&config);
+
+        assert!(rendered.contains(&"MSB_TMPFS=/tmp,size=256".to_string()));
     }
 
     #[test]
@@ -863,24 +876,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let args = sandbox_cli_args(
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/rootfs-base"),
-            Path::new("/tmp/rw"),
-            Path::new("/tmp/staging"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
-        );
-
-        let rendered = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
+        let rendered = render_args(&config);
 
         assert!(!rendered.iter().any(|a| a.starts_with("MSB_TMPFS=")));
     }
@@ -894,30 +890,17 @@ mod tests {
 
         assert!(matches!(config.image, RootfsSource::DiskImage { .. }));
 
-        let args = sandbox_cli_args(
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/rootfs-base"),
-            Path::new("/tmp/rw"),
-            Path::new("/tmp/staging"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
-        );
-
-        let rendered = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
+        let rendered = render_args(&config);
 
         assert!(rendered.contains(&"--rootfs-disk".to_string()));
         assert!(rendered.contains(&"/tmp/ubuntu.qcow2".to_string()));
         assert!(rendered.contains(&"--rootfs-disk-format".to_string()));
         assert!(rendered.contains(&"qcow2".to_string()));
-        assert!(rendered.contains(&"MSB_BLOCK_ROOT=/dev/vda,fstype=ext4".to_string()));
+        assert!(
+            rendered.contains(
+                &"MSB_BLOCK_ROOT=kind=disk-image,device=/dev/vda,fstype=ext4".to_string()
+            )
+        );
 
         // Should not contain bind or overlay args.
         assert!(!rendered.contains(&"--rootfs-path".to_string()));
@@ -935,30 +918,13 @@ mod tests {
 
         assert!(matches!(config.image, RootfsSource::DiskImage { .. }));
 
-        let args = sandbox_cli_args(
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/rootfs-base"),
-            Path::new("/tmp/rw"),
-            Path::new("/tmp/staging"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
-        );
-
-        let rendered = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
+        let rendered = render_args(&config);
 
         assert!(rendered.contains(&"--rootfs-disk".to_string()));
         assert!(rendered.contains(&"/tmp/alpine.raw".to_string()));
         assert!(rendered.contains(&"--rootfs-disk-format".to_string()));
         assert!(rendered.contains(&"raw".to_string()));
-        assert!(rendered.contains(&"MSB_BLOCK_ROOT=/dev/vda".to_string()));
+        assert!(rendered.contains(&"MSB_BLOCK_ROOT=kind=disk-image,device=/dev/vda".to_string()));
 
         // Should not contain bind or overlay args.
         assert!(!rendered.contains(&"--rootfs-path".to_string()));
@@ -983,24 +949,7 @@ mod tests {
             ),
         );
 
-        let args = sandbox_cli_args(
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/rootfs-base"),
-            Path::new("/tmp/rw"),
-            Path::new("/tmp/staging"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &staged_file_mounts,
-        );
-
-        let rendered = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
+        let rendered = render_args_with_file_mounts(&config, &staged_file_mounts);
 
         // File mount should use staging dir in --mount.
         assert!(
@@ -1037,24 +986,7 @@ mod tests {
             ),
         );
 
-        let args = sandbox_cli_args(
-            &config,
-            42,
-            Path::new("/tmp/msb.db"),
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/rootfs-base"),
-            Path::new("/tmp/rw"),
-            Path::new("/tmp/staging"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &staged_file_mounts,
-        );
-
-        let rendered = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
+        let rendered = render_args_with_file_mounts(&config, &staged_file_mounts);
 
         // Directory mount in MSB_DIR_MOUNTS.
         assert!(rendered.contains(&"MSB_DIR_MOUNTS=data:/data".to_string()));

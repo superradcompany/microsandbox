@@ -303,9 +303,7 @@ impl JsNetworkPolicy {
             policy: Some("none".to_string()),
             rules: None,
             default_action: None,
-            block_domains: None,
-            block_domain_suffixes: None,
-            dns_rebind_protection: None,
+            dns: None,
             tls: None,
             max_connections: None,
         }
@@ -318,9 +316,7 @@ impl JsNetworkPolicy {
             policy: Some("public-only".to_string()),
             rules: None,
             default_action: None,
-            block_domains: None,
-            block_domain_suffixes: None,
-            dns_rebind_protection: None,
+            dns: None,
             tls: None,
             max_connections: None,
         }
@@ -333,9 +329,7 @@ impl JsNetworkPolicy {
             policy: Some("allow-all".to_string()),
             rules: None,
             default_action: None,
-            block_domains: None,
-            block_domain_suffixes: None,
-            dns_rebind_protection: None,
+            dns: None,
             tls: None,
             max_connections: None,
         }

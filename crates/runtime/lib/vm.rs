@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use microsandbox_db::entity::run as run_entity;
-use microsandbox_filesystem::{DynFileSystem, OverlayFs, PassthroughConfig, PassthroughFs};
+use microsandbox_filesystem::{DynFileSystem, PassthroughConfig, PassthroughFs};
 use msb_krun::VmBuilder;
 use sea_orm::{ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait, Set};
 use serde::Serialize;
@@ -56,6 +56,9 @@ pub struct Config {
     /// Path to the sandbox database file.
     pub sandbox_db_path: PathBuf,
 
+    /// Timeout when acquiring a sandbox database connection from the pool.
+    pub sandbox_db_connect_timeout_secs: u64,
+
     /// Directory for log files.
     pub log_dir: PathBuf,
 
@@ -92,16 +95,7 @@ pub struct VmConfig {
     /// Root filesystem path for direct passthrough mounts.
     pub rootfs_path: Option<PathBuf>,
 
-    /// Root filesystem lower layer paths in bottom-to-top order.
-    pub rootfs_lowers: Vec<PathBuf>,
-
-    /// Writable upper layer directory for OverlayFs rootfs.
-    pub rootfs_upper: Option<PathBuf>,
-
-    /// Private staging directory for OverlayFs atomic operations.
-    pub rootfs_staging: Option<PathBuf>,
-
-    /// Disk image path for virtio-blk rootfs.
+    /// Disk image path for virtio-blk rootfs (single disk, legacy).
     pub rootfs_disk: Option<PathBuf>,
 
     /// Disk image format string ("qcow2", "raw", "vmdk").
@@ -109,6 +103,12 @@ pub struct VmConfig {
 
     /// Whether the disk image is read-only.
     pub rootfs_disk_readonly: bool,
+
+    /// VMDK descriptor path for EROFS fsmerge OCI rootfs (read-only).
+    pub rootfs_vmdk: Option<PathBuf>,
+
+    /// Upper ext4 disk path for writable overlay (paired with rootfs_vmdk).
+    pub rootfs_upper: Option<PathBuf>,
 
     /// Additional mounts as `tag:host_path[:ro]` strings.
     pub mounts: Vec<String>,
@@ -169,9 +169,8 @@ impl std::fmt::Debug for VmConfig {
             .field("vcpus", &self.vcpus)
             .field("memory_mib", &self.memory_mib)
             .field("rootfs_path", &self.rootfs_path)
-            .field("rootfs_lowers", &self.rootfs_lowers)
+            .field("rootfs_vmdk", &self.rootfs_vmdk)
             .field("rootfs_upper", &self.rootfs_upper)
-            .field("rootfs_staging", &self.rootfs_staging)
             .field("rootfs_disk", &self.rootfs_disk)
             .field("rootfs_disk_format", &self.rootfs_disk_format)
             .field("rootfs_disk_readonly", &self.rootfs_disk_readonly)
@@ -230,19 +229,21 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         .build()
         .map_err(|e| RuntimeError::Custom(format!("tokio runtime: {e}")))?;
 
-    // Create agent relay (bind agent.sock).
-    let mut relay = tokio_rt.block_on(AgentRelay::new(
-        &config.agent_sock_path,
-        Arc::clone(&shared),
-    ))?;
-
     // Set up runtime directory.
     std::fs::create_dir_all(&config.runtime_dir)?;
     std::fs::create_dir_all(config.runtime_dir.join("scripts"))?;
 
-    // Connect to DB and insert records.
-    let db = tokio_rt.block_on(connect_db(&config.sandbox_db_path))?;
-    let run_db_id = tokio_rt.block_on(insert_run(&db, config.sandbox_id, pid))?;
+    // Create the relay and persist the run record with a single runtime hop.
+    let (mut relay, db, run_db_id) = tokio_rt.block_on(async {
+        let relay = AgentRelay::new(&config.agent_sock_path, Arc::clone(&shared));
+        let db = connect_db(
+            &config.sandbox_db_path,
+            config.sandbox_db_connect_timeout_secs,
+        );
+        let (relay, db) = tokio::try_join!(relay, db)?;
+        let run_db_id = insert_run(&db, config.sandbox_id, pid).await?;
+        Ok::<_, RuntimeError>((relay, db, run_db_id))
+    })?;
 
     // Shared termination reason — background tasks store the reason before
     // triggering exit; the exit observer reads it for the DB update.
@@ -454,14 +455,37 @@ fn build_vm(
         let backend =
             PassthroughFs::new(cfg).map_err(|e| RuntimeError::Custom(format!("rootfs: {e}")))?;
         builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
-    } else if !vm.rootfs_lowers.is_empty() {
-        let overlay = build_overlay_rootfs(
-            &vm.rootfs_lowers,
-            vm.rootfs_upper.as_deref(),
-            vm.rootfs_staging.as_deref(),
-        )
-        .map_err(|e| RuntimeError::Custom(format!("overlay rootfs: {e}")))?;
-        builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(overlay)));
+    } else if let Some(ref vmdk_path) = vm.rootfs_vmdk {
+        // EROFS fsmerge OCI rootfs: VMDK (read-only) + upper.ext4 (writable).
+        let empty_trampoline = tempfile::tempdir()?;
+        let cfg = PassthroughConfig {
+            root_dir: empty_trampoline.path().to_path_buf(),
+            ..Default::default()
+        };
+        let backend = PassthroughFs::new(cfg)
+            .map_err(|e| RuntimeError::Custom(format!("trampoline rootfs: {e}")))?;
+        builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+
+        // Attach VMDK as read-only VMDK-format block device.
+        let vmdk = vmdk_path.clone();
+        builder = builder.disk(move |d| {
+            d.path(&vmdk)
+                .format(msb_krun::DiskImageFormat::Vmdk)
+                .read_only(true)
+        });
+
+        // Attach upper.ext4 as writable raw block device.
+        if let Some(ref upper) = vm.rootfs_upper {
+            let upper = upper.clone();
+            builder = builder.disk(move |d| {
+                d.path(&upper)
+                    .format(msb_krun::DiskImageFormat::Raw)
+                    .read_only(false)
+            });
+        }
+
+        // MSB_BLOCK_ROOT env var is set by the caller (spawn_sandbox).
+        let _ = empty_trampoline.keep();
     } else if let Some(ref disk_path) = vm.rootfs_disk {
         let empty_trampoline = tempfile::tempdir()?;
         let cfg = PassthroughConfig {
@@ -639,12 +663,28 @@ fn write_startup_info(json: &str) -> RuntimeResult<()> {
 }
 
 /// Connect to the sandbox database.
-async fn connect_db(db_path: &std::path::Path) -> RuntimeResult<DatabaseConnection> {
+async fn connect_db(
+    db_path: &std::path::Path,
+    connect_timeout_secs: u64,
+) -> RuntimeResult<DatabaseConnection> {
     let url = format!("sqlite://{}?mode=rwc", db_path.display());
-    let opts = ConnectOptions::new(url).max_connections(1).to_owned();
+    let opts = ConnectOptions::new(url)
+        .max_connections(1)
+        .connect_timeout(Duration::from_secs(connect_timeout_secs))
+        .sqlx_logging(false)
+        .to_owned();
     let db = Database::connect(opts)
         .await
         .map_err(|e| RuntimeError::Custom(format!("database connect: {e}")))?;
+
+    use sea_orm::ConnectionTrait;
+    db.execute(sea_orm::Statement::from_string(
+        sea_orm::DatabaseBackend::Sqlite,
+        microsandbox_utils::SQLITE_PRAGMAS,
+    ))
+    .await
+    .map_err(|e| RuntimeError::Custom(format!("database pragmas: {e}")))?;
+
     Ok(db)
 }
 
@@ -785,125 +825,13 @@ pub fn prepend_scripts_path(env: &mut Vec<String>) {
     }
 }
 
-/// Extract the runtime directory host path from the mount specs.
-pub fn find_runtime_dir(mounts: &[String]) -> Option<PathBuf> {
-    let tag = microsandbox_protocol::RUNTIME_FS_TAG;
-    for spec in mounts {
-        let spec = spec.strip_suffix(":ro").unwrap_or(spec);
-        if let Some((t, path)) = spec.split_once(':')
-            && t == tag
-        {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
-}
-
-/// Build an OverlayFs backend from rootfs lower layers.
-///
-/// Layers are ordered bottom-to-top: the first entry is the lowest (base) layer.
-pub fn build_overlay_rootfs(
-    layers: &[PathBuf],
-    upper_dir: Option<&std::path::Path>,
-    staging_dir: Option<&std::path::Path>,
-) -> msb_krun::Result<OverlayFs> {
-    debug_assert!(
-        !layers.is_empty(),
-        "overlay rootfs requires at least one lower layer"
-    );
-
-    let mut overlay_builder = OverlayFs::builder();
-
-    for layer in layers {
-        let index_path = layer.with_extension("index");
-        if index_path.exists() {
-            overlay_builder = overlay_builder.layer_with_index(layer, &index_path);
-        } else {
-            overlay_builder = overlay_builder.layer(layer);
-        }
-    }
-
-    match (upper_dir, staging_dir) {
-        (Some(upper), Some(staging)) => {
-            overlay_builder = overlay_builder.writable(upper).staging(staging);
-        }
-        (None, None) => {
-            overlay_builder = overlay_builder.read_only();
-        }
-        _ => {
-            return Err(msb_krun::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "overlay rootfs: upper_dir and staging_dir must both be set or both be omitted",
-            )));
-        }
-    }
-
-    overlay_builder.build().map_err(msb_krun::Error::Io)
-}
-
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-
-    use microsandbox_utils::index::IndexBuilder;
-    use tempfile::tempdir;
-
-    use super::{
-        append_block_root_env, build_overlay_rootfs, prepend_scripts_path, validate_disk_format,
-    };
-
-    #[test]
-    fn test_build_overlay_rootfs_rejects_mismatched_upper_staging() {
-        let temp = tempdir().unwrap();
-        let lower = create_dir(temp.path(), "lower.extracted");
-        let staging = create_dir(temp.path(), "staging");
-
-        match build_overlay_rootfs(&[lower.clone()], None, Some(&staging)) {
-            Ok(_) => panic!("expected mismatched upper/staging to be rejected"),
-            Err(err) => assert!(err.to_string().contains("both be set or both be omitted")),
-        }
-
-        let upper = create_dir(temp.path(), "rw");
-        match build_overlay_rootfs(&[lower], Some(&upper), None) {
-            Ok(_) => panic!("expected mismatched upper/staging to be rejected"),
-            Err(err) => assert!(err.to_string().contains("both be set or both be omitted")),
-        }
-    }
-
-    #[test]
-    fn test_build_overlay_rootfs_read_only() {
-        let temp = tempdir().unwrap();
-        let lower = create_dir(temp.path(), "lower.extracted");
-        build_overlay_rootfs(&[lower], None, None).unwrap();
-    }
-
-    #[test]
-    fn test_build_overlay_rootfs_accepts_single_lower_without_index() {
-        let temp = tempdir().unwrap();
-        let lower = create_dir(temp.path(), "lower.extracted");
-        let upper = create_dir(temp.path(), "rw");
-        let staging = create_dir(temp.path(), "staging");
-        assert!(build_overlay_rootfs(&[lower], Some(&upper), Some(&staging)).is_ok());
-    }
-
-    #[test]
-    fn test_build_overlay_rootfs_accepts_single_lower_with_conventional_index() {
-        let temp = tempdir().unwrap();
-        let lower = create_dir(temp.path(), "lower.extracted");
-        let upper = create_dir(temp.path(), "rw");
-        let staging = create_dir(temp.path(), "staging");
-        let index_path = lower.with_extension("index");
-        let index = IndexBuilder::new()
-            .dir("")
-            .file("", "hello.txt", 0o644)
-            .build();
-        std::fs::write(&index_path, index).unwrap();
-        assert!(build_overlay_rootfs(&[lower], Some(&upper), Some(&staging)).is_ok());
-    }
+    use super::{append_block_root_env, prepend_scripts_path, validate_disk_format};
 
     #[test]
     fn test_validate_disk_format_rejects_unknown_values() {
@@ -957,22 +885,5 @@ mod tests {
         let mut env = vec!["PATH=/.msb/scripts:/usr/bin".to_string()];
         prepend_scripts_path(&mut env);
         assert_eq!(env, vec!["PATH=/.msb/scripts:/usr/bin".to_string()]);
-    }
-
-    #[test]
-    fn test_build_overlay_rootfs_falls_back_when_conventional_index_is_corrupt() {
-        let temp = tempdir().unwrap();
-        let lower = create_dir(temp.path(), "lower.extracted");
-        let upper = create_dir(temp.path(), "rw");
-        let staging = create_dir(temp.path(), "staging");
-        let index_path = lower.with_extension("index");
-        std::fs::write(&index_path, b"definitely not a valid index").unwrap();
-        assert!(build_overlay_rootfs(&[lower], Some(&upper), Some(&staging)).is_ok());
-    }
-
-    fn create_dir(root: &Path, name: &str) -> PathBuf {
-        let path = root.join(name);
-        std::fs::create_dir_all(&path).unwrap();
-        path
     }
 }

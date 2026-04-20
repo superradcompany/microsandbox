@@ -5,15 +5,13 @@
 
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-use microsandbox_protocol::{
-    codec::encode_to_buf,
-    fs::{FS_CHUNK_SIZE, FsData, FsEntryInfo, FsOp, FsRequest, FsResponse, FsResponseData},
-    message::{Message, MessageType},
+use microsandbox_protocol::codec;
+use microsandbox_protocol::fs::{
+    FS_CHUNK_SIZE, FsData, FsEntryInfo, FsOp, FsRequest, FsResponse, FsResponseData,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    sync::mpsc,
-};
+use microsandbox_protocol::message::{Message, MessageType};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
 
 use crate::session::SessionOutput;
 
@@ -156,7 +154,7 @@ pub async fn handle_fs_data(
 fn encode_response(id: u32, resp: FsResponse, out_buf: &mut Vec<u8>) -> Result<(), String> {
     let msg = Message::with_payload(MessageType::FsResponse, id, &resp)
         .map_err(|e| format!("encode fs response: {e}"))?;
-    encode_to_buf(&msg, out_buf).map_err(|e| format!("encode fs response frame: {e}"))?;
+    codec::encode_to_buf(&msg, out_buf).map_err(|e| format!("encode fs response frame: {e}"))?;
     Ok(())
 }
 
@@ -255,7 +253,7 @@ async fn handle_read_stream(id: u32, path: &str, tx: &mpsc::UnboundedSender<(u32
                     }
                 };
                 buf.clear();
-                if let Err(e) = encode_to_buf(&msg, &mut buf) {
+                if let Err(e) = codec::encode_to_buf(&msg, &mut buf) {
                     send_raw_response(
                         id,
                         false,
@@ -292,7 +290,7 @@ fn send_raw_response(
     match Message::with_payload(MessageType::FsResponse, id, &resp) {
         Ok(msg) => {
             let mut buf = Vec::new();
-            match encode_to_buf(&msg, &mut buf) {
+            match codec::encode_to_buf(&msg, &mut buf) {
                 Ok(()) => {
                     let _ = tx.send((id, SessionOutput::Raw(buf)));
                 }

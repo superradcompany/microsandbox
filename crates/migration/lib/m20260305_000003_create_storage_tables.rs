@@ -110,6 +110,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .name("idx_snapshots_name_sandbox_unique")
                     .table(Snapshot::Table)
                     .col(Snapshot::Name)
@@ -125,7 +126,7 @@ impl MigrationTrait for Migration {
         manager
             .get_connection()
             .execute_unprepared(
-                "CREATE UNIQUE INDEX idx_snapshots_name_unique_no_sandbox ON snapshot (name) WHERE sandbox_id IS NULL",
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_name_unique_no_sandbox ON snapshot (name) WHERE sandbox_id IS NULL",
             )
             .await?;
 

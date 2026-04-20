@@ -4,7 +4,7 @@ description: Typed errors and resource cleanup patterns
 icon: "triangle-exclamation"
 ---
 
-Both SDKs surface typed errors so you can match on specific failure modes instead of parsing strings. Rust has an `Error` enum and TypeScript errors carry a type tag prefix (e.g. `[ExecTimeout]`, `[Runtime]`) in the error message.
+All SDKs surface typed errors so you can match on specific failure modes instead of parsing strings. Rust has an `Error` enum, TypeScript errors carry a type tag prefix (e.g. `[ExecTimeout]`, `[Runtime]`) in the error message, and Python provides dedicated exception classes.
 
 ## Matching errors
 
@@ -59,6 +59,26 @@ try {
 }
 ```
 
+```python Python
+from microsandbox import (
+    ExecTimeoutError, Sandbox, SandboxNotFoundError
+)
+
+async def get_or_create(name: str):
+    try:
+        handle = await Sandbox.get(name)
+        return await handle.start()
+    except SandboxNotFoundError:
+        return await Sandbox.create(name, image="python")
+
+try:
+    output = await sb.exec("python", ["script.py"])
+    if not output.success:
+        print(f"Exit {output.exit_code}: {output.stderr_text}")
+except ExecTimeoutError:
+    print("Timed out")
+```
+
 </CodeGroup>
 
 ## Resource cleanup
@@ -92,6 +112,13 @@ async function runTemporary(): Promise<string> {
         await Sandbox.remove("temp").catch(() => {})
     }
 }
+```
+
+```python Python
+# Use async context manager — auto-kills and removes on exit.
+async with await Sandbox.create("temp", image="python") as sb:
+    output = await sb.exec("python", ["-c", "print('hello')"])
+    print(output.stdout_text)
 ```
 
 </CodeGroup>

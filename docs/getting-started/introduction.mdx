@@ -45,6 +45,25 @@ const sb = await Sandbox.create({
 })
 ```
 
+```python Python
+import os
+from microsandbox import Network, Sandbox, Secret
+
+sb = await Sandbox.create(
+    "sandbox",
+    image="python",
+    memory=512,
+    cpus=2,
+    secrets=[
+        Secret.env("OPENAI_API_KEY",
+            value=os.environ["OPENAI_API_KEY"],
+            allow_hosts=["api.openai.com"],
+        ),
+    ],
+    network=Network.public_only(),
+)
+```
+
 </CodeGroup>
 
 <Callout icon="bolt" color="#7C3AED">
@@ -53,8 +72,8 @@ const sb = await Sandbox.create({
 
 ## The basics
 
-- **Under 100ms boot.** Sandboxes share the same kernel in memory. No QEMU, no disk images to load.
-- **No daemon.** The runtime spawns directly as a child process of whatever application creates the sandbox. No root process, no socket, no background service.
+- **Under 100ms boot.** Sandboxes boot in under 100 milliseconds.
+- **No daemon.** The runtime spawns directly as a child process of whatever application creates the sandbox. No root, no server, no background service.
 - **Any OCI image.** Docker Hub, GHCR, ECR, GCR, or any OCI-compatible registry. Shared layers are deduplicated and only stored once.
 - **Cross-platform.** Native on macOS (Apple Silicon) and Linux (KVM). Same CLI, same SDKs.
 - **Multi-language SDKs.** Rust, TypeScript, and Python, all with consistent APIs.
@@ -93,6 +112,19 @@ const sb = await Sandbox.create({
 })
 ```
 
+```python Python
+sb = await Sandbox.create(
+    "sandbox",
+    image="python",
+    secrets=[
+        Secret.env("OPENAI_API_KEY",
+            value=os.environ["OPENAI_API_KEY"],
+            allow_hosts=["api.openai.com"],
+        ),
+    ],
+)
+```
+
 </CodeGroup>
 
 ### Programmable network layer <sup><sup>coming soon</sup></sup>
@@ -119,6 +151,21 @@ const sb = await Sandbox.create({
     image: "python",
     network: NetworkPolicy.allowlist(["api.openai.com", "pypi.org"]),
 })
+```
+
+```python Python
+from microsandbox import Network, NetworkPolicy, Rule, Sandbox
+
+sb = await Sandbox.create(
+    "sandbox",
+    image="python",
+    network=Network(
+        policy=NetworkPolicy(rules=(
+            Rule.allow(destination="api.openai.com"),
+            Rule.allow(destination="pypi.org"),
+        )),
+    ),
+)
 ```
 
 </CodeGroup>
@@ -155,6 +202,22 @@ const sb = await Sandbox.create({
 })
 ```
 
+```python Python
+from microsandbox import Sandbox, Volume
+
+key = get_encryption_key()
+sb = await Sandbox.create(
+    "encrypted",
+    image="python",
+    volumes={
+        "/secrets": Volume.bind("/data/secrets",
+            on_read=lambda path, data: decrypt(data, key),
+            on_write=lambda path, data: encrypt(data, key),
+        ),
+    },
+)
+```
+
 </CodeGroup>
 
 ### Snapshot, fork, restore <sup><sup>coming soon</sup></sup>
@@ -188,6 +251,21 @@ const snapshot = await sb.snapshot()
 // Fork 10 workers (skips pip install entirely)
 const workers = await Promise.all(
     Array.from({ length: 10 }, (_, i) => snapshot.restore(`worker-${i}`))
+)
+```
+
+```python Python
+import asyncio
+from microsandbox import Sandbox
+
+sb = await Sandbox.create("base", image="python")
+await sb.exec("pip", ["install", "-r", "requirements.txt"])
+
+snapshot = await sb.snapshot()
+
+# Fork 10 workers (skips pip install entirely)
+workers = await asyncio.gather(
+    *(snapshot.restore(f"worker-{i}") for i in range(10))
 )
 ```
 
@@ -231,6 +309,19 @@ const sub = sb.onEvent("task.progress", (event: EventData) => {
 
 // Send events to guest
 await sb.emit("task.start", { inputFile: "/data/input.txt", options: ["--verbose"] })
+```
+
+```python Python
+# Receive events from guest
+sub = sb.on_event("task.progress", lambda event: (
+    print(f"[{event.data['percent']}%] {event.data['message']}")
+))
+
+# Send events to guest
+await sb.emit("task.start", {
+    "input_file": "/data/input.txt",
+    "output_dir": "/data/output",
+})
 ```
 
 </CodeGroup>

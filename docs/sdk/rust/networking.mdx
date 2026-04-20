@@ -48,51 +48,24 @@ Builder for configuring the sandbox's network stack. Used in `SandboxBuilder::ne
 
 ---
 
-#### block_domain()
+#### dns()
 
 ```rust
-fn block_domain(self, domain: impl Into<String>) -> Self
+fn dns(self, f: impl FnOnce(DnsBuilder) -> DnsBuilder) -> Self
 ```
 
-Block DNS lookups for an exact domain. The guest receives NXDOMAIN for this domain. Can be called multiple times.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| domain | `impl Into<String>` | Domain to block (e.g. `"malware.example.com"`) |
-
----
-
-#### block_domain_suffix()
+Configure DNS interception via a closure. See [`DnsBuilder`](#dnsbuilder) for the methods available on `d`.
 
 ```rust
-fn block_domain_suffix(self, suffix: impl Into<String>) -> Self
+.network(|n| n
+    .dns(|d| d
+        .block_domain("malware.example.com")
+        .block_domain_suffix(".tracking.com")
+        .nameservers(["1.1.1.1".parse::<NameserverSpec>()?])
+        .query_timeout_ms(3000)
+    )
+)
 ```
-
-Block DNS lookups for all subdomains matching a suffix. For example, `.tracking.com` blocks `a.tracking.com`, `b.c.tracking.com`, etc.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| suffix | `impl Into<String>` | Domain suffix (e.g. `".tracking.com"`) |
-
----
-
-#### dns_rebind_protection()
-
-```rust
-fn dns_rebind_protection(self, enabled: bool) -> Self
-```
-
-When enabled, DNS responses that resolve to private IP addresses are blocked. This prevents DNS rebinding attacks where an attacker-controlled domain resolves to an internal service. Default: `true`.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| enabled | `bool` | Enable or disable |
 
 ---
 
@@ -157,6 +130,97 @@ Configure TLS interception. The closure receives a [`TlsBuilder`](#tlsbuilder) f
 | Name | Type | Description |
 |------|------|-------------|
 | f | [`TlsBuilder`](#tlsbuilder) | Configure TLS interception. |
+
+---
+
+## DnsBuilder
+
+Builder for DNS interception settings. Used in `NetworkBuilder::dns(|d| d...)`.
+
+---
+
+#### block_domain()
+
+```rust
+fn block_domain(self, domain: impl Into<String>) -> Self
+```
+
+Block DNS lookups for an exact domain. The guest receives REFUSED for this domain. Can be called multiple times.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| domain | `impl Into<String>` | Domain to block (e.g. `"malware.example.com"`) |
+
+---
+
+#### block_domain_suffix()
+
+```rust
+fn block_domain_suffix(self, suffix: impl Into<String>) -> Self
+```
+
+Block DNS lookups for all subdomains matching a suffix. For example, `.tracking.com` blocks `a.tracking.com`, `b.c.tracking.com`, etc.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| suffix | `impl Into<String>` | Domain suffix (e.g. `".tracking.com"`) |
+
+---
+
+#### rebind_protection()
+
+```rust
+fn rebind_protection(self, enabled: bool) -> Self
+```
+
+When enabled, DNS responses that resolve to private IP addresses are blocked. This prevents DNS rebinding attacks where an attacker-controlled domain resolves to an internal service. Default: `true`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| enabled | `bool` | Enable or disable |
+
+---
+
+#### nameservers()
+
+```rust
+fn nameservers<I>(self, specs: I) -> Self
+where
+    I: IntoIterator,
+    I::Item: Into<NameserverSpec>,
+```
+
+Set the upstream nameservers to forward DNS queries to. When one or more are set, the interceptor uses these instead of the nameservers in the host's `/etc/resolv.conf`. Replaces any previously-set nameservers. Useful for pinning specific resolvers (e.g. `1.1.1.1:53`) or working around split-DNS / VPN setups.
+
+Each element is any type convertible into `NameserverSpec` (`SocketAddr`, `IpAddr`, or a parsed string via `"dns.google:53".parse::<NameserverSpec>()?`). Hostnames are resolved once at startup via the host's OS resolver.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| specs | `IntoIterator<Item: Into<NameserverSpec>>` | Iterable of nameserver specs |
+
+---
+
+#### query_timeout_ms()
+
+```rust
+fn query_timeout_ms(self, ms: u64) -> Self
+```
+
+Set the per-DNS-query timeout in milliseconds. Default: `5000`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| ms | `u64` | Timeout in milliseconds |
 
 ---
 

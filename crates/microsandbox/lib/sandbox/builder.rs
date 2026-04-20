@@ -1,6 +1,6 @@
 //! Fluent builder for [`SandboxConfig`].
 
-use microsandbox_image::RegistryAuth;
+use microsandbox_image::{PullPolicy, PullProgressHandle, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
 #[cfg(feature = "net")]
@@ -10,6 +10,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use super::{
     config::SandboxConfig,
+    exec::{Rlimit, RlimitResource},
     types::{ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource},
 };
 use crate::{LogLevel, MicrosandboxResult, size::Mebibytes};
@@ -22,6 +23,34 @@ use crate::{LogLevel, MicrosandboxResult, size::Mebibytes};
 pub struct SandboxBuilder {
     config: SandboxConfig,
     build_error: Option<crate::MicrosandboxError>,
+}
+
+/// Sub-builder for registry connection settings.
+#[derive(Default)]
+pub struct RegistryConfigBuilder {
+    pub(crate) auth: Option<RegistryAuth>,
+    pub(crate) insecure: bool,
+    pub(crate) ca_certs: Vec<Vec<u8>>,
+}
+
+impl RegistryConfigBuilder {
+    /// Set authentication credentials.
+    pub fn auth(mut self, auth: RegistryAuth) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    /// Access the registry over plain HTTP instead of HTTPS.
+    pub fn insecure(mut self) -> Self {
+        self.insecure = true;
+        self
+    }
+
+    /// Add PEM-encoded CA root certificates to trust.
+    pub fn ca_certs(mut self, pem_data: Vec<u8>) -> Self {
+        self.ca_certs.push(pem_data);
+        self
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -133,9 +162,34 @@ impl SandboxBuilder {
         self
     }
 
-    /// Set registry authentication for private OCI registries.
-    pub fn registry_auth(mut self, auth: RegistryAuth) -> Self {
-        self.config.registry_auth = Some(auth);
+    /// Configure registry connection settings (auth, TLS, insecure).
+    ///
+    /// ```rust,ignore
+    /// use microsandbox::{RegistryAuth, sandbox::Sandbox};
+    ///
+    /// let sb = Sandbox::builder("worker")
+    ///     .image("localhost:5050/my-app:latest")
+    ///     .registry(|r| r
+    ///         .auth(RegistryAuth::Basic {
+    ///             username: "user".into(),
+    ///             password: "pass".into(),
+    ///         })
+    ///         .insecure()
+    ///     )
+    ///     .create()
+    ///     .await
+    ///     .unwrap();
+    /// ```
+    pub fn registry(
+        mut self,
+        f: impl FnOnce(RegistryConfigBuilder) -> RegistryConfigBuilder,
+    ) -> Self {
+        let builder = f(RegistryConfigBuilder::default());
+        if let Some(auth) = builder.auth {
+            self.config.registry_auth = Some(auth);
+        }
+        self.config.insecure = builder.insecure;
+        self.config.ca_certs = builder.ca_certs;
         self
     }
 
@@ -167,7 +221,7 @@ impl SandboxBuilder {
     }
 
     /// Set the pull policy for OCI images.
-    pub fn pull_policy(mut self, policy: microsandbox_image::PullPolicy) -> Self {
+    pub fn pull_policy(mut self, policy: PullPolicy) -> Self {
         self.config.pull_policy = policy;
         self
     }
@@ -194,7 +248,7 @@ impl SandboxBuilder {
     /// .network(|n| n
     ///     .port(8080, 80)
     ///     .policy(NetworkPolicy::public_only())
-    ///     .block_domain("evil.com")
+    ///     .dns(|d| d.block_domain("evil.com"))
     ///     .tls(|t| t.bypass("*.internal.com"))
     /// )
     /// ```
@@ -308,6 +362,30 @@ impl SandboxBuilder {
         self
     }
 
+    /// Set a sandbox-wide resource limit inherited by all guest processes.
+    ///
+    /// This is applied during agentd PID 1 startup, so bootstrap scripts and
+    /// long-lived daemons inherit the raised baseline without needing explicit
+    /// per-exec rlimits.
+    pub fn rlimit(mut self, resource: RlimitResource, limit: u64) -> Self {
+        self.config.rlimits.push(Rlimit {
+            resource,
+            soft: limit,
+            hard: limit,
+        });
+        self
+    }
+
+    /// Set a sandbox-wide resource limit with different soft/hard values.
+    pub fn rlimit_range(mut self, resource: RlimitResource, soft: u64, hard: u64) -> Self {
+        self.config.rlimits.push(Rlimit {
+            resource,
+            soft,
+            hard,
+        });
+        self
+    }
+
     /// Register a script that will be mounted at `/.msb/scripts/<name>` in
     /// the guest. Scripts are added to `PATH` so they can be invoked by name
     /// via [`exec`](super::Sandbox::exec).
@@ -366,9 +444,9 @@ impl SandboxBuilder {
 
     /// Apply rootfs patches using a builder closure.
     ///
-    /// Patches are applied before VM start. Only works with OverlayFs and
-    /// PassthroughFs roots. Returns an error at create time if used with
-    /// block device roots (Qcow2, Raw).
+    /// Patches are applied before VM start. OCI roots bake patches into
+    /// `upper.ext4`; bind roots patch the host directory directly. Returns an
+    /// error at create time if used with block device roots (Qcow2, Raw).
     ///
     /// ```ignore
     /// .patch(|p| p
@@ -410,11 +488,11 @@ impl SandboxBuilder {
     ///
     /// Returns a progress handle for per-layer pull events and a task handle
     /// for the sandbox creation result. Useful for CLI commands that want to
-    /// display per-layer download/extraction progress during sandbox creation.
+    /// display per-layer download/materialization progress during sandbox creation.
     pub fn create_with_pull_progress(
         self,
     ) -> crate::MicrosandboxResult<(
-        microsandbox_image::PullProgressHandle,
+        PullProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
     )> {
         let config = self.build()?;
@@ -428,7 +506,7 @@ impl SandboxBuilder {
     pub fn create_detached_with_pull_progress(
         self,
     ) -> crate::MicrosandboxResult<(
-        microsandbox_image::PullProgressHandle,
+        PullProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
     )> {
         let config = self.build()?;
@@ -464,6 +542,17 @@ impl SandboxBuilder {
             _ => {}
         }
 
+        for rlimit in &self.config.rlimits {
+            if rlimit.soft > rlimit.hard {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "rlimit {}: soft ({}) must not exceed hard ({})",
+                    rlimit.resource.as_str(),
+                    rlimit.soft,
+                    rlimit.hard
+                )));
+            }
+        }
+
         Ok(())
     }
 }
@@ -489,6 +578,7 @@ impl From<SandboxConfig> for SandboxBuilder {
 mod tests {
     use super::SandboxBuilder;
     use crate::LogLevel;
+    use crate::sandbox::RlimitResource;
     #[cfg(feature = "net")]
     use microsandbox_network::config::PortProtocol;
 
@@ -524,6 +614,20 @@ mod tests {
             .unwrap();
 
         assert!(config.replace_existing);
+    }
+
+    #[test]
+    fn test_builder_rlimit_sets_sandbox_wide_limit() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .rlimit(RlimitResource::Nofile, 65_535)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.rlimits.len(), 1);
+        assert_eq!(config.rlimits[0].resource, RlimitResource::Nofile);
+        assert_eq!(config.rlimits[0].soft, 65_535);
+        assert_eq!(config.rlimits[0].hard, 65_535);
     }
 
     #[cfg(feature = "net")]

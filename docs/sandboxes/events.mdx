@@ -44,6 +44,16 @@ const sub = sb.onEvent("task.progress", (event: EventData) => {
 })
 ```
 
+```python Python
+from microsandbox import Sandbox
+
+sb = await (await Sandbox.get("worker")).start()
+
+sub = sb.on_event("task.progress", lambda event: (
+    print(f"[{event.data['percent']}%] {event.data['message']}")
+))
+```
+
 </CodeGroup>
 
 ## Send events to guest
@@ -68,6 +78,13 @@ sb.emit("task.start", TaskConfig {
 await sb.emit("task.start", {
     inputFile: "/data/input.txt",
     options: ["--verbose"],
+})
+```
+
+```python Python
+await sb.emit("task.start", {
+    "input_file": "/data/input.txt",
+    "output_dir": "/data/output",
 })
 ```
 

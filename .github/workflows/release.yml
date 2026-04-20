@@ -11,6 +11,7 @@ env:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -133,7 +134,7 @@ jobs:
       # -- Linux build deps --
       - name: Install build deps (Linux)
         if: matrix.os == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools libdbus-1-dev
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
 
       # -- agentd (Linux: native musl) --
       - name: Build agentd (musl)
@@ -249,6 +250,7 @@ jobs:
           command: build
           args: --release --out dist
           manylinux: ${{ matrix.os == 'linux' && '2_28' || 'off' }}
+          before-script-linux: dnf install -y libcap-ng-devel
 
       - name: Upload Python SDK wheel
         uses: actions/upload-artifact@v4
@@ -459,3 +461,111 @@ jobs:
 
       - name: Publish to PyPI
         run: uv publish dist/*.whl
+
+  # ---------------------------------------------------------------------------
+  # Publish Docker image to GHCR
+  # ---------------------------------------------------------------------------
+  # Build per-arch Docker images and push digests
+  # ---------------------------------------------------------------------------
+  docker-build:
+    name: Docker (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            artifact: release-linux-x86_64
+            msb_asset: msb-linux-x86_64
+            libkrunfw_asset: libkrunfw-linux-x86_64.so
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            artifact: release-linux-aarch64
+            msb_asset: msb-linux-aarch64
+            libkrunfw_asset: libkrunfw-linux-aarch64.so
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: release-artifacts
+
+      - name: Stage binaries
+        run: |
+          mkdir -p packaging/docker/build/${{ matrix.arch }}
+          cp release-artifacts/${{ matrix.msb_asset }} packaging/docker/build/${{ matrix.arch }}/msb
+          cp release-artifacts/${{ matrix.libkrunfw_asset }} packaging/docker/build/${{ matrix.arch }}/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
+          chmod +x packaging/docker/build/${{ matrix.arch }}/msb
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        id: push
+        with:
+          context: packaging/docker
+          platforms: linux/${{ matrix.arch }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          outputs: type=image,name=ghcr.io/superradcompany/microsandbox,push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.push.outputs.digest }}" > /tmp/digests/${{ matrix.arch }}.txt
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-digest-${{ matrix.arch }}
+          path: /tmp/digests/${{ matrix.arch }}.txt
+
+  # ---------------------------------------------------------------------------
+  # Combine per-arch images into a multi-arch manifest
+  # ---------------------------------------------------------------------------
+  docker-manifest:
+    name: Docker manifest
+    needs: docker-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: digests
+          pattern: docker-digest-*
+          merge-multiple: true
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/superradcompany/microsandbox
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Create multi-arch manifest
+        run: |
+          AMD64_DIGEST=$(cat digests/amd64.txt)
+          ARM64_DIGEST=$(cat digests/arm64.txt)
+          IMAGE=ghcr.io/superradcompany/microsandbox
+
+          for TAG in $(echo "${{ steps.meta.outputs.tags }}"); do
+            docker buildx imagetools create -t "$TAG" \
+              "${IMAGE}@${AMD64_DIGEST}" \
+              "${IMAGE}@${ARM64_DIGEST}"
+          done

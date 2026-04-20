@@ -14,14 +14,17 @@ path = "lib/lib.rs"
 bytes = { workspace = true }
 crossbeam-queue = { workspace = true }
 dirs = { workspace = true }
+futures = { workspace = true }
+hickory-client = { workspace = true }
 hickory-proto = { workspace = true }
-hickory-resolver = { workspace = true }
 ipnetwork = { workspace = true }
 libc = { workspace = true }
 lru = { workspace = true }
-microsandbox-utils = { version = "0.3.12", path = "../utils" }
-msb_krun = { version = "0.1.9", features = ["net"] }
+microsandbox-utils = { version = "0.3.14", path = "../utils" }
+msb_krun = { version = "0.1.10", features = ["net"] }
 rcgen = { workspace = true }
+resolv-conf = { workspace = true }
+thiserror = { workspace = true }
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
 rustls-pemfile = "2"

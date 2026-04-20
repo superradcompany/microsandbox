@@ -115,6 +115,18 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub no_dns_rebind_protection: bool,
 
+    /// Nameserver to forward DNS queries to (repeatable). Overrides the
+    /// nameservers in the host's `/etc/resolv.conf`. Accepts `IP` (port
+    /// defaults to 53) or `IP:PORT`.
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "ADDR")]
+    pub dns_nameserver: Vec<String>,
+
+    /// Per-DNS-query timeout in milliseconds. Default: 5000.
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "MS")]
+    pub dns_query_timeout_ms: Option<u64>,
+
     /// Network policy controlling which destinations are reachable from the sandbox.
     ///
     /// Options:
@@ -209,6 +221,8 @@ impl SandboxOpts {
             || !self.dns_block_domain.is_empty()
             || !self.dns_block_suffix.is_empty()
             || self.no_dns_rebind_protection
+            || !self.dns_nameserver.is_empty()
+            || self.dns_query_timeout_ms.is_some()
             || self.network_policy.is_some()
             || self.max_connections.is_some()
             || self.tls_intercept
@@ -361,6 +375,8 @@ fn apply_network_opts(
     let has_network_config = !opts.dns_block_domain.is_empty()
         || !opts.dns_block_suffix.is_empty()
         || opts.no_dns_rebind_protection
+        || !opts.dns_nameserver.is_empty()
+        || opts.dns_query_timeout_ms.is_some()
         || opts.network_policy.is_some()
         || opts.max_connections.is_some()
         || opts.tls_intercept
@@ -376,6 +392,12 @@ fn apply_network_opts(
         let dns_block_domain = opts.dns_block_domain.clone();
         let dns_block_suffix = opts.dns_block_suffix.clone();
         let no_dns_rebind = opts.no_dns_rebind_protection;
+        let dns_nameservers = opts
+            .dns_nameserver
+            .iter()
+            .map(|s| microsandbox_network::dns::parse_nameserver(s).map_err(anyhow::Error::from))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let dns_query_timeout_ms = opts.dns_query_timeout_ms;
         let network_policy = parse_network_policy(opts.network_policy.as_deref())?;
         let max_conn = opts.max_connections;
         let tls_intercept = opts.tls_intercept;
@@ -388,14 +410,30 @@ fn apply_network_opts(
         let violation_action = parse_violation_action(&opts.on_secret_violation)?;
 
         builder = builder.network(move |mut n| {
-            for domain in &dns_block_domain {
-                n = n.block_domain(domain);
-            }
-            for suffix in &dns_block_suffix {
-                n = n.block_domain_suffix(suffix);
-            }
-            if no_dns_rebind {
-                n = n.dns_rebind_protection(false);
+            let has_dns = !dns_block_domain.is_empty()
+                || !dns_block_suffix.is_empty()
+                || no_dns_rebind
+                || !dns_nameservers.is_empty()
+                || dns_query_timeout_ms.is_some();
+            if has_dns {
+                n = n.dns(move |mut d| {
+                    for domain in &dns_block_domain {
+                        d = d.block_domain(domain);
+                    }
+                    for suffix in &dns_block_suffix {
+                        d = d.block_domain_suffix(suffix);
+                    }
+                    if no_dns_rebind {
+                        d = d.rebind_protection(false);
+                    }
+                    if !dns_nameservers.is_empty() {
+                        d = d.nameservers(dns_nameservers);
+                    }
+                    if let Some(ms) = dns_query_timeout_ms {
+                        d = d.query_timeout_ms(ms);
+                    }
+                    d
+                });
             }
             if let Some(policy) = network_policy {
                 n = n.policy(policy);
@@ -584,6 +622,10 @@ fn parse_pull_policy(s: &str) -> anyhow::Result<microsandbox::sandbox::PullPolic
     }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
 /// Parse a log level string.
 fn parse_log_level(s: &str) -> anyhow::Result<microsandbox::LogLevel> {
     use microsandbox::LogLevel;
@@ -677,27 +719,11 @@ pub fn parse_rlimit(
     spec: &str,
 ) -> anyhow::Result<(microsandbox::sandbox::RlimitResource, u64, u64)> {
     use microsandbox::sandbox::RlimitResource;
+    use microsandbox_protocol::exec::ExecRlimit;
 
-    let (res_str, limit_str) = spec
-        .split_once('=')
-        .ok_or_else(|| anyhow::anyhow!("rlimit must be in format RESOURCE=LIMIT"))?;
+    let rlimit = spec.parse::<ExecRlimit>().map_err(anyhow::Error::msg)?;
+    let resource =
+        RlimitResource::try_from(rlimit.resource.as_str()).map_err(anyhow::Error::msg)?;
 
-    let resource = RlimitResource::try_from(res_str).map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    let (soft, hard) = if let Some((s, h)) = limit_str.split_once(':') {
-        let soft = s
-            .parse::<u64>()
-            .map_err(|e| anyhow::anyhow!("invalid soft limit: {e}"))?;
-        let hard = h
-            .parse::<u64>()
-            .map_err(|e| anyhow::anyhow!("invalid hard limit: {e}"))?;
-        (soft, hard)
-    } else {
-        let limit = limit_str
-            .parse::<u64>()
-            .map_err(|e| anyhow::anyhow!("invalid limit: {e}"))?;
-        (limit, limit)
-    };
-
-    Ok((resource, soft, hard))
+    Ok((resource, rlimit.soft, rlimit.hard))
 }

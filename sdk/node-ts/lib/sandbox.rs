@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use microsandbox::sandbox::{NetworkPolicy, PullPolicy, SandboxConfig as RustSandboxConfig};
-use microsandbox::{LogLevel, RegistryAuth};
+use microsandbox::{LogLevel, RegistryAuth as RustRegistryAuth};
+use microsandbox_network::dns;
 use microsandbox_network::policy::{
     Action, Destination, DestinationGroup, Direction, PortRange, Protocol, Rule,
 };
@@ -67,7 +68,7 @@ impl Sandbox {
     /// Create a sandbox from configuration (attached mode — stops on GC/process exit).
     #[napi(factory)]
     pub async fn create(config: SandboxConfig) -> Result<Sandbox> {
-        let rust_config = convert_config(config)?;
+        let rust_config = convert_config(config).await?;
         let inner = microsandbox::sandbox::Sandbox::create(rust_config)
             .await
             .map_err(to_napi_error)?;
@@ -79,7 +80,7 @@ impl Sandbox {
     /// Create a sandbox that survives the parent process (detached mode).
     #[napi(factory)]
     pub async fn create_detached(config: SandboxConfig) -> Result<Sandbox> {
-        let rust_config = convert_config(config)?;
+        let rust_config = convert_config(config).await?;
         let inner = microsandbox::sandbox::Sandbox::create_detached(rust_config)
             .await
             .map_err(to_napi_error)?;
@@ -196,6 +197,25 @@ impl Sandbox {
         let args_owned = args.unwrap_or_default();
         let handle = sb
             .exec_stream(&cmd, args_owned)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsExecHandle::from_rust(handle))
+    }
+
+    /// Execute a command with streaming I/O and full configuration.
+    ///
+    /// Unlike `execStream`, this accepts an `ExecConfig` so callers can enable
+    /// a piped stdin (`stdin: "pipe"`), set a TTY, pass env vars, etc. Required
+    /// for bidirectional streaming protocols where the host writes to the
+    /// running process's stdin via `ExecHandle.takeStdin()` while concurrently
+    /// reading events via `ExecHandle.recv()`.
+    #[napi(js_name = "execStreamWithConfig")]
+    pub async fn exec_stream_with_config(&self, config: ExecConfig) -> Result<JsExecHandle> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let f = convert_exec_config(&config);
+        let handle = sb
+            .exec_stream_with(&config.cmd, f)
             .await
             .map_err(to_napi_error)?;
         Ok(JsExecHandle::from_rust(handle))
@@ -421,7 +441,7 @@ impl AsyncGenerator for JsMetricsStream {
 }
 
 /// Convert a JS `SandboxConfig` to the Rust `SandboxConfig` via the builder pattern.
-fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
+async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
     let mut builder =
         microsandbox::sandbox::Sandbox::builder(&config.name).image(config.image.as_str());
 
@@ -491,10 +511,30 @@ fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
     if config.quiet_logs.unwrap_or(false) {
         builder = builder.quiet_logs();
     }
-    if let Some(ref auth) = config.registry_auth {
-        builder = builder.registry_auth(RegistryAuth::Basic {
-            username: auth.username.clone(),
-            password: auth.password.clone(),
+    if let Some(ref registry) = config.registry {
+        let auth = registry.auth.as_ref().map(|a| RustRegistryAuth::Basic {
+            username: a.username.clone(),
+            password: a.password.clone(),
+        });
+        let insecure = registry.insecure.unwrap_or(false);
+        let ca_certs = match &registry.ca_certs_path {
+            Some(path) => Some(tokio::fs::read(path).await.map_err(|e| {
+                napi::Error::from_reason(format!("failed to read CA certs from `{path}`: {e}"))
+            })?),
+            None => None,
+        };
+
+        builder = builder.registry(|mut r| {
+            if let Some(auth) = auth {
+                r = r.auth(auth);
+            }
+            if insecure {
+                r = r.insecure();
+            }
+            if let Some(data) = ca_certs {
+                r = r.ca_certs(data);
+            }
+            r
         });
     }
     if let Some(ref ports) = config.ports {
@@ -506,6 +546,19 @@ fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
         }
     }
     if let Some(ref network) = config.network {
+        let dns_nameserver_specs: Vec<dns::NameserverSpec> = if let Some(ref dns) = network.dns
+            && let Some(ref nameservers) = dns.nameservers
+        {
+            nameservers
+                .iter()
+                .map(|s| {
+                    dns::parse_nameserver(s).map_err(|e| napi::Error::from_reason(e.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+
         builder = builder.network(|mut n| {
             // Policy: preset or custom rules
             if let Some(ref rules) = network.rules {
@@ -526,18 +579,33 @@ fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
                 });
             }
             // DNS
-            if let Some(ref domains) = network.block_domains {
-                for domain in domains {
-                    n = n.block_domain(domain);
-                }
-            }
-            if let Some(ref suffixes) = network.block_domain_suffixes {
-                for suffix in suffixes {
-                    n = n.block_domain_suffix(suffix);
-                }
-            }
-            if let Some(rebind) = network.dns_rebind_protection {
-                n = n.dns_rebind_protection(rebind);
+            if let Some(ref dns) = network.dns {
+                let block_domains = dns.block_domains.clone();
+                let block_domain_suffixes = dns.block_domain_suffixes.clone();
+                let rebind_protection = dns.rebind_protection;
+                let query_timeout_ms = dns.query_timeout_ms;
+                n = n.dns(move |mut d| {
+                    if let Some(domains) = block_domains {
+                        for domain in &domains {
+                            d = d.block_domain(domain);
+                        }
+                    }
+                    if let Some(suffixes) = block_domain_suffixes {
+                        for suffix in &suffixes {
+                            d = d.block_domain_suffix(suffix);
+                        }
+                    }
+                    if let Some(rebind) = rebind_protection {
+                        d = d.rebind_protection(rebind);
+                    }
+                    if !dns_nameserver_specs.is_empty() {
+                        d = d.nameservers(dns_nameserver_specs);
+                    }
+                    if let Some(ms) = query_timeout_ms {
+                        d = d.query_timeout_ms(u64::from(ms));
+                    }
+                    d
+                });
             }
             // TLS
             if let Some(ref tls) = network.tls {

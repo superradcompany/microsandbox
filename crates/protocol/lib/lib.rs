@@ -47,11 +47,16 @@ pub const SCRIPTS_PATH: &str = "/.msb/scripts";
 /// - `MSB_TMPFS=/tmp,size=256,noexec` — with noexec flag
 pub const ENV_TMPFS: &str = "MSB_TMPFS";
 
-/// Environment variable specifying the block device for rootfs switch.
+/// Environment variable specifying how agentd assembles the root filesystem.
 ///
-/// Format: `device[,key=value,...]`
-/// - `device` — block device path (required, always first element)
-/// - `fstype=TYPE` — filesystem type (optional; auto-detected if absent)
+/// Format: comma-separated `key=value` pairs, semicolons for multi-value fields.
+///
+/// Variants:
+/// - `kind=disk-image,device=/dev/vda[,fstype=ext4]`
+/// - `kind=oci-layered,lowers=/dev/vdb;/dev/vdc;/dev/vdd,lower_fstype=erofs,upper=/dev/vde,upper_fstype=ext4`
+/// - `kind=oci-flat,lower=/dev/vdb,lower_fstype=erofs,upper=/dev/vdc,upper_fstype=ext4`
+///
+/// Legacy format (`/dev/vda[,fstype=ext4]`) is accepted and treated as `kind=disk-image`.
 pub const ENV_BLOCK_ROOT: &str = "MSB_BLOCK_ROOT";
 
 /// Environment variable carrying the guest network interface configuration.
@@ -155,6 +160,22 @@ pub const ENV_USER: &str = "MSB_USER";
 /// agentd calls `sethostname()` and adds the name to `/etc/hosts`.
 /// Defaults to the sandbox name when not explicitly set.
 pub const ENV_HOSTNAME: &str = "MSB_HOSTNAME";
+
+/// Environment variable carrying sandbox-wide resource limits.
+///
+/// Format: `resource=limit[:hard][;resource=limit[:hard];...]`
+///
+/// - `resource` — lowercase rlimit name such as `nofile` or `nproc`
+/// - `limit` — soft limit
+/// - `hard` — hard limit (optional; if omitted, uses the soft limit)
+///
+/// Examples:
+/// - `MSB_RLIMITS=nofile=65535`
+/// - `MSB_RLIMITS=nofile=65535:65535;nproc=4096:4096`
+///
+/// agentd applies these during PID 1 startup so every later guest process
+/// inherits the raised baseline instead of having to opt into per-exec rlimits.
+pub const ENV_RLIMITS: &str = "MSB_RLIMITS";
 
 /// Guest-side path to the CA certificate for TLS interception.
 ///

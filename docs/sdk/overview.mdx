@@ -16,6 +16,10 @@ cargo add microsandbox
 ```bash TypeScript
 npm install microsandbox
 ```
+
+```bash Python
+pip install microsandbox
+```
 </CodeGroup>
 
 ## Quick start
@@ -67,6 +71,31 @@ console.log("Output:", output.stdout())
 await sb.stop()
 ```
 
+```python Python
+import asyncio
+from microsandbox import Network, Sandbox, Volume
+
+async def main():
+    sb = await Sandbox.create(
+        "my-sandbox",
+        image="python",
+        memory=512,
+        cpus=2,
+        env={"PYTHONDONTWRITEBYTECODE": "1"},
+        volumes={
+            "/app/src": Volume.bind("./src", readonly=True),
+        },
+        network=Network.public_only(),
+    )
+
+    output = await sb.exec("python", ["-c", "print('Hello, World!')"])
+    print("Output:", output.stdout_text)
+
+    await sb.stop()
+
+asyncio.run(main())
+```
+
 </CodeGroup>
 
-The SDK reference is split by language - choose [Rust SDK](/sdk/rust/sandbox) or [TypeScript SDK](/sdk/typescript/sandbox) for the full API. See also [error handling](/sdk/errors).
+The SDK reference is split by language - choose [Rust SDK](/sdk/rust/sandbox), [TypeScript SDK](/sdk/typescript/sandbox), or [Python SDK](/sdk/python/sandbox) for the full API. See also [error handling](/sdk/errors).
