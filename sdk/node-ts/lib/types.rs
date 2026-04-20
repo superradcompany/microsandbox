@@ -203,6 +203,36 @@ pub struct SecretEntry {
     pub require_tls: Option<bool>,
     /// Violation action: "block", "block-and-log" (default), "block-and-terminate".
     pub on_violation: Option<String>,
+    /// Where in the HTTP request the secret can be injected.
+    /// Defaults to `{ headers: true, basicAuth: true, queryParams: false, body: false }`.
+    pub inject: Option<SecretInjection>,
+}
+
+/// Controls where the secret placeholder is substituted by the TLS proxy.
+///
+/// By default, substitution happens in HTTP headers (including the
+/// `Authorization` header for Basic Auth). Enable `queryParams` or `body`
+/// to expand the scope to the request line query string or the request body.
+/// When `body` is enabled, the proxy also rewrites `Content-Length` to match.
+///
+/// ```js
+/// Secret.env("API_KEY", {
+///   value: "sk-...",
+///   allowHosts: ["api.example.com"],
+///   inject: { headers: false, body: true },
+/// })
+/// ```
+#[napi(object)]
+pub struct SecretInjection {
+    /// Substitute in HTTP headers (default: true).
+    pub headers: Option<bool>,
+    /// Substitute in HTTP Basic Auth (default: true).
+    pub basic_auth: Option<bool>,
+    /// Substitute in URL query parameters (default: false).
+    pub query_params: Option<bool>,
+    /// Substitute in request body (default: false).
+    /// When enabled, `Content-Length` is rewritten to match the new body size.
+    pub body: Option<bool>,
 }
 
 /// Registry connection settings.

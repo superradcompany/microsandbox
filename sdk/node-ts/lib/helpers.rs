@@ -151,6 +151,9 @@ pub struct SecretEnvOptions {
     pub require_tls: Option<bool>,
     /// Violation action: "block", "block-and-log" (default), "block-and-terminate".
     pub on_violation: Option<String>,
+    /// Where in the HTTP request the secret can be injected. Defaults to
+    /// headers + Basic Auth only; enable `queryParams` or `body` to widen scope.
+    pub inject: Option<SecretInjection>,
 }
 
 /// Options for `Patch.text()` and `Patch.copyFile()`.
@@ -349,6 +352,7 @@ impl Secret {
             placeholder: opts.placeholder,
             require_tls: opts.require_tls,
             on_violation: opts.on_violation,
+            inject: opts.inject,
         }
     }
 }
