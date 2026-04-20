@@ -196,8 +196,27 @@ if err != nil {
 }
 defer microsandbox.RemoveVolume(ctx, "my-data")
 
-// Mount it in a sandbox (not yet supported via functional options;
-// use WithPatches or the msb CLI to pre-populate volume data).
+// Mount volumes into a sandbox.
+sb, err := microsandbox.CreateSandbox(ctx, "worker",
+    microsandbox.WithImage("python:3.12"),
+    microsandbox.WithMounts(map[string]microsandbox.MountConfig{
+        "/data":    microsandbox.Mount.Named("my-data"),
+        "/src":     microsandbox.MountConfig{Bind: "./src", Readonly: true},
+        "/scratch": microsandbox.Mount.Tmpfs(),
+    }),
+)
+
+// Look up volume metadata.
+handle, err := microsandbox.GetVolume(ctx, "my-data")
+fmt.Println(handle.Path())       // host filesystem path
+fmt.Println(handle.UsedBytes())  // bytes in use
+
+// Direct host-side file ops via VolumeFs (no agent protocol).
+vfs := handle.FS()
+err = vfs.WriteString("notes.txt", "hello")
+content, err := vfs.ReadString("notes.txt")
+
+// List all volumes.
 vols, err := microsandbox.ListVolumes(ctx)
 
 // ErrVolumeAlreadyExists on duplicate create.
@@ -342,7 +361,7 @@ sb, err := microsandbox.CreateSandbox(ctx, "tls-inspect",
 ### Metrics
 
 ```go
-// Per-sandbox metrics.
+// Point-in-time snapshot.
 m, err := sb.Metrics(ctx)
 if err != nil {
     log.Fatal(err)
@@ -350,6 +369,58 @@ if err != nil {
 fmt.Printf("CPU: %.1f%%\n", m.CPUPercent)
 fmt.Printf("Memory: %.1f MiB\n", float64(m.MemoryBytes)/1024/1024)
 fmt.Printf("Uptime: %s\n", m.Uptime)
+
+// Streaming metrics — snapshot every 500ms.
+stream, err := sb.MetricsStream(ctx, 500*time.Millisecond)
+if err != nil {
+    log.Fatal(err)
+}
+defer stream.Close()
+
+for {
+    m, err := stream.Recv(ctx)
+    if err != nil || m == nil {
+        break
+    }
+    fmt.Printf("CPU: %.1f%%  Mem: %d bytes\n", m.CPUPercent, m.MemoryBytes)
+}
+
+// All running sandboxes at once.
+all, err := microsandbox.AllSandboxMetrics(ctx)
+for name, m := range all {
+    fmt.Printf("%s: %.1f%% CPU\n", name, m.CPUPercent)
+}
+```
+
+### Exec — advanced
+
+```go
+// Per-command user and environment overrides.
+out, err := sb.Exec(ctx, "whoami", nil,
+    microsandbox.WithExecUser("nobody"),
+    microsandbox.WithExecEnv(map[string]string{"DEBUG": "1"}),
+)
+
+// ExecHandle: collect or wait.
+h, err := sb.ExecStream(ctx, "sleep", []string{"10"})
+if err != nil {
+    log.Fatal(err)
+}
+
+// Get the correlation ID assigned by the agent.
+id, err := h.ID()
+fmt.Println("exec id:", id)
+
+// Collect all output after the process finishes.
+out2, err := h.Collect(ctx)
+fmt.Println(out2.Stdout())
+
+// Or just wait for the exit code, discarding output.
+code, err := h.Wait(ctx)
+
+// Kill if needed.
+err = h.Kill(ctx)
+h.Close()
 ```
 
 ### Sandbox Listing
@@ -375,7 +446,9 @@ for _, name := range names {
 | `GetSandbox(ctx, name)` | Fetch sandbox metadata; returns `*SandboxHandle` |
 | `ListSandboxes(ctx)` | List all known sandbox names |
 | `RemoveSandbox(ctx, name)` | Remove a stopped sandbox by name |
+| `AllSandboxMetrics(ctx)` | Point-in-time metrics for all running sandboxes |
 | `CreateVolume(ctx, name, ...opts)` | Create a named persistent volume |
+| `GetVolume(ctx, name)` | Fetch volume metadata; returns `*VolumeHandle` |
 | `ListVolumes(ctx)` | List all named volumes |
 | `RemoveVolume(ctx, name)` | Remove a named volume |
 | `IsKind(err, kind)` | Test an error's `ErrorKind` |
@@ -387,14 +460,19 @@ for _, name := range names {
 | `Sandbox` | Live handle to a running sandbox — lifecycle, execution, filesystem |
 | `SandboxHandle` | Lightweight metadata reference; obtain via `GetSandbox`. Methods: `Connect`, `Start`, `StartDetached`, `Stop`, `Kill`, `Remove` |
 | `ExecOutput` | Captured stdout/stderr with exit status; inspect via `Stdout()`, `Stderr()`, `ExitCode()`, `Success()` |
-| `ExecHandle` | Streaming execution handle — call `Recv(ctx)` for events, `Signal(ctx, sig)` to send a signal |
+| `ExecHandle` | Streaming exec handle — `Recv`, `Collect`, `Wait`, `Kill`, `Signal`, `ID`, `TakeStdin` |
 | `ExecEvent` | Stream event with `Kind`, `PID`, `Data`, `ExitCode` fields |
 | `SandboxFs` | Guest filesystem operations — obtain via `sandbox.FS()` |
-| `Volume` | Named persistent volume |
+| `FsReadStream` | Streaming file read from guest — implements `io.WriterTo` |
+| `FsWriteStream` | Streaming file write to guest — implements `io.Writer` |
+| `MetricsStreamHandle` | Live metrics subscription — `Recv(ctx)`, `Close()` |
+| `Volume` | Named persistent volume — `Name()`, `Path()`, `FS()` |
+| `VolumeHandle` | Volume metadata from DB — `Name()`, `Path()`, `QuotaMiB()`, `UsedBytes()`, `Labels()`, `CreatedAt()`, `FS()` |
+| `VolumeFs` | Host-side file ops on a volume directory — no agent protocol |
 | `Metrics` | Resource metrics (CPU %, memory bytes, disk I/O, network I/O, uptime) |
 | `SandboxConfig` / `NetworkConfig` / `TlsConfig` / `ExecConfig` / `VolumeConfig` | Configuration structs |
-| `SecretEntry`, `PolicyRule`, `PatchConfig` | Value types for secrets, network rules, and rootfs patches |
-| `Patch`, `Secret`, `NetworkPolicy` | Factory namespaces (`Patch.Text`, `Secret.Env`, `NetworkPolicy.None`, …) |
+| `SecretEntry`, `PolicyRule`, `PatchConfig`, `MountConfig` | Value types for secrets, network rules, rootfs patches, and volume mounts |
+| `Patch`, `Secret`, `NetworkPolicy`, `Mount` | Factory namespaces (`Patch.Text`, `Secret.Env`, `NetworkPolicy.None`, `Mount.Named`, …) |
 
 ### Sandbox Methods
 
@@ -406,6 +484,13 @@ for _, name := range names {
 | `ShellStream(ctx, cmd)` | Streaming shell; returns `*ExecHandle` |
 | `FS()` | Return a `*SandboxFs` for guest filesystem access |
 | `Metrics(ctx)` | Return current resource metrics |
+| `MetricsStream(ctx, interval)` | Live metrics subscription; returns `*MetricsStreamHandle` |
+| `Attach(ctx, cmd, args...)` | Interactive PTY session; blocks until exit |
+| `AttachShell(ctx)` | Interactive PTY session in the default shell |
+| `Drain(ctx)` | Send graceful drain signal (SIGUSR1) |
+| `Wait(ctx)` | Block until sandbox exits; returns exit code |
+| `OwnsLifecycle()` | Whether this handle controls the VM process |
+| `RemovePersisted(ctx)` | Remove persisted state after the sandbox is stopped |
 | `Stop(ctx)` | Gracefully stop the sandbox (does not wait for VM exit) |
 | `StopAndWait(ctx)` | Stop the sandbox and wait for it to exit; returns the guest exit code |
 | `Kill(ctx)` | Terminate the sandbox immediately |
@@ -427,8 +512,14 @@ for _, name := range names {
 | `WithSecrets(secrets...)` | Credential placeholders substituted at the network layer |
 | `WithPatches(patches...)` | Pre-boot rootfs modifications |
 | `WithVolumeQuota(mib)` | Volume quota in MiB (zero = unlimited) |
+| `WithHostname(hostname)` | Guest hostname |
+| `WithUser(user)` | User to run the sandbox process as (UID or name) |
+| `WithReplace()` | Kill any existing sandbox with the same name before creating |
+| `WithMounts(map)` | Volume mounts keyed by guest path — use `Mount.Named/Bind/Tmpfs` |
 | `WithExecCwd(path)` | Working directory for a single `Exec`/`Shell` call |
 | `WithExecTimeout(d)` | Per-command timeout; returns `ErrExecTimeout` on breach |
+| `WithExecUser(user)` | User to run a single command as |
+| `WithExecEnv(map)` | Per-command environment variables (merged across repeated calls) |
 
 ### Error Kinds
 
