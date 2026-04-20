@@ -12,6 +12,9 @@ type SandboxConfig struct {
 	MemoryMiB uint32
 	CPUs      uint8
 	Workdir   string
+	Hostname  string
+	User      string
+	Replace   bool
 	Env       map[string]string
 	Detached  bool
 	Ports     map[uint16]uint16 // host port → guest port (TCP)
@@ -55,6 +58,21 @@ func WithEnv(env map[string]string) SandboxOption {
 			o.Env[k] = v
 		}
 	}
+}
+
+// WithHostname sets the guest hostname.
+func WithHostname(hostname string) SandboxOption {
+	return func(o *SandboxConfig) { o.Hostname = hostname }
+}
+
+// WithUser sets the user to run the sandbox process as (UID or name).
+func WithUser(user string) SandboxOption {
+	return func(o *SandboxConfig) { o.User = user }
+}
+
+// WithReplace kills any existing sandbox with the same name before creating.
+func WithReplace() SandboxOption {
+	return func(o *SandboxConfig) { o.Replace = true }
 }
 
 // WithDetached creates the sandbox in detached mode. The sandbox continues
@@ -332,6 +350,8 @@ type ExecConfig struct {
 	Cwd       string
 	Timeout   time.Duration
 	StdinPipe bool
+	User      string
+	Env       map[string]string
 }
 
 // ExecOption is a functional option for Exec.
@@ -353,6 +373,24 @@ func WithExecTimeout(d time.Duration) ExecOption {
 // to be written to the process via ExecHandle.TakeStdin.
 func WithExecStdinPipe() ExecOption {
 	return func(o *ExecConfig) { o.StdinPipe = true }
+}
+
+// WithExecUser sets the user to run the command as (UID or name).
+func WithExecUser(user string) ExecOption {
+	return func(o *ExecConfig) { o.User = user }
+}
+
+// WithExecEnv adds per-command environment variables. Called repeatedly, maps
+// merge; later keys overwrite earlier ones.
+func WithExecEnv(env map[string]string) ExecOption {
+	return func(o *ExecConfig) {
+		if o.Env == nil {
+			o.Env = make(map[string]string, len(env))
+		}
+		for k, v := range env {
+			o.Env[k] = v
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

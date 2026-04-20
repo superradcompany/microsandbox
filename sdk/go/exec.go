@@ -57,7 +57,7 @@ func (s *Sandbox) Exec(ctx context.Context, cmd string, args []string, opts ...E
 		opt(&o)
 	}
 
-	ffiOpts := ffi.ExecOptions{Args: args, Cwd: o.Cwd}
+	ffiOpts := ffi.ExecOptions{Args: args, Cwd: o.Cwd, User: o.User, Env: o.Env}
 	if o.Timeout > 0 {
 		ffiOpts.TimeoutSecs = timeoutSecsCeil(o.Timeout)
 	}
@@ -206,7 +206,7 @@ func (s *Sandbox) ExecStream(ctx context.Context, cmd string, args []string, opt
 	for _, opt := range opts {
 		opt(&o)
 	}
-	ffiOpts := ffi.ExecOptions{Args: args, Cwd: o.Cwd, StdinPipe: o.StdinPipe}
+	ffiOpts := ffi.ExecOptions{Args: args, Cwd: o.Cwd, StdinPipe: o.StdinPipe, User: o.User, Env: o.Env}
 	if o.Timeout > 0 {
 		ffiOpts.TimeoutSecs = timeoutSecsCeil(o.Timeout)
 	}
