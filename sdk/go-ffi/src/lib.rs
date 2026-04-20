@@ -594,6 +594,10 @@ struct SandboxCreateOpts {
     env: Option<HashMap<String, String>>,
     #[serde(default)]
     detached: bool,
+    hostname: Option<String>,
+    user: Option<String>,
+    #[serde(default)]
+    replace: bool,
     network: Option<NetworkOpts>,
     /// Top-level ports shorthand: {host_port: guest_port}.
     #[serde(default)]
@@ -928,6 +932,15 @@ pub extern "C" fn msb_sandbox_create(
             }
             if let Some(w) = opts.workdir {
                 builder = builder.workdir(w);
+            }
+            if let Some(h) = opts.hostname {
+                builder = builder.hostname(h);
+            }
+            if let Some(u) = opts.user {
+                builder = builder.user(u);
+            }
+            if opts.replace {
+                builder = builder.replace();
             }
             for (k, v) in opts.env.unwrap_or_default() {
                 builder = builder.env(k, v);
@@ -1333,6 +1346,9 @@ struct ExecOpts {
     cwd: Option<String>,
     timeout_secs: Option<u64>,
     stdin_pipe: Option<bool>,
+    user: Option<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
 }
 
 #[unsafe(no_mangle)]
@@ -1361,6 +1377,12 @@ pub extern "C" fn msb_sandbox_exec(
                     }
                     if let Some(secs) = opts.timeout_secs {
                         b = b.timeout(Duration::from_secs(secs));
+                    }
+                    if let Some(u) = opts.user {
+                        b = b.user(u);
+                    }
+                    for (k, v) in opts.env {
+                        b = b.env(k, v);
                     }
                     b
                 })
@@ -1906,6 +1928,12 @@ pub extern "C" fn msb_sandbox_exec_stream(
                     }
                     if let Some(secs) = opts.timeout_secs {
                         b = b.timeout(Duration::from_secs(secs));
+                    }
+                    if let Some(u) = opts.user {
+                        b = b.user(u);
+                    }
+                    for (k, v) in opts.env {
+                        b = b.env(k, v);
                     }
                     b
                 })

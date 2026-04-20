@@ -676,17 +676,20 @@ func call(ctx context.Context, fn func(cancelID C.uint64_t, buf *C.uint8_t, bufL
 // CreateOptions matches the JSON payload shape expected by msb_sandbox_create.
 // Zero-valued fields are omitted; the Rust side applies defaults.
 type CreateOptions struct {
-	Image     string                `json:"image,omitempty"`
-	MemoryMiB uint32                `json:"memory_mib,omitempty"`
-	CPUs      uint8                 `json:"cpus,omitempty"`
-	Workdir   string                `json:"workdir,omitempty"`
-	Env       map[string]string     `json:"env,omitempty"`
-	Detached  bool                  `json:"detached,omitempty"`
-	Ports     map[uint16]uint16     `json:"ports,omitempty"`
-	Network   *NetworkOptions       `json:"network,omitempty"`
-	Secrets   []SecretOptions       `json:"secrets,omitempty"`
-	Patches   []PatchOptions        `json:"patches,omitempty"`
-	Volumes   map[string]MountSpec  `json:"volumes,omitempty"`
+	Image     string               `json:"image,omitempty"`
+	MemoryMiB uint32               `json:"memory_mib,omitempty"`
+	CPUs      uint8                `json:"cpus,omitempty"`
+	Workdir   string               `json:"workdir,omitempty"`
+	Hostname  string               `json:"hostname,omitempty"`
+	User      string               `json:"user,omitempty"`
+	Replace   bool                 `json:"replace,omitempty"`
+	Env       map[string]string    `json:"env,omitempty"`
+	Detached  bool                 `json:"detached,omitempty"`
+	Ports     map[uint16]uint16    `json:"ports,omitempty"`
+	Network   *NetworkOptions      `json:"network,omitempty"`
+	Secrets   []SecretOptions      `json:"secrets,omitempty"`
+	Patches   []PatchOptions       `json:"patches,omitempty"`
+	Volumes   map[string]MountSpec `json:"volumes,omitempty"`
 }
 
 // MountSpec describes a volume mount for a sandbox.
@@ -1076,10 +1079,12 @@ func RemoveSandbox(ctx context.Context, name string) error {
 
 // ExecOptions configures a single Exec call.
 type ExecOptions struct {
-	Args        []string `json:"args,omitempty"`
-	Cwd         string   `json:"cwd,omitempty"`
-	TimeoutSecs uint64   `json:"timeout_secs,omitempty"`
-	StdinPipe   bool     `json:"stdin_pipe,omitempty"`
+	Args        []string          `json:"args,omitempty"`
+	Cwd         string            `json:"cwd,omitempty"`
+	TimeoutSecs uint64            `json:"timeout_secs,omitempty"`
+	StdinPipe   bool              `json:"stdin_pipe,omitempty"`
+	User        string            `json:"user,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
 }
 
 // ExecResult is the collected output of a completed command.
