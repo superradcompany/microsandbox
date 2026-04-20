@@ -61,8 +61,9 @@ pub struct NetworkConfig {
     /// TLS works behind corporate MITM proxies (Cloudflare Warp Zero
     /// Trust, Zscaler, Netskope, etc.) whose gateway CA is installed on
     /// the host but not shipped in the Mozilla root bundle the guest OS
-    /// uses. Default: true.
-    #[serde(default = "default_true")]
+    /// uses. Opt-in: host trust is not copied into the guest unless
+    /// this is explicitly enabled. Default: false.
+    #[serde(default)]
     pub trust_host_cas: bool,
 }
 
@@ -161,7 +162,7 @@ impl Default for NetworkConfig {
             tls: TlsConfig::default(),
             secrets: SecretsConfig::default(),
             max_connections: None,
-            trust_host_cas: true,
+            trust_host_cas: false,
         }
     }
 }

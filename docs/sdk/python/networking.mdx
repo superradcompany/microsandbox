@@ -28,7 +28,7 @@ Network(
 | dns | [`DnsConfig`](#dnsconfig) ` \| None` | `None` | DNS interception configuration |
 | tls | [`TlsConfig`](#tlsconfig) ` \| None` | `None` | TLS interception configuration |
 | max_connections | `int \| None` | `None` | Maximum concurrent connections |
-| trust_host_cas | `bool \| None` | `True` | Ship the host's trusted root CAs into the guest at boot so outbound TLS works behind corporate MITM proxies (Warp Zero Trust, Zscaler, etc.) |
+| trust_host_cas | `bool \| None` | `False` | Ship the host's trusted root CAs into the guest at boot so outbound TLS works behind corporate MITM proxies (Warp Zero Trust, Zscaler, etc.). Opt-in |
 
 ### DnsConfig
 

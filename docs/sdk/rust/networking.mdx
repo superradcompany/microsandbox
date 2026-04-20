@@ -91,7 +91,7 @@ Limit the maximum number of concurrent network connections from the sandbox.
 fn trust_host_cas(self, enabled: bool) -> Self
 ```
 
-Whether to ship the host's trusted root CAs into the guest at boot. Default: `true`. With this enabled, outbound HTTPS inside the sandbox works behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.) whose gateway CA is installed on the host but unknown to the guest's stock Mozilla bundle. Disable when you want the guest to rely strictly on its native trust store.
+Whether to ship the host's trusted root CAs into the guest at boot. Default: `false`. Opt in when outbound HTTPS inside the sandbox needs to work behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.) whose gateway CA is installed on the host but unknown to the guest's stock Mozilla bundle. Leave off to keep the guest validating strictly against its native trust store.
 
 **Parameters**
 

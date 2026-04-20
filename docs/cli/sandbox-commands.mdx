@@ -62,7 +62,7 @@ msb run -d --name worker python -- python worker.py
 | `--dns-nameserver` | Nameserver to forward DNS queries to (repeatable; `IP` or `IP:PORT`). Overrides the host's `/etc/resolv.conf` |
 | `--dns-query-timeout-ms` | Per-DNS-query timeout in milliseconds (default: 5000) |
 | `--max-connections` | Limit the number of concurrent network connections |
-| `--no-trust-host-cas` | Don't ship the host's trusted root CAs into the guest. Default behaviour is to copy the host trust store into the guest so outbound TLS works behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, etc.) whose gateway CA is unknown to the guest's stock bundle |
+| `--trust-host-cas` | Ship the host's trusted root CAs into the guest so outbound TLS works behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, etc.) whose gateway CA is installed on the host but unknown to the guest's stock bundle. Opt-in; by default the guest validates against its stock Mozilla bundle only |
 | `--secret` | Inject a secret that is only sent to an allowed host (`ENV=VALUE@HOST`) |
 | `--on-secret-violation` | Action when a secret is sent to a disallowed host (`block`, `block-and-log`, `block-and-terminate`) |
 | `--tls-intercept` | Intercept and inspect HTTPS traffic via a built-in TLS proxy |
