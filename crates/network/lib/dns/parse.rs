@@ -159,10 +159,6 @@ impl From<IpAddr> for Nameserver {
 mod tests {
     use super::*;
 
-    fn parse(s: &str) -> Result<Nameserver, ParseNameserverError> {
-        s.parse()
-    }
-
     fn addr(s: &str) -> Nameserver {
         Nameserver::Addr(s.parse().unwrap())
     }
@@ -176,18 +172,21 @@ mod tests {
 
     #[test]
     fn parses_ipv4_bare() {
-        assert_eq!(parse("1.1.1.1").unwrap(), addr("1.1.1.1:53"));
+        assert_eq!("1.1.1.1".parse::<Nameserver>().unwrap(), addr("1.1.1.1:53"));
     }
 
     #[test]
     fn parses_ipv4_with_port() {
-        assert_eq!(parse("8.8.8.8:5353").unwrap(), addr("8.8.8.8:5353"));
+        assert_eq!(
+            "8.8.8.8:5353".parse::<Nameserver>().unwrap(),
+            addr("8.8.8.8:5353")
+        );
     }
 
     #[test]
     fn parses_ipv6_bare() {
         assert_eq!(
-            parse("2606:4700:4700::1111").unwrap(),
+            "2606:4700:4700::1111".parse::<Nameserver>().unwrap(),
             addr("[2606:4700:4700::1111]:53")
         );
     }
@@ -195,62 +194,71 @@ mod tests {
     #[test]
     fn parses_ipv6_bracketed_with_port() {
         assert_eq!(
-            parse("[2606:4700:4700::1111]:53").unwrap(),
+            "[2606:4700:4700::1111]:53".parse::<Nameserver>().unwrap(),
             addr("[2606:4700:4700::1111]:53")
         );
     }
 
     #[test]
     fn parses_hostname_bare() {
-        assert_eq!(parse("dns.google").unwrap(), host("dns.google", 53));
+        assert_eq!(
+            "dns.google".parse::<Nameserver>().unwrap(),
+            host("dns.google", 53)
+        );
     }
 
     #[test]
     fn parses_hostname_with_port() {
-        assert_eq!(parse("dns.google:53").unwrap(), host("dns.google", 53));
         assert_eq!(
-            parse("my-dns.corp.internal:5353").unwrap(),
+            "dns.google:53".parse::<Nameserver>().unwrap(),
+            host("dns.google", 53)
+        );
+        assert_eq!(
+            "my-dns.corp.internal:5353".parse::<Nameserver>().unwrap(),
             host("my-dns.corp.internal", 5353)
         );
     }
 
     #[test]
     fn trims_whitespace() {
-        assert_eq!(parse("  1.1.1.1  ").unwrap(), addr("1.1.1.1:53"));
+        assert_eq!(
+            "  1.1.1.1  ".parse::<Nameserver>().unwrap(),
+            addr("1.1.1.1:53")
+        );
     }
 
     #[test]
     fn rejects_empty() {
-        assert!(parse("").is_err());
-        assert!(parse("   ").is_err());
+        assert!("".parse::<Nameserver>().is_err());
+        assert!("   ".parse::<Nameserver>().is_err());
     }
 
     #[test]
     fn rejects_embedded_whitespace() {
-        assert!(parse("dns google").is_err());
+        assert!("dns google".parse::<Nameserver>().is_err());
     }
 
     #[test]
     fn rejects_bad_port() {
-        assert!(parse("dns.google:notaport").is_err());
-        assert!(parse("1.1.1.1:99999").is_err());
+        assert!("dns.google:notaport".parse::<Nameserver>().is_err());
+        assert!("1.1.1.1:99999".parse::<Nameserver>().is_err());
     }
 
     #[test]
     fn display_roundtrip() {
         for s in ["1.1.1.1:53", "[2606:4700:4700::1111]:53", "dns.google:53"] {
-            let spec = parse(s).unwrap();
-            assert_eq!(spec.to_string(), s);
+            let ns: Nameserver = s.parse().unwrap();
+            assert_eq!(ns.to_string(), s);
         }
     }
 
     #[test]
     fn display_feeds_back_into_parse() {
         for s in ["1.1.1.1", "dns.google", "dns.google:53"] {
-            let spec = parse(s).unwrap();
-            // Display output round-trips to the same spec via parse.
-            let reparsed = parse(&spec.to_string()).unwrap();
-            assert_eq!(spec, reparsed);
+            let ns: Nameserver = s.parse().unwrap();
+            // Display output round-trips to the same value via parse.
+            let reparsed: Nameserver = ns.to_string().parse().unwrap();
+            assert_eq!(ns, reparsed);
         }
     }
 }
