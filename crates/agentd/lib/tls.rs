@@ -99,20 +99,15 @@ pub fn install_host_cas() -> AgentdResult<()> {
     }
 
     let pem = fs::read_to_string(path)?;
-    let count = pem.matches("-----BEGIN CERTIFICATE-----").count();
     eprintln!(
-        "tls: host CA bundle found at {} ({count} cert{}), installing into guest trust store",
-        path.display(),
-        if count == 1 { "" } else { "s" },
+        "tls: host CA bundle found at {}, installing into guest trust store",
+        path.display()
     );
 
     copy_to_trust_dirs(&pem, HOST_CAS_FILENAMES);
     let bundle_path = append_to_bundle(&pem)?;
 
-    eprintln!(
-        "tls: installed {count} host CA cert{} into {bundle_path}",
-        if count == 1 { "" } else { "s" }
-    );
+    eprintln!("tls: host CA bundle installed, bundle={bundle_path}");
     Ok(())
 }
 
