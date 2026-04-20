@@ -2664,7 +2664,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-go-ffi"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "base64 0.22.1",
  "cbindgen",
@@ -2675,6 +2675,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tokio-util",
 ]
 

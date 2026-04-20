@@ -37,17 +37,19 @@ func main() {
 	name := fmt.Sprintf("go-sdk-secrets-%d", time.Now().Unix())
 	log.Printf("creating sandbox %q with one secret", name)
 
-	sb, err := microsandbox.NewSandbox(ctx, name,
+	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
-		microsandbox.WithSecrets(microsandbox.SecretOptions{
-			EnvVar:      envVarInGuest,
-			Value:       secretValue,
-			AllowHosts:  []string{allowedHost},
-			Placeholder: placeholder,
-		}),
+		microsandbox.WithSecrets(microsandbox.Secret.Env(
+			envVarInGuest,
+			secretValue,
+			microsandbox.SecretEnvOptions{
+				AllowHosts:  []string{allowedHost},
+				Placeholder: placeholder,
+			},
+		)),
 	)
 	if err != nil {
-		log.Fatalf("NewSandbox: %v", err)
+		log.Fatalf("CreateSandbox: %v", err)
 	}
 	defer func() {
 		stopCtx, c := context.WithTimeout(context.Background(), 30*time.Second)

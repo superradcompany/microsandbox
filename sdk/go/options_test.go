@@ -7,7 +7,7 @@ import (
 )
 
 func TestWithImage(t *testing.T) {
-	o := SandboxOptions{}
+	o := SandboxConfig{}
 	WithImage("python:3.12")(&o)
 	if o.Image != "python:3.12" {
 		t.Errorf("got %q, want %q", o.Image, "python:3.12")
@@ -15,7 +15,7 @@ func TestWithImage(t *testing.T) {
 }
 
 func TestWithMemory(t *testing.T) {
-	o := SandboxOptions{}
+	o := SandboxConfig{}
 	WithMemory(512)(&o)
 	if o.MemoryMiB != 512 {
 		t.Errorf("got %d, want 512", o.MemoryMiB)
@@ -23,7 +23,7 @@ func TestWithMemory(t *testing.T) {
 }
 
 func TestWithCPUs(t *testing.T) {
-	o := SandboxOptions{}
+	o := SandboxConfig{}
 	WithCPUs(2)(&o)
 	if o.CPUs != 2 {
 		t.Errorf("got %d, want 2", o.CPUs)
@@ -31,7 +31,7 @@ func TestWithCPUs(t *testing.T) {
 }
 
 func TestWithWorkdir(t *testing.T) {
-	o := SandboxOptions{}
+	o := SandboxConfig{}
 	WithWorkdir("/app")(&o)
 	if o.Workdir != "/app" {
 		t.Errorf("got %q, want %q", o.Workdir, "/app")
@@ -39,7 +39,7 @@ func TestWithWorkdir(t *testing.T) {
 }
 
 func TestWithEnvMerge(t *testing.T) {
-	o := SandboxOptions{}
+	o := SandboxConfig{}
 	WithEnv(map[string]string{"A": "1", "B": "2"})(&o)
 	WithEnv(map[string]string{"B": "overwritten", "C": "3"})(&o)
 
@@ -50,7 +50,7 @@ func TestWithEnvMerge(t *testing.T) {
 }
 
 func TestWithEnvNilInitial(t *testing.T) {
-	o := SandboxOptions{}
+	o := SandboxConfig{}
 	if o.Env != nil {
 		t.Fatal("Env should start nil")
 	}
@@ -61,7 +61,7 @@ func TestWithEnvNilInitial(t *testing.T) {
 }
 
 func TestWithExecCwd(t *testing.T) {
-	o := ExecOptions{}
+	o := ExecConfig{}
 	WithExecCwd("/tmp")(&o)
 	if o.Cwd != "/tmp" {
 		t.Errorf("got %q, want %q", o.Cwd, "/tmp")
@@ -69,7 +69,7 @@ func TestWithExecCwd(t *testing.T) {
 }
 
 func TestWithExecTimeout(t *testing.T) {
-	o := ExecOptions{}
+	o := ExecConfig{}
 	WithExecTimeout(30 * time.Second)(&o)
 	if o.Timeout != 30*time.Second {
 		t.Errorf("got %v, want 30s", o.Timeout)
@@ -77,7 +77,7 @@ func TestWithExecTimeout(t *testing.T) {
 }
 
 func TestWithVolumeQuota(t *testing.T) {
-	o := VolumeOptions{}
+	o := VolumeConfig{}
 	WithVolumeQuota(1024)(&o)
 	if o.QuotaMiB != 1024 {
 		t.Errorf("got %d, want 1024", o.QuotaMiB)
@@ -85,7 +85,7 @@ func TestWithVolumeQuota(t *testing.T) {
 }
 
 func TestWithDetached(t *testing.T) {
-	o := SandboxOptions{}
+	o := SandboxConfig{}
 	if o.Detached {
 		t.Fatal("Detached should start false")
 	}
@@ -96,7 +96,7 @@ func TestWithDetached(t *testing.T) {
 }
 
 func TestWithPortsMerge(t *testing.T) {
-	o := SandboxOptions{}
+	o := SandboxConfig{}
 	WithPorts(map[uint16]uint16{8080: 80})(&o)
 	WithPorts(map[uint16]uint16{9090: 90})(&o)
 	if o.Ports[8080] != 80 {
@@ -108,7 +108,7 @@ func TestWithPortsMerge(t *testing.T) {
 }
 
 func TestWithPortsNilInitial(t *testing.T) {
-	o := SandboxOptions{}
+	o := SandboxConfig{}
 	if o.Ports != nil {
 		t.Fatal("Ports should start nil")
 	}
@@ -119,8 +119,8 @@ func TestWithPortsNilInitial(t *testing.T) {
 }
 
 func TestWithNetwork(t *testing.T) {
-	o := SandboxOptions{}
-	net := &NetworkOptions{Policy: "public-only"}
+	o := SandboxConfig{}
+	net := &NetworkConfig{Policy: "public-only"}
 	WithNetwork(net)(&o)
 	if o.Network != net {
 		t.Error("WithNetwork should set the Network pointer")
@@ -128,17 +128,33 @@ func TestWithNetwork(t *testing.T) {
 }
 
 func TestWithNetworkNilClearsPolicy(t *testing.T) {
-	o := SandboxOptions{Network: &NetworkOptions{Policy: "allow-all"}}
+	o := SandboxConfig{Network: &NetworkConfig{Policy: "allow-all"}}
 	WithNetwork(nil)(&o)
 	if o.Network != nil {
 		t.Error("WithNetwork(nil) should clear Network")
 	}
 }
 
+func TestNetworkPolicyFactory(t *testing.T) {
+	cases := []struct {
+		got  *NetworkConfig
+		want string
+	}{
+		{NetworkPolicy.None(), "none"},
+		{NetworkPolicy.PublicOnly(), "public-only"},
+		{NetworkPolicy.AllowAll(), "allow-all"},
+	}
+	for _, c := range cases {
+		if c.got.Policy != c.want {
+			t.Errorf("Policy: got %q, want %q", c.got.Policy, c.want)
+		}
+	}
+}
+
 func TestWithSecrets(t *testing.T) {
-	o := SandboxOptions{}
-	s1 := NewSecret("API_KEY", "sk-secret", "api.example.com")
-	s2 := NewSecret("DB_PASS", "hunter2")
+	o := SandboxConfig{}
+	s1 := Secret.Env("API_KEY", "sk-secret", SecretEnvOptions{AllowHosts: []string{"api.example.com"}})
+	s2 := Secret.Env("DB_PASS", "hunter2", SecretEnvOptions{})
 	WithSecrets(s1)(&o)
 	WithSecrets(s2)(&o)
 	if len(o.Secrets) != 2 {
@@ -155,23 +171,35 @@ func TestWithSecrets(t *testing.T) {
 	}
 }
 
-func TestNewSecret(t *testing.T) {
-	s := NewSecret("TOK", "val", "a.com", "b.com")
-	if s.EnvVar != "TOK" {
-		t.Errorf("EnvVar: got %q", s.EnvVar)
-	}
-	if s.Value != "val" {
-		t.Errorf("Value: got %q", s.Value)
+func TestSecretEnvFactory(t *testing.T) {
+	rt := true
+	s := Secret.Env("TOK", "val", SecretEnvOptions{
+		AllowHosts:        []string{"a.com", "b.com"},
+		AllowHostPatterns: []string{"*.corp"},
+		Placeholder:       "$TOK",
+		RequireTLS:        &rt,
+	})
+	if s.EnvVar != "TOK" || s.Value != "val" {
+		t.Errorf("EnvVar/Value: got %q/%q", s.EnvVar, s.Value)
 	}
 	if len(s.AllowHosts) != 2 || s.AllowHosts[0] != "a.com" {
 		t.Errorf("AllowHosts: got %v", s.AllowHosts)
 	}
+	if len(s.AllowHostPatterns) != 1 || s.AllowHostPatterns[0] != "*.corp" {
+		t.Errorf("AllowHostPatterns: got %v", s.AllowHostPatterns)
+	}
+	if s.Placeholder != "$TOK" {
+		t.Errorf("Placeholder: got %q", s.Placeholder)
+	}
+	if s.RequireTLS == nil || !*s.RequireTLS {
+		t.Error("RequireTLS should be true")
+	}
 }
 
 func TestWithPatches(t *testing.T) {
-	o := SandboxOptions{}
-	p1 := PatchText("/etc/foo", "bar\n", nil, false)
-	p2 := PatchMkdir("/var/run/app", nil)
+	o := SandboxConfig{}
+	p1 := Patch.Text("/etc/foo", "bar\n", PatchOptions{})
+	p2 := Patch.Mkdir("/var/run/app", PatchOptions{})
 	WithPatches(p1, p2)(&o)
 	if len(o.Patches) != 2 {
 		t.Fatalf("want 2 patches, got %d", len(o.Patches))
@@ -184,19 +212,19 @@ func TestWithPatches(t *testing.T) {
 	}
 }
 
-func TestPatchConstructors(t *testing.T) {
+func TestPatchFactoryKinds(t *testing.T) {
 	mode := uint32(0o644)
 	cases := []struct {
-		patch PatchOptions
+		patch PatchConfig
 		kind  string
 	}{
-		{PatchText("/a", "x", &mode, true), "text"},
-		{PatchAppend("/b", "y"), "append"},
-		{PatchMkdir("/c", nil), "mkdir"},
-		{PatchRemove("/d"), "remove"},
-		{PatchSymlink("/target", "/link", false), "symlink"},
-		{PatchCopyFile("./src", "/dst", &mode, false), "copy_file"},
-		{PatchCopyDir("./src", "/dst", true), "copy_dir"},
+		{Patch.Text("/a", "x", PatchOptions{Mode: &mode, Replace: true}), "text"},
+		{Patch.Append("/b", "y"), "append"},
+		{Patch.Mkdir("/c", PatchOptions{}), "mkdir"},
+		{Patch.Remove("/d"), "remove"},
+		{Patch.Symlink("/target", "/link", PatchOptions{}), "symlink"},
+		{Patch.CopyFile("./src", "/dst", PatchOptions{Mode: &mode}), "copy_file"},
+		{Patch.CopyDir("./src", "/dst", PatchOptions{Replace: true}), "copy_dir"},
 	}
 	for _, c := range cases {
 		if c.patch.Kind != c.kind {
@@ -207,7 +235,7 @@ func TestPatchConstructors(t *testing.T) {
 
 func TestPatchTextFields(t *testing.T) {
 	mode := uint32(0o755)
-	p := PatchText("/etc/conf", "data\n", &mode, true)
+	p := Patch.Text("/etc/conf", "data\n", PatchOptions{Mode: &mode, Replace: true})
 	if p.Path != "/etc/conf" {
 		t.Errorf("Path: got %q", p.Path)
 	}
@@ -223,17 +251,20 @@ func TestPatchTextFields(t *testing.T) {
 }
 
 func TestPatchSymlinkFields(t *testing.T) {
-	p := PatchSymlink("/usr/bin/python3", "/usr/bin/python", true)
+	p := Patch.Symlink("/usr/bin/python3", "/usr/bin/python", PatchOptions{Replace: true})
 	if p.Target != "/usr/bin/python3" {
 		t.Errorf("Target: got %q", p.Target)
 	}
 	if p.Link != "/usr/bin/python" {
 		t.Errorf("Link: got %q", p.Link)
 	}
+	if !p.Replace {
+		t.Error("Replace should be true")
+	}
 }
 
 func TestPatchCopyFileFields(t *testing.T) {
-	p := PatchCopyFile("./cert.pem", "/etc/ssl/cert.pem", nil, false)
+	p := Patch.CopyFile("./cert.pem", "/etc/ssl/cert.pem", PatchOptions{})
 	if p.Src != "./cert.pem" {
 		t.Errorf("Src: got %q", p.Src)
 	}
@@ -245,10 +276,10 @@ func TestPatchCopyFileFields(t *testing.T) {
 	}
 }
 
-func TestNetworkOptionsPreset(t *testing.T) {
+func TestNetworkConfigPreset(t *testing.T) {
 	for _, preset := range []string{"none", "public-only", "allow-all"} {
-		n := &NetworkOptions{Policy: preset}
-		o := SandboxOptions{}
+		n := &NetworkConfig{Policy: preset}
+		o := SandboxConfig{}
 		WithNetwork(n)(&o)
 		if o.Network.Policy != preset {
 			t.Errorf("Policy: got %q, want %q", o.Network.Policy, preset)
@@ -256,8 +287,8 @@ func TestNetworkOptionsPreset(t *testing.T) {
 	}
 }
 
-func TestNetworkOptionsDNS(t *testing.T) {
-	n := &NetworkOptions{
+func TestNetworkConfigDNS(t *testing.T) {
+	n := &NetworkConfig{
 		BlockDomains:        []string{"evil.com"},
 		BlockDomainSuffixes: []string{".ads"},
 	}
@@ -269,27 +300,25 @@ func TestNetworkOptionsDNS(t *testing.T) {
 	}
 }
 
-func TestNetworkOptionsCustomPolicy(t *testing.T) {
-	n := &NetworkOptions{
-		CustomPolicy: &CustomNetworkPolicy{
-			DefaultAction: "deny",
-			Rules: []NetworkRule{
-				{Action: "allow", Direction: "egress", Destination: "api.example.com", Protocol: "tcp", Port: 443},
-			},
+func TestNetworkConfigCustomRules(t *testing.T) {
+	n := &NetworkConfig{
+		DefaultAction: "deny",
+		Rules: []PolicyRule{
+			{Action: "allow", Direction: "egress", Destination: "api.example.com", Protocol: "tcp", Port: 443},
 		},
 	}
-	if n.CustomPolicy.DefaultAction != "deny" {
-		t.Errorf("DefaultAction: got %q", n.CustomPolicy.DefaultAction)
+	if n.DefaultAction != "deny" {
+		t.Errorf("DefaultAction: got %q", n.DefaultAction)
 	}
-	r := n.CustomPolicy.Rules[0]
+	r := n.Rules[0]
 	if r.Action != "allow" || r.Destination != "api.example.com" || r.Port != 443 {
 		t.Errorf("Rule: got %+v", r)
 	}
 }
 
-func TestTLSOptionsFields(t *testing.T) {
+func TestTlsConfigFields(t *testing.T) {
 	boolTrue := true
-	tls := &TLSOptions{
+	tls := &TlsConfig{
 		Bypass:           []string{"*.internal"},
 		VerifyUpstream:   &boolTrue,
 		InterceptedPorts: []uint16{443, 8443},
@@ -311,9 +340,9 @@ func TestTLSOptionsFields(t *testing.T) {
 	}
 }
 
-// SandboxOptions options compose correctly when applied in sequence.
-func TestSandboxOptionsCompose(t *testing.T) {
-	o := SandboxOptions{}
+// SandboxConfig options compose correctly when applied in sequence.
+func TestSandboxConfigCompose(t *testing.T) {
+	o := SandboxConfig{}
 	opts := []SandboxOption{
 		WithImage("alpine:3.19"),
 		WithMemory(256),

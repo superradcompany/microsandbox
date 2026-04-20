@@ -1,6 +1,6 @@
 // Basic end-to-end smoke test for the microsandbox Go SDK.
 //
-// Exercises: NewSandbox, Exec (success + non-zero), Shell, FS read/write,
+// Exercises: CreateSandbox, Exec (success + non-zero), Shell, FS read/write,
 // Metrics, StopAndWait, RemoveSandbox.
 //
 // Build: from sdk/go, run
@@ -31,14 +31,14 @@ func main() {
 	name := fmt.Sprintf("go-sdk-basic-%d", time.Now().Unix())
 	log.Printf("creating sandbox %q (alpine:3.19)", name)
 
-	sb, err := microsandbox.NewSandbox(ctx, name,
+	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
 		microsandbox.WithMemory(256),
 		microsandbox.WithCPUs(1),
 		microsandbox.WithEnv(map[string]string{"GREETING": "hello-from-go-sdk"}),
 	)
 	if err != nil {
-		log.Fatalf("NewSandbox: %v", err)
+		log.Fatalf("CreateSandbox: %v", err)
 	}
 	defer func() {
 		stopCtx, c := context.WithTimeout(context.Background(), 30*time.Second)

@@ -1,6 +1,6 @@
 // Volumes example for the microsandbox Go SDK.
 //
-// Exercises: NewVolume, ListVolumes, RemoveVolume, and the duplicate-create
+// Exercises: CreateVolume, ListVolumes, RemoveVolume, and the duplicate-create
 // error path (ErrVolumeAlreadyExists).
 //
 // Build: from sdk/go, run
@@ -29,9 +29,9 @@ func main() {
 	name := fmt.Sprintf("go-sdk-vol-%d", time.Now().Unix())
 	log.Printf("creating volume %q (64 MiB quota)", name)
 
-	vol, err := microsandbox.NewVolume(ctx, name, microsandbox.WithVolumeQuota(64))
+	vol, err := microsandbox.CreateVolume(ctx, name, microsandbox.WithVolumeQuota(64))
 	if err != nil {
-		log.Fatalf("NewVolume: %v", err)
+		log.Fatalf("CreateVolume: %v", err)
 	}
 	// Remove on exit so reruns stay clean.
 	defer func() {
@@ -58,7 +58,7 @@ func main() {
 	fmt.Printf("  volume visible in list (%d total)\n", len(vols))
 
 	// 2. Creating the same name again must return ErrVolumeAlreadyExists.
-	_, err = microsandbox.NewVolume(ctx, name)
+	_, err = microsandbox.CreateVolume(ctx, name)
 	if err == nil {
 		log.Fatalf("expected ErrVolumeAlreadyExists on duplicate create")
 	}
