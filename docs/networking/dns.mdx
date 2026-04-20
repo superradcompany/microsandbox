@@ -1,0 +1,140 @@
+---
+title: DNS
+description: Domain blocking, pinned resolvers, and query timeouts
+icon: "magnifying-glass"
+---
+
+DNS queries from the sandbox are intercepted on the host. Rather than letting the guest talk to a resolver directly, microsandbox proxies each query, which lets you:
+
+- block lookups by domain or suffix,
+- pin which upstream resolvers get used,
+- tune the query timeout,
+- power domain-based policy rules (by mapping responses back to IPs).
+
+The knobs below cover the day-to-day controls. For the rebinding and TOCTOU protections that also ride on the interceptor, see the [security model](/networking/security-model).
+
+## Blocking domains
+
+Block lookups by exact match or suffix (e.g. `*.tracking.com`). Blocked queries get a local `REFUSED` response — the upstream resolver never sees them.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("safe-agent")
+    .image("python")
+    .network(|n| n
+        .policy(NetworkPolicy::public_only())
+        .dns(|d| d
+            .block_domain("malware.example.com")
+            .block_domain_suffix(".tracking.com")
+        )
+    )
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+    name: "safe-agent",
+    image: "python",
+    network: {
+        ...NetworkPolicy.publicOnly(),
+        dns: {
+            blockDomains: ["malware.example.com"],
+            blockDomainSuffixes: [".tracking.com"],
+        },
+    },
+})
+```
+
+```python Python
+from microsandbox import DnsConfig, Network, Sandbox
+
+sb = await Sandbox.create(
+    "safe-agent",
+    image="python",
+    network=Network(
+        dns=DnsConfig(
+            block_domains=("malware.example.com",),
+            block_domain_suffixes=(".tracking.com",),
+        ),
+    ),
+)
+```
+
+```bash CLI
+msb create python --name safe-agent \
+  --dns-block-domain malware.example.com \
+  --dns-block-suffix .tracking.com
+```
+
+</CodeGroup>
+
+## Pinning nameservers
+
+By default the sandbox forwards DNS queries to whatever nameservers are listed in the host's `/etc/resolv.conf`. Override this with `nameservers` to pin specific resolvers (e.g. `1.1.1.1`, `dns.google`) or to work around split-DNS setups on VPNs where `/etc/resolv.conf` doesn't reflect the real resolver table.
+
+Accepts IPs, `IP:PORT`, hostnames, and `HOST:PORT`. Hostnames are resolved once at startup via the host's OS resolver.
+
+<CodeGroup>
+```rust Rust
+use microsandbox_network::dns::NameserverSpec;
+
+let sb = Sandbox::builder("safe-agent")
+    .image("python")
+    .network(|n| n
+        .dns(|d| d
+            .nameservers([
+                "1.1.1.1".parse::<NameserverSpec>()?,
+                "1.0.0.1".parse::<NameserverSpec>()?,
+            ])
+            .query_timeout_ms(3000)
+        )
+    )
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create("safe-agent", {
+    image: "python",
+    network: {
+        dns: {
+            nameservers: ["1.1.1.1", "1.0.0.1"],
+            queryTimeoutMs: 3000,
+        },
+    },
+})
+```
+
+```python Python
+sb = await Sandbox.create(
+    "safe-agent",
+    image="python",
+    network=Network(
+        dns=DnsConfig(
+            nameservers=("1.1.1.1", "1.0.0.1"),
+            query_timeout_ms=3000,
+        ),
+    ),
+)
+```
+
+```bash CLI
+msb create python --name safe-agent \
+  --dns-nameserver 1.1.1.1 \
+  --dns-nameserver 1.0.0.1 \
+  --dns-query-timeout-ms 3000
+```
+
+</CodeGroup>
+
+## Domain-based policy rules
+
+Network policy rules can target domains directly (`Destination::Domain`, `Destination::DomainSuffix`). Matching works by observing DNS responses as they flow through the interceptor and tracking which IPs belong to which domains — a connection to `93.184.216.34` is only allowed by a rule targeting `example.com` if that IP actually came back as an answer to a lookup for `example.com` from this sandbox.
+
+Because of this, domain rules only take effect on connections that are preceded by a DNS lookup from inside the sandbox. An application that connects to a hard-coded IP it didn't resolve through the interceptor won't match any domain rule.
+
+## See also
+
+- [Security model](/networking/security-model) — rebinding protection and DNS-to-IP binding (TOCTOU defense)
+- [TLS interception](/networking/tls) — domains that get intercepted also go through TLS inspection

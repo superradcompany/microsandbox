@@ -4,13 +4,15 @@ description: Control network access and isolation
 icon: "network-wired"
 ---
 
-All network traffic from a sandbox flows through a host-controlled networking stack. From inside, the sandbox sees a normal network interface, but on the host side every packet is subject to policy before it goes anywhere.
-
-The sandbox's only path to the outside world is through this stack, so blocked traffic never leaves the VM.
+All network traffic from a sandbox flows through a host-controlled networking stack. From inside, the sandbox sees a normal network interface, but on the host side every packet is subject to policy before it goes anywhere. The sandbox's only path to the outside world is through this stack, so blocked traffic never leaves the VM.
 
 ## Network presets
 
-The simplest way to configure networking. `public_only` is the default.
+Three presets cover most cases. `public_only` is the default.
+
+- **`none`**: no network interface at all. The guest is fully offline, though `exec` and `fs` still work since they don't use the network.
+- **`public_only`**: blocks private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`) and only allows routable public addresses.
+- **`allow_all`**: no filtering, including access to the host machine and local network.
 
 <CodeGroup>
 ```rust Rust
@@ -68,16 +70,13 @@ msb create python --name isolated --no-network
 
 # Public internet only (default)
 msb create python --name web-agent
-
-# With TLS interception
-msb create python --name agent --tls-intercept
 ```
 
 </CodeGroup>
 
 ## Custom policies
 
-Build a policy with explicit egress and ingress rules. Rules are evaluated first-match-wins.
+When a preset isn't the right shape, build a policy with explicit egress and ingress rules. Rules are evaluated first-match-wins and anything that doesn't match falls through to `default_action`.
 
 <CodeGroup>
 ```rust Rust
@@ -156,9 +155,11 @@ sb = await Sandbox.create(
 
 </CodeGroup>
 
+Rules can also target domains directly (`Destination::Domain`, `Destination::DomainSuffix`). Those rely on DNS pinning so the sandbox can map a connection's destination IP back to the domain that resolved to it — see [DNS](/networking/dns) and the [security model](/networking/security-model) for how that works.
+
 ## Port mapping
 
-Expose ports from the sandbox to the host so services running inside the VM are accessible from your machine.
+Expose ports from the sandbox to the host so services running inside the VM are reachable from your machine.
 
 In Rust, `SandboxBuilder::port()` and `port_udp()` are top-level shorthands, so you can publish ports without nesting everything inside `.network(...)`.
 
@@ -196,210 +197,20 @@ msb create python --name api -p 8080:80
 
 </CodeGroup>
 
-## DNS interception
-
-DNS queries from the guest are intercepted and resolved on the host side, which opens up a few useful controls:
-
-- **Domain blocking** by exact match or suffix (e.g. `*.tracking.com`).
-- **Rebinding protection**: if a DNS response resolves to a private IP (`10.x`, `172.16.x`, `192.168.x`, `127.x`, link-local), the query is blocked. This prevents the trick where an attacker registers a public domain that points to an internal service.
-- **DNS-to-IP binding**: when secrets are configured, domains can be pinned to the IPs they resolved to, preventing TOCTOU attacks where DNS changes between the policy check and the actual connection.
-
-<CodeGroup>
-```rust Rust
-let sb = Sandbox::builder("safe-agent")
-    .image("python")
-    .network(|n| n
-        .policy(NetworkPolicy::public_only())
-        .dns(|d| d
-            .block_domain("malware.example.com")
-            .block_domain_suffix(".tracking.com")
-        )
-    )
-    .create()
-    .await?;
-```
-
-```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "safe-agent",
-    image: "python",
-    network: {
-        ...NetworkPolicy.publicOnly(),
-        dns: {
-            blockDomains: ["malware.example.com"],
-            blockDomainSuffixes: [".tracking.com"],
-        },
-    },
-})
-```
-
-```python Python
-from microsandbox import DnsConfig, Network, Sandbox
-
-sb = await Sandbox.create(
-    "safe-agent",
-    image="python",
-    network=Network(
-        dns=DnsConfig(
-            block_domains=("malware.example.com",),
-            block_domain_suffixes=(".tracking.com",),
-        ),
-    ),
-)
-```
-
-```bash CLI
-msb create python --name safe-agent \
-  --dns-block-domain malware.example.com \
-  --dns-block-suffix .tracking.com
-```
-
-</CodeGroup>
-
-### Pinning DNS nameservers
-
-By default the sandbox forwards DNS queries to whatever nameservers are listed in the host's `/etc/resolv.conf`. Override this with `nameservers` to pin specific resolvers (e.g. `1.1.1.1`, `dns.google`) or to work around split-DNS setups on VPNs where `/etc/resolv.conf` doesn't reflect the real resolver table. Accepts IPs, `IP:PORT`, hostnames, and `HOST:PORT` — hostnames are resolved once at startup via the host's OS resolver.
-
-<CodeGroup>
-
-```rust Rust
-use microsandbox_network::dns::Nameserver;
-
-let sb = Sandbox::builder("safe-agent")
-    .image("python")
-    .network(|n| n
-        .dns(|d| d
-            .nameservers([
-                "1.1.1.1".parse::<Nameserver>()?,
-                "1.0.0.1".parse::<Nameserver>()?,
-            ])
-            .query_timeout_ms(3000)
-        )
-    )
-    .create()
-    .await?;
-```
-
-```typescript TypeScript
-const sb = await Sandbox.create("safe-agent", {
-    image: "python",
-    network: {
-        dns: {
-            nameservers: ["1.1.1.1", "1.0.0.1"],
-            queryTimeoutMs: 3000,
-        },
-    },
-})
-```
-
-```python Python
-sb = await Sandbox.create(
-    "safe-agent",
-    image="python",
-    network=Network(
-        dns=DnsConfig(
-            nameservers=("1.1.1.1", "1.0.0.1"),
-            query_timeout_ms=3000,
-        ),
-    ),
-)
-```
-
-```bash CLI
-msb create python --name safe-agent \
-  --dns-nameserver 1.1.1.1 \
-  --dns-nameserver 1.0.0.1 \
-  --dns-query-timeout-ms 3000
-```
-
-</CodeGroup>
-
-### DNS over alternative transports
-
-The block list and rebind protection only apply to queries the gateway can see. A guest that routes DNS through an encrypted or non-DNS protocol bypasses both unless the gateway intercepts or refuses it.
-
-**Intercepted** — block list + rebind + per-query upstream selection apply:
-- DNS over UDP (UDP/53)
-- DNS over TCP (TCP/53)
-- DNS over TLS (DoT, TCP/853) — requires [TLS interception](/networking/tls)
-
-**Refused** — guest's stub falls back to plain DNS:
-- DNS over QUIC (DoQ, UDP/853)
-- mDNS (UDP/5353), LLMNR (UDP/5355), NetBIOS-NS (UDP/137)
-
-**Not distinguishable from regular traffic** — operator must filter via network policy:
-- DNS over HTTPS (DoH, TCP/443)
-
-For strict DNS integrity, combine DoT interception with a network policy denying outbound `UDP/53`, `TCP/53`, and `TCP/853` to anything except the gateway.
-
-## Trusting host CAs
-
-Corporate TLS-inspecting proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, Palo Alto, ...) terminate outbound HTTPS at the host and re-sign it with a gateway CA. That CA is installed in your macOS Keychain or Linux trust store as part of the corporate rollout, so HTTPS works silently on the host. Inside a sandbox it doesn't: the guest's stock Mozilla bundle has never seen the gateway CA, so `apk update`, `pip install`, `curl`, and any SDK fetch fail with `server certificate not trusted`.
-
-By default the sandbox does not extend host trust into the guest, so the guest validates TLS strictly against its stock Mozilla bundle. Opt in when you need the guest to trust whatever the host trusts: at sandbox boot the host's trusted root CAs are copied into the guest and appended to the system CA bundle.
-
-<Note>
-**Security:** this extends the guest's trust to whatever the host trusts. That's the point for MITM-proxy environments, but it also means an attacker who can plant a CA on the host now has that trust inside every sandbox. It matches the existing threat model (a host-access attacker already owns the sandbox), but worth knowing before enabling on a host with an unfamiliar trust store.
-</Note>
-
-<CodeGroup>
-
-```rust Rust
-let sb = Sandbox::builder("agent")
-    .image("alpine")
-    .network(|n| n.trust_host_cas(true))
-    .build()?;
-```
-
-```typescript TypeScript
-const sb = await Sandbox.create({
-  name: "agent",
-  image: "alpine",
-  network: { trustHostCas: true },
-});
-```
-
-```python Python
-sb = await Sandbox.create(
-    "agent",
-    image="alpine",
-    network=Network(trust_host_cas=True),
-)
-```
-
-```bash CLI
-msb run alpine --trust-host-cas -- apk update
-```
-
-</CodeGroup>
-
-### With TLS interception enabled
-
-Microsandbox also ships an opt-in [TLS interception](/networking/tls) feature. When enabled on a port, it terminates the guest's TLS at a host-side proxy, validates the upstream certificate against the host's trust store (the corporate gateway CA is already there), and re-signs with a CA the guest already trusts. For that port, TLS interception handles the corporate-proxy case on its own.
-
-But interception is scoped. It only applies to `intercepted_ports` (default `[443]`), respects `bypass` domains, and does not touch QUIC / HTTP/3 flows. Everything outside that scope (gRPC, Postgres / Redis / Mongo TLS, custom 8443, non-intercepted ports, bypassed domains) goes over raw TLS from the guest, where host-CA trust is what makes certificate validation succeed.
-
-The two features compose. Turn on `trust_host_cas` alongside TLS interception when you need both: interception provides richer inspection on the ports it covers, host-CA trust covers everything else. Leave it off to keep the guest's TLS stack validating strictly against its stock Mozilla bundle.
-
-## How it works
-
-Policy rules are evaluated first-match-wins. Allowed traffic goes to the real network; everything else is dropped.
-
-- **`none`**: no network interface at all. The guest is fully offline, though `exec` and `fs` still work since they don't use the network.
-- **`public_only`**: blocks private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`) and only allows routable public addresses. This is the default.
-- **`allow_all`**: no filtering, including access to the host machine and local network.
-- **`allowlist`** / **`denylist`** (coming soon): fine-grained per-host control.
-
 ## Protocol support
 
 For most sandboxed workloads, networking behaves the way you'd expect:
 
 - Normal outbound **TCP** and **UDP** traffic works, including common tools and libraries like `curl`, `wget`, package managers, HTTP clients, database drivers, and DNS lookups.
-- **DNS** is intercepted on the host side, which is what enables domain blocking, rebinding protection, and secret-aware policy checks.
-- **ICMP echo** is supported: Pinging external hosts works on systems that support unprivileged ICMP echo sockets.
+- **DNS** queries are intercepted on the host side. See [DNS](/networking/dns) for blocking, pinned resolvers, and query timeouts.
+- **ICMP echo** is supported: pinging external hosts works on systems that support unprivileged ICMP echo sockets.
 
 <Note>
 **Raw sockets** and **full ICMP forwarding** are not supported because they require elevated privileges on the host. Tools that depend on richer ICMP behavior, such as `traceroute`, are outside the current scope.
 </Note>
 
-In practice, web requests, APIs, package installs, service-to-service calls, and published ports are the primary use case, and those work independently of these ICMP caveats.
+## Next
+
+- [DNS](/networking/dns) — domain blocking, pinned nameservers, query timeouts
+- [TLS interception](/networking/tls) — HTTPS inspection with an auto-generated CA
+- [Security model](/networking/security-model) — how the stack defends against SSRF, rebinding, and metadata exfiltration

@@ -54,7 +54,9 @@
             "icon": "network-wired",
             "pages": [
               "networking/overview",
-              "networking/tls"
+              "networking/dns",
+              "networking/tls",
+              "networking/security-model"
             ]
           },
           {
