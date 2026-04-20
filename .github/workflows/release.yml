@@ -319,6 +319,21 @@ jobs:
             release-artifacts/*
 
   # ---------------------------------------------------------------------------
+  # Sync mintlify branch to the released commit
+  # ---------------------------------------------------------------------------
+  sync-mintlify:
+    name: Sync mintlify branch
+    needs: assemble
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Hard reset mintlify to release commit
+        run: git push --force origin ${{ github.sha }}:refs/heads/mintlify
+
+  # ---------------------------------------------------------------------------
   # Publish Node SDK to npm
   # ---------------------------------------------------------------------------
   npm-publish:
