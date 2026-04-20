@@ -2674,6 +2674,7 @@ dependencies = [
  "lru",
  "microsandbox-utils",
  "msb_krun",
+ "pem",
  "rcgen",
  "resolv-conf",
  "rustls",

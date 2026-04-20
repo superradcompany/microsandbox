@@ -36,9 +36,12 @@ const CA_BUNDLE_PATHS: &[&str] = &[
 /// Fallback path to create if no existing bundle is found.
 const FALLBACK_BUNDLE_PATH: &str = "/etc/ssl/certs/ca-certificates.crt";
 
-/// Filenames for the CA cert when copied to distro trust directories.
+/// Filenames for the microsandbox MITM CA when copied to distro trust directories.
 /// Both extensions for broad tool compatibility (`.crt` for `update-ca-certificates`).
 const CA_CERT_FILENAMES: &[&str] = &["microsandbox-ca.pem", "microsandbox-ca.crt"];
+
+/// Filenames for the host-CA bundle when copied to distro trust directories.
+const HOST_CAS_FILENAMES: &[&str] = &["microsandbox-host-cas.pem", "microsandbox-host-cas.crt"];
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -60,7 +63,7 @@ pub fn install_ca_cert() -> AgentdResult<()> {
     );
 
     // Copy to distro-specific trust directories (if they exist).
-    copy_to_trust_dirs(&ca_pem);
+    copy_to_trust_dirs(&ca_pem, CA_CERT_FILENAMES);
 
     // Append to the system CA bundle.
     let bundle_path = append_to_bundle(&ca_pem)?;
@@ -82,16 +85,49 @@ pub fn install_ca_cert() -> AgentdResult<()> {
     Ok(())
 }
 
-/// Copies the CA PEM to distro-specific trust directories that exist.
+/// Installs the host's extra trusted CAs into the guest trust store so
+/// outbound TLS works behind corporate MITM proxies (Warp Zero Trust,
+/// Zscaler, etc.) whose gateway CA is trusted on the host but not in the
+/// guest's Mozilla root bundle.
+///
+/// No-op if `/.msb/tls/host-cas.pem` does not exist (host-CA shipping
+/// disabled or host store empty).
+pub fn install_host_cas() -> AgentdResult<()> {
+    let path = Path::new(microsandbox_protocol::GUEST_TLS_HOST_CAS_PATH);
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let pem = fs::read_to_string(path)?;
+    let count = pem.matches("-----BEGIN CERTIFICATE-----").count();
+    eprintln!(
+        "tls: host CA bundle found at {} ({count} cert{}), installing into guest trust store",
+        path.display(),
+        if count == 1 { "" } else { "s" },
+    );
+
+    copy_to_trust_dirs(&pem, HOST_CAS_FILENAMES);
+    let bundle_path = append_to_bundle(&pem)?;
+
+    eprintln!(
+        "tls: installed {count} host CA cert{} into {bundle_path}",
+        if count == 1 { "" } else { "s" }
+    );
+    Ok(())
+}
+
+/// Copies a PEM to distro-specific trust directories that exist, under
+/// each of the given filenames. Both `.pem` and `.crt` are typically
+/// passed so tools that scan by extension pick one up.
 ///
 /// Best-effort: logs warnings on failure but does not abort.
-fn copy_to_trust_dirs(ca_pem: &str) {
+fn copy_to_trust_dirs(pem: &str, filenames: &[&str]) {
     for &dir in CA_TRUST_DIRS {
         let dir_path = Path::new(dir);
         if dir_path.is_dir() {
-            for &filename in CA_CERT_FILENAMES {
+            for &filename in filenames {
                 let dest = dir_path.join(filename);
-                match fs::write(&dest, ca_pem) {
+                match fs::write(&dest, pem) {
                     Ok(()) => eprintln!("tls: copied CA cert to {}", dest.display()),
                     Err(e) => eprintln!("tls: failed to copy CA cert to {}: {e}", dest.display()),
                 }

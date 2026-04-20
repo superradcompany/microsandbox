@@ -122,6 +122,10 @@ pub struct NetworkConfig {
     pub tls: Option<TlsConfig>,
     /// Max concurrent connections (default: 256).
     pub max_connections: Option<u32>,
+    /// Ship the host's trusted CAs into the guest at boot so outbound TLS
+    /// works behind corporate MITM proxies (Warp Zero Trust, Zscaler,
+    /// etc.). Default: true.
+    pub trust_host_cas: Option<bool>,
 }
 
 /// DNS interception configuration.

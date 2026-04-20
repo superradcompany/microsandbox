@@ -642,6 +642,9 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
             if let Some(max) = network.max_connections {
                 n = n.max_connections(max as usize);
             }
+            if let Some(trust) = network.trust_host_cas {
+                n = n.trust_host_cas(trust);
+            }
             n
         });
     }

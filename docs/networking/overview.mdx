@@ -314,6 +314,61 @@ msb create python --name safe-agent \
 
 </CodeGroup>
 
+## Trusting host CAs
+
+Sandbox guests boot with their distro's stock Mozilla root bundle. That works for ordinary public TLS, but fails the moment outbound HTTPS is intercepted by a corporate proxy (Cloudflare Warp Zero Trust, Zscaler, Netskope, Palo Alto, etc.) whose gateway CA is trusted on the host but unknown to the guest. The symptom is `apk update`, `pip install`, `curl https://...`, or any HTTPS client failing with `server certificate not trusted`.
+
+By default, microsandbox copies the host's trusted root CAs into every sandbox at boot, so anything that already works on the host also works inside the sandbox. No per-sandbox configuration is needed.
+
+Disable it when you want the guest to rely strictly on its stock Mozilla bundle (for example, in reproducible-build setups where host trust should not leak in):
+
+<CodeGroup>
+
+```rust Rust
+let sb = Sandbox::builder("strict")
+    .image("alpine")
+    .network(|n| n.trust_host_cas(false))
+    .build()?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+  name: "strict",
+  image: "alpine",
+  network: { trustHostCas: false },
+});
+```
+
+```python Python
+sb = await Sandbox.create(
+    "strict",
+    image="alpine",
+    network=Network(trust_host_cas=False),
+)
+```
+
+```bash CLI
+msb run alpine --no-trust-host-cas -- apk update
+```
+
+</CodeGroup>
+
+<Note>
+**Security:** this feature extends the guest's trust to whatever the host trusts. That's the point for MITM-proxy environments, but it also means an attacker who can plant a CA on the host now has that trust inside every sandbox. This matches the existing threat model — an attacker with host access already owns the sandbox — but worth noting before disabling default-on behaviour or running on a host with an unfamiliar trust store.
+</Note>
+
+### Interaction with TLS interception
+
+[TLS interception](/networking/tls) and host-CA trust are independent settings that compose cleanly. With interception enabled, the host proxy terminates the guest's TLS, validates the upstream certificate against the host's trust store (any gateway CA like Warp's is already there), and re-signs with a microsandbox CA the guest already trusts. That handles MITM-proxy environments for the flows interception covers.
+
+Interception is scoped:
+
+- It only applies to `intercepted_ports` (default `[443]`); HTTPS on other ports (gRPC, Postgres / Redis / Mongo TLS, custom 8443, etc.) bypasses the proxy.
+- Domains listed in `bypass` skip interception on purpose.
+- QUIC / HTTP/3, when allowed, never reaches the TCP proxy.
+
+Host-CA trust covers those flows, so leaving `trust_host_cas` on (the default) is safe even when interception is enabled: interception provides richer inspection on the ports it covers, and host-CA trust is the blanket fallback for everything else. Turning `trust_host_cas` off while interception is on means port 443 still works via the proxy, but non-intercepted TLS under a MITM proxy will break with `server certificate not trusted`.
+
 ## How it works
 
 Policy rules are evaluated first-match-wins. Allowed traffic goes to the real network; everything else is dropped.

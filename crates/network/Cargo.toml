@@ -22,6 +22,7 @@ libc = { workspace = true }
 lru = { workspace = true }
 microsandbox-utils = { version = "0.3.14", path = "../utils" }
 msb_krun = { version = "0.1.10", features = ["net"] }
+pem = "3"
 rcgen = { workspace = true }
 resolv-conf = { workspace = true }
 thiserror = { workspace = true }

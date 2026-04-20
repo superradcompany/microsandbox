@@ -31,6 +31,7 @@ pub fn init(params: BootParams) -> AgentdResult<()> {
     linux::ensure_standard_tmp_permissions()?;
     network::apply_network_config(params.network())?;
     tls::install_ca_cert()?;
+    tls::install_host_cas()?;
     linux::ensure_scripts_path_in_profile()?;
     linux::create_run_dir()?;
     Ok(())
