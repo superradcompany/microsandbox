@@ -7,7 +7,7 @@ use microsandbox::sandbox::{
     NetworkPolicy, PullPolicy, PullProgress, PullProgressHandle, SandboxConfig as RustSandboxConfig,
 };
 use microsandbox::{LogLevel, MicrosandboxResult, RegistryAuth as RustRegistryAuth};
-use microsandbox_network::dns;
+use microsandbox_network::dns::{self, Nameserver};
 use microsandbox_network::policy::{
     Action, Destination, DestinationGroup, Direction, PortRange, Protocol, Rule,
 };
@@ -893,15 +893,10 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
         }
     }
     if let Some(ref network) = config.network {
-        let dns_nameserver_specs: Vec<dns::NameserverSpec> = if let Some(ref dns) = network.dns
+        let dns_nameservers = if let Some(ref dns) = network.dns
             && let Some(ref nameservers) = dns.nameservers
         {
-            nameservers
-                .iter()
-                .map(|s| {
-                    dns::parse_nameserver(s).map_err(|e| napi::Error::from_reason(e.to_string()))
-                })
-                .collect::<Result<Vec<_>, _>>()?
+            parse_nameservers(nameservers)?
         } else {
             Vec::new()
         };
@@ -945,8 +940,8 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
                     if let Some(rebind) = rebind_protection {
                         d = d.rebind_protection(rebind);
                     }
-                    if !dns_nameserver_specs.is_empty() {
-                        d = d.nameservers(dns_nameserver_specs);
+                    if !dns_nameservers.is_empty() {
+                        d = d.nameservers(dns_nameservers);
                     }
                     if let Some(ms) = query_timeout_ms {
                         d = d.query_timeout_ms(u64::from(ms));
@@ -989,6 +984,9 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
             if let Some(max) = network.max_connections {
                 n = n.max_connections(max as usize);
             }
+            if let Some(trust) = network.trust_host_cas {
+                n = n.trust_host_cas(trust);
+            }
             n
         });
     }
@@ -1001,6 +999,10 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
             let allow_host_patterns = entry.allow_host_patterns.clone();
             let placeholder = entry.placeholder.clone();
             let require_tls = entry.require_tls;
+            let inject_headers = entry.inject.as_ref().and_then(|i| i.headers);
+            let inject_basic_auth = entry.inject.as_ref().and_then(|i| i.basic_auth);
+            let inject_query = entry.inject.as_ref().and_then(|i| i.query_params);
+            let inject_body = entry.inject.as_ref().and_then(|i| i.body);
             builder = builder.secret(move |mut s| {
                 s = s.env(&env_var).value(value);
                 if let Some(hosts) = allow_hosts {
@@ -1019,6 +1021,18 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
                 if let Some(require) = require_tls {
                     s = s.require_tls_identity(require);
                 }
+                if let Some(enabled) = inject_headers {
+                    s = s.inject_headers(enabled);
+                }
+                if let Some(enabled) = inject_basic_auth {
+                    s = s.inject_basic_auth(enabled);
+                }
+                if let Some(enabled) = inject_query {
+                    s = s.inject_query(enabled);
+                }
+                if let Some(enabled) = inject_body {
+                    s = s.inject_body(enabled);
+                }
                 s
             });
             if let Some(ref action_str) = entry.on_violation {
@@ -1034,6 +1048,18 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
     }
 
     builder.build().map_err(to_napi_error)
+}
+
+/// Parse user-supplied nameserver strings into [`Nameserver`]s, wrapping any
+/// parse error in a napi `Error` so it surfaces as a JS exception.
+fn parse_nameservers(nameservers: &[String]) -> Result<Vec<Nameserver>> {
+    nameservers
+        .iter()
+        .map(|s| {
+            s.parse::<Nameserver>()
+                .map_err(|e| napi::Error::from_reason(e.to_string()))
+        })
+        .collect()
 }
 
 fn convert_mount(

@@ -893,6 +893,11 @@ export interface SecretEntry {
   requireTls?: boolean
   /** Violation action: "block", "block-and-log" (default), "block-and-terminate". */
   onViolation?: string
+  /**
+   * Where in the HTTP request the secret can be injected.
+   * Defaults to `{ headers: true, basicAuth: true, queryParams: false, body: false }`.
+   */
+  inject?: SecretInjection
 }
 
 /** Options for `Secret.env()`. */
@@ -909,6 +914,41 @@ export interface SecretEnvOptions {
   requireTls?: boolean
   /** Violation action: "block", "block-and-log" (default), "block-and-terminate". */
   onViolation?: string
+  /**
+   * Where in the HTTP request the secret can be injected. Defaults to
+   * headers + Basic Auth only; enable `queryParams` or `body` to widen scope.
+   */
+  inject?: SecretInjection
+}
+
+/**
+ * Controls where the secret placeholder is substituted by the TLS proxy.
+ *
+ * By default, substitution happens in HTTP headers (including the
+ * `Authorization` header for Basic Auth). Enable `queryParams` or `body`
+ * to expand the scope to the request line query string or the request body.
+ * When `body` is enabled, the proxy also rewrites `Content-Length` to match.
+ *
+ * ```js
+ * Secret.env("API_KEY", {
+ *   value: "sk-...",
+ *   allowHosts: ["api.example.com"],
+ *   inject: { headers: false, body: true },
+ * })
+ * ```
+ */
+export interface SecretInjection {
+  /** Substitute in HTTP headers (default: true). */
+  headers?: boolean
+  /** Substitute in HTTP Basic Auth (default: true). */
+  basicAuth?: boolean
+  /** Substitute in URL query parameters (default: false). */
+  queryParams?: boolean
+  /**
+   * Substitute in request body (default: false).
+   * When enabled, `Content-Length` is rewritten to match the new body size.
+   */
+  body?: boolean
 }
 
 /** TLS interception configuration. */

@@ -625,6 +625,8 @@ export interface NetworkConfig {
   tls?: TlsConfig
   /** Max concurrent connections (default: 256). */
   maxConnections?: number
+  /** Ship the host's trusted CAs into the guest at boot so outbound TLS works behind corporate MITM proxies (Warp Zero Trust, Zscaler, etc.). Opt-in. Default: false. */
+  trustHostCas?: boolean
 }
 
 /** Rootfs patch applied before VM startup. */

@@ -143,6 +143,14 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub max_connections: Option<usize>,
 
+    /// Ship the host's trusted root CAs into the guest. Opt in to make
+    /// outbound TLS work behind corporate MITM proxies (Warp Zero
+    /// Trust, Zscaler, etc.) whose gateway CA is installed on the host
+    /// but unknown to the guest's stock Mozilla bundle.
+    #[cfg(feature = "net")]
+    #[arg(long)]
+    pub trust_host_cas: bool,
+
     // --- TLS interception ---
     /// Intercept and inspect HTTPS traffic via a built-in TLS proxy.
     #[cfg(feature = "net")]
@@ -225,6 +233,7 @@ impl SandboxOpts {
             || self.dns_query_timeout_ms.is_some()
             || self.network_policy.is_some()
             || self.max_connections.is_some()
+            || self.trust_host_cas
             || self.tls_intercept
             || !self.tls_intercept_port.is_empty()
             || !self.tls_bypass.is_empty()
@@ -350,6 +359,8 @@ fn apply_network_opts(
     mut builder: SandboxBuilder,
     opts: &SandboxOpts,
 ) -> anyhow::Result<SandboxBuilder> {
+    use microsandbox_network::dns::Nameserver;
+
     // Port mappings.
     for port_str in &opts.port {
         let (host, guest, udp) = parse_port(port_str)?;
@@ -379,6 +390,7 @@ fn apply_network_opts(
         || opts.dns_query_timeout_ms.is_some()
         || opts.network_policy.is_some()
         || opts.max_connections.is_some()
+        || opts.trust_host_cas
         || opts.tls_intercept
         || !opts.tls_intercept_port.is_empty()
         || !opts.tls_bypass.is_empty()
@@ -395,11 +407,12 @@ fn apply_network_opts(
         let dns_nameservers = opts
             .dns_nameserver
             .iter()
-            .map(|s| microsandbox_network::dns::parse_nameserver(s).map_err(anyhow::Error::from))
+            .map(|s| s.parse::<Nameserver>().map_err(anyhow::Error::from))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let dns_query_timeout_ms = opts.dns_query_timeout_ms;
         let network_policy = parse_network_policy(opts.network_policy.as_deref())?;
         let max_conn = opts.max_connections;
+        let trust_host_cas = opts.trust_host_cas;
         let tls_intercept = opts.tls_intercept;
         let tls_ports = opts.tls_intercept_port.clone();
         let tls_bypass = opts.tls_bypass.clone();
@@ -440,6 +453,9 @@ fn apply_network_opts(
             }
             if let Some(max) = max_conn {
                 n = n.max_connections(max);
+            }
+            if trust_host_cas {
+                n = n.trust_host_cas(true);
             }
             if let Some(action) = violation_action {
                 n = n.on_secret_violation(action);

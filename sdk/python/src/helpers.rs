@@ -1,5 +1,6 @@
 use microsandbox::sandbox::{NetworkPolicy, Patch, PullPolicy, SandboxConfig};
 use microsandbox::{LogLevel, RegistryAuth};
+use microsandbox_network::dns::Nameserver;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -488,10 +489,10 @@ fn apply_network(
         let nameservers_raw = extract_opt::<Vec<String>>(&dns, "nameservers")?;
         let query_timeout_ms = extract_opt::<u64>(&dns, "query_timeout_ms")?;
 
-        let nameserver_specs: Vec<microsandbox_network::dns::NameserverSpec> = nameservers_raw
+        let nameservers: Vec<Nameserver> = nameservers_raw
             .unwrap_or_default()
             .iter()
-            .map(|s| microsandbox_network::dns::parse_nameserver(s))
+            .map(|s| s.parse::<Nameserver>())
             .collect::<Result<_, _>>()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
@@ -510,8 +511,8 @@ fn apply_network(
                 if let Some(r) = rebind {
                     d = d.rebind_protection(r);
                 }
-                if !nameserver_specs.is_empty() {
-                    d = d.nameservers(nameserver_specs);
+                if !nameservers.is_empty() {
+                    d = d.nameservers(nameservers);
                 }
                 if let Some(ms) = query_timeout_ms {
                     d = d.query_timeout_ms(ms);
@@ -524,6 +525,11 @@ fn apply_network(
     // Max connections.
     if let Some(max) = extract_opt::<usize>(net, "max_connections")? {
         builder = builder.network(|n| n.max_connections(max));
+    }
+
+    // Host-CA trust (ship host's extra CAs into the guest at boot).
+    if let Some(trust) = extract_opt::<bool>(net, "trust_host_cas")? {
+        builder = builder.network(move |n| n.trust_host_cas(trust));
     }
 
     // Secret violation action (sandbox-level, not per-secret).
