@@ -333,7 +333,7 @@ jobs:
 
       # -- Build agentd (needed by microsandbox build) --
       - name: Install agentd build deps
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools gcc
 
       - name: Build agentd
         run: |
