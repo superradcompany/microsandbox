@@ -331,9 +331,9 @@ jobs:
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
 
-      # -- Build agentd (needed by microsandbox build) --
-      - name: Install agentd build deps
-        run: sudo apt-get update && sudo apt-get install -y musl-tools gcc
+      # -- Build agentd + integration test deps --
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools gcc libcap-ng-dev
 
       - name: Build agentd
         run: |
