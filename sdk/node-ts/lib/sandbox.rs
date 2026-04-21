@@ -7,7 +7,7 @@ use microsandbox::sandbox::{
     NetworkPolicy, PullPolicy, PullProgress, PullProgressHandle, SandboxConfig as RustSandboxConfig,
 };
 use microsandbox::{LogLevel, MicrosandboxResult, RegistryAuth as RustRegistryAuth};
-use microsandbox_network::dns::{self, Nameserver};
+use microsandbox_network::dns::Nameserver;
 use microsandbox_network::policy::{
     Action, Destination, DestinationGroup, Direction, PortRange, Protocol, Rule,
 };
