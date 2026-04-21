@@ -171,6 +171,16 @@ impl NetworkBuilder {
         self
     }
 
+    /// Whether to ship the host's trusted root CAs into the guest at
+    /// boot. Default: false. Opt in when running behind a corporate
+    /// TLS-inspecting proxy (Cloudflare Warp Zero Trust, Zscaler,
+    /// Netskope, ...) whose gateway CA is trusted on the host but
+    /// unknown to the guest's stock Mozilla bundle.
+    pub fn trust_host_cas(mut self, enabled: bool) -> Self {
+        self.config.trust_host_cas = enabled;
+        self
+    }
+
     /// Consume the builder and return the configuration.
     pub fn build(self) -> NetworkConfig {
         self.config

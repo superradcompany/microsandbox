@@ -637,6 +637,9 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
             if let Some(max) = network.max_connections {
                 n = n.max_connections(max as usize);
             }
+            if let Some(trust) = network.trust_host_cas {
+                n = n.trust_host_cas(trust);
+            }
             n
         });
     }
@@ -649,6 +652,10 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
             let allow_host_patterns = entry.allow_host_patterns.clone();
             let placeholder = entry.placeholder.clone();
             let require_tls = entry.require_tls;
+            let inject_headers = entry.inject.as_ref().and_then(|i| i.headers);
+            let inject_basic_auth = entry.inject.as_ref().and_then(|i| i.basic_auth);
+            let inject_query = entry.inject.as_ref().and_then(|i| i.query_params);
+            let inject_body = entry.inject.as_ref().and_then(|i| i.body);
             builder = builder.secret(move |mut s| {
                 s = s.env(&env_var).value(value);
                 if let Some(hosts) = allow_hosts {
@@ -666,6 +673,18 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
                 }
                 if let Some(require) = require_tls {
                     s = s.require_tls_identity(require);
+                }
+                if let Some(enabled) = inject_headers {
+                    s = s.inject_headers(enabled);
+                }
+                if let Some(enabled) = inject_basic_auth {
+                    s = s.inject_basic_auth(enabled);
+                }
+                if let Some(enabled) = inject_query {
+                    s = s.inject_query(enabled);
+                }
+                if let Some(enabled) = inject_body {
+                    s = s.inject_body(enabled);
                 }
                 s
             });

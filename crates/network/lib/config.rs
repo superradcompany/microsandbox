@@ -56,6 +56,15 @@ pub struct NetworkConfig {
     /// Max concurrent guest connections. Default: 256.
     #[serde(default)]
     pub max_connections: Option<usize>,
+
+    /// Ship the host's trusted root CAs into the guest at boot so outbound
+    /// TLS works behind corporate MITM proxies (Cloudflare Warp Zero
+    /// Trust, Zscaler, Netskope, etc.) whose gateway CA is installed on
+    /// the host but not shipped in the Mozilla root bundle the guest OS
+    /// uses. Opt-in: host trust is not copied into the guest unless
+    /// this is explicitly enabled. Default: false.
+    #[serde(default)]
+    pub trust_host_cas: bool,
 }
 
 /// Optional overrides for the guest interface.
@@ -153,6 +162,7 @@ impl Default for NetworkConfig {
             tls: TlsConfig::default(),
             secrets: SecretsConfig::default(),
             max_connections: None,
+            trust_host_cas: false,
         }
     }
 }

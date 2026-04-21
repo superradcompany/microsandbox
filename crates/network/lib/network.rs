@@ -228,6 +228,20 @@ impl SmoltcpNetwork {
         self.tls_state.as_ref().map(|s| s.ca_cert_pem())
     }
 
+    /// Host-trusted CA bundle to ship into the guest, if
+    /// [`NetworkConfig::trust_host_cas`] is enabled.
+    ///
+    /// Returned PEM may concatenate CAs that the Mozilla root bundle in
+    /// the guest already trusts; duplicates are harmless and saved the
+    /// cost of computing a delta. Returns `None` when the host store is
+    /// empty or the feature is disabled.
+    pub fn host_cas_cert_pem(&self) -> Option<Vec<u8>> {
+        if !self.config.trust_host_cas {
+            return None;
+        }
+        crate::tls::host_cas::collect_host_cas()
+    }
+
     /// Create a handle for wiring runtime termination into the network stack.
     pub fn termination_handle(&self) -> TerminationHandle {
         TerminationHandle {
