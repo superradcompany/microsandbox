@@ -74,6 +74,7 @@ Network configuration object passed as [`SandboxConfig.network`](/sdk/typescript
 | policy? | `string` | - | Preset name (set automatically by `NetworkPolicy.*()`) |
 | rules? | `Array<`[`PolicyRule`](#policyrule)`>` | `[]` | Custom rules evaluated first-match-wins |
 | tls? | [`TlsConfig`](#tlsconfig) | - | TLS interception configuration |
+| trustHostCas? | `boolean` | `false` | Ship the host's trusted root CAs into the guest at boot so outbound TLS works behind corporate MITM proxies (Warp Zero Trust, Zscaler, etc.). Opt-in |
 
 ### DnsConfig
 

@@ -7,7 +7,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use serde::{Deserialize, Serialize};
 
-use crate::dns::NameserverSpec;
+use crate::dns::Nameserver;
 
 use crate::policy::NetworkPolicy;
 use crate::secrets::config::SecretsConfig;
@@ -56,6 +56,15 @@ pub struct NetworkConfig {
     /// Max concurrent guest connections. Default: 256.
     #[serde(default)]
     pub max_connections: Option<usize>,
+
+    /// Ship the host's trusted root CAs into the guest at boot so outbound
+    /// TLS works behind corporate MITM proxies (Cloudflare Warp Zero
+    /// Trust, Zscaler, Netskope, etc.) whose gateway CA is installed on
+    /// the host but not shipped in the Mozilla root bundle the guest OS
+    /// uses. Opt-in: host trust is not copied into the guest unless
+    /// this is explicitly enabled. Default: false.
+    #[serde(default)]
+    pub trust_host_cas: bool,
 }
 
 /// Optional overrides for the guest interface.
@@ -102,7 +111,7 @@ pub struct DnsConfig {
     /// resolv.conf is incomplete. Accepts IPs, `IP:PORT`, or hostnames
     /// (resolved once at startup via the host's OS resolver).
     #[serde(default)]
-    pub nameservers: Vec<NameserverSpec>,
+    pub nameservers: Vec<Nameserver>,
 
     /// Per-query timeout in milliseconds. Default: 5000.
     #[serde(default = "default_query_timeout_ms")]
@@ -153,6 +162,7 @@ impl Default for NetworkConfig {
             tls: TlsConfig::default(),
             secrets: SecretsConfig::default(),
             max_connections: None,
+            trust_host_cas: false,
         }
     }
 }

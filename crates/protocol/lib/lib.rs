@@ -184,6 +184,15 @@ pub const ENV_RLIMITS: &str = "MSB_RLIMITS";
 /// trust store.
 pub const GUEST_TLS_CA_PATH: &str = "/.msb/tls/ca.pem";
 
+/// Guest-side path to a PEM bundle of the host's extra trusted CAs.
+///
+/// Placed by the sandbox process via the runtime virtiofs mount when
+/// host-CA trust is enabled (default). agentd checks for this file during
+/// init and appends it to the guest's trust bundle, so outbound TLS works
+/// even behind a corporate MITM proxy whose gateway CA is installed on
+/// the host but unknown to the guest.
+pub const GUEST_TLS_HOST_CAS_PATH: &str = "/.msb/tls/host-cas.pem";
+
 //--------------------------------------------------------------------------------------------------
 // Exports
 //--------------------------------------------------------------------------------------------------

@@ -6,7 +6,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 
 use crate::config::{DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort};
-use crate::dns::NameserverSpec;
+use crate::dns::Nameserver;
 use crate::policy::NetworkPolicy;
 use crate::secrets::config::{HostPattern, SecretEntry, SecretInjection, ViolationAction};
 use crate::tls::TlsConfig;
@@ -103,7 +103,7 @@ impl NetworkBuilder {
     /// .dns(|d| d
     ///     .block_domain("malware.example.com")
     ///     .block_domain_suffix(".tracking.com")
-    ///     .nameservers(["1.1.1.1".parse::<NameserverSpec>()?])
+    ///     .nameservers(["1.1.1.1".parse::<Nameserver>()?])
     /// )
     /// ```
     pub fn dns(mut self, f: impl FnOnce(DnsBuilder) -> DnsBuilder) -> Self {
@@ -171,6 +171,16 @@ impl NetworkBuilder {
         self
     }
 
+    /// Whether to ship the host's trusted root CAs into the guest at
+    /// boot. Default: false. Opt in when running behind a corporate
+    /// TLS-inspecting proxy (Cloudflare Warp Zero Trust, Zscaler,
+    /// Netskope, ...) whose gateway CA is trusted on the host but
+    /// unknown to the guest's stock Mozilla bundle.
+    pub fn trust_host_cas(mut self, enabled: bool) -> Self {
+        self.config.trust_host_cas = enabled;
+        self
+    }
+
     /// Consume the builder and return the configuration.
     pub fn build(self) -> NetworkConfig {
         self.config
@@ -207,14 +217,14 @@ impl DnsBuilder {
     /// more are set, the interceptor uses these instead of the
     /// nameservers in the host's `/etc/resolv.conf`. Replaces any
     /// previously-set nameservers. Each element is any type convertible
-    /// into [`NameserverSpec`] (`SocketAddr`, `IpAddr`, or a parsed
-    /// string via `"dns.google:53".parse::<NameserverSpec>()?`).
-    pub fn nameservers<I>(mut self, specs: I) -> Self
+    /// into [`Nameserver`] (`SocketAddr`, `IpAddr`, or a parsed
+    /// string via `"dns.google:53".parse::<Nameserver>()?`).
+    pub fn nameservers<I>(mut self, nameservers: I) -> Self
     where
         I: IntoIterator,
-        I::Item: Into<NameserverSpec>,
+        I::Item: Into<Nameserver>,
     {
-        self.config.nameservers = specs.into_iter().map(Into::into).collect();
+        self.config.nameservers = nameservers.into_iter().map(Into::into).collect();
         self
     }
 

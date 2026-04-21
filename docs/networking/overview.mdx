@@ -263,15 +263,15 @@ By default the sandbox forwards DNS queries to whatever nameservers are listed i
 <CodeGroup>
 
 ```rust Rust
-use microsandbox_network::dns::NameserverSpec;
+use microsandbox_network::dns::Nameserver;
 
 let sb = Sandbox::builder("safe-agent")
     .image("python")
     .network(|n| n
         .dns(|d| d
             .nameservers([
-                "1.1.1.1".parse::<NameserverSpec>()?,
-                "1.0.0.1".parse::<NameserverSpec>()?,
+                "1.1.1.1".parse::<Nameserver>()?,
+                "1.0.0.1".parse::<Nameserver>()?,
             ])
             .query_timeout_ms(3000)
         )
@@ -313,6 +313,55 @@ msb create python --name safe-agent \
 ```
 
 </CodeGroup>
+
+## Trusting host CAs
+
+Corporate TLS-inspecting proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, Palo Alto, ...) terminate outbound HTTPS at the host and re-sign it with a gateway CA. That CA is installed in your macOS Keychain or Linux trust store as part of the corporate rollout, so HTTPS works silently on the host. Inside a sandbox it doesn't: the guest's stock Mozilla bundle has never seen the gateway CA, so `apk update`, `pip install`, `curl`, and any SDK fetch fail with `server certificate not trusted`.
+
+By default the sandbox does not extend host trust into the guest, so the guest validates TLS strictly against its stock Mozilla bundle. Opt in when you need the guest to trust whatever the host trusts: at sandbox boot the host's trusted root CAs are copied into the guest and appended to the system CA bundle.
+
+<Note>
+**Security:** this extends the guest's trust to whatever the host trusts. That's the point for MITM-proxy environments, but it also means an attacker who can plant a CA on the host now has that trust inside every sandbox. It matches the existing threat model (a host-access attacker already owns the sandbox), but worth knowing before enabling on a host with an unfamiliar trust store.
+</Note>
+
+<CodeGroup>
+
+```rust Rust
+let sb = Sandbox::builder("agent")
+    .image("alpine")
+    .network(|n| n.trust_host_cas(true))
+    .build()?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.create({
+  name: "agent",
+  image: "alpine",
+  network: { trustHostCas: true },
+});
+```
+
+```python Python
+sb = await Sandbox.create(
+    "agent",
+    image="alpine",
+    network=Network(trust_host_cas=True),
+)
+```
+
+```bash CLI
+msb run alpine --trust-host-cas -- apk update
+```
+
+</CodeGroup>
+
+### With TLS interception enabled
+
+Microsandbox also ships an opt-in [TLS interception](/networking/tls) feature. When enabled on a port, it terminates the guest's TLS at a host-side proxy, validates the upstream certificate against the host's trust store (the corporate gateway CA is already there), and re-signs with a CA the guest already trusts. For that port, TLS interception handles the corporate-proxy case on its own.
+
+But interception is scoped. It only applies to `intercepted_ports` (default `[443]`), respects `bypass` domains, and does not touch QUIC / HTTP/3 flows. Everything outside that scope (gRPC, Postgres / Redis / Mongo TLS, custom 8443, non-intercepted ports, bypassed domains) goes over raw TLS from the guest, where host-CA trust is what makes certificate validation succeed.
+
+The two features compose. Turn on `trust_host_cas` alongside TLS interception when you need both: interception provides richer inspection on the ports it covers, host-CA trust covers everything else. Leave it off to keep the guest's TLS stack validating strictly against its stock Mozilla bundle.
 
 ## How it works
 

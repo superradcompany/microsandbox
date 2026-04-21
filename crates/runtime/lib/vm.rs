@@ -558,10 +558,15 @@ fn build_vm(
         let guest_mac = network.guest_mac();
         let net_backend = network.take_backend();
 
-        if let Some(ca_pem) = network.ca_cert_pem() {
+        {
             let tls_dir = config.runtime_dir.join("tls");
             let _ = std::fs::create_dir_all(&tls_dir);
-            let _ = std::fs::write(tls_dir.join("ca.pem"), &ca_pem);
+            if let Some(ca_pem) = network.ca_cert_pem() {
+                let _ = std::fs::write(tls_dir.join("ca.pem"), &ca_pem);
+            }
+            if let Some(host_cas_pem) = network.host_cas_cert_pem() {
+                let _ = std::fs::write(tls_dir.join("host-cas.pem"), &host_cas_pem);
+            }
         }
 
         for (key, value) in network.guest_env_vars() {
