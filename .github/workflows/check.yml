@@ -331,9 +331,9 @@ jobs:
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
 
-      # -- Build agentd + integration test deps --
+      # -- Build deps (mirrors the Linux install in the check job) --
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y musl-tools gcc libcap-ng-dev
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
 
       - name: Build agentd
         run: |
