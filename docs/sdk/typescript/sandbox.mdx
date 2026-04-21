@@ -54,6 +54,50 @@ Create and boot in detached mode. The sandbox survives after your process exits.
 
 ---
 
+#### Sandbox.createDetachedWithProgress()
+
+```typescript
+static createDetachedWithProgress(config: SandboxConfig): Promise<PullSession>
+```
+
+Like [`Sandbox.createWithProgress()`](#sandbox-createwithprogress), but spawns the sandbox in detached mode so it survives after the parent process exits.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| config | [`SandboxConfig`](#sandboxconfig) | Sandbox configuration |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`PullSession`](#pullsession) | Async iterable of pull events. Call `result()` to obtain the running sandbox. |
+
+---
+
+#### Sandbox.createWithProgress()
+
+```typescript
+static createWithProgress(config: SandboxConfig): Promise<PullSession>
+```
+
+Create a sandbox and observe image pull and materialize progress. Returns a [`PullSession`](#pullsession) that yields [`PullEvent`](#pullevent)s as the image is resolved, downloaded, and materialized. Call `session.result()` after iteration to obtain the live sandbox.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| config | [`SandboxConfig`](#sandboxconfig) | Sandbox configuration |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`PullSession`](#pullsession) | Async iterable of pull events. Call `result()` to obtain the running sandbox. |
+
+---
+
 #### Sandbox.get()
 
 ```typescript
@@ -339,6 +383,41 @@ Async stream for receiving periodic metrics snapshots.
 | [Symbol.asyncIterator] | `AsyncGenerator<`[`SandboxMetrics`](#sandboxmetrics)`>` | Use with `for await...of` |
 | recv() | `Promise<`[`SandboxMetrics`](#sandboxmetrics)` \| null>` | Receive next snapshot. Returns `null` when the stream ends. |
 
+### PullEvent
+
+Image pull and materialize progress event emitted by [`PullSession`](#pullsession). `eventType` is the discriminator; only a subset of the other fields is populated per variant.
+
+| eventType | Populated fields |
+|-----------|------------------|
+| `'resolving'` | `reference` |
+| `'resolved'` | `reference`, `manifestDigest`, `layerCount`, `totalDownloadBytes` |
+| `'layer_download_progress'` | `layerIndex`, `digest`, `downloadedBytes`, `totalBytes` |
+| `'layer_download_complete'` | `layerIndex`, `digest`, `downloadedBytes` |
+| `'layer_download_verifying'` | `layerIndex`, `digest` |
+| `'layer_materialize_started'` | `layerIndex`, `diffId` |
+| `'layer_materialize_progress'` | `layerIndex`, `bytesRead`, `totalBytes` |
+| `'layer_materialize_writing'` | `layerIndex` |
+| `'layer_materialize_complete'` | `layerIndex`, `diffId` |
+| `'stitch_merging_trees'` | `layerCount` |
+| `'stitch_writing_fsmeta'` | (none) |
+| `'stitch_writing_vmdk'` | (none) |
+| `'stitch_complete'` | (none) |
+| `'complete'` | `reference`, `layerCount` |
+
+| Field | Type | Description |
+|-------|------|-------------|
+| eventType | `string` | Variant discriminator |
+| reference? | `string` | Image reference being pulled |
+| manifestDigest? | `string` | Resolved manifest digest |
+| layerCount? | `number` | Number of layers in the image |
+| totalDownloadBytes? | `number` | Sum of compressed layer sizes. May be absent if the manifest omits sizes. |
+| layerIndex? | `number` | Index of the layer this event refers to |
+| digest? | `string` | Layer digest |
+| diffId? | `string` | Layer diff ID (uncompressed content hash) |
+| downloadedBytes? | `number` | Bytes downloaded so far for this layer |
+| totalBytes? | `number` | Total bytes for this layer. May be absent if the manifest omits sizes. |
+| bytesRead? | `number` | Bytes read during materialize |
+
 ### PullPolicy
 
 Controls when the SDK fetches an OCI image from the registry.
@@ -348,6 +427,30 @@ Controls when the SDK fetches an OCI image from the registry.
 | `'always'` | Pull the image every time, even if cached locally |
 | `'if-missing'` | Pull only if the image is not already cached. This is the default. |
 | `'never'` | Never pull; fail if the image is not cached locally |
+
+### PullSession
+
+Async iterable session returned by [`Sandbox.createWithProgress()`](#sandbox-createwithprogress) and [`Sandbox.createDetachedWithProgress()`](#sandbox-createdetachedwithprogress). Yields [`PullEvent`](#pullevent)s as the image is resolved, downloaded, and materialized. Call `result()` after iteration to obtain the live sandbox.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [Symbol.asyncIterator] | `AsyncGenerator<`[`PullEvent`](#pullevent)`>` | Use with `for await...of` |
+| recv() | `Promise<`[`PullEvent`](#pullevent)` \| null>` | Receive next event. Returns `null` when the stream ends. |
+| result() | `Promise<`[`Sandbox`](#instance-methods)`>` | Resolve the underlying creation task and return the running sandbox. Single-shot: a second call throws `Error("result already consumed")`. |
+
+```typescript
+const session = await Sandbox.createWithProgress({
+  name: "my-sb",
+  image: "alpine",
+  pullPolicy: "always",
+});
+for await (const ev of session) {
+  if (ev.eventType === "layer_download_progress") {
+    console.log(`${ev.layerIndex}: ${ev.downloadedBytes}/${ev.totalBytes}`);
+  }
+}
+const sandbox = await session.result();
+```
 
 ### SandboxConfig
 
