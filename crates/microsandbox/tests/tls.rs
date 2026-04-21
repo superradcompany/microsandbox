@@ -2,19 +2,24 @@
 //!
 //! These tests require KVM (or libkrun on macOS) and are `#[ignore]` by
 //! default so they don't run in `cargo test --workspace`. Run them
-//! explicitly with `cargo test -p microsandbox -- --ignored`.
+//! explicitly with `cargo test -p microsandbox --tests -- --ignored`.
 
 use microsandbox::Sandbox;
 
-/// Regression test for #542: Node.js fetch over TLS 1.3 used to deadlock
-/// because application data piggybacked on the TLS Finished message was
-/// never drained from the handshake buffer.
+/// Covers the default TLS-interception path:
+/// - regression for #542: Node.js fetch over TLS 1.3 used to deadlock because
+///   application data piggybacked on the TLS Finished message was never
+///   drained from the handshake buffer.
+/// - wget (busybox, typically TLS 1.2) as a non-Node baseline.
+///
+/// Both probes run against a single sandbox to avoid paying two image-pull
+/// and VM-boot costs in CI.
 #[tokio::test]
 #[ignore]
-async fn tls13_node_fetch_does_not_hang() {
-    let name = "tls-test-node13";
+async fn tls_intercept_handshake() {
+    let name = "tls-test-intercept";
     let sandbox = Sandbox::builder(name)
-        .image("node")
+        .image("node:alpine")
         .cpus(1)
         .memory(512)
         .network(|n| n.tls(|t| t))
@@ -23,10 +28,60 @@ async fn tls13_node_fetch_does_not_hang() {
         .await
         .expect("failed to create sandbox");
 
-    let output = sandbox
+    let node_fetch = sandbox
         .shell(concat!(
             "node -e \"",
             "setTimeout(() => { process.exit(1); }, 15000);",
+            "fetch('https://example.com')",
+            ".then(r => { console.log(r.status); process.exit(0); })",
+            ".catch(e => { console.error(e.message); process.exit(1); });",
+            "\""
+        ))
+        .await
+        .expect("node fetch shell failed");
+    let node_stdout = node_fetch.stdout().expect("invalid utf8");
+    assert_eq!(
+        node_stdout.trim(),
+        "200",
+        "node fetch via TLS intercept failed: {node_stdout} (stderr: {})",
+        node_fetch.stderr().unwrap_or_default()
+    );
+
+    let wget = sandbox
+        .shell("wget -q -O /dev/null --timeout=10 https://example.com && echo OK || echo FAIL")
+        .await
+        .expect("wget shell failed");
+    let wget_stdout = wget.stdout().expect("invalid utf8");
+    assert_eq!(
+        wget_stdout.trim(),
+        "OK",
+        "wget via TLS intercept failed: {wget_stdout} (stderr: {})",
+        wget.stderr().unwrap_or_default()
+    );
+
+    sandbox.stop_and_wait().await.expect("failed to stop");
+    Sandbox::remove(name).await.expect("failed to remove");
+}
+
+/// Verify TLS bypass domains skip interception and still connect.
+#[tokio::test]
+#[ignore]
+async fn tls_bypass_domain_connects() {
+    let name = "tls-test-bypass";
+    let sandbox = Sandbox::builder(name)
+        .image("node:alpine")
+        .cpus(1)
+        .memory(512)
+        .network(|n| n.tls(|t| t.bypass("example.com")))
+        .replace()
+        .create()
+        .await
+        .expect("failed to create sandbox");
+
+    let output = sandbox
+        .shell(concat!(
+            "node -e \"",
+            "setTimeout(() => process.exit(1), 15000);",
             "fetch('https://example.com')",
             ".then(r => { console.log(r.status); process.exit(0); })",
             ".catch(e => { console.error(e.message); process.exit(1); });",
@@ -39,68 +94,7 @@ async fn tls13_node_fetch_does_not_hang() {
     assert_eq!(
         stdout.trim(),
         "200",
-        "expected HTTP 200, got: {stdout} (stderr: {})",
-        output.stderr().unwrap_or_default()
-    );
-
-    sandbox.stop_and_wait().await.expect("failed to stop");
-    Sandbox::remove(name).await.expect("failed to remove");
-}
-
-/// Verify HTTPS works through the TLS interception proxy using wget
-/// (covers non-Node.js clients that typically use TLS 1.2).
-#[tokio::test]
-#[ignore]
-async fn tls_intercept_wget_https() {
-    let name = "tls-test-wget";
-    let sandbox = Sandbox::builder(name)
-        .image("alpine")
-        .cpus(1)
-        .memory(512)
-        .network(|n| n.tls(|t| t))
-        .replace()
-        .create()
-        .await
-        .expect("failed to create sandbox");
-
-    let output = sandbox
-        .shell("wget -q -O /dev/null --timeout=10 https://example.com && echo OK || echo FAIL")
-        .await
-        .expect("shell failed");
-
-    let stdout = output.stdout().expect("invalid utf8");
-    assert_eq!(stdout.trim(), "OK", "wget HTTPS failed: {stdout}");
-
-    sandbox.stop_and_wait().await.expect("failed to stop");
-    Sandbox::remove(name).await.expect("failed to remove");
-}
-
-/// Verify TLS bypass domains skip interception and still connect.
-#[tokio::test]
-#[ignore]
-async fn tls_bypass_domain_connects() {
-    let name = "tls-test-bypass";
-    let sandbox = Sandbox::builder(name)
-        .image("node")
-        .cpus(1)
-        .memory(512)
-        .network(|n| n.tls(|t| t.bypass("example.com")))
-        .replace()
-        .create()
-        .await
-        .expect("failed to create sandbox");
-
-    // Bypassed domain should connect directly (no MITM cert).
-    let output = sandbox
-        .shell("curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.com")
-        .await
-        .expect("shell failed");
-
-    let stdout = output.stdout().expect("invalid utf8");
-    assert_eq!(
-        stdout.trim(),
-        "200",
-        "bypass domain failed (stderr: {})",
+        "bypass domain fetch failed: {stdout} (stderr: {})",
         output.stderr().unwrap_or_default()
     );
 
