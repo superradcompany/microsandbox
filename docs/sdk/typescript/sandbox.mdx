@@ -385,10 +385,28 @@ Async stream for receiving periodic metrics snapshots.
 
 ### PullEvent
 
-Image pull and materialize progress event emitted by [`PullSession`](#pullsession). `eventType` is the discriminator; only a subset of the other fields is populated per variant.
+Image pull and materialize progress event emitted by [`PullSession`](#pullsession). `eventType` is the discriminator; only a subset of the other fields is populated per variant — see [`PullEventType`](#pulleventtype) for which fields apply to each variant.
 
-| eventType | Populated fields |
-|-----------|------------------|
+| Field | Type | Description |
+|-------|------|-------------|
+| eventType | [`PullEventType`](#pulleventtype) | Variant discriminator |
+| reference? | `string` | Image reference being pulled |
+| manifestDigest? | `string` | Resolved manifest digest |
+| layerCount? | `number` | Number of layers in the image |
+| totalDownloadBytes? | `number` | Sum of compressed layer sizes. May be absent if the manifest omits sizes. |
+| layerIndex? | `number` | Index of the layer this event refers to |
+| digest? | `string` | Layer digest |
+| diffId? | `string` | Layer diff ID (uncompressed content hash) |
+| downloadedBytes? | `number` | Bytes downloaded so far for this layer |
+| totalBytes? | `number` | Total bytes for this layer. May be absent if the manifest omits sizes. |
+| bytesRead? | `number` | Bytes read during materialize |
+
+### PullEventType
+
+String discriminator identifying which variant a [`PullEvent`](#pullevent) represents and which of its fields are populated.
+
+| Value | Populated fields on `PullEvent` |
+|-------|----------------------------------|
 | `'resolving'` | `reference` |
 | `'resolved'` | `reference`, `manifestDigest`, `layerCount`, `totalDownloadBytes` |
 | `'layer_download_progress'` | `layerIndex`, `digest`, `downloadedBytes`, `totalBytes` |
@@ -403,20 +421,6 @@ Image pull and materialize progress event emitted by [`PullSession`](#pullsessio
 | `'stitch_writing_vmdk'` | (none) |
 | `'stitch_complete'` | (none) |
 | `'complete'` | `reference`, `layerCount` |
-
-| Field | Type | Description |
-|-------|------|-------------|
-| eventType | `string` | Variant discriminator |
-| reference? | `string` | Image reference being pulled |
-| manifestDigest? | `string` | Resolved manifest digest |
-| layerCount? | `number` | Number of layers in the image |
-| totalDownloadBytes? | `number` | Sum of compressed layer sizes. May be absent if the manifest omits sizes. |
-| layerIndex? | `number` | Index of the layer this event refers to |
-| digest? | `string` | Layer digest |
-| diffId? | `string` | Layer diff ID (uncompressed content hash) |
-| downloadedBytes? | `number` | Bytes downloaded so far for this layer |
-| totalBytes? | `number` | Total bytes for this layer. May be absent if the manifest omits sizes. |
-| bytesRead? | `number` | Bytes read during materialize |
 
 ### PullPolicy
 

@@ -499,9 +499,41 @@ Controls when the SDK fetches an OCI image from the registry.
 | `"if-missing"` | Pull only if the image is not already cached. This is the default. |
 | `"never"` | Never pull; fail if the image is not cached locally |
 
+### PullProgress
+
+Type alias for pull progress events emitted by [`PullSession.progress`](#pullsession). Each event is one of the following frozen dataclasses, imported from `microsandbox`:
+
+| Variant | Fields |
+|---------|--------|
+| `Resolving` | `reference: str` |
+| `Resolved` | `reference: str`, `manifest_digest: str`, `layer_count: int`, `total_download_bytes: int \| None` |
+| `LayerDownloadProgress` | `layer_index: int`, `digest: str`, `downloaded_bytes: int`, `total_bytes: int \| None` |
+| `LayerDownloadComplete` | `layer_index: int`, `digest: str`, `downloaded_bytes: int` |
+| `LayerExtractStarted` | `layer_index: int`, `diff_id: str` |
+| `LayerExtractProgress` | `layer_index: int`, `bytes_read: int`, `total_bytes: int` |
+| `LayerExtractComplete` | `layer_index: int`, `diff_id: str` |
+| `LayerIndexStarted` | `layer_index: int` |
+| `LayerIndexComplete` | `layer_index: int` |
+| `PullComplete` | `reference: str`, `layer_count: int` |
+
+Narrow with `isinstance`:
+
+```python
+from microsandbox import Sandbox, Resolved, LayerDownloadProgress
+
+session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
+async with session:
+    async for event in session.progress:
+        if isinstance(event, Resolved):
+            print(f"{event.layer_count} layers, {event.total_download_bytes} bytes")
+        elif isinstance(event, LayerDownloadProgress):
+            print(f"layer {event.layer_index}: {event.downloaded_bytes}/{event.total_bytes}")
+    sb = await session.result()
+```
+
 ### PullSession
 
-Returned by [`Sandbox.create_with_progress()`](#sandboxcreate_with_progress). Use as an async context manager to track image pull progress.
+Returned by [`Sandbox.create_with_progress()`](#sandbox-create_with_progress). Use as an async context manager to track image pull progress.
 
 ```python
 session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
@@ -513,7 +545,7 @@ async with session:
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
-| progress | `AsyncIterator[PullProgress]` | Async iterator of pull progress events |
+| progress | `AsyncIterator[`[`PullProgress`](#pullprogress)`]` | Async iterator of pull progress events |
 | result() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Await to get the final running sandbox |
 
 ### RegistryAuth
