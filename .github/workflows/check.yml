@@ -346,7 +346,7 @@ jobs:
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
-          cargo test -p microsandbox -- --ignored
+          cargo test -p microsandbox --tests -- --ignored
 
   # ---------------------------------------------------------------------------
   # Node.js SDK smoke tests (requires KVM)
