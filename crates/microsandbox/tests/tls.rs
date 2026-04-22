@@ -1,13 +1,15 @@
 //! Integration tests for TLS interception.
 //!
 //! These tests require KVM (or libkrun on macOS) and are `#[ignore]` by
-//! default so they don't run in `cargo test --workspace`. They share
-//! microsandbox home state (sqlite db, image cache, sandbox namespace),
-//! so run them serially:
+//! default so they don't run in `cargo test --workspace`. Run them with
+//! cargo-nextest so each test gets its own process (and therefore its own
+//! isolated `~/.microsandbox` home via [`common::init_isolated_home`]):
 //!
-//!     cargo test -p microsandbox --tests -- --ignored --test-threads=1
+//!     cargo nextest run -p microsandbox --tests --run-ignored=only
 
 use microsandbox::Sandbox;
+
+mod common;
 
 /// Covers the default TLS-interception path:
 /// - regression for #542: Node.js fetch over TLS 1.3 used to deadlock because
@@ -20,6 +22,7 @@ use microsandbox::Sandbox;
 #[tokio::test]
 #[ignore]
 async fn tls_intercept_handshake() {
+    let _home = common::init_isolated_home();
     let name = "tls-test-intercept";
     let sandbox = Sandbox::builder(name)
         .image("node:alpine")
@@ -70,6 +73,7 @@ async fn tls_intercept_handshake() {
 #[tokio::test]
 #[ignore]
 async fn tls_bypass_domain_connects() {
+    let _home = common::init_isolated_home();
     let name = "tls-test-bypass";
     let sandbox = Sandbox::builder(name)
         .image("node:alpine")
