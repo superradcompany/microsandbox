@@ -2571,6 +2571,7 @@ dependencies = [
  "serde_json",
  "tar",
  "tempfile",
+ "test-utils",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4995,6 +4996,23 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "test-macros"
+version = "0.3.14"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "test-utils"
+version = "0.3.14"
+dependencies = [
+ "tempfile",
+ "test-macros",
 ]
 
 [[package]]

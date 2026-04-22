@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   LIBKRUNFW_VERSION: "5.2.1"
@@ -291,6 +294,68 @@ jobs:
           "
           npm install --no-package-lock --ignore-scripts
           npm run build
+
+  # ---------------------------------------------------------------------------
+  # Integration tests (requires KVM)
+  # ---------------------------------------------------------------------------
+  integration-test:
+    name: Integration Tests
+    needs: check
+    runs-on: self-hosted-ubuntu-2404-x64
+    steps:
+      - name: Clean workspace
+        run: rm -rf "${{ github.workspace }}"/{build}
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      # -- Download pre-built artifacts --
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      # -- Install msb + libkrunfw --
+      - name: Install msb
+        run: |
+          chmod +x build/msb
+          mkdir -p ~/.microsandbox/bin ~/.microsandbox/lib
+          install -m755 build/msb ~/.microsandbox/bin/msb
+          install -m644 build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
+
+      # -- Build deps (mirrors the Linux install in the check job) --
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+
+      - name: Build agentd
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+          cp crates/agentd/target/x86_64-unknown-linux-musl/release/agentd build/agentd
+
+      # -- Run integration tests --
+      # MSB_TEST_ISOLATE_HOME=1 turns on per-test ~/.microsandbox isolation
+      # (see crates/test-utils), so nextest can run tests in parallel without
+      # sqlite/image-cache contention.
+      - name: Run integration tests
+        env:
+          MSB_TEST_ISOLATE_HOME: "1"
+        run: |
+          export PATH="$HOME/.microsandbox/bin:$PATH"
+          export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
+          cargo nextest run -p microsandbox --tests --run-ignored=only
 
   # ---------------------------------------------------------------------------
   # Node.js SDK smoke tests (requires KVM)
