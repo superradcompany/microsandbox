@@ -1,6 +1,6 @@
 ---
 title: DNS
-description: Domain blocking, pinned resolvers, and query timeouts
+description: How the sandbox resolves DNS queries
 icon: "magnifying-glass"
 ---
 
@@ -71,9 +71,14 @@ msb create python --name safe-agent \
 
 ## Pinning nameservers
 
-By default the sandbox picks up the host's resolver list automatically: on macOS this comes from `State:/Network/Global/DNS` in the system configuration store, with `/etc/resolv.conf` as a fallback; on Linux `/etc/resolv.conf` is authoritative. Override this with `nameservers` to pin specific resolvers (e.g. `1.1.1.1`, `dns.google`) or to work around setups where auto-discovery picks the wrong upstream.
+By default the sandbox picks up the host's resolver list automatically:
 
-Accepts IPs, `IP:PORT`, hostnames, and `HOST:PORT`. Hostnames are resolved once at startup via the host's OS resolver.
+- **macOS**: reads `State:/Network/Global/DNS` from the system configuration store, with `/etc/resolv.conf` as a fallback when the store isn't available.
+- **Linux**: reads `/etc/resolv.conf` directly.
+
+You can override this by setting `nameservers` to pin the exact resolvers you want (e.g. `1.1.1.1`, `dns.google`), which is useful when auto-discovery picks the wrong ones.
+
+Values can be plain IPs, `IP:PORT`, hostnames, or `HOST:PORT`. Hostnames are resolved once at sandbox startup using the host's OS resolver.
 
 <CodeGroup>
 ```rust Rust
@@ -128,15 +133,13 @@ msb create python --name safe-agent \
 
 </CodeGroup>
 
-## Per-query upstream routing
-
-A guest that targets a specific resolver (`dig @1.1.1.1`, an explicit `/etc/resolv.conf` entry, or a library that takes a resolver IP) reaches that resolver directly instead of being silently rewritten to the pinned upstream. The interceptor preserves the original destination IP so the guest's reply comes back from the address it aimed at. Egress policy still applies: if the destination IP isn't allowed by the network policy, the query is refused.
+If the guest aims a query at a specific resolver (`dig @1.1.1.1`, an `/etc/resolv.conf` entry inside the guest, or a library call that takes a resolver IP), the interceptor forwards the query to that resolver directly instead of redirecting it to the pinned defaults. The network policy still applies: the query only goes through if the destination IP is allowed.
 
 ## DNS over alternative transports
 
 The block list and rebind protection only apply to queries the gateway can see. A guest that routes DNS through an encrypted or non-DNS protocol bypasses both unless the gateway intercepts or refuses it.
 
-**Intercepted** (block list + rebind + per-query upstream selection apply):
+**Intercepted** (block list and rebind protection apply):
 - DNS over UDP (UDP/53)
 - DNS over TCP (TCP/53)
 - DNS over TLS (DoT, TCP/853): requires [TLS interception](/networking/tls)
@@ -152,9 +155,11 @@ For strict DNS integrity, combine DoT interception with a network policy denying
 
 ## Domain-based policy rules
 
-Network policy rules can target domains directly (`Destination::Domain`, `Destination::DomainSuffix`). Matching works by observing DNS responses as they flow through the interceptor and tracking which IPs belong to which domains. A connection to `93.184.216.34` is only allowed by a rule targeting `example.com` if that IP actually came back as an answer to a lookup for `example.com` from this sandbox.
+Network policy rules can match a destination by exact domain or by suffix. The interceptor watches DNS responses as they flow back to the guest and keeps track of which IP addresses belong to which domain.
 
-Because of this, domain rules only take effect on connections that are preceded by a DNS lookup from inside the sandbox. An application that connects to a hard-coded IP it didn't resolve through the interceptor won't match any domain rule.
+A connection to `93.184.216.34` is only allowed by a rule targeting `example.com` if that IP actually came back as an answer to a lookup for `example.com` from this sandbox.
+
+Because of that, domain rules only take effect on connections that are preceded by a DNS lookup from inside the sandbox. An application that connects to a hard-coded IP it didn't resolve through the interceptor won't match any domain rule.
 
 ## See also
 

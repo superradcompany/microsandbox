@@ -72,7 +72,7 @@ msb create python --name agent \
 
 ## Bypass patterns
 
-Some domains don't play well with interception, typically ones whose clients pin a specific certificate or public key instead of trusting the system CA store. Mobile apps talking to their vendor's backend (Apple, Google services) and software update endpoints are the usual suspects. Add them to the bypass list and their traffic flows through as-is, encrypted end-to-end between the guest and the upstream server.
+Some domains don't play well with interception, typically ones whose clients pin a specific certificate or public key instead of trusting the system CA store. Software update channels (browser autoupdate, macOS `softwareupdate`, package-manager mirrors that ship a pinned signing CA) and vendor SDKs that bundle their own pinned CA are the usual suspects. Add them to the bypass list and their traffic flows through as-is, encrypted end-to-end between the guest and the upstream server.
 
 Bypass patterns accept exact matches (`api.example.com`) and wildcards (`*.gov`, `*.apple.com`).
 
@@ -89,7 +89,9 @@ Corporate TLS-inspecting proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope,
 By default the sandbox does not extend host trust into the guest, so the guest validates TLS strictly against its stock Mozilla bundle. Opt in when you need the guest to trust whatever the host trusts: at sandbox boot the host's trusted root CAs are copied into the guest and appended to the system CA bundle.
 
 <Note>
-**Security:** this extends the guest's trust to whatever the host trusts. That's the point for MITM-proxy environments, but it also means an attacker who can plant a CA on the host now has that trust inside every sandbox. It matches the existing threat model (a host-access attacker already owns the sandbox), but worth knowing before enabling on a host with an unfamiliar trust store.
+**Security:** this extends the guest's trust to whatever the host trusts. That's the point for MITM-proxy environments, but it also means an attacker who can plant a CA on the host now has that trust inside every sandbox.
+
+It matches the existing threat model (a host-access attacker already owns the sandbox), but worth knowing before enabling on a host with an unfamiliar trust store.
 </Note>
 
 <CodeGroup>
@@ -128,7 +130,7 @@ msb run alpine --trust-host-cas -- apk update
 
 TLS interception also covers the corporate-proxy case, but only on the ports it's configured for (default `[443]`), and only for non-bypassed domains. It doesn't touch QUIC / HTTP/3 flows. Everything outside that scope (gRPC, Postgres / Redis / Mongo TLS, custom 8443, non-intercepted ports, bypassed domains) goes over raw TLS from the guest, where host-CA trust is what makes certificate validation succeed.
 
-The two features compose. Turn on `trust_host_cas` alongside TLS interception when you need both: interception provides richer inspection on the ports it covers, host-CA trust covers everything else. Leave it off to keep the guest's TLS stack validating strictly against its stock Mozilla bundle.
+The two features compose. Turn on [`trust_host_cas`](/sdk/rust/networking#trust_host_cas) alongside TLS interception when you need both: interception provides richer inspection on the ports it covers, host-CA trust covers everything else. Leave it off to keep the guest's TLS stack validating strictly against its stock Mozilla bundle.
 
 ## See also
 

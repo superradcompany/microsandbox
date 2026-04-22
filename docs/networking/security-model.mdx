@@ -53,7 +53,7 @@ msb create python --name dev --no-dns-rebind-protection
 
 Even without rebinding tricks, a classic time-of-check/time-of-use race exists: an allowlisted domain resolves to an allowed IP when the policy is checked, then the guest looks it up again at connect time and reaches a different IP.
 
-Domain-based policy rules (`Destination::Domain`, `Destination::DomainSuffix`) close this by maintaining a pin set of observed DNS answers. A connection only matches a domain rule if its destination IP was actually returned as an answer to a DNS query for that domain from this sandbox. A guest that hard-codes an IP it didn't resolve through the interceptor can't slip past a domain-based allowlist.
+Domain-based policy rules close this by maintaining a pin set of observed DNS answers. A connection only matches a domain rule if its destination IP was actually returned as an answer to a DNS query for that domain from this sandbox. A guest that hard-codes an IP it didn't resolve through the interceptor can't slip past a domain-based allowlist.
 
 The same mechanism gates host-scoped secret injection. When a `SecretEntry` is restricted via `allowed_hosts`, the secret is only injected into outbound requests whose destination IP the interceptor tied to one of those hosts. An exfiltration attempt that POSTs the secret to an arbitrary IP won't receive the injection in the first place.
 
@@ -71,7 +71,7 @@ The networking stack doesn't try to defend against:
 - **Raw packet crafting from outside the sandbox.** Host-side privileged processes aren't in this threat model.
 - **Host tampering.** If a workload can modify host-side config, it's already past this layer.
 - **Deep ICMP behavior.** Supported ICMP is limited to unprivileged echo; `traceroute`-style flows are not proxied.
-- **Host trust store integrity.** When `trust_host_cas` is opted into, an attacker who can plant a CA on the host has that trust inside every sandbox. Off by default for exactly this reason.
+- **Host trust store integrity.** When [`trust_host_cas`](/sdk/rust/networking#trust_host_cas) is opted into, an attacker who can plant a CA on the host has that trust inside every sandbox. Off by default for exactly this reason.
 
 ## See also
 
