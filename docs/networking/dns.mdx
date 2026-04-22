@@ -71,21 +71,21 @@ msb create python --name safe-agent \
 
 ## Pinning nameservers
 
-By default the sandbox forwards DNS queries to whatever nameservers are listed in the host's `/etc/resolv.conf`. Override this with `nameservers` to pin specific resolvers (e.g. `1.1.1.1`, `dns.google`) or to work around split-DNS setups on VPNs where `/etc/resolv.conf` doesn't reflect the real resolver table.
+By default the sandbox picks up the host's resolver list automatically: on macOS this comes from `State:/Network/Global/DNS` in the system configuration store, with `/etc/resolv.conf` as a fallback; on Linux `/etc/resolv.conf` is authoritative. Override this with `nameservers` to pin specific resolvers (e.g. `1.1.1.1`, `dns.google`) or to work around setups where auto-discovery picks the wrong upstream.
 
 Accepts IPs, `IP:PORT`, hostnames, and `HOST:PORT`. Hostnames are resolved once at startup via the host's OS resolver.
 
 <CodeGroup>
 ```rust Rust
-use microsandbox_network::dns::NameserverSpec;
+use microsandbox_network::dns::Nameserver;
 
 let sb = Sandbox::builder("safe-agent")
     .image("python")
     .network(|n| n
         .dns(|d| d
             .nameservers([
-                "1.1.1.1".parse::<NameserverSpec>()?,
-                "1.0.0.1".parse::<NameserverSpec>()?,
+                "1.1.1.1".parse::<Nameserver>()?,
+                "1.0.0.1".parse::<Nameserver>()?,
             ])
             .query_timeout_ms(3000)
         )
@@ -127,6 +127,28 @@ msb create python --name safe-agent \
 ```
 
 </CodeGroup>
+
+## Per-query upstream routing
+
+A guest that targets a specific resolver (`dig @1.1.1.1`, an explicit `/etc/resolv.conf` entry, or a library that takes a resolver IP) reaches that resolver directly instead of being silently rewritten to the pinned upstream. The interceptor preserves the original destination IP so the guest's reply comes back from the address it aimed at. Egress policy still applies: if the destination IP isn't allowed by the network policy, the query is refused.
+
+## DNS over alternative transports
+
+The block list and rebind protection only apply to queries the gateway can see. A guest that routes DNS through an encrypted or non-DNS protocol bypasses both unless the gateway intercepts or refuses it.
+
+**Intercepted** (block list + rebind + per-query upstream selection apply):
+- DNS over UDP (UDP/53)
+- DNS over TCP (TCP/53)
+- DNS over TLS (DoT, TCP/853): requires [TLS interception](/networking/tls)
+
+**Refused** (guest's stub falls back to plain DNS):
+- DNS over QUIC (DoQ, UDP/853)
+- mDNS (UDP/5353), LLMNR (UDP/5355), NetBIOS-NS (UDP/137)
+
+**Not distinguishable from regular traffic** (operator must filter via network policy):
+- DNS over HTTPS (DoH, TCP/443)
+
+For strict DNS integrity, combine DoT interception with a network policy denying outbound `UDP/53`, `TCP/53`, and `TCP/853` to anything except the gateway.
 
 ## Domain-based policy rules
 
