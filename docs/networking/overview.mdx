@@ -250,6 +250,24 @@ msb create python --name safe-agent \
 
 </CodeGroup>
 
+### DNS over alternative transports
+
+The block list and rebind protection only apply to queries the gateway can see. A guest that routes DNS through an encrypted or non-DNS protocol bypasses both unless the gateway intercepts or refuses it.
+
+**Intercepted** — block list + rebind + per-query upstream selection apply:
+- DNS over UDP (UDP/53)
+- DNS over TCP (TCP/53)
+- DNS over TLS (DoT, TCP/853) — requires [TLS interception](/networking/tls)
+
+**Refused** — guest's stub falls back to plain DNS:
+- DNS over QUIC (DoQ, UDP/853)
+- mDNS (UDP/5353), LLMNR (UDP/5355), NetBIOS-NS (UDP/137)
+
+**Not distinguishable from regular traffic** — operator must filter via network policy:
+- DNS over HTTPS (DoH, TCP/443)
+
+For strict DNS integrity, combine DoT interception with a network policy denying outbound `UDP/53`, `TCP/53`, and `TCP/853` to anything except the gateway.
+
 ## How it works
 
 Policy rules are evaluated first-match-wins. Allowed traffic goes to the real network; everything else is dropped.
@@ -264,7 +282,7 @@ Policy rules are evaluated first-match-wins. Allowed traffic goes to the real ne
 For most sandboxed workloads, networking behaves the way you'd expect:
 
 - Normal outbound **TCP** and **UDP** traffic works, including common tools and libraries like `curl`, `wget`, package managers, HTTP clients, database drivers, and DNS lookups.
-- **DNS** is intercepted on the host side, which is what enables domain blocking, rebinding protection, and secret-aware policy checks.
+- **DNS** is intercepted on the host side over UDP/53, TCP/53, and (with [TLS interception](/networking/tls)) DoT/853. This is what enables domain blocking, rebinding protection, and secret-aware policy checks across all supported transports.
 - **ICMP echo** is supported: Pinging external hosts works on systems that support unprivileged ICMP echo sockets.
 
 <Note>
