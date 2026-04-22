@@ -10,8 +10,8 @@ All network traffic from a sandbox flows through a host-controlled networking st
 
 Three presets cover most cases. `public_only` is the default.
 
-- **`none`**: no network interface at all. The guest is fully offline, though `exec` and `fs` still work since they don't use the network.
-- **`public_only`**: blocks private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`) and only allows routable public addresses.
+- **`none`**: no network interface at all. The guest is fully offline.
+- **`public_only`**: blocks private, loopback, and link-local addresses so only routable public destinations are reachable. The blocked ranges are `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (RFC 1918 private), `127.0.0.0/8` (loopback), and `169.254.0.0/16` (link-local).
 - **`allow_all`**: no filtering, including access to the host machine and local network.
 
 <CodeGroup>
