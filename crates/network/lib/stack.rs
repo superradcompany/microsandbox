@@ -5,7 +5,8 @@
 //! [`SmoltcpDevice`]) to smoltcp's TCP/IP stack and services connections
 //! through tokio proxy tasks.
 
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use smoltcp::iface::{Config, Interface, SocketSet};
@@ -21,7 +22,11 @@ use smoltcp::wire::{
 use crate::config::{DnsConfig, PublishedPort};
 use crate::conn::ConnectionTracker;
 use crate::device::SmoltcpDevice;
-use crate::dns::interceptor::DnsInterceptor;
+use crate::dns::common::ports::DnsPortType;
+use crate::dns::{
+    interceptor::DnsInterceptor,
+    proxies::{dot::DotProxy, tcp::TcpProxy},
+};
 use crate::icmp_relay::IcmpRelay;
 use crate::policy::{NetworkPolicy, Protocol};
 use crate::proxy;
@@ -165,8 +170,25 @@ pub fn smoltcp_poll_loop(
     let mut sockets = SocketSet::new(vec![]);
     let mut conn_tracker = ConnectionTracker::new(max_connections);
 
-    let mut dns_interceptor =
-        DnsInterceptor::new(&mut sockets, dns_config, shared.clone(), &tokio_handle);
+    // The DNS forwarder needs to know which IPs count as "the gateway"
+    // (so it routes guest queries to those addresses through the
+    // configured upstream) and the network policy (so guest-chosen
+    // `@target` resolvers are gated by egress rules just like any
+    // other outbound).
+    let gateway_ips: Arc<HashSet<IpAddr>> = Arc::new(HashSet::from([
+        IpAddr::V4(config.gateway_ipv4),
+        IpAddr::V6(config.gateway_ipv6),
+    ]));
+    let network_policy = Arc::new(network_policy);
+
+    let (mut dns_interceptor, dns_forwarder_handle) = DnsInterceptor::new(
+        &mut sockets,
+        dns_config,
+        shared.clone(),
+        &tokio_handle,
+        gateway_ips,
+        network_policy.clone(),
+    );
     let mut port_publisher = PortPublisher::new(&published_ports, config.guest_ipv4, &tokio_handle);
     let mut udp_relay = UdpRelay::new(
         shared.clone(),
@@ -215,12 +237,42 @@ pub fn smoltcp_poll_loop(
 
             match classify_frame(frame) {
                 FrameAction::TcpSyn { src, dst } => {
-                    // Policy check before socket creation.
-                    if network_policy
-                        .evaluate_egress(dst, Protocol::Tcp)
-                        .is_allow()
-                        && !conn_tracker.has_socket_for(&src, &dst)
-                    {
+                    let allow = match DnsPortType::from_tcp(dst.port()) {
+                        // Plain DNS: the interceptor enforces policy at
+                        // the application layer (block list + rebind
+                        // protection); bypass the network egress check.
+                        DnsPortType::Dns => true,
+                        // DoT: intercept only when TLS MITM is
+                        // configured. Without it, the block list can't
+                        // apply (traffic is encrypted end-to-end), so
+                        // we refuse to force a fall-back to plain
+                        // TCP/53. When TLS MITM is configured, bypass
+                        // egress policy the same way plain DNS does —
+                        // policy for the upstream resolver is applied
+                        // per query by the forwarder.
+                        DnsPortType::EncryptedDns => {
+                            if tls_state.is_some() {
+                                true
+                            } else {
+                                tracing::debug!(%dst, "DoT port refused (TLS interception not configured); stub should fall back to TCP/53");
+                                false
+                            }
+                        }
+                        // Alternative DNS protocol we can't proxy:
+                        // refuse outright — no socket means smoltcp
+                        // emits RST, which the guest's stub treats as
+                        // "upstream unavailable" and falls back to
+                        // plain TCP/53.
+                        DnsPortType::AlternativeDns => {
+                            tracing::debug!(%dst, "alternative-DNS TCP port refused; stub should fall back to TCP/53");
+                            false
+                        }
+                        // Other: regular outbound — apply egress policy.
+                        DnsPortType::Other => network_policy
+                            .evaluate_egress(dst, Protocol::Tcp)
+                            .is_allow(),
+                    };
+                    if allow && !conn_tracker.has_socket_for(&src, &dst) {
                         conn_tracker.create_tcp_socket(src, dst, &mut sockets);
                     }
                     // Let smoltcp process — matching socket completes
@@ -237,6 +289,32 @@ pub fn smoltcp_poll_loop(
                     {
                         device.drop_staged_frame();
                         continue;
+                    }
+
+                    match DnsPortType::from_udp(dst.port()) {
+                        // Dns: unreachable here — classify_transport
+                        // routes UDP/53 to FrameAction::Dns, not
+                        // UdpRelay. Defensive drop covers regressions.
+                        DnsPortType::Dns => {
+                            device.drop_staged_frame();
+                            continue;
+                        }
+                        // EncryptedDns: unreachable here —
+                        // `DnsPortType::from_udp` never returns it
+                        // today (DoT is TCP-only; UDP/853 is DoQ and
+                        // returns AlternativeDns). Defensive drop.
+                        DnsPortType::EncryptedDns => {
+                            device.drop_staged_frame();
+                            continue;
+                        }
+                        // Alternative DNS protocols on well-known UDP
+                        // ports are dropped — forces fall-back to UDP/53.
+                        DnsPortType::AlternativeDns => {
+                            tracing::debug!(%dst, "alternative-DNS UDP port dropped; stub should fall back to UDP/53");
+                            device.drop_staged_frame();
+                            continue;
+                        }
+                        DnsPortType::Other => {}
                     }
 
                     // Policy check.
@@ -301,6 +379,43 @@ pub fn smoltcp_poll_loop(
                     conn.to_smoltcp,
                     shared.clone(),
                     tls_state.clone(),
+                );
+                continue;
+            }
+            if conn.dst.port() == 53 {
+                // DNS over TCP: route through the same forwarder the UDP
+                // path uses. The forwarder applies the domain block list
+                // and rebind protection to every query and routes
+                // upstream based on `conn.dst.ip()` — the configured
+                // upstream for queries to the gateway, direct forward
+                // to the chosen `@target` (subject to egress policy)
+                // otherwise.
+                TcpProxy::spawn(
+                    &tokio_handle,
+                    conn.dst,
+                    conn.from_smoltcp,
+                    conn.to_smoltcp,
+                    dns_forwarder_handle.clone(),
+                    shared.clone(),
+                );
+                continue;
+            }
+            if conn.dst.port() == 853
+                && let Some(ref tls_state) = tls_state
+            {
+                // DNS over TLS: terminate TLS at the gateway with a
+                // per-domain cert, hand the inner DNS frames to the
+                // same forwarder plain DNS uses. Policy for the
+                // chosen `@target` resolver is applied per-query by
+                // the forwarder (block list + rebind + egress).
+                DotProxy::spawn(
+                    &tokio_handle,
+                    conn.dst,
+                    conn.from_smoltcp,
+                    conn.to_smoltcp,
+                    dns_forwarder_handle.clone(),
+                    tls_state.clone(),
+                    shared.clone(),
                 );
                 continue;
             }
@@ -574,7 +689,10 @@ fn classify_transport(
             let Ok(udp) = UdpPacket::new_checked(transport_payload) else {
                 return FrameAction::Passthrough;
             };
-            if udp.dst_port() == 53 {
+            // The plain-DNS port (UDP/53) lives in dns::common::ports so
+            // the alternative-DNS refusal logic and this dispatcher
+            // share one source of truth for "which UDP ports are DNS".
+            if DnsPortType::from_udp(udp.dst_port()) == DnsPortType::Dns {
                 FrameAction::Dns
             } else {
                 FrameAction::UdpRelay {

@@ -6,13 +6,13 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use super::forwarder::NormalizedDnsConfig;
+use super::config::NormalizedDnsConfig;
 
 /// Check if a domain is blocked by the DNS config.
 ///
 /// Block lists are pre-lowercased in [`NormalizedDnsConfig`], so only the
 /// queried domain needs lowercasing (once per query instead of per entry).
-pub(super) fn is_domain_blocked(domain: &str, config: &NormalizedDnsConfig) -> bool {
+pub(in crate::dns) fn is_domain_blocked(domain: &str, config: &NormalizedDnsConfig) -> bool {
     let domain_lower = domain.to_lowercase();
 
     // Check exact domain matches — O(1) via HashSet.
@@ -35,7 +35,7 @@ pub(super) fn is_domain_blocked(domain: &str, config: &NormalizedDnsConfig) -> b
 }
 
 /// Check if an IPv4 address is in a private/reserved range (for rebind protection).
-pub(super) fn is_private_ipv4(addr: Ipv4Addr) -> bool {
+pub(in crate::dns) fn is_private_ipv4(addr: Ipv4Addr) -> bool {
     let octets = addr.octets();
     addr.is_loopback()                                        // 127.0.0.0/8
         || octets[0] == 10                                    // 10.0.0.0/8
@@ -47,7 +47,7 @@ pub(super) fn is_private_ipv4(addr: Ipv4Addr) -> bool {
 }
 
 /// Check if an IPv6 address is in a private/reserved range (for rebind protection).
-pub(super) fn is_private_ipv6(addr: Ipv6Addr) -> bool {
+pub(in crate::dns) fn is_private_ipv6(addr: Ipv6Addr) -> bool {
     let segments = addr.segments();
     addr.is_loopback()                       // ::1
         || (segments[0] & 0xfe00) == 0xfc00  // fc00::/7 (ULA)
@@ -65,7 +65,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::dns::parse::Nameserver;
+    use crate::dns::nameserver::Nameserver;
 
     fn normalized(domains: Vec<&str>, suffixes: Vec<&str>) -> NormalizedDnsConfig {
         let blocked_suffixes: Vec<String> = suffixes

@@ -314,6 +314,24 @@ msb create python --name safe-agent \
 
 </CodeGroup>
 
+### DNS over alternative transports
+
+The block list and rebind protection only apply to queries the gateway can see. A guest that routes DNS through an encrypted or non-DNS protocol bypasses both unless the gateway intercepts or refuses it.
+
+**Intercepted** — block list + rebind + per-query upstream selection apply:
+- DNS over UDP (UDP/53)
+- DNS over TCP (TCP/53)
+- DNS over TLS (DoT, TCP/853) — requires [TLS interception](/networking/tls)
+
+**Refused** — guest's stub falls back to plain DNS:
+- DNS over QUIC (DoQ, UDP/853)
+- mDNS (UDP/5353), LLMNR (UDP/5355), NetBIOS-NS (UDP/137)
+
+**Not distinguishable from regular traffic** — operator must filter via network policy:
+- DNS over HTTPS (DoH, TCP/443)
+
+For strict DNS integrity, combine DoT interception with a network policy denying outbound `UDP/53`, `TCP/53`, and `TCP/853` to anything except the gateway.
+
 ## Trusting host CAs
 
 Corporate TLS-inspecting proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, Palo Alto, ...) terminate outbound HTTPS at the host and re-sign it with a gateway CA. That CA is installed in your macOS Keychain or Linux trust store as part of the corporate rollout, so HTTPS works silently on the host. Inside a sandbox it doesn't: the guest's stock Mozilla bundle has never seen the gateway CA, so `apk update`, `pip install`, `curl`, and any SDK fetch fail with `server certificate not trusted`.

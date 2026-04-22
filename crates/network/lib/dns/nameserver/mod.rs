@@ -12,12 +12,16 @@
 //!    empty; VPN + split-DNS setups leave the file stale. On Linux
 //!    `/etc/resolv.conf` is authoritative.
 
+pub mod parse;
+#[cfg(target_os = "macos")]
+pub(crate) mod scdynamicstore;
+
+pub use parse::{Nameserver, ParseNameserverError};
+
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 
 use resolv_conf::Config as ResolvConfig;
-
-use super::parse::Nameserver;
 
 /// DNS port.
 const DNS_PORT: u16 = 53;
@@ -77,7 +81,7 @@ pub(super) async fn read_host_dns_servers() -> std::io::Result<Vec<SocketAddr>> 
 /// back to `/etc/resolv.conf` in that case.
 #[cfg(target_os = "macos")]
 fn try_read_scdynamicstore() -> Option<Vec<SocketAddr>> {
-    match super::scdynamicstore::read_dns_servers() {
+    match self::scdynamicstore::read_dns_servers() {
         Ok(servers) if !servers.is_empty() => {
             tracing::debug!(
                 count = servers.len(),
