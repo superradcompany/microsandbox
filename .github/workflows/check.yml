@@ -342,11 +342,13 @@ jobs:
           cp crates/agentd/target/x86_64-unknown-linux-musl/release/agentd build/agentd
 
       # -- Run integration tests --
+      # Integration tests share ~/.microsandbox state (sqlite db, image cache,
+      # sandbox namespace), so run them serially to avoid flaky db-lock races.
       - name: Run integration tests
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
-          cargo test -p microsandbox --tests -- --ignored
+          cargo test -p microsandbox --tests -- --ignored --test-threads=1
 
   # ---------------------------------------------------------------------------
   # Node.js SDK smoke tests (requires KVM)

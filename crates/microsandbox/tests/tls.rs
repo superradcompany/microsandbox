@@ -1,8 +1,11 @@
 //! Integration tests for TLS interception.
 //!
 //! These tests require KVM (or libkrun on macOS) and are `#[ignore]` by
-//! default so they don't run in `cargo test --workspace`. Run them
-//! explicitly with `cargo test -p microsandbox --tests -- --ignored`.
+//! default so they don't run in `cargo test --workspace`. They share
+//! microsandbox home state (sqlite db, image cache, sandbox namespace),
+//! so run them serially:
+//!
+//!     cargo test -p microsandbox --tests -- --ignored --test-threads=1
 
 use microsandbox::Sandbox;
 
