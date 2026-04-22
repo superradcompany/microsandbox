@@ -1,15 +1,17 @@
 //! Integration tests for TLS interception.
 //!
-//! These tests require KVM (or libkrun on macOS) and are `#[ignore]` by
-//! default so they don't run in `cargo test --workspace`. Run them with
-//! cargo-nextest so each test gets its own process (and therefore its own
-//! isolated `~/.microsandbox` home via [`common::init_isolated_home`]):
+//! These tests require KVM (or libkrun on macOS). The `#[msb_test]` attribute
+//! marks them `#[ignore]`, so plain `cargo test --workspace` skips them. Run
+//! them via:
 //!
 //!     cargo nextest run -p microsandbox --tests --run-ignored=only
+//!
+//! Set `MSB_TEST_ISOLATE_HOME=1` (CI does this) to give each test its own
+//! `~/.microsandbox` so they can run in parallel without sharing the sqlite
+//! db, image cache, or sandbox namespace.
 
 use microsandbox::Sandbox;
-
-mod common;
+use test_utils::msb_test;
 
 /// Covers the default TLS-interception path:
 /// - regression for #542: Node.js fetch over TLS 1.3 used to deadlock because
@@ -19,10 +21,8 @@ mod common;
 ///
 /// Both probes run against a single sandbox to avoid paying two image-pull
 /// and VM-boot costs in CI.
-#[tokio::test]
-#[ignore]
+#[msb_test]
 async fn tls_intercept_handshake() {
-    let _home = common::init_isolated_home();
     let name = "tls-test-intercept";
     let sandbox = Sandbox::builder(name)
         .image("node:alpine")
@@ -70,10 +70,8 @@ async fn tls_intercept_handshake() {
 }
 
 /// Verify TLS bypass domains skip interception and still connect.
-#[tokio::test]
-#[ignore]
+#[msb_test]
 async fn tls_bypass_domain_connects() {
-    let _home = common::init_isolated_home();
     let name = "tls-test-bypass";
     let sandbox = Sandbox::builder(name)
         .image("node:alpine")

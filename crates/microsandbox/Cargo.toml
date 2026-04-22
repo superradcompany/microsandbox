@@ -60,6 +60,7 @@ ureq.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+test-utils = { path = "../test-utils" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

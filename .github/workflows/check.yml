@@ -346,10 +346,12 @@ jobs:
           cp crates/agentd/target/x86_64-unknown-linux-musl/release/agentd build/agentd
 
       # -- Run integration tests --
-      # Each test gets its own ~/.microsandbox home via an isolated tempdir
-      # (see crates/microsandbox/tests/common/mod.rs), so nextest can safely
-      # run them in parallel without sqlite/image-cache contention.
+      # MSB_TEST_ISOLATE_HOME=1 turns on per-test ~/.microsandbox isolation
+      # (see crates/test-utils), so nextest can run tests in parallel without
+      # sqlite/image-cache contention.
       - name: Run integration tests
+        env:
+          MSB_TEST_ISOLATE_HOME: "1"
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
