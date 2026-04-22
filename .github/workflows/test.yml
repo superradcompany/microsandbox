@@ -13,10 +13,31 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Detect whether the diff touches anything outside docs/. When it doesn't,
+  # every downstream job is gated off and posts as "skipped", which satisfies
+  # the required status checks on main without burning CI minutes.
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '!docs/**'
+
+  # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
   # ---------------------------------------------------------------------------
   build-kernel:
     name: Build kernel.c (aarch64)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +72,8 @@ jobs:
   # ---------------------------------------------------------------------------
   build-agentd-aarch64:
     name: Build agentd (aarch64-linux-musl)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -82,8 +105,8 @@ jobs:
   # ---------------------------------------------------------------------------
   test:
     name: Test (${{ matrix.target }})
-    needs: [build-kernel, build-agentd-aarch64]
-    if: always()
+    needs: [build-kernel, build-agentd-aarch64, changes]
+    if: always() && needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
