@@ -59,6 +59,8 @@ tar.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
+ipnetwork.workspace = true
+microsandbox-network = { path = "../network" }
 tempfile.workspace = true
 test-utils = { path = "../test-utils" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

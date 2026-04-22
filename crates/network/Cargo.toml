@@ -16,7 +16,10 @@ crossbeam-queue = { workspace = true }
 dirs = { workspace = true }
 futures = { workspace = true }
 hickory-client = { workspace = true }
-hickory-proto = { workspace = true }
+# tls-ring unlocks `hickory_proto::rustls::tls_client_connect` for the
+# upstream DoT client. The workspace already uses rustls with the ring
+# crypto provider, so no new dependency is introduced.
+hickory-proto = { workspace = true, features = ["tls-ring"] }
 ipnetwork = { workspace = true }
 libc = { workspace = true }
 lru = { workspace = true }

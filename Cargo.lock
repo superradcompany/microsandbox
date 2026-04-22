@@ -1799,6 +1799,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8a6fe56c0038198998a6f217ca4e7ef3a5e51f46163bd6dd60b5c71ca6c6502"
 dependencies = [
  "async-trait",
+ "bytes",
  "cfg-if",
  "data-encoding",
  "enum-as-inner",
@@ -1810,9 +1811,11 @@ dependencies = [
  "once_cell",
  "rand 0.9.4",
  "ring",
+ "rustls",
  "thiserror 2.0.18",
  "tinyvec",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "url",
 ]
@@ -2552,6 +2555,7 @@ dependencies = [
  "docker_credential",
  "flate2",
  "futures",
+ "ipnetwork",
  "keyring",
  "libc",
  "microsandbox-db",
