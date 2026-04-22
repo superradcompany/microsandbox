@@ -12,12 +12,22 @@ use syn::{ItemFn, parse_macro_input};
 /// Expands to:
 ///
 /// ```ignore
-/// #[::tokio::test]
+/// #[::tokio::test(<args>)]
 /// #[ignore]
-/// async fn <name>(<args>) -> <ret> {
+/// async fn <name>(<inputs>) -> <ret> {
 ///     let _msb_test_home = ::test_utils::init_isolated_home();
 ///     <body>
 /// }
+/// ```
+///
+/// Anything passed inside `#[msb_test(...)]` is forwarded verbatim to
+/// `#[tokio::test(...)]`, so the full tokio-test surface is available:
+///
+/// ```ignore
+/// #[msb_test]                                            // #[tokio::test]
+/// #[msb_test(flavor = "multi_thread")]                   // #[tokio::test(flavor = "multi_thread")]
+/// #[msb_test(flavor = "multi_thread", worker_threads = 4)]
+/// #[msb_test(start_paused = true)]
 /// ```
 ///
 /// The `#[ignore]` is automatic because every microsandbox integration test
@@ -27,7 +37,7 @@ use syn::{ItemFn, parse_macro_input};
 /// `init_isolated_home` is a no-op unless `MSB_TEST_ISOLATE_HOME` is set, so
 /// local `cargo test` runs against the real `~/.microsandbox`.
 #[proc_macro_attribute]
-pub fn msb_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn msb_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut input = parse_macro_input!(item as ItemFn);
 
     if input.sig.asyncness.is_none() {
@@ -43,8 +53,15 @@ pub fn msb_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
     });
     input.block = Box::new(new_block);
 
+    let tokio_args = proc_macro2::TokenStream::from(attr);
+    let tokio_attr = if tokio_args.is_empty() {
+        quote! { #[::tokio::test] }
+    } else {
+        quote! { #[::tokio::test(#tokio_args)] }
+    };
+
     let expanded = quote! {
-        #[::tokio::test]
+        #tokio_attr
         #[ignore]
         #input
     };
