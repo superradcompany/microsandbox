@@ -669,6 +669,12 @@ export interface SandboxConfig {
   cmd?: Array<string>
   /** Guest hostname. */
   hostname?: string
+  /**
+   * Override the libkrunfw shared library path for this sandbox.
+   * Defaults to the global resolver (config path, sibling of `msb`, or
+   * `~/.microsandbox/lib/`).
+   */
+  libkrunfwPath?: string
   /** User to run as (UID or name). */
   user?: string
   /** Environment variables. */

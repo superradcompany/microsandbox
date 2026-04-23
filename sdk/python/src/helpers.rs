@@ -65,6 +65,9 @@ pub fn build_config_from_kwargs(
     if let Some(hostname) = extract_opt::<String>(kwargs, "hostname")? {
         builder = builder.hostname(hostname);
     }
+    if let Some(libkrunfw_path) = extract_opt::<String>(kwargs, "libkrunfw_path")? {
+        builder = builder.libkrunfw_path(libkrunfw_path);
+    }
     if let Some(user) = extract_opt::<String>(kwargs, "user")? {
         builder = builder.user(user);
     }

@@ -1,5 +1,7 @@
 //! Fluent builder for [`SandboxConfig`].
 
+use std::path::PathBuf;
+
 use microsandbox_image::{PullPolicy, PullProgressHandle, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
@@ -211,6 +213,19 @@ impl SandboxBuilder {
     /// Set the guest hostname. Defaults to the sandbox name.
     pub fn hostname(mut self, hostname: impl Into<String>) -> Self {
         self.config.hostname = Some(hostname.into());
+        self
+    }
+
+    /// Override the libkrunfw shared library for this sandbox.
+    ///
+    /// By default, microsandbox resolves libkrunfw via the global config or
+    /// finds it next to the `msb` binary. Use this to point at a specific
+    /// libkrunfw build — for example, an unreleased firmware during
+    /// development.
+    ///
+    /// The path is validated at [`build`](Self::build) time.
+    pub fn libkrunfw_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.libkrunfw_path = Some(path.into());
         self
     }
 
@@ -540,6 +555,15 @@ impl SandboxBuilder {
                 ));
             }
             _ => {}
+        }
+
+        if let Some(path) = &self.config.libkrunfw_path
+            && !path.is_file()
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "libkrunfw_path does not exist: {}",
+                path.display()
+            )));
         }
 
         for rlimit in &self.config.rlimits {

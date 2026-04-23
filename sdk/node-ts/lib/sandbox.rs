@@ -463,6 +463,9 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
     if let Some(ref hostname) = config.hostname {
         builder = builder.hostname(hostname);
     }
+    if let Some(ref libkrunfw_path) = config.libkrunfw_path {
+        builder = builder.libkrunfw_path(libkrunfw_path);
+    }
     if let Some(ref user) = config.user {
         builder = builder.user(user);
     }

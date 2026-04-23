@@ -70,9 +70,13 @@ pub async fn spawn_sandbox(
     sandbox_id: i32,
     mode: SpawnMode,
 ) -> MicrosandboxResult<(ProcessHandle, PathBuf)> {
-    // Resolve paths.
+    // Resolve paths. Per-sandbox `libkrunfw_path` takes precedence over the
+    // global resolver so SDK callers can point at a custom firmware bundle.
     let msb_path = config::resolve_msb_path()?;
-    let libkrunfw_path = config::resolve_libkrunfw_path()?;
+    let libkrunfw_path = match &config.libkrunfw_path {
+        Some(path) => path.clone(),
+        None => config::resolve_libkrunfw_path()?,
+    };
     tracing::debug!(
         msb = %msb_path.display(),
         libkrunfw = %libkrunfw_path.display(),

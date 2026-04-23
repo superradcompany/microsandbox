@@ -27,6 +27,10 @@ pub struct SandboxConfig {
     pub cmd: Option<Vec<String>>,
     /// Guest hostname.
     pub hostname: Option<String>,
+    /// Override the libkrunfw shared library path for this sandbox.
+    /// Defaults to the global resolver (config path, sibling of `msb`, or
+    /// `~/.microsandbox/lib/`).
+    pub libkrunfw_path: Option<String>,
     /// User to run as (UID or name).
     pub user: Option<String>,
     /// Environment variables.
