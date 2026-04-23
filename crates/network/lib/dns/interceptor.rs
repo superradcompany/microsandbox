@@ -146,8 +146,13 @@ impl DnsInterceptor {
         //      interceptor's channel and routes them through the
         //      forwarder, mirroring how `tcp.rs` handles per-connection
         //      TCP/53 traffic.
-        let forwarder_handle =
-            DnsForwarder::spawn(tokio_handle, normalized, gateway_ips, network_policy);
+        let forwarder_handle = DnsForwarder::spawn(
+            tokio_handle,
+            normalized,
+            gateway_ips,
+            network_policy,
+            shared.clone(),
+        );
         UdpProxy::spawn(
             tokio_handle,
             query_rx,

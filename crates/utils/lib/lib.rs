@@ -1,6 +1,7 @@
 //! Shared constants and utilities for the microsandbox project.
 
 pub mod size;
+pub mod ttl_reverse_index;
 pub mod wake_pipe;
 
 //--------------------------------------------------------------------------------------------------

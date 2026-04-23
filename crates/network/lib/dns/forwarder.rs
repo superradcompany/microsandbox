@@ -27,12 +27,13 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures::StreamExt;
 use hickory_client::client::Client;
 use hickory_client::proto::op::{Message, MessageType, ResponseCode};
-use hickory_client::proto::rr::RData;
+use hickory_client::proto::rr::{RData, RecordType};
 use hickory_client::proto::serialize::binary::{BinDecodable, BinEncodable};
 use hickory_client::proto::xfer::{DnsHandle, DnsRequest};
 use tokio::sync::{OnceCell, watch};
@@ -43,6 +44,20 @@ use super::common::filter::{is_domain_blocked, is_private_ipv4, is_private_ipv6}
 use super::common::transport::Transport;
 use super::nameserver::{read_host_dns_servers, resolve_nameservers};
 use crate::policy::NetworkPolicy;
+use crate::shared::{ResolvedHostnameFamily, SharedState};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Policy grace floor for DNS-derived resolved hostnames.
+///
+/// This is intentionally **not** DNS semantics. Resolved-hostname
+/// lifetimes normally follow the upstream response TTL, but when that
+/// TTL is zero we keep the entry alive for a very short window so an
+/// immediate connect following a successful DNS lookup does not fail
+/// closed before the guest can use the answer.
+const RESOLVED_HOSTNAME_MIN_TTL_SECS: u32 = 1;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -78,6 +93,12 @@ pub(crate) struct DnsForwarder {
     /// Network policy. Direct-path queries consult this for outbound
     /// permission to the chosen `@target` resolver IP.
     network_policy: Arc<NetworkPolicy>,
+    /// Cross-thread network state. Used both for policy evaluation on
+    /// the direct-upstream path (Domain rules may match the resolver IP
+    /// if the guest resolved it) and for caching the resolved addresses
+    /// from upstream answers so Domain rules can match on subsequent
+    /// guest connects.
+    shared: Arc<SharedState>,
     config: Arc<NormalizedDnsConfig>,
 }
 
@@ -125,6 +146,7 @@ impl DnsForwarder {
         let guest_id = query_msg.id();
 
         let question = query_msg.queries().first()?;
+        let query_type = question.query_type();
         let domain = question.name().to_string();
         let domain = domain.trim_end_matches('.').to_owned();
 
@@ -186,6 +208,18 @@ impl DnsForwarder {
             }
         }
 
+        // Cache the resolved addresses so policy `Domain` /
+        // `DomainSuffix` rules can later match when the guest connects
+        // to one of them.
+        if let Some(family) = family_for_query_type(query_type) {
+            if let Some((addrs, ttl)) = extract_addrs_and_ttl(&response_msg, family) {
+                self.shared
+                    .cache_resolved_hostname(&domain, family, addrs, ttl);
+            } else {
+                self.shared.clear_resolved_hostname(&domain, family);
+            }
+        }
+
         // Preserve the guest's transaction id.
         response_msg.set_id(guest_id);
         let response_bytes = response_msg.to_bytes().ok()?;
@@ -224,6 +258,7 @@ impl DnsForwarder {
         match decide_upstream(
             &self.gateway_ips,
             &self.network_policy,
+            &self.shared,
             original_dst,
             transport,
         ) {
@@ -277,10 +312,12 @@ impl DnsForwarder {
         config: Arc<NormalizedDnsConfig>,
         gateway_ips: Arc<HashSet<IpAddr>>,
         network_policy: Arc<NetworkPolicy>,
+        shared: Arc<SharedState>,
     ) -> DnsForwarderHandle {
         let (forwarder_tx, forwarder_rx) = watch::channel(None);
         handle.spawn(async move {
-            let Some(forwarder) = Self::build(config, gateway_ips, network_policy).await else {
+            let Some(forwarder) = Self::build(config, gateway_ips, network_policy, shared).await
+            else {
                 // Drop forwarder_tx by returning; waiters observe init
                 // failure as `Self::wait().await == None`.
                 return;
@@ -297,6 +334,7 @@ impl DnsForwarder {
         config: Arc<NormalizedDnsConfig>,
         gateway_ips: Arc<HashSet<IpAddr>>,
         network_policy: Arc<NetworkPolicy>,
+        shared: Arc<SharedState>,
     ) -> Option<Arc<Self>> {
         let upstreams = if !config.nameservers.is_empty() {
             match resolve_nameservers(&config.nameservers).await {
@@ -336,6 +374,7 @@ impl DnsForwarder {
             configured_upstream: upstream,
             gateway_ips,
             network_policy,
+            shared,
             config,
         }))
     }
@@ -368,6 +407,7 @@ impl DnsForwarder {
 fn decide_upstream(
     gateway_ips: &HashSet<IpAddr>,
     policy: &NetworkPolicy,
+    shared: &SharedState,
     original_dst: Option<IpAddr>,
     transport: Transport,
 ) -> UpstreamDecision {
@@ -384,7 +424,7 @@ fn decide_upstream(
     // corresponding port and protocol.
     let policy_dst = SocketAddr::new(dst, transport.upstream_port());
     if policy
-        .evaluate_egress(policy_dst, transport.policy_protocol())
+        .evaluate_egress(policy_dst, transport.policy_protocol(), shared)
         .is_deny()
     {
         return UpstreamDecision::Refused;
@@ -408,6 +448,41 @@ fn build_status_response(query: &Message, rcode: ResponseCode) -> Option<Bytes> 
         response.add_query(q.clone());
     }
     response.to_bytes().ok().map(Bytes::from)
+}
+
+/// Map a DNS query type to a [`ResolvedHostnameFamily`] for policy caching.
+fn family_for_query_type(query_type: RecordType) -> Option<ResolvedHostnameFamily> {
+    match query_type {
+        RecordType::A => Some(ResolvedHostnameFamily::Ipv4),
+        RecordType::AAAA => Some(ResolvedHostnameFamily::Ipv6),
+        _ => None,
+    }
+}
+
+/// Extract resolved IP addresses and the minimum TTL across answers of
+/// the requested family. Zero-TTL answers are floored to
+/// [`RESOLVED_HOSTNAME_MIN_TTL_SECS`] so an immediate connect following
+/// a successful lookup does not fail closed.
+fn extract_addrs_and_ttl(
+    response: &Message,
+    family: ResolvedHostnameFamily,
+) -> Option<(Vec<IpAddr>, Duration)> {
+    let mut addrs = Vec::new();
+    let mut ttl: Option<Duration> = None;
+
+    for record in response.answers() {
+        let addr = match (family, record.data()) {
+            (ResolvedHostnameFamily::Ipv4, RData::A(a)) => IpAddr::V4((*a).into()),
+            (ResolvedHostnameFamily::Ipv6, RData::AAAA(aaaa)) => IpAddr::V6((*aaaa).into()),
+            _ => continue,
+        };
+        addrs.push(addr);
+        let record_ttl =
+            Duration::from_secs(u64::from(record.ttl().max(RESOLVED_HOSTNAME_MIN_TTL_SECS)));
+        ttl = Some(ttl.map_or(record_ttl, |current| current.min(record_ttl)));
+    }
+
+    ttl.map(|ttl| (addrs, ttl))
 }
 
 /// Build a header-only NoError response with TC=1. RFC 5966 §3 requires
@@ -534,10 +609,11 @@ mod tests {
     #[test]
     fn decide_upstream_configured_when_dst_is_gateway_v4() {
         let gw = gateway_set();
+        let shared = SharedState::new(4);
         let policy = NetworkPolicy::allow_all();
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)));
         assert_eq!(
-            decide_upstream(&gw, &policy, dst, Transport::Udp),
+            decide_upstream(&gw, &policy, &shared, dst, Transport::Udp),
             UpstreamDecision::Configured
         );
     }
@@ -545,10 +621,11 @@ mod tests {
     #[test]
     fn decide_upstream_configured_when_dst_is_gateway_v6() {
         let gw = gateway_set();
+        let shared = SharedState::new(4);
         let policy = NetworkPolicy::allow_all();
         let dst = Some(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
         assert_eq!(
-            decide_upstream(&gw, &policy, dst, Transport::Tcp),
+            decide_upstream(&gw, &policy, &shared, dst, Transport::Tcp),
             UpstreamDecision::Configured
         );
     }
@@ -559,9 +636,10 @@ mod tests {
         // to fall back to the configured upstream, never accidentally
         // forward to whoever the guest happens to be aiming at.
         let gw = gateway_set();
+        let shared = SharedState::new(4);
         let policy = NetworkPolicy::allow_all();
         assert_eq!(
-            decide_upstream(&gw, &policy, None, Transport::Udp),
+            decide_upstream(&gw, &policy, &shared, None, Transport::Udp),
             UpstreamDecision::Configured
         );
     }
@@ -569,10 +647,11 @@ mod tests {
     #[test]
     fn decide_upstream_direct_when_dst_external_and_policy_allows() {
         let gw = gateway_set();
+        let shared = SharedState::new(4);
         let policy = NetworkPolicy::allow_all();
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)));
         assert_eq!(
-            decide_upstream(&gw, &policy, dst, Transport::Udp),
+            decide_upstream(&gw, &policy, &shared, dst, Transport::Udp),
             UpstreamDecision::Direct(SocketAddr::from(([1, 1, 1, 1], 53)))
         );
     }
@@ -583,10 +662,11 @@ mod tests {
         // a private resolver should get REFUSED rather than silently
         // hitting the configured upstream instead.
         let gw = gateway_set();
+        let shared = SharedState::new(4);
         let policy = NetworkPolicy::public_only();
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 53)));
         assert_eq!(
-            decide_upstream(&gw, &policy, dst, Transport::Udp),
+            decide_upstream(&gw, &policy, &shared, dst, Transport::Udp),
             UpstreamDecision::Refused
         );
     }
@@ -597,16 +677,17 @@ mod tests {
         // still reach the configured upstream. Direct queries get
         // REFUSED.
         let gw = gateway_set();
+        let shared = SharedState::new(4);
         let policy = NetworkPolicy::none();
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)));
         assert_eq!(
-            decide_upstream(&gw, &policy, dst, Transport::Tcp),
+            decide_upstream(&gw, &policy, &shared, dst, Transport::Tcp),
             UpstreamDecision::Refused
         );
         // But aiming at the gateway still works.
         let gw_dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)));
         assert_eq!(
-            decide_upstream(&gw, &policy, gw_dst, Transport::Tcp),
+            decide_upstream(&gw, &policy, &shared, gw_dst, Transport::Tcp),
             UpstreamDecision::Configured
         );
     }
@@ -618,6 +699,7 @@ mod tests {
         // through to the policy evaluator.
         use crate::policy::{Action, Destination, Direction, Rule};
         let gw = gateway_set();
+        let shared = SharedState::new(4);
         let dst_ip = std::net::Ipv4Addr::new(8, 8, 8, 8);
         let policy = NetworkPolicy {
             default_action: Action::Allow,
@@ -631,11 +713,11 @@ mod tests {
         };
         let dst = Some(IpAddr::V4(dst_ip));
         assert_eq!(
-            decide_upstream(&gw, &policy, dst, Transport::Udp),
+            decide_upstream(&gw, &policy, &shared, dst, Transport::Udp),
             UpstreamDecision::Direct(SocketAddr::from(([8, 8, 8, 8], 53)))
         );
         assert_eq!(
-            decide_upstream(&gw, &policy, dst, Transport::Tcp),
+            decide_upstream(&gw, &policy, &shared, dst, Transport::Tcp),
             UpstreamDecision::Refused
         );
     }
@@ -643,10 +725,11 @@ mod tests {
     #[test]
     fn decide_upstream_dot_configured_when_dst_is_gateway() {
         let gw = gateway_set();
+        let shared = SharedState::new(4);
         let policy = NetworkPolicy::allow_all();
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)));
         assert_eq!(
-            decide_upstream(&gw, &policy, dst, Transport::Dot),
+            decide_upstream(&gw, &policy, &shared, dst, Transport::Dot),
             UpstreamDecision::Configured
         );
     }
@@ -654,10 +737,11 @@ mod tests {
     #[test]
     fn decide_upstream_dot_direct_targets_port_853() {
         let gw = gateway_set();
+        let shared = SharedState::new(4);
         let policy = NetworkPolicy::allow_all();
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)));
         assert_eq!(
-            decide_upstream(&gw, &policy, dst, Transport::Dot),
+            decide_upstream(&gw, &policy, &shared, dst, Transport::Dot),
             UpstreamDecision::Direct(SocketAddr::from(([1, 1, 1, 1], 853))),
         );
     }
@@ -668,6 +752,7 @@ mod tests {
         // regardless of port, since DoT rides TCP.
         use crate::policy::{Action, Destination, Direction, Rule};
         let gw = gateway_set();
+        let shared = SharedState::new(4);
         let policy = NetworkPolicy {
             default_action: Action::Allow,
             rules: vec![Rule {
@@ -680,7 +765,7 @@ mod tests {
         };
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)));
         assert_eq!(
-            decide_upstream(&gw, &policy, dst, Transport::Dot),
+            decide_upstream(&gw, &policy, &shared, dst, Transport::Dot),
             UpstreamDecision::Refused
         );
     }

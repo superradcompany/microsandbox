@@ -1,9 +1,11 @@
 //! Policy types: rules, actions, destinations, and protocol matching.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use ipnetwork::IpNetwork;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::shared::{SharedState, normalize_hostname};
 
 use super::destination::{matches_cidr, matches_group};
 
@@ -69,7 +71,11 @@ pub enum Direction {
 }
 
 /// Traffic destination specification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Deserialization normalizes `Domain` and `DomainSuffix` values
+/// (lowercased, trailing/leading dots stripped) so comparisons against
+/// resolved hostnames are canonical.
+#[derive(Debug, Clone, Serialize)]
 pub enum Destination {
     /// Match any destination.
     Any,
@@ -184,7 +190,12 @@ impl NetworkPolicy {
     ///
     /// Returns the action from the first matching rule, or the default
     /// action if no rule matches.
-    pub fn evaluate_egress(&self, dst: SocketAddr, protocol: Protocol) -> Action {
+    pub fn evaluate_egress(
+        &self,
+        dst: SocketAddr,
+        protocol: Protocol,
+        shared: &SharedState,
+    ) -> Action {
         for rule in &self.rules {
             if rule.direction != Direction::Outbound {
                 continue;
@@ -199,7 +210,7 @@ impl NetworkPolicy {
             {
                 continue;
             }
-            if !matches_destination(&rule.destination, dst.ip()) {
+            if !matches_destination(&rule.destination, dst.ip(), shared) {
                 continue;
             }
             return rule.action;
@@ -213,7 +224,12 @@ impl NetworkPolicy {
     /// matching — ICMP has no ports. Rules with a `ports` filter are
     /// skipped since applying a port range to a portless protocol would
     /// be semantically incorrect.
-    pub fn evaluate_egress_ip(&self, dst: std::net::IpAddr, protocol: Protocol) -> Action {
+    pub fn evaluate_egress_ip(
+        &self,
+        dst: IpAddr,
+        protocol: Protocol,
+        shared: &SharedState,
+    ) -> Action {
         for rule in &self.rules {
             if rule.direction != Direction::Outbound {
                 continue;
@@ -226,7 +242,7 @@ impl NetworkPolicy {
             if rule.ports.is_some() {
                 continue;
             }
-            if !matches_destination(&rule.destination, dst) {
+            if !matches_destination(&rule.destination, dst, shared) {
                 continue;
             }
             return rule.action;
@@ -256,23 +272,32 @@ impl Default for NetworkPolicy {
 impl Rule {
     /// Convenience: allow outbound to a destination.
     pub fn allow_outbound(destination: Destination) -> Self {
-        Self {
-            direction: Direction::Outbound,
-            destination,
-            protocol: None,
-            ports: None,
-            action: Action::Allow,
-        }
+        Self::outbound(destination, Action::Allow)
     }
 
     /// Convenience: deny outbound to a destination.
     pub fn deny_outbound(destination: Destination) -> Self {
+        Self::outbound(destination, Action::Deny)
+    }
+
+    fn outbound(mut destination: Destination, action: Action) -> Self {
+        destination.normalize_mut();
         Self {
             direction: Direction::Outbound,
             destination,
             protocol: None,
             ports: None,
-            action: Action::Deny,
+            action,
+        }
+    }
+}
+
+impl Destination {
+    fn normalize_mut(&mut self) {
+        match self {
+            Destination::Domain(s) => *s = normalize_hostname(s),
+            Destination::DomainSuffix(s) => *s = normalize_suffix(s),
+            Destination::Any | Destination::Cidr(_) | Destination::Group(_) => {}
         }
     }
 }
@@ -297,18 +322,156 @@ impl PortRange {
     }
 }
 
+impl<'de> Deserialize<'de> for Destination {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        enum Repr {
+            Any,
+            Cidr(IpNetwork),
+            Domain(String),
+            DomainSuffix(String),
+            Group(DestinationGroup),
+        }
+
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Any => Destination::Any,
+            Repr::Cidr(network) => Destination::Cidr(network),
+            Repr::Domain(s) => Destination::Domain(normalize_hostname(&s)),
+            Repr::DomainSuffix(s) => Destination::DomainSuffix(normalize_suffix(&s)),
+            Repr::Group(g) => Destination::Group(g),
+        })
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
 /// Check if an IP address matches a destination specification.
-fn matches_destination(dest: &Destination, addr: std::net::IpAddr) -> bool {
+fn matches_destination(dest: &Destination, addr: IpAddr, shared: &SharedState) -> bool {
     match dest {
         Destination::Any => true,
         Destination::Cidr(network) => matches_cidr(network, addr),
         Destination::Group(group) => matches_group(*group, addr),
-        // Domain and DomainSuffix require a DNS pin set for IP→domain
-        // reverse lookup. Without pins, they don't match by IP alone.
-        Destination::Domain(_) | Destination::DomainSuffix(_) => false,
+        Destination::Domain(domain) => {
+            shared.any_resolved_hostname(addr, |hostname| hostname == domain)
+        }
+        Destination::DomainSuffix(suffix) => {
+            shared.any_resolved_hostname(addr, |hostname| matches_suffix(hostname, suffix))
+        }
+    }
+}
+
+fn matches_suffix(hostname: &str, suffix: &str) -> bool {
+    hostname == suffix
+        || hostname
+            .strip_suffix(suffix)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
+fn normalize_suffix(suffix: &str) -> String {
+    normalize_hostname(suffix)
+        .trim_start_matches('.')
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::shared::ResolvedHostnameFamily;
+
+    const PYPI_V4: &str = "151.101.0.223";
+    const FILES_V4: &str = "151.101.64.223";
+
+    /// Build a shared state that has one resolved hostname cached.
+    fn shared_with_host(host: &str, ip_str: &str) -> SharedState {
+        let shared = SharedState::new(4);
+        shared.cache_resolved_hostname(
+            host,
+            ResolvedHostnameFamily::Ipv4,
+            [ip_str.parse::<IpAddr>().unwrap()],
+            Duration::from_secs(30),
+        );
+        shared
+    }
+
+    fn egress_tcp(policy: &NetworkPolicy, ip_str: &str, shared: &SharedState) -> Action {
+        let addr = SocketAddr::new(ip_str.parse().unwrap(), 443);
+        policy.evaluate_egress(addr, Protocol::Tcp, shared)
+    }
+
+    fn allow_rule(dest: Destination) -> NetworkPolicy {
+        NetworkPolicy {
+            default_action: Action::Deny,
+            rules: vec![Rule::allow_outbound(dest)],
+        }
+    }
+
+    #[test]
+    fn exact_domain_rules_match_resolved_hostnames() {
+        let shared = shared_with_host("pypi.org", PYPI_V4);
+        let policy = allow_rule(Destination::Domain("pypi.org".into()));
+        assert!(egress_tcp(&policy, PYPI_V4, &shared).is_allow());
+    }
+
+    #[test]
+    fn exact_domain_rules_normalize_user_input() {
+        let shared = shared_with_host("pypi.org", PYPI_V4);
+        let policy = allow_rule(Destination::Domain("PyPI.Org.".into()));
+        assert!(egress_tcp(&policy, PYPI_V4, &shared).is_allow());
+    }
+
+    #[test]
+    fn suffix_rules_match_resolved_hostnames() {
+        let shared = shared_with_host("files.pythonhosted.org", FILES_V4);
+        let policy = allow_rule(Destination::DomainSuffix(".pythonhosted.org".into()));
+        assert!(egress_tcp(&policy, FILES_V4, &shared).is_allow());
+    }
+
+    #[test]
+    fn suffix_rules_normalize_user_input() {
+        let shared = shared_with_host("files.pythonhosted.org", FILES_V4);
+        let policy = allow_rule(Destination::DomainSuffix(".PythonHosted.Org.".into()));
+        assert!(egress_tcp(&policy, FILES_V4, &shared).is_allow());
+    }
+
+    #[test]
+    fn unresolved_domain_rules_do_not_match_by_ip_alone() {
+        let shared = SharedState::new(4);
+        let policy = allow_rule(Destination::Domain("pypi.org".into()));
+        assert!(egress_tcp(&policy, PYPI_V4, &shared).is_deny());
+    }
+
+    #[test]
+    fn exact_domain_rules_match_resolved_hostnames_for_icmp() {
+        let shared = shared_with_host("pypi.org", PYPI_V4);
+        let policy = allow_rule(Destination::Domain("pypi.org".into()));
+        let ip: IpAddr = PYPI_V4.parse().unwrap();
+        assert!(
+            policy
+                .evaluate_egress_ip(ip, Protocol::Icmpv4, &shared)
+                .is_allow()
+        );
+    }
+
+    #[test]
+    fn deserialized_policies_normalize_domain_values() {
+        let shared = shared_with_host("pypi.org", PYPI_V4);
+        let policy: NetworkPolicy = serde_json::from_str(
+            r#"{
+                "default_action": "Deny",
+                "rules": [
+                    {
+                        "direction": "Outbound",
+                        "destination": { "Domain": "PyPI.Org." },
+                        "action": "Allow"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert!(egress_tcp(&policy, PYPI_V4, &shared).is_allow());
     }
 }
