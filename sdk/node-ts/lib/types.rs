@@ -324,39 +324,66 @@ pub struct ExecEvent {
 
 /// Image pull / materialize progress event emitted by `PullSession`.
 ///
-/// The `eventType` string is the discriminator; only a subset of the other
-/// fields is populated for each variant. The variants mirror the Rust
-/// `microsandbox_image::PullProgress` enum:
+/// Mirrors the Rust `microsandbox_image::PullProgress` enum. Narrow on
+/// `type` to access variant-specific fields:
 ///
-/// - `"resolving"` — `reference`
-/// - `"resolved"` — `reference`, `manifestDigest`, `layerCount`, `totalDownloadBytes`
-/// - `"layer_download_progress"` — `layerIndex`, `digest`, `downloadedBytes`, `totalBytes`
-/// - `"layer_download_complete"` — `layerIndex`, `digest`, `downloadedBytes`
-/// - `"layer_download_verifying"` — `layerIndex`, `digest`
-/// - `"layer_materialize_started"` — `layerIndex`, `diffId`
-/// - `"layer_materialize_progress"` — `layerIndex`, `bytesRead`, `totalBytes`
-/// - `"layer_materialize_writing"` — `layerIndex`
-/// - `"layer_materialize_complete"` — `layerIndex`, `diffId`
-/// - `"stitch_merging_trees"` — `layerCount`
-/// - `"stitch_writing_fsmeta"` — (no fields)
-/// - `"stitch_writing_vmdk"` — (no fields)
-/// - `"stitch_complete"` — (no fields)
-/// - `"complete"` — `reference`, `layerCount`
-#[napi(object)]
-pub struct PullEvent {
-    pub event_type: String,
-    pub reference: Option<String>,
-    pub manifest_digest: Option<String>,
-    pub layer_count: Option<u32>,
-    /// Sum of compressed layer sizes. `null` if the manifest omits sizes.
-    pub total_download_bytes: Option<f64>,
-    pub layer_index: Option<u32>,
-    pub digest: Option<String>,
-    pub diff_id: Option<String>,
-    pub downloaded_bytes: Option<f64>,
-    /// Total bytes for the current layer. `null` if the manifest omits sizes.
-    pub total_bytes: Option<f64>,
-    pub bytes_read: Option<f64>,
+/// ```js
+/// for await (const ev of session) {
+///   if (ev.type === "layer_download_progress") {
+///     console.log(`${ev.layerIndex}: ${ev.downloadedBytes}/${ev.totalBytes}`);
+///   }
+/// }
+/// ```
+#[napi(discriminant_case = "snake_case")]
+pub enum PullProgress {
+    /// Resolving the image reference.
+    Resolving { reference: String },
+    /// Manifest parsed; layer count and total size now known.
+    Resolved {
+        reference: String,
+        manifest_digest: String,
+        layer_count: u32,
+        /// Sum of compressed layer sizes. `null` if the manifest omits sizes.
+        total_download_bytes: Option<f64>,
+    },
+    /// Byte-level download progress for a single layer.
+    LayerDownloadProgress {
+        layer_index: u32,
+        digest: String,
+        downloaded_bytes: f64,
+        /// Total bytes for this layer. `null` if the manifest omits sizes.
+        total_bytes: Option<f64>,
+    },
+    /// A layer finished downloading.
+    LayerDownloadComplete {
+        layer_index: u32,
+        digest: String,
+        downloaded_bytes: f64,
+    },
+    /// Layer download complete; verifying the blob.
+    LayerDownloadVerifying { layer_index: u32, digest: String },
+    /// Layer EROFS materialization started.
+    LayerMaterializeStarted { layer_index: u32, diff_id: String },
+    /// Byte-level materialization progress for a single layer.
+    LayerMaterializeProgress {
+        layer_index: u32,
+        bytes_read: f64,
+        total_bytes: f64,
+    },
+    /// Layer tar ingest done; EROFS image is being written.
+    LayerMaterializeWriting { layer_index: u32 },
+    /// Layer EROFS materialization complete.
+    LayerMaterializeComplete { layer_index: u32, diff_id: String },
+    /// Merging per-layer trees.
+    StitchMergingTrees { layer_count: u32 },
+    /// Writing the merged filesystem metadata.
+    StitchWritingFsmeta {},
+    /// Writing the final VMDK image.
+    StitchWritingVmdk {},
+    /// Stitch phase complete.
+    StitchComplete {},
+    /// Entire image pull complete.
+    Complete { reference: String, layer_count: u32 },
 }
 
 /// Configuration for command execution.

@@ -221,7 +221,7 @@ export declare class Patch {
  *   pullPolicy: "always",
  * });
  * for await (const ev of session) {
- *   if (ev.eventType === "layer_download_progress") {
+ *   if (ev.type === "layer_download_progress") {
  *     console.log(`L${ev.layerIndex}: ${ev.downloadedBytes}/${ev.totalBytes ?? "?"}`);
  *   }
  * }
@@ -235,7 +235,7 @@ export declare class Patch {
  */
 export declare class PullSession {
   /** Receive the next pull progress event. Returns `null` when the stream ends. */
-  recv(): Promise<PullEvent | null>
+  recv(): Promise<PullProgress | null>
   /**
    * Await the sandbox creation task and return the live `Sandbox`.
    *
@@ -244,7 +244,7 @@ export declare class PullSession {
    * is definitely complete.
    */
   result(): Promise<Sandbox>
-  [Symbol.asyncIterator](): AsyncGenerator<PullEvent, void, undefined>
+  [Symbol.asyncIterator](): AsyncGenerator<PullProgress, void, undefined>
 }
 export type JsPullSession = PullSession
 
@@ -262,9 +262,9 @@ export declare class Sandbox {
   /**
    * Create a sandbox and observe image pull/materialize progress.
    *
-   * Returns a `PullSession` that yields `PullEvent`s as the image is
-   * resolved, downloaded, and materialized. Call `session.result()` after
-   * iteration to obtain the live `Sandbox`.
+   * Returns a `PullSession` that yields `PullProgress` events as the
+   * image is resolved, downloaded, and materialized. Call
+   * `session.result()` after iteration to obtain the live `Sandbox`.
    */
   static createWithProgress(config: SandboxConfig): Promise<PullSession>
   /**
@@ -709,40 +709,34 @@ export interface PolicyRule {
 /**
  * Image pull / materialize progress event emitted by `PullSession`.
  *
- * The `eventType` string is the discriminator; only a subset of the other
- * fields is populated for each variant. The variants mirror the Rust
- * `microsandbox_image::PullProgress` enum:
+ * Mirrors the Rust `microsandbox_image::PullProgress` enum. Narrow on
+ * `type` to access variant-specific fields:
  *
- * - `"resolving"` — `reference`
- * - `"resolved"` — `reference`, `manifestDigest`, `layerCount`, `totalDownloadBytes`
- * - `"layer_download_progress"` — `layerIndex`, `digest`, `downloadedBytes`, `totalBytes`
- * - `"layer_download_complete"` — `layerIndex`, `digest`, `downloadedBytes`
- * - `"layer_download_verifying"` — `layerIndex`, `digest`
- * - `"layer_materialize_started"` — `layerIndex`, `diffId`
- * - `"layer_materialize_progress"` — `layerIndex`, `bytesRead`, `totalBytes`
- * - `"layer_materialize_writing"` — `layerIndex`
- * - `"layer_materialize_complete"` — `layerIndex`, `diffId`
- * - `"stitch_merging_trees"` — `layerCount`
- * - `"stitch_writing_fsmeta"` — (no fields)
- * - `"stitch_writing_vmdk"` — (no fields)
- * - `"stitch_complete"` — (no fields)
- * - `"complete"` — `reference`, `layerCount`
+ * ```js
+ * for await (const ev of session) {
+ *   if (ev.type === "layer_download_progress") {
+ *     console.log(`${ev.layerIndex}: ${ev.downloadedBytes}/${ev.totalBytes}`);
+ *   }
+ * }
+ * ```
  */
-export interface PullEvent {
-  eventType: string
-  reference?: string
-  manifestDigest?: string
-  layerCount?: number
-  /** Sum of compressed layer sizes. `null` if the manifest omits sizes. */
-  totalDownloadBytes?: number
-  layerIndex?: number
-  digest?: string
-  diffId?: string
-  downloadedBytes?: number
-  /** Total bytes for the current layer. `null` if the manifest omits sizes. */
-  totalBytes?: number
-  bytesRead?: number
-}
+export type PullProgress =
+  | { type: 'resolving', reference: string }
+  | { type: 'resolved', reference: string, manifestDigest: string, layerCount: number, /** Sum of compressed layer sizes. `null` if the manifest omits sizes. */
+totalDownloadBytes?: number }
+| { type: 'layer_download_progress', layerIndex: number, digest: string, downloadedBytes: number, /** Total bytes for this layer. `null` if the manifest omits sizes. */
+totalBytes?: number }
+| { type: 'layer_download_complete', layerIndex: number, digest: string, downloadedBytes: number }
+| { type: 'layer_download_verifying', layerIndex: number, digest: string }
+| { type: 'layer_materialize_started', layerIndex: number, diffId: string }
+| { type: 'layer_materialize_progress', layerIndex: number, bytesRead: number, totalBytes: number }
+| { type: 'layer_materialize_writing', layerIndex: number }
+| { type: 'layer_materialize_complete', layerIndex: number, diffId: string }
+| { type: 'stitch_merging_trees', layerCount: number }
+| { type: 'stitch_writing_fsmeta' }
+| { type: 'stitch_writing_vmdk' }
+| { type: 'stitch_complete' }
+| { type: 'complete', reference: string, layerCount: number }
 
 /** Image pull policy. */
 export declare const enum PullPolicy {

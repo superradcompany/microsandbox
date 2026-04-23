@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import { describe, it, expect, afterAll, beforeAll } from "vitest";
 import { Sandbox, isInstalled } from "../index.mjs";
-import type { PullEvent } from "../index.d.cts";
+import type { PullProgress } from "../index.d.cts";
 
 const SANDBOX_NAME = "sdk-smoke-test";
 
@@ -269,33 +269,34 @@ describe("Node.js SDK Pull Progress", () => {
 			pullPolicy: "always",
 		});
 
-		const events: PullEvent[] = [];
+		const events: PullProgress[] = [];
 		for await (const ev of session) events.push(ev);
 
 		expect(events.length).toBeGreaterThan(0);
 
-		expect(events[0].eventType).toBe("resolving");
-		expect(events[0].reference).toBeTruthy();
-		const reference = events[0].reference;
+		const first = events[0];
+		if (first.type !== "resolving") throw new Error(`expected first event to be resolving, got ${first.type}`);
+		expect(first.reference).toBeTruthy();
+		const reference = first.reference;
 
-		const resolved = events.find((e) => e.eventType === "resolved");
-		expect(resolved).toBeDefined();
-		expect(resolved!.reference).toBe(reference);
-		expect(resolved!.manifestDigest).toBeTruthy();
-		expect(resolved!.layerCount).toBeGreaterThan(0);
+		const resolved = events.find((e) => e.type === "resolved");
+		if (resolved?.type !== "resolved") throw new Error("resolved event missing");
+		expect(resolved.reference).toBe(reference);
+		expect(resolved.manifestDigest).toBeTruthy();
+		expect(resolved.layerCount).toBeGreaterThan(0);
 
 		const last = events[events.length - 1];
-		expect(last.eventType).toBe("complete");
+		if (last.type !== "complete") throw new Error(`expected last event to be complete, got ${last.type}`);
 		expect(last.reference).toBe(reference);
-		expect(last.layerCount).toBe(resolved!.layerCount);
+		expect(last.layerCount).toBe(resolved.layerCount);
 
-		const idx = (t: string) => events.findIndex((e) => e.eventType === t);
+		const idx = (t: PullProgress["type"]) => events.findIndex((e) => e.type === t);
 		expect(idx("resolving")).toBeLessThan(idx("resolved"));
 		expect(idx("resolved")).toBeLessThan(idx("complete"));
 
 		// Field population is best-effort — layer events only fire on cache miss.
-		const progress = events.find((e) => e.eventType === "layer_download_progress");
-		if (progress) {
+		const progress = events.find((e) => e.type === "layer_download_progress");
+		if (progress?.type === "layer_download_progress") {
 			expect(progress.layerIndex).toBeGreaterThanOrEqual(0);
 			expect(progress.digest).toBeTruthy();
 			expect(progress.downloadedBytes).toBeGreaterThanOrEqual(0);
@@ -318,7 +319,7 @@ describe("Node.js SDK Pull Progress", () => {
 		const eventTypes: string[] = [];
 		let ev = await session.recv();
 		while (ev !== null) {
-			eventTypes.push(ev.eventType);
+			eventTypes.push(ev.type);
 			ev = await session.recv();
 		}
 
@@ -341,7 +342,7 @@ describe("Node.js SDK Pull Progress", () => {
 		});
 
 		const types: string[] = [];
-		for await (const ev of session) types.push(ev.eventType);
+		for await (const ev of session) types.push(ev.type);
 
 		expect(types[0]).toBe("resolving");
 		expect(types).toContain("resolved");
