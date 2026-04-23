@@ -1,0 +1,138 @@
+---
+title: config.json
+description: Referencia global de config.json
+icon: "gear"
+---
+
+microsandbox lee su configuración global desde `~/.microsandbox/config.json`. Todos los campos son opcionales. Un archivo ausente o un objeto JSON vacío equivale a usar los valores predeterminados.
+
+<Accordion title="Ejemplo completo">
+```json
+{
+  "home": "/custom/path/.microsandbox",
+  "log_level": "info",
+  "database": {
+    "url": "sqlite:///tmp/msb.db",
+    "max_connections": 10,
+    "connect_timeout_secs": 30
+  },
+  "paths": {
+    "msb": "/usr/local/bin/msb",
+    "libkrunfw": "/usr/local/lib/libkrunfw.so",
+    "cache": "/mnt/fast/msb-cache",
+    "sandboxes": null,
+    "volumes": null,
+    "logs": null,
+    "secrets": null
+  },
+  "sandbox_defaults": {
+    "cpus": 2,
+    "memory_mib": 1024,
+    "shell": "/bin/bash",
+    "workdir": "/app"
+  },
+  "registries": {
+    "auth": {
+      "ghcr.io": {
+        "username": "octocat",
+        "store": "keyring"
+      },
+      "registry.example.com": {
+        "username": "deploy",
+        "password_env": "REGISTRY_TOKEN"
+      },
+      "docker.io": {
+        "username": "user",
+        "secret_name": "dockerhub-token"
+      }
+    }
+  }
+}
+```
+</Accordion>
+
+## Campos de nivel superior
+
+| Campo | Valor predeterminado | Descripción |
+|-------|---------|-------------|
+| `home` | `~/.microsandbox` | Directorio raíz para todos los datos de microsandbox |
+| `log_level` | `null` (silencioso) | Nivel de registro para los procesos del sandbox: `error`, `warn`, `info`, `debug`, `trace` |
+| `database` | [referencia](#database) | Ajustes de conexión a la base de datos |
+| `paths` | [referencia](#paths) | Sobrescrituras de rutas para binarios y directorios |
+| `sandbox_defaults` | [referencia](#sandbox_defaults) | Valores predeterminados aplicados a cada sandbox |
+| `registries` | [referencia](#registries) | Autenticación del registro de contenedores |
+
+## `database`
+
+| Campo | Valor predeterminado | Descripción |
+|-------|---------|-------------|
+| `url` | `null` | URL de la base de datos. Usa SQLite bajo `home` cuando es null |
+| `max_connections` | `5` | Tamaño máximo del grupo de conexiones |
+| `connect_timeout_secs` | `30` | Tiempo de espera al obtener una conexión de la base de datos desde el grupo |
+
+## `paths`
+
+Todos los campos de ruta son opcionales. Cuando son `null`, se resuelven relativos a `home`.
+
+| Campo | Valor predeterminado | Descripción |
+|-------|---------|-------------|
+| `msb` | `{home}/bin/msb` | Binario `msb`. Se resuelve mediante: variable de entorno `MSB_PATH`, este campo, ruta predeterminada, `PATH` |
+| `libkrunfw` | `{home}/lib/libkrunfw` | Ruta a un kernel de VM personalizado (`.so` en Linux, `.dylib` en macOS) |
+| `cache` | `{home}/cache` | Caché de capas de imagen |
+| `sandboxes` | `{home}/sandboxes` | Estado por sandbox |
+| `volumes` | `{home}/volumes` | Volúmenes con nombre |
+| `logs` | `{home}/logs` | Registros del sandbox |
+| `secrets` | `{home}/secrets` | Secretos. Los secretos del registro se almacenan en `secrets/registries/` |
+
+## `sandbox_defaults`
+
+Valores predeterminados aplicados a cada sandbox salvo que se anulen por sandbox.
+
+| Campo | Valor predeterminado | Descripción |
+|-------|---------|-------------|
+| `cpus` | `1` | Número de vCPUs |
+| `memory_mib` | `512` | Memoria del huésped en MiB |
+| `shell` | `"/bin/sh"` | Shell para sesiones interactivas y scripts |
+| `workdir` | `null` | Directorio de trabajo dentro del sandbox |
+
+## `registries`
+
+### `registries.auth`
+
+Un mapa de nombres de host de registro a entradas de autenticación. Cada entrada especifica un nombre de usuario y exactamente **una** fuente de credenciales.
+
+```json
+{
+  "registries": {
+    "auth": {
+      "ghcr.io": {
+        "username": "octocat",
+        "store": "keyring"
+      }
+    }
+  }
+}
+```
+
+#### Campos de la entrada de autenticación
+
+| Campo | Obligatorio | Descripción |
+|-------|----------|-------------|
+| `username` | Sí | Nombre de usuario del registro |
+| `store` | No | Almacén de credenciales. Solo se admite `"keyring"` (Keychain de macOS, Administrador de credenciales de Windows, Secret Service de Linux) |
+| `password_env` | No | Variable de entorno que contiene la contraseña o el token |
+| `secret_name` | No | Nombre de archivo bajo `{home}/secrets/registries/` que contiene la contraseña o el token |
+
+<Note>
+  Exactamente uno de `store`, `password_env` o `secret_name` debe establecerse por entrada. No establecer ninguno o establecer más de uno es un error.
+</Note>
+
+### Orden de resolución de autenticación
+
+Al extraer desde un registro, las credenciales se resuelven en este orden:
+
+1. **Autenticación explícita del SDK** mediante `.registry_auth()` en el constructor del sandbox
+2. **Entradas del keyring del sistema operativo** creadas por `msb registry login`
+3. **Archivo de configuración** entradas de `registries.auth` en `config.json`
+4. **Configuración de Docker** asistentes de credenciales de `~/.docker/config.json`
+5. **Anónimo** (sin autenticación)

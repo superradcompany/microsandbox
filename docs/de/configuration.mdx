@@ -1,0 +1,138 @@
+---
+title: config.json
+description: Globale config.json-Referenz
+icon: "gear"
+---
+
+microsandbox liest seine globale Konfiguration aus `~/.microsandbox/config.json`. Alle Felder sind optional. Eine fehlende Datei oder ein leeres JSON-Objekt entspricht der Verwendung der Standardwerte.
+
+<Accordion title="Vollständiges Beispiel">
+```json
+{
+  "home": "/custom/path/.microsandbox",
+  "log_level": "info",
+  "database": {
+    "url": "sqlite:///tmp/msb.db",
+    "max_connections": 10,
+    "connect_timeout_secs": 30
+  },
+  "paths": {
+    "msb": "/usr/local/bin/msb",
+    "libkrunfw": "/usr/local/lib/libkrunfw.so",
+    "cache": "/mnt/fast/msb-cache",
+    "sandboxes": null,
+    "volumes": null,
+    "logs": null,
+    "secrets": null
+  },
+  "sandbox_defaults": {
+    "cpus": 2,
+    "memory_mib": 1024,
+    "shell": "/bin/bash",
+    "workdir": "/app"
+  },
+  "registries": {
+    "auth": {
+      "ghcr.io": {
+        "username": "octocat",
+        "store": "keyring"
+      },
+      "registry.example.com": {
+        "username": "deploy",
+        "password_env": "REGISTRY_TOKEN"
+      },
+      "docker.io": {
+        "username": "user",
+        "secret_name": "dockerhub-token"
+      }
+    }
+  }
+}
+```
+</Accordion>
+
+## Felder der obersten Ebene
+
+| Feld | Standard | Beschreibung |
+|-------|---------|-------------|
+| `home` | `~/.microsandbox` | Stammverzeichnis für alle microsandbox-Daten |
+| `log_level` | `null` (still) | Protokollebene für Sandbox-Prozesse: `error`, `warn`, `info`, `debug`, `trace` |
+| `database` | [Referenz](#database) | Einstellungen für die Datenbankverbindung |
+| `paths` | [Referenz](#paths) | Pfadüberschreibungen für Binärdateien und Verzeichnisse |
+| `sandbox_defaults` | [Referenz](#sandbox_defaults) | Standardwerte, die auf jede Sandbox angewendet werden |
+| `registries` | [Referenz](#registries) | Authentifizierung der Container-Registry |
+
+## `database`
+
+| Feld | Standard | Beschreibung |
+|-------|---------|-------------|
+| `url` | `null` | Datenbank-URL. Verwendet SQLite unter `home`, wenn null |
+| `max_connections` | `5` | Maximale Größe des Verbindungspools |
+| `connect_timeout_secs` | `30` | Timeout beim Abrufen einer Datenbankverbindung aus dem Pool |
+
+## `paths`
+
+Alle Pfadfelder sind optional. Wenn `null`, werden sie relativ zu `home` aufgelöst.
+
+| Feld | Standard | Beschreibung |
+|-------|---------|-------------|
+| `msb` | `{home}/bin/msb` | `msb`-Binärdatei. Aufgelöst über: Umgebungsvariable `MSB_PATH`, dieses Feld, Standardpfad, `PATH` |
+| `libkrunfw` | `{home}/lib/libkrunfw` | Pfad zu einem benutzerdefinierten VM-Kernel (`.so` unter Linux, `.dylib` unter macOS) |
+| `cache` | `{home}/cache` | Image-Layer-Cache |
+| `sandboxes` | `{home}/sandboxes` | Pro-Sandbox-Status |
+| `volumes` | `{home}/volumes` | Benannte Volumes |
+| `logs` | `{home}/logs` | Sandbox-Protokolle |
+| `secrets` | `{home}/secrets` | Geheimnisse. Registry-Geheimnisse befinden sich unter `secrets/registries/` |
+
+## `sandbox_defaults`
+
+Standardwerte, die auf jede Sandbox angewendet werden, sofern sie nicht pro Sandbox überschrieben werden.
+
+| Feld | Standard | Beschreibung |
+|-------|---------|-------------|
+| `cpus` | `1` | Anzahl der vCPUs |
+| `memory_mib` | `512` | Gast-Speicher in MiB |
+| `shell` | `"/bin/sh"` | Shell für interaktive Sitzungen und Skripte |
+| `workdir` | `null` | Arbeitsverzeichnis innerhalb der Sandbox |
+
+## `registries`
+
+### `registries.auth`
+
+Eine Zuordnung von Registry-Hostnamen zu Authentifizierungseinträgen. Jeder Eintrag gibt einen Benutzernamen und genau **eine** Anmeldeinformationsquelle an.
+
+```json
+{
+  "registries": {
+    "auth": {
+      "ghcr.io": {
+        "username": "octocat",
+        "store": "keyring"
+      }
+    }
+  }
+}
+```
+
+#### Felder des Authentifizierungseintrags
+
+| Feld | Erforderlich | Beschreibung |
+|-------|----------|-------------|
+| `username` | Ja | Registry-Benutzername |
+| `store` | Nein | Anmeldeinformationsspeicher. Es wird nur `"keyring"` unterstützt (macOS-Schlüsselbund, Windows-Anmeldeinformationsverwaltung, Linux Secret Service) |
+| `password_env` | Nein | Umgebungsvariable, die das Passwort oder Token enthält |
+| `secret_name` | Nein | Dateiname unter `{home}/secrets/registries/`, der das Passwort oder Token enthält |
+
+<Note>
+  Genau eines von `store`, `password_env` oder `secret_name` muss pro Eintrag festgelegt werden. Keines oder mehr als eines festzulegen ist ein Fehler.
+</Note>
+
+### Auflösungsreihenfolge der Authentifizierung
+
+Beim Abrufen aus einer Registry werden Anmeldeinformationen in dieser Reihenfolge aufgelöst:
+
+1. **Explizite SDK-Authentifizierung** über `.registry_auth()` am Sandbox-Builder
+2. **Einträge im Betriebssystem-Schlüsselbund**, die von `msb registry login` erstellt wurden
+3. **Konfigurationsdatei** `registries.auth`-Einträge in `config.json`
+4. **Docker-Konfiguration** Anmeldeinformationshelfer von `~/.docker/config.json`
+5. **Anonym** (keine Authentifizierung)

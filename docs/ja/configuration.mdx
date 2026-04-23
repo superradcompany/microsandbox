@@ -1,0 +1,138 @@
+---
+title: config.json
+description: グローバル config.json リファレンス
+icon: "gear"
+---
+
+microsandbox はグローバル設定を `~/.microsandbox/config.json` から読み込みます。すべてのフィールドは任意です。ファイルがないか、空の JSON オブジェクトの場合、デフォルト値を使用した場合と同じになります。
+
+<Accordion title="完全な例">
+```json
+{
+  "home": "/custom/path/.microsandbox",
+  "log_level": "info",
+  "database": {
+    "url": "sqlite:///tmp/msb.db",
+    "max_connections": 10,
+    "connect_timeout_secs": 30
+  },
+  "paths": {
+    "msb": "/usr/local/bin/msb",
+    "libkrunfw": "/usr/local/lib/libkrunfw.so",
+    "cache": "/mnt/fast/msb-cache",
+    "sandboxes": null,
+    "volumes": null,
+    "logs": null,
+    "secrets": null
+  },
+  "sandbox_defaults": {
+    "cpus": 2,
+    "memory_mib": 1024,
+    "shell": "/bin/bash",
+    "workdir": "/app"
+  },
+  "registries": {
+    "auth": {
+      "ghcr.io": {
+        "username": "octocat",
+        "store": "keyring"
+      },
+      "registry.example.com": {
+        "username": "deploy",
+        "password_env": "REGISTRY_TOKEN"
+      },
+      "docker.io": {
+        "username": "user",
+        "secret_name": "dockerhub-token"
+      }
+    }
+  }
+}
+```
+</Accordion>
+
+## 最上位フィールド
+
+| フィールド | デフォルト | 説明 |
+|-------|---------|-------------|
+| `home` | `~/.microsandbox` | すべての microsandbox データのルートディレクトリ |
+| `log_level` | `null`(サイレント) | サンドボックスプロセスのログレベル: `error`、`warn`、`info`、`debug`、`trace` |
+| `database` | [リファレンス](#database) | データベース接続設定 |
+| `paths` | [リファレンス](#paths) | バイナリとディレクトリのパスオーバーライド |
+| `sandbox_defaults` | [リファレンス](#sandbox_defaults) | すべてのサンドボックスに適用されるデフォルト |
+| `registries` | [リファレンス](#registries) | コンテナレジストリ認証 |
+
+## `database`
+
+| フィールド | デフォルト | 説明 |
+|-------|---------|-------------|
+| `url` | `null` | データベース URL。null の場合、`home` 配下の SQLite を使用します |
+| `max_connections` | `5` | 接続プールの最大サイズ |
+| `connect_timeout_secs` | `30` | プールからデータベース接続を取得する際のタイムアウト |
+
+## `paths`
+
+すべてのパスフィールドは任意です。`null` の場合、`home` からの相対で解決されます。
+
+| フィールド | デフォルト | 説明 |
+|-------|---------|-------------|
+| `msb` | `{home}/bin/msb` | `msb` バイナリ。次の順序で解決されます: 環境変数 `MSB_PATH`、このフィールド、デフォルトパス、`PATH` |
+| `libkrunfw` | `{home}/lib/libkrunfw` | カスタム VM カーネルへのパス(Linux では `.so`、macOS では `.dylib`) |
+| `cache` | `{home}/cache` | イメージレイヤーキャッシュ |
+| `sandboxes` | `{home}/sandboxes` | サンドボックスごとの状態 |
+| `volumes` | `{home}/volumes` | 名前付きボリューム |
+| `logs` | `{home}/logs` | サンドボックスログ |
+| `secrets` | `{home}/secrets` | シークレット。レジストリのシークレットは `secrets/registries/` 配下にあります |
+
+## `sandbox_defaults`
+
+サンドボックスごとにオーバーライドされない限り、すべてのサンドボックスに適用されるデフォルト。
+
+| フィールド | デフォルト | 説明 |
+|-------|---------|-------------|
+| `cpus` | `1` | vCPU の数 |
+| `memory_mib` | `512` | ゲストメモリ(MiB) |
+| `shell` | `"/bin/sh"` | 対話セッションおよびスクリプト用のシェル |
+| `workdir` | `null` | サンドボックス内の作業ディレクトリ |
+
+## `registries`
+
+### `registries.auth`
+
+レジストリホスト名から認証エントリへのマップです。各エントリはユーザー名とちょうど **1 つ** の認証情報ソースを指定します。
+
+```json
+{
+  "registries": {
+    "auth": {
+      "ghcr.io": {
+        "username": "octocat",
+        "store": "keyring"
+      }
+    }
+  }
+}
+```
+
+#### 認証エントリのフィールド
+
+| フィールド | 必須 | 説明 |
+|-------|----------|-------------|
+| `username` | はい | レジストリのユーザー名 |
+| `store` | いいえ | 認証情報ストア。サポートされるのは `"keyring"` のみ(macOS キーチェーン、Windows 資格情報マネージャー、Linux Secret Service) |
+| `password_env` | いいえ | パスワードまたはトークンを含む環境変数 |
+| `secret_name` | いいえ | パスワードまたはトークンを含む `{home}/secrets/registries/` 配下のファイル名 |
+
+<Note>
+  エントリごとに `store`、`password_env`、`secret_name` のうちちょうど 1 つを設定する必要があります。何も設定しないか、複数設定するとエラーになります。
+</Note>
+
+### 認証の解決順序
+
+レジストリから取得する際、認証情報は次の順序で解決されます。
+
+1. サンドボックスビルダーの `.registry_auth()` を介した **明示的な SDK 認証**
+2. `msb registry login` によって作成された **OS キーリング** エントリ
+3. **設定ファイル** `config.json` の `registries.auth` エントリ
+4. **Docker 設定** `~/.docker/config.json` の認証情報ヘルパー
+5. **匿名**(認証なし)
