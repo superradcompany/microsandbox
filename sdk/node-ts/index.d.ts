@@ -616,7 +616,7 @@ export interface PolicyRule {
    * - "1.2.3.4/24" — CIDR notation
    * - "example.com" — exact domain
    * - ".example.com" — domain suffix
-   * - "loopback", "private", "link-local", "metadata", "multicast" — destination group
+   * - "loopback", "private", "link-local", "metadata", "multicast", "host" — destination group
    */
   destination?: string
   /** Protocol filter: "tcp", "udp", "icmpv4", "icmpv6". */

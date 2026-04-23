@@ -116,6 +116,11 @@ pub enum DestinationGroup {
 
     /// Multicast addresses (`224.0.0.0/4`, `ff00::/8`).
     Multicast,
+
+    /// The sandbox host itself, reachable via the gateway IP and
+    /// `host.microsandbox.internal`. Matches against the per-sandbox
+    /// gateway IPs stored on [`SharedState`].
+    Host,
 }
 
 /// Protocol filter.
@@ -326,6 +331,7 @@ fn matches_destination(dest: &Destination, addr: IpAddr, shared: &SharedState) -
     match dest {
         Destination::Any => true,
         Destination::Cidr(network) => matches_cidr(network, addr),
+        Destination::Group(DestinationGroup::Host) => matches_host(addr, shared),
         Destination::Group(group) => matches_group(*group, addr),
         Destination::Domain(domain) => {
             shared.any_resolved_hostname(addr, |hostname| hostname == domain.as_str())
@@ -333,6 +339,16 @@ fn matches_destination(dest: &Destination, addr: IpAddr, shared: &SharedState) -
         Destination::DomainSuffix(suffix) => {
             shared.any_resolved_hostname(addr, |hostname| matches_suffix(hostname, suffix.as_str()))
         }
+    }
+}
+
+/// Matches the per-sandbox gateway IPs carried by [`SharedState`]. Returns
+/// `false` when gateway IPs haven't been set (e.g. isolated unit tests
+/// that don't exercise Host rules).
+fn matches_host(addr: IpAddr, shared: &SharedState) -> bool {
+    match addr {
+        IpAddr::V4(v4) => shared.gateway_ipv4().is_some_and(|gw| gw == v4),
+        IpAddr::V6(v6) => shared.gateway_ipv6().is_some_and(|gw| gw == v6),
     }
 }
 
@@ -357,6 +373,7 @@ fn matches_suffix(hostname: &str, suffix: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{Ipv4Addr, Ipv6Addr};
     use std::time::Duration;
 
     use super::*;
@@ -384,6 +401,15 @@ mod tests {
         let shared = SharedState::new(4);
         cache(&shared, host, ResolvedHostnameFamily::Ipv4, ip_str);
         shared
+    }
+
+    /// Build a shared state with gateway IPs set, for `Group::Host` tests.
+    fn shared_with_gateway() -> (SharedState, Ipv4Addr, Ipv6Addr) {
+        let shared = SharedState::new(4);
+        let v4 = Ipv4Addr::new(100, 96, 0, 1);
+        let v6 = Ipv6Addr::new(0xfd42, 0x6d73, 0x62, 0, 0, 0, 0, 1);
+        shared.set_gateway_ips(v4, v6);
+        (shared, v4, v6)
     }
 
     fn egress_tcp(policy: &NetworkPolicy, ip_str: &str, shared: &SharedState) -> Action {
@@ -608,6 +634,110 @@ mod tests {
         assert!(
             egress_tcp(&policy, CLOUDFLARE_V6, &shared).is_deny(),
             "uncached IPv6 address must not match through an IPv4-only cache entry"
+        );
+    }
+
+    // -- Group::Host -------------------------------------------------------
+
+    #[test]
+    fn group_host_matches_gateway_v4() {
+        let (shared, gw4, _) = shared_with_gateway();
+        let policy = NetworkPolicy {
+            default_action: Action::Allow,
+            rules: vec![Rule::deny_outbound(Destination::Group(
+                DestinationGroup::Host,
+            ))],
+        };
+        let dst = SocketAddr::new(IpAddr::V4(gw4), 80);
+        assert_eq!(
+            policy.evaluate_egress(dst, Protocol::Tcp, &shared),
+            Action::Deny
+        );
+    }
+
+    #[test]
+    fn group_host_matches_gateway_v6() {
+        let (shared, _, gw6) = shared_with_gateway();
+        let policy = NetworkPolicy {
+            default_action: Action::Allow,
+            rules: vec![Rule::deny_outbound(Destination::Group(
+                DestinationGroup::Host,
+            ))],
+        };
+        let dst = SocketAddr::new(IpAddr::V6(gw6), 80);
+        assert_eq!(
+            policy.evaluate_egress(dst, Protocol::Tcp, &shared),
+            Action::Deny
+        );
+    }
+
+    #[test]
+    fn group_host_does_not_match_other_ips() {
+        let (shared, _, _) = shared_with_gateway();
+        let policy = NetworkPolicy {
+            default_action: Action::Allow,
+            rules: vec![Rule::deny_outbound(Destination::Group(
+                DestinationGroup::Host,
+            ))],
+        };
+        let dst = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 80);
+        assert_eq!(
+            policy.evaluate_egress(dst, Protocol::Tcp, &shared),
+            Action::Allow
+        );
+    }
+
+    #[test]
+    fn public_only_preset_denies_host_gateway() {
+        let (shared, gw4, gw6) = shared_with_gateway();
+        let policy = NetworkPolicy::public_only();
+
+        let v4 = SocketAddr::new(IpAddr::V4(gw4), 80);
+        assert_eq!(
+            policy.evaluate_egress(v4, Protocol::Tcp, &shared),
+            Action::Deny,
+            "default policy should deny host via IPv4 gateway"
+        );
+
+        let v6 = SocketAddr::new(IpAddr::V6(gw6), 80);
+        assert_eq!(
+            policy.evaluate_egress(v6, Protocol::Tcp, &shared),
+            Action::Deny,
+            "default policy should deny host via IPv6 gateway (ULA fd42::/8)"
+        );
+    }
+
+    #[test]
+    fn allow_all_preset_permits_host_gateway() {
+        let (shared, gw4, _) = shared_with_gateway();
+        let policy = NetworkPolicy::allow_all();
+        let v4 = SocketAddr::new(IpAddr::V4(gw4), 80);
+        assert_eq!(
+            policy.evaluate_egress(v4, Protocol::Tcp, &shared),
+            Action::Allow
+        );
+    }
+
+    #[test]
+    fn group_host_allow_overrides_private_deny_when_ordered_first() {
+        let (shared, gw4, _) = shared_with_gateway();
+        let mut policy = NetworkPolicy::public_only();
+        policy.rules.insert(
+            0,
+            Rule::allow_outbound(Destination::Group(DestinationGroup::Host)),
+        );
+
+        let v4 = SocketAddr::new(IpAddr::V4(gw4), 80);
+        assert_eq!(
+            policy.evaluate_egress(v4, Protocol::Tcp, &shared),
+            Action::Allow
+        );
+
+        let other_private = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)), 80);
+        assert_eq!(
+            policy.evaluate_egress(other_private, Protocol::Tcp, &shared),
+            Action::Deny,
+            "non-host private destinations should still be blocked"
         );
     }
 }

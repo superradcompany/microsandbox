@@ -46,7 +46,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// guest, extracts length-prefixed DNS messages, dispatches each
 /// through the shared [`DnsForwarder`] in its own sub-task, and writes
 /// length-prefixed responses back as they arrive.
-pub(crate) struct TcpProxy {
+pub(crate) struct DnsTcpProxy {
     /// The (resolver-IP, 53) the guest aimed at — passed to the
     /// forwarder for upstream selection.
     dst: SocketAddr,
@@ -66,7 +66,7 @@ pub(crate) struct TcpProxy {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl TcpProxy {
+impl DnsTcpProxy {
     /// Spawn a DNS-over-TCP proxy task for a newly established TCP/53
     /// connection. Waits for the forwarder, constructs a [`TcpProxy`],
     /// and drives it to completion.
