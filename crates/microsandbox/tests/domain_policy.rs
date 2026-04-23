@@ -1,17 +1,9 @@
-//! Integration tests for Domain/DomainSuffix network-policy rules.
+//! Integration tests for Domain/DomainSuffix network-policy rules
+//! (regression coverage for issue 603).
 //!
-//! Spins up a real sandbox, installs `curl`, and exercises the fix for
-//! issue 603: a default-deny policy with explicit `Destination::Domain`
-//! / `Destination::DomainSuffix` allow rules must let matching HTTPS
-//! egress through after the guest resolves the hostname via the
-//! in-process DNS interceptor. Before the fix, any connection to a
-//! resolved IP would fall through to default-deny and return
-//! `ConnectionRefused`.
-//!
-//! These tests require KVM (or libkrun on macOS) and real outbound
-//! connectivity to `pypi.org`, `files.pythonhosted.org`, and
-//! `example.com`. The `#[msb_test]` attribute marks them `#[ignore]`,
-//! so plain `cargo test --workspace` skips them. Run them via:
+//! These tests require KVM (or libkrun on macOS). The `#[msb_test]`
+//! attribute marks them `#[ignore]`, so plain `cargo test --workspace`
+//! skips them. Run them via:
 //!
 //!     cargo nextest run -p microsandbox --tests --run-ignored=only
 //!
