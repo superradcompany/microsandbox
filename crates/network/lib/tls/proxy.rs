@@ -8,6 +8,7 @@
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use rustls::pki_types::ServerName;
@@ -35,6 +36,11 @@ const RELAY_BUF_SIZE: usize = 16384;
 //--------------------------------------------------------------------------------------------------
 
 /// Spawn a TLS proxy task for a connection to an intercepted port.
+///
+/// See [`crate::proxy::spawn_tcp_proxy`] for the `upstream_connected`
+/// contract — this task flips the flag after its upstream
+/// `TcpStream::connect` succeeds (in either bypass or intercept mode).
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_tls_proxy(
     handle: &tokio::runtime::Handle,
     dst: SocketAddr,
@@ -42,9 +48,19 @@ pub fn spawn_tls_proxy(
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
     tls_state: Arc<TlsState>,
+    upstream_connected: Arc<AtomicBool>,
 ) {
     handle.spawn(async move {
-        if let Err(e) = tls_proxy_task(dst, from_smoltcp, to_smoltcp, shared, tls_state).await {
+        if let Err(e) = tls_proxy_task(
+            dst,
+            from_smoltcp,
+            to_smoltcp,
+            shared,
+            tls_state,
+            upstream_connected,
+        )
+        .await
+        {
             tracing::debug!(dst = %dst, error = %e, "TLS proxy task ended");
         }
     });
@@ -57,6 +73,7 @@ async fn tls_proxy_task(
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
     tls_state: Arc<TlsState>,
+    upstream_connected: Arc<AtomicBool>,
 ) -> io::Result<()> {
     // Phase 0: Buffer initial data to extract SNI from ClientHello.
     // Timeout prevents a slow/malicious guest from holding a proxy slot indefinitely.
@@ -70,7 +87,15 @@ async fn tls_proxy_task(
 
     if tls_state.should_bypass(&sni_name) {
         tracing::debug!(sni = %sni_name, dst = %dst, "TLS bypass");
-        bypass_relay(dst, initial_buf, from_smoltcp, to_smoltcp, shared).await
+        bypass_relay(
+            dst,
+            initial_buf,
+            from_smoltcp,
+            to_smoltcp,
+            shared,
+            upstream_connected,
+        )
+        .await
     } else {
         tracing::debug!(sni = %sni_name, dst = %dst, "TLS intercept");
         intercept_relay(
@@ -81,6 +106,7 @@ async fn tls_proxy_task(
             to_smoltcp,
             shared,
             tls_state,
+            upstream_connected,
         )
         .await
     }
@@ -93,8 +119,10 @@ async fn bypass_relay(
     mut from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
+    upstream_connected: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let mut server = TcpStream::connect(dst).await?;
+    upstream_connected.store(true, Ordering::Release);
     server.write_all(&initial_buf).await?;
 
     let (mut server_rx, mut server_tx) = server.into_split();
@@ -127,6 +155,7 @@ async fn bypass_relay(
 }
 
 /// Intercept mode: MITM with guest-facing rustls + server-facing tokio_rustls.
+#[allow(clippy::too_many_arguments)]
 async fn intercept_relay(
     dst: SocketAddr,
     sni_name: &str,
@@ -135,6 +164,7 @@ async fn intercept_relay(
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
     tls_state: Arc<TlsState>,
+    upstream_connected: Arc<AtomicBool>,
 ) -> io::Result<()> {
     // Create secrets handler for this connection (filters by SNI).
     // tls_intercepted = true because we're in intercept_relay (not bypass).
@@ -187,6 +217,7 @@ async fn intercept_relay(
 
     // Connect to real server with TLS.
     let server_stream = TcpStream::connect(dst).await?;
+    upstream_connected.store(true, Ordering::Release);
     let server_name = ServerName::try_from(sni_name.to_string())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let mut server_tls = tls_state
