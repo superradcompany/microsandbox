@@ -23,6 +23,7 @@ hickory-proto = { workspace = true, features = ["tls-ring"] }
 ipnetwork = { workspace = true }
 libc = { workspace = true }
 lru = { workspace = true }
+microsandbox-protocol = { version = "0.3.14", path = "../protocol" }
 microsandbox-utils = { version = "0.3.14", path = "../utils" }
 msb_krun = { version = "0.1.10", features = ["net"] }
 pem = "3"

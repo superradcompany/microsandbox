@@ -8,10 +8,10 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::time::Instant;
-use std::sync::atomic::Ordering;
 
 use smoltcp::wire::{
     EthernetAddress, EthernetFrame, EthernetProtocol, HardwareAddress, Icmpv4Packet, Icmpv4Repr,
@@ -25,10 +25,10 @@ use crate::device::SmoltcpDevice;
 use crate::dns::common::ports::DnsPortType;
 use crate::dns::{
     interceptor::DnsInterceptor,
-    proxies::{dot::DotProxy, tcp::TcpProxy},
+    proxies::{dot::DotProxy, tcp::DnsTcpProxy},
 };
 use crate::icmp_relay::IcmpRelay;
-use crate::policy::{NetworkPolicy, Protocol};
+use crate::policy::{NetworkPolicy, PolicyEvaluator, Protocol};
 use crate::proxy;
 use crate::publisher::PortPublisher;
 use crate::shared::SharedState;
@@ -69,14 +69,24 @@ pub struct PollLoopConfig {
     pub gateway_mac: [u8; 6],
     /// Guest MAC address.
     pub guest_mac: [u8; 6],
-    /// Gateway IPv4 address.
-    pub gateway_ipv4: Ipv4Addr,
+    /// Gateway addresses (IPv4 + IPv6) owned by the smoltcp virtual
+    /// stack.
+    pub gateway: GatewayIps,
     /// Guest IPv4 address.
     pub guest_ipv4: Ipv4Addr,
-    /// Gateway IPv6 address.
-    pub gateway_ipv6: Ipv6Addr,
     /// IP-level MTU (e.g. 1500).
     pub mtu: usize,
+}
+
+/// Per-sandbox gateway addresses (v4 + v6) owned by the smoltcp virtual stack.
+/// Both families are always assigned. The proxy's `resolve_host_dst` helper uses
+/// these to rewrite gateway-bound connections to loopback at dial time.
+#[derive(Debug, Clone, Copy)]
+pub struct GatewayIps {
+    /// Gateway IPv4.
+    pub ipv4: Ipv4Addr,
+    /// Gateway IPv6.
+    pub ipv6: Ipv6Addr,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -115,24 +125,24 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
     iface.update_ip_addrs(|addrs| {
         addrs
             .push(IpCidr::new(
-                IpAddress::Ipv4(config.gateway_ipv4),
+                IpAddress::Ipv4(config.gateway.ipv4),
                 // /30 subnet: gateway + guest.
                 30,
             ))
             .expect("failed to add gateway IPv4 address");
         addrs
-            .push(IpCidr::new(IpAddress::Ipv6(config.gateway_ipv6), 64))
+            .push(IpCidr::new(IpAddress::Ipv6(config.gateway.ipv6), 64))
             .expect("failed to add gateway IPv6 address");
     });
 
     // Default routes so smoltcp accepts traffic for all destinations.
     iface
         .routes_mut()
-        .add_default_ipv4_route(config.gateway_ipv4)
+        .add_default_ipv4_route(config.gateway.ipv4)
         .expect("failed to add default IPv4 route");
     iface
         .routes_mut()
-        .add_default_ipv6_route(config.gateway_ipv6)
+        .add_default_ipv6_route(config.gateway.ipv6)
         .expect("failed to add default IPv6 route");
 
     // Accept traffic destined for any IP, not just gateway addresses.
@@ -143,8 +153,8 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 
 /// Main smoltcp poll loop. Runs on a dedicated OS thread.
 ///
-/// Processes guest frames with pre-inspection, drives smoltcp's TCP/IP
-/// stack, and sleeps via `poll(2)` between events.
+/// Processes guest frames with pre-inspection, drives smoltcp's TCP/IP stack,
+/// and sleeps via `poll(2)` between events.
 ///
 /// # Phases per iteration
 ///
@@ -154,6 +164,23 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 ///    tasks (added by later tasks).
 /// 4. **Sleep** — `poll(2)` on `tx_wake` + `proxy_wake` pipes with smoltcp's
 ///    requested timeout.
+///
+/// # Arguments
+///
+/// * `shared` - Stack-wide shared state: `tx_ring` / `rx_ring` for the virtio-net boundary
+///   and the wake eventfds.
+/// * `config` - Resolved per-sandbox parameters (gateway / guest MAC + IPv4 + IPv6, MTU).
+/// * `network_policy` - User-provided egress policy; wrapped in a [`PolicyEvaluator`] here
+///   with the sandbox's gateway IPs so `DestinationGroup::Host` rules match the right address.
+/// * `dns_config` - DNS interception settings (block lists, upstreams, timeout).
+/// * `tls_state` - Optional TLS MITM state; drives interception of intercepted ports and DoT
+///   when present.
+/// * `published_ports` - Host → guest port publishes; the publisher accepts inbound
+///   connections on the host-bind address and forwards into the guest.
+/// * `max_connections` - Optional cap on concurrent guest connections tracked by
+///   [`ConnectionTracker`]; `None` uses the default.
+/// * `tokio_handle` - Runtime handle used for proxy tasks, DNS forwarding, port publishing,
+///   and ICMP relays.
 #[allow(clippy::too_many_arguments)]
 pub fn smoltcp_poll_loop(
     shared: Arc<SharedState>,
@@ -172,14 +199,17 @@ pub fn smoltcp_poll_loop(
 
     // The DNS forwarder needs to know which IPs count as "the gateway"
     // (so it routes guest queries to those addresses through the
-    // configured upstream) and the network policy (so guest-chosen
+    // configured upstream) and a policy evaluator (so guest-chosen
     // `@target` resolvers are gated by egress rules just like any
     // other outbound).
     let gateway_ips: Arc<HashSet<IpAddr>> = Arc::new(HashSet::from([
-        IpAddr::V4(config.gateway_ipv4),
-        IpAddr::V6(config.gateway_ipv6),
+        IpAddr::V4(config.gateway.ipv4),
+        IpAddr::V6(config.gateway.ipv6),
     ]));
-    let network_policy = Arc::new(network_policy);
+    // Wrap the user-provided policy with the per-sandbox context so
+    // `DestinationGroup::Host` resolves to the gateway IPs that
+    // `host.microsandbox.internal` points at.
+    let policy_evaluator = Arc::new(PolicyEvaluator::new(network_policy, config.gateway));
 
     let (mut dns_interceptor, dns_forwarder_handle) = DnsInterceptor::new(
         &mut sockets,
@@ -187,7 +217,8 @@ pub fn smoltcp_poll_loop(
         shared.clone(),
         &tokio_handle,
         gateway_ips,
-        network_policy.clone(),
+        policy_evaluator.clone(),
+        config.gateway,
     );
     let mut port_publisher = PortPublisher::new(&published_ports, config.guest_ipv4, &tokio_handle);
     let mut udp_relay = UdpRelay::new(
@@ -230,7 +261,7 @@ pub fn smoltcp_poll_loop(
                 continue;
             }
 
-            if icmp_relay.relay_outbound_if_echo(frame, &config, &network_policy) {
+            if icmp_relay.relay_outbound_if_echo(frame, &config, &policy_evaluator) {
                 device.drop_staged_frame();
                 continue;
             }
@@ -268,7 +299,7 @@ pub fn smoltcp_poll_loop(
                             false
                         }
                         // Other: regular outbound — apply egress policy.
-                        DnsPortType::Other => network_policy
+                        DnsPortType::Other => policy_evaluator
                             .evaluate_egress(dst, Protocol::Tcp)
                             .is_allow(),
                     };
@@ -318,12 +349,19 @@ pub fn smoltcp_poll_loop(
                     }
 
                     // Policy check.
-                    if network_policy.evaluate_egress(dst, Protocol::Udp).is_deny() {
+                    if policy_evaluator
+                        .evaluate_egress(dst, Protocol::Udp)
+                        .is_deny()
+                    {
                         device.drop_staged_frame();
                         continue;
                     }
 
-                    udp_relay.relay_outbound(frame, src, dst);
+                    // Resolve the host-side destination for the dial.
+                    // `dst` stays unchanged so reply frames are stamped
+                    // with the IP the guest expects.
+                    let host_dst = resolve_host_dst(dst, config.gateway);
+                    udp_relay.relay_outbound(frame, src, dst, host_dst);
                     device.drop_staged_frame();
                 }
 
@@ -372,9 +410,10 @@ pub fn smoltcp_poll_loop(
                     .contains(&conn.dst.port())
             {
                 // TLS-intercepted port — spawn TLS MITM proxy.
+                let conn_dst = resolve_host_dst(conn.dst, config.gateway);
                 tls_proxy::spawn_tls_proxy(
                     &tokio_handle,
-                    conn.dst,
+                    conn_dst,
                     conn.from_smoltcp,
                     conn.to_smoltcp,
                     shared.clone(),
@@ -389,8 +428,10 @@ pub fn smoltcp_poll_loop(
                 // upstream based on `conn.dst.ip()` — the configured
                 // upstream for queries to the gateway, direct forward
                 // to the chosen `@target` (subject to egress policy)
-                // otherwise.
-                TcpProxy::spawn(
+                // otherwise. No gateway→loopback rewrite here: the
+                // forwarder dials the configured upstream, not the
+                // gateway.
+                DnsTcpProxy::spawn(
                     &tokio_handle,
                     conn.dst,
                     conn.from_smoltcp,
@@ -420,9 +461,10 @@ pub fn smoltcp_poll_loop(
                 continue;
             }
             // Plain TCP proxy.
+            let dst = resolve_host_dst(conn.dst, config.gateway);
             proxy::spawn_tcp_proxy(
                 &tokio_handle,
-                conn.dst,
+                dst,
                 conn.from_smoltcp,
                 conn.to_smoltcp,
                 shared.clone(),
@@ -480,6 +522,27 @@ pub fn smoltcp_poll_loop(
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
+/// Map a guest-wire destination to its host-socket equivalent.
+///
+/// Gateway IPs rewrite to loopback (`127.0.0.1` / `::1`); everything else
+/// passes through. Shared by the TCP proxy dispatch and the UDP relay.
+///
+/// # Arguments
+///
+/// * `dst` - Destination from the guest's packet.
+/// * `gateway` - Per-sandbox gateway IPs that trigger the loopback rewrite.
+pub(crate) fn resolve_host_dst(dst: SocketAddr, gateway: GatewayIps) -> SocketAddr {
+    match dst.ip() {
+        IpAddr::V4(v4) if v4 == gateway.ipv4 => {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), dst.port())
+        }
+        IpAddr::V6(v6) if v6 == gateway.ipv6 => {
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), dst.port())
+        }
+        _ => dst,
+    }
+}
+
 /// Get the current time as a smoltcp [`Instant`] using a monotonic clock.
 ///
 /// Uses `std::time::Instant` (monotonic) instead of `SystemTime` (wall
@@ -527,7 +590,7 @@ fn gateway_icmpv4_echo_reply(
     config: &PollLoopConfig,
 ) -> Option<Vec<u8>> {
     let ipv4 = Ipv4Packet::new_checked(eth.payload()).ok()?;
-    if ipv4.dst_addr() != config.gateway_ipv4 || ipv4.next_header() != IpProtocol::Icmp {
+    if ipv4.dst_addr() != config.gateway.ipv4 || ipv4.next_header() != IpProtocol::Icmp {
         return None;
     }
 
@@ -542,7 +605,7 @@ fn gateway_icmpv4_echo_reply(
     };
 
     let ipv4_repr = Ipv4Repr {
-        src_addr: config.gateway_ipv4,
+        src_addr: config.gateway.ipv4,
         dst_addr: ipv4.src_addr(),
         next_header: IpProtocol::Icmp,
         payload_len: 8 + data.len(),
@@ -578,7 +641,7 @@ fn gateway_icmpv6_echo_reply(
     config: &PollLoopConfig,
 ) -> Option<Vec<u8>> {
     let ipv6 = Ipv6Packet::new_checked(eth.payload()).ok()?;
-    if ipv6.dst_addr() != config.gateway_ipv6 || ipv6.next_header() != IpProtocol::Icmpv6 {
+    if ipv6.dst_addr() != config.gateway.ipv6 || ipv6.next_header() != IpProtocol::Icmpv6 {
         return None;
     }
 
@@ -599,7 +662,7 @@ fn gateway_icmpv6_echo_reply(
     };
 
     let ipv6_repr = Ipv6Repr {
-        src_addr: config.gateway_ipv6,
+        src_addr: config.gateway.ipv6,
         dst_addr: ipv6.src_addr(),
         next_header: IpProtocol::Icmpv6,
         payload_len: icmp_repr_buffer_len_v6(data),
@@ -620,7 +683,7 @@ fn gateway_icmpv6_echo_reply(
 
     ipv6_repr.emit(&mut Ipv6Packet::new_unchecked(&mut reply[14..54]));
     icmp_repr.emit(
-        &config.gateway_ipv6,
+        &config.gateway.ipv6,
         &ipv6.src_addr(),
         &mut Icmpv6Packet::new_unchecked(&mut reply[54..]),
         &smoltcp::phy::ChecksumCapabilities::default(),
@@ -934,9 +997,11 @@ mod tests {
         let poll_config = PollLoopConfig {
             gateway_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
             guest_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
-            gateway_ipv4: Ipv4Addr::new(100, 96, 0, 1),
+            gateway: GatewayIps {
+                ipv4: Ipv4Addr::new(100, 96, 0, 1),
+                ipv6: Ipv6Addr::LOCALHOST,
+            },
             guest_ipv4: Ipv4Addr::new(100, 96, 0, 2),
-            gateway_ipv6: Ipv6Addr::LOCALHOST,
             mtu: 1500,
         };
         let mut device = SmoltcpDevice::new(shared.clone(), poll_config.mtu);
@@ -951,7 +1016,7 @@ mod tests {
             .push(build_arp_request_frame(
                 poll_config.guest_mac,
                 poll_config.guest_ipv4.octets(),
-                poll_config.gateway_ipv4.octets(),
+                poll_config.gateway.ipv4.octets(),
             ))
             .unwrap();
         shared
@@ -960,7 +1025,7 @@ mod tests {
                 poll_config.guest_mac,
                 poll_config.gateway_mac,
                 poll_config.guest_ipv4.octets(),
-                poll_config.gateway_ipv4.octets(),
+                poll_config.gateway.ipv4.octets(),
                 0x1234,
                 0xABCD,
                 b"ping",
@@ -993,7 +1058,7 @@ mod tests {
         assert_eq!(eth.ethertype(), EthernetProtocol::Ipv4);
 
         let ipv4 = Ipv4Packet::new_checked(eth.payload()).expect("valid IPv4 packet");
-        assert_eq!(Ipv4Addr::from(ipv4.src_addr()), poll_config.gateway_ipv4);
+        assert_eq!(Ipv4Addr::from(ipv4.src_addr()), poll_config.gateway.ipv4);
         assert_eq!(Ipv4Addr::from(ipv4.dst_addr()), poll_config.guest_ipv4);
         assert_eq!(ipv4.next_header(), IpProtocol::Icmp);
 
@@ -1008,6 +1073,40 @@ mod tests {
                 data: b"ping",
             }
         );
+    }
+
+    fn test_gateway() -> GatewayIps {
+        GatewayIps {
+            ipv4: Ipv4Addr::new(100, 96, 0, 1),
+            ipv6: "fd42:6d73:62::1".parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn resolve_host_dst_matches_ipv4() {
+        let gw = test_gateway();
+        let dst = SocketAddr::new(IpAddr::V4(gw.ipv4), 8080);
+        assert_eq!(
+            resolve_host_dst(dst, gw),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080)
+        );
+    }
+
+    #[test]
+    fn resolve_host_dst_matches_ipv6() {
+        let gw = test_gateway();
+        let dst = SocketAddr::new(IpAddr::V6(gw.ipv6), 8080);
+        assert_eq!(
+            resolve_host_dst(dst, gw),
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080)
+        );
+    }
+
+    #[test]
+    fn resolve_host_dst_passes_through_non_gateway() {
+        let gw = test_gateway();
+        let dst = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 443);
+        assert_eq!(resolve_host_dst(dst, gw), dst);
     }
 
     #[test]
@@ -1033,9 +1132,11 @@ mod tests {
         let poll_config = PollLoopConfig {
             gateway_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
             guest_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
-            gateway_ipv4: Ipv4Addr::new(100, 96, 0, 1),
+            gateway: GatewayIps {
+                ipv4: Ipv4Addr::new(100, 96, 0, 1),
+                ipv6: Ipv6Addr::LOCALHOST,
+            },
             guest_ipv4: Ipv4Addr::new(100, 96, 0, 2),
-            gateway_ipv6: Ipv6Addr::LOCALHOST,
             mtu: 1500,
         };
         let mut device = SmoltcpDevice::new(shared.clone(), poll_config.mtu);
@@ -1048,7 +1149,7 @@ mod tests {
             .push(build_arp_request_frame(
                 poll_config.guest_mac,
                 poll_config.guest_ipv4.octets(),
-                poll_config.gateway_ipv4.octets(),
+                poll_config.gateway.ipv4.octets(),
             ))
             .unwrap();
         shared

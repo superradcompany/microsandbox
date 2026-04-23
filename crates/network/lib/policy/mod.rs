@@ -5,6 +5,7 @@
 //! destination IPs back to domain names.
 
 pub mod destination;
+mod evaluator;
 mod types;
 
 //--------------------------------------------------------------------------------------------------
@@ -12,4 +13,5 @@ mod types;
 //--------------------------------------------------------------------------------------------------
 
 pub use destination::*;
+pub use evaluator::PolicyEvaluator;
 pub use types::*;

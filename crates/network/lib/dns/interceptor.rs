@@ -25,8 +25,9 @@ use super::common::config::NormalizedDnsConfig;
 use super::forwarder::{DnsForwarder, DnsForwarderHandle};
 use super::proxies::udp::UdpProxy;
 use crate::config::DnsConfig;
-use crate::policy::NetworkPolicy;
+use crate::policy::PolicyEvaluator;
 use crate::shared::SharedState;
+use crate::stack::GatewayIps;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -102,17 +103,32 @@ impl DnsInterceptor {
     /// spawns the background forwarder task. Returns the interceptor and
     /// the shared [`DnsForwarderHandle`] used by the TCP/53 proxy.
     ///
-    /// `gateway_ips` (the v4 + v6 addresses the gateway responds to) and
-    /// `network_policy` are forwarded to the per-query upstream selector:
-    /// queries to the gateway use the configured upstream; queries to
-    /// other IPs are routed directly subject to the policy.
+    /// Create the DNS interceptor.
+    ///
+    /// Binds a smoltcp UDP socket to port 53, creates the channel pair,
+    /// and spawns the background forwarder task. Returns the interceptor
+    /// and the shared [`DnsForwarderHandle`] used by the TCP/53 proxy.
+    ///
+    /// # Arguments
+    ///
+    /// * `sockets` - Smoltcp socket set the UDP/53 socket is added to.
+    /// * `dns_config` - Operator DNS config (block lists, upstreams, timeout).
+    /// * `shared` - Stack-wide shared state used by the forwarder's UDP proxy for wake-ups.
+    /// * `tokio_handle` - Runtime the forwarder + proxy tasks are spawned on.
+    /// * `gateway_ips` - Set of gateway IPs (v4 + v6) used to distinguish "guest
+    ///   queried the gateway resolver" from "guest queried a specific `@resolver`"
+    ///   when routing upstream.
+    /// * `evaluator` - Policy evaluator consulted on direct-path queries to a guest-chosen `@resolver`.
+    /// * `gateway` - Gateway IPs returned as A / AAAA answers for `host.microsandbox.internal`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         sockets: &mut SocketSet<'_>,
         dns_config: DnsConfig,
         shared: Arc<SharedState>,
         tokio_handle: &tokio::runtime::Handle,
         gateway_ips: Arc<HashSet<IpAddr>>,
-        network_policy: Arc<NetworkPolicy>,
+        net_policy_evaluator: Arc<PolicyEvaluator>,
+        gateway: GatewayIps,
     ) -> (Self, DnsForwarderHandle) {
         // Create and bind the smoltcp UDP socket.
         let rx_meta = vec![PacketMetadata::EMPTY; DNS_SOCKET_PACKET_SLOTS];
@@ -146,8 +162,13 @@ impl DnsInterceptor {
         //      interceptor's channel and routes them through the
         //      forwarder, mirroring how `tcp.rs` handles per-connection
         //      TCP/53 traffic.
-        let forwarder_handle =
-            DnsForwarder::spawn(tokio_handle, normalized, gateway_ips, network_policy);
+        let forwarder_handle = DnsForwarder::spawn(
+            tokio_handle,
+            normalized,
+            gateway_ips,
+            net_policy_evaluator,
+            gateway,
+        );
         UdpProxy::spawn(
             tokio_handle,
             query_rx,

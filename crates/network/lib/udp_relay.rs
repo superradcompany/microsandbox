@@ -76,7 +76,15 @@ struct UdpSession {
 //--------------------------------------------------------------------------------------------------
 
 impl UdpRelay {
-    /// Create a new UDP relay.
+    /// Build a new UDP relay.
+    ///
+    /// # Arguments
+    ///
+    /// * `shared` - Stack-wide shared state used to inject response frames into `rx_ring`
+    ///   and wake the poll thread.
+    /// * `gateway_mac` - MAC address stamped as the source on synthesized response frames.
+    /// * `guest_mac` - MAC address stamped as the destination on synthesized response frames.
+    /// * `tokio_handle` - Runtime the per-session relay tasks are spawned on.
     pub fn new(
         shared: Arc<SharedState>,
         gateway_mac: [u8; 6],
@@ -94,15 +102,28 @@ impl UdpRelay {
 
     /// Relay an outbound UDP datagram from the guest.
     ///
-    /// Extracts the UDP payload from the raw ethernet frame, looks up or
-    /// creates a session, and sends the payload to the relay task.
-    pub fn relay_outbound(&mut self, frame: &[u8], src: SocketAddr, dst: SocketAddr) {
+    /// # Arguments
+    ///
+    /// * `frame` - Raw ethernet frame captured from the guest.
+    /// * `src` - Guest source address; keys the session and becomes the destination on
+    ///   response frames.
+    /// * `guest_dst` - Destination the guest wrote on the datagram. Retained as the session
+    ///   key and the source IP on replies.
+    /// * `host_dst` - Address the host socket actually connects to. Usually equal to
+    ///   `guest_dst`; the caller substitutes loopback when `guest_dst` matches the gateway IP.
+    pub fn relay_outbound(
+        &mut self,
+        frame: &[u8],
+        src: SocketAddr,
+        guest_dst: SocketAddr,
+        host_dst: SocketAddr,
+    ) {
         // Extract UDP payload from the ethernet frame.
         let Some(payload) = extract_udp_payload(frame) else {
             return;
         };
 
-        let key = (src, dst);
+        let key = (src, guest_dst);
 
         // Create session if it doesn't exist or has expired.
         if self
@@ -111,7 +132,7 @@ impl UdpRelay {
             .is_none_or(|s| s.last_active.elapsed() > SESSION_TIMEOUT)
         {
             self.sessions.remove(&key);
-            if let Some(session) = self.create_session(src, dst) {
+            if let Some(session) = self.create_session(src, guest_dst, host_dst) {
                 self.sessions.insert(key, session);
             } else {
                 return;
@@ -135,7 +156,12 @@ impl UdpRelay {
 
 impl UdpRelay {
     /// Create a new relay session: bind a host UDP socket and spawn a task.
-    fn create_session(&self, guest_src: SocketAddr, guest_dst: SocketAddr) -> Option<UdpSession> {
+    fn create_session(
+        &self,
+        guest_src: SocketAddr,
+        guest_dst: SocketAddr,
+        host_dst: SocketAddr,
+    ) -> Option<UdpSession> {
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
 
         let shared = self.shared.clone();
@@ -147,6 +173,7 @@ impl UdpRelay {
                 outbound_rx,
                 guest_src,
                 guest_dst,
+                host_dst,
                 shared,
                 gateway_mac,
                 guest_mac,
@@ -173,24 +200,53 @@ impl UdpRelay {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Async task that relays UDP between a host socket and the guest.
+/// Per-session UDP relay loop: forwards guest datagrams to a host socket, stamps the replies
+/// back into frames the guest accepts, and exits on idle timeout or channel close.
+///
+/// Binds an ephemeral host UDP socket in the address family of `host_dst` and `connect()`s it
+/// to that peer. The `connect` restricts the socket to that peer's datagrams, which both sets
+/// the default send target and filters spoofed inbound traffic. Responses are wrapped in a
+/// synthesised ethernet frame (src IP = `guest_dst`, dst = `guest_src`) and pushed into
+/// `rx_ring`.
+///
+/// # Arguments
+///
+/// * `outbound_rx` - Receives UDP payloads from the poll-loop side. Channel close signals
+///   session drop.
+/// * `guest_src` - Guest source address; stamped as the destination on reply frames.
+/// * `guest_dst` - Destination the guest wrote on the datagram. Stamped as the source IP on
+///   reply frames so the guest sees replies from the same address it dialed.
+/// * `host_dst` - Address the host socket connects to. Equal to `guest_dst` for external
+///   destinations; rewritten to loopback by [`crate::stack::resolve_host_dst`] when the guest
+///   addressed the gateway.
+/// * `shared` - Shared state; reply frames go into `rx_ring` and wake the poll thread.
+/// * `gateway_mac` - Source MAC on reply frames (guest sees replies from the gateway's MAC).
+/// * `guest_mac` - Destination MAC on reply frames.
+///
+/// # Errors
+///
+/// Returns [`std::io::Error`] when the initial `bind` or `connect` on
+/// the host UDP socket fails, or when the host-side `recv` fails after
+/// the socket was established.
+#[allow(clippy::too_many_arguments)]
 async fn udp_relay_task(
     mut outbound_rx: mpsc::Receiver<Bytes>,
     guest_src: SocketAddr,
     guest_dst: SocketAddr,
+    host_dst: SocketAddr,
     shared: Arc<SharedState>,
     gateway_mac: EthernetAddress,
     guest_mac: EthernetAddress,
 ) -> std::io::Result<()> {
-    // Bind a host UDP socket. Use the same address family as the destination.
-    let bind_addr: SocketAddr = match guest_dst {
+    // Bind a host UDP socket. Use the same address family as the host destination.
+    let bind_addr: SocketAddr = match host_dst {
         SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0u16).into(),
         SocketAddr::V6(_) => (std::net::Ipv6Addr::UNSPECIFIED, 0u16).into(),
     };
     let socket = UdpSocket::bind(bind_addr).await?;
     // Connect to the destination to restrict accepted source addresses,
     // preventing host-network entities from injecting spoofed datagrams.
-    socket.connect(guest_dst).await?;
+    socket.connect(host_dst).await?;
 
     let mut recv_buf = vec![0u8; RECV_BUF_SIZE];
     let timeout = SESSION_TIMEOUT;

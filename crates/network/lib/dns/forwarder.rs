@@ -32,7 +32,8 @@ use bytes::Bytes;
 use futures::StreamExt;
 use hickory_client::client::Client;
 use hickory_client::proto::op::{Message, MessageType, ResponseCode};
-use hickory_client::proto::rr::RData;
+use hickory_client::proto::rr::rdata::{A, AAAA};
+use hickory_client::proto::rr::{RData, Record, RecordType};
 use hickory_client::proto::serialize::binary::{BinDecodable, BinEncodable};
 use hickory_client::proto::xfer::{DnsHandle, DnsRequest};
 use tokio::sync::{OnceCell, watch};
@@ -42,7 +43,18 @@ use super::common::config::NormalizedDnsConfig;
 use super::common::filter::{is_domain_blocked, is_private_ipv4, is_private_ipv6};
 use super::common::transport::Transport;
 use super::nameserver::{read_host_dns_servers, resolve_nameservers};
-use crate::policy::NetworkPolicy;
+use crate::policy::PolicyEvaluator;
+use crate::stack::GatewayIps;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// TTL for locally-synthesized `host.microsandbox.internal` answers.
+/// Short enough that the guest re-resolves often (in case we ever
+/// expose a way to change the alias at runtime), long enough to avoid
+/// hammering the forwarder on each connection.
+const HOST_ALIAS_TTL_SECS: u32 = 60;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -75,9 +87,12 @@ pub(crate) struct DnsForwarder {
     /// the configured upstream; queries to other IPs go through the
     /// direct path subject to network egress policy.
     gateway_ips: Arc<HashSet<IpAddr>>,
-    /// Network policy. Direct-path queries consult this for outbound
+    /// Policy evaluator. Direct-path queries consult this for outbound
     /// permission to the chosen `@target` resolver IP.
-    network_policy: Arc<NetworkPolicy>,
+    evaluator: Arc<PolicyEvaluator>,
+    /// Gateway IPs returned as A / AAAA answers when the guest asks
+    /// for `host.microsandbox.internal`.
+    gateway: GatewayIps,
     config: Arc<NormalizedDnsConfig>,
 }
 
@@ -132,6 +147,18 @@ impl DnsForwarder {
         if is_domain_blocked(&domain, &self.config) {
             tracing::debug!(domain = %domain, "DNS query blocked by domain policy");
             return build_status_response(&query_msg, ResponseCode::Refused);
+        }
+
+        // Host alias (`host.microsandbox.internal`): answer locally
+        // with the gateway IPs instead of going upstream. The proxy
+        // dial-time rewrite (stack.rs) then maps those IPs back to
+        // loopback so the guest reaches host services.
+        if is_host_alias_query(&domain) {
+            let qtype = question.query_type();
+            if let Some(bytes) = synthesize_host_alias_response(&query_msg, self.gateway, qtype) {
+                tracing::debug!(domain = %domain, ?qtype, "DNS host alias synthesised locally");
+                return Some(bytes);
+            }
         }
 
         // Pick upstream client based on where the guest aimed and the
@@ -221,12 +248,7 @@ impl DnsForwarder {
         transport: Transport,
         sni: Option<&str>,
     ) -> UpstreamChoice {
-        match decide_upstream(
-            &self.gateway_ips,
-            &self.network_policy,
-            original_dst,
-            transport,
-        ) {
+        match decide_upstream(&self.gateway_ips, &self.evaluator, original_dst, transport) {
             UpstreamDecision::Configured => self.configured_client(transport).await,
             UpstreamDecision::Refused => UpstreamChoice::Refused,
             UpstreamDecision::Direct(addr) => {
@@ -272,15 +294,39 @@ impl DnsForwarder {
     /// TCP/53 proxy ([`super::proxies::tcp::TcpProxy`]) clone the
     /// handle and [`Self::wait`] before serving any query, so they
     /// share one configured upstream + policy across transports.
+    /// Spawn the forwarder init task on the given tokio runtime.
+    ///
+    /// Connects to the configured upstream asynchronously and publishes
+    /// the resulting [`DnsForwarder`] on the returned handle. Both the
+    /// UDP and TCP/53 proxies clone the handle and `wait` before
+    /// serving any query, so they share one configured upstream + policy
+    /// across transports.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Tokio runtime the init task is spawned on.
+    /// * `config` - Normalised DNS config (block lists, timeout,
+    ///   upstream specs).
+    /// * `gateway_ips` - Set of gateway IPs (v4 + v6) used to
+    ///   distinguish "guest queried the gateway resolver" from
+    ///   "guest queried a specific `@resolver`" on the direct path.
+    /// * `evaluator` - Policy evaluator consulted for egress permission
+    ///   on direct-path queries to a guest-chosen `@resolver`.
+    /// * `gateway` - Gateway IPs returned as A / AAAA answers for
+    ///   `host.microsandbox.internal`. Expected to match the pair in
+    ///   `gateway_ips`.
     pub(super) fn spawn(
         handle: &tokio::runtime::Handle,
         config: Arc<NormalizedDnsConfig>,
         gateway_ips: Arc<HashSet<IpAddr>>,
-        network_policy: Arc<NetworkPolicy>,
+        net_policy_evaluator: Arc<PolicyEvaluator>,
+        gateway: GatewayIps,
     ) -> DnsForwarderHandle {
         let (forwarder_tx, forwarder_rx) = watch::channel(None);
         handle.spawn(async move {
-            let Some(forwarder) = Self::build(config, gateway_ips, network_policy).await else {
+            let Some(forwarder) =
+                Self::build(config, gateway_ips, net_policy_evaluator, gateway).await
+            else {
                 // Drop forwarder_tx by returning; waiters observe init
                 // failure as `Self::wait().await == None`.
                 return;
@@ -296,7 +342,8 @@ impl DnsForwarder {
     async fn build(
         config: Arc<NormalizedDnsConfig>,
         gateway_ips: Arc<HashSet<IpAddr>>,
-        network_policy: Arc<NetworkPolicy>,
+        net_policy_evaluator: Arc<PolicyEvaluator>,
+        gateway: GatewayIps,
     ) -> Option<Arc<Self>> {
         let upstreams = if !config.nameservers.is_empty() {
             match resolve_nameservers(&config.nameservers).await {
@@ -335,7 +382,8 @@ impl DnsForwarder {
             configured_tcp: OnceCell::new(),
             configured_upstream: upstream,
             gateway_ips,
-            network_policy,
+            evaluator: net_policy_evaluator,
+            gateway,
             config,
         }))
     }
@@ -367,7 +415,7 @@ impl DnsForwarder {
 /// the rule logic is testable without a real upstream client.
 fn decide_upstream(
     gateway_ips: &HashSet<IpAddr>,
-    policy: &NetworkPolicy,
+    evaluator: &PolicyEvaluator,
     original_dst: Option<IpAddr>,
     transport: Transport,
 ) -> UpstreamDecision {
@@ -383,7 +431,7 @@ fn decide_upstream(
     // the egress policy for that resolver IP over the transport's
     // corresponding port and protocol.
     let policy_dst = SocketAddr::new(dst, transport.upstream_port());
-    if policy
+    if evaluator
         .evaluate_egress(policy_dst, transport.policy_protocol())
         .is_deny()
     {
@@ -407,6 +455,64 @@ fn build_status_response(query: &Message, rcode: ResponseCode) -> Option<Bytes> 
     if let Some(q) = query.queries().first() {
         response.add_query(q.clone());
     }
+    response.to_bytes().ok().map(Bytes::from)
+}
+
+/// Case-insensitive match against [`crate::HOST_ALIAS`] with
+/// trailing-dot tolerance.
+///
+/// DNS names arrive from the wire with a trailing `.` and arbitrary
+/// case. Using `eq_ignore_ascii_case` avoids allocating a lowercased
+/// copy on every query.
+///
+/// # Arguments
+///
+/// * `query_name` - Domain name pulled from the DNS question section.
+fn is_host_alias_query(query_name: &str) -> bool {
+    query_name
+        .trim_end_matches('.')
+        .eq_ignore_ascii_case(crate::HOST_ALIAS)
+}
+
+/// Synthesize an A/AAAA response for `host.microsandbox.internal`.
+///
+/// Returns `None` for query types other than A/AAAA so the caller keeps
+/// forwarding upstream (e.g. MX or TXT queries, which this alias
+/// doesn't serve).
+///
+/// # Arguments
+///
+/// * `query` - The incoming DNS query; its ID, opcode, RD bit, and
+///   question are echoed into the response.
+/// * `gateway` - Gateway IPs; the IPv4 answers an A query, the IPv6
+///   answers an AAAA query.
+/// * `qtype` - Record type the guest asked for. Only `A` and `AAAA`
+///   produce a response.
+fn synthesize_host_alias_response(
+    query: &Message,
+    gateway: GatewayIps,
+    qtype: RecordType,
+) -> Option<Bytes> {
+    let question = query.queries().first()?;
+    let name = question.name().clone();
+
+    let rdata = match qtype {
+        RecordType::A => RData::A(A::from(gateway.ipv4)),
+        RecordType::AAAA => RData::AAAA(AAAA::from(gateway.ipv6)),
+        _ => return None,
+    };
+
+    let mut response = Message::new();
+    response.set_id(query.id());
+    response.set_op_code(query.op_code());
+    response.set_recursion_desired(query.recursion_desired());
+    response.set_message_type(MessageType::Response);
+    response.set_response_code(ResponseCode::NoError);
+    response.set_recursion_available(true);
+    response.set_authoritative(true);
+    response.add_query(question.clone());
+    response.add_answer(Record::from_rdata(name, HOST_ALIAS_TTL_SECS, rdata));
+
     response.to_bytes().ok().map(Bytes::from)
 }
 
@@ -435,7 +541,7 @@ fn build_truncated_response(query: &Message) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::Protocol;
+    use crate::policy::{NetworkPolicy, Protocol};
     use hickory_client::proto::op::{Edns, MessageType, OpCode, Query};
     use hickory_client::proto::rr::{DNSClass, Name, RecordType};
 
@@ -477,6 +583,63 @@ mod tests {
         let msg = Message::from_bytes(&bytes).expect("parse response");
         assert_eq!(msg.response_code(), ResponseCode::ServFail);
         assert_eq!(msg.answers().len(), 0);
+    }
+
+    fn test_gateway() -> GatewayIps {
+        GatewayIps {
+            ipv4: std::net::Ipv4Addr::new(100, 96, 0, 1),
+            ipv6: "fd42:6d73:62::1".parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn synthesize_host_alias_returns_gateway_ipv4_for_a_query() {
+        let query = make_query("host.microsandbox.internal.", RecordType::A);
+        let gw = test_gateway();
+
+        let bytes =
+            synthesize_host_alias_response(&query, gw, RecordType::A).expect("synth returns bytes");
+        let msg = Message::from_bytes(&bytes).expect("parse synthesized response");
+
+        assert_eq!(msg.id(), 0x4242);
+        assert_eq!(msg.response_code(), ResponseCode::NoError);
+        assert_eq!(msg.message_type(), MessageType::Response);
+        assert_eq!(msg.answers().len(), 1);
+
+        let answer = &msg.answers()[0];
+        let RData::A(a) = answer.data() else {
+            panic!("expected A record");
+        };
+        assert_eq!(std::net::Ipv4Addr::from(*a), gw.ipv4);
+    }
+
+    #[test]
+    fn synthesize_host_alias_returns_gateway_ipv6_for_aaaa_query() {
+        let query = make_query("host.microsandbox.internal.", RecordType::AAAA);
+        let gw = test_gateway();
+
+        let bytes = synthesize_host_alias_response(&query, gw, RecordType::AAAA)
+            .expect("synth returns bytes");
+        let msg = Message::from_bytes(&bytes).expect("parse synthesized response");
+
+        let RData::AAAA(aaaa) = msg.answers()[0].data() else {
+            panic!("expected AAAA record");
+        };
+        assert_eq!(std::net::Ipv6Addr::from(*aaaa), gw.ipv6);
+    }
+
+    #[test]
+    fn synthesize_host_alias_returns_none_for_other_qtypes() {
+        let query = make_query("host.microsandbox.internal.", RecordType::MX);
+        assert!(synthesize_host_alias_response(&query, test_gateway(), RecordType::MX).is_none());
+    }
+
+    #[test]
+    fn is_host_alias_query_is_case_insensitive_and_trailing_dot_tolerant() {
+        assert!(is_host_alias_query("host.microsandbox.internal"));
+        assert!(is_host_alias_query("HOST.MICROSANDBOX.internal"));
+        assert!(is_host_alias_query("host.microsandbox.internal."));
+        assert!(!is_host_alias_query("other.microsandbox.internal"));
     }
 
     #[test]
@@ -531,10 +694,20 @@ mod tests {
         ])
     }
 
+    fn evaluator(policy: NetworkPolicy) -> PolicyEvaluator {
+        PolicyEvaluator::new(
+            policy,
+            GatewayIps {
+                ipv4: std::net::Ipv4Addr::new(10, 0, 0, 1),
+                ipv6: std::net::Ipv6Addr::LOCALHOST,
+            },
+        )
+    }
+
     #[test]
     fn decide_upstream_configured_when_dst_is_gateway_v4() {
         let gw = gateway_set();
-        let policy = NetworkPolicy::allow_all();
+        let policy = evaluator(NetworkPolicy::allow_all());
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)));
         assert_eq!(
             decide_upstream(&gw, &policy, dst, Transport::Udp),
@@ -545,7 +718,7 @@ mod tests {
     #[test]
     fn decide_upstream_configured_when_dst_is_gateway_v6() {
         let gw = gateway_set();
-        let policy = NetworkPolicy::allow_all();
+        let policy = evaluator(NetworkPolicy::allow_all());
         let dst = Some(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
         assert_eq!(
             decide_upstream(&gw, &policy, dst, Transport::Tcp),
@@ -559,7 +732,7 @@ mod tests {
         // to fall back to the configured upstream, never accidentally
         // forward to whoever the guest happens to be aiming at.
         let gw = gateway_set();
-        let policy = NetworkPolicy::allow_all();
+        let policy = evaluator(NetworkPolicy::allow_all());
         assert_eq!(
             decide_upstream(&gw, &policy, None, Transport::Udp),
             UpstreamDecision::Configured
@@ -569,7 +742,7 @@ mod tests {
     #[test]
     fn decide_upstream_direct_when_dst_external_and_policy_allows() {
         let gw = gateway_set();
-        let policy = NetworkPolicy::allow_all();
+        let policy = evaluator(NetworkPolicy::allow_all());
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)));
         assert_eq!(
             decide_upstream(&gw, &policy, dst, Transport::Udp),
@@ -583,7 +756,7 @@ mod tests {
         // a private resolver should get REFUSED rather than silently
         // hitting the configured upstream instead.
         let gw = gateway_set();
-        let policy = NetworkPolicy::public_only();
+        let policy = evaluator(NetworkPolicy::public_only());
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 53)));
         assert_eq!(
             decide_upstream(&gw, &policy, dst, Transport::Udp),
@@ -597,7 +770,7 @@ mod tests {
         // still reach the configured upstream. Direct queries get
         // REFUSED.
         let gw = gateway_set();
-        let policy = NetworkPolicy::none();
+        let policy = evaluator(NetworkPolicy::none());
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)));
         assert_eq!(
             decide_upstream(&gw, &policy, dst, Transport::Tcp),
@@ -619,7 +792,7 @@ mod tests {
         use crate::policy::{Action, Destination, Direction, Rule};
         let gw = gateway_set();
         let dst_ip = std::net::Ipv4Addr::new(8, 8, 8, 8);
-        let policy = NetworkPolicy {
+        let policy = evaluator(NetworkPolicy {
             default_action: Action::Allow,
             rules: vec![Rule {
                 direction: Direction::Outbound,
@@ -628,7 +801,7 @@ mod tests {
                 ports: None,
                 action: Action::Deny,
             }],
-        };
+        });
         let dst = Some(IpAddr::V4(dst_ip));
         assert_eq!(
             decide_upstream(&gw, &policy, dst, Transport::Udp),
@@ -643,7 +816,7 @@ mod tests {
     #[test]
     fn decide_upstream_dot_configured_when_dst_is_gateway() {
         let gw = gateway_set();
-        let policy = NetworkPolicy::allow_all();
+        let policy = evaluator(NetworkPolicy::allow_all());
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)));
         assert_eq!(
             decide_upstream(&gw, &policy, dst, Transport::Dot),
@@ -654,7 +827,7 @@ mod tests {
     #[test]
     fn decide_upstream_dot_direct_targets_port_853() {
         let gw = gateway_set();
-        let policy = NetworkPolicy::allow_all();
+        let policy = evaluator(NetworkPolicy::allow_all());
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)));
         assert_eq!(
             decide_upstream(&gw, &policy, dst, Transport::Dot),
@@ -668,7 +841,7 @@ mod tests {
         // regardless of port, since DoT rides TCP.
         use crate::policy::{Action, Destination, Direction, Rule};
         let gw = gateway_set();
-        let policy = NetworkPolicy {
+        let policy = evaluator(NetworkPolicy {
             default_action: Action::Allow,
             rules: vec![Rule {
                 direction: Direction::Outbound,
@@ -677,7 +850,7 @@ mod tests {
                 ports: None,
                 action: Action::Deny,
             }],
-        };
+        });
         let dst = Some(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)));
         assert_eq!(
             decide_upstream(&gw, &policy, dst, Transport::Dot),

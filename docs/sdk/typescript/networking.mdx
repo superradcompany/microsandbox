@@ -118,7 +118,7 @@ A single network policy rule.
 | Field | Type | Description |
 |-------|------|-------------|
 | action | [`PolicyAction`](#policyaction) | What to do when this rule matches |
-| destination? | `string` | Target filter: `'any'`, `'private'`, `'loopback'`, `'metadata'`, `'multicast'`, `'link-local'`, or a CIDR like `'10.0.0.0/8'` |
+| destination? | `string` | Target filter: `'any'`, `'private'`, `'loopback'`, `'metadata'`, `'multicast'`, `'link-local'`, `'host'` (the host machine, reached via `host.microsandbox.internal`), or a CIDR like `'10.0.0.0/8'` |
 | direction? | [`PolicyDirection`](#policydirection) | Traffic direction |
 | port? | `string` | Single port (`"443"`) or range (`"8000-9000"`) |
 | protocol? | [`PolicyProtocol`](#policyprotocol) | Protocol filter |

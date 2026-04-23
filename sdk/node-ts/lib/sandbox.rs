@@ -818,6 +818,7 @@ fn convert_policy_rule(rule: &PolicyRule) -> Option<Rule> {
         Some("link-local") => Destination::Group(DestinationGroup::LinkLocal),
         Some("metadata") => Destination::Group(DestinationGroup::Metadata),
         Some("multicast") => Destination::Group(DestinationGroup::Multicast),
+        Some("host") => Destination::Group(DestinationGroup::Host),
         Some(s) if s.starts_with('.') => Destination::DomainSuffix(s.to_string()),
         Some(s) if s.contains('/') => {
             // CIDR notation

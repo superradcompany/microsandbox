@@ -26,7 +26,12 @@ pub fn init(params: BootParams) -> AgentdResult<()> {
     }
     linux::apply_dir_mounts(&params.dir_mounts)?;
     linux::apply_file_mounts(&params.file_mounts)?;
-    network::apply_hostname(params.hostname.as_deref())?;
+    network::apply_hostname(
+        params.hostname.as_deref(),
+        params.host_alias.as_deref(),
+        params.net_ipv4.as_ref().map(|v4| v4.gateway),
+        params.net_ipv6.as_ref().map(|v6| v6.gateway),
+    )?;
     linux::apply_tmpfs_mounts(&params.tmpfs)?;
     linux::ensure_standard_tmp_permissions()?;
     network::apply_network_config(params.network())?;

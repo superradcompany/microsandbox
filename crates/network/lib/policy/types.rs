@@ -1,11 +1,11 @@
 //! Policy types: rules, actions, destinations, and protocol matching.
-
-use std::net::SocketAddr;
+//!
+//! These are the declarative configuration types a user serialises as
+//! YAML/JSON. Runtime evaluation — which needs per-sandbox context like
+//! the gateway IPs — lives on [`super::evaluator::PolicyEvaluator`].
 
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
-
-use super::destination::{matches_cidr, matches_group};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -14,7 +14,9 @@ use super::destination::{matches_cidr, matches_group};
 /// Network policy with ordered rules.
 ///
 /// Rules are evaluated in first-match-wins order. If no rule matches,
-/// the default action is applied.
+/// the default action is applied. Evaluation itself is performed by
+/// [`super::evaluator::PolicyEvaluator`], which binds this config to
+/// the sandbox's runtime context (gateway IPs, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkPolicy {
     /// Default action for traffic not matching any rule.
@@ -104,6 +106,11 @@ pub enum DestinationGroup {
 
     /// Multicast addresses (`224.0.0.0/4`, `ff00::/8`).
     Multicast,
+
+    /// The sandbox host itself, reachable via the gateway IP and
+    /// `host.microsandbox.internal`. Resolved by
+    /// [`super::evaluator::PolicyEvaluator`] against the per-sandbox gateway IPs.
+    Host,
 }
 
 /// Protocol filter.
@@ -179,60 +186,6 @@ impl NetworkPolicy {
             ],
         }
     }
-
-    /// Evaluate an outbound connection against the policy.
-    ///
-    /// Returns the action from the first matching rule, or the default
-    /// action if no rule matches.
-    pub fn evaluate_egress(&self, dst: SocketAddr, protocol: Protocol) -> Action {
-        for rule in &self.rules {
-            if rule.direction != Direction::Outbound {
-                continue;
-            }
-            if let Some(ref rule_proto) = rule.protocol
-                && *rule_proto != protocol
-            {
-                continue;
-            }
-            if let Some(ref ports) = rule.ports
-                && !ports.contains(dst.port())
-            {
-                continue;
-            }
-            if !matches_destination(&rule.destination, dst.ip()) {
-                continue;
-            }
-            return rule.action;
-        }
-        self.default_action
-    }
-
-    /// Evaluate an outbound ICMP packet against the policy.
-    ///
-    /// Same first-match-wins logic as [`Self::evaluate_egress`] but without port
-    /// matching — ICMP has no ports. Rules with a `ports` filter are
-    /// skipped since applying a port range to a portless protocol would
-    /// be semantically incorrect.
-    pub fn evaluate_egress_ip(&self, dst: std::net::IpAddr, protocol: Protocol) -> Action {
-        for rule in &self.rules {
-            if rule.direction != Direction::Outbound {
-                continue;
-            }
-            if let Some(ref rule_proto) = rule.protocol
-                && *rule_proto != protocol
-            {
-                continue;
-            }
-            if rule.ports.is_some() {
-                continue;
-            }
-            if !matches_destination(&rule.destination, dst) {
-                continue;
-            }
-            return rule.action;
-        }
-        self.default_action
-    }
 }
 
 impl Action {
@@ -294,21 +247,5 @@ impl PortRange {
     /// Returns `true` if the port falls within this range.
     pub fn contains(&self, port: u16) -> bool {
         port >= self.start && port <= self.end
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions
-//--------------------------------------------------------------------------------------------------
-
-/// Check if an IP address matches a destination specification.
-fn matches_destination(dest: &Destination, addr: std::net::IpAddr) -> bool {
-    match dest {
-        Destination::Any => true,
-        Destination::Cidr(network) => matches_cidr(network, addr),
-        Destination::Group(group) => matches_group(*group, addr),
-        // Domain and DomainSuffix require a DNS pin set for IP→domain
-        // reverse lookup. Without pins, they don't match by IP alone.
-        Destination::Domain(_) | Destination::DomainSuffix(_) => false,
     }
 }

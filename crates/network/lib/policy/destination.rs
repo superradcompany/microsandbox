@@ -12,6 +12,9 @@ use super::DestinationGroup;
 //--------------------------------------------------------------------------------------------------
 
 /// Returns `true` if `addr` belongs to the given destination group.
+///
+/// `DestinationGroup::Host` is handled by the policy-level matcher
+/// because it needs per-sandbox gateway IPs; it returns `false` here.
 pub fn matches_group(group: DestinationGroup, addr: IpAddr) -> bool {
     match group {
         DestinationGroup::Loopback => is_loopback(addr),
@@ -19,6 +22,7 @@ pub fn matches_group(group: DestinationGroup, addr: IpAddr) -> bool {
         DestinationGroup::LinkLocal => is_link_local(addr),
         DestinationGroup::Metadata => is_metadata(addr),
         DestinationGroup::Multicast => is_multicast(addr),
+        DestinationGroup::Host => false,
     }
 }
 

@@ -16,7 +16,7 @@ use smoltcp::wire::{
     Icmpv6Packet, Icmpv6Repr, IpProtocol, Ipv4Packet, Ipv4Repr, Ipv6Packet, Ipv6Repr,
 };
 
-use crate::policy::{NetworkPolicy, Protocol};
+use crate::policy::{PolicyEvaluator, Protocol};
 use crate::shared::SharedState;
 use crate::stack::PollLoopConfig;
 
@@ -116,7 +116,7 @@ impl IcmpRelay {
         &self,
         frame: &[u8],
         config: &PollLoopConfig,
-        policy: &NetworkPolicy,
+        evaluator: &PolicyEvaluator,
     ) -> bool {
         let Ok(eth) = EthernetFrame::new_checked(frame) else {
             return false;
@@ -124,10 +124,10 @@ impl IcmpRelay {
 
         match eth.ethertype() {
             EthernetProtocol::Ipv4 if matches!(self.backend_v4, EchoBackend::Available) => {
-                self.try_relay_icmpv4(&eth, config, policy)
+                self.try_relay_icmpv4(&eth, config, evaluator)
             }
             EthernetProtocol::Ipv6 if matches!(self.backend_v6, EchoBackend::Available) => {
-                self.try_relay_icmpv6(&eth, config, policy)
+                self.try_relay_icmpv6(&eth, config, evaluator)
             }
             _ => false,
         }
@@ -140,7 +140,7 @@ impl IcmpRelay {
         &self,
         eth: &EthernetFrame<&[u8]>,
         config: &PollLoopConfig,
-        policy: &NetworkPolicy,
+        evaluator: &PolicyEvaluator,
     ) -> bool {
         let Ok(ipv4) = Ipv4Packet::new_checked(eth.payload()) else {
             return false;
@@ -151,7 +151,7 @@ impl IcmpRelay {
 
         // Gateway echo is already handled upstream — skip.
         let dst_ip: Ipv4Addr = ipv4.dst_addr();
-        if dst_ip == config.gateway_ipv4 {
+        if dst_ip == config.gateway.ipv4 {
             return false;
         }
 
@@ -168,7 +168,7 @@ impl IcmpRelay {
         };
 
         // Policy check.
-        if policy
+        if evaluator
             .evaluate_egress_ip(IpAddr::V4(dst_ip), Protocol::Icmpv4)
             .is_deny()
         {
@@ -211,7 +211,7 @@ impl IcmpRelay {
         &self,
         eth: &EthernetFrame<&[u8]>,
         config: &PollLoopConfig,
-        policy: &NetworkPolicy,
+        evaluator: &PolicyEvaluator,
     ) -> bool {
         let Ok(ipv6) = Ipv6Packet::new_checked(eth.payload()) else {
             return false;
@@ -222,7 +222,7 @@ impl IcmpRelay {
 
         // Gateway echo is already handled upstream — skip.
         let dst_ip: Ipv6Addr = ipv6.dst_addr();
-        if dst_ip == config.gateway_ipv6 {
+        if dst_ip == config.gateway.ipv6 {
             return false;
         }
 
@@ -244,7 +244,7 @@ impl IcmpRelay {
         };
 
         // Policy check.
-        if policy
+        if evaluator
             .evaluate_egress_ip(IpAddr::V6(dst_ip), Protocol::Icmpv6)
             .is_deny()
         {

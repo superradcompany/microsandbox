@@ -2678,6 +2678,7 @@ dependencies = [
  "ipnetwork",
  "libc",
  "lru",
+ "microsandbox-protocol",
  "microsandbox-utils",
  "msb_krun",
  "pem",

@@ -197,6 +197,49 @@ msb create python --name api -p 8080:80
 
 </CodeGroup>
 
+## Reaching the host
+
+From inside the sandbox, `host.microsandbox.internal` resolves to the host machine, same idea as Docker's `host.docker.internal`. Use it to call a dev server, database, or other process running on your machine without hard-coding an IP.
+
+```bash
+# Inside the sandbox:
+curl http://host.microsandbox.internal:8080
+```
+
+The name is wired through `/etc/hosts` and the DNS interceptor, so both standard resolvers and tools that bypass `/etc/hosts` (like `dig`) find it.
+
+The default `public_only` preset denies host access — the sandbox gateway sits in a private range, same as any other local destination. Switch to `allow_all` (or a custom policy with `DestinationGroup::Host`) to open it:
+
+<CodeGroup>
+```rust Rust
+use microsandbox::NetworkPolicy;
+use microsandbox_network::policy::{Action, Destination, DestinationGroup, Rule};
+
+// Deny everything except the host.
+let policy = NetworkPolicy {
+    default_action: Action::Deny,
+    rules: vec![Rule::allow_outbound(Destination::Group(DestinationGroup::Host))],
+};
+```
+
+```typescript TypeScript
+const policy = {
+    defaultAction: "deny",
+    rules: [{ action: "allow", direction: "outbound", destination: "host" }],
+}
+```
+
+```python Python
+from microsandbox import Action, NetworkPolicy, Rule
+
+policy = NetworkPolicy(
+    default_action=Action.DENY,
+    rules=(Rule.allow(destination="host"),),
+)
+```
+
+</CodeGroup>
+
 ## Protocol support
 
 For most sandboxed workloads, networking behaves the way you'd expect:
