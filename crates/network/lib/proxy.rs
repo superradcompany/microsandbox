@@ -8,6 +8,7 @@
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -43,6 +44,12 @@ const PEEK_BUDGET: Duration = Duration::from_secs(5);
 /// match against. `connect_dst` is the host-side address tokio actually
 /// dials; for host-alias connections it's loopback (gateway rewritten).
 /// For everything else the two are identical.
+///
+/// `upstream_connected` is flipped to `true` after the upstream
+/// `TcpStream::connect` succeeds. The connection tracker reads this
+/// on proxy exit to decide between FIN (clean close) and RST
+/// (upstream never reached, e.g. connect failure or policy denial).
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_tcp_proxy(
     handle: &tokio::runtime::Handle,
     guest_dst: SocketAddr,
@@ -51,6 +58,7 @@ pub fn spawn_tcp_proxy(
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
     network_policy: Arc<NetworkPolicy>,
+    upstream_connected: Arc<AtomicBool>,
 ) {
     handle.spawn(async move {
         if let Err(e) = tcp_proxy_task(
@@ -60,6 +68,7 @@ pub fn spawn_tcp_proxy(
             to_smoltcp,
             shared,
             network_policy,
+            upstream_connected,
         )
         .await
         {
@@ -77,6 +86,7 @@ async fn tcp_proxy_task(
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
     network_policy: Arc<NetworkPolicy>,
+    upstream_connected: Arc<AtomicBool>,
 ) -> io::Result<()> {
     // Peek only when there's a Domain/DomainSuffix rule that could
     // need an SNI to refine. Otherwise the SYN handler's decision is
@@ -116,6 +126,7 @@ async fn tcp_proxy_task(
     }
 
     let stream = TcpStream::connect(connect_dst).await?;
+    upstream_connected.store(true, Ordering::Release);
     let (mut server_rx, mut server_tx) = stream.into_split();
 
     // Replay the buffered first flight before relay starts.
