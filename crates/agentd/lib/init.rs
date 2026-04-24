@@ -26,6 +26,7 @@ pub fn init(params: BootParams) -> AgentdResult<()> {
     }
     linux::apply_dir_mounts(&params.dir_mounts)?;
     linux::apply_file_mounts(&params.file_mounts)?;
+    linux::apply_disk_mounts(&params.disk_mounts)?;
     network::apply_hostname(
         params.hostname.as_deref(),
         params.host_alias.as_deref(),
@@ -72,7 +73,7 @@ mod linux {
     use nix::sys::stat::Mode;
     use nix::unistd;
 
-    use crate::config::{BlockRootSpec, DirMountSpec, FileMountSpec, TmpfsSpec};
+    use crate::config::{BlockRootSpec, DirMountSpec, DiskMountSpec, FileMountSpec, TmpfsSpec};
     use crate::error::{AgentdError, AgentdResult};
 
     /// Mounts essential Linux filesystems.
@@ -484,6 +485,119 @@ mod linux {
         Ok(())
     }
 
+    /// Mounts each disk-image volume at its guest path.
+    pub fn apply_disk_mounts(specs: &[DiskMountSpec]) -> AgentdResult<()> {
+        for spec in specs {
+            mount_disk(spec)?;
+        }
+        Ok(())
+    }
+
+    /// Resolve the block device for a disk-image mount id.
+    ///
+    /// Primary path: `/dev/disk/by-id/virtio-<id>`, which udev/kernel
+    /// create when the VMM sets `virtio_blk_config.serial`.
+    /// Fallback: scan `/sys/block/*/serial` for a match, which works
+    /// even when udev is unavailable or has not yet populated the
+    /// symlink.
+    fn resolve_disk_device(id: &str) -> AgentdResult<String> {
+        use std::{thread::sleep, time::Duration};
+        const RETRIES: u32 = 20;
+        const INTERVAL: Duration = Duration::from_millis(10);
+
+        let by_id = format!("/dev/disk/by-id/virtio-{id}");
+        for _ in 0..RETRIES {
+            if Path::new(&by_id).exists() {
+                return Ok(by_id);
+            }
+            if let Some(dev) = scan_block_serial(id) {
+                return Ok(dev);
+            }
+            sleep(INTERVAL);
+        }
+        Err(AgentdError::Init(format!(
+            "disk mount: no block device found for id '{id}' \
+             (checked /dev/disk/by-id/virtio-{id} and /sys/block/*/serial)"
+        )))
+    }
+
+    /// Walk `/sys/block/*` for an entry whose `serial` file matches `id`.
+    fn scan_block_serial(id: &str) -> Option<String> {
+        let entries = fs::read_dir("/sys/block").ok()?;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name_str) = name.to_str() else {
+                continue;
+            };
+            if !name_str.starts_with("vd") {
+                continue;
+            }
+            let serial_path = entry.path().join("serial");
+            let Ok(serial) = fs::read_to_string(&serial_path) else {
+                continue;
+            };
+            if serial.trim() == id {
+                return Some(format!("/dev/{name_str}"));
+            }
+        }
+        None
+    }
+
+    fn mount_disk(spec: &DiskMountSpec) -> AgentdResult<()> {
+        let path = spec.guest_path.as_str();
+        fs::create_dir_all(path)
+            .map_err(|e| AgentdError::Init(format!("disk mount: create dir {path}: {e}")))?;
+
+        let device = resolve_disk_device(&spec.id)?;
+
+        let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
+        if spec.readonly {
+            flags |= MsFlags::MS_RDONLY;
+        }
+
+        if let Some(fstype) = spec.fstype.as_deref() {
+            mount::mount(
+                Some(device.as_str()),
+                path,
+                Some(fstype),
+                flags,
+                None::<&str>,
+            )
+            .map_err(|e| {
+                AgentdError::Init(format!(
+                    "disk mount: failed to mount {device} at {path} as {fstype}: {e}"
+                ))
+            })?;
+        } else {
+            try_mount_with_flags(&device, path, flags)?;
+        }
+
+        Ok(())
+    }
+
+    /// Like `try_mount`, but honors caller-provided flags (notably MS_RDONLY).
+    fn try_mount_with_flags(device: &str, target: &str, flags: MsFlags) -> AgentdResult<()> {
+        let content = fs::read_to_string("/proc/filesystems")
+            .map_err(|e| AgentdError::Init(format!("failed to read /proc/filesystems: {e}")))?;
+
+        for line in content.lines() {
+            if line.starts_with("nodev") {
+                continue;
+            }
+            let fstype = line.trim();
+            if fstype.is_empty() {
+                continue;
+            }
+            if mount::mount(Some(device), target, Some(fstype), flags, None::<&str>).is_ok() {
+                return Ok(());
+            }
+        }
+
+        Err(AgentdError::Init(format!(
+            "disk mount: failed to mount {device} at {target}: no supported filesystem found"
+        )))
+    }
+
     /// Mounts each tmpfs from the parsed specs.
     pub fn apply_tmpfs_mounts(specs: &[TmpfsSpec]) -> AgentdResult<()> {
         for spec in specs {
@@ -520,6 +634,9 @@ mod linux {
         let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
         if spec.noexec {
             flags |= MsFlags::MS_NOEXEC;
+        }
+        if spec.readonly {
+            flags |= MsFlags::MS_RDONLY;
         }
 
         // Mount data: size and mode options.

@@ -17,8 +17,8 @@ use std::env;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use microsandbox_protocol::{
-    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_FILE_MOUNTS, ENV_HOST_ALIAS, ENV_HOSTNAME, ENV_NET,
-    ENV_NET_IPV4, ENV_NET_IPV6, ENV_RLIMITS, ENV_TMPFS, ENV_USER, exec::ExecRlimit,
+    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HOST_ALIAS, ENV_HOSTNAME,
+    ENV_NET, ENV_NET_IPV4, ENV_NET_IPV6, ENV_RLIMITS, ENV_TMPFS, ENV_USER, exec::ExecRlimit,
 };
 
 use crate::error::{AgentdError, AgentdResult};
@@ -45,6 +45,9 @@ pub struct BootParams {
 
     /// Parsed `MSB_FILE_MOUNTS` — virtiofs file mount specs (empty when unset).
     pub(crate) file_mounts: Vec<FileMountSpec>,
+
+    /// Parsed `MSB_DISK_MOUNTS` — disk-image mount specs (empty when unset).
+    pub(crate) disk_mounts: Vec<DiskMountSpec>,
 
     /// Parsed `MSB_TMPFS` — tmpfs mount specs (empty when unset).
     pub(crate) tmpfs: Vec<TmpfsSpec>,
@@ -90,6 +93,7 @@ pub(crate) struct TmpfsSpec {
     pub size_mib: Option<u32>,
     pub mode: Option<u32>,
     pub noexec: bool,
+    pub readonly: bool,
 }
 
 /// Parsed block-device root specification with kind-based dispatch.
@@ -122,6 +126,21 @@ pub(crate) struct FileMountSpec {
     pub tag: String,
     pub filename: String,
     pub guest_path: String,
+    pub readonly: bool,
+}
+
+/// Parsed disk-image volume mount specification.
+///
+/// Each entry corresponds to one extra virtio-blk device attached by the
+/// VMM. Agentd resolves the device node from `id` via
+/// `/dev/disk/by-id/virtio-<id>` and mounts it at `guest_path`.
+#[derive(Debug)]
+pub(crate) struct DiskMountSpec {
+    pub id: String,
+    pub guest_path: String,
+    /// Inner filesystem type. `None` triggers an autodetect walk over
+    /// `/proc/filesystems` in agentd's init path.
+    pub fstype: Option<String>,
     pub readonly: bool,
 }
 
@@ -181,6 +200,10 @@ impl BootParams {
                 .unwrap_or_default(),
             file_mounts: read_env(ENV_FILE_MOUNTS)
                 .map(|v| parse_file_mounts(&v))
+                .transpose()?
+                .unwrap_or_default(),
+            disk_mounts: read_env(ENV_DISK_MOUNTS)
+                .map(|v| parse_disk_mounts(&v))
                 .transpose()?
                 .unwrap_or_default(),
             tmpfs: read_env(ENV_TMPFS)
@@ -394,6 +417,71 @@ fn parse_file_mount_entry(entry: &str) -> AgentdResult<FileMountSpec> {
     })
 }
 
+/// Parses semicolon-separated disk-image mount entries.
+fn parse_disk_mounts(val: &str) -> AgentdResult<Vec<DiskMountSpec>> {
+    val.split(';')
+        .filter(|e| !e.is_empty())
+        .map(parse_disk_mount_entry)
+        .collect()
+}
+
+/// Parses a single disk-image mount entry: `id:guest_path[:fstype][:ro]`.
+///
+/// `fstype` may be empty (treated as autodetect). `ro` is the optional
+/// final token.
+fn parse_disk_mount_entry(entry: &str) -> AgentdResult<DiskMountSpec> {
+    let parts: Vec<&str> = entry.split(':').collect();
+    if parts.len() < 2 {
+        return Err(AgentdError::Config(format!(
+            "MSB_DISK_MOUNTS entry must be id:guest_path[:fstype][:ro], got: {entry}"
+        )));
+    }
+
+    let id = parts[0];
+    let guest_path = parts[1];
+    let mut fstype: Option<String> = None;
+    let mut readonly = false;
+
+    if let Some(third) = parts.get(2) {
+        if !third.is_empty() {
+            fstype = Some((*third).to_string());
+        }
+    }
+    if let Some(fourth) = parts.get(3) {
+        match *fourth {
+            "ro" => readonly = true,
+            other => {
+                return Err(AgentdError::Config(format!(
+                    "MSB_DISK_MOUNTS unknown flag '{other}' (expected 'ro')"
+                )));
+            }
+        }
+    }
+    if parts.len() > 4 {
+        return Err(AgentdError::Config(format!(
+            "MSB_DISK_MOUNTS entry has too many parts: {entry}"
+        )));
+    }
+
+    if id.is_empty() {
+        return Err(AgentdError::Config(
+            "MSB_DISK_MOUNTS entry has empty id".into(),
+        ));
+    }
+    if guest_path.is_empty() || !guest_path.starts_with('/') {
+        return Err(AgentdError::Config(format!(
+            "MSB_DISK_MOUNTS guest path must be absolute: {guest_path}"
+        )));
+    }
+
+    Ok(DiskMountSpec {
+        id: id.to_string(),
+        guest_path: guest_path.to_string(),
+        fstype,
+        readonly,
+    })
+}
+
 /// Parses semicolon-separated tmpfs mount entries.
 fn parse_tmpfs_mounts(val: &str) -> AgentdResult<Vec<TmpfsSpec>> {
     val.split(';')
@@ -415,10 +503,13 @@ fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec> {
     let mut size_mib = None;
     let mut mode = None;
     let mut noexec = false;
+    let mut readonly = false;
 
     for opt in parts {
         if opt == "noexec" {
             noexec = true;
+        } else if opt == "ro" {
+            readonly = true;
         } else if let Some(val) = opt.strip_prefix("size=") {
             size_mib = Some(
                 val.parse::<u32>()
@@ -439,6 +530,7 @@ fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec> {
         size_mib,
         mode,
         noexec,
+        readonly,
     })
 }
 
@@ -811,6 +903,78 @@ mod tests {
         let spec = parse_tmpfs_entry("/tmp,noexec").unwrap();
         assert_eq!(spec.path, "/tmp");
         assert!(spec.noexec);
+    }
+
+    // ── Disk Mounts ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_disk_mount_entry_basic() {
+        let spec = parse_disk_mount_entry("data_abc:/data:ext4").unwrap();
+        assert_eq!(spec.id, "data_abc");
+        assert_eq!(spec.guest_path, "/data");
+        assert_eq!(spec.fstype.as_deref(), Some("ext4"));
+        assert!(!spec.readonly);
+    }
+
+    #[test]
+    fn test_parse_disk_mount_entry_readonly() {
+        let spec = parse_disk_mount_entry("seed_7f:/seed:ext4:ro").unwrap();
+        assert!(spec.readonly);
+        assert_eq!(spec.fstype.as_deref(), Some("ext4"));
+    }
+
+    #[test]
+    fn test_parse_disk_mount_entry_empty_fstype_means_autodetect() {
+        let spec = parse_disk_mount_entry("probe_1:/data::ro").unwrap();
+        assert!(spec.fstype.is_none());
+        assert!(spec.readonly);
+    }
+
+    #[test]
+    fn test_parse_disk_mount_entry_autodetect_no_ro() {
+        let spec = parse_disk_mount_entry("probe_1:/data").unwrap();
+        assert!(spec.fstype.is_none());
+        assert!(!spec.readonly);
+    }
+
+    #[test]
+    fn test_parse_disk_mount_entry_rejects_unknown_flag() {
+        let err = parse_disk_mount_entry("id:/data:ext4:rw").unwrap_err();
+        assert!(err.to_string().contains("unknown flag"));
+    }
+
+    #[test]
+    fn test_parse_disk_mount_entry_rejects_relative_path() {
+        assert!(parse_disk_mount_entry("id:relative").is_err());
+    }
+
+    #[test]
+    fn test_parse_disk_mount_entry_rejects_empty_id() {
+        assert!(parse_disk_mount_entry(":/data:ext4").is_err());
+    }
+
+    #[test]
+    fn test_parse_disk_mounts_multiple_entries() {
+        let specs = parse_disk_mounts("data_1:/data:ext4;seed_2:/seed::ro;probe_3:/p").unwrap();
+        assert_eq!(specs.len(), 3);
+        assert_eq!(specs[0].guest_path, "/data");
+        assert!(specs[1].readonly);
+        assert!(specs[2].fstype.is_none());
+    }
+
+    #[test]
+    fn test_parse_with_ro() {
+        let spec = parse_tmpfs_entry("/seed,size=64,ro").unwrap();
+        assert_eq!(spec.path, "/seed");
+        assert_eq!(spec.size_mib, Some(64));
+        assert!(spec.readonly);
+        assert!(!spec.noexec);
+    }
+
+    #[test]
+    fn test_parse_ro_defaults_to_false_when_absent() {
+        let spec = parse_tmpfs_entry("/tmp,size=256").unwrap();
+        assert!(!spec.readonly);
     }
 
     #[test]

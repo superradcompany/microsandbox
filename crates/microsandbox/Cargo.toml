@@ -42,6 +42,7 @@ nix = { workspace = true, features = ["process", "signal"] }
 rand.workspace = true
 reqwest.workspace = true
 scopeguard.workspace = true
+sha2.workspace = true
 tar.workspace = true
 tempfile.workspace = true
 sea-orm.workspace = true

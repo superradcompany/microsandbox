@@ -13,7 +13,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use super::{
     config::SandboxConfig,
     exec::{Rlimit, RlimitResource},
-    types::{ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource},
+    types::{
+        ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource, VolumeMount,
+    },
 };
 use crate::{LogLevel, MicrosandboxResult, size::Mebibytes};
 
@@ -574,6 +576,26 @@ impl SandboxBuilder {
                     rlimit.soft,
                     rlimit.hard
                 )));
+            }
+        }
+
+        // Reject two writable DiskImage mounts backing the same host path.
+        // Read-only sharing is fine (guest writes are blocked); writable
+        // sharing corrupts the inner filesystem because each virtio-blk
+        // device caches independently on the host.
+        let mut writable_hosts: Vec<&std::path::Path> = Vec::new();
+        for mount in &self.config.mounts {
+            if let VolumeMount::DiskImage { host, readonly, .. } = mount {
+                if *readonly {
+                    continue;
+                }
+                if writable_hosts.contains(&host.as_path()) {
+                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                        "two writable disk-image volumes cannot share the same host path: {}",
+                        host.display()
+                    )));
+                }
+                writable_hosts.push(host.as_path());
             }
         }
 

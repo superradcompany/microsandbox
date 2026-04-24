@@ -103,9 +103,32 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                         let ro = if *readonly { " (ro)" } else { " (rw)" };
                         println!("  {guest:<16}\u{2192} volume:{name}{ro}");
                     }
-                    VolumeMount::Tmpfs { guest, size_mib } => {
+                    VolumeMount::Tmpfs {
+                        guest,
+                        size_mib,
+                        readonly,
+                    } => {
                         let size = size_mib.map(|s| format!(" ({s} MiB)")).unwrap_or_default();
-                        println!("  {guest:<16}\u{2192} tmpfs{size}");
+                        let ro = if *readonly { " (ro)" } else { "" };
+                        println!("  {guest:<16}\u{2192} tmpfs{size}{ro}");
+                    }
+                    VolumeMount::DiskImage {
+                        host,
+                        guest,
+                        format,
+                        fstype,
+                        readonly,
+                    } => {
+                        let ro = if *readonly { " (ro)" } else { " (rw)" };
+                        let fstype = fstype
+                            .as_deref()
+                            .map(|fs| format!(" [{fs}]"))
+                            .unwrap_or_default();
+                        println!(
+                            "  {guest:<16}\u{2192} disk:{} ({}){fstype}{ro}",
+                            host.display(),
+                            format.as_str()
+                        );
                     }
                 }
             }

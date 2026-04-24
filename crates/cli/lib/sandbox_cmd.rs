@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::Args;
 use microsandbox_runtime::{
     logging::LogLevel,
-    vm::{Config, VmConfig},
+    vm::{Config, DiskMountSpec, VmConfig},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -96,6 +96,10 @@ pub struct SandboxArgs {
     #[arg(long)]
     pub mount: Vec<String>,
 
+    /// Disk-image volume mounts as `id:host_path:format[:ro]` (repeatable).
+    #[arg(long)]
+    pub disk: Vec<String>,
+
     /// Path to the init binary in the guest.
     #[arg(long)]
     pub init_path: Option<PathBuf>,
@@ -153,6 +157,7 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
         },
         rootfs_disk_readonly: args.rootfs_disk_readonly,
         mounts: args.mount,
+        disks: parse_disk_args(&args.disk),
         backends: vec![],
         init_path: args.init_path,
         env: args.env,
@@ -188,4 +193,37 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
     };
 
     microsandbox_runtime::vm::enter(config)
+}
+
+/// Parse `--disk id:host_path:format[:ro]` entries into typed specs.
+///
+/// `guest` and `fstype` are not in this arg — they travel in the
+/// `MSB_DISK_MOUNTS` env var and are consumed by agentd, so the runtime
+/// only needs what `DiskBuilder` will set.
+fn parse_disk_args(entries: &[String]) -> Vec<DiskMountSpec> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let mut parts = entry.split(':');
+            let id = parts.next()?.to_string();
+            let host = PathBuf::from(parts.next()?);
+            let fmt_str = parts.next()?;
+            let format = match microsandbox_runtime::vm::validate_disk_format(Some(fmt_str)) {
+                Ok(f) => f,
+                Err(_) => {
+                    eprintln!("ignoring --disk entry with unknown format: {fmt_str}");
+                    return None;
+                }
+            };
+            let readonly = matches!(parts.next(), Some("ro"));
+            Some(DiskMountSpec {
+                id,
+                host,
+                guest: String::new(), // consumed only by agentd via env
+                format,
+                fstype: None, // ditto
+                readonly,
+            })
+        })
+        .collect()
 }

@@ -35,6 +35,7 @@ pub const SCRIPTS_PATH: &str = "/.msb/scripts";
 /// - `path` — guest mount path (required, always the first element)
 /// - `size=N` — size limit in MiB (optional)
 /// - `noexec` — mount with noexec flag (optional)
+/// - `ro` — mount read-only (optional)
 /// - `mode=N` — permission mode as octal integer (optional, e.g. `mode=1777`)
 ///
 /// Entries are separated by `;`. Within an entry, the path comes first
@@ -45,6 +46,7 @@ pub const SCRIPTS_PATH: &str = "/.msb/scripts";
 /// - `MSB_TMPFS=/tmp,size=256;/var/tmp,size=128` — two tmpfs mounts
 /// - `MSB_TMPFS=/tmp` — tmpfs at `/tmp` with defaults
 /// - `MSB_TMPFS=/tmp,size=256,noexec` — with noexec flag
+/// - `MSB_TMPFS=/seed,size=64,ro` — read-only tmpfs
 pub const ENV_TMPFS: &str = "MSB_TMPFS";
 
 /// Environment variable specifying how agentd assembles the root filesystem.
@@ -133,6 +135,30 @@ pub const ENV_DIR_MOUNTS: &str = "MSB_DIR_MOUNTS";
 /// - `MSB_FILE_MOUNTS=fm_config:app.conf:/etc/app.conf:ro`
 /// - `MSB_FILE_MOUNTS=fm_a:a.sh:/usr/bin/a.sh;fm_b:b.sh:/usr/bin/b.sh`
 pub const ENV_FILE_MOUNTS: &str = "MSB_FILE_MOUNTS";
+
+/// Environment variable carrying disk-image volume mount specs for guest init.
+///
+/// Each spec describes one virtio-blk device attached for the sole purpose
+/// of being mounted at a guest path by agentd (distinct from the rootfs
+/// block device, which is described by [`ENV_BLOCK_ROOT`]).
+///
+/// Format: `id:guest_path[:fstype][:ro][;id:guest_path[:fstype][:ro];...]`
+///
+/// - `id` — the `virtio_blk_config.serial` value set by the VMM. Agentd
+///   resolves it to a device node via `/dev/disk/by-id/virtio-<id>`, or
+///   by scanning `/sys/block/*/serial` as a fallback.
+/// - `guest_path` — absolute mount path in the guest (required).
+/// - `fstype` — inner filesystem type (optional). When empty or absent,
+///   agentd probes `/proc/filesystems` to find a type that mounts cleanly.
+/// - `ro` — optional flag: mount read-only.
+///
+/// Entries are separated by `;`.
+///
+/// Examples:
+/// - `MSB_DISK_MOUNTS=data_12ab:/data:ext4` — ext4 disk at `/data`
+/// - `MSB_DISK_MOUNTS=seed_7f:/seed::ro` — autodetect fstype, read-only
+/// - `MSB_DISK_MOUNTS=a_1:/a:ext4;b_2:/b::ro` — two disks
+pub const ENV_DISK_MOUNTS: &str = "MSB_DISK_MOUNTS";
 
 /// Environment variable carrying the default guest user for agentd execs.
 ///

@@ -114,6 +114,27 @@ pub enum VolumeMount {
         guest: String,
         /// Size limit in MiB.
         size_mib: Option<u32>,
+        /// Whether the mount is read-only.
+        readonly: bool,
+    },
+
+    /// Mount a disk image file as a virtio-blk device at a guest path.
+    ///
+    /// The guest OS owns the inner filesystem; microsandbox just attaches
+    /// the image and agentd mounts it. Use this for persistent state that
+    /// should be isolated from the host filesystem, for distributing
+    /// pre-built ext4/squashfs datasets, or for read-only seed volumes.
+    DiskImage {
+        /// Host path to the disk image file.
+        host: PathBuf,
+        /// Guest mount path.
+        guest: String,
+        /// Disk image format (qcow2 / raw / vmdk).
+        format: DiskImageFormat,
+        /// Inner filesystem type. When `None`, agentd probes `/proc/filesystems`.
+        fstype: Option<String>,
+        /// Whether the mount is read-only.
+        readonly: bool,
     },
 }
 
@@ -123,6 +144,9 @@ pub struct MountBuilder {
     mount: MountKind,
     readonly: bool,
     size_mib: Option<u32>,
+    disk_format: Option<DiskImageFormat>,
+    disk_fstype: Option<String>,
+    error: Option<crate::MicrosandboxError>,
 }
 
 /// Internal kind for the mount builder.
@@ -130,6 +154,7 @@ enum MountKind {
     Bind(PathBuf),
     Named(String),
     Tmpfs,
+    Disk(PathBuf),
     Unset,
 }
 
@@ -253,6 +278,9 @@ impl MountBuilder {
             mount: MountKind::Unset,
             readonly: false,
             size_mib: None,
+            disk_format: None,
+            disk_fstype: None,
+            error: None,
         }
     }
 
@@ -272,6 +300,47 @@ impl MountBuilder {
     /// Use tmpfs (memory-backed).
     pub fn tmpfs(mut self) -> Self {
         self.mount = MountKind::Tmpfs;
+        self
+    }
+
+    /// Mount a disk image file as a virtio-blk device at the guest path.
+    ///
+    /// Format defaults to the extension of `host` (`.qcow2` → Qcow2, `.vmdk`
+    /// → Vmdk, anything else → Raw). Use [`Self::format`] to override.
+    pub fn disk(mut self, host: impl Into<PathBuf>) -> Self {
+        let host = host.into();
+        if self.disk_format.is_none() {
+            let inferred = host
+                .extension()
+                .and_then(|e| e.to_str())
+                .and_then(DiskImageFormat::from_extension)
+                .unwrap_or(DiskImageFormat::Raw);
+            self.disk_format = Some(inferred);
+        }
+        self.mount = MountKind::Disk(host);
+        self
+    }
+
+    /// Override the disk image format for the current `disk()` mount.
+    pub fn format(mut self, format: DiskImageFormat) -> Self {
+        self.disk_format = Some(format);
+        self
+    }
+
+    /// Set the inner filesystem type for the current `disk()` mount. When
+    /// unset, agentd probes `/proc/filesystems` to find a type that mounts
+    /// cleanly.
+    pub fn fstype(mut self, fstype: impl Into<String>) -> Self {
+        let fstype = fstype.into();
+        if fstype.contains(',') || fstype.contains(';') || fstype.contains(':') {
+            self.error.get_or_insert_with(|| {
+                crate::MicrosandboxError::InvalidConfig(format!(
+                    "fstype must not contain ',', ';' or ':': {fstype}"
+                ))
+            });
+            return self;
+        }
+        self.disk_fstype = Some(fstype);
         self
     }
 
@@ -297,6 +366,10 @@ impl MountBuilder {
 
     /// Build the volume mount.
     pub(crate) fn build(self) -> crate::MicrosandboxResult<VolumeMount> {
+        if let Some(err) = self.error {
+            return Err(err);
+        }
+
         // Validate guest path.
         if !self.guest.starts_with('/') {
             return Err(crate::MicrosandboxError::InvalidConfig(format!(
@@ -316,6 +389,27 @@ impl MountBuilder {
             )));
         }
 
+        // Reject options set on the wrong kind.
+        match &self.mount {
+            MountKind::Tmpfs => {}
+            MountKind::Disk(_) => {}
+            _ if self.size_mib.is_some() => {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    ".size() is only valid for tmpfs mounts".into(),
+                ));
+            }
+            _ => {}
+        }
+        match &self.mount {
+            MountKind::Disk(_) => {}
+            _ if self.disk_fstype.is_some() => {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    ".fstype() is only valid for disk image mounts".into(),
+                ));
+            }
+            _ => {}
+        }
+
         match self.mount {
             MountKind::Bind(host) => Ok(VolumeMount::Bind {
                 host,
@@ -330,9 +424,19 @@ impl MountBuilder {
             MountKind::Tmpfs => Ok(VolumeMount::Tmpfs {
                 guest: self.guest,
                 size_mib: self.size_mib,
+                readonly: self.readonly,
+            }),
+            MountKind::Disk(host) => Ok(VolumeMount::DiskImage {
+                host,
+                guest: self.guest,
+                // disk() always sets disk_format, so unwrap is safe.
+                format: self.disk_format.unwrap_or(DiskImageFormat::Raw),
+                fstype: self.disk_fstype,
+                readonly: self.readonly,
             }),
             MountKind::Unset => Err(crate::MicrosandboxError::InvalidConfig(
-                "MountBuilder: no mount type set (call .bind(), .named(), or .tmpfs())".into(),
+                "MountBuilder: no mount type set (call .bind(), .named(), .tmpfs(), or .disk())"
+                    .into(),
             )),
         }
     }
@@ -467,9 +571,10 @@ impl VolumeMount {
     /// The absolute path where this mount appears inside the guest.
     pub fn guest(&self) -> &str {
         match self {
-            Self::Bind { guest, .. } | Self::Named { guest, .. } | Self::Tmpfs { guest, .. } => {
-                guest
-            }
+            Self::Bind { guest, .. }
+            | Self::Named { guest, .. }
+            | Self::Tmpfs { guest, .. }
+            | Self::DiskImage { guest, .. } => guest,
         }
     }
 }
@@ -718,11 +823,32 @@ impl Serialize for VolumeMount {
                 map.serialize_entry("readonly", readonly)?;
                 map.end()
             }
-            Self::Tmpfs { guest, size_mib } => {
-                let mut map = serializer.serialize_map(Some(3))?;
+            Self::Tmpfs {
+                guest,
+                size_mib,
+                readonly,
+            } => {
+                let mut map = serializer.serialize_map(Some(4))?;
                 map.serialize_entry("type", "Tmpfs")?;
                 map.serialize_entry("guest", guest)?;
                 map.serialize_entry("size_mib", size_mib)?;
+                map.serialize_entry("readonly", readonly)?;
+                map.end()
+            }
+            Self::DiskImage {
+                host,
+                guest,
+                format,
+                fstype,
+                readonly,
+            } => {
+                let mut map = serializer.serialize_map(Some(6))?;
+                map.serialize_entry("type", "DiskImage")?;
+                map.serialize_entry("host", host)?;
+                map.serialize_entry("guest", guest)?;
+                map.serialize_entry("format", format)?;
+                map.serialize_entry("fstype", fstype)?;
+                map.serialize_entry("readonly", readonly)?;
                 map.end()
             }
         }
@@ -752,6 +878,17 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 guest: String,
                 #[serde(default)]
                 size_mib: Option<u32>,
+                #[serde(default)]
+                readonly: bool,
+            },
+            DiskImage {
+                host: PathBuf,
+                guest: String,
+                format: DiskImageFormat,
+                #[serde(default)]
+                fstype: Option<String>,
+                #[serde(default)]
+                readonly: bool,
             },
         }
 
@@ -775,7 +912,28 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 guest,
                 readonly,
             },
-            VolumeMountHelper::Tmpfs { guest, size_mib } => Self::Tmpfs { guest, size_mib },
+            VolumeMountHelper::Tmpfs {
+                guest,
+                size_mib,
+                readonly,
+            } => Self::Tmpfs {
+                guest,
+                size_mib,
+                readonly,
+            },
+            VolumeMountHelper::DiskImage {
+                host,
+                guest,
+                format,
+                fstype,
+                readonly,
+            } => Self::DiskImage {
+                host,
+                guest,
+                format,
+                fstype,
+                readonly,
+            },
         })
     }
 }
@@ -803,10 +961,29 @@ impl std::fmt::Debug for VolumeMount {
                 .field("guest", guest)
                 .field("readonly", readonly)
                 .finish(),
-            Self::Tmpfs { guest, size_mib } => f
+            Self::Tmpfs {
+                guest,
+                size_mib,
+                readonly,
+            } => f
                 .debug_struct("Tmpfs")
                 .field("guest", guest)
                 .field("size_mib", size_mib)
+                .field("readonly", readonly)
+                .finish(),
+            Self::DiskImage {
+                host,
+                guest,
+                format,
+                fstype,
+                readonly,
+            } => f
+                .debug_struct("DiskImage")
+                .field("host", host)
+                .field("guest", guest)
+                .field("format", format)
+                .field("fstype", fstype)
+                .field("readonly", readonly)
                 .finish(),
         }
     }

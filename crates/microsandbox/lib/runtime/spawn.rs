@@ -16,19 +16,21 @@ use std::{
 
 use rand::RngExt;
 use serde::Deserialize;
+use sha2::{Digest as Sha2Digest, Sha256};
 use tempfile::TempDir;
 use tokio::{io::AsyncBufReadExt, process::Command};
 
 use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_protocol::{
-    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_FILE_MOUNTS, ENV_HOSTNAME, ENV_TMPFS, ENV_USER,
+    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HOSTNAME, ENV_TMPFS,
+    ENV_USER,
 };
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
 use crate::{
     MicrosandboxResult, config,
     runtime::handle::ProcessHandle,
-    sandbox::{Rlimit, RootfsSource, SandboxConfig, VolumeMount},
+    sandbox::{DiskImageFormat, Rlimit, RootfsSource, SandboxConfig, VolumeMount},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -361,6 +363,45 @@ fn push_file_mount_arg(args: &mut Vec<OsString>, tag: &str, file_mount_dir: &Pat
     args.push(OsString::from(arg));
 }
 
+/// Push a `--disk id:host_path:format[:ro]` arg pair.
+fn push_disk_mount_arg(
+    args: &mut Vec<OsString>,
+    id: &str,
+    host_display: &impl std::fmt::Display,
+    format: &DiskImageFormat,
+    readonly: bool,
+) {
+    let mut arg = format!("{id}:{host_display}:{}", format.as_str());
+    if readonly {
+        arg.push_str(":ro");
+    }
+    args.push(OsString::from("--disk"));
+    args.push(OsString::from(arg));
+}
+
+/// Append a `id:guest_path[:fstype][:ro]` entry to the `MSB_DISK_MOUNTS` env var value.
+fn push_disk_mounts_spec(
+    disk_mounts_val: &mut String,
+    id: &str,
+    guest: &str,
+    fstype: Option<&str>,
+    readonly: bool,
+) {
+    if !disk_mounts_val.is_empty() {
+        disk_mounts_val.push(';');
+    }
+    disk_mounts_val.push_str(id);
+    disk_mounts_val.push(':');
+    disk_mounts_val.push_str(guest);
+    disk_mounts_val.push(':');
+    if let Some(fs) = fstype {
+        disk_mounts_val.push_str(fs);
+    }
+    if readonly {
+        disk_mounts_val.push_str(":ro");
+    }
+}
+
 /// Append a `tag:filename:guest_path[:ro]` entry to the `MSB_FILE_MOUNTS` env var value.
 fn push_file_mounts_spec(
     file_mounts_val: &mut String,
@@ -407,11 +448,40 @@ fn encode_rlimits(rlimits: &[Rlimit]) -> String {
 ///
 /// Replaces `/` with `_` and strips leading underscores to produce a
 /// valid tag name. For example, `/data/cache` becomes `data_cache`.
+/// Derive a stable, collision-resistant identifier from a guest mount path.
+///
+/// Used for virtiofs tags and for virtio-blk `serial` fields (the block id
+/// agentd resolves via `/dev/disk/by-id/virtio-<id>`). The naive `/` → `_`
+/// mangling collides for adversarial inputs (`/var/log` and `/var_log` both
+/// produce `var_log`), so we append a short sha256-derived suffix.
+///
+/// Output is at most 20 bytes — the kernel's virtio-blk serial length limit.
+/// Layout: `<slug[..11]>_<8-hex>`. The slug-part is a debugging hint; the
+/// 8-hex suffix is what actually disambiguates.
 fn guest_mount_tag(guest_path: &str) -> String {
-    guest_path
+    const SLUG_MAX: usize = 11;
+    const HASH_HEX_LEN: usize = 8;
+
+    let slug: String = guest_path
         .replace('/', "_")
         .trim_start_matches('_')
-        .to_string()
+        .chars()
+        .take(SLUG_MAX)
+        .collect();
+
+    let mut hasher = Sha256::new();
+    hasher.update(guest_path.as_bytes());
+    let digest = hasher.finalize();
+    let mut hash_hex = String::with_capacity(HASH_HEX_LEN);
+    for byte in digest.iter().take(HASH_HEX_LEN / 2) {
+        hash_hex.push_str(&format!("{byte:02x}"));
+    }
+
+    if slug.is_empty() {
+        hash_hex
+    } else {
+        format!("{slug}_{hash_hex}")
+    }
 }
 
 /// Build the `msb sandbox` CLI args for a sandbox.
@@ -520,11 +590,13 @@ fn sandbox_cli_args(
         }
     }
 
-    // Process mounts: emit --mount args for virtiofs mounts, collect tmpfs and
-    // virtiofs guest-side mount specs as env vars for agentd.
+    // Process mounts: emit --mount args for virtiofs mounts, --disk args
+    // for disk-image mounts, and collect guest-side mount specs as env
+    // vars for agentd.
     let mut tmpfs_val = String::new();
     let mut dir_mounts_val = String::new();
     let mut file_mounts_val = String::new();
+    let mut disk_mounts_val = String::new();
     for mount in &config.mounts {
         match mount {
             VolumeMount::Bind {
@@ -549,7 +621,11 @@ fn sandbox_cli_args(
                 push_dir_mount_arg(&mut args, guest, &vol_path.display(), *readonly);
                 push_dir_mounts_spec(&mut dir_mounts_val, guest, *readonly);
             }
-            VolumeMount::Tmpfs { guest, size_mib } => {
+            VolumeMount::Tmpfs {
+                guest,
+                size_mib,
+                readonly,
+            } => {
                 if !tmpfs_val.is_empty() {
                     tmpfs_val.push(';');
                 }
@@ -557,6 +633,26 @@ fn sandbox_cli_args(
                 if let Some(s) = size_mib {
                     tmpfs_val.push_str(&format!(",size={s}"));
                 }
+                if *readonly {
+                    tmpfs_val.push_str(",ro");
+                }
+            }
+            VolumeMount::DiskImage {
+                host,
+                guest,
+                format,
+                fstype,
+                readonly,
+            } => {
+                let id = guest_mount_tag(guest);
+                push_disk_mount_arg(&mut args, &id, &host.display(), format, *readonly);
+                push_disk_mounts_spec(
+                    &mut disk_mounts_val,
+                    &id,
+                    guest,
+                    fstype.as_deref(),
+                    *readonly,
+                );
             }
         }
     }
@@ -579,6 +675,14 @@ fn sandbox_cli_args(
         args.push(OsString::from(format!(
             "{}={file_mounts_val}",
             ENV_FILE_MOUNTS
+        )));
+    }
+
+    if !disk_mounts_val.is_empty() {
+        args.push(OsString::from("--env"));
+        args.push(OsString::from(format!(
+            "{}={disk_mounts_val}",
+            ENV_DISK_MOUNTS
         )));
     }
 
@@ -645,7 +749,9 @@ mod tests {
     use super::sandbox_cli_args;
     use crate::{
         LogLevel,
-        sandbox::{Rlimit, RlimitResource, RootfsSource, SandboxBuilder, SandboxConfig},
+        sandbox::{
+            DiskImageFormat, Rlimit, RlimitResource, RootfsSource, SandboxBuilder, SandboxConfig,
+        },
     };
 
     //----------------------------------------------------------------------------------------------
@@ -856,6 +962,19 @@ mod tests {
     }
 
     #[test]
+    fn test_sandbox_cli_args_tmpfs_readonly_appends_ro() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/seed", |m| m.tmpfs().size(64u32).readonly())
+            .build()
+            .unwrap();
+
+        let rendered = render_args(&config);
+
+        assert!(rendered.contains(&"MSB_TMPFS=/seed,size=64,ro".to_string()));
+    }
+
+    #[test]
     fn test_sandbox_cli_args_apply_default_oci_tmpfs() {
         let mut config = SandboxConfig {
             name: "test".into(),
@@ -993,10 +1112,92 @@ mod tests {
         let rendered = render_args_with_file_mounts(&config, &staged_file_mounts);
 
         // Directory mount in MSB_DIR_MOUNTS.
-        assert!(rendered.contains(&"MSB_DIR_MOUNTS=data:/data".to_string()));
+        let data_tag = super::guest_mount_tag("/data");
+        assert!(rendered.contains(&format!("MSB_DIR_MOUNTS={data_tag}:/data")));
         // File mount in MSB_FILE_MOUNTS.
         assert!(
             rendered.contains(&"MSB_FILE_MOUNTS=fm_11223344:file.txt:/guest/file.txt".to_string())
         );
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_disk_image_volume() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| {
+                m.disk("/host/data.qcow2")
+                    .format(DiskImageFormat::Qcow2)
+                    .fstype("ext4")
+            })
+            .build()
+            .unwrap();
+
+        let rendered = render_args(&config);
+
+        // --disk arg present with correct layout.
+        let data_tag = super::guest_mount_tag("/data");
+        let expected_disk_arg = format!("{data_tag}:/host/data.qcow2:qcow2");
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--disk" && pair[1] == expected_disk_arg),
+            "missing --disk arg in {rendered:?}"
+        );
+
+        // MSB_DISK_MOUNTS env entry carries the guest path and fstype.
+        let expected_env = format!("MSB_DISK_MOUNTS={data_tag}:/data:ext4");
+        assert!(rendered.contains(&expected_env));
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_disk_image_readonly() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/seed", |m| m.disk("/host/seed.raw").readonly())
+            .build()
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let tag = super::guest_mount_tag("/seed");
+
+        assert!(
+            rendered.windows(2).any(
+                |pair| pair[0] == "--disk" && pair[1] == format!("{tag}:/host/seed.raw:raw:ro")
+            )
+        );
+        // No fstype → empty middle field, ro trailing.
+        assert!(rendered.contains(&format!("MSB_DISK_MOUNTS={tag}:/seed::ro")));
+    }
+
+    #[test]
+    fn test_guest_mount_tag_is_deterministic() {
+        let a = super::guest_mount_tag("/data");
+        let b = super::guest_mount_tag("/data");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_guest_mount_tag_disambiguates_colliding_paths() {
+        // The naive `/` → `_` mangling treats these as identical. The
+        // slug+hash form must not.
+        let a = super::guest_mount_tag("/var/log");
+        let b = super::guest_mount_tag("/var_log");
+        assert_ne!(a, b);
+        assert!(a.starts_with("var_log_"));
+        assert!(b.starts_with("var_log_"));
+    }
+
+    #[test]
+    fn test_guest_mount_tag_fits_virtio_blk_serial_limit() {
+        // virtio-blk serial is capped at 20 bytes. Long guest paths must still fit.
+        let long = "/a/very/deeply/nested/guest/mount/point/that/exceeds/the/slug/cap";
+        let tag = super::guest_mount_tag(long);
+        assert!(tag.len() <= 20, "tag {tag:?} exceeds 20 bytes");
+    }
+
+    #[test]
+    fn test_guest_mount_tag_slug_prefix_is_readable() {
+        assert!(super::guest_mount_tag("/data").starts_with("data_"));
+        assert!(super::guest_mount_tag("/var/log").starts_with("var_log_"));
     }
 }

@@ -81,6 +81,33 @@ pub struct Config {
     pub vm: VmConfig,
 }
 
+/// Specification for a disk-image volume mount attached to the guest.
+///
+/// Each entry becomes one extra virtio-blk device. Agentd consumes the
+/// companion `MSB_DISK_MOUNTS` env var to know which device to mount where.
+#[derive(Debug, Clone)]
+pub struct DiskMountSpec {
+    /// Stable block id. Surfaced in the guest as the virtio-blk `serial`
+    /// so agentd can resolve it via `/dev/disk/by-id/virtio-<id>`.
+    pub id: String,
+
+    /// Host path to the disk image file.
+    pub host: PathBuf,
+
+    /// Guest mount path. Not needed by the VMM, but carried here for
+    /// logging/validation; agentd reads the canonical value from the env.
+    pub guest: String,
+
+    /// Disk image format.
+    pub format: msb_krun::DiskImageFormat,
+
+    /// Inner filesystem type, if specified; otherwise agentd probes.
+    pub fstype: Option<String>,
+
+    /// Whether the mount is read-only.
+    pub readonly: bool,
+}
+
 /// VM hardware and rootfs configuration.
 pub struct VmConfig {
     /// Path to the libkrunfw shared library.
@@ -112,6 +139,9 @@ pub struct VmConfig {
 
     /// Additional mounts as `tag:host_path[:ro]` strings.
     pub mounts: Vec<String>,
+
+    /// Disk-image volume mounts attached as extra virtio-blk devices.
+    pub disks: Vec<DiskMountSpec>,
 
     /// Pre-built filesystem backends as `(tag, backend)` pairs.
     pub backends: Vec<(String, Box<dyn DynFileSystem + Send + Sync>)>,
@@ -175,6 +205,7 @@ impl std::fmt::Debug for VmConfig {
             .field("rootfs_disk_format", &self.rootfs_disk_format)
             .field("rootfs_disk_readonly", &self.rootfs_disk_readonly)
             .field("mounts", &self.mounts)
+            .field("disks", &self.disks)
             .field("backends", &format!("[{} backend(s)]", self.backends.len()))
             .field("init_path", &self.init_path)
             .field("env", &self.env)
@@ -538,6 +569,25 @@ fn build_vm(
                 .map_err(|e| RuntimeError::Custom(format!("mount {tag}: {e}")))?;
             builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
         }
+    }
+
+    // Disk-image volume mounts. Each adds an extra virtio-blk device with
+    // a stable block id so agentd can find it via /dev/disk/by-id/virtio-<id>.
+    for disk in &vm.disks {
+        let id = disk.id.clone();
+        let host = disk.host.clone();
+        let format = disk.format;
+        let readonly = disk.readonly;
+        builder = builder.disk(move |d| {
+            let mut d = d.id(&id).path(&host).format(format).read_only(readonly);
+            if readonly {
+                // Read-only images can skip host-side sync entirely.
+                d = d
+                    .cache(msb_krun::CacheMode::Unsafe)
+                    .sync(msb_krun::SyncMode::None);
+            }
+            d
+        });
     }
 
     let mut network_termination_handle = None;
