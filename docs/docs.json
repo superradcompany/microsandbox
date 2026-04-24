@@ -22,12 +22,6 @@
   "navigation": {
     "tabs": [
       {
-        "tab": "Changelog",
-        "pages": [
-          "changelog/overview"
-        ]
-      },
-      {
         "tab": "Documentation",
         "groups": [
           {
