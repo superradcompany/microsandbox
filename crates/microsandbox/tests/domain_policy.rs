@@ -71,9 +71,18 @@ async fn setup_alpine(name: &str, policy: NetworkPolicy) -> Sandbox {
         .create()
         .await
         .expect("create sandbox");
-    sb.shell("apk add --quiet --no-progress curl >/dev/null 2>&1")
+    // Keep apk's output so a failed install in CI panics with the
+    // real error (bad mirror, blocked host, etc.) instead of leaking
+    // into every downstream probe as an opaque `FAIL`.
+    let apk = sb
+        .shell("apk add --no-progress curl 2>&1 && command -v curl || echo CURL_MISSING")
         .await
         .expect("install curl");
+    let apk_out = apk.stdout().unwrap_or_default();
+    assert!(
+        !apk_out.contains("CURL_MISSING"),
+        "curl install failed in sandbox; apk output:\n{apk_out}"
+    );
     sb
 }
 
@@ -87,12 +96,31 @@ async fn setup_alpine(name: &str, policy: NetworkPolicy) -> Sandbox {
 /// `000`/empty back to [`CURL_FAIL`]. Without this, a denied connection
 /// leaves `000` on stdout alongside `FAIL` from the exit-code fallback,
 /// producing ambiguous `000FAIL` strings.
+///
+/// On failure, curl's exit code and stderr are echoed to the guest's
+/// stderr so the test's captured output contains enough diagnostic to
+/// tell "timeout" from "connection refused" from "curl not installed"
+/// next time this misbehaves in CI. Timeout is 30s rather than 10s so
+/// a slow CI runner isn't the thing tipping a probe over.
 async fn probe_https(sb: &Sandbox, url: &str) -> String {
     let cmd = format!(
-        "code=$(curl -sS --max-time 10 -o /dev/null -w '%{{http_code}}' {url} 2>/dev/null); \
-         case \"$code\" in 000|\"\") echo {CURL_FAIL};; *) printf '%s' \"$code\";; esac"
+        "curl -sS --max-time 30 -o /dev/null -w '%{{http_code}}' {url} \
+           >/tmp/probe-code 2>/tmp/probe-err; \
+         rc=$?; \
+         code=$(cat /tmp/probe-code 2>/dev/null); \
+         case \"$code\" in \
+           000|\"\") \
+             echo \"[probe_https {url}] rc=$rc code=$code err=$(cat /tmp/probe-err 2>/dev/null)\" >&2; \
+             echo {CURL_FAIL} \
+             ;; \
+           *) printf '%s' \"$code\" ;; \
+         esac"
     );
     let out = sb.shell(&cmd).await.expect("shell");
+    let stderr = out.stderr().unwrap_or_default();
+    if !stderr.trim().is_empty() {
+        eprintln!("{}", stderr.trim());
+    }
     out.stdout().unwrap_or_default().trim().to_string()
 }
 
