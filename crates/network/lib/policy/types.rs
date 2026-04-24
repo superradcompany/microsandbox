@@ -3,9 +3,9 @@
 use std::net::{IpAddr, SocketAddr};
 
 use ipnetwork::IpNetwork;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
-use crate::shared::{SharedState, normalize_hostname};
+use crate::shared::SharedState;
 
 use super::destination::{matches_cidr, matches_group};
 
@@ -72,10 +72,12 @@ pub enum Direction {
 
 /// Traffic destination specification.
 ///
-/// Deserialization normalizes `Domain` and `DomainSuffix` values
-/// (lowercased, trailing/leading dots stripped) so comparisons against
-/// resolved hostnames are canonical.
-#[derive(Debug, Clone, Serialize)]
+/// `Domain` and `DomainSuffix` values are stored verbatim; rule
+/// matching handles trailing dots, leading-dot suffixes, and ASCII
+/// case-insensitively at comparison time, so user-authored inputs like
+/// `"PyPI.Org."` or `".example.com"` work without a pre-normalization
+/// step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Destination {
     /// Match any destination.
     Any,
@@ -280,24 +282,13 @@ impl Rule {
         Self::outbound(destination, Action::Deny)
     }
 
-    fn outbound(mut destination: Destination, action: Action) -> Self {
-        destination.normalize_mut();
+    fn outbound(destination: Destination, action: Action) -> Self {
         Self {
             direction: Direction::Outbound,
             destination,
             protocol: None,
             ports: None,
             action,
-        }
-    }
-}
-
-impl Destination {
-    fn normalize_mut(&mut self) {
-        match self {
-            Destination::Domain(s) => *s = normalize_hostname(s),
-            Destination::DomainSuffix(s) => *s = normalize_suffix(s),
-            Destination::Any | Destination::Cidr(_) | Destination::Group(_) => {}
         }
     }
 }
@@ -322,27 +313,6 @@ impl PortRange {
     }
 }
 
-impl<'de> Deserialize<'de> for Destination {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        enum Repr {
-            Any,
-            Cidr(IpNetwork),
-            Domain(String),
-            DomainSuffix(String),
-            Group(DestinationGroup),
-        }
-
-        Ok(match Repr::deserialize(deserializer)? {
-            Repr::Any => Destination::Any,
-            Repr::Cidr(network) => Destination::Cidr(network),
-            Repr::Domain(s) => Destination::Domain(normalize_hostname(&s)),
-            Repr::DomainSuffix(s) => Destination::DomainSuffix(normalize_suffix(&s)),
-            Repr::Group(g) => Destination::Group(g),
-        })
-    }
-}
-
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -354,7 +324,7 @@ fn matches_destination(dest: &Destination, addr: IpAddr, shared: &SharedState) -
         Destination::Cidr(network) => matches_cidr(network, addr),
         Destination::Group(group) => matches_group(*group, addr),
         Destination::Domain(domain) => {
-            shared.any_resolved_hostname(addr, |hostname| hostname == domain)
+            shared.any_resolved_hostname(addr, |hostname| matches_domain(hostname, domain))
         }
         Destination::DomainSuffix(suffix) => {
             shared.any_resolved_hostname(addr, |hostname| matches_suffix(hostname, suffix))
@@ -362,17 +332,36 @@ fn matches_destination(dest: &Destination, addr: IpAddr, shared: &SharedState) -
     }
 }
 
-fn matches_suffix(hostname: &str, suffix: &str) -> bool {
-    hostname == suffix
-        || hostname
-            .strip_suffix(suffix)
-            .is_some_and(|prefix| prefix.ends_with('.'))
+/// Case-insensitive hostname equality. Trailing dots on either side are
+/// ignored so `"PyPI.Org."` and `"pypi.org"` compare equal. Operates on
+/// slices and ASCII-case byte comparison, no allocation.
+fn matches_domain(hostname: &str, rule_domain: &str) -> bool {
+    let h = hostname.trim_end_matches('.');
+    let d = rule_domain.trim_end_matches('.');
+    h.eq_ignore_ascii_case(d)
 }
 
-fn normalize_suffix(suffix: &str) -> String {
-    normalize_hostname(suffix)
-        .trim_start_matches('.')
-        .to_string()
+/// Zero-alloc suffix match. The rule may be written with or without a
+/// leading dot (`".example.com"` or `"example.com"`); both forms are
+/// normalized to the same trimmed slice for comparison. Matches either
+/// the apex domain itself (`"example.com"`) or any subdomain
+/// (`"sub.example.com"`), case-insensitively.
+fn matches_suffix(hostname: &str, suffix: &str) -> bool {
+    let hostname = hostname.trim_end_matches('.');
+    let suffix = suffix.trim_start_matches('.').trim_end_matches('.');
+    if suffix.is_empty() {
+        return false;
+    }
+    if hostname.len() == suffix.len() {
+        return hostname.eq_ignore_ascii_case(suffix);
+    }
+    if hostname.len() > suffix.len() + 1 {
+        let (prefix, tail) = hostname.split_at(hostname.len() - suffix.len());
+        if prefix.ends_with('.') && tail.eq_ignore_ascii_case(suffix) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

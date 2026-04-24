@@ -53,7 +53,16 @@ fn allow_domain_suffix_https(suffix: &str) -> Rule {
 /// across versions. `curl` gives us a portable `%{http_code}` and a
 /// deterministic non-zero exit for connection failures, which we turn
 /// into the [`CURL_FAIL`] sentinel.
+///
+/// The policy is prepended with an allow rule for `*.alpinelinux.org:443`
+/// so that `apk add curl` can reach the package mirror even when the
+/// caller supplies a default-deny policy. Test targets live on other
+/// domains, so this injection never shadows the rules under test.
 async fn setup_alpine(name: &str, policy: NetworkPolicy) -> Sandbox {
+    let mut policy = policy;
+    policy
+        .rules
+        .insert(0, allow_domain_suffix_https(".alpinelinux.org"));
     let sb = Sandbox::builder(name)
         .image("alpine")
         .cpus(1)
@@ -73,10 +82,16 @@ async fn setup_alpine(name: &str, policy: NetworkPolicy) -> Sandbox {
 /// as a 3-digit string on success, or [`CURL_FAIL`] when curl couldn't
 /// complete the request (connection refused, TLS handshake aborted,
 /// timeout, etc).
+///
+/// `curl -w '%{http_code}'` always prints a code even on failure (using
+/// `000` for "no HTTP response"), so we capture it and explicitly map
+/// `000`/empty back to [`CURL_FAIL`]. Without this, a denied connection
+/// leaves `000` on stdout alongside `FAIL` from the exit-code fallback,
+/// producing ambiguous `000FAIL` strings.
 async fn probe_https(sb: &Sandbox, url: &str) -> String {
     let cmd = format!(
-        "curl -sS --max-time 10 -o /dev/null -w '%{{http_code}}' {url} 2>/dev/null \
-         || echo {CURL_FAIL}"
+        "code=$(curl -sS --max-time 10 -o /dev/null -w '%{{http_code}}' {url} 2>/dev/null); \
+         case \"$code\" in 000|\"\") echo {CURL_FAIL};; *) printf '%s' \"$code\";; esac"
     );
     let out = sb.shell(&cmd).await.expect("shell");
     out.stdout().unwrap_or_default().trim().to_string()
@@ -158,7 +173,13 @@ async fn domain_policy_allows_whitelisted_https() {
 ///
 /// 1. `files.pythonhosted.org:443` matches `.pythonhosted.org` →
 ///    reaches server.
-/// 2. `pypi.org:443` does not match the suffix → curl fails.
+/// 2. `example.com:443` does not match the suffix → curl fails.
+///
+/// The negative case deliberately uses `example.com` (Akamai) rather
+/// than another Fastly-hosted site like `pypi.org`: both `pypi.org` and
+/// `*.pythonhosted.org` share Fastly CDN IPs, so once both names are in
+/// the DNS cache the shared IP would match the suffix rule through the
+/// wrong hostname and defeat the assertion.
 #[msb_test]
 async fn domain_policy_suffix_allows_subdomain_https() {
     let name = "net-domain-policy-suffix";
@@ -174,10 +195,10 @@ async fn domain_policy_suffix_allows_subdomain_https() {
         "files.pythonhosted.org should match .pythonhosted.org suffix: got `{files}`"
     );
 
-    let pypi = probe_https(&sb, "https://pypi.org/simple/pip/").await;
+    let example = probe_https(&sb, "https://example.com/").await;
     assert_eq!(
-        pypi, CURL_FAIL,
-        "pypi.org should not match .pythonhosted.org suffix: got `{pypi}`"
+        example, CURL_FAIL,
+        "example.com should not match .pythonhosted.org suffix: got `{example}`"
     );
 
     sb.stop_and_wait().await.expect("stop");
