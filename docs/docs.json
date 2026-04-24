@@ -22,12 +22,6 @@
   "navigation": {
     "tabs": [
       {
-        "tab": "Changelog",
-        "pages": [
-          "changelog/overview"
-        ]
-      },
-      {
         "tab": "Documentation",
         "groups": [
           {
@@ -148,6 +142,12 @@
               "cli/image-commands"
             ]
           }
+        ]
+      },
+      {
+        "tab": "Changelog",
+        "pages": [
+          "changelog/overview"
         ]
       },
       {
