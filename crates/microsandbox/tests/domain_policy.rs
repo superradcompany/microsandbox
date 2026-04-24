@@ -1,5 +1,4 @@
-//! Integration tests for Domain/DomainSuffix network-policy rules
-//! (regression coverage for issue 603).
+//! Integration tests for Domain/DomainSuffix network-policy rules.
 //!
 //! These tests require KVM (or libkrun on macOS). The `#[msb_test]`
 //! attribute marks them `#[ignore]`, so plain `cargo test --workspace`
@@ -29,7 +28,7 @@ const CURL_FAIL: &str = "FAIL";
 fn allow_domain_https(domain: &str) -> Rule {
     Rule {
         direction: Direction::Outbound,
-        destination: Destination::Domain(domain.into()),
+        destination: Destination::Domain(domain.parse().expect("valid domain")),
         protocol: Some(Protocol::Tcp),
         ports: Some(PortRange::single(443)),
         action: Action::Allow,
@@ -40,7 +39,7 @@ fn allow_domain_https(domain: &str) -> Rule {
 fn allow_domain_suffix_https(suffix: &str) -> Rule {
     Rule {
         direction: Direction::Outbound,
-        destination: Destination::DomainSuffix(suffix.into()),
+        destination: Destination::DomainSuffix(suffix.parse().expect("valid domain suffix")),
         protocol: Some(Protocol::Tcp),
         ports: Some(PortRange::single(443)),
         action: Action::Allow,
@@ -109,10 +108,9 @@ fn reached_server(probe_output: &str) -> bool {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-/// Direct reproduction of issue 603: a default-deny policy with
-/// explicit allow rules for `pypi.org` and `files.pythonhosted.org`
-/// must permit HTTPS to those hostnames after the guest resolves them
-/// via the in-process DNS interceptor.
+/// A default-deny policy with explicit allow rules for `pypi.org` and
+/// `files.pythonhosted.org` must permit HTTPS to those hostnames after
+/// the guest resolves them via the in-process DNS interceptor.
 ///
 /// Bundles three probes into one sandbox to amortise image-pull and
 /// VM-boot cost:
@@ -133,9 +131,9 @@ async fn domain_policy_allows_whitelisted_https() {
     };
     let sb = setup_alpine(name, policy).await;
 
-    // DNS resolution itself must succeed (the interceptor bypasses
-    // the egress policy for queries aimed at the gateway). This is
-    // the invariant issue 603 noted was working pre-fix.
+    // DNS resolution itself must succeed: the interceptor bypasses
+    // the egress policy for queries aimed at the gateway, so the
+    // guest can populate its cache before the policy-gated connect.
     let dns = sb
         .shell("getent hosts pypi.org | awk '{print $1; exit}'")
         .await
@@ -149,7 +147,7 @@ async fn domain_policy_allows_whitelisted_https() {
     let pypi = probe_https(&sb, "https://pypi.org/simple/pip/").await;
     assert!(
         reached_server(&pypi),
-        "HTTPS to pypi.org should be allowed (issue 603 repro): got `{pypi}`"
+        "HTTPS to pypi.org should be allowed: got `{pypi}`"
     );
 
     let files = probe_https(&sb, "https://files.pythonhosted.org/").await;

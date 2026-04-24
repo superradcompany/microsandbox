@@ -421,7 +421,12 @@ fn apply_network(
                             microsandbox_network::policy::DestinationGroup::Multicast,
                         ),
                         s if s.starts_with('.') => {
-                            microsandbox_network::policy::Destination::DomainSuffix(s.to_string())
+                            let name = s.parse().map_err(|e| {
+                                pyo3::exceptions::PyValueError::new_err(format!(
+                                    "invalid domain suffix: {e}"
+                                ))
+                            })?;
+                            microsandbox_network::policy::Destination::DomainSuffix(name)
                         }
                         s if s.contains('/') => {
                             let cidr: ipnetwork::IpNetwork = s.parse().map_err(|e| {
@@ -431,7 +436,14 @@ fn apply_network(
                             })?;
                             microsandbox_network::policy::Destination::Cidr(cidr)
                         }
-                        s => microsandbox_network::policy::Destination::Domain(s.to_string()),
+                        s => {
+                            let name = s.parse().map_err(|e| {
+                                pyo3::exceptions::PyValueError::new_err(format!(
+                                    "invalid domain: {e}"
+                                ))
+                            })?;
+                            microsandbox_network::policy::Destination::Domain(name)
+                        }
                     }
                 } else {
                     microsandbox_network::policy::Destination::Any

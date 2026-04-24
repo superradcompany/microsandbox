@@ -818,7 +818,7 @@ fn convert_policy_rule(rule: &PolicyRule) -> Option<Rule> {
         Some("link-local") => Destination::Group(DestinationGroup::LinkLocal),
         Some("metadata") => Destination::Group(DestinationGroup::Metadata),
         Some("multicast") => Destination::Group(DestinationGroup::Multicast),
-        Some(s) if s.starts_with('.') => Destination::DomainSuffix(s.to_string()),
+        Some(s) if s.starts_with('.') => Destination::DomainSuffix(s.parse().ok()?),
         Some(s) if s.contains('/') => {
             // CIDR notation
             match s.parse() {
@@ -826,7 +826,7 @@ fn convert_policy_rule(rule: &PolicyRule) -> Option<Rule> {
                 Err(_) => return None,
             }
         }
-        Some(s) => Destination::Domain(s.to_string()),
+        Some(s) => Destination::Domain(s.parse().ok()?),
     };
     let protocol = rule.protocol.as_deref().map(|p| match p {
         "udp" => Protocol::Udp,

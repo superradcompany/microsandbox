@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::shared::SharedState;
 
 use super::destination::{matches_cidr, matches_group};
+use super::name::DomainName;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -72,11 +73,11 @@ pub enum Direction {
 
 /// Traffic destination specification.
 ///
-/// `Domain` and `DomainSuffix` values are stored verbatim; rule
-/// matching handles trailing dots, leading-dot suffixes, and ASCII
-/// case-insensitively at comparison time, so user-authored inputs like
-/// `"PyPI.Org."` or `".example.com"` work without a pre-normalization
-/// step.
+/// `Domain` and `DomainSuffix` values carry a validated [`DomainName`],
+/// whose construction enforces the canonical form (lowercase ASCII,
+/// leading/trailing dots stripped) once at parse time. Matching code
+/// can then rely on byte equality against the DNS cache's own
+/// canonical entries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Destination {
     /// Match any destination.
@@ -85,11 +86,14 @@ pub enum Destination {
     /// IP address or CIDR block.
     Cidr(IpNetwork),
 
-    /// Domain name (resolved and matched via DNS pin set).
-    Domain(String),
+    /// Exact domain name. Matches only when a cached hostname for the
+    /// destination IP equals this name.
+    Domain(DomainName),
 
-    /// Domain suffix (e.g. `".example.com"`).
-    DomainSuffix(String),
+    /// Domain suffix. Matches the apex domain itself and any subdomain
+    /// of it (e.g. suffix `example.com` matches `example.com` and
+    /// `foo.example.com` but not `evilexample.com`).
+    DomainSuffix(DomainName),
 
     /// Pre-defined destination group.
     Group(DestinationGroup),
@@ -324,42 +328,29 @@ fn matches_destination(dest: &Destination, addr: IpAddr, shared: &SharedState) -
         Destination::Cidr(network) => matches_cidr(network, addr),
         Destination::Group(group) => matches_group(*group, addr),
         Destination::Domain(domain) => {
-            shared.any_resolved_hostname(addr, |hostname| matches_domain(hostname, domain))
+            shared.any_resolved_hostname(addr, |hostname| hostname == domain.as_str())
         }
         Destination::DomainSuffix(suffix) => {
-            shared.any_resolved_hostname(addr, |hostname| matches_suffix(hostname, suffix))
+            shared.any_resolved_hostname(addr, |hostname| matches_suffix(hostname, suffix.as_str()))
         }
     }
 }
 
-/// Case-insensitive hostname equality. Trailing dots on either side are
-/// ignored so `"PyPI.Org."` and `"pypi.org"` compare equal. Operates on
-/// slices and ASCII-case byte comparison, no allocation.
-fn matches_domain(hostname: &str, rule_domain: &str) -> bool {
-    let h = hostname.trim_end_matches('.');
-    let d = rule_domain.trim_end_matches('.');
-    h.eq_ignore_ascii_case(d)
-}
-
-/// Zero-alloc suffix match. The rule may be written with or without a
-/// leading dot (`".example.com"` or `"example.com"`); both forms are
-/// normalized to the same trimmed slice for comparison. Matches either
-/// the apex domain itself (`"example.com"`) or any subdomain
-/// (`"sub.example.com"`), case-insensitively.
+/// Label-aware suffix match on pre-canonicalized strings.
+///
+/// `hostname` is the lowercased-no-trailing-dot form the DNS cache
+/// stores; `suffix` is a [`DomainName`]'s inner string, which shares
+/// the same canonical form. Matches either the apex domain itself or
+/// any subdomain (label-aligned, so `evilexample.com` does not match
+/// suffix `example.com`). A plain `==` would miss the apex-vs-subdomain
+/// asymmetry, which is why this helper still exists.
 fn matches_suffix(hostname: &str, suffix: &str) -> bool {
-    let hostname = hostname.trim_end_matches('.');
-    let suffix = suffix.trim_start_matches('.').trim_end_matches('.');
-    if suffix.is_empty() {
-        return false;
-    }
-    if hostname.len() == suffix.len() {
-        return hostname.eq_ignore_ascii_case(suffix);
+    if hostname == suffix {
+        return true;
     }
     if hostname.len() > suffix.len() + 1 {
         let (prefix, tail) = hostname.split_at(hostname.len() - suffix.len());
-        if prefix.ends_with('.') && tail.eq_ignore_ascii_case(suffix) {
-            return true;
-        }
+        return prefix.ends_with('.') && tail == suffix;
     }
     false
 }
@@ -373,22 +364,30 @@ mod tests {
 
     const PYPI_V4: &str = "151.101.0.223";
     const FILES_V4: &str = "151.101.64.223";
+    const CLOUDFLARE_V6: &str = "2606:4700:4700::1111";
 
-    /// Build a shared state that has one resolved hostname cached.
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    fn sock(ip_str: &str, port: u16) -> SocketAddr {
+        SocketAddr::new(ip(ip_str), port)
+    }
+
+    /// Insert a resolved hostname into the cache.
+    fn cache(shared: &SharedState, host: &str, family: ResolvedHostnameFamily, ip_str: &str) {
+        shared.cache_resolved_hostname(host, family, [ip(ip_str)], Duration::from_secs(60));
+    }
+
+    /// Build a shared state that has one IPv4 resolved hostname cached.
     fn shared_with_host(host: &str, ip_str: &str) -> SharedState {
         let shared = SharedState::new(4);
-        shared.cache_resolved_hostname(
-            host,
-            ResolvedHostnameFamily::Ipv4,
-            [ip_str.parse::<IpAddr>().unwrap()],
-            Duration::from_secs(30),
-        );
+        cache(&shared, host, ResolvedHostnameFamily::Ipv4, ip_str);
         shared
     }
 
     fn egress_tcp(policy: &NetworkPolicy, ip_str: &str, shared: &SharedState) -> Action {
-        let addr = SocketAddr::new(ip_str.parse().unwrap(), 443);
-        policy.evaluate_egress(addr, Protocol::Tcp, shared)
+        policy.evaluate_egress(sock(ip_str, 443), Protocol::Tcp, shared)
     }
 
     fn allow_rule(dest: Destination) -> NetworkPolicy {
@@ -398,49 +397,64 @@ mod tests {
         }
     }
 
+    /// Outbound TCP/443 allow rule pinned to a specific hostname,
+    /// used by the multi-rule default-deny scenarios below.
+    fn allow_domain_tcp_443(domain: &str) -> Rule {
+        Rule {
+            direction: Direction::Outbound,
+            destination: Destination::Domain(domain.parse().unwrap()),
+            protocol: Some(Protocol::Tcp),
+            ports: Some(PortRange::single(443)),
+            action: Action::Allow,
+        }
+    }
+
     #[test]
     fn exact_domain_rules_match_resolved_hostnames() {
         let shared = shared_with_host("pypi.org", PYPI_V4);
-        let policy = allow_rule(Destination::Domain("pypi.org".into()));
+        let policy = allow_rule(Destination::Domain("pypi.org".parse().unwrap()));
         assert!(egress_tcp(&policy, PYPI_V4, &shared).is_allow());
     }
 
     #[test]
     fn exact_domain_rules_normalize_user_input() {
         let shared = shared_with_host("pypi.org", PYPI_V4);
-        let policy = allow_rule(Destination::Domain("PyPI.Org.".into()));
+        let policy = allow_rule(Destination::Domain("PyPI.Org.".parse().unwrap()));
         assert!(egress_tcp(&policy, PYPI_V4, &shared).is_allow());
     }
 
     #[test]
     fn suffix_rules_match_resolved_hostnames() {
         let shared = shared_with_host("files.pythonhosted.org", FILES_V4);
-        let policy = allow_rule(Destination::DomainSuffix(".pythonhosted.org".into()));
+        let policy = allow_rule(Destination::DomainSuffix(
+            ".pythonhosted.org".parse().unwrap(),
+        ));
         assert!(egress_tcp(&policy, FILES_V4, &shared).is_allow());
     }
 
     #[test]
     fn suffix_rules_normalize_user_input() {
         let shared = shared_with_host("files.pythonhosted.org", FILES_V4);
-        let policy = allow_rule(Destination::DomainSuffix(".PythonHosted.Org.".into()));
+        let policy = allow_rule(Destination::DomainSuffix(
+            ".PythonHosted.Org.".parse().unwrap(),
+        ));
         assert!(egress_tcp(&policy, FILES_V4, &shared).is_allow());
     }
 
     #[test]
     fn unresolved_domain_rules_do_not_match_by_ip_alone() {
         let shared = SharedState::new(4);
-        let policy = allow_rule(Destination::Domain("pypi.org".into()));
+        let policy = allow_rule(Destination::Domain("pypi.org".parse().unwrap()));
         assert!(egress_tcp(&policy, PYPI_V4, &shared).is_deny());
     }
 
     #[test]
     fn exact_domain_rules_match_resolved_hostnames_for_icmp() {
         let shared = shared_with_host("pypi.org", PYPI_V4);
-        let policy = allow_rule(Destination::Domain("pypi.org".into()));
-        let ip: IpAddr = PYPI_V4.parse().unwrap();
+        let policy = allow_rule(Destination::Domain("pypi.org".parse().unwrap()));
         assert!(
             policy
-                .evaluate_egress_ip(ip, Protocol::Icmpv4, &shared)
+                .evaluate_egress_ip(ip(PYPI_V4), Protocol::Icmpv4, &shared)
                 .is_allow()
         );
     }
@@ -462,5 +476,138 @@ mod tests {
         )
         .unwrap();
         assert!(egress_tcp(&policy, PYPI_V4, &shared).is_allow());
+    }
+
+    /// Default-deny policy with explicit allow rules for multiple
+    /// hostnames on TCP/443. Both hostnames resolve via DNS first,
+    /// populating the cache, and the subsequent connects must be
+    /// allowed through the Domain rules.
+    #[test]
+    fn default_deny_allows_multiple_domain_rules_after_dns() {
+        let shared = SharedState::new(4);
+        cache(&shared, "pypi.org", ResolvedHostnameFamily::Ipv4, PYPI_V4);
+        cache(
+            &shared,
+            "files.pythonhosted.org",
+            ResolvedHostnameFamily::Ipv4,
+            FILES_V4,
+        );
+
+        let policy = NetworkPolicy {
+            default_action: Action::Deny,
+            rules: vec![
+                allow_domain_tcp_443("pypi.org"),
+                allow_domain_tcp_443("files.pythonhosted.org"),
+            ],
+        };
+
+        assert!(
+            policy
+                .evaluate_egress(sock(PYPI_V4, 443), Protocol::Tcp, &shared)
+                .is_allow(),
+            "pypi.org:443 should be allowed after DNS resolution"
+        );
+        assert!(
+            policy
+                .evaluate_egress(sock(FILES_V4, 443), Protocol::Tcp, &shared)
+                .is_allow(),
+            "files.pythonhosted.org:443 should be allowed after DNS resolution"
+        );
+    }
+
+    /// Cache has `pypi.org` -> IP, but the policy only allows
+    /// `example.com`. A connection to `pypi.org`'s IP must not be
+    /// allowed through the unrelated rule.
+    #[test]
+    fn domain_rule_does_not_match_other_cached_hostnames() {
+        let shared = shared_with_host("pypi.org", PYPI_V4);
+        let policy = allow_rule(Destination::Domain("example.com".parse().unwrap()));
+        assert!(egress_tcp(&policy, PYPI_V4, &shared).is_deny());
+    }
+
+    /// A suffix `.pythonhosted.org` must also match the apex domain
+    /// `pythonhosted.org` itself (a common source of confusion with
+    /// naive suffix matching that checks only `.ends_with`).
+    #[test]
+    fn suffix_rule_matches_apex_domain_itself() {
+        let shared = shared_with_host("pythonhosted.org", FILES_V4);
+        let policy = allow_rule(Destination::DomainSuffix(
+            ".pythonhosted.org".parse().unwrap(),
+        ));
+        assert!(egress_tcp(&policy, FILES_V4, &shared).is_allow());
+    }
+
+    /// `.pythonhosted.org` must not match `evilpythonhosted.org`: a
+    /// naive `ends_with` check would pass, but the label-boundary
+    /// guard (dot before the suffix) must reject it.
+    #[test]
+    fn suffix_rule_does_not_false_match_adjacent_domain() {
+        let shared = shared_with_host("evilpythonhosted.org", FILES_V4);
+        let policy = allow_rule(Destination::DomainSuffix(
+            ".pythonhosted.org".parse().unwrap(),
+        ));
+        assert!(egress_tcp(&policy, FILES_V4, &shared).is_deny());
+    }
+
+    /// Shared-IP mitigation via rule ordering: a specific allow-Domain
+    /// rule listed before a broad deny-Cidr rule must win under
+    /// first-match-wins semantics, even when both would match the
+    /// destination.
+    #[test]
+    fn allow_rule_before_deny_wins_on_shared_ip() {
+        let shared = shared_with_host("pypi.org", PYPI_V4);
+        let policy = NetworkPolicy {
+            default_action: Action::Deny,
+            rules: vec![
+                Rule::allow_outbound(Destination::Domain("pypi.org".parse().unwrap())),
+                Rule {
+                    direction: Direction::Outbound,
+                    destination: Destination::Cidr("151.101.0.0/16".parse().unwrap()),
+                    protocol: None,
+                    ports: None,
+                    action: Action::Deny,
+                },
+            ],
+        };
+        assert!(egress_tcp(&policy, PYPI_V4, &shared).is_allow());
+    }
+
+    /// UDP traffic (e.g., QUIC over port 443) must match Domain rules
+    /// the same way TCP does, since both go through `evaluate_egress`.
+    #[test]
+    fn udp_egress_consults_domain_cache() {
+        let shared = shared_with_host("pypi.org", PYPI_V4);
+        let policy = NetworkPolicy {
+            default_action: Action::Deny,
+            rules: vec![Rule {
+                direction: Direction::Outbound,
+                destination: Destination::Domain("pypi.org".parse().unwrap()),
+                protocol: Some(Protocol::Udp),
+                ports: Some(PortRange::single(443)),
+                action: Action::Allow,
+            }],
+        };
+        assert!(
+            policy
+                .evaluate_egress(sock(PYPI_V4, 443), Protocol::Udp, &shared)
+                .is_allow()
+        );
+    }
+
+    /// Resolving only A (IPv4) must not grant access over IPv6, and
+    /// vice versa. The family partition in the cache key guarantees
+    /// independent refresh/expiry per address family.
+    #[test]
+    fn ipv4_and_ipv6_caches_are_independent() {
+        let shared = shared_with_host("pypi.org", PYPI_V4);
+        let policy = allow_rule(Destination::Domain("pypi.org".parse().unwrap()));
+        assert!(
+            egress_tcp(&policy, PYPI_V4, &shared).is_allow(),
+            "cached IPv4 address should match"
+        );
+        assert!(
+            egress_tcp(&policy, CLOUDFLARE_V6, &shared).is_deny(),
+            "uncached IPv6 address must not match through an IPv4-only cache entry"
+        );
     }
 }

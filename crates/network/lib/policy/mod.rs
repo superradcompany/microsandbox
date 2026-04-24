@@ -5,6 +5,7 @@
 //! index to map destination IPs back to domain names.
 
 pub mod destination;
+mod name;
 mod types;
 
 //--------------------------------------------------------------------------------------------------
@@ -12,4 +13,5 @@ mod types;
 //--------------------------------------------------------------------------------------------------
 
 pub use destination::*;
+pub use name::{DomainName, DomainNameError};
 pub use types::*;
