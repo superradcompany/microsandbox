@@ -14,7 +14,7 @@ use microsandbox::Sandbox;
 use test_utils::msb_test;
 
 /// Covers the default TLS-interception path:
-/// - regression for #542: Node.js fetch over TLS 1.3 used to deadlock because
+/// - Node.js fetch over TLS 1.3: guards against a past deadlock where
 ///   application data piggybacked on the TLS Finished message was never
 ///   drained from the handshake buffer.
 /// - wget (busybox, typically TLS 1.2) as a non-Node baseline.

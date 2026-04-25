@@ -373,9 +373,24 @@ Control whether the TLS proxy verifies the upstream server's certificate. When `
 |---------|-------------|
 | `Any` | Match any address |
 | `Cidr(IpNetwork)` | Match a CIDR range (e.g. `10.0.0.0/8`) |
-| `Domain(String)` | Match an exact domain |
-| `DomainSuffix(String)` | Match a domain suffix |
+| `Domain(`[`DomainName`](#domainname)`)` | Match an exact domain (e.g. `example.com`) |
+| `DomainSuffix(`[`DomainName`](#domainname)`)` | Match the apex domain and every subdomain (e.g. `example.com` and `api.example.com`) |
 | `Group(`[`DestinationGroup`](#destinationgroup)`)` | Match a predefined address group |
+
+### DomainName
+
+A validated DNS name. Construction goes through `str::parse` (or `TryFrom<String>`), which delegates to `hickory_proto::rr::Name` and canonicalizes the input (lowercased ASCII, leading and trailing dots stripped) so rule matching can be a byte-wise compare against the DNS cache. Invalid inputs return a `DomainNameError`.
+
+```rust
+use microsandbox_network::policy::{Destination, DomainName};
+
+let exact: DomainName = "PyPI.Org.".parse()?;        // -> "pypi.org"
+let suffix: DomainName = ".example.com".parse()?;    // -> "example.com"
+
+let rule = Rule::allow_outbound(Destination::Domain(exact));
+```
+
+Labels follow the permissive DNS grammar (RFC 2181 §11), so underscore-prefixed names like `_service._tcp.example.com` are accepted.
 
 ### DestinationGroup
 

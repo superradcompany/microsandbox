@@ -4,12 +4,17 @@
 //! All inter-thread communication flows through [`SharedState`], which holds
 //! lock-free frame queues and cross-platform [`WakePipe`] notifications.
 
-use crossbeam_queue::ArrayQueue;
-pub use microsandbox_utils::wake_pipe::WakePipe;
+use std::net::IpAddr;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::{Duration, Instant};
+
+use crossbeam_queue::ArrayQueue;
+use microsandbox_utils::ttl_reverse_index::TtlReverseIndex;
+pub use microsandbox_utils::wake_pipe::WakePipe;
+use parking_lot::RwLock;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -59,6 +64,9 @@ pub struct SharedState {
     /// Optional host-side termination hook used for fatal policy violations.
     termination_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 
+    /// Resolved hostname index used to map destination IPs back to queried hostnames.
+    resolved_hostnames: RwLock<TtlReverseIndex<ResolvedHostnameKey, IpAddr>>,
+
     /// Aggregate network byte counters at the guest/runtime boundary.
     metrics: NetworkMetrics,
 }
@@ -67,6 +75,23 @@ pub struct SharedState {
 pub struct NetworkMetrics {
     tx_bytes: AtomicU64,
     rx_bytes: AtomicU64,
+}
+
+/// Address family for resolved hostname entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ResolvedHostnameFamily {
+    Ipv4,
+    Ipv6,
+}
+
+/// Composite cache key for a single DNS resolution.
+///
+/// `family` partitions entries so that `A` and `AAAA` responses for the
+/// same hostname refresh independently instead of overwriting each other.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ResolvedHostnameKey {
+    hostname: String,
+    family: ResolvedHostnameFamily,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -83,6 +108,7 @@ impl SharedState {
             tx_wake: WakePipe::new(),
             proxy_wake: WakePipe::new(),
             termination_hook: Mutex::new(None),
+            resolved_hostnames: RwLock::new(TtlReverseIndex::default()),
             metrics: NetworkMetrics::default(),
         }
     }
@@ -97,6 +123,49 @@ impl SharedState {
         let hook = self.termination_hook.lock().unwrap().clone();
         if let Some(hook) = hook {
             hook();
+        }
+    }
+
+    /// Replace the resolved addresses for a hostname within the given address family.
+    pub fn cache_resolved_hostname(
+        &self,
+        domain: &str,
+        family: ResolvedHostnameFamily,
+        addrs: impl IntoIterator<Item = IpAddr>,
+        ttl: Duration,
+    ) {
+        let hostname = normalize_hostname(domain);
+        let key = ResolvedHostnameKey { hostname, family };
+        self.resolved_hostnames
+            .write()
+            .insert(key, addrs, ttl, Instant::now());
+    }
+
+    /// Clear the resolved addresses for a hostname within the given address family.
+    pub fn clear_resolved_hostname(&self, domain: &str, family: ResolvedHostnameFamily) {
+        let hostname = normalize_hostname(domain);
+        let key = ResolvedHostnameKey { hostname, family };
+        self.resolved_hostnames.write().remove(&key, Instant::now());
+    }
+
+    /// Returns `true` when any resolved hostname for `addr` satisfies `predicate`.
+    pub fn any_resolved_hostname(
+        &self,
+        addr: IpAddr,
+        mut predicate: impl FnMut(&str) -> bool,
+    ) -> bool {
+        self.resolved_hostnames
+            .read()
+            .member_matches(&addr, Instant::now(), |key| predicate(&key.hostname))
+    }
+
+    /// Best-effort expiry maintenance for resolved hostnames.
+    ///
+    /// This runs outside the hot egress read path. If the index is currently
+    /// busy, cleanup is skipped and retried on the next maintenance pass.
+    pub fn cleanup_resolved_hostnames(&self) {
+        if let Some(mut idx) = self.resolved_hostnames.try_write() {
+            idx.evict_expired(Instant::now());
         }
     }
 
@@ -134,6 +203,10 @@ impl Default for NetworkMetrics {
     }
 }
 
+pub(crate) fn normalize_hostname(domain: &str) -> String {
+    domain.trim_end_matches('.').to_ascii_lowercase()
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -164,5 +237,29 @@ mod tests {
         state.rx_ring.push(vec![2]).unwrap();
         // Queue is full — push returns the frame back.
         assert!(state.rx_ring.push(vec![3]).is_err());
+    }
+
+    #[test]
+    fn resolved_hostnames_are_isolated_per_family() {
+        let state = SharedState::new(4);
+        let v4: IpAddr = "1.1.1.1".parse().unwrap();
+        let v6: IpAddr = "2606:4700:4700::1111".parse().unwrap();
+
+        state.cache_resolved_hostname(
+            "Example.com.",
+            ResolvedHostnameFamily::Ipv4,
+            [v4],
+            Duration::from_secs(30),
+        );
+        state.cache_resolved_hostname(
+            "example.com",
+            ResolvedHostnameFamily::Ipv6,
+            [v6],
+            Duration::from_secs(30),
+        );
+
+        assert!(state.any_resolved_hostname(v4, |h| h == "example.com"));
+        assert!(state.any_resolved_hostname(v6, |h| h == "example.com"));
+        assert!(!state.any_resolved_hostname(v4, |h| h == "other.example"));
     }
 }

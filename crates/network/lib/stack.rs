@@ -269,7 +269,7 @@ pub fn smoltcp_poll_loop(
                         }
                         // Other: regular outbound — apply egress policy.
                         DnsPortType::Other => network_policy
-                            .evaluate_egress(dst, Protocol::Tcp)
+                            .evaluate_egress(dst, Protocol::Tcp, &shared)
                             .is_allow(),
                     };
                     if allow && !conn_tracker.has_socket_for(&src, &dst) {
@@ -318,7 +318,10 @@ pub fn smoltcp_poll_loop(
                     }
 
                     // Policy check.
-                    if network_policy.evaluate_egress(dst, Protocol::Udp).is_deny() {
+                    if network_policy
+                        .evaluate_egress(dst, Protocol::Udp, &shared)
+                        .is_deny()
+                    {
                         device.drop_staged_frame();
                         continue;
                     }
@@ -435,6 +438,7 @@ pub fn smoltcp_poll_loop(
             conn_tracker.cleanup_closed(&mut sockets);
             port_publisher.cleanup_closed(&mut sockets);
             udp_relay.cleanup_expired();
+            shared.cleanup_resolved_hostnames();
             last_cleanup = std::time::Instant::now();
         }
 

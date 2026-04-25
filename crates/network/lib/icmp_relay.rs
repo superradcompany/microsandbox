@@ -169,7 +169,7 @@ impl IcmpRelay {
 
         // Policy check.
         if policy
-            .evaluate_egress_ip(IpAddr::V4(dst_ip), Protocol::Icmpv4)
+            .evaluate_egress_ip(IpAddr::V4(dst_ip), Protocol::Icmpv4, &self.shared)
             .is_deny()
         {
             tracing::debug!(dst = %dst_ip, "ICMP echo denied by policy");
@@ -245,7 +245,7 @@ impl IcmpRelay {
 
         // Policy check.
         if policy
-            .evaluate_egress_ip(IpAddr::V6(dst_ip), Protocol::Icmpv6)
+            .evaluate_egress_ip(IpAddr::V6(dst_ip), Protocol::Icmpv6, &self.shared)
             .is_deny()
         {
             tracing::debug!(dst = %dst_ip, "ICMPv6 echo denied by policy");
@@ -649,7 +649,7 @@ fn extract_ipv4_icmp_payload(buf: &[u8]) -> std::io::Result<&[u8]> {
             "host ICMPv4 reply did not contain a usable IPv4 header",
         ));
     }
-    if buf[9] != IpProtocol::Icmp.into() {
+    if buf[9] != u8::from(IpProtocol::Icmp) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "host ICMPv4 reply did not contain an ICMP payload",
@@ -675,7 +675,7 @@ fn extract_ipv6_icmp_payload(buf: &[u8]) -> std::io::Result<&[u8]> {
             "host ICMPv6 reply did not contain a usable IPv6 header",
         ));
     }
-    if buf[6] != IpProtocol::Icmpv6.into() {
+    if buf[6] != u8::from(IpProtocol::Icmpv6) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "host ICMPv6 reply did not contain an ICMPv6 payload",

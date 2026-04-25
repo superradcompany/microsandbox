@@ -155,7 +155,7 @@ sb = await Sandbox.create(
 
 </CodeGroup>
 
-Rules can also target domains directly (`Destination::Domain`, `Destination::DomainSuffix`). Those rely on DNS pinning so the sandbox can map a connection's destination IP back to the domain that resolved to it. See [DNS](/networking/dns) and the [security model](/networking/security-model) for how that works.
+Rules can also target domains directly, either as an exact name (e.g. `example.com`) or as a suffix that covers every subdomain (e.g. `.example.com`, matching `api.example.com`, `foo.bar.example.com`, and the apex `example.com` itself). Domain rules rely on DNS pinning so the sandbox can map a connection's destination IP back to the domain that resolved to it. See [DNS](/networking/dns) and the [security model](/networking/security-model) for how that works.
 
 ## Port mapping
 
