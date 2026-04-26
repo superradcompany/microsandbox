@@ -31,6 +31,7 @@ cargo run -p fs-read-stream
 | `root-block` | `cargo run -p block-root` | qcow2 disk image |
 | `rootfs-patch` | `cargo run -p rootfs-patch` | Pre-boot filesystem patches |
 | `volume-named` | `cargo run -p named-volume` | Named volumes shared across sandboxes |
+| `volume-disk` | `cargo run -p volume-disk` | Disk image volumes (raw / qcow2) at guest paths |
 | `fs-read-stream` | `cargo run -p fs-read-stream` | Streaming file read |
 | `metrics-stream` | `cargo run -p metrics-stream` | Streaming resource metrics |
 | `shell-attach` | `cargo run -p shell-attach` | Interactive shell attach |

@@ -42,6 +42,7 @@ uv run --project sdk/python python examples/python/fs-read-stream/main.py
 | `root-block` | qcow2 disk image |
 | `rootfs-patch` | Pre-boot filesystem patches |
 | `volume-named` | Named volumes shared across sandboxes |
+| `volume-disk` | Disk image volumes (raw / qcow2) at guest paths |
 | `fs-read-stream` | Streaming file read |
 | `metrics-stream` | Streaming resource metrics |
 | `shell-attach` | Interactive shell attach |

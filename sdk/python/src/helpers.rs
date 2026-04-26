@@ -255,9 +255,32 @@ fn apply_mount(
             }
             if readonly { m.readonly() } else { m }
         }))
+    } else if let Some(disk_path) = extract_opt::<String>(mount, "disk")? {
+        let format_str = extract_opt::<String>(mount, "format")?;
+        let fstype = extract_opt::<String>(mount, "fstype")?;
+        let format = format_str
+            .as_deref()
+            .map(|s| {
+                microsandbox::sandbox::DiskImageFormat::from_extension(s).ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "invalid disk image format: {s} (expected qcow2, raw, or vmdk)"
+                    ))
+                })
+            })
+            .transpose()?;
+        Ok(builder.volume(&guest_path, |v| {
+            let mut m = v.disk(&disk_path);
+            if let Some(format) = format {
+                m = m.format(format);
+            }
+            if let Some(fstype) = fstype {
+                m = m.fstype(fstype);
+            }
+            if readonly { m.readonly() } else { m }
+        }))
     } else {
         Err(pyo3::exceptions::PyValueError::new_err(
-            "mount must have one of: bind, named, tmpfs",
+            "mount must have one of: bind, named, tmpfs, disk",
         ))
     }
 }

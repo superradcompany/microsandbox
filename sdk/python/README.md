@@ -169,6 +169,26 @@ await Sandbox.remove("reader")
 await Volume.remove("my-data")
 ```
 
+### Disk Image Volumes
+
+```python
+from microsandbox import Sandbox, Volume, DiskImageFormat
+
+# Mount a host disk image at a guest path. Format is inferred from the
+# extension; pass `format=` to override. `fstype` is the inner FS agentd
+# will mount; omit to let agentd autodetect.
+sb = await Sandbox.create(
+    "worker",
+    image="alpine",
+    volumes={
+        "/data": Volume.disk("./data.qcow2", format=DiskImageFormat.QCOW2, fstype="ext4"),
+        "/seed": Volume.disk("./seed.raw", readonly=True),
+        "/scratch": Volume.tmpfs(size_mib=128, readonly=True),
+    },
+    replace=True,
+)
+```
+
 ### Network Policies
 
 ```python
@@ -355,7 +375,7 @@ if not is_installed():
 
 | Class | Description |
 |-------|-------------|
-| `Volume.bind()` / `.named()` / `.tmpfs()` | Volume mount configuration |
+| `Volume.bind()` / `.named()` / `.tmpfs()` / `.disk()` | Volume mount configuration |
 | `Network.none()` / `.public_only()` / `.allow_all()` | Network presets |
 | `Secret.env()` | Secret entry with host allowlist |
 | `Patch.text()` / `.mkdir()` / `.copy_file()` / `.append()` / ... | Pre-boot filesystem modifications |

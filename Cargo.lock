@@ -5550,6 +5550,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "volume-disk"
+version = "0.1.0"
+dependencies = [
+ "microsandbox",
+ "tokio",
+]
+
+[[package]]
 name = "volume-named"
 version = "0.1.0"
 dependencies = [

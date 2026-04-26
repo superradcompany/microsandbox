@@ -170,6 +170,26 @@ await Sandbox.remove("reader");
 await Volume.remove("my-data");
 ```
 
+### Disk Image Volumes
+
+```typescript
+import { Sandbox, Mount } from "microsandbox";
+
+// Mount a host disk image at a guest path. Format defaults to the file
+// extension; pass `format` to override. `fstype` is the inner filesystem
+// agentd will mount; omit to let agentd autodetect.
+const sb = await Sandbox.create({
+  name: "worker",
+  image: "alpine",
+  volumes: {
+    "/data": Mount.disk("./data.qcow2", { format: "qcow2", fstype: "ext4" }),
+    "/seed": Mount.disk("./seed.raw", { readonly: true }),
+    "/scratch": Mount.tmpfs({ sizeMib: 128, readonly: true }),
+  },
+  replace: true,
+});
+```
+
 ### Network Policies
 
 ```typescript
@@ -345,7 +365,7 @@ if (!isInstalled()) {
 
 | Class | Description |
 |-------|-------------|
-| `Mount` | Volume mount configuration — `Mount.bind()`, `Mount.named()`, `Mount.tmpfs()` |
+| `Mount` | Volume mount configuration — `Mount.bind()`, `Mount.named()`, `Mount.tmpfs()`, `Mount.disk()` |
 | `NetworkPolicy` | Network presets — `NetworkPolicy.none()`, `NetworkPolicy.publicOnly()`, `NetworkPolicy.allowAll()` |
 | `Secret` | Secret entry — `Secret.env(name, options)` |
 

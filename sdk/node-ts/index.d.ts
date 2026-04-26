@@ -139,6 +139,15 @@ export declare class Mount {
   static named(name: string, opts?: MountOptions | undefined | null): MountConfig
   /** Create a tmpfs (in-memory) mount. */
   static tmpfs(opts?: TmpfsOptions | undefined | null): MountConfig
+  /**
+   * Mount a host disk image as a virtio-blk device at a guest path.
+   *
+   * Format defaults to the file extension (`.qcow2` → Qcow2, `.vmdk` →
+   * Vmdk, anything else → Raw). Use `opts.format` to override. `fstype`
+   * (e.g. `"ext4"`) is the inner filesystem agentd will mount; when
+   * omitted, agentd probes `/proc/filesystems`.
+   */
+  static disk(path: string, opts?: DiskOptions | undefined | null): MountConfig
 }
 
 /**
@@ -505,17 +514,35 @@ export declare const enum LogLevel {
 
 /** Volume mount configuration. */
 export interface MountConfig {
-  /** Mount a host directory. Mutually exclusive with `named` and `tmpfs`. */
+  /** Mount a host directory. Mutually exclusive with `named`, `tmpfs`, `disk`. */
   bind?: string
-  /** Mount a named volume. Mutually exclusive with `bind` and `tmpfs`. */
+  /** Mount a named volume. Mutually exclusive with `bind`, `tmpfs`, `disk`. */
   named?: string
-  /** Use tmpfs (memory-backed). Mutually exclusive with `bind` and `named`. */
+  /** Use tmpfs (memory-backed). Mutually exclusive with `bind`, `named`, `disk`. */
   tmpfs?: boolean
+  /**
+   * Mount a host disk image as a virtio-blk device. Mutually exclusive
+   * with `bind`, `named`, `tmpfs`.
+   */
+  disk?: string
+  /**
+   * Disk image format: `"qcow2"`, `"raw"`, or `"vmdk"`. Inferred from the
+   * file extension when omitted (only meaningful with `disk`).
+   */
+  format?: DiskImageFormat
+  /**
+   * Inner filesystem type for disk image mounts (e.g. `"ext4"`). When
+   * omitted, agentd probes `/proc/filesystems`.
+   */
+  fstype?: string
   /** Read-only mount. */
   readonly?: boolean
   /** Size limit in MiB (for tmpfs). */
   sizeMib?: number
 }
+
+/** Supported disk image formats for `Mount.disk`. */
+export type DiskImageFormat = 'qcow2' | 'raw' | 'vmdk'
 
 /** Options for bind and named volume mounts. */
 export interface MountOptions {
@@ -815,6 +842,22 @@ export interface TlsConfig {
 export interface TmpfsOptions {
   /** Size limit in MiB. */
   sizeMib?: number
+  /** Read-only mount. */
+  readonly?: boolean
+}
+
+/** Options for disk-image volume mounts. */
+export interface DiskOptions {
+  /**
+   * Disk image format: `"qcow2"`, `"raw"`, or `"vmdk"`. When omitted,
+   * inferred from the file extension.
+   */
+  format?: DiskImageFormat
+  /**
+   * Inner filesystem type the guest should mount (e.g. `"ext4"`). When
+   * omitted, agentd probes `/proc/filesystems`.
+   */
+  fstype?: string
   /** Read-only mount. */
   readonly?: boolean
 }

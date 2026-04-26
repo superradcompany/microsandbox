@@ -75,12 +75,21 @@ pub struct SandboxConfig {
 /// Volume mount configuration.
 #[napi(object)]
 pub struct MountConfig {
-    /// Mount a host directory. Mutually exclusive with `named` and `tmpfs`.
+    /// Mount a host directory. Mutually exclusive with `named`, `tmpfs`, `disk`.
     pub bind: Option<String>,
-    /// Mount a named volume. Mutually exclusive with `bind` and `tmpfs`.
+    /// Mount a named volume. Mutually exclusive with `bind`, `tmpfs`, `disk`.
     pub named: Option<String>,
-    /// Use tmpfs (memory-backed). Mutually exclusive with `bind` and `named`.
+    /// Use tmpfs (memory-backed). Mutually exclusive with `bind`, `named`, `disk`.
     pub tmpfs: Option<bool>,
+    /// Mount a host disk image as a virtio-blk device. Mutually exclusive
+    /// with `bind`, `named`, `tmpfs`.
+    pub disk: Option<String>,
+    /// Disk image format: `"qcow2"`, `"raw"`, or `"vmdk"`. Inferred from the
+    /// file extension when omitted (only meaningful with `disk`).
+    pub format: Option<String>,
+    /// Inner filesystem type for disk image mounts (e.g. `"ext4"`). When
+    /// omitted, agentd probes `/proc/filesystems`.
+    pub fstype: Option<String>,
     /// Read-only mount.
     pub readonly: Option<bool>,
     /// Size limit in MiB (for tmpfs).

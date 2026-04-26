@@ -184,6 +184,14 @@ class Volume:
     def named(name: str, *, readonly: bool = False) -> dict[str, Any]: ...
     @staticmethod
     def tmpfs(*, size_mib: int | None = None, readonly: bool = False) -> dict[str, Any]: ...
+    @staticmethod
+    def disk(
+        path: str,
+        *,
+        format: str | None = None,
+        fstype: str | None = None,
+        readonly: bool = False,
+    ) -> dict[str, Any]: ...
     @property
     def name(self) -> str: ...
     @property

@@ -71,6 +71,7 @@ class MountKind(enum.StrEnum):
     BIND = "bind"
     NAMED = "named"
     TMPFS = "tmpfs"
+    DISK = "disk"
 
 class FsEntryKind(enum.StrEnum):
     FILE = "file"
@@ -269,6 +270,9 @@ class MountConfig:
     named: str | None = None
     size_mib: int | None = None
     readonly: bool = False
+    disk: str | None = None
+    format: DiskImageFormat | None = None
+    fstype: str | None = None
 
     def _to_dict(self) -> dict:
         d: dict = {}
@@ -278,6 +282,12 @@ class MountConfig:
             d["named"] = self.named
         if self.kind == MountKind.TMPFS:
             d["tmpfs"] = True
+        if self.disk is not None:
+            d["disk"] = self.disk
+        if self.format is not None:
+            d["format"] = self.format.value
+        if self.fstype is not None:
+            d["fstype"] = self.fstype
         if self.size_mib is not None:
             d["size_mib"] = self.size_mib
         d["readonly"] = self.readonly

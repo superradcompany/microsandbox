@@ -136,6 +136,19 @@ pub struct TmpfsOptions {
     pub readonly: Option<bool>,
 }
 
+/// Options for disk-image volume mounts.
+#[napi(object)]
+pub struct DiskOptions {
+    /// Disk image format: `"qcow2"`, `"raw"`, or `"vmdk"`. When omitted,
+    /// inferred from the file extension.
+    pub format: Option<String>,
+    /// Inner filesystem type the guest should mount (e.g. `"ext4"`). When
+    /// omitted, agentd probes `/proc/filesystems`.
+    pub fstype: Option<String>,
+    /// Read-only mount.
+    pub readonly: Option<bool>,
+}
+
 /// Options for `Secret.env()`.
 #[napi(object)]
 pub struct SecretEnvOptions {
@@ -263,6 +276,9 @@ impl Mount {
             bind: Some(path),
             named: None,
             tmpfs: None,
+            disk: None,
+            format: None,
+            fstype: None,
             readonly,
             size_mib: None,
         }
@@ -276,6 +292,9 @@ impl Mount {
             bind: None,
             named: Some(name),
             tmpfs: None,
+            disk: None,
+            format: None,
+            fstype: None,
             readonly,
             size_mib: None,
         }
@@ -291,8 +310,34 @@ impl Mount {
             bind: None,
             named: None,
             tmpfs: Some(true),
+            disk: None,
+            format: None,
+            fstype: None,
             readonly,
             size_mib,
+        }
+    }
+
+    /// Mount a host disk image as a virtio-blk device at a guest path.
+    ///
+    /// Format defaults to the file extension (`.qcow2` → Qcow2, `.vmdk` →
+    /// Vmdk, anything else → Raw). Use `opts.format` to override. `fstype`
+    /// (e.g. `"ext4"`) is the inner filesystem agentd will mount; when
+    /// omitted, agentd probes `/proc/filesystems`.
+    #[napi]
+    pub fn disk(path: String, opts: Option<DiskOptions>) -> MountConfig {
+        let (format, fstype, readonly) = opts
+            .map(|o| (o.format, o.fstype, o.readonly))
+            .unwrap_or((None, None, None));
+        MountConfig {
+            bind: None,
+            named: None,
+            tmpfs: None,
+            disk: Some(path),
+            format,
+            fstype,
+            readonly,
+            size_mib: None,
         }
     }
 }

@@ -481,7 +481,22 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
     }
     if let Some(ref volumes) = config.volumes {
         for (guest_path, mount) in volumes {
-            builder = builder.volume(guest_path, |b| convert_mount(b, mount));
+            // Parse the disk-image format upfront so we can surface a clean
+            // error before the closure runs. The MountBuilder takes a typed
+            // enum, not a string, so the conversion has to happen here.
+            let format = match mount.format.as_deref() {
+                Some(s) => Some(
+                    microsandbox::sandbox::DiskImageFormat::from_extension(s).ok_or_else(
+                        || {
+                            napi::Error::from_reason(format!(
+                                "invalid disk image format for {guest_path}: {s} (expected qcow2, raw, or vmdk)"
+                            ))
+                        },
+                    )?,
+                ),
+                None => None,
+            };
+            builder = builder.volume(guest_path, |b| convert_mount(b, mount, format));
         }
     }
     if let Some(ref patches) = config.patches {
@@ -721,6 +736,7 @@ fn parse_nameservers(nameservers: &[String]) -> Result<Vec<Nameserver>> {
 fn convert_mount(
     builder: microsandbox::sandbox::MountBuilder,
     mount: &MountConfig,
+    format: Option<microsandbox::sandbox::DiskImageFormat>,
 ) -> microsandbox::sandbox::MountBuilder {
     let mut b = builder;
     if let Some(ref bind_path) = mount.bind {
@@ -729,6 +745,14 @@ fn convert_mount(
         b = b.named(vol_name);
     } else if mount.tmpfs.unwrap_or(false) {
         b = b.tmpfs();
+    } else if let Some(ref disk_path) = mount.disk {
+        b = b.disk(PathBuf::from(disk_path));
+        if let Some(format) = format {
+            b = b.format(format);
+        }
+        if let Some(ref fstype) = mount.fstype {
+            b = b.fstype(fstype);
+        }
     }
     if mount.readonly.unwrap_or(false) {
         b = b.readonly();

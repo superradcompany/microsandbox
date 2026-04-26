@@ -27,6 +27,7 @@ git submodule update --init --recursive
 | `root-block` | Create a sandbox from a qcow2 disk image |
 | `rootfs-patch` | Pre-boot filesystem modifications (files, dirs, appends) |
 | `volume-named` | Persistent named volume shared between sandboxes |
+| `volume-disk` | Mount raw / qcow2 disk images at arbitrary guest paths |
 | `fs-read-stream` | Stream a large file from the sandbox in chunks |
 | `metrics-stream` | Subscribe to streaming resource metrics |
 | `shell-attach` | Interactive terminal session inside a sandbox |
