@@ -1,8 +1,7 @@
 //! Fluent builder for [`NetworkPolicy`].
 //!
-//! See `PLAN-network-policy.md` §SDK Surfaces (Rust). The builder lets
-//! callers compose a policy via chained method calls inside rule-batch
-//! closures:
+//! Lets callers compose a policy via chained method calls inside
+//! rule-batch closures:
 //!
 //! ```ignore
 //! let policy = NetworkPolicy::builder()

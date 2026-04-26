@@ -1,6 +1,5 @@
-//! Parser for the `--net-rule` token grammar.
-//!
-//! See `PLAN-network-policy.md` §CLI Surface. The grammar is:
+//! Parser for the string-form rule token grammar used by `--net-rule`
+//! and any other consumer that builds rules from plain strings.
 //!
 //! ```text
 //! <TOKEN>     := <action>[:<direction>]@<target>[:<proto>[:<ports>]]
@@ -13,7 +12,8 @@
 //! ```
 //!
 //! Tokens are parsed eagerly. Levenshtein-2 typo suggestions are
-//! emitted for unrecognized keywords.
+//! emitted for unrecognized keywords. The parser produces fully-formed
+//! [`Rule`] values that `NetworkPolicy` consumes directly.
 
 use std::net::IpAddr;
 use std::str::FromStr;
