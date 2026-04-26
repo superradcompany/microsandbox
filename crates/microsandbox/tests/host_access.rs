@@ -119,8 +119,9 @@ async fn read_gateway_ip(sb: &Sandbox) -> String {
 /// Allow host only; deny everything else.
 fn allow_host_only_policy() -> NetworkPolicy {
     NetworkPolicy {
-        default_action: Action::Deny,
-        rules: vec![Rule::allow_outbound(Destination::Group(
+        default_egress: Action::Deny,
+        default_ingress: Action::Allow,
+        rules: vec![Rule::allow_egress(Destination::Group(
             DestinationGroup::Host,
         ))],
     }
@@ -129,8 +130,9 @@ fn allow_host_only_policy() -> NetworkPolicy {
 /// Deny host only; allow everything else.
 fn deny_host_group_policy() -> NetworkPolicy {
     NetworkPolicy {
-        default_action: Action::Allow,
-        rules: vec![Rule::deny_outbound(Destination::Group(
+        default_egress: Action::Allow,
+        default_ingress: Action::Allow,
+        rules: vec![Rule::deny_egress(Destination::Group(
             DestinationGroup::Host,
         ))],
     }
@@ -140,8 +142,9 @@ fn deny_host_group_policy() -> NetworkPolicy {
 fn deny_gateway_cidr_policy(gateway_ip: &str) -> NetworkPolicy {
     let addr: Ipv4Addr = gateway_ip.parse().expect("valid gateway ipv4");
     NetworkPolicy {
-        default_action: Action::Allow,
-        rules: vec![Rule::deny_outbound(Destination::Cidr(IpNetwork::V4(
+        default_egress: Action::Allow,
+        default_ingress: Action::Allow,
+        rules: vec![Rule::deny_egress(Destination::Cidr(IpNetwork::V4(
             Ipv4Network::new(addr, 32).expect("valid /32"),
         )))],
     }

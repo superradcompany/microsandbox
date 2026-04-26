@@ -1,5 +1,6 @@
 //! Destination group matching: maps `DestinationGroup` variants to concrete
-//! IP ranges for loopback, private, link-local, metadata, and multicast.
+//! IP ranges for public, loopback, private, link-local, metadata, and
+//! multicast.
 
 use std::net::IpAddr;
 
@@ -13,10 +14,23 @@ use super::DestinationGroup;
 
 /// Returns `true` if `addr` belongs to the given destination group.
 ///
+/// `Public` is defined as the complement of the other categories: an IP
+/// is in `Public` iff it is not in `Private`, `Loopback`, `LinkLocal`,
+/// `Metadata`, or `Multicast`. This means uncategorized address space
+/// (including future reserved ranges) falls into `Public` by construction.
+///
+/// `Metadata` takes precedence over `LinkLocal` for `169.254.169.254`:
+/// that IP is in the link-local range by CIDR but is categorized as
+/// `Metadata`. The two groups' match functions are independent
+/// (`is_link_local` returns `true` for the metadata IP) — precedence is
+/// enforced by rule authoring and the `Public` complement, not by
+/// mutating the primitives themselves.
+///
 /// `DestinationGroup::Host` is handled by the policy-level matcher
 /// because it needs per-sandbox gateway IPs; it returns `false` here.
 pub fn matches_group(group: DestinationGroup, addr: IpAddr) -> bool {
     match group {
+        DestinationGroup::Public => is_public(addr),
         DestinationGroup::Loopback => is_loopback(addr),
         DestinationGroup::Private => is_private(addr),
         DestinationGroup::LinkLocal => is_link_local(addr),
@@ -24,6 +38,16 @@ pub fn matches_group(group: DestinationGroup, addr: IpAddr) -> bool {
         DestinationGroup::Multicast => is_multicast(addr),
         DestinationGroup::Host => false,
     }
+}
+
+/// Returns `true` if `addr` is not a member of any other destination
+/// group — i.e. the "public internet" complement set.
+fn is_public(addr: IpAddr) -> bool {
+    !is_loopback(addr)
+        && !is_private(addr)
+        && !is_link_local(addr)
+        && !is_metadata(addr)
+        && !is_multicast(addr)
 }
 
 fn is_loopback(addr: IpAddr) -> bool {
@@ -214,5 +238,84 @@ mod tests {
         let net: IpNetwork = "10.0.0.0/8".parse().unwrap();
         assert!(matches_cidr(&net, IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3))));
         assert!(!matches_cidr(&net, IpAddr::V4(Ipv4Addr::new(11, 0, 0, 1))));
+    }
+
+    #[test]
+    fn test_public_v4_routable() {
+        // Arbitrary routable public IPs.
+        assert!(matches_group(
+            DestinationGroup::Public,
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))
+        ));
+        assert!(matches_group(
+            DestinationGroup::Public,
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))
+        ));
+        assert!(matches_group(
+            DestinationGroup::Public,
+            IpAddr::V4(Ipv4Addr::new(151, 101, 0, 223))
+        ));
+    }
+
+    #[test]
+    fn test_public_v6_routable() {
+        assert!(matches_group(
+            DestinationGroup::Public,
+            IpAddr::V6("2606:4700:4700::1111".parse().unwrap())
+        ));
+        assert!(matches_group(
+            DestinationGroup::Public,
+            IpAddr::V6("2001:db8::1".parse().unwrap())
+        ));
+    }
+
+    #[test]
+    fn test_public_excludes_other_categories() {
+        // Loopback is not Public.
+        assert!(!matches_group(
+            DestinationGroup::Public,
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        ));
+        // Private is not Public.
+        assert!(!matches_group(
+            DestinationGroup::Public,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+        ));
+        assert!(!matches_group(
+            DestinationGroup::Public,
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))
+        ));
+        // Link-local is not Public.
+        assert!(!matches_group(
+            DestinationGroup::Public,
+            IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1))
+        ));
+        // Metadata is not Public.
+        assert!(!matches_group(
+            DestinationGroup::Public,
+            IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))
+        ));
+        // Multicast is not Public.
+        assert!(!matches_group(
+            DestinationGroup::Public,
+            IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1))
+        ));
+        // IPv6 loopback / ULA / link-local / multicast are not Public.
+        assert!(!matches_group(
+            DestinationGroup::Public,
+            IpAddr::V6(Ipv6Addr::LOCALHOST)
+        ));
+        assert!(!matches_group(
+            DestinationGroup::Public,
+            IpAddr::V6("fd42:6d73:62:2a::1".parse().unwrap())
+        ));
+        assert!(!matches_group(
+            DestinationGroup::Public,
+            IpAddr::V6("fe80::1".parse().unwrap())
+        ));
+        assert!(!matches_group(
+            DestinationGroup::Public,
+            IpAddr::V6("ff02::1".parse().unwrap())
+        ));
     }
 }

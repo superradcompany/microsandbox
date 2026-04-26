@@ -564,10 +564,16 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
                     Some("deny") => Action::Deny,
                     _ => Action::Allow,
                 };
-                let rust_rules: Vec<_> = rules.iter().filter_map(convert_policy_rule).collect();
+                // The TS-side `rules` array carries direction per rule, matching
+                // the new single-list NetworkPolicy schema. A single TS-side
+                // `default_action` maps to both direction defaults for backwards
+                // compatibility. Proper 0.4 TS API replaces this shim
+                // (see sdk/node-ts redesign, phase 7).
+                let parsed_rules: Vec<_> = rules.iter().filter_map(convert_policy_rule).collect();
                 n = n.policy(NetworkPolicy {
-                    default_action,
-                    rules: rust_rules,
+                    default_egress: default_action,
+                    default_ingress: default_action,
+                    rules: parsed_rules,
                 });
             } else if let Some(ref policy) = network.policy {
                 n = n.policy(match policy.as_str() {
@@ -805,14 +811,19 @@ fn sandbox_handle_to_info(handle: &microsandbox::sandbox::SandboxHandle) -> Sand
     }
 }
 
+/// Convert a TS-side rule into the new single-list `Rule` shape with
+/// per-rule direction. The TS-side `direction` field accepts `"egress"`,
+/// `"ingress"`, `"any"`, or the legacy `"outbound"` / `"inbound"` aliases.
 fn convert_policy_rule(rule: &PolicyRule) -> Option<Rule> {
     let action = match rule.action.as_str() {
         "deny" => Action::Deny,
         _ => Action::Allow,
     };
     let direction = match rule.direction.as_deref() {
-        Some("inbound") => Direction::Inbound,
-        _ => Direction::Outbound,
+        Some("ingress") | Some("inbound") => Direction::Ingress,
+        Some("any") => Direction::Any,
+        // Default and "egress" / "outbound" map to Egress.
+        _ => Direction::Egress,
     };
     let destination = match rule.destination.as_deref() {
         Some("*") | None => Destination::Any,
@@ -822,6 +833,7 @@ fn convert_policy_rule(rule: &PolicyRule) -> Option<Rule> {
         Some("metadata") => Destination::Group(DestinationGroup::Metadata),
         Some("multicast") => Destination::Group(DestinationGroup::Multicast),
         Some("host") => Destination::Group(DestinationGroup::Host),
+        Some("public") => Destination::Group(DestinationGroup::Public),
         Some(s) if s.starts_with('.') => Destination::DomainSuffix(s.parse().ok()?),
         Some(s) if s.contains('/') => {
             // CIDR notation
@@ -832,24 +844,30 @@ fn convert_policy_rule(rule: &PolicyRule) -> Option<Rule> {
         }
         Some(s) => Destination::Domain(s.parse().ok()?),
     };
-    let protocol = rule.protocol.as_deref().map(|p| match p {
-        "udp" => Protocol::Udp,
-        "icmpv4" => Protocol::Icmpv4,
-        "icmpv6" => Protocol::Icmpv6,
-        _ => Protocol::Tcp,
-    });
-    let ports = rule.port.as_deref().and_then(|p| {
-        if let Some((start, end)) = p.split_once('-') {
-            Some(PortRange::range(start.parse().ok()?, end.parse().ok()?))
-        } else {
-            Some(PortRange::single(p.parse().ok()?))
+    let protocols = match rule.protocol.as_deref() {
+        Some(p) => vec![match p {
+            "udp" => Protocol::Udp,
+            "icmpv4" => Protocol::Icmpv4,
+            "icmpv6" => Protocol::Icmpv6,
+            _ => Protocol::Tcp,
+        }],
+        None => Vec::new(),
+    };
+    let ports = match rule.port.as_deref() {
+        Some(p) => {
+            if let Some((start, end)) = p.split_once('-') {
+                vec![PortRange::range(start.parse().ok()?, end.parse().ok()?)]
+            } else {
+                vec![PortRange::single(p.parse().ok()?)]
+            }
         }
-    });
+        None => Vec::new(),
+    };
 
     Some(Rule {
         direction,
         destination,
-        protocol,
+        protocols,
         ports,
         action,
     })

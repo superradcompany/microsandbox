@@ -376,7 +376,12 @@ fn apply_network(
             }
         };
 
-        let mut rules = Vec::new();
+        // The Python-side `rules` array carries direction per rule, matching
+        // the new single-list schema. A single Python-side `default_action`
+        // maps to both direction defaults for backwards compatibility.
+        // Proper 0.4 Python API replaces this shim (see sdk/python redesign,
+        // phase 8).
+        let mut rules: Vec<microsandbox_network::policy::Rule> = Vec::new();
         if let Some(rules_obj) = cp_dict.get_item("rules")?
             && !rules_obj.is_none()
         {
@@ -396,8 +401,9 @@ fn apply_network(
                 let direction_str: String =
                     extract_opt(&rd, "direction")?.unwrap_or_else(|| "egress".to_string());
                 let direction = match direction_str.as_str() {
-                    "egress" => microsandbox_network::policy::Direction::Outbound,
-                    "ingress" => microsandbox_network::policy::Direction::Inbound,
+                    "egress" => microsandbox_network::policy::Direction::Egress,
+                    "ingress" => microsandbox_network::policy::Direction::Ingress,
+                    "any" => microsandbox_network::policy::Direction::Any,
                     _ => {
                         return Err(pyo3::exceptions::PyValueError::new_err(format!(
                             "unknown direction: {direction_str}"
@@ -408,6 +414,9 @@ fn apply_network(
                 {
                     match dest_str.as_str() {
                         "*" => microsandbox_network::policy::Destination::Any,
+                        "public" => microsandbox_network::policy::Destination::Group(
+                            microsandbox_network::policy::DestinationGroup::Public,
+                        ),
                         "loopback" => microsandbox_network::policy::Destination::Group(
                             microsandbox_network::policy::DestinationGroup::Loopback,
                         ),
@@ -454,8 +463,8 @@ fn apply_network(
                 } else {
                     microsandbox_network::policy::Destination::Any
                 };
-                let protocol = if let Some(proto_str) = extract_opt::<String>(&rd, "protocol")? {
-                    Some(match proto_str.as_str() {
+                let protocols = if let Some(proto_str) = extract_opt::<String>(&rd, "protocol")? {
+                    let proto = match proto_str.as_str() {
                         "tcp" => microsandbox_network::policy::Protocol::Tcp,
                         "udp" => microsandbox_network::policy::Protocol::Udp,
                         "icmpv4" => microsandbox_network::policy::Protocol::Icmpv4,
@@ -465,23 +474,24 @@ fn apply_network(
                                 "unknown protocol: {proto_str}"
                             )));
                         }
-                    })
+                    };
+                    vec![proto]
                 } else {
-                    None
+                    Vec::new()
                 };
                 let ports = if let Some(port_val) = extract_opt::<String>(&rd, "port")? {
                     if let Ok(p) = port_val.parse::<u16>() {
-                        Some(microsandbox_network::policy::PortRange { start: p, end: p })
+                        vec![microsandbox_network::policy::PortRange { start: p, end: p }]
                     } else {
-                        None
+                        Vec::new()
                     }
                 } else {
-                    None
+                    Vec::new()
                 };
                 rules.push(microsandbox_network::policy::Rule {
                     direction,
                     destination,
-                    protocol,
+                    protocols,
                     ports,
                     action,
                 });
@@ -489,7 +499,8 @@ fn apply_network(
         }
 
         let policy = NetworkPolicy {
-            default_action,
+            default_egress: default_action,
+            default_ingress: default_action,
             rules,
         };
         builder = builder.network(|n| n.policy(policy));

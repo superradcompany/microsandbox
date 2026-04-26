@@ -42,8 +42,9 @@ pub(crate) async fn setup_sandbox(
 pub(crate) fn deny_resolver(resolver: &str) -> Result<NetworkPolicy, Box<dyn std::error::Error>> {
     let ip: Ipv4Addr = resolver.parse()?;
     Ok(NetworkPolicy {
-        default_action: Action::Allow,
-        rules: vec![Rule::deny_outbound(Destination::Cidr(IpNetwork::V4(
+        default_egress: Action::Allow,
+        default_ingress: Action::Allow,
+        rules: vec![Rule::deny_egress(Destination::Cidr(IpNetwork::V4(
             Ipv4Network::new(ip, 32)?,
         )))],
     })
