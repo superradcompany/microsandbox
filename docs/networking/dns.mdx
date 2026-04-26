@@ -22,7 +22,6 @@ Block lookups by exact match or suffix (e.g. `*.tracking.com`). Blocked queries 
 let sb = Sandbox::builder("safe-agent")
     .image("python")
     .network(|n| n
-        .policy(NetworkPolicy::public_only())
         .dns(|d| d
             .block_domain("malware.example.com")
             .block_domain_suffix(".tracking.com")
@@ -151,7 +150,7 @@ The block list and rebind protection only apply to queries the gateway can see. 
 **Not distinguishable from regular traffic** (operator must filter via network policy):
 - DNS over HTTPS (DoH, TCP/443)
 
-For strict DNS integrity, combine DoT interception with a network policy denying outbound `UDP/53`, `TCP/53`, and `TCP/853` to anything except the gateway.
+For strict DNS integrity, combine DoT interception with a network policy denying egress `UDP/53`, `TCP/53`, and `TCP/853` to anything except the gateway.
 
 ## Domain-based policy rules
 

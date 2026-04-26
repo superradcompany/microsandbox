@@ -8,20 +8,31 @@ microsandbox's networking defaults are shaped around giving an AI agent, a scrap
 
 ## Private IPs and the host's local network
 
-The largest class of real damage comes from workloads reaching things that live *inside* your network: the host machine itself, a local database, another VM on the same subnet. The `public_only` preset (the default) addresses this by dropping any packet whose destination falls in:
+The largest class of real damage comes from workloads reaching things that live *inside* your network: the host machine itself, a local database, another VM on the same subnet. The default policy addresses this by denying egress to anything outside `Group::Public` (the complement of the named local categories), which covers:
 
-- `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (RFC1918 private ranges)
-- `127.0.0.0/8` (loopback)
-- `169.254.0.0/16` (link-local)
+- `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (RFC1918 + CGN private ranges)
+- `127.0.0.0/8`, `::1` (loopback)
+- `169.254.0.0/16`, `fe80::/10` (link-local)
+- `169.254.169.254` (cloud metadata, takes precedence over link-local)
+- the per-sandbox gateway IPs (`Group::Host`)
 
-If an agent runs `curl http://192.168.1.10` or `curl http://localhost:5432`, the packet is dropped before it leaves the host stack. Use `allow_all` only when the workload genuinely needs to reach local services, and `none` when it doesn't need network at all.
+If an agent runs `curl http://192.168.1.10` or `curl http://localhost:5432`, the packet is dropped before it leaves the host stack. Override the default with `--net-default-egress allow` only when the workload genuinely needs broad reach, or use `--no-net` when it doesn't need network at all.
 
 ## Cloud metadata endpoints
 
-On AWS, GCP, Azure, and similar platforms, `169.254.169.254` is the instance metadata service, a well-known SSRF target because it hands out temporary credentials to anything that can connect. Because it sits in link-local space, the `public_only` preset already blocks it. For custom policies that start from `allow_all`, `DestinationGroup::Metadata` lets you deny it explicitly:
+On AWS, GCP, Azure, and similar platforms, `169.254.169.254` is the instance metadata service, a well-known SSRF target because it hands out temporary credentials to anything that can connect. The default policy blocks it via the `Group::Public` complement. For custom policies that flip `default_egress` to `Allow`, `Group::Metadata` lets you deny it explicitly:
+
+```bash
+msb create python --name agent \
+    --net-default-egress allow \
+    --net-rule "deny@meta"
+```
 
 ```rust
-Rule::deny_outbound(Destination::Group(DestinationGroup::Metadata)),
+NetworkPolicy::builder()
+    .default_allow()
+    .rule(|r| r.egress().deny_meta())
+    .build()?
 ```
 
 ## DNS rebinding
@@ -61,7 +72,7 @@ The same mechanism gates host-scoped secret injection. When a `SecretEntry` is r
 
 DNS-based defenses (block list, rebind protection, domain pinning) only work on queries the interceptor sees. The gateway intercepts UDP/53 and TCP/53 directly, and DoT (TCP/853) when TLS interception is enabled. Alternative transports are either refused at the port layer (DoQ, mDNS, LLMNR, NetBIOS-NS) or indistinguishable from regular traffic (DoH on TCP/443), and tunneled DNS (VPN, SOCKS5 hostname mode, HTTP `CONNECT`) is carried inside the outer encrypted flow and never reaches the forwarder.
 
-For workloads where DNS integrity matters, pair DoT interception with a network policy that denies outbound `UDP/53`, `TCP/53`, and `TCP/853` to anything except the gateway. Tunneled DNS is a network-layer concern: close it by restricting egress to an allowlist that excludes tunnel destinations. See [DNS](/networking/dns) for the transport-by-transport breakdown.
+For workloads where DNS integrity matters, pair DoT interception with a network policy that denies egress `UDP/53`, `TCP/53`, and `TCP/853` to anything except the gateway. Tunneled DNS is a network-layer concern: close it by restricting egress to an allowlist that excludes tunnel destinations. See [DNS](/networking/dns) for the transport-by-transport breakdown.
 
 ## Out of scope
 
