@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use crate::config::{DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort};
 use crate::dns::Nameserver;
-use crate::policy::{DomainName, NetworkPolicy};
+use crate::policy::{BuildError, DomainName, NetworkPolicy};
 use crate::secrets::config::{HostPattern, SecretEntry, SecretInjection, ViolationAction};
 use crate::tls::TlsConfig;
 
@@ -18,11 +18,13 @@ use crate::tls::TlsConfig;
 /// Fluent builder for [`NetworkConfig`].
 pub struct NetworkBuilder {
     config: NetworkConfig,
+    errors: Vec<BuildError>,
 }
 
 /// Fluent builder for [`DnsConfig`].
 pub struct DnsBuilder {
     config: DnsConfig,
+    errors: Vec<BuildError>,
 }
 
 /// Fluent builder for [`TlsConfig`].
@@ -57,12 +59,16 @@ impl NetworkBuilder {
     pub fn new() -> Self {
         Self {
             config: NetworkConfig::default(),
+            errors: Vec::new(),
         }
     }
 
     /// Start building from an existing network configuration.
     pub fn from_config(config: NetworkConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            errors: Vec::new(),
+        }
     }
 
     /// Enable or disable networking.
@@ -107,7 +113,11 @@ impl NetworkBuilder {
     /// )
     /// ```
     pub fn dns(mut self, f: impl FnOnce(DnsBuilder) -> DnsBuilder) -> Self {
-        self.config.dns = f(DnsBuilder::new()).build();
+        let dns_builder = f(DnsBuilder::new());
+        match dns_builder.build() {
+            Ok(config) => self.config.dns = config,
+            Err(err) => self.errors.push(err),
+        }
         self
     }
 
@@ -182,8 +192,15 @@ impl NetworkBuilder {
     }
 
     /// Consume the builder and return the configuration.
-    pub fn build(self) -> NetworkConfig {
-        self.config
+    ///
+    /// Surfaces the first [`BuildError`] accumulated by any nested
+    /// builder (currently [`DnsBuilder`]). Errors stored on the
+    /// network builder itself flow through here too.
+    pub fn build(mut self) -> Result<NetworkConfig, BuildError> {
+        if let Some(err) = self.errors.drain(..).next() {
+            return Err(err);
+        }
+        Ok(self.config)
     }
 }
 
@@ -192,46 +209,41 @@ impl DnsBuilder {
     pub fn new() -> Self {
         Self {
             config: DnsConfig::default(),
+            errors: Vec::new(),
         }
     }
 
     /// Block a specific domain via DNS interception (returns REFUSED).
     ///
-    /// Accepts any string-like input. The string is parsed and
-    /// canonicalized via [`DomainName`] internally before storage —
-    /// invalid names (failing the DNS label grammar) are silently
-    /// skipped with a `tracing::warn!`, since this is a configuration
-    /// path that should not block startup on a single malformed entry.
-    /// Valid entries are stored in canonical lowercase form, ready for
-    /// byte-equality match against the DNS interceptor's resolved-name
-    /// cache.
-    ///
-    /// TODO: retrofit to lazy-parse + accumulate-at-`.build()`,
-    /// matching the model the new `NetworkPolicy::builder()` uses.
+    /// Accepts any string-like input. The string is stored raw and
+    /// parsed via [`DomainName`] at [`Self::build`] time. Invalid
+    /// names accumulate as
+    /// [`BuildError::InvalidBlockedDomain`] and surface from the
+    /// outermost `.build()` in the chain — the chain itself stays
+    /// infallible (no `?` per call).
     pub fn block_domain(mut self, domain: impl Into<String>) -> Self {
         let raw: String = domain.into();
         match raw.parse::<DomainName>() {
             Ok(name) => self.config.blocked_domains.push(name.into()),
-            Err(e) => {
-                tracing::warn!(domain = %raw, error = %e, "skipping invalid block_domain entry")
-            }
+            Err(source) => self
+                .errors
+                .push(BuildError::InvalidBlockedDomain { raw, source }),
         }
         self
     }
 
     /// Block a domain suffix via DNS interception (returns REFUSED).
     ///
-    /// Same string-input + internal-parse + skip-on-invalid behavior as
-    /// [`Self::block_domain`]. Reuses [`DomainName`] for validation —
-    /// the suffix-vs-exact distinction lives in interpretation, not in
-    /// the validated value.
+    /// Same string-input + lazy-parse + accumulate behavior as
+    /// [`Self::block_domain`]. Invalid suffixes accumulate as
+    /// [`BuildError::InvalidBlockedDomainSuffix`].
     pub fn block_domain_suffix(mut self, suffix: impl Into<String>) -> Self {
         let raw: String = suffix.into();
         match raw.parse::<DomainName>() {
             Ok(name) => self.config.blocked_suffixes.push(name.into()),
-            Err(e) => {
-                tracing::warn!(suffix = %raw, error = %e, "skipping invalid block_domain_suffix entry")
-            }
+            Err(source) => self
+                .errors
+                .push(BuildError::InvalidBlockedDomainSuffix { raw, source }),
         }
         self
     }
@@ -264,8 +276,15 @@ impl DnsBuilder {
     }
 
     /// Consume the builder and return the configuration.
-    pub fn build(self) -> DnsConfig {
-        self.config
+    ///
+    /// Surfaces the first parse error accumulated by `block_domain` /
+    /// `block_domain_suffix` (or any future lazy-parse method on this
+    /// builder). Successful chains return the populated `DnsConfig`.
+    pub fn build(mut self) -> Result<DnsConfig, BuildError> {
+        if let Some(err) = self.errors.drain(..).next() {
+            return Err(err);
+        }
+        Ok(self.config)
     }
 }
 
@@ -462,5 +481,97 @@ impl Default for TlsBuilder {
 impl Default for SecretBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Valid block-domain entries land in the config. No errors on
+    /// the happy path.
+    #[test]
+    fn block_domain_happy_path() {
+        let cfg = DnsBuilder::new()
+            .block_domain("evil.com")
+            .block_domain_suffix(".tracking.example")
+            .build()
+            .unwrap();
+        assert_eq!(cfg.blocked_domains.len(), 1);
+        assert_eq!(cfg.blocked_suffixes.len(), 1);
+    }
+
+    /// Invalid block-domain accumulates as
+    /// `BuildError::InvalidBlockedDomain`; surfaces from `.build()`.
+    #[test]
+    fn block_domain_invalid_surfaces_at_build() {
+        let result = DnsBuilder::new().block_domain("not a domain!").build();
+        match result {
+            Err(BuildError::InvalidBlockedDomain { raw, .. }) => {
+                assert_eq!(raw, "not a domain!");
+            }
+            other => panic!("expected InvalidBlockedDomain, got {other:?}"),
+        }
+    }
+
+    /// Invalid suffix accumulates as
+    /// `BuildError::InvalidBlockedDomainSuffix`.
+    #[test]
+    fn block_domain_suffix_invalid_surfaces_at_build() {
+        let result = DnsBuilder::new()
+            .block_domain_suffix("...invalid!!!")
+            .build();
+        match result {
+            Err(BuildError::InvalidBlockedDomainSuffix { raw, .. }) => {
+                assert_eq!(raw, "...invalid!!!");
+            }
+            other => panic!("expected InvalidBlockedDomainSuffix, got {other:?}"),
+        }
+    }
+
+    /// First-error semantics: multiple bad inputs surface only the
+    /// first one (matching `NetworkPolicyBuilder`).
+    #[test]
+    fn block_domain_first_error_wins() {
+        let result = DnsBuilder::new()
+            .block_domain("first bad!")
+            .block_domain("second bad!")
+            .build();
+        match result {
+            Err(BuildError::InvalidBlockedDomain { raw, .. }) => {
+                assert_eq!(raw, "first bad!");
+            }
+            other => panic!("expected first-error InvalidBlockedDomain, got {other:?}"),
+        }
+    }
+
+    /// Errors accumulated by a `DnsBuilder` cascade up through
+    /// `NetworkBuilder::dns()` and surface from
+    /// `NetworkBuilder::build()`.
+    #[test]
+    fn dns_error_cascades_through_network_builder() {
+        let result = NetworkBuilder::new()
+            .dns(|d| d.block_domain("not a domain!"))
+            .build();
+        match result {
+            Err(BuildError::InvalidBlockedDomain { raw, .. }) => {
+                assert_eq!(raw, "not a domain!");
+            }
+            other => panic!("expected cascaded InvalidBlockedDomain, got {other:?}"),
+        }
+    }
+
+    /// Network builder happy path returns the config unchanged.
+    #[test]
+    fn network_builder_happy_path_returns_config() {
+        let cfg = NetworkBuilder::new()
+            .dns(|d| d.block_domain("evil.com"))
+            .build()
+            .unwrap();
+        assert_eq!(cfg.dns.blocked_domains.len(), 1);
     }
 }

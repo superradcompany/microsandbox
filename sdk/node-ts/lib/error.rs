@@ -33,6 +33,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::VolumeNotFound(_) => "VolumeNotFound",
         MicrosandboxError::VolumeAlreadyExists(_) => "VolumeAlreadyExists",
         MicrosandboxError::Image(_) => "Image",
+        MicrosandboxError::NetworkBuilder(_) => "NetworkBuilder",
         MicrosandboxError::PatchFailed(_) => "PatchFailed",
         MicrosandboxError::Custom(_) => "Custom",
     }
