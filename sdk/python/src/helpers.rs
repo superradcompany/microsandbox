@@ -261,11 +261,8 @@ fn apply_mount(
         let format = format_str
             .as_deref()
             .map(|s| {
-                microsandbox::sandbox::DiskImageFormat::from_extension(s).ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err(format!(
-                        "invalid disk image format: {s} (expected qcow2, raw, or vmdk)"
-                    ))
-                })
+                s.parse::<microsandbox::sandbox::DiskImageFormat>()
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
             })
             .transpose()?;
         Ok(builder.volume(&guest_path, |v| {

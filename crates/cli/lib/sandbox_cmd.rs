@@ -200,30 +200,136 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
 /// `guest` and `fstype` are not in this arg — they travel in the
 /// `MSB_DISK_MOUNTS` env var and are consumed by agentd, so the runtime
 /// only needs what `DiskBuilder` will set.
+///
+/// Malformed entries are skipped with a stderr warning rather than
+/// panicking, but every rejection path emits a diagnostic so users get
+/// a clear signal if a CLI flag is dropped.
 fn parse_disk_args(entries: &[String]) -> Vec<DiskMountSpec> {
     entries
         .iter()
-        .filter_map(|entry| {
-            let mut parts = entry.split(':');
-            let id = parts.next()?.to_string();
-            let host = PathBuf::from(parts.next()?);
-            let fmt_str = parts.next()?;
-            let format = match microsandbox_runtime::vm::validate_disk_format(Some(fmt_str)) {
-                Ok(f) => f,
-                Err(_) => {
-                    eprintln!("ignoring --disk entry with unknown format: {fmt_str}");
-                    return None;
-                }
-            };
-            let readonly = matches!(parts.next(), Some("ro"));
-            Some(DiskMountSpec {
-                id,
-                host,
-                guest: String::new(), // consumed only by agentd via env
-                format,
-                fstype: None, // ditto
-                readonly,
-            })
-        })
+        .filter_map(|entry| parse_one_disk_arg(entry))
         .collect()
+}
+
+fn parse_one_disk_arg(entry: &str) -> Option<DiskMountSpec> {
+    let parts: Vec<&str> = entry.split(':').collect();
+    if parts.len() < 3 || parts.len() > 4 {
+        eprintln!("ignoring --disk entry, expected id:host:format[:ro], got: {entry:?}");
+        return None;
+    }
+
+    let id = parts[0];
+    if id.is_empty() {
+        eprintln!("ignoring --disk entry with empty id: {entry:?}");
+        return None;
+    }
+    let host = parts[1];
+    if host.is_empty() {
+        eprintln!("ignoring --disk entry with empty host path: {entry:?}");
+        return None;
+    }
+    let fmt_str = parts[2];
+    let format = match microsandbox_runtime::vm::validate_disk_format(Some(fmt_str)) {
+        Ok(f) => f,
+        Err(_) => {
+            eprintln!("ignoring --disk entry with unknown format {fmt_str:?}: {entry:?}");
+            return None;
+        }
+    };
+
+    let readonly = match parts.get(3) {
+        None => false,
+        Some(&"ro") => true,
+        Some(&other) => {
+            eprintln!(
+                "ignoring --disk entry with unknown flag {other:?} (expected 'ro'): {entry:?}"
+            );
+            return None;
+        }
+    };
+
+    Some(DiskMountSpec {
+        id: id.to_string(),
+        host: PathBuf::from(host),
+        guest: String::new(), // consumed only by agentd via env
+        format,
+        fstype: None, // ditto
+        readonly,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fmt(s: &str) -> String {
+        format!(
+            "{:?}",
+            microsandbox_runtime::vm::validate_disk_format(Some(s)).unwrap()
+        )
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_happy() {
+        let spec = parse_one_disk_arg("data_abc:/host/data.qcow2:qcow2").unwrap();
+        assert_eq!(spec.id, "data_abc");
+        assert_eq!(spec.host, PathBuf::from("/host/data.qcow2"));
+        assert_eq!(format!("{:?}", spec.format), fmt("qcow2"));
+        assert!(!spec.readonly);
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_with_ro() {
+        let spec = parse_one_disk_arg("seed:/host/seed.raw:raw:ro").unwrap();
+        assert!(spec.readonly);
+        assert_eq!(format!("{:?}", spec.format), fmt("raw"));
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_missing_format_field() {
+        // Two-field entries are rejected (no format token).
+        assert!(parse_one_disk_arg("id:/host").is_none());
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_too_many_fields() {
+        assert!(parse_one_disk_arg("id:/host:raw:ro:extra").is_none());
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_empty_id() {
+        assert!(parse_one_disk_arg(":/host:raw").is_none());
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_empty_host() {
+        assert!(parse_one_disk_arg("id::raw").is_none());
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_unknown_format() {
+        assert!(parse_one_disk_arg("id:/host:bogus").is_none());
+    }
+
+    #[test]
+    fn test_parse_one_disk_arg_unknown_flag() {
+        // "rw" / typos are rejected explicitly so they don't silently coerce
+        // to readonly=false.
+        assert!(parse_one_disk_arg("id:/host:raw:rw").is_none());
+        assert!(parse_one_disk_arg("id:/host:raw:RO").is_none());
+    }
+
+    #[test]
+    fn test_parse_disk_args_skips_bad_entries_keeps_good() {
+        let entries = vec![
+            "good:/host/g.raw:raw".to_string(),
+            "bad".to_string(),
+            "another:/host/a.qcow2:qcow2:ro".to_string(),
+        ];
+        let specs = parse_disk_args(&entries);
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].id, "good");
+        assert_eq!(specs[1].id, "another");
+        assert!(specs[1].readonly);
+    }
 }

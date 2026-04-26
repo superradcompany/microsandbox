@@ -17,6 +17,28 @@ pub enum PullPolicy {
     Never,
 }
 
+/// Supported disk image formats for [`Mount.disk`] and the `disk()` rootfs.
+#[napi(string_enum)]
+#[derive(Clone, Copy)]
+pub enum DiskImageFormat {
+    #[napi(value = "qcow2")]
+    Qcow2,
+    #[napi(value = "raw")]
+    Raw,
+    #[napi(value = "vmdk")]
+    Vmdk,
+}
+
+impl From<DiskImageFormat> for microsandbox::sandbox::DiskImageFormat {
+    fn from(f: DiskImageFormat) -> Self {
+        match f {
+            DiskImageFormat::Qcow2 => microsandbox::sandbox::DiskImageFormat::Qcow2,
+            DiskImageFormat::Raw => microsandbox::sandbox::DiskImageFormat::Raw,
+            DiskImageFormat::Vmdk => microsandbox::sandbox::DiskImageFormat::Vmdk,
+        }
+    }
+}
+
 /// Log level for sandbox process output.
 #[napi(string_enum)]
 pub enum LogLevel {
@@ -139,9 +161,8 @@ pub struct TmpfsOptions {
 /// Options for disk-image volume mounts.
 #[napi(object)]
 pub struct DiskOptions {
-    /// Disk image format: `"qcow2"`, `"raw"`, or `"vmdk"`. When omitted,
-    /// inferred from the file extension.
-    pub format: Option<String>,
+    /// Disk image format. When omitted, inferred from the file extension.
+    pub format: Option<DiskImageFormat>,
     /// Inner filesystem type the guest should mount (e.g. `"ext4"`). When
     /// omitted, agentd probes `/proc/filesystems`.
     pub fstype: Option<String>,

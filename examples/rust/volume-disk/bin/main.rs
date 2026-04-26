@@ -9,7 +9,16 @@ use microsandbox::{Sandbox, sandbox::DiskImageFormat};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let data_dir = manifest_dir.join("sample-images").canonicalize()?;
+    let data_dir = manifest_dir
+        .join("sample-images")
+        .canonicalize()
+        .map_err(|e| {
+            format!(
+                "missing sample-images submodule at {}/sample-images ({e}). \
+             Run `git submodule update --init --recursive` first.",
+                manifest_dir.display()
+            )
+        })?;
     let raw_path = data_dir.join("ext4-seeded.raw");
     let qcow2_path = data_dir.join("ext4-seeded.qcow2");
 

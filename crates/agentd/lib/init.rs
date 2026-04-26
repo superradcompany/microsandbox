@@ -205,7 +205,8 @@ mod linux {
                 ))
             })?;
         } else {
-            try_mount(device, "/newroot")?;
+            let fstypes = read_proc_filesystems()?;
+            try_mount_any(device, "/newroot", MsFlags::empty(), &fstypes)?;
         }
         Ok(())
     }
@@ -293,27 +294,43 @@ mod linux {
         Ok(())
     }
 
-    /// Tries every filesystem type listed in `/proc/filesystems` until one succeeds.
-    fn try_mount(device: &str, target: &str) -> AgentdResult<()> {
+    /// Read native filesystem types from `/proc/filesystems`, skipping
+    /// `nodev` entries (virtual filesystems that can't back a real device).
+    fn read_proc_filesystems() -> AgentdResult<Vec<String>> {
         let content = fs::read_to_string("/proc/filesystems")
             .map_err(|e| AgentdError::Init(format!("failed to read /proc/filesystems: {e}")))?;
+        Ok(content
+            .lines()
+            .filter_map(|line| {
+                if line.starts_with("nodev") {
+                    return None;
+                }
+                let fstype = line.trim();
+                if fstype.is_empty() {
+                    None
+                } else {
+                    Some(fstype.to_string())
+                }
+            })
+            .collect())
+    }
 
-        for line in content.lines() {
-            // Skip virtual filesystems marked with "nodev".
-            if line.starts_with("nodev") {
-                continue;
-            }
-
-            let fstype = line.trim();
-            if fstype.is_empty() {
-                continue;
-            }
-
+    /// Try mounting `device` at `target` with `flags`, walking the supplied
+    /// candidate filesystem list until one succeeds. Use
+    /// `read_proc_filesystems` to build the candidate list (typically once
+    /// per init phase) and reuse it across multiple mount attempts.
+    fn try_mount_any(
+        device: &str,
+        target: &str,
+        flags: MsFlags,
+        fstypes: &[String],
+    ) -> AgentdResult<()> {
+        for fstype in fstypes {
             if mount::mount(
                 Some(device),
                 target,
-                Some(fstype),
-                MsFlags::empty(),
+                Some(fstype.as_str()),
+                flags,
                 None::<&str>,
             )
             .is_ok()
@@ -321,7 +338,6 @@ mod linux {
                 return Ok(());
             }
         }
-
         Err(AgentdError::Init(format!(
             "failed to mount {device} at {target}: no supported filesystem found"
         )))
@@ -487,8 +503,14 @@ mod linux {
 
     /// Mounts each disk-image volume at its guest path.
     pub fn apply_disk_mounts(specs: &[DiskMountSpec]) -> AgentdResult<()> {
+        if specs.is_empty() {
+            return Ok(());
+        }
+        // Read /proc/filesystems once and reuse the candidate list across
+        // all autodetect mounts in this batch.
+        let fstypes = read_proc_filesystems()?;
         for spec in specs {
-            mount_disk(spec)?;
+            mount_disk(spec, &fstypes)?;
         }
         Ok(())
     }
@@ -506,14 +528,18 @@ mod linux {
         const INTERVAL: Duration = Duration::from_millis(10);
 
         let by_id = format!("/dev/disk/by-id/virtio-{id}");
-        for _ in 0..RETRIES {
+        for attempt in 0..RETRIES {
             if Path::new(&by_id).exists() {
                 return Ok(by_id);
             }
             if let Some(dev) = scan_block_serial(id) {
                 return Ok(dev);
             }
-            sleep(INTERVAL);
+            // Skip the sleep after the last check so the failure path
+            // doesn't pay 10ms it can't use.
+            if attempt + 1 < RETRIES {
+                sleep(INTERVAL);
+            }
         }
         Err(AgentdError::Init(format!(
             "disk mount: no block device found for id '{id}' \
@@ -543,7 +569,7 @@ mod linux {
         None
     }
 
-    fn mount_disk(spec: &DiskMountSpec) -> AgentdResult<()> {
+    fn mount_disk(spec: &DiskMountSpec, fstypes: &[String]) -> AgentdResult<()> {
         let path = spec.guest_path.as_str();
         fs::create_dir_all(path)
             .map_err(|e| AgentdError::Init(format!("disk mount: create dir {path}: {e}")))?;
@@ -569,33 +595,10 @@ mod linux {
                 ))
             })?;
         } else {
-            try_mount_with_flags(&device, path, flags)?;
+            try_mount_any(&device, path, flags, fstypes)?;
         }
 
         Ok(())
-    }
-
-    /// Like `try_mount`, but honors caller-provided flags (notably MS_RDONLY).
-    fn try_mount_with_flags(device: &str, target: &str, flags: MsFlags) -> AgentdResult<()> {
-        let content = fs::read_to_string("/proc/filesystems")
-            .map_err(|e| AgentdError::Init(format!("failed to read /proc/filesystems: {e}")))?;
-
-        for line in content.lines() {
-            if line.starts_with("nodev") {
-                continue;
-            }
-            let fstype = line.trim();
-            if fstype.is_empty() {
-                continue;
-            }
-            if mount::mount(Some(device), target, Some(fstype), flags, None::<&str>).is_ok() {
-                return Ok(());
-            }
-        }
-
-        Err(AgentdError::Init(format!(
-            "disk mount: failed to mount {device} at {target}: no supported filesystem found"
-        )))
     }
 
     /// Mounts each tmpfs from the parsed specs.

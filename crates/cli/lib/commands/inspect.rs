@@ -120,12 +120,9 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                         readonly,
                     } => {
                         let ro = if *readonly { " (ro)" } else { " (rw)" };
-                        let fstype = fstype
-                            .as_deref()
-                            .map(|fs| format!(" [{fs}]"))
-                            .unwrap_or_default();
+                        let fstype = fstype.as_deref().unwrap_or("auto");
                         println!(
-                            "  {guest:<16}\u{2192} disk:{} ({}){fstype}{ro}",
+                            "  {guest:<16}\u{2192} disk:{} ({}) [{fstype}]{ro}",
                             host.display(),
                             format.as_str()
                         );

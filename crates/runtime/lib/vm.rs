@@ -574,6 +574,22 @@ fn build_vm(
     // Disk-image volume mounts. Each adds an extra virtio-blk device with
     // a stable block id so agentd can find it via /dev/disk/by-id/virtio-<id>.
     for disk in &vm.disks {
+        if !disk.host.exists() {
+            return Err(RuntimeError::Custom(format!(
+                "disk {}: host path not found: {}",
+                disk.id,
+                disk.host.display()
+            )));
+        }
+        tracing::debug!(
+            id = %disk.id,
+            guest = %disk.guest,
+            host = %disk.host.display(),
+            ?disk.format,
+            fstype = ?disk.fstype,
+            readonly = disk.readonly,
+            "attaching disk-image volume",
+        );
         let id = disk.id.clone();
         let host = disk.host.clone();
         let format = disk.format;

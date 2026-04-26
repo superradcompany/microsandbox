@@ -275,22 +275,32 @@ class MountConfig:
     fstype: str | None = None
 
     def _to_dict(self) -> dict:
-        d: dict = {}
-        if self.bind is not None:
+        # Drive emission off `kind` exclusively so a `MountConfig` with
+        # contradictory fields (e.g. kind=DISK + bind=...) raises here
+        # rather than silently letting the wrong arm of `apply_mount` win.
+        d: dict = {"readonly": self.readonly}
+        if self.kind == MountKind.BIND:
+            if self.bind is None:
+                raise ValueError("MountConfig kind=BIND requires bind=...")
             d["bind"] = self.bind
-        if self.named is not None:
+        elif self.kind == MountKind.NAMED:
+            if self.named is None:
+                raise ValueError("MountConfig kind=NAMED requires named=...")
             d["named"] = self.named
-        if self.kind == MountKind.TMPFS:
+        elif self.kind == MountKind.TMPFS:
             d["tmpfs"] = True
-        if self.disk is not None:
+            if self.size_mib is not None:
+                d["size_mib"] = self.size_mib
+        elif self.kind == MountKind.DISK:
+            if self.disk is None:
+                raise ValueError("MountConfig kind=DISK requires disk=...")
             d["disk"] = self.disk
-        if self.format is not None:
-            d["format"] = self.format.value
-        if self.fstype is not None:
-            d["fstype"] = self.fstype
-        if self.size_mib is not None:
-            d["size_mib"] = self.size_mib
-        d["readonly"] = self.readonly
+            if self.format is not None:
+                d["format"] = self.format.value
+            if self.fstype is not None:
+                d["fstype"] = self.fstype
+        else:  # pragma: no cover - StrEnum exhaustive above
+            raise ValueError(f"unknown MountKind: {self.kind!r}")
         return d
 
 #--------------------------------------------------------------------------------------------------

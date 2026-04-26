@@ -84,9 +84,9 @@ pub struct MountConfig {
     /// Mount a host disk image as a virtio-blk device. Mutually exclusive
     /// with `bind`, `named`, `tmpfs`.
     pub disk: Option<String>,
-    /// Disk image format: `"qcow2"`, `"raw"`, or `"vmdk"`. Inferred from the
-    /// file extension when omitted (only meaningful with `disk`).
-    pub format: Option<String>,
+    /// Disk image format. Inferred from the file extension when omitted
+    /// (only meaningful with `disk`).
+    pub format: Option<crate::helpers::DiskImageFormat>,
     /// Inner filesystem type for disk image mounts (e.g. `"ext4"`). When
     /// omitted, agentd probes `/proc/filesystems`.
     pub fstype: Option<String>,

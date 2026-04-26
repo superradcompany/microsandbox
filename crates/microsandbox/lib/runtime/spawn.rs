@@ -444,10 +444,6 @@ fn encode_rlimits(rlimits: &[Rlimit]) -> String {
     out
 }
 
-/// Generate a virtiofs tag from a guest mount path.
-///
-/// Replaces `/` with `_` and strips leading underscores to produce a
-/// valid tag name. For example, `/data/cache` becomes `data_cache`.
 /// Derive a stable, collision-resistant identifier from a guest mount path.
 ///
 /// Used for virtiofs tags and for virtio-blk `serial` fields (the block id
@@ -459,6 +455,8 @@ fn encode_rlimits(rlimits: &[Rlimit]) -> String {
 /// Layout: `<slug[..11]>_<8-hex>`. The slug-part is a debugging hint; the
 /// 8-hex suffix is what actually disambiguates.
 fn guest_mount_tag(guest_path: &str) -> String {
+    use std::fmt::Write as _;
+
     const SLUG_MAX: usize = 11;
     const HASH_HEX_LEN: usize = 8;
 
@@ -472,16 +470,18 @@ fn guest_mount_tag(guest_path: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(guest_path.as_bytes());
     let digest = hasher.finalize();
-    let mut hash_hex = String::with_capacity(HASH_HEX_LEN);
-    for byte in digest.iter().take(HASH_HEX_LEN / 2) {
-        hash_hex.push_str(&format!("{byte:02x}"));
-    }
 
-    if slug.is_empty() {
-        hash_hex
-    } else {
-        format!("{slug}_{hash_hex}")
+    // Total layout: optional `<slug>_` prefix + HASH_HEX_LEN hex chars.
+    let mut out = String::with_capacity(slug.len() + 1 + HASH_HEX_LEN);
+    if !slug.is_empty() {
+        out.push_str(&slug);
+        out.push('_');
     }
+    for byte in digest.iter().take(HASH_HEX_LEN / 2) {
+        // write! to a String can't fail.
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// Build the `msb sandbox` CLI args for a sandbox.
@@ -731,12 +731,6 @@ fn sandbox_cli_args(
     args
 }
 
-/// Map a zero-based disk index to a Linux virtio block device path.
-///
-/// libkrun's ordered disk API assigns device names sequentially:
-/// 0 → /dev/vda, 1 → /dev/vdb, ..., 25 → /dev/vdz, 26 → /dev/vdaa, etc.
-/// This follows the same bijective base-26 scheme the kernel uses for
-/// virtio-blk device naming.
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -1122,10 +1116,17 @@ mod tests {
 
     #[test]
     fn test_sandbox_cli_args_disk_image_volume() {
+        // SandboxBuilder::validate canonicalizes disk hosts, so the file
+        // must exist. Stage one in a tempdir.
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir.path().join("data.qcow2");
+        std::fs::write(&host, []).unwrap();
+
+        let host_clone = host.clone();
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/data", |m| {
-                m.disk("/host/data.qcow2")
+                m.disk(host_clone)
                     .format(DiskImageFormat::Qcow2)
                     .fstype("ext4")
             })
@@ -1136,7 +1137,7 @@ mod tests {
 
         // --disk arg present with correct layout.
         let data_tag = super::guest_mount_tag("/data");
-        let expected_disk_arg = format!("{data_tag}:/host/data.qcow2:qcow2");
+        let expected_disk_arg = format!("{data_tag}:{}:qcow2", host.display());
         assert!(
             rendered
                 .windows(2)
@@ -1151,20 +1152,23 @@ mod tests {
 
     #[test]
     fn test_sandbox_cli_args_disk_image_readonly() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir.path().join("seed.raw");
+        std::fs::write(&host, []).unwrap();
+
+        let host_clone = host.clone();
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
-            .volume("/seed", |m| m.disk("/host/seed.raw").readonly())
+            .volume("/seed", |m| m.disk(host_clone).readonly())
             .build()
             .unwrap();
 
         let rendered = render_args(&config);
         let tag = super::guest_mount_tag("/seed");
 
-        assert!(
-            rendered.windows(2).any(
-                |pair| pair[0] == "--disk" && pair[1] == format!("{tag}:/host/seed.raw:raw:ro")
-            )
-        );
+        assert!(rendered.windows(2).any(
+            |pair| pair[0] == "--disk" && pair[1] == format!("{tag}:{}:raw:ro", host.display())
+        ));
         // No fstype → empty middle field, ro trailing.
         assert!(rendered.contains(&format!("MSB_DISK_MOUNTS={tag}:/seed::ro")));
     }

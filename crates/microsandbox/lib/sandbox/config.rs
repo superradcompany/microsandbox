@@ -588,4 +588,25 @@ mod tests {
 
         assert!(config.mounts.is_empty());
     }
+
+    #[test]
+    fn test_apply_runtime_defaults_skips_disk_image_roots() {
+        // Disk-image rootfses bring their own /tmp (it's part of the
+        // shipped filesystem), so we don't synthesise an implicit tmpfs
+        // for them. This test pins the policy so a future change has to
+        // be deliberate.
+        use crate::sandbox::DiskImageFormat;
+        let mut config = SandboxConfig {
+            image: RootfsSource::DiskImage {
+                path: "/tmp/disk.qcow2".into(),
+                format: DiskImageFormat::Qcow2,
+                fstype: None,
+            },
+            ..Default::default()
+        };
+
+        config.apply_runtime_defaults();
+
+        assert!(config.mounts.is_empty());
+    }
 }

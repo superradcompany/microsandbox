@@ -579,23 +579,30 @@ impl SandboxBuilder {
             }
         }
 
-        // Reject two writable DiskImage mounts backing the same host path.
-        // Read-only sharing is fine (guest writes are blocked); writable
-        // sharing corrupts the inner filesystem because each virtio-blk
-        // device caches independently on the host.
-        let mut writable_hosts: Vec<&std::path::Path> = Vec::new();
+        // Reject any two DiskImage mounts pointing at the same host file.
+        // Each virtio-blk device caches independently on the host, so any
+        // mix of writable+writable, writable+read-only, or even two
+        // read-only mounts of the same image will diverge from the
+        // kernel's view (RW invalidates the RO cache; RO+RO doubles the
+        // page-cache footprint with no benefit). Compare against the
+        // canonical path so symlinks and `./` prefixes don't bypass the
+        // check.
+        let mut seen: Vec<PathBuf> = Vec::new();
         for mount in &self.config.mounts {
-            if let VolumeMount::DiskImage { host, readonly, .. } = mount {
-                if *readonly {
-                    continue;
-                }
-                if writable_hosts.contains(&host.as_path()) {
-                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                        "two writable disk-image volumes cannot share the same host path: {}",
+            if let VolumeMount::DiskImage { host, .. } = mount {
+                let canonical = std::fs::canonicalize(host).map_err(|e| {
+                    crate::MicrosandboxError::InvalidConfig(format!(
+                        "disk image host path does not exist: {} ({e})",
                         host.display()
+                    ))
+                })?;
+                if seen.contains(&canonical) {
+                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                        "disk-image volumes cannot share the same host path: {}",
+                        canonical.display()
                     )));
                 }
-                writable_hosts.push(host.as_path());
+                seen.push(canonical);
             }
         }
 
@@ -732,5 +739,114 @@ mod tests {
         assert_eq!(config.network.ports[0].protocol, PortProtocol::Tcp);
         assert_eq!(config.network.secrets.secrets.len(), 1);
         assert_eq!(config.network.max_connections, Some(128));
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // DiskImage host-path validation
+    //----------------------------------------------------------------------------------------------
+
+    /// Helper: stage two files in a tempdir, return absolute paths.
+    fn two_disk_files() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.qcow2");
+        let b = dir.path().join("b.qcow2");
+        std::fs::write(&a, []).unwrap();
+        std::fs::write(&b, []).unwrap();
+        (dir, a, b)
+    }
+
+    #[test]
+    fn test_builder_rejects_two_writable_same_host() {
+        let (_dir, a, _) = two_disk_files();
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .volume("/x", |v| v.disk(a.clone()))
+            .volume("/y", |v| v.disk(a.clone()))
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("disk-image volumes cannot share the same host path")
+        );
+    }
+
+    #[test]
+    fn test_builder_rejects_writable_plus_readonly_same_host() {
+        // Mixed writable+readonly still corrupts because the writable side's
+        // host page cache invalidates the readonly side's view.
+        let (_dir, a, _) = two_disk_files();
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .volume("/x", |v| v.disk(a.clone()))
+            .volume("/y", |v| v.disk(a.clone()).readonly())
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("disk-image volumes cannot share the same host path")
+        );
+    }
+
+    #[test]
+    fn test_builder_rejects_two_readonly_same_host() {
+        let (_dir, a, _) = two_disk_files();
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .volume("/x", |v| v.disk(a.clone()).readonly())
+            .volume("/y", |v| v.disk(a.clone()).readonly())
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("disk-image volumes cannot share the same host path")
+        );
+    }
+
+    #[test]
+    fn test_builder_accepts_two_writable_different_hosts() {
+        let (_dir, a, b) = two_disk_files();
+        SandboxBuilder::new("test")
+            .image("alpine")
+            .volume("/x", |v| v.disk(a))
+            .volume("/y", |v| v.disk(b))
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn test_builder_canonicalizes_host_paths() {
+        // /foo/./bar resolves to the same canonical as /foo/bar; the check
+        // must catch this even though the byte strings differ.
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.qcow2");
+        std::fs::write(&a, []).unwrap();
+        let parent = a.parent().unwrap();
+        let dotted = parent.join(".").join("a.qcow2");
+
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .volume("/x", |v| v.disk(a))
+            .volume("/y", |v| v.disk(dotted))
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("disk-image volumes cannot share the same host path")
+        );
+    }
+
+    #[test]
+    fn test_builder_rejects_missing_disk_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let nonexistent = dir.path().join("nope.qcow2");
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .volume("/x", |v| v.disk(nonexistent))
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("disk image host path does not exist")
+        );
     }
 }

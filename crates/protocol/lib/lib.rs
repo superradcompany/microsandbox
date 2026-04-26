@@ -39,7 +39,8 @@ pub const SCRIPTS_PATH: &str = "/.msb/scripts";
 /// - `mode=N` — permission mode as octal integer (optional, e.g. `mode=1777`)
 ///
 /// Entries are separated by `;`. Within an entry, the path comes first
-/// followed by comma-separated options.
+/// followed by comma-separated options. Options compose order-independently
+/// (e.g. `,ro,noexec` and `,noexec,ro` are equivalent).
 ///
 /// Examples:
 /// - `MSB_TMPFS=/tmp,size=256` — 256 MiB tmpfs at `/tmp`
@@ -152,7 +153,10 @@ pub const ENV_FILE_MOUNTS: &str = "MSB_FILE_MOUNTS";
 ///   agentd probes `/proc/filesystems` to find a type that mounts cleanly.
 /// - `ro` — optional flag: mount read-only.
 ///
-/// Entries are separated by `;`.
+/// Entries are separated by `;`. The `fstype` slot is positional, not
+/// keyed. To express "no fstype + ro" the slot must be empty:
+/// `id:/path::ro`. The form `id:/path:ro` would parse as `fstype=ro`,
+/// not the readonly flag.
 ///
 /// Examples:
 /// - `MSB_DISK_MOUNTS=data_12ab:/data:ext4` — ext4 disk at `/data`

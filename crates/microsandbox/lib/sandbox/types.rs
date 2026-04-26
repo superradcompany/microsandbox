@@ -308,20 +308,15 @@ impl MountBuilder {
     /// Format defaults to the extension of `host` (`.qcow2` → Qcow2, `.vmdk`
     /// → Vmdk, anything else → Raw). Use [`Self::format`] to override.
     pub fn disk(mut self, host: impl Into<PathBuf>) -> Self {
-        let host = host.into();
-        if self.disk_format.is_none() {
-            let inferred = host
-                .extension()
-                .and_then(|e| e.to_str())
-                .and_then(DiskImageFormat::from_extension)
-                .unwrap_or(DiskImageFormat::Raw);
-            self.disk_format = Some(inferred);
-        }
-        self.mount = MountKind::Disk(host);
+        self.mount = MountKind::Disk(host.into());
         self
     }
 
     /// Override the disk image format for the current `disk()` mount.
+    ///
+    /// Only valid alongside [`Self::disk`]. Calling on bind / named / tmpfs
+    /// mounts produces an error when the surrounding `SandboxBuilder` is
+    /// finalized so the option does not silently get dropped.
     pub fn format(mut self, format: DiskImageFormat) -> Self {
         self.disk_format = Some(format);
         self
@@ -332,10 +327,14 @@ impl MountBuilder {
     /// cleanly.
     pub fn fstype(mut self, fstype: impl Into<String>) -> Self {
         let fstype = fstype.into();
-        if fstype.contains(',') || fstype.contains(';') || fstype.contains(':') {
+        if fstype.contains(',')
+            || fstype.contains(';')
+            || fstype.contains(':')
+            || fstype.contains('=')
+        {
             self.error.get_or_insert_with(|| {
                 crate::MicrosandboxError::InvalidConfig(format!(
-                    "fstype must not contain ',', ';' or ':': {fstype}"
+                    "fstype must not contain ',', ';', ':', or '=': {fstype}"
                 ))
             });
             return self;
@@ -390,24 +389,22 @@ impl MountBuilder {
         }
 
         // Reject options set on the wrong kind.
-        match &self.mount {
-            MountKind::Tmpfs => {}
-            MountKind::Disk(_) => {}
-            _ if self.size_mib.is_some() => {
-                return Err(crate::MicrosandboxError::InvalidConfig(
-                    ".size() is only valid for tmpfs mounts".into(),
-                ));
-            }
-            _ => {}
+        let is_tmpfs = matches!(self.mount, MountKind::Tmpfs);
+        let is_disk = matches!(self.mount, MountKind::Disk(_));
+        if self.size_mib.is_some() && !is_tmpfs {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                ".size() is only valid for tmpfs mounts".into(),
+            ));
         }
-        match &self.mount {
-            MountKind::Disk(_) => {}
-            _ if self.disk_fstype.is_some() => {
-                return Err(crate::MicrosandboxError::InvalidConfig(
-                    ".fstype() is only valid for disk image mounts".into(),
-                ));
-            }
-            _ => {}
+        if self.disk_format.is_some() && !is_disk {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                ".format() is only valid for disk image mounts".into(),
+            ));
+        }
+        if self.disk_fstype.is_some() && !is_disk {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                ".fstype() is only valid for disk image mounts".into(),
+            ));
         }
 
         match self.mount {
@@ -426,14 +423,21 @@ impl MountBuilder {
                 size_mib: self.size_mib,
                 readonly: self.readonly,
             }),
-            MountKind::Disk(host) => Ok(VolumeMount::DiskImage {
-                host,
-                guest: self.guest,
-                // disk() always sets disk_format, so unwrap is safe.
-                format: self.disk_format.unwrap_or(DiskImageFormat::Raw),
-                fstype: self.disk_fstype,
-                readonly: self.readonly,
-            }),
+            MountKind::Disk(host) => {
+                let format = self.disk_format.unwrap_or_else(|| {
+                    host.extension()
+                        .and_then(|e| e.to_str())
+                        .and_then(DiskImageFormat::from_extension)
+                        .unwrap_or(DiskImageFormat::Raw)
+                });
+                Ok(VolumeMount::DiskImage {
+                    host,
+                    guest: self.guest,
+                    format,
+                    fstype: self.disk_fstype,
+                    readonly: self.readonly,
+                })
+            }
             MountKind::Unset => Err(crate::MicrosandboxError::InvalidConfig(
                 "MountBuilder: no mount type set (call .bind(), .named(), .tmpfs(), or .disk())"
                     .into(),
@@ -689,9 +693,13 @@ impl ImageBuilder {
     /// ```
     pub fn fstype(mut self, fstype: impl Into<String>) -> Self {
         let fstype = fstype.into();
-        if fstype.contains(',') || fstype.contains('=') {
+        if fstype.contains(',')
+            || fstype.contains(';')
+            || fstype.contains(':')
+            || fstype.contains('=')
+        {
             self.error = Some(crate::MicrosandboxError::InvalidConfig(format!(
-                "fstype must not contain ',' or '=': {fstype}"
+                "fstype must not contain ',', ';', ':', or '=': {fstype}"
             )));
             return self;
         }
@@ -792,8 +800,7 @@ impl From<PathBuf> for ImageSource {
     }
 }
 
-/// Custom serialization — only serializable variants are written.
-/// Custom serialization for `VolumeMount`.
+/// Custom serialization for `VolumeMount` covering all four variants.
 impl Serialize for VolumeMount {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
@@ -855,7 +862,7 @@ impl Serialize for VolumeMount {
     }
 }
 
-/// Custom deserialization — only Bind, Named, Tmpfs are expected.
+/// Custom deserialization for `VolumeMount` covering all four variants.
 impl<'de> Deserialize<'de> for VolumeMount {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         /// Helper for tagged deserialization.
@@ -1031,6 +1038,101 @@ mod tests {
     #[test]
     fn test_disk_image_format_from_str_unknown() {
         assert!("ext4".parse::<DiskImageFormat>().is_err());
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // MountBuilder validation
+    //----------------------------------------------------------------------------------------------
+
+    #[test]
+    fn test_mount_builder_size_rejected_on_disk() {
+        let err = MountBuilder::new("/data")
+            .disk("/host/data.qcow2")
+            .size(64u32)
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains(".size() is only valid for tmpfs"));
+    }
+
+    #[test]
+    fn test_mount_builder_size_rejected_on_bind() {
+        let err = MountBuilder::new("/data")
+            .bind("/host/data")
+            .size(64u32)
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains(".size() is only valid for tmpfs"));
+    }
+
+    #[test]
+    fn test_mount_builder_format_rejected_on_non_disk() {
+        let err = MountBuilder::new("/data")
+            .bind("/host/data")
+            .format(DiskImageFormat::Qcow2)
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(".format() is only valid for disk image mounts")
+        );
+    }
+
+    #[test]
+    fn test_mount_builder_fstype_rejected_on_non_disk() {
+        let err = MountBuilder::new("/data")
+            .tmpfs()
+            .fstype("ext4")
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(".fstype() is only valid for disk image mounts")
+        );
+    }
+
+    #[test]
+    fn test_mount_builder_disk_then_format_overrides_inference() {
+        // .disk(qcow2 path) would infer Qcow2; .format(Raw) afterwards must win.
+        let mount = MountBuilder::new("/data")
+            .disk("/host/data.qcow2")
+            .format(DiskImageFormat::Raw)
+            .build()
+            .unwrap();
+        match mount {
+            VolumeMount::DiskImage { format, .. } => assert_eq!(format, DiskImageFormat::Raw),
+            other => panic!("expected DiskImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mount_builder_format_before_disk_still_overrides() {
+        // Builder methods are call-order independent on the disk path.
+        let mount = MountBuilder::new("/data")
+            .format(DiskImageFormat::Vmdk)
+            .disk("/host/data.qcow2")
+            .build()
+            .unwrap();
+        match mount {
+            VolumeMount::DiskImage { format, .. } => assert_eq!(format, DiskImageFormat::Vmdk),
+            other => panic!("expected DiskImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mount_builder_disk_extension_inference() {
+        // No explicit format → infer from extension.
+        for (path, expected) in [
+            ("/host/data.qcow2", DiskImageFormat::Qcow2),
+            ("/host/data.vmdk", DiskImageFormat::Vmdk),
+            ("/host/data.raw", DiskImageFormat::Raw),
+            ("/host/data.img", DiskImageFormat::Raw), // unknown → Raw fallback
+        ] {
+            let mount = MountBuilder::new("/data").disk(path).build().unwrap();
+            match mount {
+                VolumeMount::DiskImage { format, .. } => assert_eq!(format, expected, "{path}"),
+                other => panic!("expected DiskImage for {path}, got {other:?}"),
+            }
+        }
     }
 
     #[test]

@@ -481,22 +481,12 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
     }
     if let Some(ref volumes) = config.volumes {
         for (guest_path, mount) in volumes {
-            // Parse the disk-image format upfront so we can surface a clean
-            // error before the closure runs. The MountBuilder takes a typed
-            // enum, not a string, so the conversion has to happen here.
-            let format = match mount.format.as_deref() {
-                Some(s) => Some(
-                    microsandbox::sandbox::DiskImageFormat::from_extension(s).ok_or_else(
-                        || {
-                            napi::Error::from_reason(format!(
-                                "invalid disk image format for {guest_path}: {s} (expected qcow2, raw, or vmdk)"
-                            ))
-                        },
-                    )?,
-                ),
-                None => None,
-            };
-            builder = builder.volume(guest_path, |b| convert_mount(b, mount, format));
+            validate_mount_kinds(guest_path, mount)?;
+            // `format` is now a typed enum on the napi boundary, so no
+            // string parsing is needed here — convert_mount turns it into
+            // the underlying microsandbox::sandbox::DiskImageFormat via
+            // the From impl.
+            builder = builder.volume(guest_path, |b| convert_mount(b, mount));
         }
     }
     if let Some(ref patches) = config.patches {
@@ -721,6 +711,58 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
     builder.build().map_err(to_napi_error)
 }
 
+/// Validate that a `MountConfig` has exactly one mount kind set and that
+/// disk-only options are not paired with non-disk mounts.
+fn validate_mount_kinds(guest_path: &str, mount: &MountConfig) -> Result<()> {
+    let mut kinds: Vec<&'static str> = Vec::with_capacity(4);
+    if mount.bind.is_some() {
+        kinds.push("bind");
+    }
+    if mount.named.is_some() {
+        kinds.push("named");
+    }
+    if mount.tmpfs.unwrap_or(false) {
+        kinds.push("tmpfs");
+    }
+    if mount.disk.is_some() {
+        kinds.push("disk");
+    }
+    match kinds.len() {
+        0 => {
+            return Err(napi::Error::from_reason(format!(
+                "mount at {guest_path}: must set one of bind, named, tmpfs, or disk"
+            )));
+        }
+        1 => {}
+        _ => {
+            return Err(napi::Error::from_reason(format!(
+                "mount at {guest_path}: kinds {kinds:?} are mutually exclusive"
+            )));
+        }
+    }
+
+    let is_disk = mount.disk.is_some();
+    if !is_disk && mount.format.is_some() {
+        return Err(napi::Error::from_reason(format!(
+            "mount at {guest_path}: `format` is only valid with `disk`"
+        )));
+    }
+    if !is_disk && mount.fstype.is_some() {
+        return Err(napi::Error::from_reason(format!(
+            "mount at {guest_path}: `fstype` is only valid with `disk`"
+        )));
+    }
+    if mount.tmpfs.unwrap_or(false) {
+        // size_mib OK on tmpfs; nothing else to check here.
+    } else if mount.size_mib.is_some() {
+        return Err(napi::Error::from_reason(format!(
+            "mount at {guest_path}: `sizeMib` is only valid with `tmpfs`"
+        )));
+    }
+
+    Ok(())
+}
+
 /// Parse user-supplied nameserver strings into [`Nameserver`]s, wrapping any
 /// parse error in a napi `Error` so it surfaces as a JS exception.
 fn parse_nameservers(nameservers: &[String]) -> Result<Vec<Nameserver>> {
@@ -736,7 +778,6 @@ fn parse_nameservers(nameservers: &[String]) -> Result<Vec<Nameserver>> {
 fn convert_mount(
     builder: microsandbox::sandbox::MountBuilder,
     mount: &MountConfig,
-    format: Option<microsandbox::sandbox::DiskImageFormat>,
 ) -> microsandbox::sandbox::MountBuilder {
     let mut b = builder;
     if let Some(ref bind_path) = mount.bind {
@@ -747,8 +788,8 @@ fn convert_mount(
         b = b.tmpfs();
     } else if let Some(ref disk_path) = mount.disk {
         b = b.disk(PathBuf::from(disk_path));
-        if let Some(format) = format {
-            b = b.format(format);
+        if let Some(format) = mount.format {
+            b = b.format(format.into());
         }
         if let Some(ref fstype) = mount.fstype {
             b = b.fstype(fstype);

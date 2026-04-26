@@ -569,8 +569,12 @@ export interface MountConfig {
   sizeMib?: number
 }
 
-/** Supported disk image formats for `Mount.disk`. */
-export type DiskImageFormat = 'qcow2' | 'raw' | 'vmdk'
+/** Supported disk image formats for `Mount.disk` and the `disk()` rootfs. */
+export declare const enum DiskImageFormat {
+  Qcow2 = 'qcow2',
+  Raw = 'raw',
+  Vmdk = 'vmdk'
+}
 
 /** Options for bind and named volume mounts. */
 export interface MountOptions {

@@ -954,6 +954,11 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_disk_mount_entry_rejects_too_many_parts() {
+        assert!(parse_disk_mount_entry("id:/data:ext4:ro:extra").is_err());
+    }
+
+    #[test]
     fn test_parse_disk_mounts_multiple_entries() {
         let specs = parse_disk_mounts("data_1:/data:ext4;seed_2:/seed::ro;probe_3:/p").unwrap();
         assert_eq!(specs.len(), 3);
