@@ -5,6 +5,7 @@
 //! index to map destination IPs back to domain names.
 
 mod builder;
+pub mod cli;
 pub mod destination;
 mod name;
 mod types;
@@ -14,6 +15,7 @@ mod types;
 //--------------------------------------------------------------------------------------------------
 
 pub use builder::{BuildError, ExplicitRuleBuilder, NetworkPolicyBuilder, RuleBuilder};
+pub use cli::{RuleParseError, parse_rule_list, parse_rule_token};
 pub use destination::*;
 pub use name::{DomainName, DomainNameError};
 pub use types::*;
