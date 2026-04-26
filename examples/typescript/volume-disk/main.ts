@@ -5,7 +5,7 @@ import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 async function main() {
-  const dataDir = resolve(__dirname, "..", "..", "volume-disk-data");
+  const dataDir = resolve(__dirname, "sample-images");
   const rawPath = resolve(dataDir, "ext4-seeded.raw");
   const qcow2Path = resolve(dataDir, "ext4-seeded.qcow2");
 

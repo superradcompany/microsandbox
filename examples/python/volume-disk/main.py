@@ -8,7 +8,7 @@ from microsandbox import DiskImageFormat, Sandbox, Volume
 
 async def main():
     data_dir = os.path.realpath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "volume-disk-data")
+        os.path.join(os.path.dirname(__file__), "sample-images")
     )
     raw_path = os.path.join(data_dir, "ext4-seeded.raw")
     qcow2_path = os.path.join(data_dir, "ext4-seeded.qcow2")
