@@ -220,7 +220,13 @@ pub fn smoltcp_poll_loop(
         network_policy.clone(),
         config.gateway,
     );
-    let mut port_publisher = PortPublisher::new(&published_ports, config.guest_ipv4, &tokio_handle);
+    let mut port_publisher = PortPublisher::new(
+        &published_ports,
+        config.guest_ipv4,
+        network_policy.clone(),
+        shared.clone(),
+        &tokio_handle,
+    );
     let mut udp_relay = UdpRelay::new(
         shared.clone(),
         config.gateway_mac,
