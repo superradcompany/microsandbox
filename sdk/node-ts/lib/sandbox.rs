@@ -565,15 +565,22 @@ async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
         builder = builder.network(|mut n| {
             // Policy: preset or custom rules
             if let Some(ref rules) = network.rules {
-                let default_action = match network.default_action.as_deref() {
+                let parse_action = |s: Option<&str>, default: Action| match s {
                     Some("deny") => Action::Deny,
-                    _ => Action::Allow,
+                    Some("allow") => Action::Allow,
+                    _ => default,
                 };
-                // TODO: replace this shim with a per-direction TS API.
+                // Asymmetric defaults match today's behavior: egress defaults
+                // to Deny (the implicit allow-public rule comes via the rules
+                // list when present), ingress defaults to Allow (today's
+                // unfiltered published-port behavior).
+                let default_egress = parse_action(network.default_egress.as_deref(), Action::Deny);
+                let default_ingress =
+                    parse_action(network.default_ingress.as_deref(), Action::Allow);
                 let parsed_rules: Vec<_> = rules.iter().filter_map(convert_policy_rule).collect();
                 n = n.policy(NetworkPolicy {
-                    default_egress: default_action,
-                    default_ingress: default_action,
+                    default_egress,
+                    default_ingress,
                     rules: parsed_rules,
                 });
             } else if let Some(ref policy) = network.policy {

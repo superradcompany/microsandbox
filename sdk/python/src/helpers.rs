@@ -384,19 +384,31 @@ fn apply_network(
         && !custom.is_none()
     {
         let cp_dict = as_dict(&custom)?;
-        let default_action_str: String =
-            extract_opt(&cp_dict, "default_action")?.unwrap_or_else(|| "allow".to_string());
-        let default_action = match default_action_str.as_str() {
-            "allow" => microsandbox_network::policy::Action::Allow,
-            "deny" => microsandbox_network::policy::Action::Deny,
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "unknown default_action: {default_action_str}"
-                )));
+        let parse_action_field = |field: &str,
+                                  default: microsandbox_network::policy::Action|
+         -> PyResult<microsandbox_network::policy::Action> {
+            let s: Option<String> = extract_opt(&cp_dict, field)?;
+            match s.as_deref() {
+                None => Ok(default),
+                Some("allow") => Ok(microsandbox_network::policy::Action::Allow),
+                Some("deny") => Ok(microsandbox_network::policy::Action::Deny),
+                Some(other) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown {field}: {other}"
+                ))),
             }
         };
+        // Asymmetric defaults match the rest of the stack: egress falls
+        // through to Deny (preserves today's `public_only` reachability
+        // when paired with an implicit allow-public rule); ingress falls
+        // through to Allow (preserves today's unfiltered published-port
+        // behavior).
+        let default_egress =
+            parse_action_field("default_egress", microsandbox_network::policy::Action::Deny)?;
+        let default_ingress = parse_action_field(
+            "default_ingress",
+            microsandbox_network::policy::Action::Allow,
+        )?;
 
-        // TODO: replace this shim with a per-direction Python API.
         let mut rules: Vec<microsandbox_network::policy::Rule> = Vec::new();
         if let Some(rules_obj) = cp_dict.get_item("rules")?
             && !rules_obj.is_none()
@@ -515,8 +527,8 @@ fn apply_network(
         }
 
         let policy = NetworkPolicy {
-            default_egress: default_action,
-            default_ingress: default_action,
+            default_egress,
+            default_ingress,
             rules,
         };
         builder = builder.network(|n| n.policy(policy));

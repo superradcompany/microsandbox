@@ -80,10 +80,12 @@ pub enum PolicyAction {
 /// Network policy rule direction.
 #[napi(string_enum)]
 pub enum PolicyDirection {
-    #[napi(value = "outbound")]
-    Outbound,
-    #[napi(value = "inbound")]
-    Inbound,
+    #[napi(value = "egress")]
+    Egress,
+    #[napi(value = "ingress")]
+    Ingress,
+    #[napi(value = "any")]
+    Any,
 }
 
 /// Network policy rule protocol.
@@ -371,7 +373,8 @@ impl JsNetworkPolicy {
         NetworkConfig {
             policy: Some("none".to_string()),
             rules: None,
-            default_action: None,
+            default_egress: None,
+            default_ingress: None,
             dns: None,
             tls: None,
             max_connections: None,
@@ -385,7 +388,8 @@ impl JsNetworkPolicy {
         NetworkConfig {
             policy: Some("public-only".to_string()),
             rules: None,
-            default_action: None,
+            default_egress: None,
+            default_ingress: None,
             dns: None,
             tls: None,
             max_connections: None,
@@ -399,7 +403,8 @@ impl JsNetworkPolicy {
         NetworkConfig {
             policy: Some("allow-all".to_string()),
             rules: None,
-            default_action: None,
+            default_egress: None,
+            default_ingress: None,
             dns: None,
             tls: None,
             max_connections: None,

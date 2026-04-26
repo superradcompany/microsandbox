@@ -127,8 +127,14 @@ pub struct NetworkConfig {
     pub policy: Option<String>,
     /// Custom policy rules (first match wins). Overrides `policy` preset.
     pub rules: Option<Vec<PolicyRule>>,
-    /// Default action when no rule matches: "allow" or "deny".
-    pub default_action: Option<String>,
+    /// Default action for egress traffic when no rule matches: "allow" or
+    /// "deny". When omitted, falls through to today's `public_only`
+    /// behavior (deny + implicit allow public).
+    pub default_egress: Option<String>,
+    /// Default action for ingress traffic when no rule matches: "allow" or
+    /// "deny". When omitted, defaults to "allow" (today's unfiltered
+    /// published-port behavior).
+    pub default_ingress: Option<String>,
     /// DNS interception configuration.
     pub dns: Option<DnsConfig>,
     /// TLS interception configuration.
