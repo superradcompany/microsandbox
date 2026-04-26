@@ -442,10 +442,10 @@ fn parse_disk_mount_entry(entry: &str) -> AgentdResult<DiskMountSpec> {
     let mut fstype: Option<String> = None;
     let mut readonly = false;
 
-    if let Some(third) = parts.get(2) {
-        if !third.is_empty() {
-            fstype = Some((*third).to_string());
-        }
+    if let Some(third) = parts.get(2)
+        && !third.is_empty()
+    {
+        fstype = Some((*third).to_string());
     }
     if let Some(fourth) = parts.get(3) {
         match *fourth {
