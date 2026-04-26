@@ -588,6 +588,7 @@ module.exports.JsMetricsStream = nativeBinding.JsMetricsStream
 module.exports.Mount = nativeBinding.Mount
 module.exports.NetworkPolicy = nativeBinding.NetworkPolicy
 module.exports.JsNetworkPolicy = nativeBinding.JsNetworkPolicy
+module.exports.NetworkPolicyBuilder = nativeBinding.NetworkPolicyBuilder
 module.exports.Patch = nativeBinding.Patch
 module.exports.Sandbox = nativeBinding.Sandbox
 module.exports.SandboxFs = nativeBinding.SandboxFs

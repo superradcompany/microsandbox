@@ -156,11 +156,19 @@ export declare class Mount {
  * ```js
  * import { NetworkPolicy, Sandbox } from 'microsandbox'
  *
- * const sb = await Sandbox.create({
+ * // legacy preset
+ * const sb1 = await Sandbox.create({
  *     name: "worker",
  *     image: "python",
  *     network: NetworkPolicy.publicOnly(),
  * })
+ *
+ * // fluent builder
+ * const policy = NetworkPolicy.builder()
+ *     .defaultDeny()
+ *     .egress().tcp().port(443).allowPublic().allowPrivate()
+ *     .any().denyIp("198.51.100.5")
+ *     .build()
  * ```
  */
 export declare class NetworkPolicy {
@@ -170,8 +178,169 @@ export declare class NetworkPolicy {
   static publicOnly(): NetworkConfig
   /** Unrestricted network access. */
   static allowAll(): NetworkConfig
+  /**
+   * Open a fluent [`NetworkPolicyBuilder`] for composing a custom
+   * policy. See the `NetworkPolicyBuilder` class for the full
+   * chainable surface.
+   */
+  static builder(): NetworkPolicyBuilder
 }
 export type JsNetworkPolicy = NetworkPolicy
+
+/**
+ * Fluent builder for [`NetworkConfig`]-shaped policies. Mirrors the
+ * rust `NetworkPolicy::builder()` surface, flattened so the chain
+ * stays readable in javascript without nested closures.
+ *
+ * State setters (`.egress() / .ingress() / .any()` for direction,
+ * `.tcp() / .udp() / .icmpv4() / .icmpv6()` for the protocols set,
+ * `.port(n) / .portRange(lo, hi)` for the ports set) accumulate
+ * eagerly. Each rule-adder commits one rule using the closure's
+ * current state. State is **not reset** between rule-adders.
+ *
+ * `.build()` returns a [`NetworkConfig`] with `defaultEgress`,
+ * `defaultIngress`, and `rules` populated. Pass it through
+ * `Sandbox.create({ network: ... })` like any other network config.
+ */
+export declare class NetworkPolicyBuilder {
+  /**
+   * Construct an empty builder. Prefer [`JsNetworkPolicy::builder`]
+   * (`NetworkPolicy.builder()` in JS) over calling this directly.
+   */
+  constructor()
+  /** Set both `defaultEgress` and `defaultIngress` to `"allow"`. */
+  defaultAllow(): this
+  /** Set both `defaultEgress` and `defaultIngress` to `"deny"`. */
+  defaultDeny(): this
+  /** Per-direction override for the egress default action. */
+  defaultEgress(action: PolicyAction): this
+  /** Per-direction override for the ingress default action. */
+  defaultIngress(action: PolicyAction): this
+  /** Set the direction for subsequent rule-adders to `"egress"`. */
+  egress(): this
+  /** Set the direction for subsequent rule-adders to `"ingress"`. */
+  ingress(): this
+  /**
+   * Set the direction for subsequent rule-adders to `"any"`. Rules
+   * committed with this direction match in either direction.
+   */
+  any(): this
+  /** Add `"tcp"` to the protocols set (set semantics; duplicates dedupe). */
+  tcp(): this
+  /** Add `"udp"` to the protocols set. */
+  udp(): this
+  /**
+   * Add `"icmpv4"` to the protocols set. Egress-only — committing a
+   * rule with `"icmpv4"` and direction `"ingress"` or `"any"` will
+   * be rejected at sandbox creation.
+   */
+  icmpv4(): this
+  /** Add `"icmpv6"` to the protocols set. Egress-only. */
+  icmpv6(): this
+  /** Add a single port to the ports set. */
+  port(port: number): this
+  /**
+   * Add an inclusive port range to the ports set, formatted as
+   * `"<lo>-<hi>"` on the wire. `lo > hi` is rejected at sandbox
+   * creation.
+   */
+  portRange(lo: number, hi: number): this
+  /** Allow the `"public"` group (complement of named categories). */
+  allowPublic(): this
+  /** Deny the `"public"` group. */
+  denyPublic(): this
+  /** Allow the `"private"` group (RFC1918 + ULA + CGN). */
+  allowPrivate(): this
+  /** Deny the `"private"` group. */
+  denyPrivate(): this
+  /**
+   * Allow the `"loopback"` group (`127.0.0.0/8`, `::1`) — the
+   * **guest's own** loopback interface. Not the host machine. To
+   * reach a service on the host's localhost, use [`Self::allow_host`].
+   */
+  allowLoopback(): this
+  /**
+   * Deny the `"loopback"` group. Useful in `defaultEgress = "allow"`
+   * configurations to block crafted-packet leaks where a process
+   * inside the guest binds a raw socket to eth0 with `dst=127.0.0.1`.
+   */
+  denyLoopback(): this
+  /**
+   * Allow the `"link-local"` group (`169.254.0.0/16`, `fe80::/10`).
+   * Excludes the metadata IP (categorized as `"metadata"`).
+   */
+  allowLinkLocal(): this
+  /** Deny the `"link-local"` group. */
+  denyLinkLocal(): this
+  /**
+   * Allow the `"metadata"` group (`169.254.169.254`). **Dangerous on
+   * cloud hosts** — exposes IAM credentials.
+   */
+  allowMeta(): this
+  /** Deny the `"metadata"` group. */
+  denyMeta(): this
+  /** Allow the `"multicast"` group (`224.0.0.0/4`, `ff00::/8`). */
+  allowMulticast(): this
+  /** Deny the `"multicast"` group. */
+  denyMulticast(): this
+  /**
+   * Allow the `"host"` group — the per-sandbox gateway IPs that
+   * back `host.microsandbox.internal`. This is the right shortcut
+   * for "let the sandbox reach my host's localhost", not
+   * [`Self::allow_loopback`].
+   */
+  allowHost(): this
+  /** Deny the `"host"` group. */
+  denyHost(): this
+  /**
+   * Allow `"loopback"` + `"link-local"` + `"host"` — the three
+   * "near the sandbox" groups a developer typically wants together
+   * when running locally. Adds **three rules** atomically using
+   * the current state. `"metadata"` is explicitly **not** included.
+   */
+  allowLocal(): this
+  /** Deny `"loopback"` + `"link-local"` + `"host"` (no metadata). */
+  denyLocal(): this
+  /**
+   * Allow traffic to a specific IP address (stored as `/32` or
+   * `/128` CIDR on the wire).
+   */
+  allowIp(ip: string): this
+  /** Deny traffic to a specific IP address. */
+  denyIp(ip: string): this
+  /** Allow traffic to a CIDR range (e.g. `"10.0.0.0/8"`). */
+  allowCidr(cidr: string): this
+  /** Deny traffic to a CIDR range. */
+  denyCidr(cidr: string): this
+  /**
+   * Allow traffic to an exact domain (e.g. `"api.example.com"`).
+   * Domain rules require the guest to resolve through the
+   * sandbox's DNS interceptor.
+   */
+  allowDomain(domain: string): this
+  /** Deny traffic to an exact domain. */
+  denyDomain(domain: string): this
+  /**
+   * Allow traffic to any subdomain matching this suffix. The
+   * suffix should be prefixed with `"."` (e.g.
+   * `".pythonhosted.org"` matches `files.pythonhosted.org`).
+   */
+  allowDomainSuffix(suffix: string): this
+  /** Deny traffic to any subdomain matching this suffix. */
+  denyDomainSuffix(suffix: string): this
+  /** Allow traffic to any destination (`"*"`). */
+  allowAny(): this
+  /** Deny traffic to any destination. */
+  denyAny(): this
+  /**
+   * Materialize the accumulated state into a [`NetworkConfig`]
+   * suitable for `Sandbox.create({ network: ... })`. Errors in the
+   * rule contents (invalid ip / cidr / domain strings, lo > hi
+   * port range, icmp on a non-egress rule) surface at sandbox
+   * creation, not here.
+   */
+  build(): NetworkConfig
+}
 
 /**
  * Factory for creating rootfs patch configurations.
@@ -591,14 +760,30 @@ export interface NetworkConfig {
   policy?: string
   /** Custom policy rules (first match wins). Overrides `policy` preset. */
   rules?: Array<PolicyRule>
-  /** Default action when no rule matches: "allow" or "deny". */
-  defaultAction?: string
+  /**
+   * Default action for egress traffic when no rule matches: "allow" or
+   * "deny". When omitted, falls through to today's `public_only`
+   * behavior (deny + implicit allow public).
+   */
+  defaultEgress?: string
+  /**
+   * Default action for ingress traffic when no rule matches: "allow" or
+   * "deny". When omitted, defaults to "allow" (today's unfiltered
+   * published-port behavior).
+   */
+  defaultIngress?: string
   /** DNS interception configuration. */
   dns?: DnsConfig
   /** TLS interception configuration. */
   tls?: TlsConfig
   /** Max concurrent connections (default: 256). */
   maxConnections?: number
+  /**
+   * Ship the host's trusted CAs into the guest at boot so outbound TLS
+   * works behind corporate MITM proxies (Warp Zero Trust, Zscaler,
+   * etc.). Opt-in. Default: false.
+   */
+  trustHostCas?: boolean
 }
 
 /** Rootfs patch applied before VM startup. */
@@ -645,8 +830,9 @@ export declare const enum PolicyAction {
 
 /** Network policy rule direction. */
 export declare const enum PolicyDirection {
-  Outbound = 'outbound',
-  Inbound = 'inbound'
+  Egress = 'egress',
+  Ingress = 'ingress',
+  Any = 'any'
 }
 
 /** Network policy rule protocol. */
