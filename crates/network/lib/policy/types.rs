@@ -1,4 +1,23 @@
 //! Policy types: rules, actions, destinations, and protocol matching.
+//!
+//! A [`NetworkPolicy`] is a single ordered rule list plus two direction-
+//! specific default actions. Each rule carries its direction
+//! ([`Direction`]) — `Egress`, `Ingress`, or `Both` — which determines
+//! which evaluator considers it. Rule lookup is first-match-wins per
+//! direction; if no rule of the right direction matches, the direction-
+//! specific default applies.
+//!
+//! The `Rule::destination` field is direction-dependent in interpretation.
+//! In an egress rule it matches the destination the guest is reaching;
+//! in an ingress rule it matches the source (peer) of the incoming
+//! connection. `Rule::ports` always refers to the guest-side port
+//! (destination for egress, listening port for ingress) — ingress does
+//! not filter by peer source port.
+//!
+//! [`Rule::protocols`] and [`Rule::ports`] are sets (Vecs); a rule
+//! matches if the packet's protocol is in `protocols` or `protocols` is
+//! empty (any-protocol), and likewise for ports. This compresses common
+//! cases like "TCP-or-UDP on 80-or-443 to Public" into a single rule.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -14,26 +33,36 @@ use super::name::DomainName;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Network policy with ordered rules.
+/// Network policy: single ordered rule list plus per-direction default actions.
 ///
-/// Rules are evaluated in first-match-wins order. If no rule matches,
-/// the default action is applied.
+/// Rules carry a [`Direction`] field that determines which evaluator
+/// considers them. Egress evaluation iterates rules where
+/// `direction ∈ {Egress, Both}`; ingress evaluation iterates rules where
+/// `direction ∈ {Ingress, Both}`. First-match-wins within a direction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkPolicy {
-    /// Default action for traffic not matching any rule.
-    #[serde(default)]
-    pub default_action: Action,
+    /// Default action for egress traffic not matching any rule.
+    /// `Deny` paired with an implicit allow-`Public` rule reproduces
+    /// today's "public internet only" reachability.
+    #[serde(default = "Action::deny")]
+    pub default_egress: Action,
 
-    /// Ordered list of rules (first match wins).
+    /// Default action for ingress traffic not matching any rule.
+    /// `Allow` so a sandbox publishing a port without an explicit
+    /// ingress rule still accepts traffic.
+    #[serde(default = "Action::allow")]
+    pub default_ingress: Action,
+
+    /// Ordered list of rules, evaluated first-match-wins per direction.
     #[serde(default)]
     pub rules: Vec<Rule>,
 }
 
 /// Action to take on matched traffic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Action {
     /// Allow the traffic.
-    #[default]
     Allow,
 
     /// Silently drop.
@@ -41,34 +70,47 @@ pub enum Action {
 }
 
 /// A single network rule.
+///
+/// The `destination` field is direction-dependent: in an egress-direction
+/// rule, `destination` is what the guest is reaching; in an ingress-
+/// direction rule, `destination` is the source (peer) of the incoming
+/// connection. `Both`-direction rules apply in either path with the
+/// destination interpreted appropriately for each.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
-    /// Traffic direction.
+    /// Direction this rule applies to: outbound, inbound, or either.
     pub direction: Direction,
 
-    /// Destination filter.
+    /// Destination filter. Direction-dependent interpretation.
     pub destination: Destination,
 
-    /// Protocol filter (None = any protocol).
+    /// Protocol set (empty = any protocol). The rule matches if the
+    /// packet's protocol is in this set.
     #[serde(default)]
-    pub protocol: Option<Protocol>,
+    pub protocols: Vec<Protocol>,
 
-    /// Port filter (None = any port).
+    /// Port-range set (empty = any port). Always the guest-side port:
+    /// destination port for egress, listening port for ingress.
     #[serde(default)]
-    pub ports: Option<PortRange>,
+    pub ports: Vec<PortRange>,
 
     /// Action to take.
     pub action: Action,
 }
 
-/// Traffic direction.
+/// Direction a rule applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Direction {
-    /// Outbound (guest → internet).
-    Outbound,
+    /// Outbound: guest → destination. Evaluated by `evaluate_egress`.
+    Egress,
 
-    /// Inbound (internet → guest).
-    Inbound,
+    /// Inbound: peer → guest. Evaluated by `evaluate_ingress`.
+    Ingress,
+
+    /// Either direction. The rule is matched by both evaluators
+    /// (egress and ingress).
+    Any,
 }
 
 /// Traffic destination specification.
@@ -79,6 +121,7 @@ pub enum Direction {
 /// can then rely on byte equality against the DNS cache's own
 /// canonical entries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Destination {
     /// Match any destination.
     Any,
@@ -100,15 +143,27 @@ pub enum Destination {
 }
 
 /// Pre-defined destination groups.
+///
+/// Categories are disjoint with one exception: `Metadata` is a single IP
+/// (`169.254.169.254`) that also falls inside the `LinkLocal` range.
+/// Membership order in [`matches_group`](super::destination::matches_group)
+/// gives `Metadata` precedence over `LinkLocal` for that IP. All other
+/// categories are disjoint; [`Public`](Self::Public) is defined as the
+/// complement of the other five.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DestinationGroup {
+    /// Public internet — any address not in one of the other categories.
+    Public,
+
     /// Loopback addresses (`127.0.0.0/8`, `::1`).
     Loopback,
 
-    /// Private IP ranges (RFC 1918 + RFC 4193 ULA).
+    /// Private IP ranges (RFC 1918 + RFC 4193 ULA + CGN).
     Private,
 
-    /// Link-local addresses (`169.254.0.0/16`, `fe80::/10`).
+    /// Link-local addresses (`169.254.0.0/16`, `fe80::/10`), excluding
+    /// the metadata IP which is categorized as [`Metadata`](Self::Metadata).
     LinkLocal,
 
     /// Cloud metadata endpoints (`169.254.169.254`).
@@ -125,6 +180,7 @@ pub enum DestinationGroup {
 
 /// Protocol filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Protocol {
     /// TCP.
     Tcp,
@@ -154,53 +210,56 @@ pub struct PortRange {
 //--------------------------------------------------------------------------------------------------
 
 impl NetworkPolicy {
-    /// No network access — deny everything.
+    /// No network access — deny everything in both directions.
     pub fn none() -> Self {
         Self {
-            default_action: Action::Deny,
+            default_egress: Action::Deny,
+            default_ingress: Action::Deny,
             rules: vec![],
         }
     }
 
-    /// Unrestricted network access — allow everything.
+    /// Unrestricted network access — allow everything in both directions.
     pub fn allow_all() -> Self {
         Self {
-            default_action: Action::Allow,
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
             rules: vec![],
         }
     }
 
-    /// Public internet only — deny loopback, private, link-local, and
-    /// cloud metadata addresses.
+    /// Public internet only — allow egress to public IPs, deny private,
+    /// loopback, link-local, and metadata. Ingress defaults to allow
+    /// (preserves today's unfiltered published-port behavior).
     pub fn public_only() -> Self {
         Self {
-            default_action: Action::Allow,
-            rules: vec![
-                Rule::deny_outbound(Destination::Group(DestinationGroup::Loopback)),
-                Rule::deny_outbound(Destination::Group(DestinationGroup::Private)),
-                Rule::deny_outbound(Destination::Group(DestinationGroup::LinkLocal)),
-                Rule::deny_outbound(Destination::Group(DestinationGroup::Metadata)),
-            ],
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::allow_egress(Destination::Group(
+                DestinationGroup::Public,
+            ))],
         }
     }
 
-    /// Non-local network access — allow public internet and private/LAN addresses,
-    /// but deny loopback, link-local, and cloud metadata addresses.
+    /// Non-local network access — allow public internet and private/LAN
+    /// egress; deny loopback, link-local, and metadata. Ingress defaults
+    /// to allow.
     pub fn non_local() -> Self {
         Self {
-            default_action: Action::Allow,
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
             rules: vec![
-                Rule::deny_outbound(Destination::Group(DestinationGroup::Loopback)),
-                Rule::deny_outbound(Destination::Group(DestinationGroup::LinkLocal)),
-                Rule::deny_outbound(Destination::Group(DestinationGroup::Metadata)),
+                Rule::allow_egress(Destination::Group(DestinationGroup::Public)),
+                Rule::allow_egress(Destination::Group(DestinationGroup::Private)),
             ],
         }
     }
 
-    /// Evaluate an outbound connection against the policy.
+    /// Evaluate an outbound connection against the rule list.
     ///
-    /// Returns the action from the first matching rule, or the default
-    /// action if no rule matches.
+    /// Iterates rules in order, considering only rules where
+    /// `direction ∈ {Egress, Any}`. Returns the action from the first
+    /// matching rule, or `default_egress` if no rule matches.
     pub fn evaluate_egress(
         &self,
         dst: SocketAddr,
@@ -208,31 +267,21 @@ impl NetworkPolicy {
         shared: &SharedState,
     ) -> Action {
         for rule in &self.rules {
-            if rule.direction != Direction::Outbound {
+            if !matches!(rule.direction, Direction::Egress | Direction::Any) {
                 continue;
             }
-            if let Some(ref rule_proto) = rule.protocol
-                && *rule_proto != protocol
-            {
-                continue;
-            }
-            if let Some(ref ports) = rule.ports
-                && !ports.contains(dst.port())
-            {
-                continue;
-            }
-            if !matches_destination(&rule.destination, dst.ip(), shared) {
+            if !rule_matches(rule, dst.ip(), Some(dst.port()), protocol, shared) {
                 continue;
             }
             return rule.action;
         }
-        self.default_action
+        self.default_egress
     }
 
-    /// Evaluate an outbound ICMP packet against the policy.
+    /// Evaluate an outbound ICMP packet against the rule list.
     ///
-    /// Same first-match-wins logic as [`Self::evaluate_egress`] but without port
-    /// matching — ICMP has no ports. Rules with a `ports` filter are
+    /// Same as [`Self::evaluate_egress`] but without port matching —
+    /// ICMP has no ports. Rules with a non-empty `ports` filter are
     /// skipped since applying a port range to a portless protocol would
     /// be semantically incorrect.
     pub fn evaluate_egress_ip(
@@ -242,23 +291,45 @@ impl NetworkPolicy {
         shared: &SharedState,
     ) -> Action {
         for rule in &self.rules {
-            if rule.direction != Direction::Outbound {
+            if !matches!(rule.direction, Direction::Egress | Direction::Any) {
                 continue;
             }
-            if let Some(ref rule_proto) = rule.protocol
-                && *rule_proto != protocol
-            {
+            if !rule.ports.is_empty() {
                 continue;
             }
-            if rule.ports.is_some() {
-                continue;
-            }
-            if !matches_destination(&rule.destination, dst, shared) {
+            if !rule_matches(rule, dst, None, protocol, shared) {
                 continue;
             }
             return rule.action;
         }
-        self.default_action
+        self.default_egress
+    }
+
+    /// Evaluate an inbound connection against the rule list.
+    ///
+    /// Iterates rules in order, considering only rules where
+    /// `direction ∈ {Ingress, Any}`. `peer` is the source of the
+    /// incoming connection (peer IP and source port — only the IP is
+    /// matched). `guest_port` is the guest-side listening port; rules'
+    /// `ports` filter is matched against `guest_port`, not the peer's
+    /// port.
+    pub fn evaluate_ingress(
+        &self,
+        peer: SocketAddr,
+        guest_port: u16,
+        protocol: Protocol,
+        shared: &SharedState,
+    ) -> Action {
+        for rule in &self.rules {
+            if !matches!(rule.direction, Direction::Ingress | Direction::Any) {
+                continue;
+            }
+            if !rule_matches(rule, peer.ip(), Some(guest_port), protocol, shared) {
+                continue;
+            }
+            return rule.action;
+        }
+        self.default_ingress
     }
 }
 
@@ -272,6 +343,16 @@ impl Action {
     pub fn is_deny(self) -> bool {
         matches!(self, Action::Deny)
     }
+
+    /// Helper for `#[serde(default)]` — returns [`Action::Allow`].
+    pub fn allow() -> Self {
+        Action::Allow
+    }
+
+    /// Helper for `#[serde(default)]` — returns [`Action::Deny`].
+    pub fn deny() -> Self {
+        Action::Deny
+    }
 }
 
 impl Default for NetworkPolicy {
@@ -281,22 +362,42 @@ impl Default for NetworkPolicy {
 }
 
 impl Rule {
-    /// Convenience: allow outbound to a destination.
-    pub fn allow_outbound(destination: Destination) -> Self {
-        Self::outbound(destination, Action::Allow)
+    /// Convenience: allow rule for egress, any protocol, any port.
+    pub fn allow_egress(destination: Destination) -> Self {
+        Self::new(Direction::Egress, destination, Action::Allow)
     }
 
-    /// Convenience: deny outbound to a destination.
-    pub fn deny_outbound(destination: Destination) -> Self {
-        Self::outbound(destination, Action::Deny)
+    /// Convenience: deny rule for egress, any protocol, any port.
+    pub fn deny_egress(destination: Destination) -> Self {
+        Self::new(Direction::Egress, destination, Action::Deny)
     }
 
-    fn outbound(destination: Destination, action: Action) -> Self {
+    /// Convenience: allow rule for ingress, any protocol, any port.
+    pub fn allow_ingress(destination: Destination) -> Self {
+        Self::new(Direction::Ingress, destination, Action::Allow)
+    }
+
+    /// Convenience: deny rule for ingress, any protocol, any port.
+    pub fn deny_ingress(destination: Destination) -> Self {
+        Self::new(Direction::Ingress, destination, Action::Deny)
+    }
+
+    /// Convenience: allow rule for either direction, any protocol, any port.
+    pub fn allow_any(destination: Destination) -> Self {
+        Self::new(Direction::Any, destination, Action::Allow)
+    }
+
+    /// Convenience: deny rule for either direction, any protocol, any port.
+    pub fn deny_any(destination: Destination) -> Self {
+        Self::new(Direction::Any, destination, Action::Deny)
+    }
+
+    fn new(direction: Direction, destination: Destination, action: Action) -> Self {
         Self {
-            direction: Direction::Outbound,
+            direction,
             destination,
-            protocol: None,
-            ports: None,
+            protocols: Vec::new(),
+            ports: Vec::new(),
             action,
         }
     }
@@ -326,29 +427,46 @@ impl PortRange {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Internal helper: does this rule match a flow's address/port/protocol?
+///
+/// The direction filter is applied by the caller (`evaluate_egress` /
+/// `evaluate_ingress`). This function checks only protocol set, port
+/// set, and destination match.
+fn rule_matches(
+    rule: &Rule,
+    addr: IpAddr,
+    port: Option<u16>,
+    protocol: Protocol,
+    shared: &SharedState,
+) -> bool {
+    if !rule.protocols.is_empty() && !rule.protocols.contains(&protocol) {
+        return false;
+    }
+    if !rule.ports.is_empty() {
+        let Some(p) = port else {
+            // Caller doesn't have a port (ICMP path). Skip rules that
+            // require a port match.
+            return false;
+        };
+        if !rule.ports.iter().any(|range| range.contains(p)) {
+            return false;
+        }
+    }
+    matches_destination(&rule.destination, addr, shared)
+}
+
 /// Check if an IP address matches a destination specification.
 fn matches_destination(dest: &Destination, addr: IpAddr, shared: &SharedState) -> bool {
     match dest {
         Destination::Any => true,
         Destination::Cidr(network) => matches_cidr(network, addr),
-        Destination::Group(DestinationGroup::Host) => matches_host(addr, shared),
-        Destination::Group(group) => matches_group(*group, addr),
+        Destination::Group(group) => matches_group(*group, addr, shared),
         Destination::Domain(domain) => {
             shared.any_resolved_hostname(addr, |hostname| hostname == domain.as_str())
         }
         Destination::DomainSuffix(suffix) => {
             shared.any_resolved_hostname(addr, |hostname| matches_suffix(hostname, suffix.as_str()))
         }
-    }
-}
-
-/// Matches the per-sandbox gateway IPs carried by [`SharedState`]. Returns
-/// `false` when gateway IPs haven't been set (e.g. isolated unit tests
-/// that don't exercise Host rules).
-fn matches_host(addr: IpAddr, shared: &SharedState) -> bool {
-    match addr {
-        IpAddr::V4(v4) => shared.gateway_ipv4().is_some_and(|gw| gw == v4),
-        IpAddr::V6(v6) => shared.gateway_ipv6().is_some_and(|gw| gw == v6),
     }
 }
 
@@ -418,8 +536,9 @@ mod tests {
 
     fn allow_rule(dest: Destination) -> NetworkPolicy {
         NetworkPolicy {
-            default_action: Action::Deny,
-            rules: vec![Rule::allow_outbound(dest)],
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::allow_egress(dest)],
         }
     }
 
@@ -427,10 +546,10 @@ mod tests {
     /// used by the multi-rule default-deny scenarios below.
     fn allow_domain_tcp_443(domain: &str) -> Rule {
         Rule {
-            direction: Direction::Outbound,
+            direction: Direction::Egress,
             destination: Destination::Domain(domain.parse().unwrap()),
-            protocol: Some(Protocol::Tcp),
-            ports: Some(PortRange::single(443)),
+            protocols: vec![Protocol::Tcp],
+            ports: vec![PortRange::single(443)],
             action: Action::Allow,
         }
     }
@@ -490,12 +609,13 @@ mod tests {
         let shared = shared_with_host("pypi.org", PYPI_V4);
         let policy: NetworkPolicy = serde_json::from_str(
             r#"{
-                "default_action": "Deny",
+                "default_egress": "deny",
+                "default_ingress": "allow",
                 "rules": [
                     {
-                        "direction": "Outbound",
-                        "destination": { "Domain": "PyPI.Org." },
-                        "action": "Allow"
+                        "direction": "egress",
+                        "destination": { "domain": "PyPI.Org." },
+                        "action": "allow"
                     }
                 ]
             }"#,
@@ -520,7 +640,8 @@ mod tests {
         );
 
         let policy = NetworkPolicy {
-            default_action: Action::Deny,
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
             rules: vec![
                 allow_domain_tcp_443("pypi.org"),
                 allow_domain_tcp_443("files.pythonhosted.org"),
@@ -583,14 +704,15 @@ mod tests {
     fn allow_rule_before_deny_wins_on_shared_ip() {
         let shared = shared_with_host("pypi.org", PYPI_V4);
         let policy = NetworkPolicy {
-            default_action: Action::Deny,
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
             rules: vec![
-                Rule::allow_outbound(Destination::Domain("pypi.org".parse().unwrap())),
+                Rule::allow_egress(Destination::Domain("pypi.org".parse().unwrap())),
                 Rule {
-                    direction: Direction::Outbound,
+                    direction: Direction::Egress,
                     destination: Destination::Cidr("151.101.0.0/16".parse().unwrap()),
-                    protocol: None,
-                    ports: None,
+                    protocols: Vec::new(),
+                    ports: Vec::new(),
                     action: Action::Deny,
                 },
             ],
@@ -604,12 +726,13 @@ mod tests {
     fn udp_egress_consults_domain_cache() {
         let shared = shared_with_host("pypi.org", PYPI_V4);
         let policy = NetworkPolicy {
-            default_action: Action::Deny,
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
             rules: vec![Rule {
-                direction: Direction::Outbound,
+                direction: Direction::Egress,
                 destination: Destination::Domain("pypi.org".parse().unwrap()),
-                protocol: Some(Protocol::Udp),
-                ports: Some(PortRange::single(443)),
+                protocols: vec![Protocol::Udp],
+                ports: vec![PortRange::single(443)],
                 action: Action::Allow,
             }],
         };
@@ -643,8 +766,9 @@ mod tests {
     fn group_host_matches_gateway_v4() {
         let (shared, gw4, _) = shared_with_gateway();
         let policy = NetworkPolicy {
-            default_action: Action::Allow,
-            rules: vec![Rule::deny_outbound(Destination::Group(
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::deny_egress(Destination::Group(
                 DestinationGroup::Host,
             ))],
         };
@@ -659,8 +783,9 @@ mod tests {
     fn group_host_matches_gateway_v6() {
         let (shared, _, gw6) = shared_with_gateway();
         let policy = NetworkPolicy {
-            default_action: Action::Allow,
-            rules: vec![Rule::deny_outbound(Destination::Group(
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::deny_egress(Destination::Group(
                 DestinationGroup::Host,
             ))],
         };
@@ -675,8 +800,9 @@ mod tests {
     fn group_host_does_not_match_other_ips() {
         let (shared, _, _) = shared_with_gateway();
         let policy = NetworkPolicy {
-            default_action: Action::Allow,
-            rules: vec![Rule::deny_outbound(Destination::Group(
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::deny_egress(Destination::Group(
                 DestinationGroup::Host,
             ))],
         };
@@ -724,7 +850,7 @@ mod tests {
         let mut policy = NetworkPolicy::public_only();
         policy.rules.insert(
             0,
-            Rule::allow_outbound(Destination::Group(DestinationGroup::Host)),
+            Rule::allow_egress(Destination::Group(DestinationGroup::Host)),
         );
 
         let v4 = SocketAddr::new(IpAddr::V4(gw4), 80);
@@ -739,5 +865,218 @@ mod tests {
             Action::Deny,
             "non-host private destinations should still be blocked"
         );
+    }
+
+    /// Ingress default is Allow; empty ingress-applicable rules means
+    /// all inbound traffic is permitted (today's unfiltered published-
+    /// port behavior).
+    #[test]
+    fn default_ingress_allows_unfiltered_with_no_rules() {
+        let shared = SharedState::new(4);
+        let policy = NetworkPolicy::default();
+        let peer = sock("198.51.100.10", 54321);
+        assert!(
+            policy
+                .evaluate_ingress(peer, 8080, Protocol::Tcp, &shared)
+                .is_allow()
+        );
+    }
+
+    /// Single rule with `direction: Ingress` only fires for ingress
+    /// evaluation, never for egress.
+    #[test]
+    fn ingress_rule_does_not_fire_on_egress() {
+        let shared = SharedState::new(4);
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Deny,
+            rules: vec![Rule::allow_ingress(Destination::Group(
+                DestinationGroup::Private,
+            ))],
+        };
+        // Egress to a private IP: ingress rule doesn't apply, falls to default_egress = Deny.
+        assert!(
+            policy
+                .evaluate_egress(sock("10.0.0.5", 443), Protocol::Tcp, &shared)
+                .is_deny()
+        );
+        // Ingress from a private peer: rule fires, allowed.
+        assert!(
+            policy
+                .evaluate_ingress(sock("10.0.0.5", 54321), 8080, Protocol::Tcp, &shared)
+                .is_allow()
+        );
+    }
+
+    /// `Direction::Any` rule fires for evaluation in either direction.
+    #[test]
+    fn any_direction_rule_matches_egress_and_ingress() {
+        let shared = SharedState::new(4);
+        let policy = NetworkPolicy {
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::deny_any(Destination::Cidr(
+                "1.2.3.4/32".parse().unwrap(),
+            ))],
+        };
+        // Egress to 1.2.3.4: Any rule fires.
+        assert!(
+            policy
+                .evaluate_egress(sock("1.2.3.4", 443), Protocol::Tcp, &shared)
+                .is_deny()
+        );
+        // Ingress from 1.2.3.4: Any rule fires.
+        assert!(
+            policy
+                .evaluate_ingress(sock("1.2.3.4", 54321), 8080, Protocol::Tcp, &shared)
+                .is_deny()
+        );
+        // Egress to a different IP: rule doesn't match, falls to default_egress = Allow.
+        assert!(
+            policy
+                .evaluate_egress(sock("8.8.8.8", 443), Protocol::Tcp, &shared)
+                .is_allow()
+        );
+    }
+
+    /// Wire-format casing: every field name and enum tag must serialize
+    /// in snake_case, and the serializer's output must round-trip back to
+    /// an equivalent value.
+    #[test]
+    fn serde_round_trip_uses_snake_case() {
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![
+                Rule {
+                    direction: Direction::Egress,
+                    destination: Destination::Group(DestinationGroup::LinkLocal),
+                    protocols: vec![Protocol::Tcp, Protocol::Icmpv4],
+                    ports: vec![],
+                    action: Action::Allow,
+                },
+                Rule {
+                    direction: Direction::Any,
+                    destination: Destination::DomainSuffix(".example.com".parse().unwrap()),
+                    protocols: vec![],
+                    ports: vec![],
+                    action: Action::Deny,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+
+        // Field names: snake_case directly from Rust source (no rename needed).
+        assert!(json.contains("\"default_egress\""), "JSON: {json}");
+        assert!(json.contains("\"default_ingress\""), "JSON: {json}");
+        // Enum tags: snake_case via rename_all on each enum.
+        assert!(json.contains("\"egress\""), "JSON: {json}");
+        assert!(json.contains("\"any\""), "JSON: {json}");
+        assert!(json.contains("\"allow\""), "JSON: {json}");
+        assert!(json.contains("\"deny\""), "JSON: {json}");
+        assert!(json.contains("\"link_local\""), "JSON: {json}");
+        assert!(json.contains("\"domain_suffix\""), "JSON: {json}");
+        assert!(json.contains("\"icmpv4\""), "JSON: {json}");
+        assert!(json.contains("\"tcp\""), "JSON: {json}");
+        // No PascalCase residue.
+        assert!(!json.contains("\"Egress\""), "JSON: {json}");
+        assert!(!json.contains("\"Allow\""), "JSON: {json}");
+        assert!(!json.contains("\"LinkLocal\""), "JSON: {json}");
+        assert!(!json.contains("\"DomainSuffix\""), "JSON: {json}");
+        // No camelCase residue.
+        assert!(!json.contains("\"linkLocal\""), "JSON: {json}");
+        assert!(!json.contains("\"domainSuffix\""), "JSON: {json}");
+        assert!(!json.contains("\"defaultEgress\""), "JSON: {json}");
+
+        // Round-trip back: must parse and produce a structurally equivalent value.
+        let back: NetworkPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.rules.len(), policy.rules.len());
+        assert!(matches!(back.default_egress, Action::Deny));
+        assert!(matches!(back.default_ingress, Action::Allow));
+        assert!(matches!(back.rules[0].direction, Direction::Egress));
+        assert!(matches!(back.rules[1].direction, Direction::Any));
+    }
+
+    /// Multi-protocol rule: TCP-or-UDP both match.
+    #[test]
+    fn multi_protocol_rule_matches_any_listed() {
+        let shared = SharedState::new(4);
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule {
+                direction: Direction::Egress,
+                destination: Destination::Group(DestinationGroup::Public),
+                protocols: vec![Protocol::Tcp, Protocol::Udp],
+                ports: vec![PortRange::single(443)],
+                action: Action::Allow,
+            }],
+        };
+        assert!(
+            policy
+                .evaluate_egress(sock("8.8.8.8", 443), Protocol::Tcp, &shared)
+                .is_allow()
+        );
+        assert!(
+            policy
+                .evaluate_egress(sock("8.8.8.8", 443), Protocol::Udp, &shared)
+                .is_allow()
+        );
+        // Different protocol — doesn't match, falls to default_egress.
+        assert!(
+            policy
+                .evaluate_egress(sock("8.8.8.8", 443), Protocol::Icmpv4, &shared)
+                .is_deny()
+        );
+    }
+
+    /// Multi-port rule: 80 OR 443 both match.
+    #[test]
+    fn multi_port_rule_matches_any_listed() {
+        let shared = SharedState::new(4);
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule {
+                direction: Direction::Egress,
+                destination: Destination::Group(DestinationGroup::Public),
+                protocols: vec![Protocol::Tcp],
+                ports: vec![PortRange::single(80), PortRange::single(443)],
+                action: Action::Allow,
+            }],
+        };
+        assert!(
+            policy
+                .evaluate_egress(sock("8.8.8.8", 80), Protocol::Tcp, &shared)
+                .is_allow()
+        );
+        assert!(
+            policy
+                .evaluate_egress(sock("8.8.8.8", 443), Protocol::Tcp, &shared)
+                .is_allow()
+        );
+        // Different port — doesn't match, falls to default_egress.
+        assert!(
+            policy
+                .evaluate_egress(sock("8.8.8.8", 8080), Protocol::Tcp, &shared)
+                .is_deny()
+        );
+    }
+
+    /// The `Public` group matches IPs that are not in any of the other
+    /// categories.
+    #[test]
+    fn public_group_matches_complement_of_other_categories() {
+        let shared = SharedState::new(4);
+        let policy = allow_rule(Destination::Group(DestinationGroup::Public));
+
+        // Public IPs (8.8.8.8, an arbitrary non-private routable) are allowed.
+        assert!(egress_tcp(&policy, "8.8.8.8", &shared).is_allow());
+        // Private IPs are not in Public.
+        assert!(egress_tcp(&policy, "10.0.0.5", &shared).is_deny());
+        // Loopback is not in Public.
+        assert!(egress_tcp(&policy, "127.0.0.1", &shared).is_deny());
+        // Metadata is not in Public.
+        assert!(egress_tcp(&policy, "169.254.169.254", &shared).is_deny());
     }
 }

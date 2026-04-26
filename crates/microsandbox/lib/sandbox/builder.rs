@@ -718,7 +718,10 @@ mod tests {
             .unwrap();
 
         assert!(!config.network.enabled);
-        assert_eq!(config.network.policy.default_action, Action::Deny);
+        // `disable_network()` uses `NetworkPolicy::none()` which is deny-all
+        // in both directions with no rules.
+        assert_eq!(config.network.policy.default_egress, Action::Deny);
+        assert_eq!(config.network.policy.default_ingress, Action::Deny);
         assert!(config.network.policy.rules.is_empty());
     }
 

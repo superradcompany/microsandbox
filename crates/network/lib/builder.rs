@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use crate::config::{DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort};
 use crate::dns::Nameserver;
-use crate::policy::NetworkPolicy;
+use crate::policy::{DomainName, NetworkPolicy};
 use crate::secrets::config::{HostPattern, SecretEntry, SecretInjection, ViolationAction};
 use crate::tls::TlsConfig;
 
@@ -196,14 +196,43 @@ impl DnsBuilder {
     }
 
     /// Block a specific domain via DNS interception (returns REFUSED).
+    ///
+    /// Accepts any string-like input. The string is parsed and
+    /// canonicalized via [`DomainName`] internally before storage —
+    /// invalid names (failing the DNS label grammar) are silently
+    /// skipped with a `tracing::warn!`, since this is a configuration
+    /// path that should not block startup on a single malformed entry.
+    /// Valid entries are stored in canonical lowercase form, ready for
+    /// byte-equality match against the DNS interceptor's resolved-name
+    /// cache.
+    ///
+    /// TODO: retrofit to lazy-parse + accumulate-at-`.build()`,
+    /// matching the model the new `NetworkPolicy::builder()` uses.
     pub fn block_domain(mut self, domain: impl Into<String>) -> Self {
-        self.config.blocked_domains.push(domain.into());
+        let raw: String = domain.into();
+        match raw.parse::<DomainName>() {
+            Ok(name) => self.config.blocked_domains.push(name.into()),
+            Err(e) => {
+                tracing::warn!(domain = %raw, error = %e, "skipping invalid block_domain entry")
+            }
+        }
         self
     }
 
     /// Block a domain suffix via DNS interception (returns REFUSED).
+    ///
+    /// Same string-input + internal-parse + skip-on-invalid behavior as
+    /// [`Self::block_domain`]. Reuses [`DomainName`] for validation —
+    /// the suffix-vs-exact distinction lives in interpretation, not in
+    /// the validated value.
     pub fn block_domain_suffix(mut self, suffix: impl Into<String>) -> Self {
-        self.config.blocked_suffixes.push(suffix.into());
+        let raw: String = suffix.into();
+        match raw.parse::<DomainName>() {
+            Ok(name) => self.config.blocked_suffixes.push(name.into()),
+            Err(e) => {
+                tracing::warn!(suffix = %raw, error = %e, "skipping invalid block_domain_suffix entry")
+            }
+        }
         self
     }
 

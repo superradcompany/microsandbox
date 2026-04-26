@@ -763,12 +763,13 @@ mod tests {
         let shared = SharedState::new(4);
         let dst_ip = std::net::Ipv4Addr::new(8, 8, 8, 8);
         let policy = NetworkPolicy {
-            default_action: Action::Allow,
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
             rules: vec![Rule {
-                direction: Direction::Outbound,
+                direction: Direction::Egress,
                 destination: Destination::Cidr("8.8.8.8/32".parse().unwrap()),
-                protocol: Some(Protocol::Tcp),
-                ports: None,
+                protocols: vec![Protocol::Tcp],
+                ports: vec![],
                 action: Action::Deny,
             }],
         };
@@ -815,12 +816,13 @@ mod tests {
         let gw = gateway_set();
         let shared = SharedState::new(4);
         let policy = NetworkPolicy {
-            default_action: Action::Allow,
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
             rules: vec![Rule {
-                direction: Direction::Outbound,
+                direction: Direction::Egress,
                 destination: Destination::Cidr("1.1.1.1/32".parse().unwrap()),
-                protocol: Some(Protocol::Tcp),
-                ports: None,
+                protocols: vec![Protocol::Tcp],
+                ports: vec![],
                 action: Action::Deny,
             }],
         };

@@ -27,10 +27,10 @@ const CURL_FAIL: &str = "FAIL";
 /// Outbound HTTPS (TCP/443) allow rule for a specific hostname.
 fn allow_domain_https(domain: &str) -> Rule {
     Rule {
-        direction: Direction::Outbound,
+        direction: Direction::Egress,
         destination: Destination::Domain(domain.parse().expect("valid domain")),
-        protocol: Some(Protocol::Tcp),
-        ports: Some(PortRange::single(443)),
+        protocols: vec![Protocol::Tcp],
+        ports: vec![PortRange::single(443)],
         action: Action::Allow,
     }
 }
@@ -38,10 +38,10 @@ fn allow_domain_https(domain: &str) -> Rule {
 /// Outbound HTTPS (TCP/443) allow rule for a DNS suffix.
 fn allow_domain_suffix_https(suffix: &str) -> Rule {
     Rule {
-        direction: Direction::Outbound,
+        direction: Direction::Egress,
         destination: Destination::DomainSuffix(suffix.parse().expect("valid domain suffix")),
-        protocol: Some(Protocol::Tcp),
-        ports: Some(PortRange::single(443)),
+        protocols: vec![Protocol::Tcp],
+        ports: vec![PortRange::single(443)],
         action: Action::Allow,
     }
 }
@@ -126,7 +126,8 @@ fn reached_server(probe_output: &str) -> bool {
 async fn domain_policy_allows_whitelisted_https() {
     let name = "net-domain-policy-allow";
     let policy = NetworkPolicy {
-        default_action: Action::Deny,
+        default_egress: Action::Deny,
+        default_ingress: Action::Allow,
         rules: vec![
             allow_domain_https("pypi.org"),
             allow_domain_https("files.pythonhosted.org"),
@@ -185,7 +186,8 @@ async fn domain_policy_allows_whitelisted_https() {
 async fn domain_policy_suffix_allows_subdomain_https() {
     let name = "net-domain-policy-suffix";
     let policy = NetworkPolicy {
-        default_action: Action::Deny,
+        default_egress: Action::Deny,
+        default_ingress: Action::Allow,
         rules: vec![allow_domain_suffix_https(".pythonhosted.org")],
     };
     let sb = setup_alpine(name, policy).await;
