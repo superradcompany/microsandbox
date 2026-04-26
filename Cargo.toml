@@ -115,14 +115,3 @@ rcgen = { version = "0.13", features = ["x509-parser"] }
 lru = "0.16.3"
 parking_lot = "0.12"
 rpassword = "7"
-
-# Point the msb_krun family at the local libkrun fork so in-progress API
-# changes (e.g. DiskBuilder id/cache/direct_io/sync) are picked up without
-# a crates.io release.
-[patch.crates-io]
-msb_krun = { path = "../libkrun/src/krun" }
-msb_krun_devices = { path = "../libkrun/src/devices" }
-msb_krun_polly = { path = "../libkrun/src/polly" }
-msb_krun_utils = { path = "../libkrun/src/utils" }
-msb_krun_vmm = { path = "../libkrun/src/vmm" }
-msb_krun_hvf = { path = "../libkrun/src/hvf" }
