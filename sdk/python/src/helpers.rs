@@ -423,6 +423,9 @@ fn apply_network(
                         "multicast" => microsandbox_network::policy::Destination::Group(
                             microsandbox_network::policy::DestinationGroup::Multicast,
                         ),
+                        "host" => microsandbox_network::policy::Destination::Group(
+                            microsandbox_network::policy::DestinationGroup::Host,
+                        ),
                         s if s.starts_with('.') => {
                             let name = s.parse().map_err(|e| {
                                 pyo3::exceptions::PyValueError::new_err(format!(

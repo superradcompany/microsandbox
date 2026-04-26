@@ -27,6 +27,7 @@ use super::proxies::udp::UdpProxy;
 use crate::config::DnsConfig;
 use crate::policy::NetworkPolicy;
 use crate::shared::SharedState;
+use crate::stack::GatewayIps;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -98,14 +99,10 @@ pub(crate) struct DnsResponse {
 impl DnsInterceptor {
     /// Create the DNS interceptor.
     ///
-    /// Binds a smoltcp UDP socket to port 53, creates the channel pair, and
-    /// spawns the background forwarder task. Returns the interceptor and
-    /// the shared [`DnsForwarderHandle`] used by the TCP/53 proxy.
-    ///
-    /// `gateway_ips` (the v4 + v6 addresses the gateway responds to) and
-    /// `network_policy` are forwarded to the per-query upstream selector:
-    /// queries to the gateway use the configured upstream; queries to
-    /// other IPs are routed directly subject to the policy.
+    /// Binds a smoltcp UDP socket to port 53, creates the channel pair, and spawns the
+    /// background forwarder task. Returns the interceptor and the shared [`DnsForwarderHandle`]
+    /// used by the TCP/53 proxy.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         sockets: &mut SocketSet<'_>,
         dns_config: DnsConfig,
@@ -113,6 +110,7 @@ impl DnsInterceptor {
         tokio_handle: &tokio::runtime::Handle,
         gateway_ips: Arc<HashSet<IpAddr>>,
         network_policy: Arc<NetworkPolicy>,
+        gateway: GatewayIps,
     ) -> (Self, DnsForwarderHandle) {
         // Create and bind the smoltcp UDP socket.
         let rx_meta = vec![PacketMetadata::EMPTY; DNS_SOCKET_PACKET_SLOTS];
@@ -152,6 +150,7 @@ impl DnsInterceptor {
             gateway_ips,
             network_policy,
             shared.clone(),
+            gateway,
         );
         UdpProxy::spawn(
             tokio_handle,

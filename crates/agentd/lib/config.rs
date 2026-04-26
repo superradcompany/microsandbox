@@ -17,8 +17,8 @@ use std::env;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use microsandbox_protocol::{
-    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_FILE_MOUNTS, ENV_HOSTNAME, ENV_NET, ENV_NET_IPV4,
-    ENV_NET_IPV6, ENV_RLIMITS, ENV_TMPFS, ENV_USER, exec::ExecRlimit,
+    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_FILE_MOUNTS, ENV_HOST_ALIAS, ENV_HOSTNAME, ENV_NET,
+    ENV_NET_IPV4, ENV_NET_IPV6, ENV_RLIMITS, ENV_TMPFS, ENV_USER, exec::ExecRlimit,
 };
 
 use crate::error::{AgentdError, AgentdResult};
@@ -51,6 +51,11 @@ pub struct BootParams {
 
     /// `MSB_HOSTNAME` — guest hostname.
     pub(crate) hostname: Option<String>,
+
+    /// `MSB_HOST_ALIAS` — DNS name (e.g. `host.microsandbox.internal`)
+    /// the guest uses to reach the sandbox host. Written into
+    /// `/etc/hosts` pointing at the gateway IPs.
+    pub(crate) host_alias: Option<String>,
 
     /// Parsed `MSB_NET` — network interface config.
     pub(crate) net: Option<NetSpec>,
@@ -183,6 +188,7 @@ impl BootParams {
                 .transpose()?
                 .unwrap_or_default(),
             hostname: read_env(ENV_HOSTNAME),
+            host_alias: read_env(ENV_HOST_ALIAS),
             net: read_env(ENV_NET).map(|v| parse_net(&v)).transpose()?,
             net_ipv4: read_env(ENV_NET_IPV4)
                 .map(|v| parse_net_ipv4(&v))

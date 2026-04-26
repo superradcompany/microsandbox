@@ -17,3 +17,9 @@ pub mod shared;
 pub mod stack;
 pub mod tls;
 pub mod udp_relay;
+
+/// Static hostname the guest uses to reach the sandbox host.
+///
+/// The host-side DNS interceptor matches guest queries against this
+/// name, and agentd writes the same name into `/etc/hosts`.
+pub(crate) const HOST_ALIAS: &str = "host.microsandbox.internal";

@@ -60,6 +60,7 @@ class DestGroup(enum.StrEnum):
     LINK_LOCAL = "link-local"
     METADATA = "metadata"
     MULTICAST = "multicast"
+    HOST = "host"
 
 class ViolationAction(enum.StrEnum):
     BLOCK = "block"

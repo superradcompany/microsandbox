@@ -4,9 +4,9 @@
 //! All inter-thread communication flows through [`SharedState`], which holds
 //! lock-free frame queues and cross-platform [`WakePipe`] notifications.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -67,6 +67,14 @@ pub struct SharedState {
     /// Resolved hostname index used to map destination IPs back to queried hostnames.
     resolved_hostnames: RwLock<TtlReverseIndex<ResolvedHostnameKey, IpAddr>>,
 
+    /// Per-sandbox gateway IPv4. Set once at boot; used by
+    /// `DestinationGroup::Host` rule matching and `host.microsandbox.internal`
+    /// DNS synthesis. `None` in isolated unit tests.
+    gateway_ipv4: OnceLock<Ipv4Addr>,
+
+    /// Per-sandbox gateway IPv6. Set once at boot. See `gateway_ipv4`.
+    gateway_ipv6: OnceLock<Ipv6Addr>,
+
     /// Aggregate network byte counters at the guest/runtime boundary.
     metrics: NetworkMetrics,
 }
@@ -109,8 +117,26 @@ impl SharedState {
             proxy_wake: WakePipe::new(),
             termination_hook: Mutex::new(None),
             resolved_hostnames: RwLock::new(TtlReverseIndex::default()),
+            gateway_ipv4: OnceLock::new(),
+            gateway_ipv6: OnceLock::new(),
             metrics: NetworkMetrics::default(),
         }
+    }
+
+    /// Set the per-sandbox gateway IPs. Called once at boot.
+    pub fn set_gateway_ips(&self, ipv4: Ipv4Addr, ipv6: Ipv6Addr) {
+        let _ = self.gateway_ipv4.set(ipv4);
+        let _ = self.gateway_ipv6.set(ipv6);
+    }
+
+    /// Gateway IPv4 address, if set.
+    pub fn gateway_ipv4(&self) -> Option<Ipv4Addr> {
+        self.gateway_ipv4.get().copied()
+    }
+
+    /// Gateway IPv6 address, if set.
+    pub fn gateway_ipv6(&self) -> Option<Ipv6Addr> {
+        self.gateway_ipv6.get().copied()
     }
 
     /// Install a host-side termination hook.

@@ -33,7 +33,8 @@ use bytes::Bytes;
 use futures::StreamExt;
 use hickory_client::client::Client;
 use hickory_client::proto::op::{Message, MessageType, ResponseCode};
-use hickory_client::proto::rr::{RData, RecordType};
+use hickory_client::proto::rr::rdata::{A, AAAA};
+use hickory_client::proto::rr::{RData, Record, RecordType};
 use hickory_client::proto::serialize::binary::{BinDecodable, BinEncodable};
 use hickory_client::proto::xfer::{DnsHandle, DnsRequest};
 use tokio::sync::{OnceCell, watch};
@@ -45,6 +46,7 @@ use super::common::transport::Transport;
 use super::nameserver::{read_host_dns_servers, resolve_nameservers};
 use crate::policy::NetworkPolicy;
 use crate::shared::{ResolvedHostnameFamily, SharedState};
+use crate::stack::GatewayIps;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -58,6 +60,11 @@ use crate::shared::{ResolvedHostnameFamily, SharedState};
 /// immediate connect following a successful DNS lookup does not fail
 /// closed before the guest can use the answer.
 const RESOLVED_HOSTNAME_MIN_TTL_SECS: u32 = 1;
+
+/// TTL for locally-synthesized `host.microsandbox.internal` answers. Short
+/// enough that the guest re-resolves often, long enough to avoid hammering
+/// the forwarder on each connection.
+const HOST_ALIAS_TTL_SECS: u32 = 60;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -99,6 +106,9 @@ pub(crate) struct DnsForwarder {
     /// from upstream answers so Domain rules can match on subsequent
     /// guest connects.
     shared: Arc<SharedState>,
+    /// Gateway IPs returned as A / AAAA answers when the guest asks for
+    /// `host.microsandbox.internal`.
+    gateway: GatewayIps,
     config: Arc<NormalizedDnsConfig>,
 }
 
@@ -154,6 +164,15 @@ impl DnsForwarder {
         if is_domain_blocked(&domain, &self.config) {
             tracing::debug!(domain = %domain, "DNS query blocked by domain policy");
             return build_status_response(&query_msg, ResponseCode::Refused);
+        }
+
+        // Locally synthesize answers for the host alias; MX / TXT / etc.
+        // fall through to upstream.
+        if is_host_alias_query(&domain)
+            && let Some(response) =
+                synthesize_host_alias_response(&query_msg, self.gateway, query_type)
+        {
+            return Some(response);
         }
 
         // Pick upstream client based on where the guest aimed and the
@@ -307,16 +326,19 @@ impl DnsForwarder {
     /// TCP/53 proxy ([`super::proxies::tcp::TcpProxy`]) clone the
     /// handle and [`Self::wait`] before serving any query, so they
     /// share one configured upstream + policy across transports.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn(
         handle: &tokio::runtime::Handle,
         config: Arc<NormalizedDnsConfig>,
         gateway_ips: Arc<HashSet<IpAddr>>,
         network_policy: Arc<NetworkPolicy>,
         shared: Arc<SharedState>,
+        gateway: GatewayIps,
     ) -> DnsForwarderHandle {
         let (forwarder_tx, forwarder_rx) = watch::channel(None);
         handle.spawn(async move {
-            let Some(forwarder) = Self::build(config, gateway_ips, network_policy, shared).await
+            let Some(forwarder) =
+                Self::build(config, gateway_ips, network_policy, shared, gateway).await
             else {
                 // Drop forwarder_tx by returning; waiters observe init
                 // failure as `Self::wait().await == None`.
@@ -335,6 +357,7 @@ impl DnsForwarder {
         gateway_ips: Arc<HashSet<IpAddr>>,
         network_policy: Arc<NetworkPolicy>,
         shared: Arc<SharedState>,
+        gateway: GatewayIps,
     ) -> Option<Arc<Self>> {
         let upstreams = if !config.nameservers.is_empty() {
             match resolve_nameservers(&config.nameservers).await {
@@ -375,6 +398,7 @@ impl DnsForwarder {
             gateway_ips,
             network_policy,
             shared,
+            gateway,
             config,
         }))
     }
@@ -483,6 +507,43 @@ fn extract_addrs_and_ttl(
     }
 
     ttl.map(|ttl| (addrs, ttl))
+}
+
+/// Case-insensitive match against [`crate::HOST_ALIAS`] with trailing-dot tolerance.
+fn is_host_alias_query(query_name: &str) -> bool {
+    query_name
+        .trim_end_matches('.')
+        .eq_ignore_ascii_case(crate::HOST_ALIAS)
+}
+
+/// Synthesize an A/AAAA response for `host.microsandbox.internal`. Returns
+/// `None` for non-A/AAAA queries so the caller keeps forwarding upstream.
+fn synthesize_host_alias_response(
+    query: &Message,
+    gateway: GatewayIps,
+    qtype: RecordType,
+) -> Option<Bytes> {
+    let question = query.queries().first()?;
+    let name = question.name().clone();
+
+    let rdata = match qtype {
+        RecordType::A => RData::A(A::from(gateway.ipv4)),
+        RecordType::AAAA => RData::AAAA(AAAA::from(gateway.ipv6)),
+        _ => return None,
+    };
+
+    let mut response = Message::new();
+    response.set_id(query.id());
+    response.set_op_code(query.op_code());
+    response.set_recursion_desired(query.recursion_desired());
+    response.set_message_type(MessageType::Response);
+    response.set_response_code(ResponseCode::NoError);
+    response.set_recursion_available(true);
+    response.set_authoritative(true);
+    response.add_query(question.clone());
+    response.add_answer(Record::from_rdata(name, HOST_ALIAS_TTL_SECS, rdata));
+
+    response.to_bytes().ok().map(Bytes::from)
 }
 
 /// Build a header-only NoError response with TC=1. RFC 5966 §3 requires

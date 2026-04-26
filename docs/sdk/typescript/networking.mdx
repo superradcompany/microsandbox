@@ -118,7 +118,7 @@ A single network policy rule.
 | Field | Type | Description |
 |-------|------|-------------|
 | action | [`PolicyAction`](#policyaction) | What to do when this rule matches |
-| destination? | `string` | Target filter: `'any'`, `'private'`, `'loopback'`, `'metadata'`, `'multicast'`, `'link-local'`, a CIDR like `'10.0.0.0/8'`, an exact domain like `'example.com'`, or a suffix prefixed with `.` like `'.example.com'` (matches the apex and every subdomain). Domain and suffix strings are validated when the sandbox is created. |
+| destination? | `string` | Target filter: `'any'`, `'private'`, `'loopback'`, `'metadata'`, `'multicast'`, `'link-local'`, `'host'` (the host machine, reached via `host.microsandbox.internal`), a CIDR like `'10.0.0.0/8'`, an exact domain like `'example.com'`, or a suffix prefixed with `.` like `'.example.com'` (matches the apex and every subdomain). Domain and suffix strings are validated when the sandbox is created. |
 | direction? | [`PolicyDirection`](#policydirection) | Traffic direction |
 | port? | `string` | Single port (`"443"`) or range (`"8000-9000"`) |
 | protocol? | [`PolicyProtocol`](#policyprotocol) | Protocol filter |

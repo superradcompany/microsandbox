@@ -9,12 +9,13 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+use microsandbox_protocol::{ENV_HOST_ALIAS, ENV_NET, ENV_NET_IPV4, ENV_NET_IPV6};
 use msb_krun::backends::net::NetBackend;
 
 use crate::backend::SmoltcpBackend;
 use crate::config::NetworkConfig;
 use crate::shared::{DEFAULT_QUEUE_CAPACITY, SharedState};
-use crate::stack::{self, PollLoopConfig};
+use crate::stack::{self, GatewayIps, PollLoopConfig};
 use crate::tls::state::TlsState;
 
 //--------------------------------------------------------------------------------------------------
@@ -134,6 +135,14 @@ impl SmoltcpNetwork {
         }
     }
 
+    /// Get the gateway IPs for virtio-net configuration and domain-based policy rules.
+    fn gateway_ips(&self) -> GatewayIps {
+        GatewayIps {
+            ipv4: self.gateway_ipv4,
+            ipv6: self.gateway_ipv6,
+        }
+    }
+
     /// Start the smoltcp poll thread.
     ///
     /// Must be called before VM boot. Requires a tokio runtime handle for
@@ -143,9 +152,8 @@ impl SmoltcpNetwork {
         let poll_config = PollLoopConfig {
             gateway_mac: self.gateway_mac,
             guest_mac: self.guest_mac,
-            gateway_ipv4: self.gateway_ipv4,
+            gateway: self.gateway_ips(),
             guest_ipv4: self.guest_ipv4,
-            gateway_ipv6: self.gateway_ipv6,
             mtu: self.mtu as usize,
         };
         let network_policy = self.config.policy.clone();
@@ -190,7 +198,7 @@ impl SmoltcpNetwork {
     pub fn guest_env_vars(&self) -> Vec<(String, String)> {
         let mut vars = vec![
             (
-                "MSB_NET".into(),
+                ENV_NET.into(),
                 format!(
                     "iface=eth0,mac={},mtu={}",
                     format_mac(self.guest_mac),
@@ -198,19 +206,20 @@ impl SmoltcpNetwork {
                 ),
             ),
             (
-                "MSB_NET_IPV4".into(),
+                ENV_NET_IPV4.into(),
                 format!(
                     "addr={}/30,gw={},dns={}",
                     self.guest_ipv4, self.gateway_ipv4, self.gateway_ipv4,
                 ),
             ),
             (
-                "MSB_NET_IPV6".into(),
+                ENV_NET_IPV6.into(),
                 format!(
                     "addr={}/64,gw={},dns={}",
                     self.guest_ipv6, self.gateway_ipv6, self.gateway_ipv6,
                 ),
             ),
+            (ENV_HOST_ALIAS.into(), crate::HOST_ALIAS.into()),
         ];
 
         // Auto-expose secret placeholders as environment variables.
@@ -387,12 +396,14 @@ mod tests {
         let net = SmoltcpNetwork::new(config, 0);
         let vars = net.guest_env_vars();
 
-        assert_eq!(vars.len(), 3);
-        assert_eq!(vars[0].0, "MSB_NET");
+        assert_eq!(vars.len(), 4);
+        assert_eq!(vars[0].0, ENV_NET);
         assert!(vars[0].1.contains("iface=eth0"));
-        assert_eq!(vars[1].0, "MSB_NET_IPV4");
+        assert_eq!(vars[1].0, ENV_NET_IPV4);
         assert!(vars[1].1.contains("/30"));
-        assert_eq!(vars[2].0, "MSB_NET_IPV6");
+        assert_eq!(vars[2].0, ENV_NET_IPV6);
         assert!(vars[2].1.contains("/64"));
+        assert_eq!(vars[3].0, ENV_HOST_ALIAS);
+        assert_eq!(vars[3].1, crate::HOST_ALIAS);
     }
 }
