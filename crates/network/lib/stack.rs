@@ -237,6 +237,8 @@ pub fn smoltcp_poll_loop(
         &published_ports,
         config.guest_ipv4,
         config.guest_ipv6,
+        network_policy.clone(),
+        shared.clone(),
         &tokio_handle,
     );
     let mut udp_relay = UdpRelay::new(
