@@ -86,6 +86,14 @@ pub enum MicrosandboxError {
     #[error("image error: {0}")]
     Image(#[from] microsandbox_image::ImageError),
 
+    /// A network builder accumulated a parse / validation error.
+    /// Surfaces from `NetworkBuilder::build()` (and its nested
+    /// `DnsBuilder::build()`) when chained inside
+    /// `SandboxBuilder::network(|n| ...)`.
+    #[cfg(feature = "net")]
+    #[error("network builder: {0}")]
+    NetworkBuilder(#[from] microsandbox_network::policy::BuildError),
+
     /// A rootfs patch operation failed.
     #[error("patch failed: {0}")]
     PatchFailed(String),

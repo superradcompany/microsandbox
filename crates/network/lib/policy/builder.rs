@@ -43,11 +43,15 @@ use super::{
 // Errors
 //--------------------------------------------------------------------------------------------------
 
-/// Errors surfaced by [`NetworkPolicyBuilder::build`].
+/// Errors surfaced by [`NetworkPolicyBuilder::build`] and the related
+/// nested builders ([`crate::builder::DnsBuilder::build`],
+/// [`crate::builder::NetworkBuilder::build`]).
 ///
-/// The builder accumulates errors lazily — string inputs are stored
-/// raw and only parsed at `.build()` time, where the first failure is
-/// returned.
+/// All these builders accumulate errors lazily — string inputs are
+/// stored raw and only parsed at `.build()` time, where the first
+/// failure is returned. The same enum covers both rule-grammar
+/// failures (with a `rule_index`) and DNS-block-list failures (no
+/// rule index, since DNS blocks aren't rules).
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
     /// A rule was committed without setting a direction first.
@@ -93,6 +97,24 @@ pub enum BuildError {
         "rule #{rule_index}: ICMP protocols are egress-only; ingress and any-direction rules cannot include icmpv4 or icmpv6"
     )]
     IngressDoesNotSupportIcmp { rule_index: usize },
+
+    /// `DnsBuilder::block_domain(&str)` received a value that doesn't
+    /// parse as a [`DomainName`].
+    #[error("invalid blocked domain `{raw}`: {source}")]
+    InvalidBlockedDomain {
+        raw: String,
+        #[source]
+        source: DomainNameError,
+    },
+
+    /// `DnsBuilder::block_domain_suffix(&str)` received a value that
+    /// doesn't parse as a [`DomainName`].
+    #[error("invalid blocked domain suffix `{raw}`: {source}")]
+    InvalidBlockedDomainSuffix {
+        raw: String,
+        #[source]
+        source: DomainNameError,
+    },
 }
 
 //--------------------------------------------------------------------------------------------------

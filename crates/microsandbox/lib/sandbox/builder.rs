@@ -270,7 +270,14 @@ impl SandboxBuilder {
     #[cfg(feature = "net")]
     pub fn network(mut self, f: impl FnOnce(NetworkBuilder) -> NetworkBuilder) -> Self {
         let network = std::mem::take(&mut self.config.network);
-        self.config.network = f(NetworkBuilder::from_config(network)).build();
+        match f(NetworkBuilder::from_config(network)).build() {
+            Ok(net) => self.config.network = net,
+            Err(err) => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(err.into());
+                }
+            }
+        }
         self
     }
 
