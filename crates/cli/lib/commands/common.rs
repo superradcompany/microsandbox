@@ -390,8 +390,28 @@ fn apply_network_opts(
         };
     }
 
-    // Disable networking.
+    // Disable networking. `--no-net` is mutually exclusive with the
+    // policy-shaping flags: it kills the guest's network interface
+    // entirely, so any rule or default action would be dead code and
+    // is almost certainly a user mistake. Reject the combination at
+    // parse time with a helpful migration hint.
     if opts.no_net {
+        let mut conflicts: Vec<&'static str> = Vec::new();
+        if !opts.net_rule.is_empty() {
+            conflicts.push("--net-rule");
+        }
+        if opts.net_default_egress.is_some() {
+            conflicts.push("--net-default-egress");
+        }
+        if opts.net_default_ingress.is_some() {
+            conflicts.push("--net-default-ingress");
+        }
+        if !conflicts.is_empty() {
+            anyhow::bail!(
+                "--no-net cannot be combined with {}; --no-net disables the guest network entirely, so rules and defaults are dead code. Drop --no-net to apply rules, or drop the rule flags to keep the network off.",
+                conflicts.join(" / "),
+            );
+        }
         builder = builder.disable_network();
     }
 
