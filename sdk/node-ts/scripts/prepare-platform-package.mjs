@@ -11,7 +11,7 @@
 // Refuses to run when the host triple doesn't match the requested target,
 // since we don't cross-compile here — CI orchestrates that matrix.
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,7 +76,7 @@ if (!msbSrc) {
 }
 const msbDst = join(binDir, "msb");
 copyFileSync(msbSrc, msbDst);
-execSync(`chmod +x ${JSON.stringify(msbDst)}`);
+execFileSync("chmod", ["+x", msbDst]);
 console.log(`copied msb (${msbSrc})`);
 
 // On macOS, codesign the bundled binary with the hypervisor entitlement
@@ -87,8 +87,9 @@ if (triple === "darwin-arm64") {
     console.error(`missing ${entitlements}; cannot codesign.`);
     process.exit(1);
   }
-  execSync(
-    `codesign --entitlements ${JSON.stringify(entitlements)} --force -s - ${JSON.stringify(msbDst)}`,
+  execFileSync(
+    "codesign",
+    ["--entitlements", entitlements, "--force", "-s", "-", msbDst],
     { stdio: "inherit" },
   );
   console.log(`codesigned msb`);
