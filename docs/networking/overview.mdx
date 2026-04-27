@@ -90,20 +90,31 @@ The builder accepts string inputs (`.ip("10.0.0.5")`, `.cidr("10.0.0.0/24")`, `.
 Both SDKs accept policies as plain config objects matching the wire format. Direction strings are `"egress"`, `"ingress"`, or `"any"`. Group keywords match the CLI grammar.
 
 ```typescript
-const sb = await Sandbox.create({
-    name: "secure-agent",
-    image: "alpine",
-    network: {
-        policy: {
-            default_egress: "deny",
-            default_ingress: "allow",
-            rules: [
-                { action: "allow", direction: "egress", protocol: "tcp", port: "443" },
-                { action: "allow", direction: "egress", protocol: "udp", port: "53" },
-            ],
-        },
-    },
-})
+import { Destination, PortRange, Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("secure-agent")
+    .image("alpine")
+    .network((n) => n.policy({
+        defaultEgress: "deny",
+        defaultIngress: "allow",
+        rules: [
+            {
+                direction: "egress",
+                destination: Destination.any(),
+                protocols: ["tcp"],
+                ports: [PortRange.single(443)],
+                action: "allow",
+            },
+            {
+                direction: "egress",
+                destination: Destination.any(),
+                protocols: ["udp"],
+                ports: [PortRange.single(53)],
+                action: "allow",
+            },
+        ],
+    }))
+    .create();
 ```
 
 ```python
@@ -142,11 +153,11 @@ let sb = Sandbox::builder("api")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "api",
-    image: "python",
-    ports: { "8080": 80 },
-})
+await using sb = await Sandbox.builder("api")
+    .image("python")
+    .port(8080, 80)
+    .portUdp(5353, 5353)
+    .create();
 ```
 
 ```python Python

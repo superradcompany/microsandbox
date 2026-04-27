@@ -23,16 +23,13 @@ let sb = Sandbox::builder("dev")
 ```
 
 ```typescript TypeScript
-import { Mount, Sandbox } from 'microsandbox'
+import { Sandbox } from "microsandbox";
 
-const sb = await Sandbox.create({
-    name: "dev",
-    image: "python",
-    volumes: {
-        "/app/src": Mount.bind("./src", { readonly: true }),
-        "/app/data": Mount.bind("./data"),
-    },
-})
+await using sb = await Sandbox.builder("dev")
+    .image("python")
+    .volume("/app/src",  (m) => m.bind("./src").readonly())
+    .volume("/app/data", (m) => m.bind("./data"))
+    .create();
 ```
 
 ```python Python
@@ -71,7 +68,9 @@ let cache = Volume::builder("pip-cache")
 ```
 
 ```typescript TypeScript
-const cache = await Volume.create({ name: "pip-cache", quotaMib: 1024 })
+import { Volume } from "microsandbox";
+
+const cache = await Volume.builder("pip-cache").quota(1024).create();
 ```
 
 ```python Python
@@ -96,13 +95,10 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "python",
-    volumes: {
-        "/root/.cache/pip": Mount.named(cache.name),
-    },
-})
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .volume("/root/.cache/pip", (m) => m.named(cache.name))
+    .create();
 ```
 
 ```python Python
@@ -148,20 +144,18 @@ let output = reader.exec("cat", ["/data/message.txt"]).await?;
 
 ```typescript TypeScript
 // Writer
-const writer = await Sandbox.create({
-    name: "writer",
-    image: "alpine",
-    volumes: { "/data": Mount.named("shared-data") },
-})
-await writer.exec("sh", ["-c", "echo 'hello' > /data/message.txt"])
+await using writer = await Sandbox.builder("writer")
+    .image("alpine")
+    .volume("/data", (m) => m.named("shared-data"))
+    .create();
+await writer.shell("echo 'hello' > /data/message.txt");
 
 // Reader (read-only)
-const reader = await Sandbox.create({
-    name: "reader",
-    image: "alpine",
-    volumes: { "/data": Mount.named("shared-data", { readonly: true }) },
-})
-const output = await reader.exec("cat", ["/data/message.txt"])
+await using reader = await Sandbox.builder("reader")
+    .image("alpine")
+    .volume("/data", (m) => m.named("shared-data").readonly())
+    .create();
+const output = await reader.exec("cat", ["/data/message.txt"]);
 // => "hello"
 ```
 
@@ -201,7 +195,8 @@ vol.fs().write("/requirements.txt", "requests==2.28.0").await?;
 ```
 
 ```typescript TypeScript
-// Coming soon — host-side filesystem access for volumes
+const vol = await Volume.get("pip-cache");
+await vol.fs().write("requirements.txt", "requests==2.28.0");
 ```
 
 ```python Python
@@ -220,8 +215,8 @@ Volume::remove("old-cache").await?;
 ```
 
 ```typescript TypeScript
-const volumes = await Volume.list()
-await Volume.remove("old-cache")
+const volumes = await Volume.list();
+await Volume.remove("old-cache");
 ```
 
 ```python Python
@@ -250,13 +245,12 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "alpine",
-    volumes: {
-        "/tmp/scratch": Mount.tmpfs({ sizeMib: 100 }),
-    },
-})
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+    .image("alpine")
+    .volume("/tmp/scratch", (m) => m.tmpfs().size(100))
+    .create();
 ```
 
 ```python Python

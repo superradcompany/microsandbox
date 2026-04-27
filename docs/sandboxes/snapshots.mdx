@@ -30,13 +30,13 @@ sb.resume().await?;
 ```
 
 ```typescript TypeScript
-import { Sandbox } from 'microsandbox'
+import { Sandbox } from "microsandbox";
 
-const sb = await Sandbox.create({ name: "base", image: "python" })
-await sb.exec("pip", ["install", "-r", "requirements.txt"])
+const sb = await Sandbox.builder("base").image("python").create();
+await sb.exec("pip", ["install", "-r", "requirements.txt"]);
 
-const snapshot = await sb.snapshot()
-await sb.resume()
+const snapshot = await sb.snapshot();
+await sb.resume();
 ```
 
 ```python Python
@@ -151,10 +151,9 @@ import { Snapshot } from 'microsandbox'
 
 const saved = await Snapshot.get("after-pip-install")
 
-const custom = await saved.restore("custom", {
-    memoryMib: 1024,
-    cpus: 4,
-})
+const custom = await saved.restoreWith("custom", (r) =>
+    r.memory(1024).cpus(4).env("WORKER_ID", "42")
+)
 ```
 
 ```python Python

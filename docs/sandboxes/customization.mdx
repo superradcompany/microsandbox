@@ -35,19 +35,16 @@ let output = sb.shell("start").await?;
 ```
 
 ```typescript TypeScript
-import { Sandbox } from 'microsandbox'
+import { Sandbox } from "microsandbox";
 
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "ubuntu",
-    scripts: {
-        setup: "#!/bin/bash\napt-get update && apt-get install -y python3 curl",
-        run: "#!/bin/bash\nexec python3 /app/main.py",
-    },
-})
+await using sb = await Sandbox.builder("worker")
+    .image("ubuntu")
+    .script("setup", "#!/bin/bash\napt-get update && apt-get install -y python3 curl")
+    .script("run",   "#!/bin/bash\nexec python3 /app/main.py")
+    .create();
 
-await sb.shell("setup")
-const output = await sb.shell("run")
+await sb.shell("setup");
+const output = await sb.shell("run");
 ```
 
 ```python Python
@@ -97,20 +94,19 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-import { Patch, Sandbox } from 'microsandbox'
+import { Sandbox } from "microsandbox";
 
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "alpine",
-    patches: [
-        Patch.text("/etc/greeting.txt", "Hello from a patched rootfs!\n"),
-        Patch.text("/etc/motd", "Custom message of the day.\n", { replace: true }),
-        Patch.mkdir("/app"),
-        Patch.text("/app/config.json", '{"debug": true}'),
-        Patch.copyFile("./cert.pem", "/etc/ssl/cert.pem"),
-        Patch.append("/etc/hosts", "127.0.0.1 myapp.local\n"),
-    ],
-})
+await using sb = await Sandbox.builder("worker")
+    .image("alpine")
+    .patch((p) => p
+        .text("/etc/greeting.txt", "Hello from a patched rootfs!\n")
+        .text("/etc/motd", "Custom message of the day.\n", { replace: true })
+        .mkdir("/app", { mode: 0o755 })
+        .text("/app/config.json", '{"debug": true}', { mode: 0o644 })
+        .copyFile("./cert.pem", "/etc/ssl/cert.pem")
+        .append("/etc/hosts", "127.0.0.1 myapp.local\n"),
+    )
+    .create();
 ```
 
 ```python Python
@@ -134,12 +130,17 @@ sb = await Sandbox.create(
 
 ### Available operations
 
+The patch builder is invoked through `SandboxBuilder.patch(p => ...)`. Each method appends an operation; calls are chainable.
+
 | Method | Description |
 |--------|-------------|
-| `Patch.text(path, content, opts?)` | Write text content to a file |
-| `Patch.mkdir(path, opts?)` | Create a directory (idempotent) |
-| `Patch.append(path, content)` | Append content to an existing file |
-| `Patch.copyFile(src, dst, opts?)` | Copy a file from the host into the rootfs |
-| `Patch.copyDir(src, dst, opts?)` | Recursively copy a directory from the host |
-| `Patch.symlink(target, link, opts?)` | Create a symlink |
-| `Patch.remove(path)` | Delete a file or directory (idempotent) |
+| `text(path, content, opts?)` | Write text content to a file |
+| `file(path, bytes, opts?)` | Write raw bytes to a file |
+| `mkdir(path, opts?)` | Create a directory (idempotent) |
+| `append(path, content)` | Append content to an existing file |
+| `copyFile(src, dst, opts?)` | Copy a file from the host into the rootfs |
+| `copyDir(src, dst, opts?)` | Recursively copy a directory from the host |
+| `symlink(target, link, opts?)` | Create a symlink |
+| `remove(path)` | Delete a file or directory (idempotent) |
+
+`opts` accepts `{ mode?: number; replace?: boolean }` for `text` / `file` / `copyFile`, `{ replace?: boolean }` for `copyDir` / `symlink`, and `{ mode?: number }` for `mkdir`.

@@ -58,11 +58,12 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "localhost:5050/my-image:latest",
-    registry: { insecure: true },
-})
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+    .image("localhost:5050/my-image:latest")
+    .registry((r) => r.insecure())
+    .create();
 ```
 </CodeGroup>
 

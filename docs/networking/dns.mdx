@@ -32,17 +32,18 @@ let sb = Sandbox::builder("safe-agent")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "safe-agent",
-    image: "python",
-    network: {
-        ...NetworkPolicy.publicOnly(),
-        dns: {
-            blockDomains: ["malware.example.com"],
-            blockDomainSuffixes: [".tracking.com"],
-        },
-    },
-})
+import { NetworkPolicy, Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("safe-agent")
+    .image("python")
+    .network((n) => n
+        .policy(NetworkPolicy.publicOnly())
+        .dns((d) => d
+            .blockDomain("malware.example.com")
+            .blockDomainSuffix(".tracking.com"),
+        ),
+    )
+    .create();
 ```
 
 ```python Python
@@ -99,15 +100,13 @@ let sb = Sandbox::builder("safe-agent")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create("safe-agent", {
-    image: "python",
-    network: {
-        dns: {
-            nameservers: ["1.1.1.1", "1.0.0.1"],
-            queryTimeoutMs: 3000,
-        },
-    },
-})
+await using sb = await Sandbox.builder("safe-agent")
+    .image("python")
+    .network((n) => n.dns((d) =>
+        d.nameservers(["1.1.1.1", "1.0.0.1"])
+            .queryTimeoutMs(3000),
+    ))
+    .create();
 ```
 
 ```python Python

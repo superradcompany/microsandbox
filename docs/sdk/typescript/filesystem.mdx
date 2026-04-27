@@ -8,7 +8,14 @@ See [Filesystem](/sandboxes/filesystem) for usage examples and extensible backen
 
 ## SandboxFs
 
-Filesystem handle for a running sandbox. Obtained via `sb.fs()`. All operations go through the same host-guest channel as command execution - no SSH, no network involved. For bulk file operations, consider using [volumes](/sandboxes/volumes) instead.
+Filesystem handle for a running sandbox. Obtained via `sb.fs()`. All operations go through the same host-guest channel as command execution — no SSH, no network involved. For bulk file operations, consider using [volumes](/sandboxes/volumes) instead.
+
+```typescript
+const fs = sandbox.fs();
+
+await fs.write("/tmp/config.json", '{"debug": true}');
+const content = await fs.readToString("/tmp/config.json");
+```
 
 ---
 
@@ -81,14 +88,14 @@ Check whether a path exists inside the sandbox.
 
 | Type | Description |
 |------|-------------|
-| `boolean` | `true` if the path exists |
+| `Promise<boolean>` | `true` if the path exists |
 
 ---
 
 #### list()
 
 ```typescript
-list(path: string): Promise<Array<FsEntry>>
+list(path: string): Promise<FsEntry[]>
 ```
 
 List the entries in a directory.
@@ -103,7 +110,7 @@ List the entries in a directory.
 
 | Type | Description |
 |------|-------------|
-| `Array<`[`FsEntry`](#fsentry)`>` | Directory entries |
+| `Promise<`[`FsEntry`](#fsentry)`[]>` | Directory entries |
 
 ---
 
@@ -126,7 +133,7 @@ Create a directory. Parent directories must already exist.
 #### read()
 
 ```typescript
-read(path: string): Promise<Buffer>
+read(path: string): Promise<Uint8Array>
 ```
 
 Read the entire contents of a file as raw bytes.
@@ -141,7 +148,7 @@ Read the entire contents of a file as raw bytes.
 
 | Type | Description |
 |------|-------------|
-| `Buffer` | File contents as raw bytes |
+| `Promise<Uint8Array>` | File contents as raw bytes |
 
 ---
 
@@ -153,6 +160,12 @@ readStream(path: string): Promise<FsReadStream>
 
 Open a streaming reader for a file. Data is transferred in chunks of approximately 3 MiB each. Use this for files too large to fit in memory.
 
+```typescript
+for await (const chunk of await fs.readStream("/var/log/syslog")) {
+  process.stdout.write(chunk); // chunk is a Uint8Array
+}
+```
+
 **Parameters**
 
 | Name | Type | Description |
@@ -163,14 +176,14 @@ Open a streaming reader for a file. Data is transferred in chunks of approximate
 
 | Type | Description |
 |------|-------------|
-| [`FsReadStream`](#fsreadstream) | Async stream that yields chunks of file data |
+| `Promise<`[`FsReadStream`](#fsreadstream)`>` | Async stream that yields chunks of file data |
 
 ---
 
-#### readString()
+#### readToString()
 
 ```typescript
-readString(path: string): Promise<string>
+readToString(path: string): Promise<string>
 ```
 
 Read the entire contents of a file and decode as UTF-8.
@@ -185,7 +198,7 @@ Read the entire contents of a file and decode as UTF-8.
 
 | Type | Description |
 |------|-------------|
-| `string` | File contents as a string |
+| `Promise<string>` | File contents as a string |
 
 ---
 
@@ -256,24 +269,51 @@ Get detailed metadata for a file or directory.
 
 | Type | Description |
 |------|-------------|
-| [`FsMetadata`](#fsmetadata) | File metadata |
+| `Promise<`[`FsMetadata`](#fsmetadata)`>` | File metadata |
 
 ---
 
 #### write()
 
 ```typescript
-write(path: string, data: Buffer): Promise<void>
+write(path: string, data: Uint8Array | string): Promise<void>
 ```
 
-Write content to a file, creating it if it doesn't exist and overwriting if it does. Parent directories must already exist.
+Write content to a file, creating it if it doesn't exist and overwriting if it does. Parent directories must already exist. `string` payloads are encoded as UTF-8.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
 | path | `string` | Absolute path inside the guest |
-| data | `Buffer` | File content |
+| data | `Uint8Array \| string` | File content |
+
+---
+
+#### writeStream()
+
+```typescript
+writeStream(path: string): Promise<FsWriteSink>
+```
+
+Open a streaming writer for a file. Use for files too large to hold in memory; pair with `await using` so the sink closes itself.
+
+```typescript
+await using sink = await fs.writeStream("/tmp/big.bin");
+await sink.write(new Uint8Array(1 << 20));
+```
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Absolute path inside the guest |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Promise<`[`FsWriteSink`](#fswritesink)`>` | Streaming writer |
 
 ---
 
@@ -285,20 +325,24 @@ Metadata for a single directory entry, returned by [`list()`](#list).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| kind | [`FsEntryKind`](#fsentrykind) | Type of entry |
-| mode | `number` | Unix permission bits |
-| modified? | `number` | Last modified timestamp (ms since epoch) |
 | path | `string` | File path |
+| kind | [`FsEntryKind`](#fsentrykind) | Type of entry |
 | size | `number` | File size in bytes |
+| mode | `number` | Unix permission bits |
+| modified | `Date \| null` | Last modified timestamp |
 
 ### FsEntryKind
 
+```typescript
+type FsEntryKind = "file" | "directory" | "symlink" | "other";
+```
+
 | Value | Description |
 |-------|-------------|
-| `'directory'` | Directory |
 | `'file'` | Regular file |
-| `'other'` | Other entry type |
+| `'directory'` | Directory |
 | `'symlink'` | Symbolic link |
+| `'other'` | Other entry type |
 
 ### FsMetadata
 
@@ -306,18 +350,30 @@ Detailed file metadata, returned by [`stat()`](#stat).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| created? | `number` | Creation timestamp (ms since epoch) |
 | kind | [`FsEntryKind`](#fsentrykind) | Type of entry |
-| mode | `number` | Unix permission bits |
-| modified? | `number` | Last modified timestamp (ms since epoch) |
-| readonly | `boolean` | Whether the file is read-only |
 | size | `number` | File size in bytes |
+| mode | `number` | Unix permission bits |
+| readonly | `boolean` | Whether the file is read-only |
+| modified | `Date \| null` | Last modified timestamp |
+| created | `Date \| null` | Creation timestamp |
 
 ### FsReadStream
 
-Async stream for reading a file in chunks. Obtained via [`readStream()`](#readstream).
+Async stream for reading a file in chunks. Obtained via [`readStream()`](#readstream). `AsyncIterable<Uint8Array>` and `AsyncDisposable`.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| [Symbol.asyncIterator] | `AsyncGenerator<Buffer>` | Use with `for await...of` |
-| recv() | `Promise<Buffer \| null>` | Receive the next chunk. Returns `null` when the file has been fully read. |
+| `recv()` | `Promise<Uint8Array \| null>` | Receive the next chunk. Returns `null` when the file has been fully read. |
+| `collect()` | `Promise<Uint8Array>` | Drain the stream into a single buffer |
+| `[Symbol.asyncIterator]()` | `AsyncIterator<Uint8Array>` | Use with `for await...of` |
+| `[Symbol.asyncDispose]()` | `Promise<void>` | Stop reading; safe to use with `await using` |
+
+### FsWriteSink
+
+Streaming writer returned by [`writeStream()`](#writestream). `AsyncDisposable`.
+
+| Method | Parameters | Description |
+|--------|-----------|-------------|
+| `write(data)` | `Uint8Array \| string` | Append a chunk |
+| `close()` | - | Flush and close. Idempotent. |
+| `[Symbol.asyncDispose]()` | - | Calls `close()` |

@@ -47,7 +47,7 @@ Rebind protection catches this at the response level: when the DNS interceptor s
 ```
 
 ```typescript TypeScript
-network: { dns: { rebindProtection: false } }
+.network((n) => n.dns((d) => d.rebindProtection(false)))
 ```
 
 ```python Python

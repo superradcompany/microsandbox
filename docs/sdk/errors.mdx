@@ -4,7 +4,7 @@ description: Typed errors and resource cleanup patterns
 icon: "triangle-exclamation"
 ---
 
-All SDKs surface typed errors so you can match on specific failure modes instead of parsing strings. Rust has an `Error` enum, TypeScript errors carry a type tag prefix (e.g. `[ExecTimeout]`, `[Runtime]`) in the error message, and Python provides dedicated exception classes.
+All SDKs surface typed errors so you can match on specific failure modes instead of parsing strings. Rust has an `Error` enum, TypeScript exposes a dedicated subclass per variant (use `instanceof`), and Python provides dedicated exception classes.
 
 ## Matching errors
 
@@ -36,25 +36,37 @@ match sb.exec("python", ["script.py"]).await {
 ```
 
 ```typescript TypeScript
-import { Sandbox } from 'microsandbox'
+import {
+    ExecTimeoutError,
+    RuntimeError,
+    Sandbox,
+    SandboxNotFoundError,
+} from "microsandbox";
+
+async function getOrCreate(name: string): Promise<Sandbox> {
+    try {
+        const handle = await Sandbox.get(name);
+        return await handle.start();
+    } catch (e) {
+        if (e instanceof SandboxNotFoundError) {
+            return Sandbox.builder(name).image("python").create();
+        }
+        throw e;
+    }
+}
 
 try {
-    const output = await sb.exec("python", ["script.py"])
+    const output = await sb.exec("python", ["script.py"]);
     if (!output.success) {
-        console.error(`Failed (exit ${output.code}):`, output.stderr())
+        console.error(`Failed (exit ${output.code}):`, output.stderr());
     }
 } catch (e) {
-    if (e instanceof Error) {
-        // Error messages are prefixed with a type tag, e.g. "[ExecTimeout] ..."
-        if (e.message.startsWith("[ExecTimeout]")) {
-            console.error("Timed out")
-        } else if (e.message.startsWith("[Runtime]")) {
-            console.error("Runtime:", e.message)
-        } else {
-            throw e
-        }
+    if (e instanceof ExecTimeoutError) {
+        console.error(`Timed out after ${e.timeoutMs}ms`);
+    } else if (e instanceof RuntimeError) {
+        console.error("Runtime:", e.message);
     } else {
-        throw e
+        throw e;
     }
 }
 ```
@@ -83,7 +95,7 @@ except ExecTimeoutError:
 
 ## Resource cleanup
 
-Sandboxes hold compute resources, so release them when done. In Rust, `Drop` handles cleanup when the sandbox goes out of scope. In TypeScript, use `try`/`finally`.
+Sandboxes hold compute resources, so release them when done. In Rust, `Drop` handles cleanup when the sandbox goes out of scope. In TypeScript, prefer `await using` (Node 22+) which calls `Sandbox.stop()` automatically when the binding leaves scope.
 
 <CodeGroup>
 ```rust Rust
@@ -103,14 +115,14 @@ use microsandbox::Sandbox;
 
 ```typescript TypeScript
 async function runTemporary(): Promise<string> {
-    const sb = await Sandbox.create({ name: "temp", image: "python" })
-    try {
-        const out = await sb.exec("python", ["-c", "print('hello')"])
-        return out.stdout()
-    } finally {
-        await sb.kill().catch(() => {})
-        await Sandbox.remove("temp").catch(() => {})
-    }
+    // `await using` calls Sandbox.stop() when the binding leaves scope.
+    await using sb = await Sandbox.builder("temp")
+        .image("python")
+        .replace()
+        .create();
+
+    const out = await sb.exec("python", ["-c", "print('hello')"]);
+    return out.stdout();
 }
 ```
 
