@@ -23,8 +23,9 @@ The `microsandbox` npm package provides native bindings to the [microsandbox](ht
 
 ## Requirements
 
-- **Node.js** >= 18
+- **Node.js** >= 22 (the SDK relies on `Symbol.asyncDispose` and `await using`)
 - **Linux** with KVM enabled, or **macOS** with Apple Silicon (M-series)
+- The `msb` runtime ships inside the matching `@superradcompany/microsandbox-<triple>` platform package. If your install resolved without one, run `npx microsandbox install` once or set `MSB_PATH` to a working binary.
 
 ## Supported Platforms
 
@@ -42,28 +43,27 @@ Platform-specific binaries are installed automatically via optional dependencies
 npm install microsandbox
 ```
 
-The postinstall script automatically downloads the `msb` binary and `libkrunfw` library to `~/.microsandbox/`.
+The matching platform package (`@superradcompany/microsandbox-<triple>`) carries the `msb` binary and the `libkrunfw` shared library. If your install resolves without one (rare — typically a manual `--no-optional` install), run `npx microsandbox install` once to populate `~/.microsandbox/` or set `MSB_PATH` to a working binary.
 
 ## Quick Start
 
 ```typescript
-import { Sandbox } from "microsandbox";
+import { Sandbox, MiB } from "microsandbox";
 
-// Create a sandbox from an OCI image.
-const sandbox = await Sandbox.create({
-  name: "my-sandbox",
-  image: "alpine",
-  cpus: 1,
-  memoryMib: 512,
-});
+// Build and boot a sandbox in attached mode (auto-disposed at scope exit).
+await using sandbox = await Sandbox.builder("my-sandbox")
+  .image("alpine")
+  .cpus(1)
+  .memory(MiB(512))
+  .create();
 
-// Run a command.
 const output = await sandbox.shell("echo 'Hello from microsandbox!'");
 console.log(output.stdout());
-
-// Stop the sandbox.
-await sandbox.stopAndWait();
 ```
+
+The `await using` form (Node.js 22+) automatically calls `Sandbox.stop` when
+`sandbox` falls out of scope. If you need finer control, drop the `using` and
+call `sandbox.stopAndWait()` explicitly.
 
 ## Examples
 
@@ -72,38 +72,35 @@ await sandbox.stopAndWait();
 ```typescript
 import { Sandbox } from "microsandbox";
 
-const sandbox = await Sandbox.create({
-  name: "exec-demo",
-  image: "python",
-  replace: true,
-});
+await using sandbox = await Sandbox.builder("exec-demo")
+  .image("python")
+  .replace()
+  .create();
 
 // Collected output.
 const result = await sandbox.exec("python3", ["-c", "print(1 + 1)"]);
-console.log(result.stdout());  // "2\n"
-console.log(result.code);      // 0
+console.log(result.stdout()); // "2\n"
+console.log(result.code);     // 0
 
 // Shell command (pipes, redirects, etc.).
 const output = await sandbox.shell("echo hello && pwd");
 console.log(output.stdout());
 
-// Full configuration.
-const configured = await sandbox.execWithConfig({
-  cmd: "python3",
-  args: ["script.py"],
-  cwd: "/app",
-  env: { PYTHONPATH: "/app/lib" },
-  timeoutMs: 30000,
-});
+// Full configuration via the chainable options builder.
+const configured = await sandbox.execWith("python3", (e) =>
+  e.args(["script.py"])
+    .cwd("/app")
+    .env("PYTHONPATH", "/app/lib")
+    .timeout(30_000),
+);
 
-// Streaming output.
+// Streaming output. ExecHandle is AsyncIterable<ExecEvent>; the union
+// is discriminated on `kind` so `event.data` narrows correctly.
 const handle = await sandbox.execStream("tail", ["-f", "/var/log/app.log"]);
-let event;
-while ((event = await handle.recv()) !== null) {
-  if (event.eventType === "stdout") process.stdout.write(event.data);
+for await (const event of handle) {
+  if (event.kind === "stdout") process.stdout.write(event.data);
+  if (event.kind === "exited") break;
 }
-
-await sandbox.stopAndWait();
 ```
 
 ### Filesystem Operations
@@ -111,15 +108,24 @@ await sandbox.stopAndWait();
 ```typescript
 const fs = sandbox.fs();
 
-// Write and read files.
-await fs.write("/tmp/config.json", Buffer.from('{"debug": true}'));
-const content = await fs.readString("/tmp/config.json");
+// Write and read files. write() accepts Uint8Array or string.
+await fs.write("/tmp/config.json", '{"debug": true}');
+const content = await fs.readToString("/tmp/config.json");
 
-// List a directory.
+// List a directory. `entry.kind` narrows to "file" | "directory" | "symlink" | "other".
 const entries = await fs.list("/etc");
 for (const entry of entries) {
   console.log(`${entry.path} (${entry.kind})`);
 }
+
+// Streaming reads/writes (e.g. for large files).
+for await (const chunk of await fs.readStream("/var/log/syslog")) {
+  process.stdout.write(chunk); // chunk is a Uint8Array
+}
+
+await using sink = await fs.writeStream("/tmp/big.bin");
+await sink.write(new Uint8Array(1 << 20));
+// `await using` calls sink.close() automatically.
 
 // Copy between host and guest.
 await fs.copyFromHost("./local-file.txt", "/tmp/file.txt");
@@ -128,41 +134,41 @@ await fs.copyToHost("/tmp/output.txt", "./output.txt");
 // Check existence and metadata.
 if (await fs.exists("/tmp/config.json")) {
   const meta = await fs.stat("/tmp/config.json");
-  console.log(`size: ${meta.size}, kind: ${meta.kind}`);
+  console.log(`size: ${meta.size}, kind: ${meta.kind}, modified: ${meta.modified}`);
 }
 ```
 
 ### Named Volumes
 
 ```typescript
-import { Sandbox, Volume, Mount } from "microsandbox";
+import { Sandbox, Volume, MiB } from "microsandbox";
 
 // Create a 100 MiB named volume.
-const data = await Volume.create({ name: "my-data", quotaMib: 100 });
+const data = await Volume.builder("my-data").quota(MiB(100)).create();
 
-// Mount it in a sandbox.
-const writer = await Sandbox.create({
-  name: "writer",
-  image: "alpine",
-  volumes: { "/data": Mount.named(data.name) },
-  replace: true,
-});
+// Writer sandbox.
+{
+  await using writer = await Sandbox.builder("writer")
+    .image("alpine")
+    .volume("/data", (m) => m.named(data.name))
+    .replace()
+    .create();
+  await writer.shell("echo 'hello' > /data/message.txt");
+}
 
-await writer.shell("echo 'hello' > /data/message.txt");
-await writer.stopAndWait();
+// Reader sandbox — same volume mounted read-only.
+{
+  await using reader = await Sandbox.builder("reader")
+    .image("alpine")
+    .volume("/data", (m) => m.named(data.name).readonly())
+    .replace()
+    .create();
+  console.log((await reader.shell("cat /data/message.txt")).stdout());
+}
 
-// Mount the same volume in another sandbox (read-only).
-const reader = await Sandbox.create({
-  name: "reader",
-  image: "alpine",
-  volumes: { "/data": Mount.named(data.name, { readonly: true }) },
-  replace: true,
-});
-
-const output = await reader.shell("cat /data/message.txt");
-console.log(output.stdout()); // "hello\n"
-
-await reader.stopAndWait();
+// Host-side filesystem ops on the volume — no sandbox needed.
+const vfs = data.fs();
+console.log(await vfs.list("")); // ["message.txt"]
 
 // Cleanup.
 await Sandbox.remove("writer");
@@ -172,68 +178,72 @@ await Volume.remove("my-data");
 
 ### Disk Image Volumes
 
-```typescript
-import { Sandbox, Mount } from "microsandbox";
+Mount a host disk image at a guest path. Format defaults to the file
+extension; call `.format(...)` to override. `.fstype(...)` is the inner
+filesystem agentd will mount; omit to let agentd autodetect.
 
-// Mount a host disk image at a guest path. Format defaults to the file
-// extension; pass `format` to override. `fstype` is the inner filesystem
-// agentd will mount; omit to let agentd autodetect.
-const sb = await Sandbox.create({
-  name: "worker",
-  image: "alpine",
-  volumes: {
-    "/data": Mount.disk("./data.qcow2", { format: "qcow2", fstype: "ext4" }),
-    "/seed": Mount.disk("./seed.raw", { readonly: true }),
-    "/scratch": Mount.tmpfs({ sizeMib: 128, readonly: true }),
-  },
-  replace: true,
-});
+```typescript
+import { Sandbox, MiB } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+  .image("alpine")
+  .volume("/data",    (m) => m.disk("./data.qcow2").fstype("ext4"))
+  .volume("/seed",    (m) => m.disk("./seed.raw").readonly())
+  .volume("/scratch", (m) => m.tmpfs().size(MiB(128)).readonly())
+  .replace()
+  .create();
 ```
 
 ### Network Policies
 
 ```typescript
-import { Sandbox, NetworkPolicy } from "microsandbox";
+import { Sandbox, NetworkPolicy, Rule, Destination, PortRange } from "microsandbox";
 
-// Default: public internet only (blocks private ranges).
-const publicOnly = await Sandbox.create({
-  name: "public",
-  image: "alpine",
-});
+// Default — public internet only (blocks private ranges).
+await using publicOnly = await Sandbox.builder("public").image("alpine").create();
 
 // Fully airgapped.
-const isolated = await Sandbox.create({
-  name: "isolated",
-  image: "alpine",
-  network: NetworkPolicy.none(),
-});
+await using isolated = await Sandbox.builder("isolated")
+  .image("alpine")
+  .network((n) => n.policy(NetworkPolicy.none()))
+  .create();
 
 // Unrestricted.
-const open = await Sandbox.create({
-  name: "open",
-  image: "alpine",
-  network: NetworkPolicy.allowAll(),
-});
+await using open = await Sandbox.builder("open")
+  .image("alpine")
+  .network((n) => n.policy(NetworkPolicy.allowAll()))
+  .create();
 
 // DNS filtering.
-const filtered = await Sandbox.create({
-  name: "filtered",
-  image: "alpine",
-  network: {
-    blockDomains: ["blocked.example.com"],
-    blockDomainSuffixes: [".evil.com"],
-  },
-});
+await using filtered = await Sandbox.builder("filtered")
+  .image("alpine")
+  .network((n) => n.dns((d) =>
+    d.blockDomain("blocked.example.com").blockDomainSuffix(".evil.com"),
+  ))
+  .create();
+
+// Custom rule list — first match wins, evaluated independently per direction.
+await using custom = await Sandbox.builder("custom")
+  .image("alpine")
+  .network((n) => n.policy({
+    defaultEgress: "deny",
+    defaultIngress: "allow",
+    rules: [
+      Rule.allowEgress(Destination.domain("api.openai.com")),
+      Rule.denyEgress(Destination.group("metadata")),
+    ],
+  }))
+  .create();
 ```
 
 ### Port Publishing
 
 ```typescript
-const sandbox = await Sandbox.create({
-  name: "web",
-  image: "python",
-  ports: { "8080": 80 }, // host:8080 -> guest:80
-});
+await using sb = await Sandbox.builder("web")
+  .image("python")
+  .port(8080, 80)        // TCP host:8080 -> guest:80
+  .portUdp(5353, 5353)   // UDP host:5353 -> guest:5353
+  .create();
 ```
 
 ### Secrets
@@ -241,22 +251,30 @@ const sandbox = await Sandbox.create({
 Secrets use placeholder substitution — the real value never enters the VM. It is only swapped in at the network layer for HTTPS requests to allowed hosts.
 
 ```typescript
-import { Sandbox, Secret } from "microsandbox";
+import { Sandbox } from "microsandbox";
 
-const sandbox = await Sandbox.create({
-  name: "agent",
-  image: "python",
-  secrets: [
-    Secret.env("OPENAI_API_KEY", {
-      value: process.env.OPENAI_API_KEY!,
-      allowHosts: ["api.openai.com"],
-    }),
-  ],
-});
+// Shorthand: auto-generates the placeholder as `$MSB_<ENV_VAR>`.
+await using sb = await Sandbox.builder("agent")
+  .image("python")
+  .secretEnv("OPENAI_API_KEY", process.env.OPENAI_API_KEY!, "api.openai.com")
+  .create();
 
-// Guest sees: OPENAI_API_KEY=$MSB_OPENAI_API_KEY (a placeholder)
-// HTTPS to api.openai.com: placeholder is transparently replaced with the real key
-// HTTPS to any other host with the placeholder: request is blocked
+// Or with full control via SecretBuilder.
+await using sb2 = await Sandbox.builder("agent2")
+  .image("python")
+  .secret((s) =>
+    s.env("STRIPE_KEY")
+      .value(process.env.STRIPE_KEY!)
+      .allowHost("api.stripe.com")
+      .allowHostPattern("*.stripe.com")
+      .injectHeaders(true)
+      .injectQuery(false),
+  )
+  .create();
+
+// Guest sees: OPENAI_API_KEY=$MSB_OPENAI_API_KEY (a placeholder).
+// HTTPS to api.openai.com  → placeholder transparently replaced with the real key.
+// HTTPS anywhere else      → request blocked.
 ```
 
 ### Rootfs Patches
@@ -264,70 +282,68 @@ const sandbox = await Sandbox.create({
 Modify the filesystem before the VM boots:
 
 ```typescript
-import { Patch, Sandbox } from "microsandbox";
+import { Sandbox } from "microsandbox";
 
-const sandbox = await Sandbox.create({
-  name: "patched",
-  image: "alpine",
-  patches: [
-    Patch.text("/etc/greeting.txt", "Hello!\n"),
-    Patch.mkdir("/app", { mode: 0o755 }),
-    Patch.text("/app/config.json", '{"debug": true}', { mode: 0o644 }),
-    Patch.copyDir("./scripts", "/app/scripts"),
-    Patch.append("/etc/hosts", "127.0.0.1 myapp.local\n"),
-  ],
-});
+await using sandbox = await Sandbox.builder("patched")
+  .image("alpine")
+  .patch((p) => p
+    .text("/etc/greeting.txt", "Hello!\n")
+    .mkdir("/app", { mode: 0o755 })
+    .text("/app/config.json", '{"debug": true}', { mode: 0o644 })
+    .copyDir("./scripts", "/app/scripts")
+    .append("/etc/hosts", "127.0.0.1 myapp.local\n"),
+  )
+  .create();
 ```
 
 ### Detached Mode
 
-Sandboxes in detached mode survive the Node.js process:
+Detached sandboxes survive the Node.js process:
 
 ```typescript
-// Create and detach.
-const sandbox = await Sandbox.createDetached({
-  name: "background",
-  image: "python",
-});
-await sandbox.detach();
+// Create detached — drops the lifecycle on this handle's `Symbol.asyncDispose`.
+const sb = await Sandbox.builder("background")
+  .image("python")
+  .createDetached();
 
 // Later, from another process:
 const handle = await Sandbox.get("background");
-const reconnected = await handle.connect();
-const output = await reconnected.shell("echo reconnected");
+const live = await handle.connect();              // no lifecycle ownership
+await live.shell("echo reconnected");
 ```
 
 ### TLS Interception
 
 ```typescript
-const sandbox = await Sandbox.create({
-  name: "tls-inspect",
-  image: "python",
-  network: {
-    tls: {
-      bypass: ["*.googleapis.com"],
-      verifyUpstream: true,
-      interceptedPorts: [443],
-    },
-  },
-});
+await using sandbox = await Sandbox.builder("tls-inspect")
+  .image("python")
+  .network((n) => n.tls((t) =>
+    t.bypass("*.googleapis.com")
+      .verifyUpstream(true)
+      .interceptedPorts([443]),
+  ))
+  .create();
 ```
 
 ### Metrics
 
 ```typescript
-import { Sandbox, allSandboxMetrics } from "microsandbox";
+import { allSandboxMetrics, Sandbox } from "microsandbox";
 
-const sandbox = await Sandbox.create({
-  name: "metrics-demo",
-  image: "python",
-});
+await using sandbox = await Sandbox.builder("metrics-demo")
+  .image("python")
+  .create();
 
-// Per-sandbox metrics.
 const m = await sandbox.metrics();
 console.log(`CPU: ${m.cpuPercent.toFixed(1)}%`);
 console.log(`Memory: ${(m.memoryBytes / 1024 / 1024).toFixed(1)} MiB`);
 console.log(`Uptime: ${(m.uptimeMs / 1000).toFixed(1)}s`);
+
+// Stream snapshots every second.
+for await (const sample of await sandbox.metricsStream(1000)) {
+  console.log(sample.timestamp.toISOString(), sample.cpuPercent);
+  if (sample.uptimeMs > 10_000) break;
+}
 
 // All sandboxes at once.
 const all = await allSandboxMetrics();
@@ -336,71 +352,164 @@ for (const [name, metrics] of Object.entries(all)) {
 }
 ```
 
+### Image Cache
+
+```typescript
+import { Image } from "microsandbox";
+
+const cached = await Image.list();
+for (const h of cached) console.log(h.reference, h.architecture, h.layerCount);
+
+const detail = await Image.inspect("python:3.12");
+console.log(detail.config?.entrypoint, detail.config?.workingDir);
+
+await Image.remove("old:tag", { force: true });
+const reclaimed = await Image.gcLayers();
+console.log(`reclaimed ${reclaimed} orphaned layers`);
+```
+
+### Typed Errors
+
+Every `MicrosandboxError` variant has a dedicated subclass — use
+`instanceof` instead of parsing message strings.
+
+```typescript
+import { ExecTimeoutError, Sandbox, SandboxNotFoundError } from "microsandbox";
+
+try {
+  await Sandbox.remove("ghost");
+} catch (e) {
+  if (e instanceof SandboxNotFoundError) {
+    console.log("nothing to remove:", e.message);
+  } else {
+    throw e;
+  }
+}
+
+try {
+  await sandbox.execWith("sleep", (e) => e.args(["10"]).timeout(500));
+} catch (e) {
+  if (e instanceof ExecTimeoutError) {
+    console.log(`timed out after ${e.timeoutMs}ms`);
+  }
+}
+```
+
 ### Runtime Setup
 
 ```typescript
-import { isInstalled, install } from "microsandbox";
+import { install, isInstalled, setup } from "microsandbox";
 
 if (!isInstalled()) {
-  await install(); // Downloads msb + libkrunfw to ~/.microsandbox/
+  await install();        // simple — bundled version, default location
 }
+
+// Or with full control:
+await setup()
+  .baseDir("/opt/microsandbox")
+  .skipVerify(false)
+  .force(false)
+  .install();
 ```
 
 ## API Reference
 
-### Classes
+### Lifecycle
 
-| Class | Description |
-|-------|-------------|
-| `Sandbox` | Live handle to a running sandbox — lifecycle, execution, filesystem |
-| `SandboxHandle` | Lightweight database handle — use `connect()` or `start()` to get a live `Sandbox` |
-| `ExecOutput` | Captured stdout/stderr with exit status |
-| `ExecHandle` | Streaming execution handle — call `recv()` for events |
-| `ExecSink` | Writable stdin channel for streaming exec |
-| `SandboxFs` | Guest filesystem operations (read, write, list, copy, stat) |
-| `Volume` | Persistent named volume |
-| `VolumeHandle` | Lightweight volume handle from the database |
+| Symbol | Description |
+|---|---|
+| `Sandbox` | Live sandbox — lifecycle, exec, fs, metrics. Implements `AsyncDisposable`. |
+| `SandboxBuilder` | Fluent builder — every Rust setter, terminal `.create()` / `.createDetached()`. |
+| `SandboxHandle` | Lightweight DB handle — `connect()`, `start()`, `stop()`, `kill()`. |
+| `SandboxConfig` | Built sandbox configuration (output of `SandboxBuilder.build()`). |
+| `SandboxStatus` | `"running" \| "stopped" \| "crashed" \| "draining"` |
 
-### Factories
+### Execution
 
-| Class | Description |
-|-------|-------------|
-| `Mount` | Volume mount configuration — `Mount.bind()`, `Mount.named()`, `Mount.tmpfs()`, `Mount.disk()` |
-| `NetworkPolicy` | Network presets — `NetworkPolicy.none()`, `NetworkPolicy.publicOnly()`, `NetworkPolicy.allowAll()` |
-| `Secret` | Secret entry — `Secret.env(name, options)` |
+| Symbol | Description |
+|---|---|
+| `ExecOutput` | Captured stdout/stderr + exit status. |
+| `ExecHandle` | Streaming handle — `AsyncIterable<ExecEvent>`, `recv()`, `wait()`, `collect()`, `Symbol.asyncDispose`. |
+| `ExecSink` | Stdin sink — `write()`, `close()`. |
+| `ExecOptionsBuilder` / `ExecOptions` | Chained options used by `Sandbox.execWith` / `execStreamWith`. |
+| `AttachOptionsBuilder` / `AttachOptions` | PTY-attach options. |
+| `ExecEvent` | Discriminated union: `{kind:"started", pid}` \| `{kind:"stdout", data}` \| `{kind:"stderr", data}` \| `{kind:"exited", code}`. |
+| `Stdin` | Factory for `StdinMode`: `Stdin.null()`, `Stdin.pipe()`, `Stdin.bytes(...)`. |
+| `Rlimit` / `RlimitResource` | Per-exec resource limits. |
+| `ExitStatus` | `{ code, success }`. |
 
-### Interfaces
+### Filesystem
 
-| Interface | Description |
-|-----------|-------------|
-| `SandboxConfig` | Sandbox creation configuration |
-| `ExecConfig` | Full command execution options (cmd, args, cwd, env, timeout, tty) |
-| `NetworkConfig` | Network policy with rules, DNS blocking, TLS interception |
-| `MountConfig` | Volume mount (bind, named, or tmpfs) |
-| `PatchConfig` | Pre-boot filesystem modification |
-| `VolumeConfig` | Volume creation options (name, quota, labels) |
-| `SecretEntry` / `SecretEnvOptions` | Secret binding to env var with host allowlist |
-| `ExecEvent` | Stream event: `"started"`, `"stdout"`, `"stderr"`, `"exited"` |
-| `ExitStatus` | Exit code and success flag |
-| `FsEntry` / `FsMetadata` | Filesystem entry info and metadata |
-| `SandboxInfo` | Sandbox listing info (name, status, timestamps) |
-| `SandboxMetrics` | Resource metrics (CPU, memory, disk I/O, network I/O, uptime) |
-| `TlsConfig` | TLS interception options (bypass domains, upstream verification) |
+| Symbol | Description |
+|---|---|
+| `SandboxFs` | Guest fs ops (read, write, list, mkdir, copy, rename, stat, exists, copyFromHost, copyToHost, readStream, writeStream). |
+| `FsReadStream` | Streaming reader — `AsyncIterable<Uint8Array>`. |
+| `FsWriteSink` | Streaming writer — `write()`, `close()`, `Symbol.asyncDispose`. |
+| `FsEntry` / `FsMetadata` / `FsEntryKind` | Listing entry, stat metadata, kind union. |
 
-### Functions
+### Volumes
 
-| Function | Description |
-|----------|-------------|
-| `isInstalled()` | Check if `msb` and `libkrunfw` are available |
-| `install()` | Download and install runtime dependencies |
-| `allSandboxMetrics()` | Get metrics for all running sandboxes |
+| Symbol | Description |
+|---|---|
+| `Volume` / `VolumeBuilder` / `VolumeHandle` | Named persistent storage with quotas and labels. |
+| `VolumeFs` | Host-side fs ops on a volume's directory (no sandbox required). |
+| `VolumeFsReadStream` / `VolumeFsWriteSink` | Streaming variants. |
+| `MountBuilder` | Mount-spec builder — `bind`, `named`, `tmpfs`, `disk`, `format`, `fstype`, `readonly`, `size`. |
+| `VolumeMount` | Discriminated union of mount kinds. |
 
-### Enums
+### Image Cache
 
-| Enum | Values |
-|------|--------|
-| `LogLevel` | `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"` |
-| `PullPolicy` | `"always"`, `"if-missing"`, `"never"` |
+| Symbol | Description |
+|---|---|
+| `Image` | Static API: `get`, `list`, `inspect`, `remove`, `gcLayers`, `gc`. |
+| `ImageHandle` / `ImageDetail` / `ImageConfigDetail` / `ImageLayerDetail` | Cached image metadata. |
+| `RootfsSource` / `DiskImageFormat` | Discriminated rootfs union and disk format literal type. |
+| `intoRootfsSource(input)` | Resolve a string into the right `RootfsSource`. |
+
+### Networking
+
+| Symbol | Description |
+|---|---|
+| `NetworkBuilder` / `NetworkConfig` | Top-level network builder — ports, policy, DNS, TLS, secrets. |
+| `DnsBuilder` / `DnsConfig` | DNS interception (block lists, nameservers, query timeout). |
+| `TlsBuilder` / `TlsConfig` | TLS interception (bypass list, intercepted ports, custom CAs). |
+| `SecretBuilder` / `SecretEntry` / `SecretInjection` / `ViolationAction` | Secret entries with host allowlists and injection points. |
+| `NetworkPolicy` | Factory + interface — `NetworkPolicy.none()` / `.allowAll()` / `.publicOnly()` / `.nonLocal()`. |
+| `Rule` | Factory + interface — `Rule.allowEgress(...)`, `Rule.denyIngress(...)`, `Rule.allowAny(...)`, etc. |
+| `Destination` / `DestinationGroup` | Factory + union for rule destinations. |
+| `PortRange` | `PortRange.single(port)`, `PortRange.range(start, end)`. |
+| `Action` / `Direction` / `Protocol` | String-literal unions used by rules. |
+
+### Patches & Registry
+
+| Symbol | Description |
+|---|---|
+| `PatchBuilder` / `Patch` | Pre-boot rootfs modifications — `text`, `file`, `copyFile`, `copyDir`, `symlink`, `mkdir`, `remove`, `append`. |
+| `RegistryConfigBuilder` / `RegistryConfig` / `RegistryAuth` | Registry connection (auth, insecure, CA certs). |
+| `PullPolicy` | `"always" \| "if-missing" \| "never"`. |
+
+### Metrics & Setup
+
+| Symbol | Description |
+|---|---|
+| `SandboxMetrics` | CPU%, memory, disk I/O, net I/O, uptime, timestamp. |
+| `MetricsStream` | `AsyncIterable<SandboxMetrics>` returned by `Sandbox.metricsStream(intervalMs)`. |
+| `allSandboxMetrics()` | Snapshot of metrics for every running sandbox. |
+| `Setup` / `setup()` | Builder for advanced installs (custom base dir, version, force). |
+| `install()` / `isInstalled()` | Simple bootstrapping helpers. |
+
+### Sizes & Logging
+
+| Symbol | Description |
+|---|---|
+| `Mebibytes` (branded type) + `KiB` / `MiB` / `GiB` / `TiB` | Type-safe size helpers; bare numbers are accepted as MiB. |
+| `LogLevel` | `"trace" \| "debug" \| "info" \| "warn" \| "error"`. |
+
+### Errors
+
+`MicrosandboxError` is the base class; every Rust variant has a typed subclass:
+
+`IoError`, `HttpError`, `LibkrunfwNotFoundError`, `DatabaseError`, `InvalidConfigError`, `SandboxNotFoundError`, `SandboxStillRunningError`, `RuntimeError`, `JsonError`, `ProtocolError`, `NixError`, `ExecTimeoutError` (carries `timeoutMs`), `TerminalError`, `SandboxFsError`, `ImageNotFoundError`, `ImageInUseError`, `VolumeNotFoundError`, `VolumeAlreadyExistsError`, `ImageError`, `PatchFailedError`, `CustomError`.
 
 ## License
 

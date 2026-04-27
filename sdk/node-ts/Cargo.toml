@@ -8,7 +8,7 @@ edition.workspace = true
 
 [lib]
 crate-type = ["cdylib"]
-path = "lib/lib.rs"
+path = "native/lib.rs"
 
 [dependencies]
 microsandbox = { version = "0.3.14", path = "../../crates/microsandbox" }

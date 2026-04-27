@@ -1,60 +1,22 @@
-import { Sandbox, Mount } from "microsandbox";
-import { resolve, dirname } from "path";
-import { fileURLToPath } from "url";
+import { Sandbox } from "microsandbox";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const dataDir = resolve(__dirname, "sample-images");
+const rawPath = resolve(dataDir, "ext4-seeded.raw");
+const qcow2Path = resolve(dataDir, "ext4-seeded.qcow2");
 
-async function main() {
-  const dataDir = resolve(__dirname, "sample-images");
-  const rawPath = resolve(dataDir, "ext4-seeded.raw");
-  const qcow2Path = resolve(dataDir, "ext4-seeded.qcow2");
+await using sandbox = await Sandbox.builder("volume-disk")
+  .image("alpine")
+  .volume("/seed", (m) => m.disk(rawPath).fstype("ext4").readonly())
+  .volume("/data", (m) => m.disk(qcow2Path).fstype("ext4"))
+  .replace()
+  .create();
 
-  console.log("Mounting:");
-  console.log(`  /seed (raw, ro) <- ${rawPath}`);
-  console.log(`  /data (qcow2, rw) <- ${qcow2Path}`);
+const seed = await sandbox.shell("cat /seed/hello.txt");
+console.log(seed.stdout());
 
-  const sandbox = await Sandbox.create({
-    name: "volume-disk",
-    image: "alpine",
-    volumes: {
-      "/seed": Mount.disk(rawPath, { format: "raw", fstype: "ext4", readonly: true }),
-      "/data": Mount.disk(qcow2Path, { format: "qcow2", fstype: "ext4" }),
-    },
-    replace: true,
-  });
-
-  // Verify the read-only seed mount.
-  console.log("\n=== /seed (read-only) ===");
-  const listing = await sandbox.shell("ls -la /seed");
-  process.stdout.write(listing.stdout());
-
-  const hello = await sandbox.shell("cat /seed/hello.txt");
-  console.log(`hello.txt: ${hello.stdout().trim()}`);
-
-  const release = await sandbox.shell("cat /seed/notes/release.txt");
-  console.log(`notes/release.txt: ${release.stdout().trim()}`);
-
-  const manifest = await sandbox.shell("cat /seed/lib/data.json");
-  console.log(`lib/data.json:\n${manifest.stdout()}`);
-
-  // Confirm writes are blocked on the read-only mount.
-  const blocked = await sandbox.shell("touch /seed/should-fail 2>&1 || true");
-  console.log(`attempted /seed write -> ${blocked.stdout().trim()}`);
-
-  // Demonstrate writes to the writable qcow2 mount.
-  console.log("\n=== /data (read-write) ===");
-  await sandbox.shell("echo 'written from inside the sandbox' > /data/created.txt");
-  const readback = await sandbox.shell("cat /data/created.txt");
-  console.log(`created.txt: ${readback.stdout().trim()}`);
-
-  const qcowHello = await sandbox.shell("cat /data/hello.txt");
-  console.log(`hello.txt: ${qcowHello.stdout().trim()}`);
-
-  await sandbox.stopAndWait();
-  console.log("\nSandbox stopped.");
-}
-
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+await sandbox.shell("echo 'written from sandbox' > /data/created.txt");
+const back = await sandbox.shell("cat /data/created.txt");
+console.log(back.stdout());
