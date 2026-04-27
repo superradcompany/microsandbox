@@ -1,3 +1,25 @@
+/** Discriminator tags for `Patch`. */
+export type PatchKind =
+  | "text"
+  | "file"
+  | "copyFile"
+  | "copyDir"
+  | "symlink"
+  | "mkdir"
+  | "remove"
+  | "append";
+
+export const PatchKinds: readonly PatchKind[] = [
+  "text",
+  "file",
+  "copyFile",
+  "copyDir",
+  "symlink",
+  "mkdir",
+  "remove",
+  "append",
+] as const;
+
 /** Pre-boot rootfs modification — see `PatchBuilder` for the fluent constructor. */
 export type Patch =
   | {

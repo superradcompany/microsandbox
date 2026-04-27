@@ -3,6 +3,15 @@ export type DiskImageFormat = "qcow2" | "raw" | "vmdk";
 
 export const DiskImageFormats: readonly DiskImageFormat[] = ["qcow2", "raw", "vmdk"] as const;
 
+/** Discriminator tags for `RootfsSource`. */
+export type RootfsSourceKind = "bind" | "oci" | "disk";
+
+export const RootfsSourceKinds: readonly RootfsSourceKind[] = [
+  "bind",
+  "oci",
+  "disk",
+] as const;
+
 /** Source of a sandbox's root filesystem. */
 export type RootfsSource =
   | { kind: "bind"; path: string }

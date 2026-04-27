@@ -111,11 +111,22 @@ export type { Rlimit, RlimitResource } from "./rlimit.js";
 export type { FsEntry, FsEntryKind, FsMetadata } from "./fs-types.js";
 
 // Mounts / rootfs / patches / registry
-export { DiskImageFormats, intoRootfsSource } from "./rootfs.js";
-export type { DiskImageFormat, RootfsSource } from "./rootfs.js";
-export type { VolumeMount } from "./mount.js";
-export type { Patch } from "./patch.js";
-export type { RegistryAuth } from "./registry.js";
+export {
+  DiskImageFormats,
+  RootfsSourceKinds,
+  intoRootfsSource,
+} from "./rootfs.js";
+export type {
+  DiskImageFormat,
+  RootfsSource,
+  RootfsSourceKind,
+} from "./rootfs.js";
+export { VolumeMountKinds } from "./mount.js";
+export type { VolumeMount, VolumeMountKind } from "./mount.js";
+export { PatchKinds } from "./patch.js";
+export type { Patch, PatchKind } from "./patch.js";
+export { RegistryAuthKinds } from "./registry.js";
+export type { RegistryAuth, RegistryAuthKind } from "./registry.js";
 
 // Metrics
 export type { SandboxMetrics } from "./metrics.js";

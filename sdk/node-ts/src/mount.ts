@@ -1,5 +1,15 @@
 import type { DiskImageFormat } from "./rootfs.js";
 
+/** Discriminator tags for `VolumeMount`. */
+export type VolumeMountKind = "bind" | "named" | "tmpfs" | "disk";
+
+export const VolumeMountKinds: readonly VolumeMountKind[] = [
+  "bind",
+  "named",
+  "tmpfs",
+  "disk",
+] as const;
+
 /** Volume mount specification — see `MountBuilder` for the fluent constructor. */
 export type VolumeMount =
   | { kind: "bind"; host: string; guest: string; readonly: boolean }

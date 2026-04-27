@@ -1,4 +1,8 @@
 import { createRequire } from "node:module";
+import type { LogLevel } from "../log-level.js";
+import type { Action, Direction, Protocol } from "../policy/types.js";
+import type { PullPolicy } from "../pull-policy.js";
+import type { ViolationAction } from "../violation-action.js";
 import { msbPath } from "./resolve-binary.js";
 
 // Make the bundled msb visible to the Rust binding. `MSB_PATH` is the
@@ -315,8 +319,8 @@ export interface NapiSandboxConfig {
   scripts?: Record<string, string>;
   volumes?: Record<string, NapiMountConfig>;
   patches?: NapiPatchConfig[];
-  pullPolicy?: string;
-  logLevel?: string;
+  pullPolicy?: PullPolicy;
+  logLevel?: LogLevel;
   replace?: boolean;
   quietLogs?: boolean;
   labels?: Record<string, string>;
@@ -360,8 +364,8 @@ export interface NapiRegistryConfig {
 export interface NapiNetworkConfig {
   policy?: string;
   rules?: NapiPolicyRule[];
-  defaultEgress?: string;
-  defaultIngress?: string;
+  defaultEgress?: Action;
+  defaultIngress?: Action;
   dns?: NapiDnsConfig;
   tls?: NapiTlsConfig;
   maxConnections?: number;
@@ -369,11 +373,11 @@ export interface NapiNetworkConfig {
 }
 
 export interface NapiPolicyRule {
-  action: string;
-  direction?: string;
+  action: Action;
+  direction?: Direction;
   destination?: string;
-  protocol?: string;
-  protocols?: string[];
+  protocol?: Protocol;
+  protocols?: Protocol[];
   port?: string;
   ports?: string[];
 }
@@ -403,7 +407,7 @@ export interface NapiSecretEntry {
   allowHostPatterns?: string[];
   placeholder?: string;
   requireTls?: boolean;
-  onViolation?: string;
+  onViolation?: ViolationAction;
   inject?: NapiSecretInjection;
 }
 
