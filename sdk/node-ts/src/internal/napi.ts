@@ -360,7 +360,8 @@ export interface NapiRegistryConfig {
 export interface NapiNetworkConfig {
   policy?: string;
   rules?: NapiPolicyRule[];
-  defaultAction?: string;
+  defaultEgress?: string;
+  defaultIngress?: string;
   dns?: NapiDnsConfig;
   tls?: NapiTlsConfig;
   maxConnections?: number;

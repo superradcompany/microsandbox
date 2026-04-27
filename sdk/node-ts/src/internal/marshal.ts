@@ -135,7 +135,8 @@ function ruleToNapi(rule: Rule): NapiPolicyRule {
 export function networkPolicyToNapi(policy: NetworkPolicy): NapiNetworkConfig {
   return {
     rules: policy.rules.map(ruleToNapi),
-    defaultAction: policy.defaultEgress,
+    defaultEgress: policy.defaultEgress,
+    defaultIngress: policy.defaultIngress,
   };
 }
 
@@ -206,7 +207,8 @@ export function networkConfigToNapi(
   const out: NapiNetworkConfig = {};
   if (net.policy) {
     out.rules = net.policy.rules.map(ruleToNapi);
-    out.defaultAction = net.policy.defaultEgress;
+    out.defaultEgress = net.policy.defaultEgress;
+    out.defaultIngress = net.policy.defaultIngress;
   }
   const dns = dnsConfigToNapi(net.dns);
   if (dns) out.dns = dns;
