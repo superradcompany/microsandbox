@@ -21,10 +21,11 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "python",
-})
+import { Sandbox } from 'microsandbox'
+
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .create()
 ```
 
 ```python Python
@@ -56,21 +57,18 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-import { Mount, Sandbox } from 'microsandbox'
+import { Sandbox } from 'microsandbox'
 
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "python",
-    memoryMib: 1024,
-    cpus: 2,
-
-    env: { DEBUG: "true", API_PORT: "8000" },
-    volumes: {
-        "/app/src": Mount.bind("./src", { readonly: true }),
-        "/data": Mount.named("my-data"),
-        "/tmp/scratch": Mount.tmpfs({ sizeMib: 100 }),
-    },
-})
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .memory(1024)
+    .cpus(2)
+    .env("DEBUG", "true")
+    .env("API_PORT", "8000")
+    .volume("/app/src", (m) => m.bind("./src").readonly())
+    .volume("/data", (m) => m.named("my-data"))
+    .volume("/tmp/scratch", (m) => m.tmpfs().size(100))
+    .create()
 ```
 
 ```python Python
@@ -134,7 +132,7 @@ Sandbox::builder("worker").image("python").create().await?;
 ```
 
 ```typescript TypeScript
-await Sandbox.create({ name: "worker", image: "python" })
+await using sb = await Sandbox.builder("worker").image("python").create()
 ```
 
 ```python Python
@@ -157,7 +155,7 @@ Sandbox::builder("worker").image("./my-rootfs").create().await?;
 ```
 
 ```typescript TypeScript
-await Sandbox.create({ name: "worker", image: "./my-rootfs" })
+await using sb = await Sandbox.builder("worker").image("./my-rootfs").create()
 ```
 
 ```python Python
@@ -194,10 +192,15 @@ Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-await Sandbox.create({
-    name: "worker",
-    image: "./alpine.qcow2",
-})
+// Auto-detect filesystem from extension
+await using sb = await Sandbox.builder("worker")
+    .image("./ubuntu-22.04.qcow2")
+    .create()
+
+// Explicit filesystem type via a disk mount on the rootfs
+await using sb2 = await Sandbox.builder("worker")
+    .image("./alpine.raw")
+    .create()
 ```
 
 ```python Python
@@ -234,11 +237,10 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "python",
-    replace: true,
-})
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .replace()
+    .create()
 ```
 
 ```python Python
@@ -271,14 +273,17 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-import { PullPolicy, Sandbox } from 'microsandbox'
+import { Sandbox } from 'microsandbox'
 
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "private.registry.io/org/app:v1",
-    registryAuth: { username: "deploy", password: process.env.REGISTRY_TOKEN! },
-    pullPolicy: PullPolicy.Always,
-})
+await using sb = await Sandbox.builder("worker")
+    .image("private.registry.io/org/app:v1")
+    .registry((r) => r.auth({
+        kind: "basic",
+        username: "deploy",
+        password: process.env.REGISTRY_TOKEN!,
+    }))
+    .pullPolicy("always")
+    .create()
 ```
 
 ```python Python
@@ -327,14 +332,16 @@ let sb = Sandbox::create(config).await?;
 ```
 
 ```typescript TypeScript
-const config = Sandbox.buildConfig({
-    name: "preview",
-    image: "python",
-    memoryMib: 1024,
-})
+import { Sandbox } from 'microsandbox'
 
+const builder = Sandbox.builder("preview")
+    .image("python")
+    .memory(1024)
+
+const config = builder.build()
 console.log(JSON.stringify(config, null, 2))
-const sb = await Sandbox.create(config)
+
+await using sb = await builder.create()
 ```
 
 ```python Python

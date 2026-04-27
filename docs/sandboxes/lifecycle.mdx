@@ -48,11 +48,11 @@ let sb = Sandbox::builder("worker").image("python").create_detached().await?;
 ```
 
 ```typescript TypeScript
-// Standard creation (attached, sandbox stops when your process exits)
-const sb = await Sandbox.create({ name: "worker", image: "python" })
+// Attached: sandbox stops when your process exits (or scope ends with `await using`).
+await using sb = await Sandbox.builder("worker").image("python").create()
 
-// Detached creation (sandbox survives after your process exits)
-const sb = await Sandbox.createDetached({ name: "worker", image: "python" })
+// Detached: sandbox survives after your process exits.
+const detached = await Sandbox.builder("worker").image("python").createDetached()
 ```
 
 ```python Python
@@ -88,7 +88,7 @@ let sb = Sandbox::start("worker").await?;
 await sb.stop()
 
 // Later, resume where you left off
-const sb = await Sandbox.start("worker")
+const resumed = await Sandbox.start("worker")
 ```
 
 ```python Python
@@ -141,8 +141,7 @@ sb.resume().await?;
 ```
 
 ```typescript TypeScript
-await sb.pause()
-await sb.resume()
+// TODO: pause/resume is not yet exposed by the Node.js SDK.
 ```
 
 ```python Python
@@ -205,6 +204,7 @@ let exit_status = sb.wait().await?;
 
 ```typescript TypeScript
 const exitStatus = await sb.wait()
+console.log(exitStatus.code, exitStatus.success)
 ```
 
 ```python Python
@@ -247,12 +247,12 @@ for handle in Sandbox::list().await? {
 
 ```typescript TypeScript
 const sandboxes = await Sandbox.list()
-for (const info of sandboxes) {
-    console.log(`${info.name}: ${info.status}`)
+for (const handle of sandboxes) {
+    console.log(`${handle.name}: ${handle.status}`)
 }
 
 const handle = await Sandbox.get("worker")
-console.log(handle.status) // "Running" | "Stopped" | ...
+console.log(handle.status) // "running" | "stopped" | "crashed" | "draining"
 ```
 
 ```python Python
@@ -327,14 +327,16 @@ match tokio::time::timeout(Duration::from_secs(30), handle.stop()).await {
 ```typescript TypeScript
 import { Sandbox } from 'microsandbox'
 
-const sb = await Sandbox.get("worker")
+const handle = await Sandbox.get("worker")
 try {
     await Promise.race([
-        sb.stop(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 30_000)),
+        handle.stop(),
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("timeout")), 30_000),
+        ),
     ])
 } catch {
-    await sb.kill()
+    await handle.kill()
 }
 ```
 
@@ -367,11 +369,11 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "python",
-    maxDurationSecs: 3600,  // maximum sandbox lifetime in seconds
-})
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .maxDuration(3600)   // maximum sandbox lifetime, in seconds
+    .idleTimeout(300)    // auto-drain after 5 minutes of inactivity
+    .create()
 ```
 
 ```python Python

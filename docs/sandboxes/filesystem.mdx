@@ -33,7 +33,7 @@ let content = sb.fs().read_to_string("/app/config.json").await?;
 ```
 
 ```typescript TypeScript
-const content = await sb.fs().readString("/app/config.json")
+const content = await sb.fs().readToString("/app/config.json")
 ```
 
 ```python Python
@@ -80,7 +80,7 @@ while let Some(chunk) = stream.recv().await? {
 ```
 
 ```typescript TypeScript
-const stream = await sb.fs().readStream("/app/data.bin")
+await using stream = await sb.fs().readStream("/app/data.bin")
 for await (const chunk of stream) {
     processChunk(chunk)
 }
@@ -141,20 +141,7 @@ let sb = Sandbox::builder("encrypted")
 ```
 
 ```typescript TypeScript
-import { Mount, Sandbox } from 'microsandbox'
-
-const sb = await Sandbox.create({
-    name: "encrypted",
-    image: "python",
-    volumes: {
-        "/secrets": Mount.bind("/data/secrets", {
-            hooks: {
-                onRead: (path, data) => decrypt(data, key),
-                onWrite: (path, data) => encrypt(data, key),
-            },
-        }),
-    },
-})
+// TODO: volume read/write hooks are not yet exposed by the Node.js SDK.
 ```
 
 ```python Python
@@ -207,19 +194,7 @@ let sb = Sandbox::builder("custom")
 ```
 
 ```typescript TypeScript
-import { FsBackend, Mount, Sandbox } from 'microsandbox'
-
-// Implement the FsBackend interface
-class EncryptedFs implements FsBackend {
-    // ... implement read, write, and other required methods
-}
-
-const sb = await Sandbox.create({
-    name: "custom",
-    volumes: {
-        "/secrets": Mount.backend(new EncryptedFs(key, "/data")),
-    },
-})
+// TODO: custom FsBackend is not yet exposed by the Node.js SDK.
 ```
 
 ```python Python

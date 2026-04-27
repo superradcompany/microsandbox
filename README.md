@@ -141,18 +141,15 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > ```typescript
 > import { Sandbox } from "microsandbox";
 >
-> const sandbox = await Sandbox.create({
->   name: "my-sandbox",
->   image: "python",
->   cpus: 1,
->   memoryMib: 512,
-> });
+> await using sandbox = await Sandbox.builder("my-sandbox")
+>   .image("python")
+>   .cpus(1)
+>   .memory(512)
+>   .create();
 >
 > const output = await sandbox.exec("python", ["-c", "print('Hello from a microVM!')"]);
 >
 > console.log(output.stdout());
->
-> await sandbox.stopAndWait();
 > ```
 >
 > </details>

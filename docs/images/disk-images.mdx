@@ -44,21 +44,21 @@ let sb2 = Sandbox::builder("custom-vm")
 ```
 
 ```typescript TypeScript
-// Auto-detect format from file extension
-const sb = await Sandbox.create({
-    name: "custom-vm",
-    image: "./ubuntu-22.04.qcow2",
-    cpus: 2,
-    memoryMib: 2048,
-})
+import { Sandbox } from "microsandbox"
 
-// Explicit format — pass the disk image path directly
-const sb2 = await Sandbox.create({
-    name: "custom-vm",
-    image: "./alpine.raw",
-    cpus: 1,
-    memoryMib: 512,
-})
+// Auto-detect format from file extension
+await using sb = await Sandbox.builder("custom-vm")
+    .image("./ubuntu-22.04.qcow2")
+    .cpus(2)
+    .memory(2048)
+    .create()
+
+// Explicit format + filesystem type via a RootfsSource object
+await using sb2 = await Sandbox.builder("custom-vm")
+    .image({ kind: "disk", path: "./alpine.raw", format: "raw", fstype: "ext4" })
+    .cpus(1)
+    .memory(512)
+    .create()
 ```
 
 ```python Python

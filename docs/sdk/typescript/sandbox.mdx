@@ -10,19 +10,41 @@ See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/
 
 ---
 
-#### Sandbox.create()
+#### Sandbox.builder()
 
 ```typescript
-static create(config: SandboxConfig): Promise<Sandbox>
+static builder(name: string): SandboxBuilder
 ```
 
-Create and boot a sandbox in attached mode. The sandbox stops when your process exits. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it's ready to accept commands.
+Begin building a new sandbox. Chain configuration setters, then call `.create()` or `.createDetached()` (see [`SandboxBuilder`](#sandboxbuilder)) to boot the VM.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
-| config | [`SandboxConfig`](#sandboxconfig) | Sandbox configuration |
+| name | `string` | Sandbox name |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxBuilder`](#sandboxbuilder) | Fluent builder |
+
+---
+
+#### Sandbox.start()
+
+```typescript
+static start(name: string): Promise<Sandbox>
+```
+
+Resume a previously stopped sandbox in attached mode. The VM reboots using the persisted configuration.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Name of a stopped sandbox |
 
 **Returns**
 
@@ -32,19 +54,19 @@ Create and boot a sandbox in attached mode. The sandbox stops when your process 
 
 ---
 
-#### Sandbox.createDetached()
+#### Sandbox.startDetached()
 
 ```typescript
-static createDetached(config: SandboxConfig): Promise<Sandbox>
+static startDetached(name: string): Promise<Sandbox>
 ```
 
-Create and boot in detached mode. The sandbox survives after your process exits. Reconnect later with [`Sandbox.get()`](#sandboxget).
+Resume a stopped sandbox in detached mode (the sandbox survives this process).
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
-| config | [`SandboxConfig`](#sandboxconfig) | Sandbox configuration |
+| name | `string` | Name of a stopped sandbox |
 
 **Returns**
 
@@ -79,16 +101,16 @@ Get a handle to an existing sandbox (running or stopped). The handle provides st
 #### Sandbox.list()
 
 ```typescript
-static list(): Promise<Array<SandboxInfo>>
+static list(): Promise<Array<SandboxHandle>>
 ```
 
-List all sandboxes (running, stopped, and crashed).
+List all known sandboxes (running, stopped, and crashed). Each handle is read-only — call [`Sandbox.get(name)`](#sandboxget) to obtain a live handle that supports lifecycle methods.
 
 **Returns**
 
 | Type | Description |
 |------|-------------|
-| `Array<`[`SandboxInfo`](#sandboxinfo)`>` | All sandboxes |
+| `Array<`[`SandboxHandle`](#sandboxhandle)`>` | All sandboxes |
 
 ---
 
@@ -108,95 +130,106 @@ Delete a stopped sandbox and all its state from disk. Fails if the sandbox is st
 
 ---
 
-#### Sandbox.start()
-
-```typescript
-static start(name: string): Promise<Sandbox>
-```
-
-Restart a previously stopped sandbox. The VM reboots using the persisted configuration.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| name | `string` | Name of a stopped sandbox |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`Sandbox`](#instance-methods) | Running sandbox |
-
----
-
-#### Sandbox.startDetached()
-
-```typescript
-static startDetached(name: string): Promise<Sandbox>
-```
-
-Restart a stopped sandbox in detached mode.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| name | `string` | Name of a stopped sandbox |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`Sandbox`](#instance-methods) | Running sandbox |
-
----
-
 ## Instance properties
 
----
+`Sandbox` instances are obtained from [`SandboxBuilder`](#sandboxbuilder)`.create()` / `.createDetached()`, [`Sandbox.start()`](#sandboxstart), [`Sandbox.startDetached()`](#sandboxstartdetached), or by calling `.start()`/`.connect()` on a [`SandboxHandle`](#sandboxhandle). Properties below are synchronous getters.
 
-#### name
-
-```typescript
-get name(): Promise<string>
-```
-
-Sandbox name.
-
----
-
-#### ownsLifecycle
-
-```typescript
-get ownsLifecycle(): Promise<boolean>
-```
-
-Whether this handle owns the sandbox lifecycle. `true` in attached mode, `false` in detached mode.
+| Property | Type | Description |
+|----------|------|-------------|
+| name | `string` | Sandbox name. |
+| config | `Readonly<`[`SandboxConfig`](#sandboxconfig)`>` | The configuration this sandbox was built from. Read-only. |
+| ownsLifecycle | `boolean` | `true` for sandboxes created in attached mode (auto-stops on `Symbol.asyncDispose`); `false` for detached or reconnected sandboxes. |
 
 ---
 
 ## Instance methods
 
----
-
-#### detach()
+`Sandbox` implements `AsyncDisposable` — use `await using sandbox = ...` to auto-stop the VM at scope exit (only when `ownsLifecycle` is `true`).
 
 ```typescript
-detach(): Promise<void>
-```
+import { Sandbox } from "microsandbox";
 
-Release the handle without stopping the sandbox. Reconnect later with [`Sandbox.get()`](#sandboxget).
+await using sandbox = await Sandbox.builder("demo")
+  .image("alpine")
+  .cpus(1)
+  .memory(512)
+  .create();
+
+const out = await sandbox.shell("echo hi");
+console.log(out.stdout());
+```
 
 ---
 
-#### drain()
+#### exec()
 
 ```typescript
-drain(): Promise<void>
+exec(cmd: string, args?: Iterable<string>): Promise<ExecOutput>
 ```
 
-Start a graceful drain. Existing commands run to completion, new `exec` calls are rejected.
+Run a command inside the sandbox and wait for it to complete. See [Execution](/sdk/typescript/execution#exec) for details.
+
+---
+
+#### execWith()
+
+```typescript
+execWith(
+  cmd: string,
+  configure: (b: ExecOptionsBuilder) => ExecOptionsBuilder,
+): Promise<ExecOutput>
+```
+
+Run a command with full options (cwd, env, timeout, stdin, rlimits, …). See [Execution](/sdk/typescript/execution#execwith).
+
+---
+
+#### execStream()
+
+```typescript
+execStream(cmd: string, args?: Iterable<string>): Promise<ExecHandle>
+```
+
+Run a command with streaming output. See [Execution](/sdk/typescript/execution#execstream).
+
+---
+
+#### execStreamWith()
+
+```typescript
+execStreamWith(
+  cmd: string,
+  configure: (b: ExecOptionsBuilder) => ExecOptionsBuilder,
+): Promise<ExecHandle>
+```
+
+Streaming variant of `execWith`.
+
+---
+
+#### shell() / shellStream()
+
+```typescript
+shell(script: string): Promise<ExecOutput>
+shellStream(script: string): Promise<ExecHandle>
+```
+
+Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Shell syntax like pipes, redirects, and `&&` chains works.
+
+---
+
+#### attach() / attachShell() / attachWith()
+
+```typescript
+attach(cmd: string, args?: Iterable<string>): Promise<number>
+attachShell(): Promise<number>
+attachWith(
+  cmd: string,
+  configure: (b: AttachOptionsBuilder) => AttachOptionsBuilder,
+): Promise<number>
+```
+
+Bridge your terminal to a process inside the sandbox for a fully interactive PTY session. See [Execution](/sdk/typescript/execution#attach).
 
 ---
 
@@ -206,23 +239,7 @@ Start a graceful drain. Existing commands run to completion, new `exec` calls ar
 fs(): SandboxFs
 ```
 
-Get a filesystem handle for reading and writing files inside the running sandbox. See [Filesystem](/sdk/typescript/filesystem) for the full API.
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`SandboxFs`](/sdk/typescript/filesystem) | Filesystem handle |
-
----
-
-#### kill()
-
-```typescript
-kill(): Promise<void>
-```
-
-Force-terminate the sandbox immediately. No graceful shutdown.
+Get a filesystem handle for reading and writing files inside the running sandbox. See [Filesystem](/sdk/typescript/filesystem).
 
 ---
 
@@ -248,7 +265,7 @@ Get a point-in-time snapshot of the sandbox's resource usage.
 metricsStream(intervalMs: number): Promise<MetricsStream>
 ```
 
-Stream resource metrics at a regular interval. The returned stream supports both `recv()` and `for await...of`.
+Stream resource metrics at a regular interval. The returned stream supports `recv()`, `for await...of`, and `Symbol.asyncDispose`.
 
 **Parameters**
 
@@ -261,16 +278,6 @@ Stream resource metrics at a regular interval. The returned stream supports both
 | Type | Description |
 |------|-------------|
 | [`MetricsStream`](#metricsstream) | Async stream of metrics |
-
----
-
-#### removePersisted()
-
-```typescript
-removePersisted(): Promise<void>
-```
-
-Remove the sandbox and all its persisted state from disk.
 
 ---
 
@@ -300,6 +307,26 @@ Stop the sandbox and wait for the exit status.
 
 ---
 
+#### kill()
+
+```typescript
+kill(): Promise<void>
+```
+
+Force-terminate the sandbox immediately. No graceful shutdown.
+
+---
+
+#### drain()
+
+```typescript
+drain(): Promise<void>
+```
+
+Start a graceful drain. Existing commands run to completion, new `exec` calls are rejected.
+
+---
+
 #### wait()
 
 ```typescript
@@ -316,7 +343,156 @@ Block until the sandbox exits on its own.
 
 ---
 
+#### detach()
+
+```typescript
+detach(): Promise<void>
+```
+
+Release the handle without stopping the sandbox. Reconnect later with [`Sandbox.get()`](#sandboxget).
+
+---
+
+#### removePersisted()
+
+```typescript
+removePersisted(): Promise<void>
+```
+
+Remove the sandbox and all its persisted state from disk.
+
+---
+
+#### `[Symbol.asyncDispose]()`
+
+```typescript
+[Symbol.asyncDispose](): Promise<void>
+```
+
+Called automatically by `await using`. When `ownsLifecycle` is `true`, stops the sandbox; otherwise no-op. Errors during the dispose-stop are swallowed.
+
+---
+
 ## Types
+
+### SandboxBuilder
+
+Fluent builder returned by [`Sandbox.builder(name)`](#sandboxbuilder-1). Every setter returns the builder for chaining. The terminal calls are `build()`, `create()`, and `createDetached()` (documented in the table below).
+
+#### Core image / sizing
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| image | `(src: string \| RootfsSource) => this` | OCI reference (`"python:3.12"`), bind path (`"./rootfs"`), or disk image (`"./disk.qcow2"`). **Required.** |
+| cpus | `(count: number) => this` | Virtual CPU count. |
+| memory | `(size: Mebibytes \| number) => this` | Guest memory limit. Use [`MiB(n)`](#sizes), `KiB(n)`, `GiB(n)`, `TiB(n)` — or a bare number (interpreted as MiB). |
+| logLevel | `(level: LogLevel) => this` | Override log verbosity. |
+| quietLogs | `() => this` | Suppress sandbox stderr. |
+| workdir | `(path: string) => this` | Default working directory for commands. |
+| shell | `(shell: string) => this` | Shell binary used by `sandbox.shell(...)` (default: `/bin/sh`). |
+
+#### Image-defined overrides
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| entrypoint | `(cmd: Iterable<string>) => this` | Override image entrypoint. |
+| hostname | `(name: string) => this` | Guest hostname. |
+| user | `(user: string) => this` | Default guest user. |
+| pullPolicy | `(policy: PullPolicy) => this` | When to pull the image (`"always"` \| `"if-missing"` \| `"never"`). |
+| libkrunfwPath | `(path: string) => this` | Override the `libkrunfw` shared library path for this sandbox. |
+
+#### Environment, scripts, lifecycle
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| env | `(key: string, value: string) => this` | Add a single environment variable. |
+| envs | `(vars: Iterable<[string,string]> \| Record<string,string>) => this` | Bulk-add environment variables. |
+| script | `(name: string, content: string) => this` | Add a named script mounted at `/.msb/scripts/<name>`. |
+| scripts | `(scripts: Iterable<[string,string]> \| Record<string,string>) => this` | Bulk-add scripts. |
+| replace | `() => this` | Replace any existing sandbox with the same name. |
+| maxDuration | `(secs: number) => this` | Maximum sandbox lifetime in seconds. |
+| idleTimeout | `(secs: number) => this` | Stop the sandbox after this many seconds of inactivity. |
+
+#### Mounts and patches
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| volume | `(guestPath: string, configure: (m: MountBuilder) => MountBuilder) => this` | Mount a volume — see [Volumes](/sdk/typescript/volumes#mountbuilder). |
+| patch | `(configure: (p: PatchBuilder) => PatchBuilder) => this` | Pre-boot rootfs modifications — see [Snapshots](/sdk/typescript/snapshots). |
+| addPatch | `(p: Patch) => this` | Append a single pre-built `Patch`. |
+
+#### Registry, networking, ports, secrets
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| registry | `(configure: (r: RegistryConfigBuilder) => RegistryConfigBuilder) => this` | Configure registry auth, CA paths, and insecure mode. |
+| port | `(hostPort: number, guestPort: number) => this` | Publish a TCP port `host → guest`. |
+| portUdp | `(hostPort: number, guestPort: number) => this` | Publish a UDP port `host → guest`. |
+| disableNetwork | `() => this` | Disable networking entirely. |
+| network | `(configure: (n: NetworkBuilder) => NetworkBuilder) => this` | Full networking config — see [Networking](/sdk/typescript/networking). |
+| secretEnv | `(envVar: string, value: string, allowedHost: string) => this` | Shorthand for a secret with placeholder `$MSB_<envVar>` and a single allowed host. |
+| secret | `(configure: (b: SecretBuilder) => SecretBuilder) => this` | Add a fully customized secret — see [Secrets](/sdk/typescript/secrets). |
+
+#### Terminal methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| build | `() => SandboxConfig` | Materialize the accumulated state without booting. Throws [`InvalidConfigError`](/sdk/typescript/sandbox) if configuration is invalid. |
+| create | `() => Promise<Sandbox>` | Build and boot in attached mode (auto-stops on `Symbol.asyncDispose`). |
+| createDetached | `() => Promise<Sandbox>` | Build and boot in detached mode (survives this process). |
+
+### SandboxConfig
+
+Built sandbox configuration produced by [`SandboxBuilder.build()`](#sandboxbuilder) and exposed as `sandbox.config`. All fields are `readonly`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| name | `string` | Sandbox name. |
+| image | [`RootfsSource`](#rootfssource) | Resolved rootfs source (OCI / bind / disk image). |
+| cpus | `number \| null` | Virtual CPU count. |
+| memoryMib | `number \| null` | Guest memory limit in MiB. |
+| logLevel | [`LogLevel`](#loglevel) `\| null` | Log verbosity override. |
+| quietLogs | `boolean` | Whether stderr is suppressed. |
+| workdir | `string \| null` | Default working directory. |
+| shell | `string \| null` | Shell binary used by `sandbox.shell(...)`. |
+| entrypoint | `readonly string[] \| null` | Image entrypoint override. |
+| cmd | `readonly string[] \| null` | Image command override. |
+| hostname | `string \| null` | Guest hostname. |
+| user | `string \| null` | Default guest user. |
+| libkrunfwPath | `string \| null` | Per-sandbox libkrunfw override. |
+| env | `ReadonlyArray<[string, string]>` | Environment variables. |
+| scripts | `ReadonlyArray<[string, string]>` | Named scripts. |
+| mounts | `readonly` [`VolumeMount`](/sdk/typescript/volumes#volumemount)`[]` | Volume mounts. |
+| patches | `readonly` [`Patch`](/sdk/typescript/snapshots#patch)`[]` | Pre-boot rootfs modifications. |
+| pullPolicy | [`PullPolicy`](#pullpolicy) `\| null` | Image pull behavior. |
+| replace | `boolean` | Whether to replace an existing sandbox of the same name. |
+| maxDurationSecs | `number \| null` | Maximum sandbox lifetime in seconds. |
+| idleTimeoutSecs | `number \| null` | Idle timeout in seconds. |
+| portsTcp | `ReadonlyArray<[number, number]>` | TCP port publications (`[hostPort, guestPort]`). |
+| portsUdp | `ReadonlyArray<[number, number]>` | UDP port publications. |
+| registry | `RegistryConfig \| null` | Registry connection. |
+| network | [`NetworkConfig`](/sdk/typescript/networking#networkconfig) `\| null` | Network configuration. |
+| disableNetwork | `boolean` | Whether networking is disabled. |
+| secrets | `readonly` [`SecretEntry`](/sdk/typescript/secrets#secretentry)`[]` | Secret entries. |
+
+### SandboxHandle
+
+A lightweight handle to an existing sandbox, returned by [`Sandbox.get()`](#sandboxget) and [`Sandbox.list()`](#sandboxlist). Handles produced by `Sandbox.list()` are read-only — fetch a live handle via `Sandbox.get(name)` to call lifecycle methods.
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| name | `string` | Sandbox name. |
+| status | [`SandboxStatus`](#sandboxstatus) | Current status. |
+| configJson | `string` | Raw JSON configuration. |
+| createdAt | `Date \| null` | Creation timestamp. |
+| updatedAt | `Date \| null` | Last update timestamp. |
+| metrics() | `Promise<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics. |
+| start() | `Promise<`[`Sandbox`](#instance-methods)`>` | Resume in attached mode. |
+| startDetached() | `Promise<`[`Sandbox`](#instance-methods)`>` | Resume in detached mode. |
+| connect() | `Promise<`[`Sandbox`](#instance-methods)`>` | Connect to an already-running sandbox without taking lifecycle ownership. |
+| stop() | `Promise<void>` | Graceful shutdown. |
+| kill() | `Promise<void>` | Force terminate. |
+| remove() | `Promise<void>` | Delete sandbox and all state from disk. |
 
 ### LogLevel
 
@@ -324,19 +500,19 @@ Sandbox process log verbosity.
 
 | Value | Description |
 |-------|-------------|
-| `'debug'` | Debug and higher |
-| `'error'` | Errors only |
-| `'info'` | Info and higher |
 | `'trace'` | Most verbose - all diagnostic output |
+| `'debug'` | Debug and higher |
+| `'info'` | Info and higher |
 | `'warn'` | Warnings and errors only |
+| `'error'` | Errors only |
 
 ### MetricsStream
 
-Async stream for receiving periodic metrics snapshots.
+Async stream returned by [`Sandbox.metricsStream()`](#metricsstream). Supports `Symbol.asyncDispose`.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| [Symbol.asyncIterator] | `AsyncGenerator<`[`SandboxMetrics`](#sandboxmetrics)`>` | Use with `for await...of` |
+| [Symbol.asyncIterator] | `AsyncIterator<`[`SandboxMetrics`](#sandboxmetrics)`>` | Use with `for await...of` |
 | recv() | `Promise<`[`SandboxMetrics`](#sandboxmetrics)` \| null>` | Receive next snapshot. Returns `null` when the stream ends. |
 
 ### PullPolicy
@@ -346,68 +522,21 @@ Controls when the SDK fetches an OCI image from the registry.
 | Value | Description |
 |-------|-------------|
 | `'always'` | Pull the image every time, even if cached locally |
-| `'if-missing'` | Pull only if the image is not already cached. This is the default. |
+| `'if-missing'` | Pull only if the image is not already cached |
 | `'never'` | Never pull; fail if the image is not cached locally |
 
-### SandboxConfig
+### RootfsSource
 
-Configuration object passed to [`Sandbox.create()`](#sandboxcreate) and [`Sandbox.createDetached()`](#sandboxcreatedetached).
+Source of the sandbox's root filesystem. Resolved automatically from a string by [`intoRootfsSource(input)`](#rootfssource): a leading `/`, `./`, or `../` becomes a bind path; a `.qcow2` / `.raw` / `.vmdk` extension becomes a disk image; everything else is treated as an OCI reference.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| cpus? | `number` | `1` | Virtual CPUs |
-| entrypoint? | `Array<string>` | - | Override image entrypoint |
-| env? | `Record<string, string>` | `{}` | Environment variables visible to all commands |
-| hostname? | `string` | - | Guest hostname |
-| image | `string` | - | OCI image, local path, or disk image (required) |
-| logLevel? | [`LogLevel`](#loglevel) | - | Override log verbosity |
-| maxDurationSecs? | `number` | - | Maximum sandbox lifetime in seconds |
-| memoryMib? | `number` | `512` | Guest memory in MiB. This is a limit, not a reservation. |
-| name | `string` | - | Sandbox name (required) |
-| network? | [`NetworkConfig`](/sdk/typescript/networking#networkconfig) | `publicOnly` | Network policy and configuration |
-| patches? | `Array<PatchConfig>` | `[]` | Rootfs modifications applied before boot |
-| ports? | `Record<string, number>` | `{}` | Port mappings (`"hostPort": guestPort`) |
-| pullPolicy? | [`PullPolicy`](#pullpolicy) | `'if-missing'` | Image pull behavior |
-| quietLogs? | `boolean` | `false` | Suppress log output |
-| registryAuth? | `{ username: string, password: string }` | - | Private registry credentials |
-| replace? | `boolean` | `false` | Replace existing sandbox with same name |
-| scripts? | `Record<string, string>` | `{}` | Named scripts mounted at `/.msb/scripts/` |
-| secrets? | `Array<`[`SecretEntry`](/sdk/typescript/secrets#secretentry)`>` | `[]` | Secret injection |
-| shell? | `string` | `/bin/sh` | Shell for `shell()` calls |
-| user? | `string` | - | Default guest user |
-| volumes? | `Record<string, MountConfig>` | `{}` | Volume mounts. See [Volumes](/sdk/typescript/volumes). |
-| workdir? | `string` | - | Default working directory for commands |
+```typescript
+type RootfsSource =
+  | { kind: "bind"; path: string }
+  | { kind: "oci"; reference: string }
+  | { kind: "disk"; path: string; format: DiskImageFormat; fstype?: string };
 
-### SandboxHandle
-
-A lightweight handle to an existing sandbox (running or stopped). Obtained via [`Sandbox.get()`](#sandboxget) or [`Sandbox.list()`](#sandboxlist). Provides status, configuration, and lifecycle control **without** an active connection to the guest agent. Call `.start()` or `.connect()` to upgrade to a full [`Sandbox`](#instance-methods).
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| configJson | `string` | Raw JSON configuration |
-| connect() | `Promise<`[`Sandbox`](#instance-methods)`>` | Connect to a running sandbox |
-| createdAt | `number \| null` | Creation timestamp (ms since epoch) |
-| kill() | `Promise<void>` | Force terminate |
-| metrics() | `Promise<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
-| name | `string` | Sandbox name |
-| remove() | `Promise<void>` | Delete sandbox and state |
-| start() | `Promise<`[`Sandbox`](#instance-methods)`>` | Start in attached mode |
-| startDetached() | `Promise<`[`Sandbox`](#instance-methods)`>` | Start in detached mode |
-| status | [`SandboxStatus`](#sandboxstatus) | Current status |
-| stop() | `Promise<void>` | Graceful shutdown |
-| updatedAt | `number \| null` | Last update timestamp (ms since epoch) |
-
-### SandboxInfo
-
-Summary information about a sandbox, returned by [`Sandbox.list()`](#sandboxlist).
-
-| Field | Type | Description |
-|-------|------|-------------|
-| configJson | `string` | Raw JSON configuration |
-| createdAt | `number \| null` | Creation timestamp |
-| name | `string` | Sandbox name |
-| status | `string` | Current status |
-| updatedAt | `number \| null` | Last update timestamp |
+type DiskImageFormat = "qcow2" | "raw" | "vmdk";
+```
 
 ### SandboxMetrics
 
@@ -416,20 +545,55 @@ Point-in-time resource usage snapshot.
 | Field | Type | Description |
 |-------|------|-------------|
 | cpuPercent | `number` | CPU usage as a percentage |
-| diskReadBytes | `number` | Total bytes read from disk since boot |
-| diskWriteBytes | `number` | Total bytes written to disk since boot |
 | memoryBytes | `number` | Current memory usage in bytes |
 | memoryLimitBytes | `number` | Memory limit in bytes |
+| diskReadBytes | `number` | Total bytes read from disk since boot |
+| diskWriteBytes | `number` | Total bytes written to disk since boot |
 | netRxBytes | `number` | Total bytes received over the network since boot |
 | netTxBytes | `number` | Total bytes sent over the network since boot |
-| timestampMs | `number` | When this measurement was taken (ms since epoch) |
 | uptimeMs | `number` | Time since the sandbox was created (ms) |
+| timestamp | `Date` | When this measurement was taken |
+
+`allSandboxMetrics()` returns a `Record<string, SandboxMetrics>` keyed by sandbox name.
 
 ### SandboxStatus
 
 | Value | Description |
 |-------|-------------|
-| `'crashed'` | VM exited unexpectedly |
-| `'draining'` | Graceful shutdown in progress |
 | `'running'` | Guest agent is ready |
 | `'stopped'` | VM shut down; can be restarted |
+| `'crashed'` | VM exited unexpectedly |
+| `'draining'` | Graceful shutdown in progress |
+
+### Sizes
+
+The `microsandbox` package exports type-safe size helpers. All accept a number and return a branded `Mebibytes` value.
+
+| Helper | Description |
+|--------|-------------|
+| `MiB(n)` | `n` mebibytes. |
+| `KiB(n)` | `n` kibibytes (sub-MiB precision). |
+| `GiB(n)` | `n` gibibytes. |
+| `TiB(n)` | `n` tebibytes. |
+
+Bare numbers are also accepted by APIs taking `Mebibytes | number` (interpreted as MiB).
+
+### Errors
+
+`MicrosandboxError` is the base class. Every Rust-side variant has a dedicated subclass — use `instanceof` instead of parsing message strings.
+
+```typescript
+import { Sandbox, SandboxNotFoundError, ExecTimeoutError } from "microsandbox";
+
+try {
+  await Sandbox.remove("ghost");
+} catch (e) {
+  if (e instanceof SandboxNotFoundError) {
+    console.log("nothing to remove:", e.message);
+  } else {
+    throw e;
+  }
+}
+```
+
+Subclasses: `IoError`, `HttpError`, `LibkrunfwNotFoundError`, `DatabaseError`, `InvalidConfigError`, `SandboxNotFoundError`, `SandboxStillRunningError`, `RuntimeError`, `JsonError`, `ProtocolError`, `NixError`, `ExecTimeoutError` (carries `timeoutMs`), `TerminalError`, `SandboxFsError`, `ImageNotFoundError`, `ImageInUseError`, `VolumeNotFoundError`, `VolumeAlreadyExistsError`, `ImageError`, `PatchFailedError`, `CustomError`.

@@ -28,21 +28,19 @@ let sb = Sandbox::builder("sandbox")
 ```
 
 ```typescript TypeScript
-import { NetworkPolicy, Sandbox, Secret } from 'microsandbox'
+import { NetworkPolicy, Sandbox } from 'microsandbox'
 
-const sb = await Sandbox.create({
-    name: "sandbox",
-    image: "python",
-    memoryMib: 512,
-    cpus: 2,
-    secrets: [
-        Secret.env("OPENAI_API_KEY", {
-            value: process.env.OPENAI_API_KEY!,
-            allowHosts: ["api.openai.com"],
-        }),
-    ],
-    network: NetworkPolicy.publicOnly(),
-})
+await using sb = await Sandbox.builder("sandbox")
+    .image("python")
+    .memory(512)
+    .cpus(2)
+    .secret((s) => s
+        .env("OPENAI_API_KEY")
+        .value(process.env.OPENAI_API_KEY!)
+        .allowHost("api.openai.com")
+    )
+    .network((n) => n.policy(NetworkPolicy.publicOnly()))
+    .create()
 ```
 
 ```python Python
@@ -100,16 +98,12 @@ let sb = Sandbox::builder("sandbox")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "sandbox",
-    image: "python",
-    secrets: [
-        Secret.env("OPENAI_API_KEY", {
-            value: process.env.OPENAI_API_KEY!,
-            allowHosts: ["api.openai.com"],
-        }),
-    ],
-})
+import { Sandbox } from 'microsandbox'
+
+await using sb = await Sandbox.builder("sandbox")
+    .image("python")
+    .secretEnv("OPENAI_API_KEY", process.env.OPENAI_API_KEY!, "api.openai.com")
+    .create()
 ```
 
 ```python Python
@@ -146,11 +140,19 @@ let sb = Sandbox::builder("sandbox")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "sandbox",
-    image: "python",
-    network: NetworkPolicy.allowlist(["api.openai.com", "pypi.org"]),
-})
+import { Destination, Rule, Sandbox } from 'microsandbox'
+
+await using sb = await Sandbox.builder("sandbox")
+    .image("python")
+    .network((n) => n.policy({
+        defaultEgress: "deny",
+        defaultIngress: "allow",
+        rules: [
+            Rule.allowEgress(Destination.domain("api.openai.com")),
+            Rule.allowEgress(Destination.domain("pypi.org")),
+        ],
+    }))
+    .create()
 ```
 
 ```python Python
@@ -188,18 +190,14 @@ let sb = Sandbox::builder("encrypted")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "encrypted",
-    image: "python",
-    volumes: {
-        "/secrets": Mount.bind("/data/secrets", {
-            hooks: {
-                onRead: (path, data) => decrypt(data, key),
-                onWrite: (path, data) => encrypt(data, key),
-            },
-        }),
-    },
-})
+await using sb = await Sandbox.builder("encrypted")
+    .image("python")
+    .volume("/secrets", (v) => v
+        .bind("/data/secrets")
+        .onRead((path, data) => decrypt(data, key))
+        .onWrite((path, data) => encrypt(data, key))
+    )
+    .create()
 ```
 
 ```python Python
@@ -243,7 +241,7 @@ let workers: Vec<Sandbox> = futures::future::try_join_all(
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({ name: "base", image: "python" })
+const sb = await Sandbox.builder("base").image("python").create()
 await sb.exec("pip", ["install", "-r", "requirements.txt"])
 
 const snapshot = await sb.snapshot()

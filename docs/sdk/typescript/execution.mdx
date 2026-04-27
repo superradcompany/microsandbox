@@ -6,73 +6,42 @@ icon: "terminal"
 
 See [Commands](/sandboxes/commands) for usage examples.
 
----
-
-#### attach()
-
 ```typescript
-attach(cmd: string, args?: Array<string>): Promise<number>
+import { Sandbox } from "microsandbox";
+
+await using sandbox = await Sandbox.builder("exec-demo")
+  .image("python")
+  .replace()
+  .create();
+
+// Collected output.
+const result = await sandbox.exec("python3", ["-c", "print(1 + 1)"]);
+console.log(result.stdout()); // "2\n"
+console.log(result.code);     // 0
+
+// Shell command (pipes, redirects, etc.).
+const out = await sandbox.shell("echo hello && pwd");
+console.log(out.stdout());
+
+// Full configuration via the chainable options builder.
+const configured = await sandbox.execWith("python3", (e) =>
+  e.args(["script.py"]).cwd("/app").env("PYTHONPATH", "/app/lib").timeout(30_000),
+);
+
+// Streaming output.
+await using handle = await sandbox.execStream("tail", ["-f", "/var/log/app.log"]);
+for await (const event of handle) {
+  if (event.kind === "stdout") process.stdout.write(event.data);
+  if (event.kind === "exited") break;
+}
 ```
-
-Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session. Press `Ctrl+]` (or configured detach keys) to disconnect without stopping the process.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| cmd | `string` | Command to run |
-| args? | `Array<string>` | Command arguments |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `number` | Exit code of the process |
-
----
-
-#### attachShell()
-
-```typescript
-attachShell(): Promise<number>
-```
-
-Attach to the sandbox's default shell.
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `number` | Exit code |
-
----
-
-#### attachWithConfig()
-
-```typescript
-attachWithConfig(config: AttachConfig): Promise<number>
-```
-
-Interactive PTY attach with options for environment variables, working directory, user, and custom detach keys.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| config | [`AttachConfig`](#attachconfig) | Attach configuration |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `number` | Exit code |
 
 ---
 
 #### exec()
 
 ```typescript
-exec(cmd: string, args?: Array<string>): Promise<ExecOutput>
+exec(cmd: string, args?: Iterable<string>): Promise<ExecOutput>
 ```
 
 Run a command inside the sandbox and wait for it to complete. Collects all stdout and stderr into memory and returns them along with the exit code. For long-running processes or large output, use [`execStream()`](#execstream) instead.
@@ -82,7 +51,33 @@ Run a command inside the sandbox and wait for it to complete. Collects all stdou
 | Name | Type | Description |
 |------|------|-------------|
 | cmd | `string` | Command to execute (e.g. `"python"`, `"/usr/bin/node"`) |
-| args? | `Array<string>` | Command arguments (e.g. `["-c", "print('hello')"]`) |
+| args? | `Iterable<string>` | Command arguments (e.g. `["-c", "print('hello')"]`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecOutput`](#execoutput) | Collected stdout, stderr, and exit status |
+
+---
+
+#### execWith()
+
+```typescript
+execWith(
+  cmd: string,
+  configure: (b: ExecOptionsBuilder) => ExecOptionsBuilder,
+): Promise<ExecOutput>
+```
+
+Run a command with per-execution overrides. Configure working directory, environment variables, timeout, stdin, TTY, user, and rlimits using the chained [`ExecOptionsBuilder`](#execoptionsbuilder). These overrides apply only to this execution.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `string` | Command to execute |
+| configure | `(b: ExecOptionsBuilder) => ExecOptionsBuilder` | Builder callback |
 
 **Returns**
 
@@ -95,17 +90,17 @@ Run a command inside the sandbox and wait for it to complete. Collects all stdou
 #### execStream()
 
 ```typescript
-execStream(cmd: string, args?: Array<string>): Promise<ExecHandle>
+execStream(cmd: string, args?: Iterable<string>): Promise<ExecHandle>
 ```
 
-Run a command with streaming output. Returns a handle that emits stdout, stderr, and exit events as they happen, rather than buffering everything.
+Run a command with streaming output. Returns a handle that emits `started` / `stdout` / `stderr` / `exited` events as they happen, rather than buffering everything.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
 | cmd | `string` | Command to execute |
-| args? | `Array<string>` | Command arguments |
+| args? | `Iterable<string>` | Command arguments |
 
 **Returns**
 
@@ -115,25 +110,16 @@ Run a command with streaming output. Returns a handle that emits stdout, stderr,
 
 ---
 
-#### execWithConfig()
+#### execStreamWith()
 
 ```typescript
-execWithConfig(config: ExecConfig): Promise<ExecOutput>
+execStreamWith(
+  cmd: string,
+  configure: (b: ExecOptionsBuilder) => ExecOptionsBuilder,
+): Promise<ExecHandle>
 ```
 
-Run a command with per-execution overrides. Configure working directory, environment variables, timeout, stdin, and TTY allocation. These overrides apply only to this execution and don't change the sandbox's defaults.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| config | [`ExecConfig`](#execconfig) | Execution configuration |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`ExecOutput`](#execoutput) | Collected stdout, stderr, and exit status |
+Streaming variant of [`execWith()`](#execwith).
 
 ---
 
@@ -181,65 +167,133 @@ Shell command with streaming output.
 
 ---
 
+#### attach()
+
+```typescript
+attach(cmd: string, args?: Iterable<string>): Promise<number>
+```
+
+Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session. Press `Ctrl+]` (or configured detach keys) to disconnect without stopping the process.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `string` | Command to run |
+| args? | `Iterable<string>` | Command arguments |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `number` | Exit code of the process |
+
+---
+
+#### attachShell()
+
+```typescript
+attachShell(): Promise<number>
+```
+
+Attach to the sandbox's default shell.
+
+---
+
+#### attachWith()
+
+```typescript
+attachWith(
+  cmd: string,
+  configure: (b: AttachOptionsBuilder) => AttachOptionsBuilder,
+): Promise<number>
+```
+
+Interactive PTY attach with full options (cwd, env, user, detachKeys, rlimits) via the [`AttachOptionsBuilder`](#attachoptionsbuilder).
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `string` | Command to run |
+| configure | `(b: AttachOptionsBuilder) => AttachOptionsBuilder` | Builder callback |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `number` | Exit code |
+
+---
+
 ## Types
 
-### AttachConfig
+### ExecOptionsBuilder
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| args? | `Array<string>` | `[]` | Command arguments |
-| cmd | `string` | - | Command to run (required) |
-| cwd? | `string` | - | Working directory |
-| detachKeys? | `string` | `Ctrl+]` | Key sequence to detach without stopping |
-| env? | `Record<string, string>` | `{}` | Environment variables |
-| user? | `string` | - | Guest user |
+Chainable options builder consumed by [`Sandbox.execWith()`](#execwith) and [`Sandbox.execStreamWith()`](#execstreamwith). Every setter returns the builder.
 
-### ExecConfig
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| arg | `(arg: string) => this` | Append a single argument. |
+| args | `(args: Iterable<string>) => this` | Append multiple arguments. |
+| cwd | `(cwd: string) => this` | Working directory for the command. |
+| user | `(user: string) => this` | Guest user to run as. |
+| env | `(key: string, value: string) => this` | Add a single environment variable (merged onto sandbox env). |
+| envs | `(vars: Iterable<[string,string]> \| Record<string,string>) => this` | Bulk-add environment variables. |
+| timeout | `(ms: number) => this` | Kill the process if it hasn't exited within `ms` milliseconds. Triggers [`ExecTimeoutError`](/sdk/typescript/sandbox#errors). |
+| stdinNull | `() => this` | Connect stdin to `/dev/null` (default). |
+| stdinPipe | `() => this` | Open a writable pipe — caller writes via [`ExecHandle.takeStdin()`](#exechandle). |
+| stdinBytes | `(data: Uint8Array \| string) => this` | Pre-load stdin with these bytes and close. |
+| tty | `(enabled: boolean) => this` | Allocate a pseudo-terminal. |
+| rlimit | `(resource: RlimitResource, limit: number) => this` | Set both soft and hard limit to `limit`. |
+| rlimitRange | `(resource: RlimitResource, soft: number, hard: number) => this` | Set distinct soft and hard limits. |
+| build | `() => ExecOptions` | Materialize the accumulated options. |
 
-Per-execution overrides.
+`RlimitResource` is one of `"cpu" | "fsize" | "data" | "stack" | "core" | "rss" | "nproc" | "nofile" | "memlock" | "as" | "locks" | "sigpending" | "msgqueue" | "nice" | "rtprio" | "rttime"`.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| args? | `Array<string>` | `[]` | Command arguments |
-| cmd | `string` | - | Command to execute (required) |
-| cwd? | `string` | - | Working directory |
-| env? | `Record<string, string>` | `{}` | Environment variables (merged on top of sandbox env) |
-| stdin? | `string` | - | Fixed stdin content |
-| timeoutMs? | `number` | - | Kill the process after this many milliseconds |
-| tty? | `boolean` | `false` | Allocate a pseudo-terminal |
-| user? | `string` | - | Guest user |
+### ExecOptions
 
-### ExecEvent
+Result of `ExecOptionsBuilder.build()`. All fields are read-only.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| code? | `number` | Exit code (on `'exited'`) |
-| data? | `Buffer` | Output data (on `'stdout'` / `'stderr'`) |
-| eventType | [`ExecEventType`](#execeventtype) | Event type |
-| pid? | `number` | Guest PID (on `'started'`) |
+| args | `readonly string[]` | Command arguments. |
+| cwd | `string \| null` | Working directory. |
+| user | `string \| null` | Guest user. |
+| env | `ReadonlyArray<[string,string]>` | Per-exec environment overrides. |
+| timeoutMs | `number \| null` | Hard timeout in ms. |
+| stdin | [`StdinMode`](#stdin) | Stdin behavior. |
+| tty | `boolean` | Whether to allocate a PTY. |
+| rlimits | `readonly Rlimit[]` | Per-exec rlimits. |
 
-### ExecEventType
+### AttachOptionsBuilder
 
-| Value | Description |
-|-------|-------------|
-| `'exited'` | The process has exited |
-| `'started'` | The process has started |
-| `'stderr'` | A chunk of stderr data |
-| `'stdout'` | A chunk of stdout data |
+Options builder for [`attachWith()`](#attachwith).
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| arg / args | (same as ExecOptionsBuilder) | Command arguments. |
+| cwd | `(cwd: string) => this` | Working directory. |
+| user | `(user: string) => this` | Guest user. |
+| env / envs | (same as ExecOptionsBuilder) | Environment variables. |
+| detachKeys | `(spec: string) => this` | Detach key sequence (e.g. `"ctrl-]"` or `"ctrl-p,ctrl-q"`). |
+| rlimit / rlimitRange | (same as ExecOptionsBuilder) | Per-attach rlimits. |
+| build | `() => AttachOptions` | Materialize the options. |
 
 ### ExecHandle
 
-A handle to a running streaming execution.
+Streaming handle returned by [`execStream()`](#execstream), [`execStreamWith()`](#execstreamwith), and [`shellStream()`](#shellstream). Implements `AsyncIterable<ExecEvent>` and `AsyncDisposable` (the dispose path sends `kill()`).
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
-| collect() | `Promise<`[`ExecOutput`](#execoutput)`>` | Wait and collect all remaining output |
-| id | `Promise<string>` | Session ID for this execution |
-| kill() | `Promise<void>` | Send SIGKILL |
-| recv() | `Promise<`[`ExecEvent`](#execevent)` \| null>` | Receive the next event. Returns `null` when done. |
-| signal(signal) | `Promise<void>` | Send a POSIX signal to the process |
-| takeStdin() | `Promise<`[`ExecSink`](#execsink)` \| null>` | Take the stdin writer. Returns `null` after first call. |
-| wait() | `Promise<`[`ExitStatus`](#exitstatus)`>` | Wait for the process to exit |
+| recv() | `Promise<`[`ExecEvent`](/sdk/typescript/events#execevent)` \| null>` | Receive the next event. Returns `null` when the stream ends. |
+| takeStdin() | `Promise<`[`ExecSink`](#execsink)` \| null>` | Take ownership of the stdin sink. Returns `null` after first call (or if stdin is not piped). |
+| wait() | `Promise<`[`ExitStatus`](#exitstatus)`>` | Wait for the process to exit. |
+| collect() | `Promise<`[`ExecOutput`](#execoutput)`>` | Drain stdout/stderr and wait for exit. |
+| signal(signal) | `Promise<void>` | Send a POSIX signal (number) to the process. |
+| kill() | `Promise<void>` | Send SIGKILL. |
+| [Symbol.asyncIterator] | `AsyncIterator<`[`ExecEvent`](/sdk/typescript/events#execevent)`>` | Use with `for await...of`. |
+| [Symbol.asyncDispose] | `() => Promise<void>` | Calls `kill()` on dispose; errors are swallowed. |
 
 ### ExecOutput
 
@@ -247,26 +301,36 @@ The result of a completed command execution.
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
-| code | `number` | Exit code |
-| status() | [`ExitStatus`](#exitstatus) | Exit status object |
-| stderr() | `string` | Collected stderr decoded as a string |
-| stderrBytes() | `Buffer` | Raw stderr bytes |
-| stdout() | `string` | Collected stdout decoded as a string |
-| stdoutBytes() | `Buffer` | Raw stdout bytes |
-| success | `boolean` | `true` if code is `0` |
+| code | `number` | Exit code. |
+| success | `boolean` | `true` if `code === 0`. |
+| status | [`ExitStatus`](#exitstatus) | `{ code, success }` getter. |
+| stdout() | `string` | Decoded stdout (UTF-8, lossy on invalid sequences). |
+| stderr() | `string` | Decoded stderr. |
+| stdoutBytes() | `Uint8Array` | Raw stdout bytes. |
+| stderrBytes() | `Uint8Array` | Raw stderr bytes. |
 
 ### ExecSink
 
-Writer for sending data to a running process's stdin.
+Writer for sending data to a running process's stdin. Implements `AsyncDisposable` (calls `close()`).
 
-| Method | Parameters | Description |
+| Method | Signature | Description |
 |--------|-----------|-------------|
-| close() | - | Close stdin. The process sees EOF. |
-| write() | `data: Buffer` | Write bytes to the process's stdin |
+| write | `(data: Uint8Array \| string) => Promise<void>` | Write bytes to the process's stdin. |
+| close | `() => Promise<void>` | Send EOF. Idempotent. |
+
+### Stdin
+
+Factory for [`StdinMode`](/sdk/typescript/sandbox) values used directly in `ExecOptions`.
+
+| Helper | Description |
+|--------|-------------|
+| `Stdin.null()` | Connect stdin to `/dev/null`. |
+| `Stdin.pipe()` | Open a writable pipe (use with `ExecHandle.takeStdin()`). |
+| `Stdin.bytes(data)` | Send the given bytes (or UTF-8 string) and close stdin. |
 
 ### ExitStatus
 
 | Field | Type | Description |
 |-------|------|-------------|
-| code | `number` | Exit code. `0` typically means success. |
-| success | `boolean` | `true` if code is `0` |
+| code | `number` | Process exit code. |
+| success | `boolean` | `true` if `code === 0`. |

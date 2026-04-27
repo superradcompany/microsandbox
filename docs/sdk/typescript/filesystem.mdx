@@ -8,68 +8,55 @@ See [Filesystem](/sandboxes/filesystem) for usage examples and extensible backen
 
 ## SandboxFs
 
-Filesystem handle for a running sandbox. Obtained via `sb.fs()`. All operations go through the same host-guest channel as command execution - no SSH, no network involved. For bulk file operations, consider using [volumes](/sandboxes/volumes) instead.
+Filesystem handle for a running sandbox. Obtained via `sandbox.fs()`. All operations go through the same host–guest channel as command execution — no SSH, no network involved. For bulk file operations, consider using [volumes](/sdk/typescript/volumes) instead.
+
+```typescript
+const fs = sandbox.fs();
+
+await fs.write("/tmp/config.json", '{"debug": true}');
+const text = await fs.readToString("/tmp/config.json");
+
+for (const entry of await fs.list("/etc")) {
+  console.log(`${entry.path} (${entry.kind})`);
+}
+
+if (await fs.exists("/tmp/config.json")) {
+  const meta = await fs.stat("/tmp/config.json");
+  console.log(`size=${meta.size}, kind=${meta.kind}`);
+}
+```
 
 ---
 
-#### copy()
+#### read()
 
 ```typescript
-copy(from: string, to: string): Promise<void>
+read(path: string): Promise<Uint8Array>
 ```
 
-Copy a file within the sandbox.
+Read the entire contents of a file as raw bytes.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
-| from | `string` | Source path |
-| to | `string` | Destination path |
+| path | `string` | Absolute path inside the guest (e.g. `"/app/config.json"`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Uint8Array` | File contents |
 
 ---
 
-#### copyFromHost()
+#### readToString()
 
 ```typescript
-copyFromHost(hostPath: string, guestPath: string): Promise<void>
+readToString(path: string): Promise<string>
 ```
 
-Copy a file from the host machine into the sandbox. For transferring many files, consider a [bind-mounted volume](/sandboxes/volumes) instead.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| hostPath | `string` | Path on the host filesystem |
-| guestPath | `string` | Destination path inside the sandbox |
-
----
-
-#### copyToHost()
-
-```typescript
-copyToHost(guestPath: string, hostPath: string): Promise<void>
-```
-
-Copy a file from the sandbox to the host machine.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| guestPath | `string` | Path inside the sandbox |
-| hostPath | `string` | Destination path on the host |
-
----
-
-#### exists()
-
-```typescript
-exists(path: string): Promise<boolean>
-```
-
-Check whether a path exists inside the sandbox.
+Read the entire contents of a file and decode as UTF-8.
 
 **Parameters**
 
@@ -81,14 +68,75 @@ Check whether a path exists inside the sandbox.
 
 | Type | Description |
 |------|-------------|
-| `boolean` | `true` if the path exists |
+| `string` | File contents as a string |
+
+---
+
+#### readStream()
+
+```typescript
+readStream(path: string): Promise<FsReadStream>
+```
+
+Open a streaming reader for a file. Use this for files too large to fit in memory.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Absolute path inside the guest |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`FsReadStream`](#fsreadstream) | Async stream that yields `Uint8Array` chunks |
+
+---
+
+#### write()
+
+```typescript
+write(path: string, data: Uint8Array | string): Promise<void>
+```
+
+Write content to a file, creating it if it doesn't exist and overwriting if it does. Parent directories must already exist.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Absolute path inside the guest |
+| data | `Uint8Array \| string` | File content (strings are UTF-8 encoded) |
+
+---
+
+#### writeStream()
+
+```typescript
+writeStream(path: string): Promise<FsWriteSink>
+```
+
+Open a streaming writer for a file. The sink supports `Symbol.asyncDispose`, so prefer `await using sink = await fs.writeStream(path)` to auto-close.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Absolute path inside the guest |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`FsWriteSink`](#fswritesink) | Streaming writer |
 
 ---
 
 #### list()
 
 ```typescript
-list(path: string): Promise<Array<FsEntry>>
+list(path: string): Promise<FsEntry[]>
 ```
 
 List the entries in a directory.
@@ -103,7 +151,7 @@ List the entries in a directory.
 
 | Type | Description |
 |------|-------------|
-| `Array<`[`FsEntry`](#fsentry)`>` | Directory entries |
+| [`FsEntry`](#fsentry)`[]` | Directory entries |
 
 ---
 
@@ -123,69 +171,19 @@ Create a directory. Parent directories must already exist.
 
 ---
 
-#### read()
+#### removeDir()
 
 ```typescript
-read(path: string): Promise<Buffer>
+removeDir(path: string): Promise<void>
 ```
 
-Read the entire contents of a file as raw bytes.
+Remove a directory.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
-| path | `string` | Absolute path inside the guest (e.g. `"/app/config.json"`) |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `Buffer` | File contents as raw bytes |
-
----
-
-#### readStream()
-
-```typescript
-readStream(path: string): Promise<FsReadStream>
-```
-
-Open a streaming reader for a file. Data is transferred in chunks of approximately 3 MiB each. Use this for files too large to fit in memory.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| path | `string` | Absolute path inside the guest |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`FsReadStream`](#fsreadstream) | Async stream that yields chunks of file data |
-
----
-
-#### readString()
-
-```typescript
-readString(path: string): Promise<string>
-```
-
-Read the entire contents of a file and decode as UTF-8.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| path | `string` | Absolute path inside the guest |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `string` | File contents as a string |
+| path | `string` | Absolute directory path |
 
 ---
 
@@ -205,19 +203,20 @@ Remove a file.
 
 ---
 
-#### removeDir()
+#### copy()
 
 ```typescript
-removeDir(path: string): Promise<void>
+copy(from: string, to: string): Promise<void>
 ```
 
-Remove a directory.
+Copy a file within the sandbox.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
-| path | `string` | Absolute directory path |
+| from | `string` | Source path |
+| to | `string` | Destination path |
 
 ---
 
@@ -260,20 +259,59 @@ Get detailed metadata for a file or directory.
 
 ---
 
-#### write()
+#### exists()
 
 ```typescript
-write(path: string, data: Buffer): Promise<void>
+exists(path: string): Promise<boolean>
 ```
 
-Write content to a file, creating it if it doesn't exist and overwriting if it does. Parent directories must already exist.
+Check whether a path exists inside the sandbox.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
 | path | `string` | Absolute path inside the guest |
-| data | `Buffer` | File content |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `boolean` | `true` if the path exists |
+
+---
+
+#### copyFromHost()
+
+```typescript
+copyFromHost(hostPath: string, guestPath: string): Promise<void>
+```
+
+Copy a file from the host machine into the sandbox. For transferring many files, consider a [bind-mounted volume](/sdk/typescript/volumes) instead.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| hostPath | `string` | Path on the host filesystem |
+| guestPath | `string` | Destination path inside the sandbox |
+
+---
+
+#### copyToHost()
+
+```typescript
+copyToHost(guestPath: string, hostPath: string): Promise<void>
+```
+
+Copy a file from the sandbox to the host machine.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| guestPath | `string` | Path inside the sandbox |
+| hostPath | `string` | Destination path on the host |
 
 ---
 
@@ -285,20 +323,20 @@ Metadata for a single directory entry, returned by [`list()`](#list).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| kind | [`FsEntryKind`](#fsentrykind) | Type of entry |
-| mode | `number` | Unix permission bits |
-| modified? | `number` | Last modified timestamp (ms since epoch) |
 | path | `string` | File path |
+| kind | [`FsEntryKind`](#fsentrykind) | Type of entry |
 | size | `number` | File size in bytes |
+| mode | `number` | Unix permission bits |
+| modified | `Date \| null` | Last modified timestamp |
 
 ### FsEntryKind
 
 | Value | Description |
 |-------|-------------|
-| `'directory'` | Directory |
 | `'file'` | Regular file |
-| `'other'` | Other entry type |
+| `'directory'` | Directory |
 | `'symlink'` | Symbolic link |
+| `'other'` | Other entry type |
 
 ### FsMetadata
 
@@ -306,18 +344,29 @@ Detailed file metadata, returned by [`stat()`](#stat).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| created? | `number` | Creation timestamp (ms since epoch) |
 | kind | [`FsEntryKind`](#fsentrykind) | Type of entry |
-| mode | `number` | Unix permission bits |
-| modified? | `number` | Last modified timestamp (ms since epoch) |
-| readonly | `boolean` | Whether the file is read-only |
 | size | `number` | File size in bytes |
+| mode | `number` | Unix permission bits |
+| readonly | `boolean` | Whether the file is read-only |
+| modified | `Date \| null` | Last modified timestamp |
+| created | `Date \| null` | Creation timestamp |
 
 ### FsReadStream
 
-Async stream for reading a file in chunks. Obtained via [`readStream()`](#readstream).
+Async stream for reading a file in chunks. Obtained via [`readStream()`](#readstream). Implements `AsyncIterable<Uint8Array>` and `AsyncDisposable`.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| [Symbol.asyncIterator] | `AsyncGenerator<Buffer>` | Use with `for await...of` |
-| recv() | `Promise<Buffer \| null>` | Receive the next chunk. Returns `null` when the file has been fully read. |
+| recv() | `Promise<Uint8Array \| null>` | Receive the next chunk. Returns `null` once the file is fully read. |
+| collect() | `Promise<Uint8Array>` | Drain the stream into a single buffer. |
+| [Symbol.asyncIterator] | `AsyncIterator<Uint8Array>` | Use with `for await...of`. |
+| [Symbol.asyncDispose] | `() => Promise<void>` | Marks the stream as done. |
+
+### FsWriteSink
+
+Async writer returned by [`writeStream()`](#writestream). Implements `AsyncDisposable` (calls `close()`).
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| write | `(data: Uint8Array \| string) => Promise<void>` | Append bytes to the file. |
+| close | `() => Promise<void>` | Flush and close. Idempotent. |

@@ -66,16 +66,13 @@ icon: "bolt"
     ```typescript TypeScript
     import { Sandbox } from 'microsandbox'
 
-    const sb = await Sandbox.create({
-        name: "hello",
-        image: "python",
-        memoryMib: 512,
-    })
+    await using sb = await Sandbox.builder("hello")
+        .image("python")
+        .memory(512)
+        .create()
 
     const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"])
     console.log(output.stdout()) // Hello from a microVM!
-
-    await sb.stop()
     ```
 
     ```python Python

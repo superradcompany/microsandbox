@@ -48,13 +48,13 @@ The matching platform package (`@superradcompany/microsandbox-<triple>`) carries
 ## Quick Start
 
 ```typescript
-import { Sandbox, MiB } from "microsandbox";
+import { Sandbox } from "microsandbox";
 
 // Build and boot a sandbox in attached mode (auto-disposed at scope exit).
 await using sandbox = await Sandbox.builder("my-sandbox")
   .image("alpine")
   .cpus(1)
-  .memory(MiB(512))
+  .memory(512)
   .create();
 
 const output = await sandbox.shell("echo 'Hello from microsandbox!'");
@@ -141,10 +141,10 @@ if (await fs.exists("/tmp/config.json")) {
 ### Named Volumes
 
 ```typescript
-import { Sandbox, Volume, MiB } from "microsandbox";
+import { Sandbox, Volume } from "microsandbox";
 
 // Create a 100 MiB named volume.
-const data = await Volume.builder("my-data").quota(MiB(100)).create();
+const data = await Volume.builder("my-data").quota(100).create();
 
 // Writer sandbox.
 {
@@ -183,13 +183,13 @@ extension; call `.format(...)` to override. `.fstype(...)` is the inner
 filesystem agentd will mount; omit to let agentd autodetect.
 
 ```typescript
-import { Sandbox, MiB } from "microsandbox";
+import { Sandbox } from "microsandbox";
 
 await using sb = await Sandbox.builder("worker")
   .image("alpine")
   .volume("/data",    (m) => m.disk("./data.qcow2").fstype("ext4"))
   .volume("/seed",    (m) => m.disk("./seed.raw").readonly())
-  .volume("/scratch", (m) => m.tmpfs().size(MiB(128)).readonly())
+  .volume("/scratch", (m) => m.tmpfs().size(128).readonly())
   .replace()
   .create();
 ```

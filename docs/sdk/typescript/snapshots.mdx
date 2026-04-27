@@ -1,140 +1,80 @@
 ---
 title: Snapshots
-description: TypeScript SDK - Snapshot API reference
+description: TypeScript SDK - Snapshot and rootfs patch API reference
 icon: "camera"
 ---
 
 <Note>
-  Snapshots are coming soon and not yet available in the current SDK.
+  VM snapshots (live capture / fork / restore) are coming soon and not yet available in the current SDK. The API below covers the related shipping feature: **rootfs patches**, which let you modify the guest filesystem before the VM boots.
 </Note>
 
 See [Snapshots](/sandboxes/snapshots) for usage examples and patterns.
 
-## Sandbox methods
+## Rootfs patches
 
----
-
-#### resume()
+Rootfs patches are pre-boot modifications applied to the guest filesystem. Use them to seed config files, drop in scripts, or patch image defaults without rebuilding the OCI image.
 
 ```typescript
-resume(): Promise<void>
+import { Sandbox } from "microsandbox";
+
+await using sandbox = await Sandbox.builder("patched")
+  .image("alpine")
+  .patch((p) =>
+    p
+      .text("/etc/greeting.txt", "Hello!\n")
+      .mkdir("/app", { mode: 0o755 })
+      .text("/app/config.json", '{"debug": true}', { mode: 0o644 })
+      .copyDir("./scripts", "/app/scripts")
+      .append("/etc/hosts", "127.0.0.1 myapp.local\n"),
+  )
+  .replace()
+  .create();
 ```
 
-Resume the sandbox after a snapshot. The VM continues from exactly where it was paused.
+## PatchBuilder
 
----
+Builder consumed by [`SandboxBuilder.patch(p => …)`](/sdk/typescript/sandbox#sandboxbuilder). Each call appends one entry to the patch list and returns the builder.
 
-#### snapshot()
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| text | `(path: string, content: string, opts?: PatchFileOptions) => this` | Write text to a file in the guest rootfs. |
+| file | `(path: string, content: Uint8Array, opts?: PatchFileOptions) => this` | Write raw bytes. |
+| copyFile | `(src: string, dst: string, opts?: PatchFileOptions) => this` | Copy a host file into the guest rootfs. |
+| copyDir | `(src: string, dst: string, opts?: PatchReplaceOnly) => this` | Recursively copy a host directory. |
+| symlink | `(target: string, link: string, opts?: PatchReplaceOnly) => this` | Create a symlink. |
+| mkdir | `(path: string, opts?: PatchModeOnly) => this` | Create a directory (idempotent). |
+| remove | `(path: string) => this` | Delete a path (idempotent). |
+| append | `(path: string, content: string) => this` | Append text to an existing file; copies up from a lower layer if needed. |
+| build | `() => Patch[]` | Materialize the patch list. |
+
+### Option types
 
 ```typescript
-snapshot(): Promise<Snapshot>
+interface PatchFileOptions {
+  mode?: number;     // Unix permission bits (e.g. 0o644)
+  replace?: boolean; // Allow shadowing an existing path
+}
+
+interface PatchReplaceOnly { replace?: boolean; }
+interface PatchModeOnly    { mode?: number; }
 ```
 
-Capture the full VM state: memory, CPU registers, filesystem, everything. The sandbox is paused during capture. Call [`resume()`](#resume) to continue running, or use the snapshot to fork new sandboxes.
+## Types
 
-**Returns**
+### Patch
 
-| Type | Description |
-|------|-------------|
-| `Snapshot` | Handle to the captured state |
-
----
-
-## Snapshot (instance)
-
----
-
-#### restore()
+Discriminated union representing one patch entry. Stored on `SandboxConfig.patches`.
 
 ```typescript
-restore(sandboxName: string, opts?: RestoreOptions): Promise<Sandbox>
+type Patch =
+  | { kind: "text"; path: string; content: string; mode?: number; replace?: boolean }
+  | { kind: "file"; path: string; content: Uint8Array; mode?: number; replace?: boolean }
+  | { kind: "copyFile"; src: string; dst: string; mode?: number; replace?: boolean }
+  | { kind: "copyDir"; src: string; dst: string; replace?: boolean }
+  | { kind: "symlink"; target: string; link: string; replace?: boolean }
+  | { kind: "mkdir"; path: string; mode?: number }
+  | { kind: "remove"; path: string }
+  | { kind: "append"; path: string; content: string };
 ```
 
-Fork a new sandbox from this snapshot. The new sandbox starts exactly where the original was - no boot, no setup. Each fork gets its own copy-on-write filesystem.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| sandboxName | `string` | Name for the new sandbox |
-| opts? | `{ memoryMib?: number, cpus?: number }` | Optional config overrides |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`Sandbox`](/sdk/typescript/sandbox#instance-methods) | The forked sandbox, ready to accept commands |
-
----
-
-#### saveNamed()
-
-```typescript
-saveNamed(name: string): Promise<void>
-```
-
-Persist this snapshot under a name so it survives beyond the lifetime of the original sandbox. Named snapshots can be loaded later with [`Snapshot.get()`](#snapshotget) to fork workers.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| name | `string` | Snapshot name (e.g. `"after-pip-install"`) |
-
----
-
-## Snapshot (static)
-
----
-
-#### Snapshot.delete()
-
-```typescript
-static delete(name: string): Promise<void>
-```
-
-Delete a named snapshot from disk.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| name | `string` | Snapshot name |
-
----
-
-#### Snapshot.get()
-
-```typescript
-static get(name: string): Promise<Snapshot>
-```
-
-Load a previously saved named snapshot.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| name | `string` | Snapshot name |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `Snapshot` | The loaded snapshot |
-
----
-
-#### Snapshot.list()
-
-```typescript
-static list(): Promise<Array<SnapshotInfo>>
-```
-
-List all saved named snapshots.
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `Array<SnapshotInfo>` | All named snapshots |
+Patch failures at boot raise [`PatchFailedError`](/sdk/typescript/sandbox#errors).

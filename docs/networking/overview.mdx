@@ -30,25 +30,22 @@ let sb = Sandbox::builder("web-agent")
 import { NetworkPolicy, Sandbox } from 'microsandbox'
 
 // No network access
-const sb1 = await Sandbox.create({
-    name: "isolated",
-    image: "python",
-    network: NetworkPolicy.none(),
-})
+await using sb1 = await Sandbox.builder("isolated")
+    .image("python")
+    .network((n) => n.policy(NetworkPolicy.none()))
+    .create()
 
 // Public internet only (default, blocks private ranges)
-const sb2 = await Sandbox.create({
-    name: "web-agent",
-    image: "python",
-    network: NetworkPolicy.publicOnly(),
-})
+await using sb2 = await Sandbox.builder("web-agent")
+    .image("python")
+    .network((n) => n.policy(NetworkPolicy.publicOnly()))
+    .create()
 
 // Unrestricted access
-const sb3 = await Sandbox.create({
-    name: "dev",
-    image: "python",
-    network: NetworkPolicy.allowAll(),
-})
+await using sb3 = await Sandbox.builder("dev")
+    .image("python")
+    .network((n) => n.policy(NetworkPolicy.allowAll()))
+    .create()
 ```
 
 ```python Python
@@ -116,21 +113,45 @@ let sb = Sandbox::builder("secure-agent")
 ```
 
 ```typescript TypeScript
-import { Sandbox } from 'microsandbox'
+import { Destination, PortRange, Sandbox } from 'microsandbox'
 
-const sb = await Sandbox.create({
-    name: "secure-agent",
-    image: "alpine",
-    network: {
+await using sb = await Sandbox.builder("secure-agent")
+    .image("alpine")
+    .network((n) => n.policy({
+        defaultEgress: "deny",
+        defaultIngress: "allow",
         rules: [
-            { action: "allow", direction: "outbound", protocol: "tcp", port: "443" },
-            { action: "allow", direction: "outbound", protocol: "udp", port: "53" },
-            { action: "deny", direction: "outbound", destination: "metadata" },
-            { action: "deny", direction: "outbound", destination: "private" },
+            {
+                direction: "egress",
+                destination: Destination.any(),
+                protocols: ["tcp"],
+                ports: [PortRange.single(443)],
+                action: "allow",
+            },
+            {
+                direction: "egress",
+                destination: Destination.any(),
+                protocols: ["udp"],
+                ports: [PortRange.single(53)],
+                action: "allow",
+            },
+            {
+                direction: "egress",
+                destination: Destination.group("metadata"),
+                protocols: [],
+                ports: [],
+                action: "deny",
+            },
+            {
+                direction: "egress",
+                destination: Destination.group("private"),
+                protocols: [],
+                ports: [],
+                action: "deny",
+            },
         ],
-        defaultAction: "deny",
-    },
-})
+    }))
+    .create()
 ```
 
 ```python Python
@@ -175,12 +196,12 @@ let sb = Sandbox::builder("api")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "api",
-    image: "python",
-    ports: { "8080": 80 },
-    network: NetworkPolicy.publicOnly(),
-})
+await using sb = await Sandbox.builder("api")
+    .image("python")
+    .port(8080, 80)
+    .portUdp(5353, 5353)
+    .network((n) => n.policy(NetworkPolicy.publicOnly()))
+    .create()
 ```
 
 ```python Python
@@ -223,9 +244,13 @@ let policy = NetworkPolicy {
 ```
 
 ```typescript TypeScript
+import { Destination, Rule } from 'microsandbox'
+
+// Deny everything except the host.
 const policy = {
-    defaultAction: "deny",
-    rules: [{ action: "allow", direction: "outbound", destination: "host" }],
+    defaultEgress: "deny",
+    defaultIngress: "allow",
+    rules: [Rule.allowEgress(Destination.group("host"))],
 }
 ```
 

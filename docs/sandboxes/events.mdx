@@ -34,14 +34,7 @@ let _sub = sb.on_event("task.progress", |event: EventData| {
 ```
 
 ```typescript TypeScript
-import { Sandbox, EventData } from 'microsandbox'
-
-const sb = await Sandbox.get("worker")
-
-const sub = sb.onEvent("task.progress", (event: EventData) => {
-    const { percent, message } = event.data as { percent: number; message: string }
-    console.log(`[${percent}%] ${message}`)
-})
+// TODO: events API is not yet exposed by the Node.js SDK.
 ```
 
 ```python Python
@@ -75,10 +68,7 @@ sb.emit("task.start", TaskConfig {
 ```
 
 ```typescript TypeScript
-await sb.emit("task.start", {
-    inputFile: "/data/input.txt",
-    options: ["--verbose"],
-})
+// TODO: events API is not yet exposed by the Node.js SDK.
 ```
 
 ```python Python

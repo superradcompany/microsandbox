@@ -30,13 +30,7 @@ sb.resume().await?;
 ```
 
 ```typescript TypeScript
-import { Sandbox } from 'microsandbox'
-
-const sb = await Sandbox.create({ name: "base", image: "python" })
-await sb.exec("pip", ["install", "-r", "requirements.txt"])
-
-const snapshot = await sb.snapshot()
-await sb.resume()
+// TODO: snapshots are not yet exposed by the Node.js SDK.
 ```
 
 ```python Python
@@ -68,14 +62,7 @@ let saved = Snapshot::get("after-pip-install").await?;
 ```
 
 ```typescript TypeScript
-import { Snapshot } from 'microsandbox'
-
-// Save
-const snapshot = await sb.snapshot()
-await snapshot.saveNamed("after-pip-install")
-
-// Load by name
-const saved = await Snapshot.get("after-pip-install")
+// TODO: snapshots are not yet exposed by the Node.js SDK.
 ```
 
 ```python Python
@@ -107,13 +94,7 @@ let workers: Vec<Sandbox> = futures::future::try_join_all(
 ```
 
 ```typescript TypeScript
-import { Snapshot } from 'microsandbox'
-
-const saved = await Snapshot.get("after-pip-install")
-
-const workers = await Promise.all(
-    Array.from({ length: 10 }, (_, i) => saved.restore(`worker-${i}`))
-)
+// TODO: snapshots are not yet exposed by the Node.js SDK.
 ```
 
 ```python Python
@@ -147,14 +128,7 @@ let custom = saved.restore_with("custom", |r| r
 ```
 
 ```typescript TypeScript
-import { Snapshot } from 'microsandbox'
-
-const saved = await Snapshot.get("after-pip-install")
-
-const custom = await saved.restore("custom", {
-    memoryMib: 1024,
-    cpus: 4,
-})
+// TODO: snapshots are not yet exposed by the Node.js SDK.
 ```
 
 ```python Python
@@ -183,10 +157,7 @@ Snapshot::delete("old-snapshot").await?;
 ```
 
 ```typescript TypeScript
-import { Snapshot } from 'microsandbox'
-
-const snapshots = await Snapshot.list()
-await Snapshot.delete("old-snapshot")
+// TODO: snapshots are not yet exposed by the Node.js SDK.
 ```
 
 ```python Python

@@ -2,8 +2,9 @@
 
 ## Prerequisites
 
-- Node.js >= 18
-- `msb` + `libkrunfw` installed (auto-downloaded by the npm postinstall script)
+- Node.js >= 22 (the SDK relies on `Symbol.asyncDispose` and `await using`)
+- `msb` + `libkrunfw` available — they ship inside the matching `@superradcompany/microsandbox-<triple>` platform package, or run `npx microsandbox install` once (or set `MSB_PATH` to a working binary).
+- These examples link the local SDK via `file:../../../sdk/node-ts`. Build it first: `cd sdk/node-ts && npm install && npm run build`.
 - For `root-bind` and `root-block`: `git submodule update --init --recursive`
 
 ## Setup

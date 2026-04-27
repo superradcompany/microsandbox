@@ -5,62 +5,57 @@ icon: "tower-broadcast"
 ---
 
 <Note>
-  Events are coming soon and not yet available in the current SDK.
+  Guest-emitted events (`sandbox.emit` / `sandbox.onEvent`) are coming soon and not yet available in the current SDK. The only event surface today is the [`ExecEvent`](#execevent) stream produced by [`Sandbox.execStream()`](/sdk/typescript/execution#execstream) and friends.
 </Note>
 
-See [Events](/sandboxes/events) for usage examples and guest-side emitting.
+## ExecEvent
 
-## Sandbox methods
-
----
-
-#### emit()
+A discriminated union emitted by [`ExecHandle`](/sdk/typescript/execution#exechandle). The `kind` field narrows the rest of the payload.
 
 ```typescript
-emit(eventName: string, data: any): Promise<void>
+type ExecEvent =
+  | { kind: "started"; pid: number }
+  | { kind: "stdout"; data: Uint8Array }
+  | { kind: "stderr"; data: Uint8Array }
+  | { kind: "exited"; code: number };
 ```
 
-Send a named event with a JSON-serializable payload into the guest. Any process listening on the agent socket (`/run/agent.sock`) receives it.
+| Variant | Fields | Description |
+|---------|--------|-------------|
+| `"started"` | `pid: number` | Emitted once when the guest process starts. |
+| `"stdout"` | `data: Uint8Array` | A chunk of stdout bytes. |
+| `"stderr"` | `data: Uint8Array` | A chunk of stderr bytes. |
+| `"exited"` | `code: number` | Final event with the process exit code. |
 
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| eventName | `string` | Event name (e.g. `"task.start"`) |
-| data | `any` | Event payload - must be JSON-serializable |
-
----
-
-#### onEvent()
+### Example
 
 ```typescript
-onEvent(eventName: string, callback: (event: EventData) => void): Subscription
+import { Sandbox } from "microsandbox";
+
+await using sandbox = await Sandbox.builder("events-demo")
+  .image("alpine")
+  .replace()
+  .create();
+
+await using handle = await sandbox.execStream("sh", [
+  "-c",
+  "echo out; echo err >&2; exit 7",
+]);
+
+for await (const event of handle) {
+  switch (event.kind) {
+    case "started":
+      console.log(`pid=${event.pid}`);
+      break;
+    case "stdout":
+      process.stdout.write(event.data);
+      break;
+    case "stderr":
+      process.stderr.write(event.data);
+      break;
+    case "exited":
+      console.log(`exit=${event.code}`);
+      break;
+  }
+}
 ```
-
-Subscribe to named events emitted by guest processes. The callback fires each time the guest sends a matching event through `/run/agent.sock`. Multiple subscriptions to the same event name are supported.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| eventName | `string` | Event name to subscribe to (e.g. `"task.progress"`) |
-| callback | `(event: EventData) => void` | Called with the event data each time |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `Subscription` | Call `.unsubscribe()` to stop receiving events |
-
----
-
-## Types
-
-### EventData
-
-Data received from a guest event.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| data | `any` | Event payload. `undefined` if the event had no data. |
-| event | `string` | Event name |
