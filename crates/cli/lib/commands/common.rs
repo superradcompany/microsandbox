@@ -580,7 +580,9 @@ fn build_network_policy(
     default_egress: Option<&str>,
     default_ingress: Option<&str>,
 ) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
-    use microsandbox_network::policy::{Action, NetworkPolicy, parse_rule_list};
+    use microsandbox_network::policy::{Action, NetworkPolicy};
+
+    use crate::net_rule::parse_rule_list;
 
     if rule_args.is_empty() && default_egress.is_none() && default_ingress.is_none() {
         return Ok(None);

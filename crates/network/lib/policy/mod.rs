@@ -7,7 +7,6 @@
 mod builder;
 pub mod destination;
 mod name;
-pub mod parse;
 mod types;
 
 //--------------------------------------------------------------------------------------------------
@@ -17,5 +16,4 @@ mod types;
 pub use builder::{BuildError, ExplicitRuleBuilder, NetworkPolicyBuilder, RuleBuilder};
 pub use destination::*;
 pub use name::{DomainName, DomainNameError};
-pub use parse::{RuleParseError, parse_rule_list, parse_rule_token};
 pub use types::*;

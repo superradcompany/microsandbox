@@ -1,5 +1,9 @@
-//! Parser for the string-form rule token grammar used by `--net-rule`
-//! and any other consumer that builds rules from plain strings.
+// Variant-field-level docs would be redundant — the variant
+// docstrings explain the cause and the field names speak for
+// themselves.
+#![allow(missing_docs)]
+
+//! Parser for the `--net-rule` token grammar.
 //!
 //! ```text
 //! <TOKEN>     := <action>[:<direction>]@<target>[:<proto>[:<ports>]]
@@ -13,15 +17,17 @@
 //!
 //! Tokens are parsed eagerly. Levenshtein-2 typo suggestions are
 //! emitted for unrecognized keywords. The parser produces fully-formed
-//! [`Rule`] values that `NetworkPolicy` consumes directly.
+//! [`Rule`] values that `NetworkPolicy` consumes directly. Lives in
+//! the cli crate because the string grammar is a cli-input concern;
+//! sdk callers construct rules from typed values, not strings.
 
 use std::net::IpAddr;
 use std::str::FromStr;
 
 use ipnetwork::IpNetwork;
-
-use super::{
-    Action, Destination, DestinationGroup, Direction, DomainName, PortRange, Protocol, Rule,
+use microsandbox_network::policy::{
+    Action, Destination, DestinationGroup, Direction, DomainName, DomainNameError, PortRange,
+    Protocol, Rule,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -81,7 +87,7 @@ pub enum RuleParseError {
     InvalidDomain {
         raw: String,
         #[source]
-        source: super::DomainNameError,
+        source: DomainNameError,
     },
 
     /// CIDR didn't parse.
