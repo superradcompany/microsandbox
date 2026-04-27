@@ -36,6 +36,10 @@ use serde::{Deserialize, Serialize};
 
 /// Canonical DNS name used in network policy rules.
 ///
+/// Strictly a hostname — port suffixes, userinfo, schemes, paths,
+/// queries, and fragments are rejected at parse time so a rule can
+/// never end up "matching" a name no DNS responder will ever return.
+///
 /// Constructed via `str::parse` or `TryFrom<String>`; both route through
 /// the same validation and canonicalization. The inner form is
 /// lowercased ASCII with no leading or trailing dots — the same form
@@ -190,5 +194,28 @@ mod tests {
     fn serde_deserialize_validates() {
         assert!(serde_json::from_str::<DomainName>(r#""foo bar.example""#).is_err());
         assert!(serde_json::from_str::<DomainName>(r#""""#).is_err());
+    }
+
+    #[test]
+    fn rejects_url_decorations() {
+        for bad in [
+            "bar.example:443",       // host:port
+            "user@example.com",      // userinfo@host
+            "user:pass@example.com", // userinfo:pass@host
+            "https://example.com",   // scheme://host
+            "example.com/path",      // host/path
+            "example.com?q=1",       // host?query
+            "example.com#frag",      // host#fragment
+        ] {
+            assert!(
+                bad.parse::<DomainName>().is_err(),
+                "expected `{bad}` to be rejected"
+            );
+            let json = serde_json::to_string(bad).unwrap();
+            assert!(
+                serde_json::from_str::<DomainName>(&json).is_err(),
+                "expected serde to reject `{bad}`"
+            );
+        }
     }
 }

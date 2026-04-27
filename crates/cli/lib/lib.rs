@@ -9,6 +9,8 @@
 
 pub mod commands;
 pub mod log_args;
+#[cfg(feature = "net")]
+pub mod net_rule;
 pub mod sandbox_cmd;
 pub mod styles;
 pub mod tree;

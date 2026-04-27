@@ -95,10 +95,11 @@ pub struct SandboxOpts {
     #[arg(short, long)]
     pub port: Vec<String>,
 
-    /// Disable all network access.
+    /// Disable all network access. Sugar for `--net-default-egress deny`
+    /// with no rules.
     #[cfg(feature = "net")]
-    #[arg(long)]
-    pub no_network: bool,
+    #[arg(long = "no-net")]
+    pub no_net: bool,
 
     /// Block DNS lookups for a domain (returns NXDOMAIN).
     #[cfg(feature = "net")]
@@ -127,16 +128,32 @@ pub struct SandboxOpts {
     #[arg(long, value_name = "MS")]
     pub dns_query_timeout_ms: Option<u64>,
 
-    /// Network policy controlling which destinations are reachable from the sandbox.
+    /// Network rule. Repeatable; each value is a comma-separated list of
+    /// rule tokens. Token grammar:
+    /// `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`.
     ///
-    /// Options:
-    ///   none        — no network access
-    ///   public-only — public internet only (default); blocks private, loopback, link-local
-    ///   nonlocal    — public + private/LAN; blocks loopback, link-local, and metadata
-    ///   allow-all   — unrestricted access to any destination
+    /// Examples:
+    ///   --net-rule "allow@public"
+    ///   --net-rule "deny@198.51.100.5,allow@public"
+    ///   --net-rule "allow:ingress@private"
+    ///   --net-rule "allow@example.com:tcp:443"
     #[cfg(feature = "net")]
-    #[arg(long, value_name = "POLICY")]
-    pub network_policy: Option<String>,
+    #[arg(long = "net-rule", value_name = "TOKENS")]
+    pub net_rule: Vec<String>,
+
+    /// Default action for egress traffic that doesn't match any
+    /// `--net-rule`. Default: deny (with an implicit allow@public rule
+    /// when no other rules are present).
+    #[cfg(feature = "net")]
+    #[arg(long = "net-default-egress", value_name = "ACTION")]
+    pub net_default_egress: Option<String>,
+
+    /// Default action for ingress traffic that doesn't match any
+    /// `--net-rule`. Default: allow (preserves today's unfiltered
+    /// published-port behavior when no ingress rules are set).
+    #[cfg(feature = "net")]
+    #[arg(long = "net-default-ingress", value_name = "ACTION")]
+    pub net_default_ingress: Option<String>,
 
     /// Limit the number of concurrent network connections.
     #[cfg(feature = "net")]
@@ -225,13 +242,15 @@ impl SandboxOpts {
 
         #[cfg(feature = "net")]
         let net = !self.port.is_empty()
-            || self.no_network
+            || self.no_net
             || !self.dns_block_domain.is_empty()
             || !self.dns_block_suffix.is_empty()
             || self.no_dns_rebind_protection
             || !self.dns_nameserver.is_empty()
             || self.dns_query_timeout_ms.is_some()
-            || self.network_policy.is_some()
+            || !self.net_rule.is_empty()
+            || self.net_default_egress.is_some()
+            || self.net_default_ingress.is_some()
             || self.max_connections.is_some()
             || self.trust_host_cas
             || self.tls_intercept
@@ -371,8 +390,28 @@ fn apply_network_opts(
         };
     }
 
-    // Disable networking.
-    if opts.no_network {
+    // Disable networking. `--no-net` is mutually exclusive with the
+    // policy-shaping flags: it kills the guest's network interface
+    // entirely, so any rule or default action would be dead code and
+    // is almost certainly a user mistake. Reject the combination at
+    // parse time with a helpful migration hint.
+    if opts.no_net {
+        let mut conflicts: Vec<&'static str> = Vec::new();
+        if !opts.net_rule.is_empty() {
+            conflicts.push("--net-rule");
+        }
+        if opts.net_default_egress.is_some() {
+            conflicts.push("--net-default-egress");
+        }
+        if opts.net_default_ingress.is_some() {
+            conflicts.push("--net-default-ingress");
+        }
+        if !conflicts.is_empty() {
+            anyhow::bail!(
+                "--no-net cannot be combined with {}; --no-net disables the guest network entirely, so rules and defaults are dead code. Drop --no-net to apply rules, or drop the rule flags to keep the network off.",
+                conflicts.join(" / "),
+            );
+        }
         builder = builder.disable_network();
     }
 
@@ -388,7 +427,9 @@ fn apply_network_opts(
         || opts.no_dns_rebind_protection
         || !opts.dns_nameserver.is_empty()
         || opts.dns_query_timeout_ms.is_some()
-        || opts.network_policy.is_some()
+        || !opts.net_rule.is_empty()
+        || opts.net_default_egress.is_some()
+        || opts.net_default_ingress.is_some()
         || opts.max_connections.is_some()
         || opts.trust_host_cas
         || opts.tls_intercept
@@ -410,7 +451,11 @@ fn apply_network_opts(
             .map(|s| s.parse::<Nameserver>().map_err(anyhow::Error::from))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let dns_query_timeout_ms = opts.dns_query_timeout_ms;
-        let network_policy = parse_network_policy(opts.network_policy.as_deref())?;
+        let network_policy = build_network_policy(
+            &opts.net_rule,
+            opts.net_default_egress.as_deref(),
+            opts.net_default_ingress.as_deref(),
+        )?;
         let max_conn = opts.max_connections;
         let trust_host_cas = opts.trust_host_cas;
         let tls_intercept = opts.tls_intercept;
@@ -522,23 +567,58 @@ pub fn parse_duration_secs(s: &str) -> anyhow::Result<u64> {
     }
 }
 
-/// Parse a `--network-policy` value into a [`NetworkPolicy`], or `None` to leave the default.
+/// Assemble a [`NetworkPolicy`] from the new `--net-rule` /
+/// `--net-default-egress` / `--net-default-ingress` flag set, or
+/// `None` if no flag was set (caller falls back to the sandbox
+/// default).
+///
+/// Multiple `--net-rule` invocations concatenate in argv order; tokens
+/// inside each value are comma-separated and likewise preserved.
 #[cfg(feature = "net")]
-fn parse_network_policy(
-    s: Option<&str>,
+fn build_network_policy(
+    rule_args: &[String],
+    default_egress: Option<&str>,
+    default_ingress: Option<&str>,
 ) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
-    use microsandbox_network::policy::NetworkPolicy;
-    match s {
-        None => Ok(None),
-        Some("none") => Ok(Some(NetworkPolicy::none())),
-        Some("public-only") => Ok(Some(NetworkPolicy::public_only())),
-        Some("nonlocal") => Ok(Some(NetworkPolicy::non_local())),
-        Some("allow-all") => Ok(Some(NetworkPolicy::allow_all())),
-        Some(other) => anyhow::bail!(
-            "unknown network policy {:?}; valid values are: none, public-only, nonlocal, allow-all",
-            other
-        ),
+    use microsandbox_network::policy::{Action, NetworkPolicy};
+
+    use crate::net_rule::parse_rule_list;
+
+    if rule_args.is_empty() && default_egress.is_none() && default_ingress.is_none() {
+        return Ok(None);
     }
+
+    let mut rules = Vec::new();
+    for arg in rule_args {
+        let parsed = parse_rule_list(arg).map_err(anyhow::Error::from)?;
+        rules.extend(parsed);
+    }
+
+    let parse_action = |label: &str, raw: &str| -> anyhow::Result<Action> {
+        match raw {
+            "allow" => Ok(Action::Allow),
+            "deny" => Ok(Action::Deny),
+            other => anyhow::bail!("unknown {label} value {other:?}; expected `allow` or `deny`"),
+        }
+    };
+
+    // When the user sets no defaults explicitly, preserve today's
+    // asymmetric behavior: egress = Deny (rules open things);
+    // ingress = Allow (unfiltered published-port behavior).
+    let default_egress = match default_egress {
+        Some(raw) => parse_action("--net-default-egress", raw)?,
+        None => Action::Deny,
+    };
+    let default_ingress = match default_ingress {
+        Some(raw) => parse_action("--net-default-ingress", raw)?,
+        None => Action::Allow,
+    };
+
+    Ok(Some(NetworkPolicy {
+        default_egress,
+        default_ingress,
+        rules,
+    }))
 }
 
 /// Parse a port spec: `HOST:GUEST` or `HOST:GUEST/udp` or `HOST:GUEST/tcp`.
