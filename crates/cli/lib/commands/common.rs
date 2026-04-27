@@ -471,7 +471,9 @@ fn apply_network_opts(
         }
         if !conflicts.is_empty() {
             anyhow::bail!(
-                "--no-net cannot be combined with {}; --no-net disables the guest network entirely, so rules and defaults are dead code. Drop --no-net to apply rules, or drop the rule flags to keep the network off.",
+                "--no-net cannot be combined with {}; \
+                 --no-net disables the guest network entirely, so rules and defaults are dead code. \
+                 Drop --no-net to apply rules, or drop the rule flags to keep the network off.",
                 conflicts.join(" / "),
             );
         }
