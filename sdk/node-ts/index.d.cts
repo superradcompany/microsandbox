@@ -1079,7 +1079,7 @@ export interface TlsConfig {
   verifyUpstream?: boolean
   /** Ports to intercept (default: [443]). */
   interceptedPorts?: Array<number>
-  /** Block QUIC on intercepted ports (default: false). */
+  /** Block QUIC on intercepted ports (default: true). */
   blockQuic?: boolean
   /** Path to custom interception CA certificate PEM file. */
   interceptCaCert?: string

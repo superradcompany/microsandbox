@@ -193,7 +193,7 @@ pub struct TlsConfig {
     pub verify_upstream: Option<bool>,
     /// Ports to intercept (default: [443]).
     pub intercepted_ports: Option<Vec<u32>>,
-    /// Block QUIC on intercepted ports (default: false).
+    /// Block QUIC on intercepted ports (default: true).
     pub block_quic: Option<bool>,
     /// Path to custom interception CA certificate PEM file.
     pub intercept_ca_cert: Option<String>,

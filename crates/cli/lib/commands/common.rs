@@ -101,7 +101,7 @@ pub struct SandboxOpts {
     #[arg(long = "no-net")]
     pub no_net: bool,
 
-    /// Block DNS lookups for a domain (returns NXDOMAIN).
+    /// Block DNS lookups for a domain (returns REFUSED).
     #[cfg(feature = "net")]
     #[arg(long)]
     pub dns_block_domain: Vec<String>,
