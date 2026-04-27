@@ -26,11 +26,11 @@ cargo run -p fs-read-stream
 
 | Example | Command | Description |
 |---------|---------|-------------|
-| `root-oci` | `cargo run -p oci-root` | OCI image rootfs |
-| `root-bind` | `cargo run -p bind-root` | Bind-mounted local directory |
-| `root-block` | `cargo run -p block-root` | qcow2 disk image |
+| `root-oci` | `cargo run -p root-oci` | OCI image rootfs |
+| `root-bind` | `cargo run -p root-bind` | Bind-mounted local directory |
+| `root-block` | `cargo run -p root-block` | qcow2 disk image |
 | `rootfs-patch` | `cargo run -p rootfs-patch` | Pre-boot filesystem patches |
-| `volume-named` | `cargo run -p named-volume` | Named volumes shared across sandboxes |
+| `volume-named` | `cargo run -p volume-named` | Named volumes shared across sandboxes |
 | `volume-disk` | `cargo run -p volume-disk` | Disk image volumes (raw / qcow2) at guest paths |
 | `fs-read-stream` | `cargo run -p fs-read-stream` | Streaming file read |
 | `metrics-stream` | `cargo run -p metrics-stream` | Streaming resource metrics |
