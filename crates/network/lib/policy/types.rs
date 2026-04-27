@@ -47,10 +47,11 @@ pub struct NetworkPolicy {
     #[serde(default = "Action::deny")]
     pub default_egress: Action,
 
-    /// Default action for ingress traffic not matching any rule.
-    /// `Allow` so a sandbox publishing a port without an explicit
-    /// ingress rule still accepts traffic.
-    #[serde(default = "Action::allow")]
+    /// Default action for ingress traffic not matching any rule. The
+    /// per-field serde default is `Deny` so partially-specified JSON
+    /// fails closed; permissive presets like [`NetworkPolicy::public_only`]
+    /// flip this back to `Allow` explicitly.
+    #[serde(default = "Action::deny")]
     pub default_ingress: Action,
 
     /// Ordered list of rules, evaluated first-match-wins per direction.
