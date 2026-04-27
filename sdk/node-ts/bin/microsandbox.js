@@ -1,56 +1,70 @@
 #!/usr/bin/env node
 
-// Thin shim that forwards all arguments to the installed msb binary.
-// Self-heals if msb is missing (e.g. stale npx cache, skipped postinstall):
-// downloads the runtime on first run, then exec.
+// Thin shim that forwards all arguments to the bundled msb binary.
 
-const { spawnSync } = require("child_process");
-const fs = require("fs");
-const os = require("os");
-const path = require("path");
+const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
-const { ensureMsb } = require("../lib/install");
+const TRIPLES = {
+  "darwin-arm64": "darwin-arm64",
+  "linux-x64": "linux-x64-gnu",
+  "linux-arm64": "linux-arm64-gnu",
+};
 
 function resolveMsb() {
-  if (process.env.MSB_PATH) return { path: process.env.MSB_PATH, fromEnv: true };
-  const home = os.homedir();
-  if (!home) return null;
-  return { path: path.join(home, ".microsandbox", "bin", "msb"), fromEnv: false };
-}
-
-async function main() {
-  const resolved = resolveMsb();
-  if (!resolved) {
-    console.error("microsandbox: could not determine home directory");
-    process.exit(127);
+  if (process.env.MSB_PATH) {
+    return { path: process.env.MSB_PATH, source: "MSB_PATH" };
   }
 
-  let msb = resolved.path;
-  if (!fs.existsSync(msb)) {
-    if (resolved.fromEnv) {
-      console.error(`microsandbox: MSB_PATH points at nonexistent ${msb}`);
-      process.exit(127);
-    }
+  const triple = TRIPLES[`${process.platform}-${process.arch}`];
+  if (triple) {
     try {
-      msb = await ensureMsb({ ephemeralStatus: true });
-    } catch (err) {
-      console.error(`microsandbox: failed to download runtime: ${err.message}`);
-      console.error("microsandbox: retry, or set MSB_PATH to an existing msb binary.");
-      process.exit(127);
+      const pkgPath = require.resolve(
+        `@superradcompany/microsandbox-${triple}/package.json`,
+      );
+      const candidate = path.join(path.dirname(pkgPath), "bin", "msb");
+      if (fs.existsSync(candidate)) {
+        return { path: candidate, source: "platform-package" };
+      }
+    } catch {
+      // platform package not installed — fall through
     }
   }
 
-  const result = spawnSync(msb, process.argv.slice(2), { stdio: "inherit" });
+  const home = os.homedir();
+  if (home) {
+    const fallback = path.join(home, ".microsandbox", "bin", "msb");
+    if (fs.existsSync(fallback)) {
+      return { path: fallback, source: "home-dir" };
+    }
+  }
 
-  if (result.error) {
-    console.error(`microsandbox: failed to run ${msb}: ${result.error.message}`);
-    process.exit(127);
-  }
-  if (result.signal) {
-    process.kill(process.pid, result.signal);
-    process.exit(1);
-  }
-  process.exit(result.status ?? 0);
+  return null;
 }
 
-main();
+const resolved = resolveMsb();
+if (!resolved) {
+  console.error(
+    "microsandbox: msb binary not found. Run `npx microsandbox install` " +
+      "or set MSB_PATH to a working binary.",
+  );
+  process.exit(127);
+}
+
+const result = spawnSync(resolved.path, process.argv.slice(2), {
+  stdio: "inherit",
+});
+
+if (result.error) {
+  console.error(
+    `microsandbox: failed to run ${resolved.path}: ${result.error.message}`,
+  );
+  process.exit(127);
+}
+if (result.signal) {
+  process.kill(process.pid, result.signal);
+  process.exit(1);
+}
+process.exit(result.status ?? 0);
