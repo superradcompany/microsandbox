@@ -13,7 +13,7 @@ mod types;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use builder::{BuildError, ExplicitRuleBuilder, NetworkPolicyBuilder, RuleBuilder};
+pub use builder::{BuildError, NetworkPolicyBuilder, RuleBuilder, RuleDestinationBuilder};
 pub use destination::*;
 pub use name::{DomainName, DomainNameError};
 pub use types::*;

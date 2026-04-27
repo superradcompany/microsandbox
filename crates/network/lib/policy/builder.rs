@@ -61,9 +61,9 @@ pub enum BuildError {
     DirectionNotSet { rule_index: usize },
 
     /// A rule was committed via `.allow()` / `.deny()` but no destination
-    /// method was called on the resulting `ExplicitRuleBuilder`.
+    /// method was called on the resulting `RuleDestinationBuilder`.
     #[error(
-        "rule #{rule_index}: destination not set; call .ip(), .cidr(), .domain(), .domain_suffix(), .group(), or .any() on the explicit-rule builder"
+        "rule #{rule_index}: destination not set; call .ip(), .cidr(), .domain(), .domain_suffix(), .group(), or .any() on the rule-destination builder"
     )]
     MissingDestination { rule_index: usize },
 
@@ -233,7 +233,7 @@ impl NetworkPolicyBuilder {
             let direction = pending
                 .direction
                 .ok_or(BuildError::DirectionNotSet { rule_index: idx })?;
-            let destination = parse_destination(&pending.destination, idx)?;
+            let destination = pending.destination.parse(idx)?;
 
             if matches!(direction, Direction::Ingress | Direction::Any)
                 && pending
@@ -377,6 +377,15 @@ impl RuleBuilder {
         self
     }
 
+    /// Add multiple single ports to the ports set. Equivalent to calling
+    /// [`Self::port`] once per element; duplicates dedupe via set semantics.
+    pub fn ports<I: IntoIterator<Item = u16>>(&mut self, ports: I) -> &mut Self {
+        for p in ports {
+            self.port(p);
+        }
+        self
+    }
+
     // -- atomic rule-adders (per-category shortcuts) -----------------
 
     /// Allow the `Public` group: any IP not in another named category.
@@ -499,19 +508,19 @@ impl RuleBuilder {
     // -- explicit-rule entry ----------------------------------------
 
     /// Begin an explicit-destination rule with action `Allow`. Returns
-    /// an [`ExplicitRuleBuilder`] that requires a destination call
+    /// an [`RuleDestinationBuilder`] that requires a destination call
     /// (`.ip`, `.cidr`, `.domain`, `.domain_suffix`, `.group`, `.any`)
     /// to commit the rule.
-    pub fn allow(&mut self) -> ExplicitRuleBuilder<'_> {
-        ExplicitRuleBuilder {
+    pub fn allow(&mut self) -> RuleDestinationBuilder<'_> {
+        RuleDestinationBuilder {
             rule_builder: self,
             action: Action::Allow,
         }
     }
 
     /// Begin an explicit-destination rule with action `Deny`.
-    pub fn deny(&mut self) -> ExplicitRuleBuilder<'_> {
-        ExplicitRuleBuilder {
+    pub fn deny(&mut self) -> RuleDestinationBuilder<'_> {
+        RuleDestinationBuilder {
             rule_builder: self,
             action: Action::Deny,
         }
@@ -539,7 +548,7 @@ impl RuleBuilder {
 }
 
 //--------------------------------------------------------------------------------------------------
-// ExplicitRuleBuilder
+// RuleDestinationBuilder
 //--------------------------------------------------------------------------------------------------
 
 /// Returned by [`RuleBuilder::allow`] / [`RuleBuilder::deny`]. Requires
@@ -547,13 +556,13 @@ impl RuleBuilder {
 ///
 /// Dropping without a destination call silently does nothing — no rule
 /// is added. The `#[must_use]` attribute warns at compile time.
-#[must_use = "ExplicitRuleBuilder requires a destination method (.ip, .cidr, .domain, .domain_suffix, .group, .any) to commit the rule"]
-pub struct ExplicitRuleBuilder<'a> {
+#[must_use = "RuleDestinationBuilder requires a destination method (.ip, .cidr, .domain, .domain_suffix, .group, .any) to commit the rule"]
+pub struct RuleDestinationBuilder<'a> {
     rule_builder: &'a mut RuleBuilder,
     action: Action,
 }
 
-impl<'a> ExplicitRuleBuilder<'a> {
+impl<'a> RuleDestinationBuilder<'a> {
     /// Commit the rule with destination `Ip(<addr>)`. The string is
     /// stored raw and parsed at [`NetworkPolicyBuilder::build`] time;
     /// invalid IPs surface as [`BuildError::InvalidIp`].
@@ -627,45 +636,49 @@ enum PendingDestination {
     DomainSuffix(String),
 }
 
-fn parse_destination(pending: &PendingDestination, idx: usize) -> Result<Destination, BuildError> {
-    match pending {
-        PendingDestination::Resolved(d) => Ok(d.clone()),
-        PendingDestination::Ip(raw) => {
-            let ip = std::net::IpAddr::from_str(raw).map_err(|_| BuildError::InvalidIp {
-                rule_index: idx,
-                raw: raw.clone(),
-            })?;
-            // Express a single IP as a /32 (v4) or /128 (v6) CIDR so
-            // it lives in `Destination::Cidr` alongside the rest.
-            let prefix = if ip.is_ipv4() { 32 } else { 128 };
-            let net = IpNetwork::new(ip, prefix).map_err(|_| BuildError::InvalidIp {
-                rule_index: idx,
-                raw: raw.clone(),
-            })?;
-            Ok(Destination::Cidr(net))
-        }
-        PendingDestination::Cidr(raw) => {
-            let net = IpNetwork::from_str(raw).map_err(|_| BuildError::InvalidCidr {
-                rule_index: idx,
-                raw: raw.clone(),
-            })?;
-            Ok(Destination::Cidr(net))
-        }
-        PendingDestination::Domain(raw) => {
-            let name = DomainName::from_str(raw).map_err(|source| BuildError::InvalidDomain {
-                rule_index: idx,
-                raw: raw.clone(),
-                source,
-            })?;
-            Ok(Destination::Domain(name))
-        }
-        PendingDestination::DomainSuffix(raw) => {
-            let name = DomainName::from_str(raw).map_err(|source| BuildError::InvalidDomain {
-                rule_index: idx,
-                raw: raw.clone(),
-                source,
-            })?;
-            Ok(Destination::DomainSuffix(name))
+impl PendingDestination {
+    fn parse(&self, idx: usize) -> Result<Destination, BuildError> {
+        match self {
+            PendingDestination::Resolved(d) => Ok(d.clone()),
+            PendingDestination::Ip(raw) => {
+                let ip = std::net::IpAddr::from_str(raw).map_err(|_| BuildError::InvalidIp {
+                    rule_index: idx,
+                    raw: raw.clone(),
+                })?;
+                // Express a single IP as a /32 (v4) or /128 (v6) CIDR so
+                // it lives in `Destination::Cidr` alongside the rest.
+                let prefix = if ip.is_ipv4() { 32 } else { 128 };
+                let net = IpNetwork::new(ip, prefix).map_err(|_| BuildError::InvalidIp {
+                    rule_index: idx,
+                    raw: raw.clone(),
+                })?;
+                Ok(Destination::Cidr(net))
+            }
+            PendingDestination::Cidr(raw) => {
+                let net = IpNetwork::from_str(raw).map_err(|_| BuildError::InvalidCidr {
+                    rule_index: idx,
+                    raw: raw.clone(),
+                })?;
+                Ok(Destination::Cidr(net))
+            }
+            PendingDestination::Domain(raw) => {
+                let name =
+                    DomainName::from_str(raw).map_err(|source| BuildError::InvalidDomain {
+                        rule_index: idx,
+                        raw: raw.clone(),
+                        source,
+                    })?;
+                Ok(Destination::Domain(name))
+            }
+            PendingDestination::DomainSuffix(raw) => {
+                let name =
+                    DomainName::from_str(raw).map_err(|source| BuildError::InvalidDomain {
+                        rule_index: idx,
+                        raw: raw.clone(),
+                        source,
+                    })?;
+                Ok(Destination::DomainSuffix(name))
+            }
         }
     }
 }
