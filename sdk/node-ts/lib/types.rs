@@ -43,7 +43,13 @@ pub struct SandboxConfig {
     pub patches: Option<Vec<PatchConfig>>,
     /// Image pull policy: "always", "if-missing", or "never".
     pub pull_policy: Option<String>,
-    /// Log level: "trace", "debug", "info", "warn", "error".
+    /// Log level for the sandbox supervisor process: "trace", "debug", "info",
+    /// "warn", "error".
+    ///
+    /// Controls verbosity of the spawned `msb` supervisor's own logs, which are
+    /// written to its stderr (inherited by the parent Node process). This does
+    /// not surface image pull progress or structured events to the SDK — for
+    /// pull progress use `Sandbox.createWithProgress`.
     pub log_level: Option<String>,
     /// Kill any existing sandbox with the same name before creating.
     pub replace: Option<bool>,
@@ -327,6 +333,70 @@ pub struct ExecEvent {
     pub data: Option<napi::bindgen_prelude::Buffer>,
     /// Exit code (only for "exited" events).
     pub code: Option<i32>,
+}
+
+/// Image pull / materialize progress event emitted by `PullSession`.
+///
+/// Mirrors the Rust `microsandbox_image::PullProgress` enum. Narrow on
+/// `type` to access variant-specific fields:
+///
+/// ```js
+/// for await (const ev of session) {
+///   if (ev.type === "layer_download_progress") {
+///     console.log(`${ev.layerIndex}: ${ev.downloadedBytes}/${ev.totalBytes}`);
+///   }
+/// }
+/// ```
+#[napi(discriminant_case = "snake_case")]
+pub enum PullProgress {
+    /// Resolving the image reference.
+    Resolving { reference: String },
+    /// Manifest parsed; layer count and total size now known.
+    Resolved {
+        reference: String,
+        manifest_digest: String,
+        layer_count: u32,
+        /// Sum of compressed layer sizes. `null` if the manifest omits sizes.
+        total_download_bytes: Option<f64>,
+    },
+    /// Byte-level download progress for a single layer.
+    LayerDownloadProgress {
+        layer_index: u32,
+        digest: String,
+        downloaded_bytes: f64,
+        /// Total bytes for this layer. `null` if the manifest omits sizes.
+        total_bytes: Option<f64>,
+    },
+    /// A layer finished downloading.
+    LayerDownloadComplete {
+        layer_index: u32,
+        digest: String,
+        downloaded_bytes: f64,
+    },
+    /// Layer download complete; verifying the blob.
+    LayerDownloadVerifying { layer_index: u32, digest: String },
+    /// Layer EROFS materialization started.
+    LayerMaterializeStarted { layer_index: u32, diff_id: String },
+    /// Byte-level materialization progress for a single layer.
+    LayerMaterializeProgress {
+        layer_index: u32,
+        bytes_read: f64,
+        total_bytes: f64,
+    },
+    /// Layer tar ingest done; EROFS image is being written.
+    LayerMaterializeWriting { layer_index: u32 },
+    /// Layer EROFS materialization complete.
+    LayerMaterializeComplete { layer_index: u32, diff_id: String },
+    /// Merging per-layer trees.
+    StitchMergingTrees { layer_count: u32 },
+    /// Writing the merged filesystem metadata.
+    StitchWritingFsmeta {},
+    /// Writing the final VMDK image.
+    StitchWritingVmdk {},
+    /// Stitch phase complete.
+    StitchComplete {},
+    /// Entire image pull complete.
+    Complete { reference: String, layer_count: u32 },
 }
 
 /// Configuration for command execution.

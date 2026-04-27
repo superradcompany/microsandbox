@@ -3,8 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use microsandbox::sandbox::{NetworkPolicy, PullPolicy, SandboxConfig as RustSandboxConfig};
-use microsandbox::{LogLevel, RegistryAuth as RustRegistryAuth};
+use microsandbox::sandbox::{
+    NetworkPolicy, PullPolicy, PullProgress as CorePullProgress, PullProgressHandle,
+    SandboxConfig as RustSandboxConfig,
+};
+use microsandbox::{LogLevel, MicrosandboxResult, RegistryAuth as RustRegistryAuth};
 use microsandbox_network::dns::Nameserver;
 use microsandbox_network::policy::{
     Action, Destination, DestinationGroup, Direction, PortRange, Protocol, Rule,
@@ -47,6 +50,36 @@ pub struct JsMetricsStream {
     rx: Arc<Mutex<tokio::sync::mpsc::Receiver<napi::Result<SandboxMetrics>>>>,
 }
 
+/// A session combining pull-progress events and a pending sandbox creation.
+///
+/// Created via `Sandbox.createWithProgress()` or
+/// `Sandbox.createDetachedWithProgress()`. Iterate the session to observe
+/// image pull and materialize events, then call `result()` to obtain the
+/// live `Sandbox`. The iterator ends when the pull finishes (successfully
+/// or not); `result()` resolves with the sandbox or rejects with the
+/// creation error.
+///
+/// ```js
+/// const session = await Sandbox.createWithProgress({
+///   name: "my-sb",
+///   image: "alpine",
+///   pullPolicy: "always",
+/// });
+/// for await (const ev of session) {
+///   if (ev.type === "layer_download_progress") {
+///     console.log(`L${ev.layerIndex}: ${ev.downloadedBytes}/${ev.totalBytes ?? "?"}`);
+///   }
+/// }
+/// const sandbox = await session.result();
+/// ```
+#[napi(async_iterator, js_name = "PullSession")]
+pub struct JsPullSession {
+    rx: Arc<Mutex<tokio::sync::mpsc::Receiver<PullProgress>>>,
+    task: Arc<
+        Mutex<Option<tokio::task::JoinHandle<MicrosandboxResult<microsandbox::sandbox::Sandbox>>>>,
+    >,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -87,6 +120,28 @@ impl Sandbox {
         Ok(Sandbox {
             inner: Arc::new(Mutex::new(Some(inner))),
         })
+    }
+
+    /// Create a sandbox and observe image pull/materialize progress.
+    ///
+    /// Returns a `PullSession` that yields `PullProgress` events as the
+    /// image is resolved, downloaded, and materialized. Call
+    /// `session.result()` after iteration to obtain the live `Sandbox`.
+    #[napi(js_name = "createWithProgress")]
+    pub async fn create_with_progress(config: SandboxConfig) -> Result<JsPullSession> {
+        let rust_config = convert_config(config).await?;
+        let (handle, task) = microsandbox::sandbox::Sandbox::create_with_pull_progress(rust_config);
+        Ok(JsPullSession::new(handle, task))
+    }
+
+    /// Like `createWithProgress`, but spawns the sandbox in detached mode
+    /// so it survives after the parent process exits.
+    #[napi(js_name = "createDetachedWithProgress")]
+    pub async fn create_detached_with_progress(config: SandboxConfig) -> Result<JsPullSession> {
+        let rust_config = convert_config(config).await?;
+        let (handle, task) =
+            microsandbox::sandbox::Sandbox::create_detached_with_pull_progress(rust_config);
+        Ok(JsPullSession::new(handle, task))
     }
 
     /// Start an existing stopped sandbox (attached mode).
@@ -437,6 +492,169 @@ impl AsyncGenerator for JsMetricsStream {
                 None => Ok(None),
             }
         }
+    }
+}
+
+impl JsPullSession {
+    fn new(
+        mut handle: PullProgressHandle,
+        task: tokio::task::JoinHandle<MicrosandboxResult<microsandbox::sandbox::Sandbox>>,
+    ) -> Self {
+        // Bridge the core PullProgress channel into the NAPI-facing one.
+        // Using try_send matches the upstream PullProgressSender pattern —
+        // events are dropped on overflow rather than blocking the bridge
+        // task if the JS consumer stops draining.
+        let (tx, rx) = tokio::sync::mpsc::channel::<PullProgress>(256);
+        tokio::spawn(async move {
+            while let Some(event) = handle.recv().await {
+                match tx.try_send(convert_pull_progress(event)) {
+                    Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                }
+            }
+        });
+
+        JsPullSession {
+            rx: Arc::new(Mutex::new(rx)),
+            task: Arc::new(Mutex::new(Some(task))),
+        }
+    }
+}
+
+#[napi]
+impl JsPullSession {
+    /// Receive the next pull progress event. Returns `null` when the stream ends.
+    #[napi]
+    pub async fn recv(&self) -> Result<Option<PullProgress>> {
+        let mut guard = self.rx.lock().await;
+        Ok(guard.recv().await)
+    }
+
+    /// Await the sandbox creation task and return the live `Sandbox`.
+    ///
+    /// Single-shot: a second call throws `Error("result already consumed")`.
+    /// Prefer calling this after the event iterator has finished so the pull
+    /// is definitely complete.
+    #[napi]
+    pub async fn result(&self) -> Result<Sandbox> {
+        let join_handle = {
+            let mut guard = self.task.lock().await;
+            guard
+                .take()
+                .ok_or_else(|| napi::Error::from_reason("result already consumed"))?
+        };
+        let sandbox = join_handle
+            .await
+            .map_err(|e| napi::Error::from_reason(format!("create task panicked: {e}")))?
+            .map_err(to_napi_error)?;
+        Ok(Sandbox::from_rust(sandbox))
+    }
+}
+
+#[napi]
+impl AsyncGenerator for JsPullSession {
+    type Yield = PullProgress;
+    type Next = ();
+    type Return = ();
+
+    fn next(
+        &mut self,
+        _value: Option<Self::Next>,
+    ) -> impl std::future::Future<Output = Result<Option<Self::Yield>>> + Send + 'static {
+        let rx = Arc::clone(&self.rx);
+        async move {
+            let mut guard = rx.lock().await;
+            Ok(guard.recv().await)
+        }
+    }
+}
+
+/// Convert a core `PullProgress` variant into the NAPI-facing `PullProgress`
+/// enum exposed to JavaScript.
+fn convert_pull_progress(event: CorePullProgress) -> PullProgress {
+    match event {
+        CorePullProgress::Resolving { reference } => PullProgress::Resolving {
+            reference: reference.to_string(),
+        },
+        CorePullProgress::Resolved {
+            reference,
+            manifest_digest,
+            layer_count,
+            total_download_bytes,
+        } => PullProgress::Resolved {
+            reference: reference.to_string(),
+            manifest_digest: manifest_digest.to_string(),
+            layer_count: layer_count as u32,
+            total_download_bytes: total_download_bytes.map(|b| b as f64),
+        },
+        CorePullProgress::LayerDownloadProgress {
+            layer_index,
+            digest,
+            downloaded_bytes,
+            total_bytes,
+        } => PullProgress::LayerDownloadProgress {
+            layer_index: layer_index as u32,
+            digest: digest.to_string(),
+            downloaded_bytes: downloaded_bytes as f64,
+            total_bytes: total_bytes.map(|b| b as f64),
+        },
+        CorePullProgress::LayerDownloadComplete {
+            layer_index,
+            digest,
+            downloaded_bytes,
+        } => PullProgress::LayerDownloadComplete {
+            layer_index: layer_index as u32,
+            digest: digest.to_string(),
+            downloaded_bytes: downloaded_bytes as f64,
+        },
+        CorePullProgress::LayerDownloadVerifying {
+            layer_index,
+            digest,
+        } => PullProgress::LayerDownloadVerifying {
+            layer_index: layer_index as u32,
+            digest: digest.to_string(),
+        },
+        CorePullProgress::LayerMaterializeStarted {
+            layer_index,
+            diff_id,
+        } => PullProgress::LayerMaterializeStarted {
+            layer_index: layer_index as u32,
+            diff_id: diff_id.to_string(),
+        },
+        CorePullProgress::LayerMaterializeProgress {
+            layer_index,
+            bytes_read,
+            total_bytes,
+        } => PullProgress::LayerMaterializeProgress {
+            layer_index: layer_index as u32,
+            bytes_read: bytes_read as f64,
+            total_bytes: total_bytes as f64,
+        },
+        CorePullProgress::LayerMaterializeWriting { layer_index } => {
+            PullProgress::LayerMaterializeWriting {
+                layer_index: layer_index as u32,
+            }
+        }
+        CorePullProgress::LayerMaterializeComplete {
+            layer_index,
+            diff_id,
+        } => PullProgress::LayerMaterializeComplete {
+            layer_index: layer_index as u32,
+            diff_id: diff_id.to_string(),
+        },
+        CorePullProgress::StitchMergingTrees { layer_count } => PullProgress::StitchMergingTrees {
+            layer_count: layer_count as u32,
+        },
+        CorePullProgress::StitchWritingFsmeta => PullProgress::StitchWritingFsmeta {},
+        CorePullProgress::StitchWritingVmdk => PullProgress::StitchWritingVmdk {},
+        CorePullProgress::StitchComplete => PullProgress::StitchComplete {},
+        CorePullProgress::Complete {
+            reference,
+            layer_count,
+        } => PullProgress::Complete {
+            reference: reference.to_string(),
+            layer_count: layer_count as u32,
+        },
     }
 }
 

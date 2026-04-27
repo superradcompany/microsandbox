@@ -54,6 +54,50 @@ Create and boot in detached mode. The sandbox survives after your process exits.
 
 ---
 
+#### Sandbox.createDetachedWithProgress()
+
+```typescript
+static createDetachedWithProgress(config: SandboxConfig): Promise<PullSession>
+```
+
+Like [`Sandbox.createWithProgress()`](#sandbox-createwithprogress), but spawns the sandbox in detached mode so it survives after the parent process exits.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| config | [`SandboxConfig`](#sandboxconfig) | Sandbox configuration |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`PullSession`](#pullsession) | Async iterable of pull events. Call `result()` to obtain the running sandbox. |
+
+---
+
+#### Sandbox.createWithProgress()
+
+```typescript
+static createWithProgress(config: SandboxConfig): Promise<PullSession>
+```
+
+Create a sandbox and observe image pull and materialize progress. Returns a [`PullSession`](#pullsession) that yields [`PullProgress`](#pullprogress) events as the image is resolved, downloaded, and materialized. Call `session.result()` after iteration to obtain the live sandbox.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| config | [`SandboxConfig`](#sandboxconfig) | Sandbox configuration |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`PullSession`](#pullsession) | Async iterable of pull events. Call `result()` to obtain the running sandbox. |
+
+---
+
 #### Sandbox.get()
 
 ```typescript
@@ -348,6 +392,47 @@ Controls when the SDK fetches an OCI image from the registry.
 | `'always'` | Pull the image every time, even if cached locally |
 | `'if-missing'` | Pull only if the image is not already cached. This is the default. |
 | `'never'` | Never pull; fail if the image is not cached locally |
+
+### PullProgress
+
+Image pull and materialize progress event emitted by [`PullSession`](#pullsession). A discriminated union — narrow on `type` to access variant-specific fields:
+
+```typescript
+for await (const ev of session) {
+  if (ev.type === "layer_download_progress") {
+    console.log(`${ev.layerIndex}: ${ev.downloadedBytes}/${ev.totalBytes}`);
+  }
+}
+```
+
+| `type` value | Additional fields |
+|--------------|-------------------|
+| `'resolving'` | `reference: string` |
+| `'resolved'` | `reference: string`, `manifestDigest: string`, `layerCount: number`, `totalDownloadBytes?: number` |
+| `'layer_download_progress'` | `layerIndex: number`, `digest: string`, `downloadedBytes: number`, `totalBytes?: number` |
+| `'layer_download_complete'` | `layerIndex: number`, `digest: string`, `downloadedBytes: number` |
+| `'layer_download_verifying'` | `layerIndex: number`, `digest: string` |
+| `'layer_materialize_started'` | `layerIndex: number`, `diffId: string` |
+| `'layer_materialize_progress'` | `layerIndex: number`, `bytesRead: number`, `totalBytes: number` |
+| `'layer_materialize_writing'` | `layerIndex: number` |
+| `'layer_materialize_complete'` | `layerIndex: number`, `diffId: string` |
+| `'stitch_merging_trees'` | `layerCount: number` |
+| `'stitch_writing_fsmeta'` | (none) |
+| `'stitch_writing_vmdk'` | (none) |
+| `'stitch_complete'` | (none) |
+| `'complete'` | `reference: string`, `layerCount: number` |
+
+`totalDownloadBytes` and `totalBytes` on the `'resolved'` / `'layer_download_progress'` variants may be absent if the manifest omits sizes.
+
+### PullSession
+
+Async iterable session returned by [`Sandbox.createWithProgress()`](#sandbox-createwithprogress) and [`Sandbox.createDetachedWithProgress()`](#sandbox-createdetachedwithprogress). Yields [`PullProgress`](#pullprogress) events as the image is resolved, downloaded, and materialized. Call `result()` after iteration to obtain the live sandbox.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [Symbol.asyncIterator] | `AsyncGenerator<`[`PullProgress`](#pullprogress)`>` | Use with `for await...of` |
+| recv() | `Promise<`[`PullProgress`](#pullprogress)` \| null>` | Receive next event. Returns `null` when the stream ends. |
+| result() | `Promise<`[`Sandbox`](#instance-methods)`>` | Resolve the underlying creation task and return the running sandbox. Single-shot: a second call throws `Error("result already consumed")`. |
 
 ### SandboxConfig
 

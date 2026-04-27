@@ -214,6 +214,50 @@ export declare class Patch {
 }
 
 /**
+ * A session combining pull-progress events and a pending sandbox creation.
+ *
+ * Created via `Sandbox.createWithProgress()` or
+ * `Sandbox.createDetachedWithProgress()`. Iterate the session to observe
+ * image pull and materialize events, then call `result()` to obtain the
+ * live `Sandbox`. The iterator ends when the pull finishes (successfully
+ * or not); `result()` resolves with the sandbox or rejects with the
+ * creation error.
+ *
+ * ```js
+ * const session = await Sandbox.createWithProgress({
+ *   name: "my-sb",
+ *   image: "alpine",
+ *   pullPolicy: "always",
+ * });
+ * for await (const ev of session) {
+ *   if (ev.type === "layer_download_progress") {
+ *     console.log(`L${ev.layerIndex}: ${ev.downloadedBytes}/${ev.totalBytes ?? "?"}`);
+ *   }
+ * }
+ * const sandbox = await session.result();
+ * ```
+ *
+ * This type implements JavaScript's async iterable protocol.
+ * It can be used with `for await...of` loops.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
+ */
+export declare class PullSession {
+  /** Receive the next pull progress event. Returns `null` when the stream ends. */
+  recv(): Promise<PullProgress | null>
+  /**
+   * Await the sandbox creation task and return the live `Sandbox`.
+   *
+   * Single-shot: a second call throws `Error("result already consumed")`.
+   * Prefer calling this after the event iterator has finished so the pull
+   * is definitely complete.
+   */
+  result(): Promise<Sandbox>
+  [Symbol.asyncIterator](): AsyncGenerator<PullProgress, void, undefined>
+}
+export type JsPullSession = PullSession
+
+/**
  * A running sandbox instance.
  *
  * Created via `Sandbox.create()` or `Sandbox.start()`. Holds a live connection
@@ -224,6 +268,19 @@ export declare class Sandbox {
   static create(config: SandboxConfig): Promise<Sandbox>
   /** Create a sandbox that survives the parent process (detached mode). */
   static createDetached(config: SandboxConfig): Promise<Sandbox>
+  /**
+   * Create a sandbox and observe image pull/materialize progress.
+   *
+   * Returns a `PullSession` that yields `PullProgress` events as the
+   * image is resolved, downloaded, and materialized. Call
+   * `session.result()` after iteration to obtain the live `Sandbox`.
+   */
+  static createWithProgress(config: SandboxConfig): Promise<PullSession>
+  /**
+   * Like `createWithProgress`, but spawns the sandbox in detached mode
+   * so it survives after the parent process exits.
+   */
+  static createDetachedWithProgress(config: SandboxConfig): Promise<PullSession>
   /** Start an existing stopped sandbox (attached mode). */
   static start(name: string): Promise<Sandbox>
   /** Start an existing stopped sandbox (detached mode). */
@@ -599,6 +656,12 @@ export interface NetworkConfig {
   tls?: TlsConfig
   /** Max concurrent connections (default: 256). */
   maxConnections?: number
+  /**
+   * Ship the host's trusted CAs into the guest at boot so outbound TLS
+   * works behind corporate MITM proxies (Warp Zero Trust, Zscaler,
+   * etc.). Opt-in. Default: false.
+   */
+  trustHostCas?: boolean
 }
 
 /** Rootfs patch applied before VM startup. */
@@ -685,6 +748,38 @@ export declare const enum PullPolicy {
   Never = 'never'
 }
 
+/**
+ * Image pull / materialize progress event emitted by `PullSession`.
+ *
+ * Mirrors the Rust `microsandbox_image::PullProgress` enum. Narrow on
+ * `type` to access variant-specific fields:
+ *
+ * ```js
+ * for await (const ev of session) {
+ *   if (ev.type === "layer_download_progress") {
+ *     console.log(`${ev.layerIndex}: ${ev.downloadedBytes}/${ev.totalBytes}`);
+ *   }
+ * }
+ * ```
+ */
+export type PullProgress =
+  | { type: 'resolving', reference: string }
+  | { type: 'resolved', reference: string, manifestDigest: string, layerCount: number, /** Sum of compressed layer sizes. `null` if the manifest omits sizes. */
+totalDownloadBytes?: number }
+| { type: 'layer_download_progress', layerIndex: number, digest: string, downloadedBytes: number, /** Total bytes for this layer. `null` if the manifest omits sizes. */
+totalBytes?: number }
+| { type: 'layer_download_complete', layerIndex: number, digest: string, downloadedBytes: number }
+| { type: 'layer_download_verifying', layerIndex: number, digest: string }
+| { type: 'layer_materialize_started', layerIndex: number, diffId: string }
+| { type: 'layer_materialize_progress', layerIndex: number, bytesRead: number, totalBytes: number }
+| { type: 'layer_materialize_writing', layerIndex: number }
+| { type: 'layer_materialize_complete', layerIndex: number, diffId: string }
+| { type: 'stitch_merging_trees', layerCount: number }
+| { type: 'stitch_writing_fsmeta' }
+| { type: 'stitch_writing_vmdk' }
+| { type: 'stitch_complete' }
+| { type: 'complete', reference: string, layerCount: number }
+
 /** Registry authentication credentials. */
 export interface RegistryAuth {
   username: string
@@ -739,7 +834,15 @@ export interface SandboxConfig {
   patches?: Array<PatchConfig>
   /** Image pull policy: "always", "if-missing", or "never". */
   pullPolicy?: string
-  /** Log level: "trace", "debug", "info", "warn", "error". */
+  /**
+   * Log level for the sandbox supervisor process: "trace", "debug", "info",
+   * "warn", "error".
+   *
+   * Controls verbosity of the spawned `msb` supervisor's own logs, which are
+   * written to its stderr (inherited by the parent Node process). This does
+   * not surface image pull progress or structured events to the SDK — for
+   * pull progress use `Sandbox.createWithProgress`.
+   */
   logLevel?: string
   /** Kill any existing sandbox with the same name before creating. */
   replace?: boolean
