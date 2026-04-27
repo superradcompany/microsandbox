@@ -63,7 +63,7 @@ async fn setup_alpine(name: &str, policy: NetworkPolicy) -> Sandbox {
         .rules
         .insert(0, allow_domain_suffix_https(".alpinelinux.org"));
     let sb = Sandbox::builder(name)
-        .image("alpine")
+        .image("mirror.gcr.io/library/alpine")
         .cpus(1)
         .memory(512)
         .network(|n| n.policy(policy))

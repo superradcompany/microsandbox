@@ -25,7 +25,7 @@ use test_utils::msb_test;
 async fn tls_intercept_handshake() {
     let name = "tls-test-intercept";
     let sandbox = Sandbox::builder(name)
-        .image("node:alpine")
+        .image("mirror.gcr.io/library/node:alpine")
         .cpus(1)
         .memory(512)
         .network(|n| n.tls(|t| t))
@@ -74,7 +74,7 @@ async fn tls_intercept_handshake() {
 async fn tls_bypass_domain_connects() {
     let name = "tls-test-bypass";
     let sandbox = Sandbox::builder(name)
-        .image("node:alpine")
+        .image("mirror.gcr.io/library/node:alpine")
         .cpus(1)
         .memory(512)
         .network(|n| n.tls(|t| t.bypass("example.com")))

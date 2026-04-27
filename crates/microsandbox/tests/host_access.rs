@@ -89,7 +89,7 @@ impl Drop for HostHttp {
 /// Boot an alpine sandbox with the given policy (or the default when `None`).
 async fn spawn_sandbox(name: &str, policy: Option<NetworkPolicy>) -> Sandbox {
     let builder = Sandbox::builder(name)
-        .image("alpine")
+        .image("mirror.gcr.io/library/alpine")
         .cpus(1)
         .memory(256)
         .replace();

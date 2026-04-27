@@ -10,7 +10,7 @@ describe("Node.js SDK Smoke Tests", () => {
 	beforeAll(async () => {
 		sandbox = await Sandbox.create({
 			name: SANDBOX_NAME,
-			image: "alpine",
+			image: "mirror.gcr.io/library/alpine",
 			cpus: 1,
 			memoryMib: 512,
 			replace: true,

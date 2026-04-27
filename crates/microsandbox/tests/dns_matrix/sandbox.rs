@@ -24,7 +24,7 @@ pub(crate) async fn setup_sandbox(
     configure_network: impl FnOnce(NetworkBuilder) -> NetworkBuilder,
 ) -> Result<(Sandbox, String), Box<dyn std::error::Error>> {
     let sb = Sandbox::builder(name)
-        .image("alpine")
+        .image("mirror.gcr.io/library/alpine")
         .cpus(1)
         .memory(512)
         .network(configure_network)
