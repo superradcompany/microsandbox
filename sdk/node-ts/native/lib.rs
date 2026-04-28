@@ -5,6 +5,7 @@
 // in test builds only — production builds still lint it normally.
 #![cfg_attr(test, allow(dead_code))]
 
+mod dns_builder;
 mod error;
 mod exec;
 mod fs;

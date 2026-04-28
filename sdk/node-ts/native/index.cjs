@@ -576,6 +576,8 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
+module.exports.DnsBuilder = nativeBinding.DnsBuilder
+module.exports.JsDnsBuilder = nativeBinding.JsDnsBuilder
 module.exports.ExecHandle = nativeBinding.ExecHandle
 module.exports.JsExecHandle = nativeBinding.JsExecHandle
 module.exports.ExecOutput = nativeBinding.ExecOutput
