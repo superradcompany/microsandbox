@@ -242,7 +242,7 @@ jobs:
 
       - name: Build Node SDK
         working-directory: sdk/node-ts
-        run: npm install && npm run build
+        run: npm ci && npm run build
 
       # -- Checks (Python SDK) --
       - uses: astral-sh/setup-uv@v3
@@ -425,7 +425,7 @@ jobs:
       # -- Install deps & run tests --
       - name: Install Node.js dependencies
         working-directory: sdk/node-ts
-        run: npm install --ignore-scripts
+        run: npm ci --ignore-scripts
 
       - name: Run SDK smoke tests
         working-directory: sdk/node-ts
