@@ -212,7 +212,8 @@ jobs:
         working-directory: sdk/node-ts
         run: |
           npm ci
-          npm run build -- --target ${{ matrix.napi_target }}
+          npm run build:native -- --target ${{ matrix.napi_target }}
+          npm run build:ts
 
       - name: Upload Node SDK artifacts
         uses: actions/upload-artifact@v4
