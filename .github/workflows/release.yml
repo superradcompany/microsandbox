@@ -3,9 +3,6 @@ name: Release
 on:
   push:
     tags: ["v*"]
-    # TEMP: trigger on this fix branch to re-run npm publish for v0.4.0.
-    # Revert before merge.
-    branches: ["fix/release-node-sdk-artifact-paths"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -294,7 +291,6 @@ jobs:
   assemble:
     name: Assemble Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -329,7 +325,6 @@ jobs:
   sync-mintlify:
     name: Sync mintlify branch
     needs: assemble
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -408,7 +403,6 @@ jobs:
   refresh-lockfile:
     name: Refresh npm lockfile
     needs: npm-publish
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -446,7 +440,6 @@ jobs:
   mcp-publish:
     name: Publish MCP server
     needs: npm-publish
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -474,7 +467,6 @@ jobs:
   crates-publish:
     name: Publish crates
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -509,7 +501,6 @@ jobs:
   pypi-publish:
     name: Publish Python SDK
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -542,7 +533,6 @@ jobs:
   docker-build:
     name: Docker (${{ matrix.arch }})
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -607,7 +597,6 @@ jobs:
   docker-manifest:
     name: Docker manifest
     needs: docker-build
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - name: Download digests
