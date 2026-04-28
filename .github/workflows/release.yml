@@ -220,9 +220,9 @@ jobs:
         with:
           name: node-sdk-${{ matrix.npm_dir }}
           path: |
-            sdk/node-ts/${{ matrix.node_file }}
-            sdk/node-ts/index.cjs
-            sdk/node-ts/index.d.cts
+            sdk/node-ts/native/${{ matrix.node_file }}
+            sdk/node-ts/native/index.cjs
+            sdk/node-ts/native/index.d.ts
 
       # -- Python SDK --
       - uses: astral-sh/setup-uv@v3
@@ -362,10 +362,18 @@ jobs:
           cp node-artifacts/node-sdk-linux-x64-gnu/microsandbox.linux-x64-gnu.node sdk/node-ts/npm/linux-x64-gnu/
           cp node-artifacts/node-sdk-linux-arm64-gnu/microsandbox.linux-arm64-gnu.node sdk/node-ts/npm/linux-arm64-gnu/
 
-          # Copy build-generated index.cjs and index.d.cts into root package
-          # (use darwin-arm64 — all platforms produce identical JS/types).
-          cp node-artifacts/node-sdk-darwin-arm64/index.cjs sdk/node-ts/index.cjs
-          cp node-artifacts/node-sdk-darwin-arm64/index.d.cts sdk/node-ts/index.d.cts
+          # Copy napi-generated bindings into the root package's native/ dir
+          # (use darwin-arm64; all platforms emit identical JS and types).
+          # napi build emits index.d.ts; rename to index.d.cts so nodenext
+          # resolution finds it next to the .cjs binding.
+          cp node-artifacts/node-sdk-darwin-arm64/index.cjs sdk/node-ts/native/index.cjs
+          cp node-artifacts/node-sdk-darwin-arm64/index.d.ts sdk/node-ts/native/index.d.cts
+
+      - name: Build TypeScript output (root package dist/)
+        working-directory: sdk/node-ts
+        run: |
+          npm ci
+          npm run build:ts
 
       - name: Publish platform packages
         env:
