@@ -330,6 +330,12 @@ jobs:
       - name: Clean workspace
         run: rm -rf "${{ github.workspace }}"/{build}
 
+      # /dev/kvm ships as 0660 root:kvm on ubuntu-2404; the runner user isn't
+      # in the kvm group, so libkrun aborts on open(). Flip to 0666 for this
+      # ephemeral VM.
+      - name: Grant /dev/kvm access
+        run: sudo chmod 666 /dev/kvm
+
       - uses: actions/checkout@v4
         with:
           submodules: true
@@ -396,6 +402,10 @@ jobs:
         run: |
           rm -rf "${{ github.workspace }}"/{sdk,build}
           rm -rf ~/.microsandbox
+
+      # See integration-test job above for rationale.
+      - name: Grant /dev/kvm access
+        run: sudo chmod 666 /dev/kvm
 
       - uses: actions/setup-node@v4
         with:
