@@ -372,10 +372,12 @@ jobs:
       # -- Run integration tests --
       # MSB_TEST_ISOLATE_HOME=1 turns on per-test ~/.microsandbox isolation
       # (see crates/test-utils), so nextest can run tests in parallel without
-      # sqlite/image-cache contention.
+      # sqlite/image-cache contention. MSB_TEST_KEEP_HOME=1 preserves the
+      # tempdir after each test so sandbox logs are inspectable when SSH'ing in.
       - name: Run integration tests
         env:
           MSB_TEST_ISOLATE_HOME: "1"
+          MSB_TEST_KEEP_HOME: "1"
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
@@ -429,6 +431,8 @@ jobs:
         run: npm install --ignore-scripts
 
       - name: Run SDK smoke tests
+        env:
+          MSB_TEST_KEEP_HOME: "1"
         working-directory: sdk/node-ts
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
