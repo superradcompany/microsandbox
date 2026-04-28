@@ -36,12 +36,12 @@ dirs.workspace = true
 indicatif.workspace = true
 ipnetwork = { workspace = true, optional = true }
 libc.workspace = true
-microsandbox = { version = "0.3.14", path = "../microsandbox", default-features = false }
-microsandbox-image = { version = "0.3.14", path = "../image" }
-microsandbox-network = { version = "0.3.14", path = "../network", optional = true }
-microsandbox-protocol = { version = "0.3.14", path = "../protocol" }
-microsandbox-runtime = { version = "0.3.14", path = "../runtime", default-features = false }
-microsandbox-utils = { version = "0.3.14", path = "../utils" }
+microsandbox = { version = "0.4.0", path = "../microsandbox", default-features = false }
+microsandbox-image = { version = "0.4.0", path = "../image" }
+microsandbox-network = { version = "0.4.0", path = "../network", optional = true }
+microsandbox-protocol = { version = "0.4.0", path = "../protocol" }
+microsandbox-runtime = { version = "0.4.0", path = "../runtime", default-features = false }
+microsandbox-utils = { version = "0.4.0", path = "../utils" }
 rand.workspace = true
 reqwest.workspace = true
 rpassword.workspace = true

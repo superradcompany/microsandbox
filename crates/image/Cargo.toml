@@ -16,7 +16,7 @@ async-compression = { workspace = true, features = ["gzip", "tokio", "zstd"] }
 futures.workspace = true
 hex.workspace = true
 libc.workspace = true
-microsandbox-utils = { version = "0.3.14", path = "../utils" }
+microsandbox-utils = { version = "0.4.0", path = "../utils" }
 oci-client.workspace = true
 rustls-pemfile.workspace = true
 oci-spec.workspace = true

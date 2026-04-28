@@ -13,8 +13,8 @@ crate-type = ["cdylib"]
 path = "src/lib.rs"
 
 [dependencies]
-microsandbox = { version = "0.3.14", path = "../../crates/microsandbox" }
-microsandbox-network = { version = "0.3.14", path = "../../crates/network" }
+microsandbox = { version = "0.4.0", path = "../../crates/microsandbox" }
+microsandbox-network = { version = "0.4.0", path = "../../crates/network" }
 ipnetwork = { version = "0.21.0", features = ["serde"] }
 pyo3 = { version = "0.24", features = ["abi3-py310", "extension-module"] }
 pyo3-async-runtimes = { version = "0.24", features = ["tokio-runtime"] }

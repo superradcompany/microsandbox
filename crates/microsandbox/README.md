@@ -30,7 +30,7 @@ Lightweight VM sandboxes for running AI agents and untrusted code with hardware-
 
 ```toml
 [dependencies]
-microsandbox = "0.3"
+microsandbox = "0.4"
 ```
 
 ### Cargo Features
@@ -44,7 +44,7 @@ To disable networking:
 
 ```toml
 [dependencies]
-microsandbox = { version = "0.3", default-features = false, features = ["prebuilt"] }
+microsandbox = { version = "0.4", default-features = false, features = ["prebuilt"] }
 ```
 
 ## Quick Start
