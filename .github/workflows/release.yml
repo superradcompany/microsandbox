@@ -211,7 +211,7 @@ jobs:
       - name: Build Node SDK
         working-directory: sdk/node-ts
         run: |
-          npm install
+          npm ci
           npm run build -- --target ${{ matrix.napi_target }}
 
       - name: Upload Node SDK artifacts
@@ -385,6 +385,45 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: sdk/node-ts
         run: npm publish --access public
+
+  # ---------------------------------------------------------------------------
+  # Refresh sdk/node-ts/package-lock.json against the just-published platform
+  # packages, so main always has lockfile integrity hashes that satisfy
+  # `npm ci`. Opens a PR that the maintainer merges manually.
+  # ---------------------------------------------------------------------------
+  refresh-lockfile:
+    name: Refresh npm lockfile
+    needs: npm-publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Wait for npm to index platform packages
+        run: sleep 60
+
+      - name: Regenerate lockfile
+        working-directory: sdk/node-ts
+        run: npm install --package-lock-only --ignore-scripts
+
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          title: "chore: refresh npm lockfile after ${{ github.ref_name }}"
+          body: |
+            Regenerates `sdk/node-ts/package-lock.json` against the platform packages published for ${{ github.ref_name }}, so `npm ci` keeps working on main.
+          branch: refresh-lockfile-${{ github.ref_name }}
+          commit-message: "chore: refresh npm lockfile after ${{ github.ref_name }}"
+          base: main
+          add-paths: sdk/node-ts/package-lock.json
+          delete-branch: true
 
   # ---------------------------------------------------------------------------
   # Publish MCP server to npm
