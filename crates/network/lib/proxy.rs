@@ -67,34 +67,36 @@ async fn tcp_proxy_task(
     shared: Arc<SharedState>,
     network_policy: Arc<NetworkPolicy>,
 ) -> io::Result<()> {
-    // Skip the peek entirely when no Domain/DomainSuffix rule exists —
-    // peek can only refine those, and waiting for guest bytes before
-    // connecting upstream adds latency that breaks short-timeout
-    // clients on plain TCP (e.g. wget --timeout=N).
+    // Peek only when there's a Domain/DomainSuffix rule that could
+    // need an SNI to refine. Otherwise the SYN handler's decision
+    // already accepted this connection — re-evaluating here would be
+    // redundant (and wrong: the proxy receives a translated dst for
+    // host-alias connections, which the policy can't match against).
     let (initial_buf, sni) = if network_policy.has_domain_rules() {
         peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await
     } else {
         (Vec::new(), None)
     };
-    let source = match sni.as_deref() {
-        Some(name) => HostnameSource::Sni(name),
-        None => HostnameSource::CacheOnly,
-    };
 
-    match network_policy.evaluate_egress_with_source(dst, Protocol::Tcp, &shared, source) {
-        EgressEvaluation::Allow => {}
-        EgressEvaluation::Deny => {
-            tracing::debug!(
-                dst = %dst,
-                source = source.label(),
-                "TCP egress denied by domain policy",
-            );
-            return Ok(());
-        }
-        EgressEvaluation::DeferUntilHostname => {
-            // Only the SYN handler asks for deferral; treat as Deny.
-            debug_assert!(false, "DeferUntilHostname leaked into TCP proxy task");
-            return Ok(());
+    // Re-evaluate egress only when we actually extracted an SNI. SNI
+    // can override an over-allow that matched the cache against a
+    // shared CDN IP, so this is the only refinement worth doing here.
+    if let Some(name) = sni.as_deref() {
+        let source = HostnameSource::Sni(name);
+        match network_policy.evaluate_egress_with_source(dst, Protocol::Tcp, &shared, source) {
+            EgressEvaluation::Allow => {}
+            EgressEvaluation::Deny => {
+                tracing::debug!(
+                    dst = %dst,
+                    sni = name,
+                    "TCP egress denied by SNI gate",
+                );
+                return Ok(());
+            }
+            EgressEvaluation::DeferUntilHostname => {
+                debug_assert!(false, "DeferUntilHostname under HostnameSource::Sni");
+                return Ok(());
+            }
         }
     }
 
