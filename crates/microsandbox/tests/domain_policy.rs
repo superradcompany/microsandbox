@@ -170,6 +170,102 @@ async fn domain_policy_allows_whitelisted_https() {
     let _ = Sandbox::remove(name).await;
 }
 
+/// `deny Domain("example.com")` must cause DNS resolution for that
+/// name to fail at the gateway resolver (REFUSED), while unrelated
+/// names continue to resolve normally. The deny lives at the DNS layer
+/// because `dns_query_denied` consults Domain rules before the
+/// forwarder forwards upstream.
+#[msb_test]
+async fn domain_policy_deny_domain_refuses_dns() {
+    let name = "net-domain-policy-deny-dns";
+    let policy = NetworkPolicy {
+        default_egress: Action::Allow,
+        default_ingress: Action::Allow,
+        rules: vec![Rule::deny_egress(Destination::Domain(
+            "example.com".parse().expect("valid domain"),
+        ))],
+    };
+    let sb = setup_alpine(name, policy).await;
+
+    // Denied: gateway returns REFUSED, getent prints nothing.
+    let denied = sb
+        .shell("getent hosts example.com | awk '{print $1; exit}'")
+        .await
+        .expect("dns probe denied");
+    let denied_out = denied.stdout().unwrap_or_default().trim().to_string();
+    assert!(
+        denied_out.is_empty(),
+        "example.com DNS lookup should be refused: got `{denied_out}`"
+    );
+
+    // Companion: an unrelated name still resolves.
+    let allowed = sb
+        .shell("getent hosts pypi.org | awk '{print $1; exit}'")
+        .await
+        .expect("dns probe allowed");
+    let allowed_out = allowed.stdout().unwrap_or_default().trim().to_string();
+    assert!(
+        !allowed_out.is_empty(),
+        "pypi.org DNS lookup should succeed under default-allow: got `{allowed_out}`"
+    );
+
+    sb.stop_and_wait().await.expect("stop");
+    let _ = Sandbox::remove(name).await;
+}
+
+/// `deny DomainSuffix(".example.com")` must refuse DNS for the apex
+/// and any subdomain. Mirrors the suffix-match invariant tested for
+/// allow rules: `matches_suffix` is label-aware, so the apex itself
+/// matches as well as deeper labels.
+#[msb_test]
+async fn domain_policy_deny_suffix_refuses_dns_apex_and_subdomain() {
+    let name = "net-domain-policy-deny-suffix-dns";
+    let policy = NetworkPolicy {
+        default_egress: Action::Allow,
+        default_ingress: Action::Allow,
+        rules: vec![Rule::deny_egress(Destination::DomainSuffix(
+            ".example.com".parse().expect("valid domain suffix"),
+        ))],
+    };
+    let sb = setup_alpine(name, policy).await;
+
+    // Apex: `.example.com` suffix matches `example.com` itself.
+    let apex = sb
+        .shell("getent hosts example.com | awk '{print $1; exit}'")
+        .await
+        .expect("dns probe apex");
+    let apex_out = apex.stdout().unwrap_or_default().trim().to_string();
+    assert!(
+        apex_out.is_empty(),
+        "example.com (apex) should be refused by .example.com suffix: got `{apex_out}`"
+    );
+
+    // Subdomain: `www.example.com` also matches.
+    let sub = sb
+        .shell("getent hosts www.example.com | awk '{print $1; exit}'")
+        .await
+        .expect("dns probe subdomain");
+    let sub_out = sub.stdout().unwrap_or_default().trim().to_string();
+    assert!(
+        sub_out.is_empty(),
+        "www.example.com should be refused by .example.com suffix: got `{sub_out}`"
+    );
+
+    // Companion: an unrelated suffix still resolves.
+    let allowed = sb
+        .shell("getent hosts pypi.org | awk '{print $1; exit}'")
+        .await
+        .expect("dns probe allowed");
+    let allowed_out = allowed.stdout().unwrap_or_default().trim().to_string();
+    assert!(
+        !allowed_out.is_empty(),
+        "pypi.org DNS lookup should succeed under default-allow: got `{allowed_out}`"
+    );
+
+    sb.stop_and_wait().await.expect("stop");
+    let _ = Sandbox::remove(name).await;
+}
+
 /// `Destination::DomainSuffix` must match subdomains but not unrelated
 /// hosts. One sandbox, two probes:
 ///
