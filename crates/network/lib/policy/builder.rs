@@ -486,6 +486,72 @@ impl RuleBuilder {
         self
     }
 
+    // -- bulk-domain shortcuts --------------------------------------
+
+    /// Allow each name in `names` as a `Destination::Domain` rule. One
+    /// rule per name; subject to the closure's current direction,
+    /// protocol, and port state.
+    ///
+    /// Inputs are stored raw and parsed via [`DomainName`] at
+    /// [`NetworkPolicyBuilder::build`] time; invalid names accumulate
+    /// as [`BuildError::InvalidDomain`].
+    pub fn allow_domains<I, S>(&mut self, names: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for name in names {
+            self.commit_rule(Action::Allow, PendingDestination::Domain(name.into()));
+        }
+        self
+    }
+
+    /// Deny each name in `names` as a `Destination::Domain` rule.
+    /// Mirrors [`Self::allow_domains`].
+    pub fn deny_domains<I, S>(&mut self, names: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for name in names {
+            self.commit_rule(Action::Deny, PendingDestination::Domain(name.into()));
+        }
+        self
+    }
+
+    /// Allow each suffix in `suffixes` as a `Destination::DomainSuffix`
+    /// rule. Each suffix matches the apex itself and any subdomain
+    /// (label-aligned). One rule per suffix.
+    pub fn allow_domain_suffixes<I, S>(&mut self, suffixes: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for suffix in suffixes {
+            self.commit_rule(
+                Action::Allow,
+                PendingDestination::DomainSuffix(suffix.into()),
+            );
+        }
+        self
+    }
+
+    /// Deny each suffix in `suffixes` as a `Destination::DomainSuffix`
+    /// rule. Mirrors [`Self::allow_domain_suffixes`].
+    pub fn deny_domain_suffixes<I, S>(&mut self, suffixes: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for suffix in suffixes {
+            self.commit_rule(
+                Action::Deny,
+                PendingDestination::DomainSuffix(suffix.into()),
+            );
+        }
+        self
+    }
+
     // -- explicit-rule entry ----------------------------------------
 
     /// Begin an explicit-destination rule with action `Allow`. Returns
@@ -1030,5 +1096,114 @@ mod tests {
         assert!(direction_covers(Ingress, Ingress));
         assert!(!direction_covers(Ingress, Egress));
         assert!(!direction_covers(Ingress, Any));
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Bulk-domain shortcuts
+    //----------------------------------------------------------------------------------------------
+
+    /// `deny_domains` produces one deny-Domain rule per input name,
+    /// inheriting the closure's direction, protocol, and port state.
+    #[test]
+    fn deny_domains_produces_one_rule_per_name() {
+        let p = NetworkPolicy::builder()
+            .default_allow()
+            .egress(|e| e.deny_domains(["evil.com", "tracker.example"]))
+            .build()
+            .unwrap();
+        assert_eq!(p.rules.len(), 2);
+        for rule in &p.rules {
+            assert_eq!(rule.action, Action::Deny);
+            assert_eq!(rule.direction, Direction::Egress);
+            assert!(rule.protocols.is_empty(), "no protocol filter");
+            assert!(rule.ports.is_empty(), "no port filter");
+        }
+        assert!(matches!(
+            &p.rules[0].destination,
+            Destination::Domain(d) if d.as_str() == "evil.com",
+        ));
+        assert!(matches!(
+            &p.rules[1].destination,
+            Destination::Domain(d) if d.as_str() == "tracker.example",
+        ));
+    }
+
+    /// `deny_domain_suffixes` mirrors `deny_domains` but produces
+    /// `Destination::DomainSuffix` rules.
+    #[test]
+    fn deny_domain_suffixes_produces_one_rule_per_suffix() {
+        let p = NetworkPolicy::builder()
+            .default_allow()
+            .egress(|e| e.deny_domain_suffixes([".ads.example", ".doubleclick.net"]))
+            .build()
+            .unwrap();
+        assert_eq!(p.rules.len(), 2);
+        assert!(matches!(
+            &p.rules[0].destination,
+            Destination::DomainSuffix(d) if d.as_str() == "ads.example",
+        ));
+        assert!(matches!(
+            &p.rules[1].destination,
+            Destination::DomainSuffix(d) if d.as_str() == "doubleclick.net",
+        ));
+    }
+
+    /// Bulk shortcuts inherit the closure's protocol and port state, so
+    /// users can narrow the bulk in the same call.
+    #[test]
+    fn deny_domains_inherits_protocol_and_port_filter() {
+        let p = NetworkPolicy::builder()
+            .default_allow()
+            .egress(|e| e.tcp().port(443).deny_domains(["evil.com"]))
+            .build()
+            .unwrap();
+        assert_eq!(p.rules[0].protocols, vec![Protocol::Tcp]);
+        assert_eq!(p.rules[0].ports, vec![PortRange::single(443)]);
+    }
+
+    /// `allow_domains` symmetric with `deny_domains` — same shape,
+    /// `Action::Allow`.
+    #[test]
+    fn allow_domains_produces_allow_rules() {
+        let p = NetworkPolicy::builder()
+            .default_deny()
+            .egress(|e| e.allow_domains(["pypi.org", "files.pythonhosted.org"]))
+            .build()
+            .unwrap();
+        assert_eq!(p.rules.len(), 2);
+        for rule in &p.rules {
+            assert_eq!(rule.action, Action::Allow);
+        }
+    }
+
+    /// Empty input is a no-op — no rules pushed.
+    #[test]
+    fn deny_domains_empty_input_is_noop() {
+        let p = NetworkPolicy::builder()
+            .default_allow()
+            .egress(|e| e.deny_domains(Vec::<&str>::new()))
+            .build()
+            .unwrap();
+        assert!(p.rules.is_empty());
+    }
+
+    /// Invalid names accumulate as `BuildError::InvalidDomain` and the
+    /// FIRST one surfaces from `.build()`. Mirrors the per-rule
+    /// `.domain(...)` lazy-parse contract.
+    #[test]
+    fn deny_domains_invalid_input_surfaces_at_build() {
+        let result = NetworkPolicy::builder()
+            .default_allow()
+            .egress(|e| e.deny_domains(["evil.com", "not a domain!"]))
+            .build();
+        match result {
+            Err(BuildError::InvalidDomain { raw, .. }) => {
+                // First-error-wins: but here both rules go into the
+                // pending list and parse runs on each in order. The
+                // first invalid one (index 1) surfaces.
+                assert_eq!(raw, "not a domain!");
+            }
+            other => panic!("expected InvalidDomain, got {other:?}"),
+        }
     }
 }
