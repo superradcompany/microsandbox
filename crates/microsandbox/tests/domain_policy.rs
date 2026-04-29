@@ -91,9 +91,18 @@ async fn setup_alpine(name: &str, policy: NetworkPolicy) -> Sandbox {
 /// Timeout is 30s rather than 10s so a slow CI runner isn't the thing
 /// tipping a probe over on the TLS handshake.
 async fn probe_https(sb: &Sandbox, url: &str) -> String {
+    // Capture curl's exit code and stderr alongside the http_code so a
+    // FAIL surfaces the specific reason (DNS, TCP, TLS, etc.) instead
+    // of an opaque sentinel.
     let cmd = format!(
-        "code=$(curl -sS --max-time 30 -o /dev/null -w '%{{http_code}}' {url} 2>/dev/null); \
-         case \"$code\" in 000|\"\") echo {CURL_FAIL};; *) printf '%s' \"$code\";; esac"
+        "tmp=$(mktemp); \
+         code=$(curl -sS --max-time 30 -o /dev/null -w '%{{http_code}}' {url} 2>\"$tmp\"); \
+         exit=$?; \
+         err=$(tr '\\n' ' ' <\"$tmp\"; rm -f \"$tmp\"); \
+         case \"$code\" in \
+             000|\"\") printf 'FAIL exit=%s err=%s' \"$exit\" \"$err\" ;; \
+             *) printf '%s' \"$code\" ;; \
+         esac"
     );
     let out = sb.shell(&cmd).await.expect("shell");
     out.stdout().unwrap_or_default().trim().to_string()
@@ -105,6 +114,13 @@ async fn probe_https(sb: &Sandbox, url: &str) -> String {
 /// means the policy let the connection through.
 fn reached_server(probe_output: &str) -> bool {
     probe_output.len() == 3 && probe_output.chars().all(|c| c.is_ascii_digit())
+}
+
+/// True when `probe_https` reported a curl-side failure (any output
+/// starting with [`CURL_FAIL`]). The full output includes curl's exit
+/// code and stderr so the failure reason is visible in test logs.
+fn curl_failed(probe_output: &str) -> bool {
+    probe_output.starts_with(CURL_FAIL)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -152,8 +168,8 @@ async fn domain_policy_allows_whitelisted_https() {
     );
 
     let example = probe_https(&sb, "https://example.com/").await;
-    assert_eq!(
-        example, CURL_FAIL,
+    assert!(
+        curl_failed(&example),
         "HTTPS to example.com should be denied by default-action: got `{example}`"
     );
 
@@ -289,8 +305,8 @@ async fn domain_policy_sni_disambiguates_shared_cdn_ip() {
     // allowed name's cache entry, SNI disambiguates and the rule no
     // longer matches.
     let denied = probe_https(&sb, "https://pypi.org/simple/pip/").await;
-    assert_eq!(
-        denied, CURL_FAIL,
+    assert!(
+        curl_failed(&denied),
         "pypi.org should be denied even on shared Fastly IP: got `{denied}`"
     );
 
@@ -318,8 +334,8 @@ async fn domain_policy_suffix_allows_subdomain_https() {
     );
 
     let example = probe_https(&sb, "https://example.com/").await;
-    assert_eq!(
-        example, CURL_FAIL,
+    assert!(
+        curl_failed(&example),
         "example.com should not match .cloudflare.com suffix: got `{example}`"
     );
 
