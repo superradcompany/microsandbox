@@ -97,13 +97,12 @@ if (triple === "darwin-arm64") {
 
 // 3. libkrunfw shared library --------------------------------------------
 // `just build` lands these in build/. Match the {dylib,so} filename for the host.
-const libExt = process.platform === "darwin" ? "dylib" : "so";
 const buildDir = join(repoRoot, "build");
 let krunfw;
 let krunfwVersioned; // e.g. libkrunfw.5.dylib or libkrunfw.so.5
 if (existsSync(buildDir)) {
   const entries = readdirSync(buildDir);
-  // Pick the highest-versioned libkrunfw
+  // Pick the ABI-versioned name that the npm package manifest includes.
   const real = entries
     .filter((e) =>
       process.platform === "darwin"

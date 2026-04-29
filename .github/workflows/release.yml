@@ -215,6 +215,10 @@ jobs:
           npm run build:native -- --target ${{ matrix.napi_target }}
           npm run build:ts
 
+      - name: Prepare Node platform package
+        working-directory: sdk/node-ts
+        run: node scripts/prepare-platform-package.mjs ${{ matrix.npm_dir }}
+
       - name: Upload Node SDK artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -223,6 +227,9 @@ jobs:
             sdk/node-ts/native/${{ matrix.node_file }}
             sdk/node-ts/native/index.cjs
             sdk/node-ts/native/index.d.ts
+            sdk/node-ts/npm/${{ matrix.npm_dir }}/${{ matrix.node_file }}
+            sdk/node-ts/npm/${{ matrix.npm_dir }}/bin/msb
+            sdk/node-ts/npm/${{ matrix.npm_dir }}/lib/*
 
       # -- Python SDK --
       - uses: astral-sh/setup-uv@v3
@@ -357,17 +364,20 @@ jobs:
 
       - name: Place binaries and update generated files
         run: |
-          # Copy .node binaries into platform packages.
-          cp node-artifacts/node-sdk-darwin-arm64/microsandbox.darwin-arm64.node sdk/node-ts/npm/darwin-arm64/
-          cp node-artifacts/node-sdk-linux-x64-gnu/microsandbox.linux-x64-gnu.node sdk/node-ts/npm/linux-x64-gnu/
-          cp node-artifacts/node-sdk-linux-arm64-gnu/microsandbox.linux-arm64-gnu.node sdk/node-ts/npm/linux-arm64-gnu/
+          # Copy prepared platform package payloads.
+          for dir in darwin-arm64 linux-x64-gnu linux-arm64-gnu; do
+            mkdir -p "sdk/node-ts/npm/$dir/bin" "sdk/node-ts/npm/$dir/lib"
+            cp "node-artifacts/node-sdk-$dir/npm/$dir"/microsandbox.*.node "sdk/node-ts/npm/$dir/"
+            cp "node-artifacts/node-sdk-$dir/npm/$dir/bin/msb" "sdk/node-ts/npm/$dir/bin/"
+            cp "node-artifacts/node-sdk-$dir/npm/$dir/lib/"* "sdk/node-ts/npm/$dir/lib/"
+          done
 
           # Copy napi-generated bindings into the root package's native/ dir
           # (use darwin-arm64; all platforms emit identical JS and types).
           # napi build emits index.d.ts; rename to index.d.cts so nodenext
           # resolution finds it next to the .cjs binding.
-          cp node-artifacts/node-sdk-darwin-arm64/index.cjs sdk/node-ts/native/index.cjs
-          cp node-artifacts/node-sdk-darwin-arm64/index.d.ts sdk/node-ts/native/index.d.cts
+          cp node-artifacts/node-sdk-darwin-arm64/native/index.cjs sdk/node-ts/native/index.cjs
+          cp node-artifacts/node-sdk-darwin-arm64/native/index.d.ts sdk/node-ts/native/index.d.cts
 
       - name: Build TypeScript output (root package dist/)
         working-directory: sdk/node-ts
