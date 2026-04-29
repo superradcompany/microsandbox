@@ -29,7 +29,7 @@ function resolveMsb() {
         return { path: candidate, source: "platform-package" };
       }
     } catch {
-      // platform package not installed — fall through
+      // platform package not installed - fall through
     }
   }
 
