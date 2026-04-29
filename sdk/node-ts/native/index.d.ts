@@ -279,6 +279,11 @@ export declare class MountBuilder {
   readonly(): this
   /** Tmpfs size cap in MiB (only valid with `.tmpfs()`). */
   size(mib: number): this
+  /**
+   * Materialize the mount spec. Returns a flat `BuiltVolumeMount`
+   * with a `kind` discriminator and per-variant fields.
+   */
+  build(): BuiltVolumeMount
 }
 export type JsMountBuilder = MountBuilder
 
@@ -789,6 +794,21 @@ export interface BuiltPatch {
   mode?: number
   /** Allow replacing an existing path. */
   replace?: boolean
+}
+
+/**
+ * Built volume mount specification (flat representation of the
+ * `VolumeMount` enum: `kind` discriminator + per-variant fields).
+ */
+export interface BuiltVolumeMount {
+  kind: string
+  guest: string
+  readonly: boolean
+  host?: string
+  name?: string
+  sizeMib?: number
+  format?: string
+  fstype?: string
 }
 
 /** DNS interception configuration produced by `DnsBuilder.build()`. */

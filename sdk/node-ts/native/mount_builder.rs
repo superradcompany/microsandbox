@@ -5,12 +5,30 @@ use napi_derive::napi;
 
 use microsandbox::sandbox::{
     DiskImageFormat as RustDiskImageFormat, MountBuilder as RustMountBuilder,
+    VolumeMount as RustVolumeMount,
 };
 use microsandbox::size::Mebibytes;
+
+use crate::error::to_napi_error;
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// Built volume mount specification (flat representation of the
+/// `VolumeMount` enum: `kind` discriminator + per-variant fields).
+#[derive(Clone)]
+#[napi(object, js_name = "BuiltVolumeMount")]
+pub struct JsBuiltVolumeMount {
+    pub kind: String,
+    pub guest: String,
+    pub readonly: bool,
+    pub host: Option<String>,
+    pub name: Option<String>,
+    pub size_mib: Option<u32>,
+    pub format: Option<String>,
+    pub fstype: Option<String>,
+}
 
 /// Fluent builder for a sandbox volume mount.
 ///
@@ -111,9 +129,88 @@ impl JsMountBuilder {
         self
     }
 
-    // Build is intentionally not exposed here — the sandbox builder
-    // consumes `MountBuilder` via the `volume(...)` callback, which
-    // invokes the underlying validation. Use that flow instead.
+    /// Materialize the mount spec. Returns a flat `BuiltVolumeMount`
+    /// with a `kind` discriminator and per-variant fields.
+    #[napi]
+    pub fn build(&mut self) -> Result<JsBuiltVolumeMount> {
+        let mount = self
+            .inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("MountBuilder already consumed"))?
+            .build()
+            .map_err(to_napi_error)?;
+        Ok(to_built_mount(mount))
+    }
+}
+
+fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
+    match mount {
+        RustVolumeMount::Bind {
+            host,
+            guest,
+            readonly,
+        } => JsBuiltVolumeMount {
+            kind: "bind".into(),
+            guest,
+            readonly,
+            host: Some(host.to_string_lossy().into_owned()),
+            name: None,
+            size_mib: None,
+            format: None,
+            fstype: None,
+        },
+        RustVolumeMount::Named {
+            name,
+            guest,
+            readonly,
+        } => JsBuiltVolumeMount {
+            kind: "named".into(),
+            guest,
+            readonly,
+            host: None,
+            name: Some(name),
+            size_mib: None,
+            format: None,
+            fstype: None,
+        },
+        RustVolumeMount::Tmpfs {
+            guest,
+            size_mib,
+            readonly,
+        } => JsBuiltVolumeMount {
+            kind: "tmpfs".into(),
+            guest,
+            readonly,
+            host: None,
+            name: None,
+            size_mib,
+            format: None,
+            fstype: None,
+        },
+        RustVolumeMount::DiskImage {
+            host,
+            guest,
+            format,
+            fstype,
+            readonly,
+        } => JsBuiltVolumeMount {
+            kind: "disk".into(),
+            guest,
+            readonly,
+            host: Some(host.to_string_lossy().into_owned()),
+            name: None,
+            size_mib: None,
+            format: Some(
+                match format {
+                    RustDiskImageFormat::Qcow2 => "qcow2",
+                    RustDiskImageFormat::Raw => "raw",
+                    RustDiskImageFormat::Vmdk => "vmdk",
+                }
+                .into(),
+            ),
+            fstype,
+        },
+    }
 }
 
 impl JsMountBuilder {

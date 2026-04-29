@@ -1,3 +1,4 @@
+import { mapNapiError } from "./internal/error-mapping.js";
 import { napi } from "./internal/napi.js";
 
 // Sandbox lifecycle and execution
@@ -63,6 +64,76 @@ export { MetricsStream } from "./metrics-stream.js";
 // `.allowAll()` / `.none()` / `.nonLocal()` and the custom-rule
 // factories. Native exposes `policyJson(string)`; this shim
 // serializes once.
+// Wrap a class's prototype method so any thrown error gets remapped
+// to a typed `MicrosandboxError` subclass via the prefix the Rust
+// binding emits (`[InvalidConfig] ...`). Used on builders whose
+// `.build()` can throw a typed validation error.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function wrapMethodWithErrorMap(cls: any, method: string) {
+  const proto = cls.prototype;
+  const orig = proto[method];
+  if (typeof orig !== "function" || (orig as { __wrapped?: boolean }).__wrapped) {
+    return;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const wrapped = function (this: unknown, ...args: any[]) {
+    try {
+      const result = orig.apply(this, args);
+      if (result && typeof result.then === "function") {
+        return result.catch((e: unknown) => {
+          throw mapNapiError(e);
+        });
+      }
+      return result;
+    } catch (e) {
+      throw mapNapiError(e);
+    }
+  };
+  (wrapped as { __wrapped?: boolean }).__wrapped = true;
+  proto[method] = wrapped;
+}
+
+wrapMethodWithErrorMap(napi.MountBuilder, "build");
+wrapMethodWithErrorMap(napi.SandboxBuilder, "create");
+wrapMethodWithErrorMap(napi.SandboxBuilder, "createDetached");
+wrapMethodWithErrorMap(napi.PatchBuilder, "build");
+wrapMethodWithErrorMap(napi.DnsBuilder, "build");
+wrapMethodWithErrorMap(napi.SecretBuilder, "build");
+wrapMethodWithErrorMap(napi.VolumeBuilder, "create");
+
+// `SandboxBuilder.build()` natively returns the JSON-serialized config
+// (snake_case). Replace it with a TS-side wrapper that parses and
+// key-maps to camelCase so consumers get a plain JS object.
+{
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const proto: any = napi.SandboxBuilder.prototype;
+  if (!proto.__buildWrapped) {
+    const origBuild = proto.build;
+    const snakeToCamel = (k: string): string =>
+      k.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const remapKeys = (v: any): any => {
+      if (Array.isArray(v)) return v.map(remapKeys);
+      if (v && typeof v === "object") {
+        const out: Record<string, unknown> = {};
+        for (const [k, val] of Object.entries(v)) out[snakeToCamel(k)] = remapKeys(val);
+        return out;
+      }
+      return v;
+    };
+    proto.build = function () {
+      let json: string;
+      try {
+        json = origBuild.apply(this);
+      } catch (e) {
+        throw mapNapiError(e);
+      }
+      return remapKeys(JSON.parse(json));
+    };
+    proto.__buildWrapped = true;
+  }
+}
+
 {
   // The TS-side `NetworkPolicy` object uses camelCase (`defaultEgress`,
   // `defaultIngress`); the Rust struct it deserializes into expects

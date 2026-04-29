@@ -157,13 +157,15 @@ describe("SandboxBuilder.build", () => {
       .volume("/tmp", (m) => m.tmpfs().size(MiB(64)))
       .build();
     expect(cfg.mounts).toHaveLength(2);
+    // The Rust VolumeMount enum serializes externally-tagged: each
+    // entry is `{ type: "Named", name, guest, readonly }` etc.
     expect(cfg.mounts[0]).toMatchObject({
-      kind: "named",
+      type: "Named",
       name: "v1",
       readonly: true,
     });
     expect(cfg.mounts[1]).toMatchObject({
-      kind: "tmpfs",
+      type: "Tmpfs",
       sizeMib: 64,
     });
   });
