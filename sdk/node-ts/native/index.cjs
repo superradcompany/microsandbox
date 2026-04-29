@@ -576,10 +576,14 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
+module.exports.AttachOptionsBuilder = nativeBinding.AttachOptionsBuilder
+module.exports.JsAttachOptionsBuilder = nativeBinding.JsAttachOptionsBuilder
 module.exports.DnsBuilder = nativeBinding.DnsBuilder
 module.exports.JsDnsBuilder = nativeBinding.JsDnsBuilder
 module.exports.ExecHandle = nativeBinding.ExecHandle
 module.exports.JsExecHandle = nativeBinding.JsExecHandle
+module.exports.ExecOptionsBuilder = nativeBinding.ExecOptionsBuilder
+module.exports.JsExecOptionsBuilder = nativeBinding.JsExecOptionsBuilder
 module.exports.ExecOutput = nativeBinding.ExecOutput
 module.exports.ExecSink = nativeBinding.ExecSink
 module.exports.JsExecSink = nativeBinding.JsExecSink

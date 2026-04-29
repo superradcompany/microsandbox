@@ -5,9 +5,11 @@
 // in test builds only — production builds still lint it normally.
 #![cfg_attr(test, allow(dead_code))]
 
+mod attach_options_builder;
 mod dns_builder;
 mod error;
 mod exec;
+mod exec_options_builder;
 mod fs;
 mod helpers;
 mod image;
