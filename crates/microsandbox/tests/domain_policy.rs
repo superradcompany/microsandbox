@@ -123,6 +123,21 @@ fn curl_failed(probe_output: &str) -> bool {
     probe_output.starts_with(CURL_FAIL)
 }
 
+/// `probe_https` with a small retry for the success case. Self-hosted
+/// runners occasionally drop a single TLS handshake to shared-CDN
+/// edges; the policy under test is unchanged across retries, so a
+/// one-shot probe is the only thing that flakes.
+async fn probe_https_with_retry(sb: &Sandbox, url: &str) -> String {
+    let mut last = String::new();
+    for _ in 0..3 {
+        last = probe_https(sb, url).await;
+        if reached_server(&last) {
+            return last;
+        }
+    }
+    last
+}
+
 /// `getent hosts <name>` with a small retry. Self-hosted CI runners
 /// occasionally drop a single DNS forward; the policy under test is
 /// unchanged across retries, so a one-shot probe is the only thing
@@ -167,13 +182,13 @@ async fn domain_policy_allows_whitelisted_https() {
         "DNS resolution of cloudflare.com should succeed via the gateway resolver"
     );
 
-    let apex = probe_https(&sb, "https://cloudflare.com/").await;
+    let apex = probe_https_with_retry(&sb, "https://cloudflare.com/").await;
     assert!(
         reached_server(&apex),
         "HTTPS to cloudflare.com should be allowed: got `{apex}`"
     );
 
-    let www = probe_https(&sb, "https://www.cloudflare.com/").await;
+    let www = probe_https_with_retry(&sb, "https://www.cloudflare.com/").await;
     assert!(
         reached_server(&www),
         "HTTPS to www.cloudflare.com should be allowed: got `{www}`"
@@ -299,7 +314,7 @@ async fn domain_policy_sni_disambiguates_shared_cdn_ip() {
         .expect("dns probe files.pythonhosted.org");
 
     // Allowed name: SNI matches the rule, connection proceeds.
-    let allowed = probe_https(&sb, "https://files.pythonhosted.org/").await;
+    let allowed = probe_https_with_retry(&sb, "https://files.pythonhosted.org/").await;
     assert!(
         reached_server(&allowed),
         "files.pythonhosted.org should be allowed: got `{allowed}`"
@@ -331,7 +346,7 @@ async fn domain_policy_suffix_allows_subdomain_https() {
     };
     let sb = setup_alpine(name, policy).await;
 
-    let www = probe_https(&sb, "https://www.cloudflare.com/").await;
+    let www = probe_https_with_retry(&sb, "https://www.cloudflare.com/").await;
     assert!(
         reached_server(&www),
         "www.cloudflare.com should match .cloudflare.com suffix: got `{www}`"
