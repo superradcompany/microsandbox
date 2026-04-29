@@ -166,6 +166,12 @@ impl DnsForwarder {
             return build_status_response(&query_msg, ResponseCode::Refused);
         }
 
+        // Network policy `deny Domain` / `deny DomainSuffix`: synthesize REFUSED.
+        if self.network_policy.dns_query_denied(&domain) {
+            tracing::debug!(domain = %domain, "DNS query refused by network policy");
+            return build_status_response(&query_msg, ResponseCode::Refused);
+        }
+
         // Locally synthesize answers for the host alias; MX / TXT / etc.
         // fall through to upstream.
         if is_host_alias_query(&domain)

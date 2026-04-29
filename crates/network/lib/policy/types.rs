@@ -332,6 +332,35 @@ impl NetworkPolicy {
         }
         self.default_ingress
     }
+
+    /// Should the DNS forwarder refuse a query for `name`?
+    ///
+    /// Returns `true` iff the first matching `Domain` / `DomainSuffix`
+    /// rule (in egress-applicable direction) has action `Deny`. Port and
+    /// protocol filters are ignored — DNS queries don't carry a
+    /// destination port, so even a port-narrow deny rule still refuses
+    /// at this layer; the port filter still applies at TCP egress.
+    ///
+    /// `Cidr` / `Group` / `Any` rules cannot match a hostname string and
+    /// are skipped. `default_egress` is not consulted: deny-by-default
+    /// does not refuse all DNS, only explicit deny rules do.
+    pub fn dns_query_denied(&self, name: &str) -> bool {
+        let canonical = name.trim_end_matches('.').to_ascii_lowercase();
+        for rule in &self.rules {
+            if !matches!(rule.direction, Direction::Egress | Direction::Any) {
+                continue;
+            }
+            let matched = match &rule.destination {
+                Destination::Domain(d) => canonical == d.as_str(),
+                Destination::DomainSuffix(s) => matches_suffix(&canonical, s.as_str()),
+                _ => false,
+            };
+            if matched {
+                return rule.action == Action::Deny;
+            }
+        }
+        false
+    }
 }
 
 impl Action {
@@ -1079,5 +1108,135 @@ mod tests {
         assert!(egress_tcp(&policy, "127.0.0.1", &shared).is_deny());
         // Metadata is not in Public.
         assert!(egress_tcp(&policy, "169.254.169.254", &shared).is_deny());
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // dns_query_denied
+    //----------------------------------------------------------------------------------------------
+
+    fn deny_domain_policy(dest: Destination) -> NetworkPolicy {
+        NetworkPolicy {
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::deny_egress(dest)],
+        }
+    }
+
+    #[test]
+    fn dns_query_denied_matches_exact_domain() {
+        let policy = deny_domain_policy(Destination::Domain("evil.com".parse().unwrap()));
+        assert!(policy.dns_query_denied("evil.com"));
+        assert!(!policy.dns_query_denied("good.com"));
+    }
+
+    #[test]
+    fn dns_query_denied_matches_suffix_apex_and_subdomain() {
+        let policy = deny_domain_policy(Destination::DomainSuffix(".evil.com".parse().unwrap()));
+        assert!(policy.dns_query_denied("evil.com"), "apex must match");
+        assert!(
+            policy.dns_query_denied("foo.evil.com"),
+            "subdomain must match"
+        );
+        assert!(
+            policy.dns_query_denied("deep.sub.evil.com"),
+            "deeper subdomain must match"
+        );
+    }
+
+    #[test]
+    fn dns_query_denied_does_not_match_disjoint_suffix() {
+        let policy = deny_domain_policy(Destination::DomainSuffix(".evil.com".parse().unwrap()));
+        assert!(!policy.dns_query_denied("notevil.com"));
+    }
+
+    #[test]
+    fn dns_query_denied_ignores_cidr_group_any_rules() {
+        let policy = NetworkPolicy {
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![
+                Rule::deny_egress(Destination::Any),
+                Rule::deny_egress(Destination::Cidr("10.0.0.0/8".parse().unwrap())),
+                Rule::deny_egress(Destination::Group(DestinationGroup::Public)),
+            ],
+        };
+        assert!(!policy.dns_query_denied("anything.example"));
+    }
+
+    #[test]
+    fn dns_query_denied_first_match_wins_when_allow_precedes_deny() {
+        let policy = NetworkPolicy {
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![
+                Rule::allow_egress(Destination::Domain("evil.com".parse().unwrap())),
+                Rule::deny_egress(Destination::DomainSuffix(".evil.com".parse().unwrap())),
+            ],
+        };
+        // Allow rule comes first; DNS resolution must proceed.
+        assert!(!policy.dns_query_denied("evil.com"));
+        // Deny suffix still catches subdomains the allow rule didn't cover.
+        assert!(policy.dns_query_denied("foo.evil.com"));
+    }
+
+    #[test]
+    fn dns_query_denied_ignores_port_and_protocol_filters() {
+        // A narrow rule (only TCP/443) must still refuse DNS — DNS does
+        // not carry a destination port.
+        let policy = NetworkPolicy {
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![Rule {
+                direction: Direction::Egress,
+                destination: Destination::Domain("evil.com".parse().unwrap()),
+                protocols: vec![Protocol::Tcp],
+                ports: vec![PortRange::single(443)],
+                action: Action::Deny,
+            }],
+        };
+        assert!(policy.dns_query_denied("evil.com"));
+    }
+
+    #[test]
+    fn dns_query_denied_ignores_default_egress() {
+        // Deny-by-default with no Domain rules: DNS proceeds.
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![],
+        };
+        assert!(!policy.dns_query_denied("anything.example"));
+    }
+
+    #[test]
+    fn dns_query_denied_normalizes_case_and_trailing_dot() {
+        let policy = deny_domain_policy(Destination::Domain("evil.com".parse().unwrap()));
+        assert!(policy.dns_query_denied("Evil.COM"));
+        assert!(policy.dns_query_denied("evil.com."));
+        assert!(policy.dns_query_denied("EVIL.COM."));
+    }
+
+    #[test]
+    fn dns_query_denied_skips_ingress_only_rules() {
+        let policy = NetworkPolicy {
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::deny_ingress(Destination::Domain(
+                "evil.com".parse().unwrap(),
+            ))],
+        };
+        assert!(!policy.dns_query_denied("evil.com"));
+    }
+
+    #[test]
+    fn dns_query_denied_any_direction_rule_applies() {
+        let policy = NetworkPolicy {
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::deny_any(Destination::Domain(
+                "evil.com".parse().unwrap(),
+            ))],
+        };
+        assert!(policy.dns_query_denied("evil.com"));
     }
 }
