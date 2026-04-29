@@ -143,8 +143,7 @@ async fn dns_matrix_dot() {
 
 /// Apply the network config shared by both sandboxes: the deny-resolver
 /// policy with deny-Domain rules for the test block list (exact +
-/// suffix). Block-list enforcement now flows through policy rules
-/// instead of the legacy `block_domain` builder API.
+/// suffix). Block-list enforcement flows through policy rules.
 fn with_policy_and_block_list(n: NetworkBuilder, mut policy: NetworkPolicy) -> NetworkBuilder {
     let exact: DomainName = BLOCKED_EXACT.parse().expect("BLOCKED_EXACT parses");
     let suffix: DomainName = BLOCKED_SUFFIX.parse().expect("BLOCKED_SUFFIX parses");

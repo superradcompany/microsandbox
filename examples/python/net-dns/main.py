@@ -12,8 +12,8 @@ async def main():
         cpus=1,
         memory=512,
         network=Network(
-            block_domains=("blocked.example.com",),
-            block_domain_suffixes=(".evil.com",),
+            deny_domains=("blocked.example.com",),
+            deny_domain_suffixes=(".evil.com",),
         ),
         replace=True,
     )

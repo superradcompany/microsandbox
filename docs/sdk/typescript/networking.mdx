@@ -151,11 +151,7 @@ Returned to the callback you pass to `SandboxBuilder.network(...)`. Every setter
 | `queryTimeoutMs(ms)` | Per-query timeout. |
 | `build()` | Internal — produce a [`DnsConfig`](#dnsconfig). |
 
-Domain blocking lives on `NetworkBuilder` now — see [`denyDomains`](#networkbuilder) below.
-
-<Note>
-**Deprecated:** `DnsBuilder.blockDomain(domain)` and `DnsBuilder.blockDomainSuffix(suffix)` still work but emit a `@deprecated` JSDoc warning. Migrate to `NetworkBuilder.denyDomains(...)` / `denyDomainSuffixes(...)`; the new methods also enforce at TLS first-flight (SNI) and TCP egress (cache fallback), not just DNS.
-</Note>
+Domain blocking lives on `NetworkBuilder` now — see [`denyDomains`](#networkbuilder) above.
 
 ---
 
@@ -279,8 +275,6 @@ interface PortRange {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| blockedDomains | `readonly string[]` | Block DNS for exact domains (returns REFUSED) |
-| blockedSuffixes | `readonly string[]` | Block DNS for all subdomains of a suffix |
 | nameservers | `readonly string[]` | Upstream nameservers |
 | rebindProtection | `boolean \| null` | DNS rebinding protection toggle |
 | queryTimeoutMs | `number \| null` | Per-query timeout |

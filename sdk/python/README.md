@@ -216,8 +216,8 @@ sandbox = await Sandbox.create(
     "filtered",
     image="alpine",
     network=Network(
-        block_domains=("blocked.example.com",),
-        block_domain_suffixes=(".evil.com",),
+        deny_domains=("blocked.example.com",),
+        deny_domain_suffixes=(".evil.com",),
     ),
 )
 ```

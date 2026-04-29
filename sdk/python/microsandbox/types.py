@@ -553,10 +553,6 @@ class TlsConfig:
 @dataclass(frozen=True, slots=True)
 class DnsConfig:
     """DNS interception configuration."""
-    block_domains: tuple[str, ...] = ()
-    """Block DNS lookups for exact domains (returns REFUSED)."""
-    block_domain_suffixes: tuple[str, ...] = ()
-    """Block DNS lookups for all subdomains of a suffix."""
     rebind_protection: bool = True
     """Block DNS responses resolving to private IPs. Default: True."""
     nameservers: tuple[str, ...] = ()
@@ -567,10 +563,6 @@ class DnsConfig:
 
     def _to_dict(self) -> dict:
         d: dict = {}
-        if self.block_domains:
-            d["blocked_domains"] = list(self.block_domains)
-        if self.block_domain_suffixes:
-            d["blocked_suffixes"] = list(self.block_domain_suffixes)
         if not self.rebind_protection:
             d["rebind_protection"] = False
         if self.nameservers:
@@ -585,6 +577,15 @@ class Network:
     """Network configuration for a sandbox."""
     policy: str | NetworkPolicy | None = None
     ports: Mapping[int, int] = field(default_factory=dict)
+    deny_domains: tuple[str, ...] = ()
+    """Deny egress to these exact domains. Each entry adds a
+    `deny Domain("...")` policy rule that fires at DNS resolution
+    (REFUSED), TLS first-flight (SNI), and TCP egress (cache fallback).
+    Prepended onto the policy so it takes precedence over later allow
+    rules."""
+    deny_domain_suffixes: tuple[str, ...] = ()
+    """Deny egress to all subdomains of these suffixes. Same enforcement
+    layers as `deny_domains`."""
     dns: DnsConfig | None = None
     tls: TlsConfig | None = None
     max_connections: int | None = None
@@ -610,6 +611,10 @@ class Network:
             d["custom_policy"] = self.policy._to_dict()
         if self.ports:
             d["ports"] = dict(self.ports)
+        if self.deny_domains:
+            d["deny_domains"] = list(self.deny_domains)
+        if self.deny_domain_suffixes:
+            d["deny_domain_suffixes"] = list(self.deny_domain_suffixes)
         if self.dns is not None:
             dns_dict = self.dns._to_dict()
             if dns_dict:

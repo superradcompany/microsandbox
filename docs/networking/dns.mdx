@@ -72,9 +72,6 @@ msb create python --name safe-agent \
 
 </CodeGroup>
 
-<Note>
-**Deprecated:** the previous DNS-only block list (`DnsBuilder::block_domain` / `DnsConfig.block_domains` / `--dns-block-domain`) is kept as an alias for back-compat but emits a runtime deprecation warning on use. Migrate to the canonical names above; the new rules also enforce at TCP egress, not just DNS.
-</Note>
 
 ## Pinning nameservers
 

@@ -52,9 +52,6 @@ DnsConfig(
 | nameservers | `tuple[str, ...]` | `()` | Nameservers (`IP`, `IP:PORT`, `HOST`, or `HOST:PORT`). Overrides the host's `/etc/resolv.conf` when set. Hostnames are resolved once at startup via the host's OS resolver |
 | query_timeout_ms | `int \| None` | `None` | Per-DNS-query timeout in milliseconds (default: 5000) |
 
-<Note>
-**Deprecated:** `DnsConfig.blocked_domains` and `DnsConfig.blocked_suffixes` still work as aliases for `Network.deny_domains` / `Network.deny_domain_suffixes` but emit a `DeprecationWarning` on use. Migrate to the canonical fields above.
-</Note>
 
 ---
 

@@ -5,9 +5,9 @@ await using sandbox = await Sandbox.builder("net-dns")
   .cpus(1)
   .memory(512)
   .network((n) =>
-    n.dns((d) =>
-      d.blockDomain("blocked.example.com").blockDomainSuffix(".evil.com"),
-    ),
+    n
+      .denyDomains("blocked.example.com")
+      .denyDomainSuffixes(".evil.com"),
   )
   .replace()
   .create();

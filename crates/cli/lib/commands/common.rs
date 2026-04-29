@@ -113,18 +113,6 @@ pub struct SandboxOpts {
     #[arg(long = "deny-domain-suffix", value_name = "SUFFIX")]
     pub deny_domain_suffix: Vec<String>,
 
-    /// Deprecated alias for `--deny-domain`. Kept for back-compat;
-    /// emits a warning on use.
-    #[cfg(feature = "net")]
-    #[arg(long, hide = true)]
-    pub dns_block_domain: Vec<String>,
-
-    /// Deprecated alias for `--deny-domain-suffix`. Kept for
-    /// back-compat; emits a warning on use.
-    #[cfg(feature = "net")]
-    #[arg(long, hide = true)]
-    pub dns_block_suffix: Vec<String>,
-
     /// Allow DNS responses pointing to private/internal IP addresses.
     #[cfg(feature = "net")]
     #[arg(long)]
@@ -259,8 +247,6 @@ impl SandboxOpts {
             || self.no_net
             || !self.deny_domain.is_empty()
             || !self.deny_domain_suffix.is_empty()
-            || !self.dns_block_domain.is_empty()
-            || !self.dns_block_suffix.is_empty()
             || self.no_dns_rebind_protection
             || !self.dns_nameserver.is_empty()
             || self.dns_query_timeout_ms.is_some()
@@ -440,8 +426,6 @@ fn apply_network_opts(
     // DNS, TLS, and other network configuration.
     let has_network_config = !opts.deny_domain.is_empty()
         || !opts.deny_domain_suffix.is_empty()
-        || !opts.dns_block_domain.is_empty()
-        || !opts.dns_block_suffix.is_empty()
         || opts.no_dns_rebind_protection
         || !opts.dns_nameserver.is_empty()
         || opts.dns_query_timeout_ms.is_some()
@@ -460,21 +444,6 @@ fn apply_network_opts(
         || opts.on_secret_violation.is_some();
 
     if has_network_config {
-        // Warn on the deprecated aliases, but accept them. New flags
-        // and old flags concatenate into a single deny-rule list.
-        if !opts.dns_block_domain.is_empty() {
-            eprintln!("warning: --dns-block-domain is deprecated; use --deny-domain instead");
-        }
-        if !opts.dns_block_suffix.is_empty() {
-            eprintln!(
-                "warning: --dns-block-suffix is deprecated; use --deny-domain-suffix instead"
-            );
-        }
-        let mut deny_domains = opts.deny_domain.clone();
-        deny_domains.extend(opts.dns_block_domain.iter().cloned());
-        let mut deny_domain_suffixes = opts.deny_domain_suffix.clone();
-        deny_domain_suffixes.extend(opts.dns_block_suffix.iter().cloned());
-
         let no_dns_rebind = opts.no_dns_rebind_protection;
         let dns_nameservers = opts
             .dns_nameserver
@@ -486,8 +455,8 @@ fn apply_network_opts(
             &opts.net_rule,
             opts.net_default_egress.as_deref(),
             opts.net_default_ingress.as_deref(),
-            &deny_domains,
-            &deny_domain_suffixes,
+            &opts.deny_domain,
+            &opts.deny_domain_suffix,
         )?;
         let max_conn = opts.max_connections;
         let trust_host_cas = opts.trust_host_cas;
@@ -592,10 +561,9 @@ pub fn parse_duration_secs(s: &str) -> anyhow::Result<u64> {
 }
 
 /// Assemble a [`NetworkPolicy`] from `--net-rule` / `--net-default-*`
-/// and the bulk-deny flags (`--deny-domain` / `--deny-domain-suffix`,
-/// plus the deprecated `--dns-block-domain` / `--dns-block-suffix`
-/// aliases the caller has already merged in). Returns `None` when no
-/// flag was set (caller falls back to the sandbox default).
+/// and the bulk-deny flags (`--deny-domain` / `--deny-domain-suffix`).
+/// Returns `None` when no flag was set (caller falls back to the
+/// sandbox default).
 ///
 /// Bulk-deny flags are convenience shortcuts for `deny Domain(...)` /
 /// `deny DomainSuffix(...)` rules; they are prepended to the rule list
@@ -657,11 +625,11 @@ fn build_network_policy(
     // When the user sets no defaults explicitly, preserve today's
     // asymmetric behavior: egress = Deny (rules open things);
     // ingress = Allow (unfiltered published-port behavior). Exception:
-    // if only --dns-block-domain / --dns-block-suffix were set (no
+    // if only --deny-domain / --deny-domain-suffix were set (no
     // --net-rule, no --net-default-*), default egress flips to Allow so
     // the rest of the network keeps working — these flags add deny
-    // entries on top of permissive defaults, mirroring the legacy
-    // DNS-only block list's lack of side effects on TCP egress.
+    // entries on top of permissive defaults, leaving non-denied
+    // traffic unaffected.
     let default_egress = match default_egress {
         Some(raw) => parse_action("--net-default-egress", raw)?,
         None if no_rule_flags => Action::Allow,
