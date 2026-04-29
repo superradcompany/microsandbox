@@ -214,11 +214,13 @@ async fn domain_policy_deny_domain_refuses_dns() {
         "example.com DNS lookup should be refused: got `{denied_out}`"
     );
 
-    // Companion: an unrelated name still resolves.
-    let allowed_out = dns_lookup(&sb, "cloudflare.com").await;
+    // Companion: an unrelated name still resolves. We pick the alpine
+    // mirror because `setup_alpine` just resolved it via apk, so the
+    // forwarder has demonstrably reached it once already.
+    let allowed_out = dns_lookup(&sb, "dl-cdn.alpinelinux.org").await;
     assert!(
         !allowed_out.is_empty(),
-        "cloudflare.com DNS lookup should succeed under default-allow: got `{allowed_out}`"
+        "dl-cdn.alpinelinux.org DNS lookup should succeed under default-allow: got `{allowed_out}`"
     );
 
     sb.stop_and_wait().await.expect("stop");
@@ -261,11 +263,12 @@ async fn domain_policy_deny_suffix_refuses_dns_apex_and_subdomain() {
         "www.example.com should be refused by .example.com suffix: got `{sub_out}`"
     );
 
-    // Companion: an unrelated suffix still resolves.
-    let allowed_out = dns_lookup(&sb, "cloudflare.com").await;
+    // Companion: an unrelated suffix still resolves. The alpine mirror
+    // is a known-reachable name (resolved during setup_alpine).
+    let allowed_out = dns_lookup(&sb, "dl-cdn.alpinelinux.org").await;
     assert!(
         !allowed_out.is_empty(),
-        "cloudflare.com DNS lookup should succeed under default-allow: got `{allowed_out}`"
+        "dl-cdn.alpinelinux.org DNS lookup should succeed under default-allow: got `{allowed_out}`"
     );
 
     sb.stop_and_wait().await.expect("stop");
