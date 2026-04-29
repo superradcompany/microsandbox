@@ -364,40 +364,70 @@ fn apply_network(
     mut builder: microsandbox::sandbox::SandboxBuilder,
     net: &Bound<'_, PyDict>,
 ) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
-    // Pre-parse legacy `dns.blocked_domains` / `dns.blocked_suffixes`
-    // into deny-egress policy rules. They no longer flow through the
-    // DNS builder; instead they are prepended to whatever policy is
-    // selected so they take precedence over later allow rules.
-    let dns_deny_rules: Vec<microsandbox_network::policy::Rule> = if let Some(dns) =
-        net.get_item("dns")?
+    // Bulk deny-Domain rules from network.deny_domains /
+    // network.deny_domain_suffixes (canonical) and the deprecated
+    // network.dns.blocked_domains / blocked_suffixes (warns). Parse
+    // up-front so PyValueError propagates cleanly rather than getting
+    // swallowed inside the builder closure.
+    let mut dns_deny_rules: Vec<microsandbox_network::policy::Rule> = Vec::new();
+
+    if let Some(domains) = extract_opt::<Vec<String>>(net, "deny_domains")? {
+        for d in domains {
+            let domain = d.parse().map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("deny_domains[{d:?}]: {e}"))
+            })?;
+            dns_deny_rules.push(microsandbox_network::policy::Rule::deny_egress(
+                microsandbox_network::policy::Destination::Domain(domain),
+            ));
+        }
+    }
+    if let Some(suffixes) = extract_opt::<Vec<String>>(net, "deny_domain_suffixes")? {
+        for s in suffixes {
+            let suffix = s.parse().map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("deny_domain_suffixes[{s:?}]: {e}"))
+            })?;
+            dns_deny_rules.push(microsandbox_network::policy::Rule::deny_egress(
+                microsandbox_network::policy::Destination::DomainSuffix(suffix),
+            ));
+        }
+    }
+    if let Some(dns) = net.get_item("dns")?
         && !dns.is_none()
     {
         let dns = as_dict(&dns)?;
-        let mut rules = Vec::new();
         if let Some(domains) = extract_opt::<Vec<String>>(&dns, "blocked_domains")? {
+            if !domains.is_empty() {
+                emit_deprecation_warning(
+                    net.py(),
+                    "network.dns.blocked_domains is deprecated; use network.deny_domains instead",
+                );
+            }
             for d in domains {
                 let domain = d.parse().map_err(|e| {
                     pyo3::exceptions::PyValueError::new_err(format!("blocked_domains[{d:?}]: {e}"))
                 })?;
-                rules.push(microsandbox_network::policy::Rule::deny_egress(
+                dns_deny_rules.push(microsandbox_network::policy::Rule::deny_egress(
                     microsandbox_network::policy::Destination::Domain(domain),
                 ));
             }
         }
         if let Some(suffixes) = extract_opt::<Vec<String>>(&dns, "blocked_suffixes")? {
+            if !suffixes.is_empty() {
+                emit_deprecation_warning(
+                    net.py(),
+                    "network.dns.blocked_suffixes is deprecated; use network.deny_domain_suffixes instead",
+                );
+            }
             for s in suffixes {
                 let suffix = s.parse().map_err(|e| {
                     pyo3::exceptions::PyValueError::new_err(format!("blocked_suffixes[{s:?}]: {e}"))
                 })?;
-                rules.push(microsandbox_network::policy::Rule::deny_egress(
+                dns_deny_rules.push(microsandbox_network::policy::Rule::deny_egress(
                     microsandbox_network::policy::Destination::DomainSuffix(suffix),
                 ));
             }
         }
-        rules
-    } else {
-        Vec::new()
-    };
+    }
     let mut policy_set = false;
 
     // Check for preset policy string.
@@ -786,4 +816,18 @@ fn extract_required<'py, T: FromPyObject<'py>>(
     dict.get_item(key)?
         .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("{key} is required")))?
         .extract()
+}
+
+/// Emit a `DeprecationWarning` via Python's `warnings` module so the
+/// deprecation surface respects the host's filter / -W flags.
+/// Failures are ignored — best-effort signal, never break the call.
+fn emit_deprecation_warning(py: Python<'_>, message: &str) {
+    let _ = pyo3::PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+        std::ffi::CString::new(message)
+            .unwrap_or_default()
+            .as_c_str(),
+        2,
+    );
 }
