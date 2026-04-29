@@ -123,6 +123,22 @@ fn curl_failed(probe_output: &str) -> bool {
     probe_output.starts_with(CURL_FAIL)
 }
 
+/// `getent hosts <name>` with a small retry. Self-hosted CI runners
+/// occasionally drop a single DNS forward; the policy under test is
+/// unchanged across retries, so a one-shot probe is the only thing
+/// that flakes — not the rule engine itself.
+async fn dns_lookup(sb: &Sandbox, name: &str) -> String {
+    let cmd = format!(
+        "for i in 1 2 3; do \
+           ip=$(getent hosts {name} | awk '{{print $1; exit}}'); \
+           [ -n \"$ip\" ] && {{ printf '%s' \"$ip\"; exit 0; }}; \
+           sleep 1; \
+         done"
+    );
+    let out = sb.shell(&cmd).await.expect("dns probe");
+    out.stdout().unwrap_or_default().trim().to_string()
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -145,11 +161,7 @@ async fn domain_policy_allows_whitelisted_https() {
     // DNS resolution itself must succeed: the interceptor bypasses
     // the egress policy for queries aimed at the gateway, so the
     // guest can populate its cache before the policy-gated connect.
-    let dns = sb
-        .shell("getent hosts cloudflare.com | awk '{print $1; exit}'")
-        .await
-        .expect("dns probe");
-    let dns_out = dns.stdout().unwrap_or_default().trim().to_string();
+    let dns_out = dns_lookup(&sb, "cloudflare.com").await;
     assert!(
         !dns_out.is_empty(),
         "DNS resolution of cloudflare.com should succeed via the gateway resolver"
@@ -203,11 +215,7 @@ async fn domain_policy_deny_domain_refuses_dns() {
     );
 
     // Companion: an unrelated name still resolves.
-    let allowed = sb
-        .shell("getent hosts cloudflare.com | awk '{print $1; exit}'")
-        .await
-        .expect("dns probe allowed");
-    let allowed_out = allowed.stdout().unwrap_or_default().trim().to_string();
+    let allowed_out = dns_lookup(&sb, "cloudflare.com").await;
     assert!(
         !allowed_out.is_empty(),
         "cloudflare.com DNS lookup should succeed under default-allow: got `{allowed_out}`"
@@ -254,11 +262,7 @@ async fn domain_policy_deny_suffix_refuses_dns_apex_and_subdomain() {
     );
 
     // Companion: an unrelated suffix still resolves.
-    let allowed = sb
-        .shell("getent hosts cloudflare.com | awk '{print $1; exit}'")
-        .await
-        .expect("dns probe allowed");
-    let allowed_out = allowed.stdout().unwrap_or_default().trim().to_string();
+    let allowed_out = dns_lookup(&sb, "cloudflare.com").await;
     assert!(
         !allowed_out.is_empty(),
         "cloudflare.com DNS lookup should succeed under default-allow: got `{allowed_out}`"
