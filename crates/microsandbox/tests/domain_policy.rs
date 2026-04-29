@@ -111,17 +111,8 @@ fn reached_server(probe_output: &str) -> bool {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-/// A default-deny policy with explicit allow rules for `pypi.org` and
-/// `files.pythonhosted.org` must permit HTTPS to those hostnames after
-/// the guest resolves them via the in-process DNS interceptor.
-///
-/// Bundles three probes into one sandbox to amortise image-pull and
-/// VM-boot cost:
-///
-/// 1. `pypi.org:443` is whitelisted → reaches server.
-/// 2. `files.pythonhosted.org:443` is whitelisted → reaches server.
-/// 3. `example.com:443` is not whitelisted → curl fails (sandbox
-///    dropped the TCP SYN).
+/// Default-deny policy with explicit allow rules for `cloudflare.com`
+/// and `www.cloudflare.com` permits HTTPS to both, denies the rest.
 #[msb_test]
 async fn domain_policy_allows_whitelisted_https() {
     let name = "net-domain-policy-allow";
@@ -129,8 +120,8 @@ async fn domain_policy_allows_whitelisted_https() {
         default_egress: Action::Deny,
         default_ingress: Action::Allow,
         rules: vec![
-            allow_domain_https("pypi.org"),
-            allow_domain_https("files.pythonhosted.org"),
+            allow_domain_https("cloudflare.com"),
+            allow_domain_https("www.cloudflare.com"),
         ],
     };
     let sb = setup_alpine(name, policy).await;
@@ -139,25 +130,25 @@ async fn domain_policy_allows_whitelisted_https() {
     // the egress policy for queries aimed at the gateway, so the
     // guest can populate its cache before the policy-gated connect.
     let dns = sb
-        .shell("getent hosts pypi.org | awk '{print $1; exit}'")
+        .shell("getent hosts cloudflare.com | awk '{print $1; exit}'")
         .await
         .expect("dns probe");
     let dns_out = dns.stdout().unwrap_or_default().trim().to_string();
     assert!(
         !dns_out.is_empty(),
-        "DNS resolution of pypi.org should succeed via the gateway resolver"
+        "DNS resolution of cloudflare.com should succeed via the gateway resolver"
     );
 
-    let pypi = probe_https(&sb, "https://pypi.org/simple/pip/").await;
+    let apex = probe_https(&sb, "https://cloudflare.com/").await;
     assert!(
-        reached_server(&pypi),
-        "HTTPS to pypi.org should be allowed: got `{pypi}`"
+        reached_server(&apex),
+        "HTTPS to cloudflare.com should be allowed: got `{apex}`"
     );
 
-    let files = probe_https(&sb, "https://files.pythonhosted.org/").await;
+    let www = probe_https(&sb, "https://www.cloudflare.com/").await;
     assert!(
-        reached_server(&files),
-        "HTTPS to files.pythonhosted.org should be allowed: got `{files}`"
+        reached_server(&www),
+        "HTTPS to www.cloudflare.com should be allowed: got `{www}`"
     );
 
     let example = probe_https(&sb, "https://example.com/").await;
@@ -197,13 +188,13 @@ async fn domain_policy_deny_domain_refuses_dns() {
 
     // Companion: an unrelated name still resolves.
     let allowed = sb
-        .shell("getent hosts pypi.org | awk '{print $1; exit}'")
+        .shell("getent hosts cloudflare.com | awk '{print $1; exit}'")
         .await
         .expect("dns probe allowed");
     let allowed_out = allowed.stdout().unwrap_or_default().trim().to_string();
     assert!(
         !allowed_out.is_empty(),
-        "pypi.org DNS lookup should succeed under default-allow: got `{allowed_out}`"
+        "cloudflare.com DNS lookup should succeed under default-allow: got `{allowed_out}`"
     );
 
     sb.stop_and_wait().await.expect("stop");
@@ -248,13 +239,13 @@ async fn domain_policy_deny_suffix_refuses_dns_apex_and_subdomain() {
 
     // Companion: an unrelated suffix still resolves.
     let allowed = sb
-        .shell("getent hosts pypi.org | awk '{print $1; exit}'")
+        .shell("getent hosts cloudflare.com | awk '{print $1; exit}'")
         .await
         .expect("dns probe allowed");
     let allowed_out = allowed.stdout().unwrap_or_default().trim().to_string();
     assert!(
         !allowed_out.is_empty(),
-        "pypi.org DNS lookup should succeed under default-allow: got `{allowed_out}`"
+        "cloudflare.com DNS lookup should succeed under default-allow: got `{allowed_out}`"
     );
 
     sb.stop_and_wait().await.expect("stop");
@@ -307,38 +298,29 @@ async fn domain_policy_sni_disambiguates_shared_cdn_ip() {
     let _ = Sandbox::remove(name).await;
 }
 
-/// `Destination::DomainSuffix` must match subdomains but not unrelated
-/// hosts. One sandbox, two probes:
-///
-/// 1. `files.pythonhosted.org:443` matches `.pythonhosted.org` →
-///    reaches server.
-/// 2. `example.com:443` does not match the suffix → curl fails.
-///
-/// The negative case deliberately uses `example.com` (Akamai) rather
-/// than another Fastly-hosted site like `pypi.org`: both `pypi.org` and
-/// `*.pythonhosted.org` share Fastly CDN IPs, so once both names are in
-/// the DNS cache the shared IP would match the suffix rule through the
-/// wrong hostname and defeat the assertion.
+/// `Destination::DomainSuffix` matches subdomains but not unrelated
+/// hosts: `www.cloudflare.com` matches `.cloudflare.com`,
+/// `example.com` does not.
 #[msb_test]
 async fn domain_policy_suffix_allows_subdomain_https() {
     let name = "net-domain-policy-suffix";
     let policy = NetworkPolicy {
         default_egress: Action::Deny,
         default_ingress: Action::Allow,
-        rules: vec![allow_domain_suffix_https(".pythonhosted.org")],
+        rules: vec![allow_domain_suffix_https(".cloudflare.com")],
     };
     let sb = setup_alpine(name, policy).await;
 
-    let files = probe_https(&sb, "https://files.pythonhosted.org/").await;
+    let www = probe_https(&sb, "https://www.cloudflare.com/").await;
     assert!(
-        reached_server(&files),
-        "files.pythonhosted.org should match .pythonhosted.org suffix: got `{files}`"
+        reached_server(&www),
+        "www.cloudflare.com should match .cloudflare.com suffix: got `{www}`"
     );
 
     let example = probe_https(&sb, "https://example.com/").await;
     assert_eq!(
         example, CURL_FAIL,
-        "example.com should not match .pythonhosted.org suffix: got `{example}`"
+        "example.com should not match .cloudflare.com suffix: got `{example}`"
     );
 
     sb.stop_and_wait().await.expect("stop");
