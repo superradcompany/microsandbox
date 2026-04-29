@@ -15,7 +15,7 @@ await using sb = await Sandbox.builder("filtered")
   .image("alpine")
   .network((n) => n
     .policy(NetworkPolicy.publicOnly())
-    .dns((d) => d.blockDomainSuffix(".evil.com"))
+    .denyDomainSuffixes(".evil.com")
     .tls((t) => t.bypass("*.googleapis.com")),
   )
   .create();
@@ -129,6 +129,8 @@ Returned to the callback you pass to `SandboxBuilder.network(...)`. Every setter
 | `port(host, guest)` | Publish a TCP port. |
 | `portUdp(host, guest)` | Publish a UDP port. |
 | `policy(NetworkPolicy)` | Set the policy. Use a [`NetworkPolicy`](#networkpolicy) factory or a literal. |
+| `denyDomains(...names)` | Deny egress to these exact domains. Each entry adds a `deny Domain("...")` policy rule that fires at DNS resolution (REFUSED), TLS first-flight (SNI), and TCP egress (cache fallback). Prepended onto the policy. |
+| `denyDomainSuffixes(...suffixes)` | Deny egress to all subdomains of these suffixes. Same enforcement layers. |
 | `dns(d => ...)` | Configure DNS — see [`DnsBuilder`](#dnsbuilder). |
 | `tls(t => ...)` | Configure TLS — see [`TlsBuilder`](#tlsbuilder). |
 | `secret(s => ...)` | Add a secret — see [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder). |
@@ -144,12 +146,16 @@ Returned to the callback you pass to `SandboxBuilder.network(...)`. Every setter
 
 | Method | Description |
 |--------|-------------|
-| `blockDomain(domain)` | Block a specific FQDN (returns REFUSED). |
-| `blockDomainSuffix(suffix)` | Block any name ending in `suffix`. |
 | `nameservers(servers)` | Override upstream nameservers (`IP`, `IP:PORT`, `HOST`, or `HOST:PORT`). |
 | `rebindProtection(enabled)` | Toggle DNS rebinding protection. |
 | `queryTimeoutMs(ms)` | Per-query timeout. |
 | `build()` | Internal — produce a [`DnsConfig`](#dnsconfig). |
+
+Domain blocking lives on `NetworkBuilder` now — see [`denyDomains`](#networkbuilder) below.
+
+<Note>
+**Deprecated:** `DnsBuilder.blockDomain(domain)` and `DnsBuilder.blockDomainSuffix(suffix)` still work but emit a `@deprecated` JSDoc warning. Migrate to `NetworkBuilder.denyDomains(...)` / `denyDomainSuffixes(...)`; the new methods also enforce at TLS first-flight (SNI) and TCP egress (cache fallback), not just DNS.
+</Note>
 
 ---
 

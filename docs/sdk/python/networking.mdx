@@ -14,6 +14,8 @@ Frozen dataclass for sandbox network configuration. Use the class method presets
 Network(
     policy: str | NetworkPolicy | None = None,
     ports: Mapping[int, int] = {},
+    deny_domains: tuple[str, ...] = (),
+    deny_domain_suffixes: tuple[str, ...] = (),
     dns: DnsConfig | None = None,
     tls: TlsConfig | None = None,
     max_connections: int | None = None,
@@ -25,6 +27,8 @@ Network(
 |-------|------|---------|-------------|
 | policy | `str \| NetworkPolicy \| None` | `None` | Preset name or custom [`NetworkPolicy`](#networkpolicy) |
 | ports | `Mapping[int, int]` | `{}` | Port mappings from host to guest |
+| deny_domains | `tuple[str, ...]` | `()` | Deny egress to these exact domains. Each entry adds a `deny Domain("...")` policy rule that fires at DNS resolution (REFUSED), TLS first-flight (SNI), and TCP egress (cache fallback). Prepended onto the policy so it takes precedence over later allow rules |
+| deny_domain_suffixes | `tuple[str, ...]` | `()` | Deny egress to all subdomains of these suffixes. Adds `deny DomainSuffix("...")` rules; same enforcement layers as `deny_domains` |
 | dns | [`DnsConfig`](#dnsconfig) ` \| None` | `None` | DNS interception configuration |
 | tls | [`TlsConfig`](#tlsconfig) ` \| None` | `None` | TLS interception configuration |
 | max_connections | `int \| None` | `None` | Maximum concurrent connections |
@@ -36,8 +40,6 @@ Frozen dataclass for DNS interception settings.
 
 ```python
 DnsConfig(
-    block_domains: tuple[str, ...] = (),
-    block_domain_suffixes: tuple[str, ...] = (),
     rebind_protection: bool = True,
     nameservers: tuple[str, ...] = (),
     query_timeout_ms: int | None = None,
@@ -46,11 +48,13 @@ DnsConfig(
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| block_domains | `tuple[str, ...]` | `()` | Block DNS for exact domains (returns REFUSED) |
-| block_domain_suffixes | `tuple[str, ...]` | `()` | Block DNS for all subdomains of a suffix |
 | rebind_protection | `bool` | `True` | Block DNS responses resolving to private IPs |
 | nameservers | `tuple[str, ...]` | `()` | Nameservers (`IP`, `IP:PORT`, `HOST`, or `HOST:PORT`). Overrides the host's `/etc/resolv.conf` when set. Hostnames are resolved once at startup via the host's OS resolver |
 | query_timeout_ms | `int \| None` | `None` | Per-DNS-query timeout in milliseconds (default: 5000) |
+
+<Note>
+**Deprecated:** `DnsConfig.blocked_domains` and `DnsConfig.blocked_suffixes` still work as aliases for `Network.deny_domains` / `Network.deny_domain_suffixes` but emit a `DeprecationWarning` on use. Migrate to the canonical fields above.
+</Note>
 
 ---
 

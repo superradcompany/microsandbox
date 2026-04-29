@@ -84,6 +84,22 @@ Inside `.rule(|r| ...)` (or any of the direction sub-builders), state setters an
 | `.allow_multicast() / .deny_multicast()` | `Group::Multicast` |
 | `.allow_host() / .deny_host()` | `Group::Host` (per-sandbox gateway IPs that back `host.microsandbox.internal`) |
 
+**Bulk-domain shortcuts** (one rule per name, inheriting current direction/protocol/port state):
+
+| Method | Effect |
+|--------|--------|
+| <a id="deny_domains"></a>`.allow_domains([..]) / .deny_domains([..])` | One `Destination::Domain` rule per name. Lazy-parse: invalid names surface as `BuildError::InvalidDomain` from `.build()` |
+| <a id="deny_domain_suffixes"></a>`.allow_domain_suffixes([..]) / .deny_domain_suffixes([..])` | One `Destination::DomainSuffix` rule per suffix. Same lazy-parse contract |
+
+```rust
+NetworkPolicy::builder()
+    .default_allow()
+    .egress(|e| e
+        .deny_domains(["evil.com", "tracker.example"])
+        .deny_domain_suffixes([".ads.example", ".doubleclick.net"]))
+    .build()?
+```
+
 **Composite sugar:**
 
 | Method | Effect |
@@ -143,13 +159,13 @@ Configure DNS interception. Errors accumulated by [`DnsBuilder`](#dnsbuilder) ca
 ```rust
 .network(|n| n
     .dns(|d| d
-        .block_domain("malware.example.com")
-        .block_domain_suffix(".tracking.com")
         .nameservers(["1.1.1.1".parse::<Nameserver>()?])
         .query_timeout_ms(3000)
     )
 )
 ```
+
+Domain blocking is expressed as policy rules — see [`NetworkPolicyBuilder::deny_domains`](#deny_domains) — not on `DnsBuilder`.
 
 #### max_connections()
 
@@ -189,23 +205,7 @@ Set the action taken when a secret placeholder is detected in traffic destined f
 
 Builder for DNS interception settings. Used in `NetworkBuilder::dns(|d| d...)`.
 
-`block_domain` and `block_domain_suffix` use the same lazy-parse + accumulate-at-`.build()` model as `NetworkPolicy::builder()` — string inputs are stored raw, errors surface as `BuildError::InvalidBlockedDomain` / `InvalidBlockedDomainSuffix` from the outermost `.build()` in the chain.
-
-#### block_domain()
-
-```rust
-fn block_domain(self, domain: impl Into<String>) -> Self
-```
-
-Block DNS lookups for an exact domain. The guest receives REFUSED for this domain.
-
-#### block_domain_suffix()
-
-```rust
-fn block_domain_suffix(self, suffix: impl Into<String>) -> Self
-```
-
-Block DNS lookups for all subdomains matching a suffix. For example, `.tracking.com` blocks `a.tracking.com`, `b.c.tracking.com`, etc.
+Domain blocking is no longer here — express it as policy rules via [`NetworkPolicyBuilder::deny_domains`](#deny_domains) / [`deny_domain_suffixes`](#deny_domain_suffixes) instead. The DnsBuilder still owns rebind protection, nameserver pinning, and query timeouts.
 
 #### rebind_protection()
 
@@ -376,8 +376,6 @@ Errors surfaced by the builders' `.build()` methods. The same enum covers `Netwo
 | `InvalidDomain { rule_index, raw, source }` | `.domain` or `.domain_suffix` got a value that failed `DomainName` parse |
 | `InvalidPortRange { rule_index, lo, hi }` | `.port_range(lo, hi)` had `lo > hi` |
 | `IngressDoesNotSupportIcmp { rule_index }` | ICMP protocol on a non-egress rule |
-| `InvalidBlockedDomain { raw, source }` | `DnsBuilder::block_domain` got an unparseable value |
-| `InvalidBlockedDomainSuffix { raw, source }` | `DnsBuilder::block_domain_suffix` got an unparseable value |
 
 Inside `SandboxBuilder::build()`, `BuildError` is wrapped as `MicrosandboxError::NetworkBuilder(BuildError)`.
 
