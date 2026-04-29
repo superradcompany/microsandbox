@@ -205,6 +205,38 @@ export declare class Mount {
 }
 
 /**
+ * Fluent builder for a sandbox volume mount.
+ *
+ * Pick exactly one mount kind via `.bind()`, `.named()`, `.tmpfs()`, or
+ * `.disk(...)`, then chain modifiers (`.readonly()`, `.size(mib)` for
+ * tmpfs, `.format(fmt)` / `.fstype(s)` for disk). Validation is deferred
+ * to the terminal `.build()` call.
+ */
+export declare class MountBuilder {
+  constructor(guest: string)
+  /** Bind a host directory at the guest path. */
+  bind(host: string): this
+  /** Mount a named volume created via `Volume.builder(name).create()`. */
+  named(name: string): this
+  /** Mount an in-memory tmpfs at the guest path. */
+  tmpfs(): this
+  /** Mount a host disk image file as a virtio-blk device. */
+  disk(host: string): this
+  /**
+   * Override the disk image format (`"qcow2" | "raw" | "vmdk"`). Only
+   * valid when paired with `.disk()`.
+   */
+  format(format: string): this
+  /** Inner filesystem type for a `.disk()` mount (e.g. `"ext4"`). */
+  fstype(fstype: string): this
+  /** Mark the mount read-only. */
+  readonly(): this
+  /** Tmpfs size cap in MiB (only valid with `.tmpfs()`). */
+  size(mib: number): this
+}
+export type JsMountBuilder = MountBuilder
+
+/**
  * Factory for creating rootfs patch configurations.
  *
  * ```js
@@ -243,6 +275,42 @@ export declare class Patch {
   /** Remove a file or directory from the guest filesystem (idempotent). */
   static remove(path: string): PatchConfig
 }
+
+/** Fluent builder for an ordered list of pre-boot rootfs patches. */
+export declare class PatchBuilder {
+  constructor()
+  /** Write a text file (UTF-8) at `path`. */
+  text(path: string, content: string, opts?: PatchFileOptions | undefined | null): this
+  /** Write raw bytes at `path`. */
+  file(path: string, content: Buffer, opts?: PatchFileOptions | undefined | null): this
+  /** Copy a host file into the rootfs at `dst`. */
+  copyFile(src: string, dst: string, opts?: PatchFileOptions | undefined | null): this
+  /** Copy a host directory into the rootfs at `dst`. */
+  copyDir(src: string, dst: string, opts?: PatchReplaceOnly | undefined | null): this
+  /** Create a symlink at `link` pointing to `target`. */
+  symlink(target: string, link: string, opts?: PatchReplaceOnly | undefined | null): this
+  /** Create a directory (idempotent). */
+  mkdir(path: string, opts?: PatchModeOnly | undefined | null): this
+  /** Remove a file or directory (idempotent). */
+  remove(path: string): this
+  /** Append text to an existing file. */
+  append(path: string, content: string): this
+  /** Materialize into the ordered list of patches. */
+  build(): Array<BuiltPatch>
+}
+export type JsPatchBuilder = PatchBuilder
+
+/** Fluent builder for OCI registry connection settings. */
+export declare class RegistryConfigBuilder {
+  constructor()
+  /** Set authentication credentials. */
+  auth(auth: RegistryAuthInput): this
+  /** Use plain HTTP (no TLS). */
+  insecure(): this
+  /** Add a PEM-encoded CA root certificate to trust. May be called repeatedly. */
+  caCerts(pemData: Buffer): this
+}
+export type JsRegistryConfigBuilder = RegistryConfigBuilder
 
 /**
  * A running sandbox instance.
@@ -412,6 +480,43 @@ export declare class Secret {
   static env(envVar: string, opts: SecretEnvOptions): SecretEntry
 }
 
+/** Fluent builder for a single secret entry. */
+export declare class SecretBuilder {
+  constructor()
+  /** Environment variable to expose the placeholder under (required). */
+  env(var: string): this
+  /** Secret value (required). */
+  value(value: string): this
+  /** Custom placeholder. Auto-generated as `$MSB_<env>` when unset. */
+  placeholder(placeholder: string): this
+  /** Add an allowed exact-match host. */
+  allowHost(host: string): this
+  /** Add an allowed wildcard host pattern (e.g. `*.openai.com`). */
+  allowHostPattern(pattern: string): this
+  /**
+   * Allow any host. **Dangerous** — secret can be exfiltrated.
+   * Pass `true` to opt in.
+   */
+  allowAnyHostDangerous(iUnderstand: boolean): this
+  /** Require verified TLS identity before substituting (default: true). */
+  requireTlsIdentity(enabled: boolean): this
+  /** Configure header injection (default: true). */
+  injectHeaders(enabled: boolean): this
+  /** Configure Basic Auth injection (default: true). */
+  injectBasicAuth(enabled: boolean): this
+  /** Configure URL query parameter injection (default: false). */
+  injectQuery(enabled: boolean): this
+  /** Configure request body injection (default: false). */
+  injectBody(enabled: boolean): this
+  /**
+   * Materialize into a `SecretEntry`. Panics if `env` or `value` weren't
+   * set (matches the underlying Rust builder's contract; surface as a
+   * typed error here).
+   */
+  build(): SecretEntry
+}
+export type JsSecretBuilder = SecretBuilder
+
 /** Builder for installing the runtime binaries. */
 export declare class Setup {
   constructor()
@@ -422,6 +527,28 @@ export declare class Setup {
   install(): Promise<void>
 }
 export type JsSetup = Setup
+
+/** Fluent builder for TLS interception settings. */
+export declare class TlsBuilder {
+  constructor()
+  /** Add a bypass pattern (no MITM). Supports `*.suffix` wildcards. */
+  bypass(pattern: string): this
+  /** Verify upstream server certificates (default: true). */
+  verifyUpstream(verify: boolean): this
+  /** Set the ports to intercept (default: 443). */
+  interceptedPorts(ports: Array<number>): this
+  /** Block QUIC on intercepted ports (default: true). */
+  blockQuic(block: boolean): this
+  /** Add an upstream CA certificate PEM path. May be called repeatedly. */
+  upstreamCaCert(path: string): this
+  /** Set a custom interception CA certificate PEM path. */
+  interceptCaCert(path: string): this
+  /** Set a custom interception CA private key PEM path. */
+  interceptCaKey(path: string): this
+  /** Materialize into a `TlsConfig`. */
+  build(): TlsConfig
+}
+export type JsTlsBuilder = TlsBuilder
 
 export declare class Volume {
   static create(config: VolumeConfig): Promise<Volume>
@@ -499,6 +626,33 @@ export interface AttachConfig {
   env?: Record<string, string>
   /** Detach key sequence (default: "ctrl-]"). Uses Docker-style syntax. */
   detachKeys?: string
+}
+
+/**
+ * Built rootfs patch (flat representation of the `Patch` enum: `kind`
+ * + per-variant fields).
+ */
+export interface BuiltPatch {
+  /** `"text" | "file" | "copyFile" | "copyDir" | "symlink" | "mkdir" | "remove" | "append"`. */
+  kind: string
+  /** Absolute guest path (text/file/mkdir/remove/append). */
+  path?: string
+  /** Host source path (copyFile/copyDir). */
+  src?: string
+  /** Guest destination path (copyFile/copyDir). */
+  dst?: string
+  /** Symlink target. */
+  target?: string
+  /** Symlink link path. */
+  link?: string
+  /** Text content (text/append). */
+  content?: string
+  /** Raw byte content (file). */
+  contentBytes?: Array<number>
+  /** File / directory permissions. */
+  mode?: number
+  /** Allow replacing an existing path. */
+  replace?: boolean
 }
 
 /** Supported disk image formats for [`Mount.disk`] and the `disk()` rootfs. */
@@ -804,11 +958,27 @@ export interface PatchConfig {
   replace?: boolean
 }
 
+/** Optional knobs accepted by `text`, `file`, `copyFile`. */
+export interface PatchFileOptions {
+  mode?: number
+  replace?: boolean
+}
+
+/** Optional knobs accepted by `mkdir`. */
+export interface PatchModeOnly {
+  mode?: number
+}
+
 /** Options for `Patch.text()` and `Patch.copyFile()`. */
 export interface PatchOptions {
   /** File permissions (e.g. 0o644). */
   mode?: number
   /** Allow replacing existing files. */
+  replace?: boolean
+}
+
+/** Optional knobs accepted by `copyDir`, `symlink`. */
+export interface PatchReplaceOnly {
   replace?: boolean
 }
 
@@ -860,6 +1030,13 @@ export declare const enum PullPolicy {
 export interface RegistryAuth {
   username: string
   password: string
+}
+
+/** Plain-object form of `RegistryAuth`. `kind: "anonymous" | "basic"`. */
+export interface RegistryAuthInput {
+  kind: string
+  username?: string
+  password?: string
 }
 
 /** Registry connection settings. */
@@ -974,6 +1151,26 @@ export declare const enum SandboxStatus {
   Draining = 'draining'
 }
 
+/** A secret entry produced by `SecretBuilder.build()`. */
+export interface SecretEntry {
+  /** Environment variable name exposed to the sandbox (holds the placeholder). */
+  envVar: string
+  /** Secret value (never enters the sandbox). */
+  value: string
+  /** Placeholder string the sandbox sees instead of the real value. */
+  placeholder: string
+  /** Exact host names allowed to receive this secret. */
+  allowedHosts: Array<string>
+  /** Wildcard host patterns (e.g. `*.openai.com`) allowed to receive this secret. */
+  allowedHostPatterns: Array<string>
+  /** Allow any host. **Dangerous** — secret can be exfiltrated. */
+  allowAnyHost: boolean
+  /** Require verified TLS identity before substituting (default: true). */
+  requireTlsIdentity: boolean
+  /** Where the secret may be injected into requests. */
+  injection: JsSecretInjection
+}
+
 /**
  * A secret entry for the `secrets` array on `SandboxConfig`.
  *
@@ -1026,6 +1223,14 @@ export interface SecretEnvOptions {
   inject?: SecretInjection
 }
 
+/** Injection sites for a secret value. */
+export interface SecretInjection {
+  headers: boolean
+  basicAuth: boolean
+  queryParams: boolean
+  body: boolean
+}
+
 /**
  * Controls where the secret placeholder is substituted by the TLS proxy.
  *
@@ -1054,6 +1259,18 @@ export interface SecretInjection {
    * When enabled, `Content-Length` is rewritten to match the new body size.
    */
   body?: boolean
+}
+
+/** TLS interception configuration produced by `TlsBuilder.build()`. */
+export interface TlsConfig {
+  enabled: boolean
+  bypass: Array<string>
+  verifyUpstream: boolean
+  interceptedPorts: Array<number>
+  blockQuic: boolean
+  upstreamCaCertPaths: Array<string>
+  interceptCaCertPath?: string
+  interceptCaKeyPath?: string
 }
 
 /** TLS interception configuration. */
