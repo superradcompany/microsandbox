@@ -146,16 +146,6 @@ Restart a stopped sandbox in detached mode.
 
 ---
 
-#### name
-
-```typescript
-readonly name: string
-```
-
-Sandbox name.
-
----
-
 #### config
 
 ```typescript
@@ -163,6 +153,16 @@ readonly config: Readonly<SandboxConfig>
 ```
 
 The frozen configuration the sandbox was built with.
+
+---
+
+#### name
+
+```typescript
+readonly name: string
+```
+
+Sandbox name.
 
 ---
 
@@ -326,46 +326,514 @@ Implements `AsyncDisposable` so the sandbox can be used with `await using`. When
 
 ---
 
+## SandboxBuilder
+
+Fluent configuration builder returned by [`Sandbox.builder(name)`](#sandboxbuilder). Every setter returns the same builder so calls can be chained. Terminate with `.create()`, `.createDetached()`, or `.build()`.
+
+---
+
+#### addPatch()
+
+```typescript
+addPatch(patch: Patch): this
+```
+
+Append a pre-built `Patch` value.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| patch | `Patch` | A constructed patch |
+
+---
+
+#### build()
+
+```typescript
+build(): SandboxConfig
+```
+
+Materialize the accumulated state into a [`SandboxConfig`](#sandboxconfig) without booting. Throws `InvalidConfigError` if `.image(...)` was never called.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxConfig`](#sandboxconfig) | Frozen configuration |
+
+---
+
+#### cpus()
+
+```typescript
+cpus(count: number): this
+```
+
+Set the number of virtual CPUs. This is a limit, not a reservation.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| count | `number` | Number of vCPUs |
+
+---
+
+#### create()
+
+```typescript
+create(): Promise<Sandbox>
+```
+
+Build and boot the sandbox in attached mode. The sandbox stops when your process exits.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Promise<`[`Sandbox`](#instance-methods)`>` | Running sandbox |
+
+---
+
+#### createDetached()
+
+```typescript
+createDetached(): Promise<Sandbox>
+```
+
+Build and boot the sandbox in detached mode. The sandbox survives after your process exits.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Promise<`[`Sandbox`](#instance-methods)`>` | Running sandbox |
+
+---
+
+#### disableNetwork()
+
+```typescript
+disableNetwork(): this
+```
+
+Fully disable networking. No network interface is created.
+
+---
+
+#### entrypoint()
+
+```typescript
+entrypoint(cmd: Iterable<string>): this
+```
+
+Override the OCI image's entrypoint.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `Iterable<string>` | Entrypoint command and arguments |
+
+---
+
+#### env()
+
+```typescript
+env(key: string, value: string): this
+```
+
+Add a single environment variable visible to all commands. Per-command env vars are merged on top.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| key | `string` | Variable name |
+| value | `string` | Variable value |
+
+---
+
+#### envs()
+
+```typescript
+envs(vars: Iterable<readonly [string, string]> | Record<string, string>): this
+```
+
+Add many environment variables at once.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| vars | `Iterable<[string, string]> \| Record<string, string>` | Env vars as entries or a plain object |
+
+---
+
+#### hostname()
+
+```typescript
+hostname(name: string): this
+```
+
+Set the guest hostname.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Hostname |
+
+---
+
+#### idleTimeout()
+
+```typescript
+idleTimeout(secs: number): this
+```
+
+Auto-drain the sandbox after this many seconds of inactivity (no active exec sessions). Enforced on the host side.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| secs | `number` | Idle timeout in seconds |
+
+---
+
+#### image()
+
+```typescript
+image(src: string | RootfsSource): this
+```
+
+Set the root filesystem source. Accepts an OCI image name (`"alpine"`), a local rootfs path, or a `RootfsSource` discriminated union. The format is auto-detected. **Required.**
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `string \| RootfsSource` | OCI image name, directory path, or disk image path |
+
+---
+
+#### libkrunfwPath()
+
+```typescript
+libkrunfwPath(path: string): this
+```
+
+Override the libkrunfw shared library path for this sandbox.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Filesystem path to libkrunfw |
+
+---
+
+#### logLevel()
+
+```typescript
+logLevel(level: LogLevel): this
+```
+
+Override the sandbox process's log verbosity.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| level | [`LogLevel`](#loglevel) | Log level |
+
+---
+
+#### maxDuration()
+
+```typescript
+maxDuration(secs: number): this
+```
+
+Set the maximum sandbox lifetime in seconds. When exceeded, the sandbox is drained and stopped. Enforced on the host side — the guest cannot override it.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| secs | `number` | Maximum lifetime in seconds |
+
+---
+
+#### memory()
+
+```typescript
+memory(size: number): this
+```
+
+Set the guest memory size in MiB. Physical pages are only allocated as the guest touches them, so this is a limit, not an upfront reservation. Default: `512`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| size | `number` | Memory in MiB |
+
+---
+
+#### network()
+
+```typescript
+network(configure: (n: NetworkBuilder) => NetworkBuilder): this
+```
+
+Configure networking — DNS, TLS interception, policy, secrets. See [Networking](/sdk/typescript/networking) for the full builder API.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| configure | [`NetworkBuilder`](/sdk/typescript/networking#networkbuilder) callback | Configure the network |
+
+---
+
+#### patch()
+
+```typescript
+patch(configure: (p: PatchBuilder) => PatchBuilder): this
+```
+
+Modify the rootfs before the VM boots. Patches go into the writable layer — the base image is untouched. See [Snapshots](/sdk/typescript/snapshots) for available operations.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| configure | `PatchBuilder` callback | Configure rootfs patches |
+
+---
+
+#### port()
+
+```typescript
+port(hostPort: number, guestPort: number): this
+```
+
+Publish a TCP port from the sandbox to the host.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| hostPort | `number` | Port on the host |
+| guestPort | `number` | Port inside the sandbox |
+
+---
+
+#### portUdp()
+
+```typescript
+portUdp(hostPort: number, guestPort: number): this
+```
+
+Publish a UDP port.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| hostPort | `number` | Port on the host |
+| guestPort | `number` | Port inside the sandbox |
+
+---
+
+#### pullPolicy()
+
+```typescript
+pullPolicy(policy: PullPolicy): this
+```
+
+Control when the OCI image is pulled from the registry.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| policy | [`PullPolicy`](#pullpolicy) | Pull behavior |
+
+---
+
+#### quietLogs()
+
+```typescript
+quietLogs(): this
+```
+
+Suppress log output from the sandbox process.
+
+---
+
+#### registry()
+
+```typescript
+registry(configure: (r: RegistryConfigBuilder) => RegistryConfigBuilder): this
+```
+
+Configure the OCI registry connection — auth, insecure HTTP, custom CA bundles.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| configure | `RegistryConfigBuilder` callback | Configure the registry |
+
+---
+
+#### replace()
+
+```typescript
+replace(): this
+```
+
+If a sandbox with the same name already exists, stop it, remove it, and create a fresh one. Without this, creation fails on name conflict.
+
+---
+
+#### script()
+
+```typescript
+script(name: string, content: string): this
+```
+
+Add a named script at `/.msb/scripts/<name>` inside the guest. Scripts are added to `PATH` and can be called by name via `exec()` or `shell()`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Script name (becomes the filename) |
+| content | `string` | Script content |
+
+---
+
+#### scripts()
+
+```typescript
+scripts(scripts: Iterable<readonly [string, string]> | Record<string, string>): this
+```
+
+Add many scripts at once.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| scripts | `Iterable<[string, string]> \| Record<string, string>` | Scripts as entries or a plain object |
+
+---
+
+#### secret()
+
+```typescript
+secret(configure: (b: SecretBuilder) => SecretBuilder): this
+```
+
+Add a secret with full configuration. See [Secrets](/sdk/typescript/secrets) for the builder API. Automatically enables TLS interception.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| configure | [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder) callback | Configure the secret |
+
+---
+
+#### secretEnv()
+
+```typescript
+secretEnv(envVar: string, value: string, allowedHost: string): this
+```
+
+Shorthand for adding a header-injected secret. Auto-generates the placeholder as `$MSB_<ENV_VAR>` and allows substitution only on `allowedHost`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| envVar | `string` | Environment variable name |
+| value | `string` | Secret value |
+| allowedHost | `string` | Allowed destination host |
+
+---
+
+#### shell()
+
+```typescript
+shell(shell: string): this
+```
+
+Set the shell used by [`sandbox.shell(...)`](/sdk/typescript/execution#shell). Default: `/bin/sh`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| shell | `string` | Shell path (e.g. `"/bin/bash"`) |
+
+---
+
+#### user()
+
+```typescript
+user(user: string): this
+```
+
+Set the default guest user for all commands.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| user | `string` | User name or UID |
+
+---
+
+#### volume()
+
+```typescript
+volume(guestPath: string, configure: (m: MountBuilder) => MountBuilder): this
+```
+
+Add a volume mount. See [Volumes](/sdk/typescript/volumes) for mount types.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| guestPath | `string` | Mount point inside the sandbox |
+| configure | [`MountBuilder`](/sdk/typescript/volumes#mountbuilder) callback | Configure the mount |
+
+---
+
+#### workdir()
+
+```typescript
+workdir(path: string): this
+```
+
+Set the default working directory for all commands.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Absolute path inside the guest |
+
+---
+
 ## Types
-
-### SandboxBuilder
-
-Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter returns the same builder so calls can be chained.
-
-| Method | Description |
-|--------|-------------|
-| `image(src)` | OCI image (`"alpine"`), local rootfs path, or a `RootfsSource`. **Required.** |
-| `cpus(n)` | Virtual CPUs |
-| `memory(mib)` | Guest memory in MiB |
-| `logLevel(level)` | Override log verbosity |
-| `quietLogs()` | Suppress log output |
-| `workdir(path)` | Default working directory for commands |
-| `shell(shell)` | Shell binary used by `sandbox.shell(...)` |
-| `entrypoint(iter)` | Override the image entrypoint |
-| `hostname(name)` | Guest hostname |
-| `user(user)` | Default guest user |
-| `pullPolicy(policy)` | Image pull behavior |
-| `libkrunfwPath(path)` | Override the bundled libkrunfw shared library |
-| `env(key, value)` | Add a single env var |
-| `envs(record \| iter)` | Add many env vars |
-| `script(name, content)` | Mount a script at `/.msb/scripts/<name>` |
-| `scripts(record \| iter)` | Mount many scripts |
-| `replace()` | Replace any existing sandbox with the same name |
-| `maxDuration(secs)` | Maximum sandbox lifetime |
-| `idleTimeout(secs)` | Stop the sandbox after this many idle seconds |
-| `volume(guestPath, m => ...)` | Mount a volume — see [Volumes](/sdk/typescript/volumes) |
-| `patch(p => ...)` | Modify the rootfs before boot — see [Snapshots](/sdk/typescript/snapshots) |
-| `addPatch(patch)` | Append a pre-built `Patch` |
-| `registry(r => r.auth(...).insecure().caCertsPath(...))` | Configure the OCI registry |
-| `port(host, guest)` | Publish a TCP port |
-| `portUdp(host, guest)` | Publish a UDP port |
-| `disableNetwork()` | Disable networking entirely |
-| `network(n => ...)` | Configure DNS / TLS / policy / secrets — see [Networking](/sdk/typescript/networking) |
-| `secret(s => ...)` | Add a secret via [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder) |
-| `secretEnv(envVar, value, allowedHost)` | Auto-placeholder shorthand. Generates `$MSB_<ENV_VAR>`. |
-| `build(): SandboxConfig` | Materialize without booting |
-| `create(): Promise<Sandbox>` | Build and boot in attached mode |
-| `createDetached(): Promise<Sandbox>` | Build and boot in detached mode |
 
 ### LogLevel
 

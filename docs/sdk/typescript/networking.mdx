@@ -21,17 +21,24 @@ await using sb = await Sandbox.builder("filtered")
   .create();
 ```
 
-For port publishing, use `SandboxBuilder.port(host, guest)` / `portUdp(host, guest)` (or the equivalent methods on `NetworkBuilder`).
+For port publishing, use `SandboxBuilder.port(host, guest)` / `portUdp(host, guest)` (or the equivalent methods on [`NetworkBuilder`](#networkbuilder)).
 
 ## NetworkPolicy
 
-Static factory for creating preset policies. Each helper returns a plain `NetworkPolicy` value that can be passed to `NetworkBuilder.policy(...)`.
+```typescript
+interface NetworkPolicy {
+  readonly defaultEgress: Action;
+  readonly defaultIngress: Action;
+  readonly rules: readonly Rule[];
+}
+```
+
+A network access policy: per-direction defaults plus an ordered list of rules evaluated first-match-wins per direction. Use the preset factories below for common cases, or build a literal directly.
 
 ```typescript
 import { NetworkPolicy, Rule, Destination } from "microsandbox";
 
-// Custom policy
-const custom = {
+const custom: NetworkPolicy = {
   defaultEgress: "deny",
   defaultIngress: "allow",
   rules: [
@@ -43,17 +50,23 @@ const custom = {
 
 ---
 
-#### NetworkPolicy.allowAll()
+#### allowAll()
 
 ```typescript
 static allowAll(): NetworkPolicy
 ```
 
-Unrestricted network access, including to private addresses and the host machine.
+Unrestricted network access, including private addresses and the host machine.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`NetworkPolicy`](#networkpolicy) | Allow-all policy |
 
 ---
 
-#### NetworkPolicy.none()
+#### none()
 
 ```typescript
 static none(): NetworkPolicy
@@ -61,19 +74,15 @@ static none(): NetworkPolicy
 
 Deny all traffic. The guest is fully offline. `exec` and `fs` still work since they use the host-guest channel, not the network.
 
----
+**Returns**
 
-#### NetworkPolicy.publicOnly()
-
-```typescript
-static publicOnly(): NetworkPolicy
-```
-
-Block private address ranges and cloud metadata endpoints. Allow everything else. This is the **default** policy.
+| Type | Description |
+|------|-------------|
+| [`NetworkPolicy`](#networkpolicy) | Deny-all policy |
 
 ---
 
-#### NetworkPolicy.nonLocal()
+#### nonLocal()
 
 ```typescript
 static nonLocal(): NetworkPolicy
@@ -81,122 +90,31 @@ static nonLocal(): NetworkPolicy
 
 Allow egress to public + private (LAN) destinations; ingress allowed by default.
 
----
+**Returns**
 
-## Rules and destinations
-
-### Rule
-
-Factory for individual policy rules. Each method returns a single [`Rule`](#rule-1) value.
-
-| Method | Direction | Action |
-|--------|-----------|--------|
-| `Rule.allowEgress(dest)` | egress | allow |
-| `Rule.denyEgress(dest)` | egress | deny |
-| `Rule.allowIngress(dest)` | ingress | allow |
-| `Rule.denyIngress(dest)` | ingress | deny |
-| `Rule.allowAny(dest)` | any | allow |
-| `Rule.denyAny(dest)` | any | deny |
-
-### Destination
-
-Factory for rule destinations.
-
-| Method | Description |
-|--------|-------------|
-| `Destination.any()` | Match any destination |
-| `Destination.cidr(cidr)` | Match an IP range, e.g. `"10.0.0.0/8"` |
-| `Destination.domain(domain)` | Exact domain match |
-| `Destination.domainSuffix(suffix)` | Match the apex and every subdomain |
-| `Destination.group(group)` | Match a [`DestinationGroup`](#destinationgroup) |
-
-### PortRange
-
-| Method | Description |
-|--------|-------------|
-| `PortRange.single(port)` | Single port (`{ start, end }` set to the same value) |
-| `PortRange.range(start, end)` | Inclusive port range |
+| Type | Description |
+|------|-------------|
+| [`NetworkPolicy`](#networkpolicy) | Non-local egress policy |
 
 ---
 
-## NetworkBuilder
-
-Returned to the callback you pass to `SandboxBuilder.network(...)`. Every setter returns the same builder.
-
-| Method | Description |
-|--------|-------------|
-| `enabled(b)` | Enable or disable networking. |
-| `port(host, guest)` | Publish a TCP port. |
-| `portUdp(host, guest)` | Publish a UDP port. |
-| `policy(NetworkPolicy)` | Set the policy. Use a [`NetworkPolicy`](#networkpolicy) factory or a literal. |
-| `dns(d => ...)` | Configure DNS — see [`DnsBuilder`](#dnsbuilder). |
-| `tls(t => ...)` | Configure TLS — see [`TlsBuilder`](#tlsbuilder). |
-| `secret(s => ...)` | Add a secret — see [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder). |
-| `secretEnv(envVar, value, placeholder, allowedHost)` | Four-arg explicit-placeholder shorthand. |
-| `onSecretViolation(action)` | Action on disallowed secret use — see [`ViolationAction`](/sdk/typescript/secrets#violationaction). |
-| `maxConnections(n)` | Maximum concurrent connections. |
-| `trustHostCAs(enabled)` | Ship the host's trusted root CAs into the guest at boot. Opt-in. |
-| `build()` | Internal — produce a [`NetworkConfig`](#networkconfig). |
-
----
-
-## DnsBuilder
-
-| Method | Description |
-|--------|-------------|
-| `blockDomain(domain)` | Block a specific FQDN (returns REFUSED). |
-| `blockDomainSuffix(suffix)` | Block any name ending in `suffix`. |
-| `nameservers(servers)` | Override upstream nameservers (`IP`, `IP:PORT`, `HOST`, or `HOST:PORT`). |
-| `rebindProtection(enabled)` | Toggle DNS rebinding protection. |
-| `queryTimeoutMs(ms)` | Per-query timeout. |
-| `build()` | Internal — produce a [`DnsConfig`](#dnsconfig). |
-
----
-
-## TlsBuilder
-
-| Method | Description |
-|--------|-------------|
-| `bypass(pattern)` | Skip interception for hosts matching this glob (e.g. `"*.internal.corp"`). |
-| `verifyUpstream(verify)` | Verify upstream server certificates. Default `true`. |
-| `interceptedPorts(ports)` | TCP ports to intercept. Default `[443]`. |
-| `blockQuic(block)` | Block QUIC on intercepted ports, forcing TCP/TLS fallback. |
-| `upstreamCaCert(path)` | Add a PEM file with extra root CAs the proxy should trust. |
-| `interceptCaCert(path)` | PEM file used as the intercepting CA's certificate. |
-| `interceptCaKey(path)` | PEM file used as the intercepting CA's private key. |
-| `build()` | Internal — produce a [`TlsConfig`](#tlsconfig). |
-
----
-
-## Types
-
-### NetworkConfig
-
-Built network configuration produced by `NetworkBuilder.build()`.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| enabled | `boolean` | Master enable flag |
-| ports | `readonly PublishedPort[]` | Port publishings |
-| policy | [`NetworkPolicy`](#networkpolicy-1) ` \| null` | Active policy |
-| dns | [`DnsConfig`](#dnsconfig) ` \| null` | DNS interception |
-| tls | [`TlsConfig`](#tlsconfig) ` \| null` | TLS interception |
-| secrets | `readonly SecretEntry[]` | Secret entries |
-| secretViolation | [`ViolationAction`](/sdk/typescript/secrets#violationaction) ` \| null` | Action on disallowed secret use |
-| maxConnections | `number \| null` | Maximum concurrent connections |
-| trustHostCAs | `boolean` | Ship host CAs into the guest |
-
-### NetworkPolicy
+#### publicOnly()
 
 ```typescript
-interface NetworkPolicy {
-  readonly defaultEgress: Action;
-  readonly defaultIngress: Action;
-  readonly rules: readonly Rule[];
-}
+static publicOnly(): NetworkPolicy
 ```
 
-### Rule
+Block private address ranges and cloud metadata endpoints. Allow everything else. This is the **default** policy.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`NetworkPolicy`](#networkpolicy) | Public-only egress policy |
+
+---
+
+## Rule
 
 ```typescript
 interface Rule {
@@ -208,7 +126,143 @@ interface Rule {
 }
 ```
 
-### Destination
+A single network policy rule. Use the factories below to build rules without writing the literal shape.
+
+---
+
+#### allowAny()
+
+```typescript
+allowAny(destination: Destination): Rule
+```
+
+Allow `destination` in either direction.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| destination | [`Destination`](#destination) | Match target |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Rule`](#rule) | Direction-agnostic allow rule |
+
+---
+
+#### allowEgress()
+
+```typescript
+allowEgress(destination: Destination): Rule
+```
+
+Allow egress to `destination`. No protocol or port filter.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| destination | [`Destination`](#destination) | Egress target |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Rule`](#rule) | Allow-egress rule |
+
+---
+
+#### allowIngress()
+
+```typescript
+allowIngress(destination: Destination): Rule
+```
+
+Allow ingress from `destination`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| destination | [`Destination`](#destination) | Ingress source |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Rule`](#rule) | Allow-ingress rule |
+
+---
+
+#### denyAny()
+
+```typescript
+denyAny(destination: Destination): Rule
+```
+
+Deny `destination` in either direction.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| destination | [`Destination`](#destination) | Match target |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Rule`](#rule) | Direction-agnostic deny rule |
+
+---
+
+#### denyEgress()
+
+```typescript
+denyEgress(destination: Destination): Rule
+```
+
+Deny egress to `destination`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| destination | [`Destination`](#destination) | Egress target |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Rule`](#rule) | Deny-egress rule |
+
+---
+
+#### denyIngress()
+
+```typescript
+denyIngress(destination: Destination): Rule
+```
+
+Deny ingress from `destination`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| destination | [`Destination`](#destination) | Ingress source |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Rule`](#rule) | Deny-ingress rule |
+
+---
+
+## Destination
 
 ```typescript
 type Destination =
@@ -218,6 +272,581 @@ type Destination =
   | { kind: "domainSuffix"; suffix: string }
   | { kind: "group"; group: DestinationGroup };
 ```
+
+Discriminated union of rule destinations. Use the factories below to construct values without typing the literal shape.
+
+---
+
+#### any()
+
+```typescript
+any(): Destination
+```
+
+Match any destination.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Destination`](#destination) | `{ kind: "any" }` |
+
+---
+
+#### cidr()
+
+```typescript
+cidr(cidr: string): Destination
+```
+
+Match an IP range.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cidr | `string` | CIDR (e.g. `"10.0.0.0/8"`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Destination`](#destination) | CIDR destination |
+
+---
+
+#### domain()
+
+```typescript
+domain(domain: string): Destination
+```
+
+Match an exact domain.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| domain | `string` | Domain name (e.g. `"api.openai.com"`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Destination`](#destination) | Domain destination |
+
+---
+
+#### domainSuffix()
+
+```typescript
+domainSuffix(suffix: string): Destination
+```
+
+Match a domain suffix and every subdomain.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| suffix | `string` | Suffix (e.g. `"example.com"`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Destination`](#destination) | Domain-suffix destination |
+
+---
+
+#### group()
+
+```typescript
+group(group: DestinationGroup): Destination
+```
+
+Match a predefined address group.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| group | [`DestinationGroup`](#destinationgroup) | Group name |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Destination`](#destination) | Group destination |
+
+---
+
+## PortRange
+
+```typescript
+interface PortRange {
+  readonly start: number;
+  readonly end: number;
+}
+```
+
+Inclusive port range used in rule port filters.
+
+---
+
+#### range()
+
+```typescript
+range(start: number, end: number): PortRange
+```
+
+An inclusive range.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| start | `number` | Range start (inclusive) |
+| end | `number` | Range end (inclusive) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`PortRange`](#portrange) | Inclusive range |
+
+---
+
+#### single()
+
+```typescript
+single(port: number): PortRange
+```
+
+A single-port range — `start` and `end` set to the same value.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| port | `number` | Port number |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`PortRange`](#portrange) | Single-port range |
+
+---
+
+## NetworkBuilder
+
+Returned to the callback you pass to `SandboxBuilder.network(...)`. Every setter returns the same builder.
+
+---
+
+#### dns()
+
+```typescript
+dns(configure: (b: DnsBuilder) => DnsBuilder): this
+```
+
+Configure DNS interception via a [`DnsBuilder`](#dnsbuilder) callback.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| configure | [`DnsBuilder`](#dnsbuilder) callback | Configure DNS |
+
+---
+
+#### enabled()
+
+```typescript
+enabled(enabled: boolean): this
+```
+
+Master enable flag. Off disables the network stack entirely.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| enabled | `boolean` | `false` to disable networking |
+
+---
+
+#### maxConnections()
+
+```typescript
+maxConnections(max: number): this
+```
+
+Limit the maximum number of concurrent network connections from the sandbox.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| max | `number` | Maximum concurrent connections |
+
+---
+
+#### onSecretViolation()
+
+```typescript
+onSecretViolation(action: ViolationAction): this
+```
+
+Action taken when a secret placeholder reaches a host outside its allow list.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| action | [`ViolationAction`](/sdk/typescript/secrets#violationaction) | Violation action |
+
+---
+
+#### policy()
+
+```typescript
+policy(policy: NetworkPolicy): this
+```
+
+Set the network access policy. Use a [`NetworkPolicy`](#networkpolicy) preset factory or a literal.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| policy | [`NetworkPolicy`](#networkpolicy) | Active policy |
+
+---
+
+#### port()
+
+```typescript
+port(hostPort: number, guestPort: number): this
+```
+
+Publish a TCP port from host to guest.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| hostPort | `number` | Port on the host |
+| guestPort | `number` | Port inside the sandbox |
+
+---
+
+#### portUdp()
+
+```typescript
+portUdp(hostPort: number, guestPort: number): this
+```
+
+Publish a UDP port from host to guest.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| hostPort | `number` | Port on the host |
+| guestPort | `number` | Port inside the sandbox |
+
+---
+
+#### secret()
+
+```typescript
+secret(configure: (b: SecretBuilder) => SecretBuilder): this
+```
+
+Add a secret with full configuration. See [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder).
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| configure | [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder) callback | Configure the secret |
+
+---
+
+#### secretEnv()
+
+```typescript
+secretEnv(envVar: string, value: string, placeholder: string, allowedHost: string): this
+```
+
+Four-argument explicit-placeholder shorthand. Sister to `SandboxBuilder.secretEnv()` (3-arg) which auto-generates the placeholder.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| envVar | `string` | Environment variable name |
+| value | `string` | Secret value |
+| placeholder | `string` | Custom placeholder string |
+| allowedHost | `string` | Allowed destination host |
+
+---
+
+#### tls()
+
+```typescript
+tls(configure: (b: TlsBuilder) => TlsBuilder): this
+```
+
+Configure TLS interception via a [`TlsBuilder`](#tlsbuilder) callback.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| configure | [`TlsBuilder`](#tlsbuilder) callback | Configure TLS |
+
+---
+
+#### trustHostCAs()
+
+```typescript
+trustHostCAs(enabled: boolean): this
+```
+
+Ship the host's trusted root CAs into the guest at boot. Default: `false`. Opt in for environments where corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.) install a gateway CA on the host that the guest's stock bundle doesn't know about.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| enabled | `boolean` | `true` to ship host CAs |
+
+---
+
+## DnsBuilder
+
+Builder for DNS interception settings. Used in `NetworkBuilder.dns(d => ...)`.
+
+---
+
+#### blockDomain()
+
+```typescript
+blockDomain(domain: string): this
+```
+
+Block DNS lookups for an exact domain. The guest receives REFUSED.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| domain | `string` | FQDN (e.g. `"malware.example.com"`) |
+
+---
+
+#### blockDomainSuffix()
+
+```typescript
+blockDomainSuffix(suffix: string): this
+```
+
+Block DNS lookups for any name ending in `suffix`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| suffix | `string` | Domain suffix (e.g. `".tracking.com"`) |
+
+---
+
+#### nameservers()
+
+```typescript
+nameservers(servers: Iterable<string>): this
+```
+
+Override the upstream nameservers. Each entry can be `IP`, `IP:PORT`, `HOST`, or `HOST:PORT`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| servers | `Iterable<string>` | Upstream resolver addresses |
+
+---
+
+#### queryTimeoutMs()
+
+```typescript
+queryTimeoutMs(ms: number): this
+```
+
+Per-DNS-query timeout in milliseconds. Default: `5000`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| ms | `number` | Timeout in milliseconds |
+
+---
+
+#### rebindProtection()
+
+```typescript
+rebindProtection(enabled: boolean): this
+```
+
+Toggle DNS rebinding protection. When enabled, responses resolving to private IPs are blocked. Default: `true`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| enabled | `boolean` | `false` disables protection |
+
+---
+
+## TlsBuilder
+
+Builder for TLS interception settings. Used in `NetworkBuilder.tls(t => ...)`.
+
+---
+
+#### blockQuic()
+
+```typescript
+blockQuic(block: boolean): this
+```
+
+Block QUIC / HTTP3 on intercepted ports (forces clients to fall back to TCP, which the proxy can read). Default: `true`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| block | `boolean` | `true` to block QUIC |
+
+---
+
+#### bypass()
+
+```typescript
+bypass(pattern: string): this
+```
+
+Skip interception for hosts matching a glob (e.g. `"*.internal.corp"`). Can be called multiple times.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| pattern | `string` | Domain or `*.suffix` pattern |
+
+---
+
+#### interceptCaCert()
+
+```typescript
+interceptCaCert(path: string): this
+```
+
+Path to the PEM file used as the intercepting CA's certificate. Pair with [`interceptCaKey()`](#interceptcakey) to keep the same CA across sandbox restarts.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Path to PEM-encoded CA cert |
+
+---
+
+#### interceptCaKey()
+
+```typescript
+interceptCaKey(path: string): this
+```
+
+Path to the PEM file used as the intercepting CA's private key.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Path to PEM-encoded CA key |
+
+---
+
+#### interceptedPorts()
+
+```typescript
+interceptedPorts(ports: Iterable<number>): this
+```
+
+TCP ports where interception is active. Default: `[443]`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| ports | `Iterable<number>` | TCP ports to intercept |
+
+---
+
+#### upstreamCaCert()
+
+```typescript
+upstreamCaCert(path: string): this
+```
+
+Add a PEM file with extra root CAs the proxy should trust when verifying upstream servers. Can be called multiple times.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Path to PEM-encoded CA bundle |
+
+---
+
+#### verifyUpstream()
+
+```typescript
+verifyUpstream(verify: boolean): this
+```
+
+Whether the proxy verifies upstream server certificates. Default: `true`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| verify | `boolean` | `true` to enforce upstream verification |
+
+---
+
+## Types
+
+### NetworkConfig
+
+Built network configuration produced internally by `NetworkBuilder.build()`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| enabled | `boolean` | Master enable flag |
+| ports | `readonly PublishedPort[]` | Port publishings |
+| policy | [`NetworkPolicy`](#networkpolicy) ` \| null` | Active policy |
+| dns | [`DnsConfig`](#dnsconfig) ` \| null` | DNS interception |
+| tls | [`TlsConfig`](#tlsconfig) ` \| null` | TLS interception |
+| secrets | `readonly SecretEntry[]` | Secret entries |
+| secretViolation | [`ViolationAction`](/sdk/typescript/secrets#violationaction) ` \| null` | Action on disallowed secret use |
+| maxConnections | `number \| null` | Maximum concurrent connections |
+| trustHostCAs | `boolean` | Ship host CAs into the guest |
 
 ### Action
 
@@ -259,15 +888,6 @@ type DestinationGroup =
 | `'metadata'` | Cloud metadata endpoints (`169.254.169.254`, `fd00:ec2::254`) |
 | `'multicast'` | Multicast addresses |
 | `'host'` | The host machine, reached via `host.microsandbox.internal` |
-
-### PortRange
-
-```typescript
-interface PortRange {
-  readonly start: number;
-  readonly end: number;
-}
-```
 
 ### DnsConfig
 

@@ -30,31 +30,26 @@ Network(
 | max_connections | `int \| None` | `None` | Maximum concurrent connections |
 | trust_host_cas | `bool \| None` | `False` | Ship the host's trusted root CAs into the guest at boot so outbound TLS works behind corporate MITM proxies (Warp Zero Trust, Zscaler, etc.). Opt-in |
 
-### DnsConfig
+---
 
-Frozen dataclass for DNS interception settings.
+#### allow_all()
 
 ```python
-DnsConfig(
-    block_domains: tuple[str, ...] = (),
-    block_domain_suffixes: tuple[str, ...] = (),
-    rebind_protection: bool = True,
-    nameservers: tuple[str, ...] = (),
-    query_timeout_ms: int | None = None,
-)
+@classmethod
+def allow_all() -> Network
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| block_domains | `tuple[str, ...]` | `()` | Block DNS for exact domains (returns REFUSED) |
-| block_domain_suffixes | `tuple[str, ...]` | `()` | Block DNS for all subdomains of a suffix |
-| rebind_protection | `bool` | `True` | Block DNS responses resolving to private IPs |
-| nameservers | `tuple[str, ...]` | `()` | Nameservers (`IP`, `IP:PORT`, `HOST`, or `HOST:PORT`). Overrides the host's `/etc/resolv.conf` when set. Hostnames are resolved once at startup via the host's OS resolver |
-| query_timeout_ms | `int \| None` | `None` | Per-DNS-query timeout in milliseconds (default: 5000) |
+Unrestricted network access, including to private addresses and the host machine.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Network`](#network) | Unrestricted network configuration |
 
 ---
 
-#### Network.none()
+#### none()
 
 ```python
 @classmethod
@@ -71,7 +66,7 @@ Deny all traffic. No network interface is created -- the guest is fully offline.
 
 ---
 
-#### Network.public_only()
+#### public_only()
 
 ```python
 @classmethod
@@ -85,23 +80,6 @@ Block private address ranges and cloud metadata endpoints. Allow everything else
 | Type | Description |
 |------|-------------|
 | [`Network`](#network) | Public-only network configuration |
-
----
-
-#### Network.allow_all()
-
-```python
-@classmethod
-def allow_all() -> Network
-```
-
-Unrestricted network access, including to private addresses and the host machine.
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`Network`](#network) | Unrestricted network configuration |
 
 ---
 
@@ -155,7 +133,7 @@ Ingress rules carrying ICMP protocols are rejected at sandbox creation: `publish
 
 ---
 
-#### Rule.allow()
+#### allow()
 
 ```python
 @classmethod
@@ -187,7 +165,7 @@ Create a rule that permits matching traffic.
 
 ---
 
-#### Rule.deny()
+#### deny()
 
 ```python
 @classmethod
@@ -216,6 +194,30 @@ Create a rule that blocks matching traffic.
 | Type | Description |
 |------|-------------|
 | [`Rule`](#rule) | A deny rule |
+
+---
+
+### DnsConfig
+
+Frozen dataclass for DNS interception settings within [`Network`](#network).
+
+```python
+DnsConfig(
+    block_domains: tuple[str, ...] = (),
+    block_domain_suffixes: tuple[str, ...] = (),
+    rebind_protection: bool = True,
+    nameservers: tuple[str, ...] = (),
+    query_timeout_ms: int | None = None,
+)
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| block_domains | `tuple[str, ...]` | `()` | Block DNS for exact domains (returns REFUSED) |
+| block_domain_suffixes | `tuple[str, ...]` | `()` | Block DNS for all subdomains of a suffix |
+| rebind_protection | `bool` | `True` | Block DNS responses resolving to private IPs |
+| nameservers | `tuple[str, ...]` | `()` | Nameservers (`IP`, `IP:PORT`, `HOST`, or `HOST:PORT`). Overrides the host's `/etc/resolv.conf` when set. Hostnames are resolved once at startup via the host's OS resolver |
+| query_timeout_ms | `int \| None` | `None` | Per-DNS-query timeout in milliseconds (default: 5000) |
 
 ---
 

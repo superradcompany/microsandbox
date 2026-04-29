@@ -101,6 +101,30 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
 
 ## Instance properties
 
+---
+
+#### fs()
+
+```typescript
+fs(): VolumeFs
+```
+
+Get a host-side filesystem handle for this volume — no sandbox required.
+
+```typescript
+const vfs = data.fs();
+await vfs.write("seed.txt", "hello");
+console.log(await vfs.list(""));
+```
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`VolumeFs`](#volumefs) | Host-side filesystem handle |
+
+---
+
 #### name
 
 ```typescript
@@ -121,25 +145,80 @@ Absolute host path to the volume's directory.
 
 ---
 
-#### fs()
+## VolumeBuilder
 
-```typescript
-fs(): VolumeFs
-```
-
-Get a host-side filesystem handle for this volume — no sandbox required.
-
-```typescript
-const vfs = data.fs();
-await vfs.write("seed.txt", "hello");
-console.log(await vfs.list(""));
-```
+Fluent builder returned by [`Volume.builder(name)`](#volumebuilder). Every setter returns the same builder. Terminate with `.create()` or `.build()`.
 
 ---
 
-## Mounts
+#### build()
 
-Volume mounts attach a host directory, named volume, tmpfs, or disk image to a guest path. Configure them via `SandboxBuilder.volume(guestPath, m => ...)`:
+```typescript
+build(): VolumeConfig
+```
+
+Materialize the accumulated state without creating the volume.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`VolumeConfig`](#volumeconfig) | Frozen volume configuration |
+
+---
+
+#### create()
+
+```typescript
+create(): Promise<Volume>
+```
+
+Build and create the volume on disk.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Promise<`[`Volume`](#volume)`>` | Created volume |
+
+---
+
+#### label()
+
+```typescript
+label(key: string, value: string): this
+```
+
+Add a metadata label. Can be called multiple times.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| key | `string` | Label key |
+| value | `string` | Label value |
+
+---
+
+#### quota()
+
+```typescript
+quota(size: number): this
+```
+
+Maximum storage size in MiB. Floor of the value is taken; negative inputs clamp to `0`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| size | `number` | Quota in MiB |
+
+---
+
+## MountBuilder
+
+Used inside `SandboxBuilder.volume(guestPath, m => ...)`. Pick exactly one mount kind ([`bind()`](#bind), [`named()`](#named), [`tmpfs()`](#tmpfs), or [`disk()`](#disk)), then chain modifiers.
 
 ```typescript
 await using sb = await Sandbox.builder("worker")
@@ -151,21 +230,155 @@ await using sb = await Sandbox.builder("worker")
   .create();
 ```
 
-### MountBuilder
+---
 
-Used inside `SandboxBuilder.volume(guestPath, m => ...)`. Pick exactly one mount kind, then chain modifiers.
+#### bind()
 
-| Method | Description |
-|--------|-------------|
-| `bind(host)` | Mount a host directory into the guest. |
-| `named(name)` | Mount a named volume created via [`Volume.builder`](#volumebuilder). |
-| `tmpfs()` | Mount an in-memory filesystem. |
-| `disk(host)` | Mount a host disk image as a virtio-blk device. |
-| `format(fmt)` | Disk image format (`'qcow2' \| 'raw' \| 'vmdk'`). Defaults to the file extension. Disk only. |
-| `fstype(fs)` | Inner filesystem type (e.g. `"ext4"`). Disk only; omit to autodetect. |
-| `readonly()` | Mount read-only. |
-| `size(mib)` | Cap in MiB. Tmpfs only. |
-| `build()` | Internal — produce a `VolumeMount`. |
+```typescript
+bind(host: string): this
+```
+
+Mount a host directory into the guest.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| host | `string` | Absolute host path |
+
+---
+
+#### disk()
+
+```typescript
+disk(host: string): this
+```
+
+Mount a host disk image as a virtio-blk device.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| host | `string` | Path to the disk image on the host |
+
+---
+
+#### format()
+
+```typescript
+format(format: DiskImageFormat): this
+```
+
+Override the disk image format. Disk only — defaults to the file extension.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| format | [`DiskImageFormat`](#diskimageformat) | `"qcow2"`, `"raw"`, or `"vmdk"` |
+
+---
+
+#### fstype()
+
+```typescript
+fstype(fstype: string): this
+```
+
+Inner filesystem type for a disk image (e.g. `"ext4"`). Disk only; omit to autodetect. Must not contain `,`, `;`, `:`, or `=`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| fstype | `string` | Filesystem type |
+
+---
+
+#### named()
+
+```typescript
+named(name: string): this
+```
+
+Mount a named volume created via [`Volume.builder`](#volumebuilder).
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Volume name |
+
+---
+
+#### readonly()
+
+```typescript
+readonly(): this
+```
+
+Prevent writes to this mount.
+
+---
+
+#### size()
+
+```typescript
+size(size: number): this
+```
+
+Size cap in MiB. Tmpfs only — calling on other kinds throws at `.build()`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| size | `number` | Cap in MiB |
+
+---
+
+#### tmpfs()
+
+```typescript
+tmpfs(): this
+```
+
+Mount an in-memory filesystem. Pair with [`size()`](#size) to cap usage.
+
+---
+
+## Types
+
+### VolumeConfig
+
+Frozen configuration produced by [`VolumeBuilder.build()`](#build).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| name | `string` | Volume name |
+| quotaMib | `number \| null` | Maximum storage size in MiB |
+| labels | `ReadonlyArray<readonly [string, string]>` | Metadata labels |
+
+### VolumeHandle
+
+Handle returned by [`Volume.get()`](#volumeget) or in the array from [`Volume.list()`](#volumelist).
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| name | `string` | Volume name |
+| quotaMib | `number \| null` | Storage quota |
+| usedBytes | `number` | Current disk usage in bytes |
+| labels | `ReadonlyArray<readonly [string, string]>` | Metadata labels |
+| createdAt | `Date \| null` | Creation timestamp |
+| fs() | [`VolumeFs`](#volumefs) | Host-side filesystem on this volume (live handles only) |
+| remove() | `Promise<void>` | Delete this volume (live handles only) |
+
+Handles in the array returned by [`Volume.list()`](#volumelist) are read-only: calling `.fs()` or `.remove()` throws. Use [`Volume.get(name)`](#volumeget) to upgrade.
+
+### VolumeFs
+
+Host-side filesystem operations on a volume's directory. Same surface area as [`SandboxFs`](/sdk/typescript/filesystem) (`read`, `readToString`, `readStream`, `write`, `writeStream`, `list`, `mkdir`, `removeDir`, `remove`, `copy`, `rename`, `stat`, `exists`) — but operates directly on the host without booting a sandbox.
 
 ### VolumeMount
 
@@ -191,44 +404,3 @@ type VolumeMount =
 ```typescript
 type DiskImageFormat = "qcow2" | "raw" | "vmdk";
 ```
-
----
-
-## Types
-
-### VolumeBuilder
-
-| Method | Description |
-|--------|-------------|
-| `quota(mib)` | Maximum storage size in MiB |
-| `label(key, value)` | Add a metadata label |
-| `build()` | Materialize a [`VolumeConfig`](#volumeconfig) |
-| `create()` | Build and create the volume; returns a [`Volume`](#volume) |
-
-### VolumeConfig
-
-Frozen configuration produced by `VolumeBuilder.build()`.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| name | `string` | Volume name |
-| quotaMib | `number \| null` | Maximum storage size in MiB |
-| labels | `ReadonlyArray<readonly [string, string]>` | Metadata labels |
-
-### VolumeHandle
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| name | `string` | Volume name |
-| quotaMib | `number \| null` | Storage quota |
-| usedBytes | `number` | Current disk usage in bytes |
-| labels | `ReadonlyArray<readonly [string, string]>` | Metadata labels |
-| createdAt | `Date \| null` | Creation timestamp |
-| fs() | [`VolumeFs`](#volumefs) | Host-side filesystem on this volume (live handles only) |
-| remove() | `Promise<void>` | Delete this volume (live handles only) |
-
-Handles in the array returned by `Volume.list()` are read-only: calling `.fs()` or `.remove()` throws. Use `Volume.get(name)` to upgrade.
-
-### VolumeFs
-
-Host-side filesystem operations on a volume's directory. Same surface area as [`SandboxFs`](/sdk/typescript/filesystem) (read, readToString, readStream, write, writeStream, list, mkdir, removeDir, remove, copy, rename, stat, exists) — but operates directly on the host without booting a sandbox.

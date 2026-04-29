@@ -130,7 +130,7 @@ Restart a stopped sandbox in detached mode. The sandbox survives after your proc
 
 ---
 
-## Instance methods
+## Instance properties
 
 ---
 
@@ -147,6 +147,42 @@ Access the sandbox's full configuration.
 | Type | Description |
 |------|-------------|
 | [`&SandboxConfig`](#sandboxconfig) | Sandbox configuration |
+
+---
+
+#### name()
+
+```rust
+fn name(&self) -> &str
+```
+
+Get the sandbox name.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `&str` | Sandbox name |
+
+---
+
+#### owns_lifecycle()
+
+```rust
+fn owns_lifecycle(&self) -> bool
+```
+
+Whether this handle owns the sandbox lifecycle. `true` in attached mode (sandbox stops when your process exits), `false` in detached mode.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `bool` | `true` if attached |
+
+---
+
+## Instance methods
 
 ---
 
@@ -231,38 +267,6 @@ Stream resource metrics at a regular interval. Returns an async stream that yiel
 | Type | Description |
 |------|-------------|
 | `impl Stream<Item = Result<`[`SandboxMetrics`](#sandboxmetrics)`>>` | Async stream of metrics |
-
----
-
-#### name()
-
-```rust
-fn name(&self) -> &str
-```
-
-Get the sandbox name.
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `&str` | Sandbox name |
-
----
-
-#### owns_lifecycle()
-
-```rust
-fn owns_lifecycle(&self) -> bool
-```
-
-Whether this handle owns the sandbox lifecycle. `true` in attached mode (sandbox stops when your process exits), `false` in detached mode.
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `bool` | `true` if attached |
 
 ---
 

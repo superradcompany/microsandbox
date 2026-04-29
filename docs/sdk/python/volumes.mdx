@@ -97,12 +97,29 @@ Delete a named volume and its contents. Fails if the volume is currently mounted
 
 ---
 
-## Volume instance properties
+## Instance properties
 
-| Property | Type | Description |
-|----------|------|-------------|
-| name | `str` | Volume name |
-| path | `str` | Host path to the volume directory |
+---
+
+#### name
+
+```python
+@property
+def name(self) -> str
+```
+
+Volume name.
+
+---
+
+#### path
+
+```python
+@property
+def path(self) -> str
+```
+
+Host path to the volume's directory.
 
 ---
 
@@ -178,22 +195,6 @@ Use an in-memory filesystem. Contents are discarded when the sandbox stops.
 | Type | Description |
 |------|-------------|
 | `dict` | Mount configuration dictionary |
-
----
-
-## VolumeHandle
-
-Handle to an existing named volume, returned by [`Volume.get()`](#volumeget) and [`Volume.list()`](#volumelist).
-
-| Property / Method | Type | Description |
-|-------------------|------|-------------|
-| name | `str` | Volume name |
-| quota_mib | `int \| None` | Storage quota in MiB |
-| used_bytes | `int` | Current disk usage in bytes |
-| labels | `dict[str, str]` | Metadata labels |
-| created_at | `float \| None` | Creation timestamp (ms since epoch) |
-| fs | [`VolumeFs`](#volumefs) | Host-side filesystem handle |
-| remove() | *(async)* `None` | Delete this volume |
 
 ---
 
@@ -341,6 +342,20 @@ Check whether a path exists within the volume.
 ---
 
 ## Types
+
+### VolumeHandle
+
+Handle to an existing named volume, returned by [`Volume.get()`](#volumeget) and [`Volume.list()`](#volumelist).
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| name | `str` | Volume name |
+| quota_mib | `int \| None` | Storage quota in MiB |
+| used_bytes | `int` | Current disk usage in bytes |
+| labels | `dict[str, str]` | Metadata labels |
+| created_at | `float \| None` | Creation timestamp (ms since epoch) |
+| fs | [`VolumeFs`](#volumefs) | Host-side filesystem handle |
+| remove() | *(async)* `None` | Delete this volume |
 
 ### MountConfig
 
