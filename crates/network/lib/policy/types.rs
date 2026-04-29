@@ -245,6 +245,18 @@ pub enum HostnameSource<'a> {
     Deferred,
 }
 
+impl HostnameSource<'_> {
+    /// Short, stable label suitable for tracing tags / logs (e.g.
+    /// `"sni"`, `"cache"`, `"deferred"`).
+    pub fn label(&self) -> &'static str {
+        match self {
+            HostnameSource::Sni(_) => "sni",
+            HostnameSource::CacheOnly => "cache",
+            HostnameSource::Deferred => "deferred",
+        }
+    }
+}
+
 /// Outcome of an egress evaluation. Extends [`Action`] with a
 /// "decision deferred until SNI is known" state that is reachable only
 /// under [`HostnameSource::Deferred`].

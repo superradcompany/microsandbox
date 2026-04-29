@@ -88,7 +88,7 @@ async fn tcp_proxy_task(
         EgressEvaluation::Deny => {
             tracing::debug!(
                 dst = %dst,
-                source = %hostname_source_label(source),
+                source = source.label(),
                 "TCP egress denied by domain policy",
             );
             return Ok(());
@@ -210,16 +210,6 @@ async fn peek_for_sni(
 
     let canonical = raw_sni.map(|s| s.trim_end_matches('.').to_ascii_lowercase());
     (buf, canonical)
-}
-
-/// Short label for tracing tags, identifying which hostname source was
-/// used for an egress decision.
-fn hostname_source_label(source: HostnameSource<'_>) -> &'static str {
-    match source {
-        HostnameSource::Sni(_) => "sni",
-        HostnameSource::CacheOnly => "cache",
-        HostnameSource::Deferred => "deferred",
-    }
 }
 
 //--------------------------------------------------------------------------------------------------

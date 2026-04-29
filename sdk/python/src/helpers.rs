@@ -369,14 +369,14 @@ fn apply_network(
     // network.dns.blocked_domains / blocked_suffixes (warns). Parse
     // up-front so PyValueError propagates cleanly rather than getting
     // swallowed inside the builder closure.
-    let mut dns_deny_rules: Vec<microsandbox_network::policy::Rule> = Vec::new();
+    let mut bulk_deny_rules: Vec<microsandbox_network::policy::Rule> = Vec::new();
 
     if let Some(domains) = extract_opt::<Vec<String>>(net, "deny_domains")? {
         for d in domains {
             let domain = d.parse().map_err(|e| {
                 pyo3::exceptions::PyValueError::new_err(format!("deny_domains[{d:?}]: {e}"))
             })?;
-            dns_deny_rules.push(microsandbox_network::policy::Rule::deny_egress(
+            bulk_deny_rules.push(microsandbox_network::policy::Rule::deny_egress(
                 microsandbox_network::policy::Destination::Domain(domain),
             ));
         }
@@ -386,7 +386,7 @@ fn apply_network(
             let suffix = s.parse().map_err(|e| {
                 pyo3::exceptions::PyValueError::new_err(format!("deny_domain_suffixes[{s:?}]: {e}"))
             })?;
-            dns_deny_rules.push(microsandbox_network::policy::Rule::deny_egress(
+            bulk_deny_rules.push(microsandbox_network::policy::Rule::deny_egress(
                 microsandbox_network::policy::Destination::DomainSuffix(suffix),
             ));
         }
@@ -406,7 +406,7 @@ fn apply_network(
                 let domain = d.parse().map_err(|e| {
                     pyo3::exceptions::PyValueError::new_err(format!("blocked_domains[{d:?}]: {e}"))
                 })?;
-                dns_deny_rules.push(microsandbox_network::policy::Rule::deny_egress(
+                bulk_deny_rules.push(microsandbox_network::policy::Rule::deny_egress(
                     microsandbox_network::policy::Destination::Domain(domain),
                 ));
             }
@@ -422,7 +422,7 @@ fn apply_network(
                 let suffix = s.parse().map_err(|e| {
                     pyo3::exceptions::PyValueError::new_err(format!("blocked_suffixes[{s:?}]: {e}"))
                 })?;
-                dns_deny_rules.push(microsandbox_network::policy::Rule::deny_egress(
+                bulk_deny_rules.push(microsandbox_network::policy::Rule::deny_egress(
                     microsandbox_network::policy::Destination::DomainSuffix(suffix),
                 ));
             }
@@ -442,7 +442,7 @@ fn apply_network(
                 )));
             }
         };
-        let mut combined = dns_deny_rules.clone();
+        let mut combined = bulk_deny_rules.clone();
         combined.extend(policy.rules);
         policy.rules = combined;
         builder = builder.network(|n| n.policy(policy));
@@ -596,7 +596,7 @@ fn apply_network(
             }
         }
 
-        let mut combined = dns_deny_rules.clone();
+        let mut combined = bulk_deny_rules.clone();
         combined.extend(rules);
         let policy = NetworkPolicy {
             default_egress,
@@ -611,11 +611,11 @@ fn apply_network(
     // entries were. Use permissive defaults so the rest of the network
     // keeps working — preserves the legacy "full network minus blocked
     // domains" semantics.
-    if !policy_set && !dns_deny_rules.is_empty() {
+    if !policy_set && !bulk_deny_rules.is_empty() {
         let policy = NetworkPolicy {
             default_egress: microsandbox_network::policy::Action::Allow,
             default_ingress: microsandbox_network::policy::Action::Allow,
-            rules: dns_deny_rules,
+            rules: bulk_deny_rules,
         };
         builder = builder.network(|n| n.policy(policy));
     }
