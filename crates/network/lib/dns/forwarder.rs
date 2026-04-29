@@ -160,10 +160,7 @@ impl DnsForwarder {
         let domain = question.name().to_string();
         let domain = domain.trim_end_matches('.').to_owned();
 
-        // Network policy `deny Domain` / `deny DomainSuffix`: synthesize REFUSED.
-        // Wire-form names that fail DomainName validation can never match a
-        // (validated) rule destination, so we fail-open and let the query
-        // proceed to host-alias synthesis / upstream forwarding.
+        // Refuse queries denied by the network policy.
         if let Ok(canonical) = domain.parse::<DomainName>()
             && self.network_policy.dns_query_denied(&canonical)
         {

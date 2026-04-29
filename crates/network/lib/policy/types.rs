@@ -206,48 +206,22 @@ pub struct PortRange {
     pub end: u16,
 }
 
-/// Source of the hostname used to match `Domain` / `DomainSuffix` rules
-/// during an egress evaluation.
-///
-/// Each variant maps to one of the three points in a TCP connection's
-/// lifecycle where Domain rules can be evaluated:
-///
-/// - [`Sni`]: TLS first-flight, after SNI extraction. Authoritative for
-///   the flow; the resolved-hostname cache is not consulted.
-/// - [`CacheOnly`]: no SNI available — fall back to
-///   [`SharedState::any_resolved_hostname`]. Used for non-TCP paths,
-///   non-TLS TCP traffic, and TLS connections whose SNI extraction
-///   timed out, returned no name, or hit the buffer cap.
-/// - [`Deferred`]: TCP SYN time. A matching `Domain` / `DomainSuffix`
-///   rule short-circuits the walk with
-///   [`EgressEvaluation::DeferUntilHostname`] so the caller can accept
-///   the SYN and re-evaluate at first-flight.
-///
-/// The SNI string passed in [`Self::Sni`] is expected in canonical form
-/// (lowercase ASCII, no trailing dot) so byte equality against rule
-/// destinations works directly.
-///
-/// [`Sni`]: Self::Sni
-/// [`CacheOnly`]: Self::CacheOnly
-/// [`Deferred`]: Self::Deferred
-/// [`SharedState::any_resolved_hostname`]: crate::shared::SharedState::any_resolved_hostname
+/// Source of the hostname used to match `Domain` / `DomainSuffix`
+/// rules during an egress evaluation.
 #[derive(Debug, Clone, Copy)]
 pub enum HostnameSource<'a> {
-    /// Authoritative hostname extracted from a TLS ClientHello SNI
-    /// extension. Canonicalized at the boundary.
+    /// Hostname from a TLS ClientHello, canonicalized.
     Sni(&'a str),
-    /// No authoritative hostname — match `Domain` / `DomainSuffix` via
-    /// the resolved-hostname cache. Used for UDP, ICMP, plain TCP, and
-    /// SNI-absent TLS first-flight fallback.
+    /// No SNI — match `Domain` rules via the resolved-hostname cache.
     CacheOnly,
-    /// Pre-first-flight TCP SYN. A matching `Domain` / `DomainSuffix`
-    /// rule short-circuits to [`EgressEvaluation::DeferUntilHostname`].
+    /// SYN time, before SNI is known. A matching `Domain` /
+    /// `DomainSuffix` rule short-circuits to
+    /// [`EgressEvaluation::DeferUntilHostname`].
     Deferred,
 }
 
 impl HostnameSource<'_> {
-    /// Short, stable label suitable for tracing tags / logs (e.g.
-    /// `"sni"`, `"cache"`, `"deferred"`).
+    /// Short label for tracing tags (`"sni"`, `"cache"`, `"deferred"`).
     pub fn label(&self) -> &'static str {
         match self {
             HostnameSource::Sni(_) => "sni",
@@ -257,18 +231,16 @@ impl HostnameSource<'_> {
     }
 }
 
-/// Outcome of an egress evaluation. Extends [`Action`] with a
-/// "decision deferred until SNI is known" state that is reachable only
-/// under [`HostnameSource::Deferred`].
+/// Outcome of an egress evaluation. Like [`Action`] plus a deferred
+/// state reachable only under [`HostnameSource::Deferred`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EgressEvaluation {
     /// Permit the connection.
     Allow,
     /// Refuse the connection.
     Deny,
-    /// First-match was a `Domain` / `DomainSuffix` rule and the source
-    /// was [`HostnameSource::Deferred`]. The caller should accept the
-    /// SYN and re-evaluate once the SNI hostname is known.
+    /// First match was a Domain / DomainSuffix rule and the SNI isn't
+    /// known yet — accept the SYN and re-evaluate at first-flight.
     DeferUntilHostname,
 }
 
@@ -327,10 +299,6 @@ impl NetworkPolicy {
     /// Iterates rules in order, considering only rules where
     /// `direction ∈ {Egress, Any}`. Returns the action from the first
     /// matching rule, or `default_egress` if no rule matches.
-    ///
-    /// Back-compat wrapper around [`Self::evaluate_egress_with_source`]
-    /// using [`HostnameSource::CacheOnly`]; existing callers (UDP, the
-    /// DNS forwarder, SYN-time IP-rule checks) keep their signature.
     pub fn evaluate_egress(
         &self,
         dst: SocketAddr,
@@ -347,12 +315,9 @@ impl NetworkPolicy {
         .into()
     }
 
-    /// Evaluate an outbound ICMP packet against the rule list.
-    ///
-    /// Same as [`Self::evaluate_egress`] but without port matching —
-    /// ICMP has no ports. Rules with a non-empty `ports` filter are
-    /// skipped since applying a port range to a portless protocol would
-    /// be semantically incorrect.
+    /// Evaluate an outbound ICMP packet against the rule list. Like
+    /// [`Self::evaluate_egress`] but skips rules with a port filter
+    /// (ICMP has no ports).
     pub fn evaluate_egress_ip(
         &self,
         dst: IpAddr,
@@ -363,29 +328,10 @@ impl NetworkPolicy {
             .into()
     }
 
-    /// Evaluate an outbound connection against the rule list with an
-    /// explicit hostname source for `Domain` / `DomainSuffix` matching.
-    ///
-    /// Three sources are supported (see [`HostnameSource`]):
-    ///
-    /// - [`HostnameSource::Sni`]: caller has the authoritative hostname
-    ///   from a TLS ClientHello. Domain rules match against this name
-    ///   directly; the resolved-hostname cache is not consulted.
-    /// - [`HostnameSource::CacheOnly`]: caller has no hostname.
-    ///   `Domain` / `DomainSuffix` rules consult the cache via
-    ///   [`SharedState::any_resolved_hostname`]. Equivalent to
-    ///   [`Self::evaluate_egress`].
-    /// - [`HostnameSource::Deferred`]: caller is the TCP SYN handler
-    ///   and has no hostname yet. A matching `Domain` / `DomainSuffix`
-    ///   rule short-circuits with [`EgressEvaluation::DeferUntilHostname`];
-    ///   the caller should accept the SYN and re-evaluate at
-    ///   first-flight.
-    ///
-    /// First-match-wins, walk order, and protocol/port filtering are
-    /// invariant across sources — only the `Domain` / `DomainSuffix`
-    /// match predicate varies.
-    ///
-    /// [`SharedState::any_resolved_hostname`]: crate::shared::SharedState::any_resolved_hostname
+    /// Evaluate an outbound connection with an explicit
+    /// [`HostnameSource`] for `Domain` / `DomainSuffix` matching.
+    /// Walk order and protocol/port filtering are identical across
+    /// sources — only the Domain match predicate varies.
     pub fn evaluate_egress_with_source(
         &self,
         dst: SocketAddr,
@@ -396,9 +342,8 @@ impl NetworkPolicy {
         self.egress_walk(dst.ip(), Some(dst.port()), protocol, shared, source)
     }
 
-    /// Internal: shared rule walk for the egress public methods. `port`
-    /// is `None` on the ICMP path; rules with a non-empty port set are
-    /// skipped in that case.
+    /// Shared rule walk for the egress public methods. `port = None`
+    /// is the ICMP path; rules with a port filter are skipped there.
     fn egress_walk(
         &self,
         addr: IpAddr,
@@ -460,21 +405,10 @@ impl NetworkPolicy {
 
     /// Should the DNS forwarder refuse a query for `name`?
     ///
-    /// Returns `true` iff the first matching `Domain` / `DomainSuffix`
-    /// rule (in egress-applicable direction) has action `Deny`. Port and
-    /// protocol filters are ignored — DNS queries don't carry a
-    /// destination port, so even a port-narrow deny rule still refuses
-    /// at this layer; the port filter still applies at TCP egress.
-    ///
-    /// `Cidr` / `Group` / `Any` rules cannot match a hostname string and
-    /// are skipped. `default_egress` is not consulted: deny-by-default
-    /// does not refuse all DNS, only explicit deny rules do.
-    ///
-    /// `name` is a validated [`DomainName`] (lowercase ASCII, no
-    /// trailing dot) so matching collapses to byte equality. Callers
-    /// that hold a wire-form string parse it via [`str::parse`] first;
-    /// names that fail to parse cannot match any (validated) rule and
-    /// the caller should fail-open by skipping the check.
+    /// Returns `true` iff the first matching Domain / DomainSuffix
+    /// rule has action `Deny`. Port and protocol filters and
+    /// `default_egress` are not consulted — only explicit deny rules
+    /// refuse a query.
     pub fn dns_query_denied(&self, name: &DomainName) -> bool {
         for rule in &self.rules {
             if !matches!(rule.direction, Direction::Egress | Direction::Any) {
@@ -492,36 +426,28 @@ impl NetworkPolicy {
         false
     }
 
-    /// Prepend a single `deny Domain(name)` egress rule. Sugar over
-    /// [`Self::deny_domains`] for the one-name case.
+    /// Single-name sugar over [`Self::deny_domains`].
     pub fn deny_domain<S: AsRef<str>>(self, name: S) -> Result<Self, DomainNameError> {
         self.deny_domains([name])
     }
 
-    /// Prepend a single `allow Domain(name)` egress rule. Sugar over
-    /// [`Self::allow_domains`].
+    /// Single-name sugar over [`Self::allow_domains`].
     pub fn allow_domain<S: AsRef<str>>(self, name: S) -> Result<Self, DomainNameError> {
         self.allow_domains([name])
     }
 
-    /// Prepend a single `deny DomainSuffix(suffix)` egress rule. Sugar
-    /// over [`Self::deny_domain_suffixes`].
+    /// Single-suffix sugar over [`Self::deny_domain_suffixes`].
     pub fn deny_domain_suffix<S: AsRef<str>>(self, suffix: S) -> Result<Self, DomainNameError> {
         self.deny_domain_suffixes([suffix])
     }
 
-    /// Prepend a single `allow DomainSuffix(suffix)` egress rule.
-    /// Sugar over [`Self::allow_domain_suffixes`].
+    /// Single-suffix sugar over [`Self::allow_domain_suffixes`].
     pub fn allow_domain_suffix<S: AsRef<str>>(self, suffix: S) -> Result<Self, DomainNameError> {
         self.allow_domain_suffixes([suffix])
     }
 
-    /// Prepend `deny Domain(name)` egress rules for each input.
-    /// Prepending (not appending) lets the deny outrank catch-all
-    /// allows already in the policy — without it, a deny placed after
-    /// `allow Public` would never fire for a domain on a public IP.
-    /// Names parse via [`DomainName`]; the first invalid input returns
-    /// [`DomainNameError`].
+    /// Prepend `deny Domain(name)` egress rules. Prepending lets the
+    /// deny outrank catch-all allows like `allow Public`.
     pub fn deny_domains<I, S>(self, names: I) -> Result<Self, DomainNameError>
     where
         I: IntoIterator<Item = S>,
@@ -530,8 +456,7 @@ impl NetworkPolicy {
         self.prepend_egress_rules(names, |d| Rule::deny_egress(Destination::Domain(d)))
     }
 
-    /// Prepend `allow Domain(name)` egress rules for each input. See
-    /// [`Self::deny_domains`] for ordering semantics.
+    /// Prepend `allow Domain(name)` egress rules.
     pub fn allow_domains<I, S>(self, names: I) -> Result<Self, DomainNameError>
     where
         I: IntoIterator<Item = S>,
@@ -540,9 +465,8 @@ impl NetworkPolicy {
         self.prepend_egress_rules(names, |d| Rule::allow_egress(Destination::Domain(d)))
     }
 
-    /// Prepend `deny DomainSuffix(suffix)` egress rules for each input.
-    /// Each suffix matches the apex itself and any subdomain
-    /// (label-aligned). See [`Self::deny_domains`] for ordering.
+    /// Prepend `deny DomainSuffix(suffix)` egress rules. Suffixes
+    /// match the apex and any subdomain (label-aligned).
     pub fn deny_domain_suffixes<I, S>(self, suffixes: I) -> Result<Self, DomainNameError>
     where
         I: IntoIterator<Item = S>,
@@ -553,8 +477,7 @@ impl NetworkPolicy {
         })
     }
 
-    /// Prepend `allow DomainSuffix(suffix)` egress rules for each
-    /// input. See [`Self::deny_domains`] for ordering.
+    /// Prepend `allow DomainSuffix(suffix)` egress rules.
     pub fn allow_domain_suffixes<I, S>(self, suffixes: I) -> Result<Self, DomainNameError>
     where
         I: IntoIterator<Item = S>,
@@ -618,11 +541,9 @@ impl From<Action> for EgressEvaluation {
 }
 
 impl From<EgressEvaluation> for Action {
-    /// Convert an [`EgressEvaluation`] back into an [`Action`].
-    /// `DeferUntilHostname` is unreachable when an evaluator is called
-    /// with a non-`Deferred` source, which is the only way an
-    /// [`Action`] is requested. Debug builds panic on the unreachable
-    /// case; release builds map to `Deny` as a safe default.
+    /// `DeferUntilHostname` is unreachable here (only the SYN handler
+    /// asks for deferral, and it doesn't request an `Action`). Debug
+    /// builds panic; release falls back to `Deny`.
     fn from(eval: EgressEvaluation) -> Self {
         match eval {
             EgressEvaluation::Allow => Action::Allow,

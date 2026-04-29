@@ -80,25 +80,17 @@ async fn tls_proxy_task(
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "SNI extraction timed out"))?;
     let (sni_name, initial_buf) = sni_name?;
 
-    // Canonicalize once at the boundary so byte equality against rule
-    // destinations (which carry validated `DomainName` values) works
-    // directly. The existing `should_bypass` path already lowercases
-    // internally, so this is forwards-compatible with that.
+    // Canonicalize so byte equality against rule destinations works.
     let sni_name = sni_name.trim_end_matches('.').to_ascii_lowercase();
 
-    // Apply network-policy Domain / DomainSuffix rules with the SNI as
-    // the authoritative hostname. Distinct from the SYN-time IP-rule
-    // check (which deferred Domain rules) and from the TLS-bypass
-    // pattern list (which is interception config, not policy).
-    if matches!(
-        network_policy.evaluate_egress_with_source(
-            dst,
-            Protocol::Tcp,
-            &shared,
-            HostnameSource::Sni(&sni_name),
-        ),
-        EgressEvaluation::Deny,
-    ) {
+    // Apply Domain / DomainSuffix rules against the SNI.
+    let eval = network_policy.evaluate_egress_with_source(
+        dst,
+        Protocol::Tcp,
+        &shared,
+        HostnameSource::Sni(&sni_name),
+    );
+    if matches!(eval, EgressEvaluation::Deny) {
         tracing::debug!(sni = %sni_name, dst = %dst, "TLS egress denied by domain policy");
         return Ok(());
     }

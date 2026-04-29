@@ -268,10 +268,6 @@ impl SandboxBuilder {
     ///     .tls(|t| t.bypass("*.internal.com"))
     /// )
     /// ```
-    ///
-    /// Domain blocking lives on the policy: add a
-    /// `Rule::deny_egress(Destination::Domain("evil.com".parse()?))` to
-    /// the `NetworkPolicy` instead of using a separate DNS block list.
     #[cfg(feature = "net")]
     pub fn network(mut self, f: impl FnOnce(NetworkBuilder) -> NetworkBuilder) -> Self {
         let network = std::mem::take(&mut self.config.network);

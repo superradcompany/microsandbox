@@ -30,7 +30,6 @@ mod scenario;
 
 use microsandbox::{NetworkPolicy, Sandbox};
 use microsandbox_network::builder::NetworkBuilder;
-use microsandbox_network::policy::{Destination, DomainName, Rule};
 use test_utils::msb_test;
 
 use crate::sandbox::{deny_resolver, setup_sandbox};
@@ -142,18 +141,12 @@ async fn dns_matrix_dot() {
 //--------------------------------------------------------------------------------------------------
 
 /// Apply the network config shared by both sandboxes: the deny-resolver
-/// policy with deny-Domain rules for the test block list (exact +
-/// suffix). Block-list enforcement flows through policy rules.
-fn with_policy_and_block_list(n: NetworkBuilder, mut policy: NetworkPolicy) -> NetworkBuilder {
-    let exact: DomainName = BLOCKED_EXACT.parse().expect("BLOCKED_EXACT parses");
-    let suffix: DomainName = BLOCKED_SUFFIX.parse().expect("BLOCKED_SUFFIX parses");
-    // Prepend so the deny rules outrank any later allow rules in the
-    // policy (the deny-resolver policy is otherwise permissive).
-    policy
-        .rules
-        .insert(0, Rule::deny_egress(Destination::DomainSuffix(suffix)));
-    policy
-        .rules
-        .insert(0, Rule::deny_egress(Destination::Domain(exact)));
+/// policy plus deny rules for the test block list.
+fn with_policy_and_block_list(n: NetworkBuilder, policy: NetworkPolicy) -> NetworkBuilder {
+    let policy = policy
+        .deny_domain(BLOCKED_EXACT)
+        .expect("BLOCKED_EXACT parses")
+        .deny_domain_suffix(BLOCKED_SUFFIX)
+        .expect("BLOCKED_SUFFIX parses");
     n.policy(policy)
 }

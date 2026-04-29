@@ -364,10 +364,8 @@ fn apply_network(
     mut builder: microsandbox::sandbox::SandboxBuilder,
     net: &Bound<'_, PyDict>,
 ) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
-    // Bulk deny-Domain rules from network.deny_domains /
-    // network.deny_domain_suffixes. Parse up-front so PyValueError
-    // propagates cleanly rather than getting swallowed inside the
-    // builder closure.
+    // Parse bulk deny-Domain rules up-front so PyValueError propagates
+    // cleanly rather than being swallowed inside the builder closure.
     let mut bulk_deny_rules: Vec<microsandbox_network::policy::Rule> = Vec::new();
 
     if let Some(domains) = extract_opt::<Vec<String>>(net, "deny_domains")? {
@@ -582,8 +580,6 @@ fn apply_network(
         builder = builder.network(|n| n.policy(policy));
     }
 
-    // DNS configuration (nested `dns` dict): rebind / nameservers /
-    // query timeout only — block lists are part of the policy now.
     if let Some(dns) = net.get_item("dns")?
         && !dns.is_none()
     {
@@ -600,22 +596,20 @@ fn apply_network(
             .collect::<Result<_, _>>()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
-        if rebind.is_some() || !nameservers.is_empty() || query_timeout_ms.is_some() {
-            builder = builder.network(move |n| {
-                n.dns(move |mut d| {
-                    if let Some(r) = rebind {
-                        d = d.rebind_protection(r);
-                    }
-                    if !nameservers.is_empty() {
-                        d = d.nameservers(nameservers);
-                    }
-                    if let Some(ms) = query_timeout_ms {
-                        d = d.query_timeout_ms(ms);
-                    }
-                    d
-                })
-            });
-        }
+        builder = builder.network(move |n| {
+            n.dns(move |mut d| {
+                if let Some(r) = rebind {
+                    d = d.rebind_protection(r);
+                }
+                if !nameservers.is_empty() {
+                    d = d.nameservers(nameservers);
+                }
+                if let Some(ms) = query_timeout_ms {
+                    d = d.query_timeout_ms(ms);
+                }
+                d
+            })
+        });
     }
 
     // Max connections.

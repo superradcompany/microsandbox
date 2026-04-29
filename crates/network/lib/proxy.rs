@@ -27,13 +27,10 @@ use crate::tls::sni;
 const SERVER_READ_BUF_SIZE: usize = 16384;
 
 /// Max bytes to buffer while peeking for the ClientHello's SNI.
-/// Matches the TLS proxy's [`tls::proxy::CLIENT_HELLO_BUF_SIZE`].
 const PEEK_BUF_SIZE: usize = 16384;
 
-/// Upper bound on time spent buffering the first flight before falling
-/// back to a cache-only egress decision. Smaller than the TLS proxy's
-/// own 10 s SNI timeout because we're only waiting for the guest's
-/// first write, not a full TLS handshake.
+/// Upper bound on time spent buffering the first flight before
+/// falling back to a cache-only egress decision.
 const PEEK_BUDGET: Duration = Duration::from_secs(5);
 
 //--------------------------------------------------------------------------------------------------
@@ -61,9 +58,8 @@ pub fn spawn_tcp_proxy(
     });
 }
 
-/// Core TCP proxy: peek for SNI, evaluate egress policy with the
-/// resulting hostname source, then either connect and relay or drop the
-/// channels.
+/// Core TCP proxy: peek for SNI, evaluate egress policy, then either
+/// connect and relay or drop the channels.
 async fn tcp_proxy_task(
     dst: SocketAddr,
     mut from_smoltcp: mpsc::Receiver<Bytes>,
@@ -71,13 +67,7 @@ async fn tcp_proxy_task(
     shared: Arc<SharedState>,
     network_policy: Arc<NetworkPolicy>,
 ) -> io::Result<()> {
-    // Phase 0: peek for SNI. Returns the buffered first-flight bytes
-    // (replayed verbatim to upstream below) and the canonicalized SNI
-    // string when present.
     let (initial_buf, sni) = peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await;
-
-    // Map peek result to a hostname source. SNI is authoritative when
-    // present; otherwise fall back to the resolved-hostname cache.
     let source = match sni.as_deref() {
         Some(name) => HostnameSource::Sni(name),
         None => HostnameSource::CacheOnly,
@@ -94,12 +84,8 @@ async fn tcp_proxy_task(
             return Ok(());
         }
         EgressEvaluation::DeferUntilHostname => {
-            // The proxy task never asks for deferral — only the SYN
-            // handler does. Treat as Deny defensively.
-            debug_assert!(
-                false,
-                "EgressEvaluation::DeferUntilHostname leaked into the TCP proxy task",
-            );
+            // Only the SYN handler asks for deferral; treat as Deny.
+            debug_assert!(false, "DeferUntilHostname leaked into TCP proxy task");
             return Ok(());
         }
     }
@@ -107,7 +93,7 @@ async fn tcp_proxy_task(
     let stream = TcpStream::connect(dst).await?;
     let (mut server_rx, mut server_tx) = stream.into_split();
 
-    // Replay the buffered first flight before entering the relay loop.
+    // Replay the buffered first flight before relay starts.
     if !initial_buf.is_empty()
         && let Err(e) = server_tx.write_all(&initial_buf).await
     {
@@ -163,21 +149,15 @@ async fn tcp_proxy_task(
     Ok(())
 }
 
-/// Buffer the first flight from the guest until the TLS ClientHello's
-/// SNI extension can be extracted, or one of the bail-out conditions is
-/// hit (channel close, buffer cap, timeout). Never errors — non-TLS
-/// traffic and slow / malformed clients all fall through to a `None`
-/// SNI, leaving the caller to decide whether to fall back.
+/// Buffer the first flight until SNI can be extracted, or until one
+/// of the bail-out conditions hits (channel close, buffer cap,
+/// timeout). Never errors; non-TLS / slow / malformed input all
+/// fall through to `None`.
 ///
-/// On success, the SNI string is canonicalized (lowercase ASCII +
-/// trailing-dot trim) so byte equality against rule destinations
-/// (validated `DomainName` values) works directly.
-///
-/// The returned buffer holds whatever bytes were consumed from the
-/// channel and must be replayed to upstream verbatim before the
-/// caller's relay loop starts — otherwise the upstream sees a
-/// truncated TLS record (or, for non-TLS traffic, missing leading
-/// bytes).
+/// On hit, the SNI is canonicalized (lowercase + trim trailing dot)
+/// for byte-equal matching against rule destinations. The returned
+/// buffer must be replayed verbatim to upstream before the caller
+/// starts its relay loop.
 async fn peek_for_sni(
     rx: &mut mpsc::Receiver<Bytes>,
     max: usize,
@@ -339,11 +319,6 @@ mod tests {
     //----------------------------------------------------------------------------------------------
     // peek_for_sni × evaluate_egress_with_source — combined integration tests
     //----------------------------------------------------------------------------------------------
-    //
-    // These exercise the path tcp_proxy_task takes after the SYN flip:
-    // peek the first flight, pick a HostnameSource, then walk policy
-    // rules. They cover the over-allow / over-block scenarios end-to-end
-    // at the proxy-task logic level (no real upstream TcpStream needed).
 
     use std::net::IpAddr;
     use std::time::Duration as StdDuration;
@@ -374,10 +349,8 @@ mod tests {
         }
     }
 
-    /// Over-allow case: cache associates a Fastly IP with the allowed
-    /// `pypi.org`; the guest opens a TLS connection to that IP carrying
-    /// SNI `evil.com`. Pre-SNI, the cache match would let the connection
-    /// through; with `peek_for_sni` + `Sni` source the policy walk denies.
+    /// Over-allow case: cache says IP X is `pypi.org` (allowed); SNI
+    /// is `evil.com`. SNI must override the cache and deny.
     #[tokio::test]
     async fn integration_sni_overrides_cache_for_over_allow() {
         let shared = shared_with("pypi.org", SHARED_FASTLY_IP);
@@ -410,11 +383,8 @@ mod tests {
         );
     }
 
-    /// Over-block case: cache associates an IP with the denied
-    /// `ads.example.com`; a connection lands on that IP with SNI
-    /// `api.example.com`. Pre-SNI, the cache match would deny;
-    /// with `Sni` source the unrelated SNI does not match the deny rule
-    /// and the connection is allowed under the default egress.
+    /// Over-block case: cache says IP X is `ads.example.com` (denied);
+    /// SNI is `api.example.com`. SNI must override the cache and allow.
     #[tokio::test]
     async fn integration_sni_overrides_cache_for_over_block() {
         let shared = shared_with("ads.example.com", SHARED_FASTLY_IP);
@@ -448,10 +418,8 @@ mod tests {
         );
     }
 
-    /// Non-TLS first-flight: peek_for_sni returns `(buf, None)`,
-    /// caller falls back to `HostnameSource::CacheOnly`, and the cache
-    /// match decides. Verifies the fallback path (PR #605 behaviour
-    /// preserved for non-TLS allow rules).
+    /// Non-TLS first-flight falls back to `CacheOnly`; the cache
+    /// match decides.
     #[tokio::test]
     async fn integration_non_tls_falls_back_to_cache() {
         let shared = shared_with("pypi.org", SHARED_FASTLY_IP);
@@ -490,8 +458,7 @@ mod tests {
         );
     }
 
-    /// SNI matches a `DomainSuffix` rule directly without hitting the
-    /// cache — pure SNI-side suffix logic at the proxy-task layer.
+    /// SNI matches a `DomainSuffix` rule directly without the cache.
     #[tokio::test]
     async fn integration_sni_matches_domain_suffix_without_cache() {
         let shared = SharedState::new(4); // empty cache

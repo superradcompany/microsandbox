@@ -111,9 +111,6 @@ impl NetworkBuilder {
     ///     .rebind_protection(false)
     /// )
     /// ```
-    ///
-    /// Domain blocking is expressed via network policy rules
-    /// (`deny Domain("...")` / `deny DomainSuffix("...")`), not here.
     pub fn dns(mut self, f: impl FnOnce(DnsBuilder) -> DnsBuilder) -> Self {
         self.config.dns = f(DnsBuilder::new()).build();
         self

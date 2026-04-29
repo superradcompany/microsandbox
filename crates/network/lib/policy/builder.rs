@@ -488,13 +488,7 @@ impl RuleBuilder {
 
     // -- bulk-domain shortcuts --------------------------------------
 
-    /// Allow each name in `names` as a `Destination::Domain` rule. One
-    /// rule per name; subject to the closure's current direction,
-    /// protocol, and port state.
-    ///
-    /// Inputs are stored raw and parsed via [`DomainName`] at
-    /// [`NetworkPolicyBuilder::build`] time; invalid names accumulate
-    /// as [`BuildError::InvalidDomain`].
+    /// Allow each name as a `Destination::Domain` rule.
     pub fn allow_domains<I, S>(&mut self, names: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,
@@ -506,8 +500,7 @@ impl RuleBuilder {
         self
     }
 
-    /// Deny each name in `names` as a `Destination::Domain` rule.
-    /// Mirrors [`Self::allow_domains`].
+    /// Deny each name as a `Destination::Domain` rule.
     pub fn deny_domains<I, S>(&mut self, names: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,
@@ -519,9 +512,7 @@ impl RuleBuilder {
         self
     }
 
-    /// Allow each suffix in `suffixes` as a `Destination::DomainSuffix`
-    /// rule. Each suffix matches the apex itself and any subdomain
-    /// (label-aligned). One rule per suffix.
+    /// Allow each suffix as a `Destination::DomainSuffix` rule.
     pub fn allow_domain_suffixes<I, S>(&mut self, suffixes: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,
@@ -536,8 +527,7 @@ impl RuleBuilder {
         self
     }
 
-    /// Deny each suffix in `suffixes` as a `Destination::DomainSuffix`
-    /// rule. Mirrors [`Self::allow_domain_suffixes`].
+    /// Deny each suffix as a `Destination::DomainSuffix` rule.
     pub fn deny_domain_suffixes<I, S>(&mut self, suffixes: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,
@@ -1197,11 +1187,13 @@ mod tests {
             .egress(|e| e.deny_domains(["evil.com", "not a domain!"]))
             .build();
         match result {
-            Err(BuildError::InvalidDomain { raw, .. }) => {
-                // First-error-wins: but here both rules go into the
-                // pending list and parse runs on each in order. The
-                // first invalid one (index 1) surfaces.
+            Err(BuildError::InvalidDomain {
+                raw, rule_index, ..
+            }) => {
                 assert_eq!(raw, "not a domain!");
+                // The valid evil.com is rule 0; the invalid one is
+                // rule 1, which is what the parser reports.
+                assert_eq!(rule_index, 1);
             }
             other => panic!("expected InvalidDomain, got {other:?}"),
         }

@@ -101,14 +101,15 @@ pub struct SandboxOpts {
     #[arg(long = "no-net")]
     pub no_net: bool,
 
-    /// Deny egress to a domain (DNS REFUSED + TCP block by SNI).
-    /// Repeatable. Equivalent to a `deny Domain("...")` policy rule.
+    /// Deny egress to a domain. Equivalent to a `deny Domain("...")`
+    /// policy rule appended after any `--net-rule` entries.
     #[cfg(feature = "net")]
     #[arg(long = "deny-domain", value_name = "NAME")]
     pub deny_domain: Vec<String>,
 
     /// Deny egress to all subdomains of a suffix (e.g. `.ads.example`).
-    /// Repeatable. Equivalent to a `deny DomainSuffix("...")` policy rule.
+    /// Equivalent to a `deny DomainSuffix("...")` rule appended after
+    /// any `--net-rule` entries.
     #[cfg(feature = "net")]
     #[arg(long = "deny-domain-suffix", value_name = "SUFFIX")]
     pub deny_domain_suffix: Vec<String>,
@@ -470,22 +471,18 @@ fn apply_network_opts(
         let violation_action = parse_violation_action(&opts.on_secret_violation)?;
 
         builder = builder.network(move |mut n| {
-            let has_dns =
-                no_dns_rebind || !dns_nameservers.is_empty() || dns_query_timeout_ms.is_some();
-            if has_dns {
-                n = n.dns(move |mut d| {
-                    if no_dns_rebind {
-                        d = d.rebind_protection(false);
-                    }
-                    if !dns_nameservers.is_empty() {
-                        d = d.nameservers(dns_nameservers);
-                    }
-                    if let Some(ms) = dns_query_timeout_ms {
-                        d = d.query_timeout_ms(ms);
-                    }
-                    d
-                });
-            }
+            n = n.dns(move |mut d| {
+                if no_dns_rebind {
+                    d = d.rebind_protection(false);
+                }
+                if !dns_nameservers.is_empty() {
+                    d = d.nameservers(dns_nameservers);
+                }
+                if let Some(ms) = dns_query_timeout_ms {
+                    d = d.query_timeout_ms(ms);
+                }
+                d
+            });
             if let Some(policy) = network_policy {
                 n = n.policy(policy);
             }
@@ -561,18 +558,8 @@ pub fn parse_duration_secs(s: &str) -> anyhow::Result<u64> {
 }
 
 /// Assemble a [`NetworkPolicy`] from `--net-rule` / `--net-default-*`
-/// and the bulk-deny flags (`--deny-domain` / `--deny-domain-suffix`).
-/// Returns `None` when no flag was set (caller falls back to the
-/// sandbox default).
-///
-/// Bulk-deny flags are convenience shortcuts for `deny Domain(...)` /
-/// `deny DomainSuffix(...)` rules; they are prepended to the rule list
-/// so they take precedence over any later allow rules. When these are
-/// the only policy flags set, the defaults flip to Allow on egress to
-/// preserve the legacy "full network minus blocked domains" semantics.
-///
-/// Multiple `--net-rule` invocations concatenate in argv order; tokens
-/// inside each value are comma-separated and likewise preserved.
+/// and the bulk-deny flags. Returns `None` when no flag is set.
+/// Multiple `--net-rule` invocations concatenate in argv order.
 #[cfg(feature = "net")]
 fn build_network_policy(
     rule_args: &[String],
@@ -595,9 +582,7 @@ fn build_network_policy(
 
     let mut rules = Vec::new();
 
-    // Prepend deny rules from the bulk-deny flags so they take
-    // precedence over any later allow rules. The user's intent in
-    // writing these flags is unambiguous: refuse these names.
+    // Prepend bulk-deny flags so they outrank later allow rules.
     for d in deny_domains {
         let domain: DomainName = d.parse().with_context(|| format!("--deny-domain {d:?}"))?;
         rules.push(Rule::deny_egress(Destination::Domain(domain)));
@@ -622,22 +607,23 @@ fn build_network_policy(
         }
     };
 
-    // When the user sets no defaults explicitly, preserve today's
-    // asymmetric behavior: egress = Deny (rules open things);
-    // ingress = Allow (unfiltered published-port behavior). Exception:
-    // if only --deny-domain / --deny-domain-suffix were set (no
-    // --net-rule, no --net-default-*), default egress flips to Allow so
-    // the rest of the network keeps working — these flags add deny
-    // entries on top of permissive defaults, leaving non-denied
-    // traffic unaffected.
+    // When the user sets no defaults explicitly, fall through to
+    // NetworkPolicy::public_only's defaults so behaviour stays in sync
+    // with the preset.
+    //
+    // Exception: if only --deny-domain / --deny-domain-suffix were set
+    // (no --net-rule, no --net-default-*), default egress flips to
+    // Allow so the rest of the network keeps working — these flags
+    // add deny entries on top of permissive defaults.
+    let preset = NetworkPolicy::public_only();
     let default_egress = match default_egress {
         Some(raw) => parse_action("--net-default-egress", raw)?,
         None if no_rule_flags => Action::Allow,
-        None => Action::Deny,
+        None => preset.default_egress,
     };
     let default_ingress = match default_ingress {
         Some(raw) => parse_action("--net-default-ingress", raw)?,
-        None => Action::Allow,
+        None => preset.default_ingress,
     };
 
     Ok(Some(NetworkPolicy {

@@ -170,11 +170,8 @@ async fn domain_policy_allows_whitelisted_https() {
     let _ = Sandbox::remove(name).await;
 }
 
-/// `deny Domain("example.com")` must cause DNS resolution for that
-/// name to fail at the gateway resolver (REFUSED), while unrelated
-/// names continue to resolve normally. The deny lives at the DNS layer
-/// because `dns_query_denied` consults Domain rules before the
-/// forwarder forwards upstream.
+/// `deny Domain("example.com")` refuses DNS for that name; unrelated
+/// names still resolve.
 #[msb_test]
 async fn domain_policy_deny_domain_refuses_dns() {
     let name = "net-domain-policy-deny-dns";
@@ -213,10 +210,8 @@ async fn domain_policy_deny_domain_refuses_dns() {
     let _ = Sandbox::remove(name).await;
 }
 
-/// `deny DomainSuffix(".example.com")` must refuse DNS for the apex
-/// and any subdomain. Mirrors the suffix-match invariant tested for
-/// allow rules: `matches_suffix` is label-aware, so the apex itself
-/// matches as well as deeper labels.
+/// `deny DomainSuffix(".example.com")` refuses DNS for the apex and
+/// any subdomain.
 #[msb_test]
 async fn domain_policy_deny_suffix_refuses_dns_apex_and_subdomain() {
     let name = "net-domain-policy-deny-suffix-dns";
@@ -266,21 +261,10 @@ async fn domain_policy_deny_suffix_refuses_dns_apex_and_subdomain() {
     let _ = Sandbox::remove(name).await;
 }
 
-/// SNI-based enforcement for shared-CDN IPs (the over-allow fix).
-///
-/// `pypi.org` and `files.pythonhosted.org` are both served from Fastly
-/// and frequently share IPs. Allow only `files.pythonhosted.org` and
-/// resolve both names so the DNS cache associates the same Fastly IP
-/// with both. Cache-only matching (pre-SNI) would mis-allow a request
-/// for `pypi.org` whenever it lands on a Fastly IP previously cached
-/// for `files.pythonhosted.org`. With first-flight SNI deferral,
-/// `Sni="pypi.org"` no longer matches the `files.pythonhosted.org`
-/// rule and the connection is denied.
-///
-/// Real-CDN signal: depends on Fastly's IP allocation actually
-/// overlapping at test time. If the IPs diverge the negative probe
-/// degrades to "denied because no rule matched" rather than "denied
-/// because SNI disambiguated"; either way the assertion holds.
+/// SNI-based enforcement on shared-CDN IPs (the over-allow fix).
+/// Allow only `files.pythonhosted.org`, resolve both that name and
+/// `pypi.org` (often co-located on Fastly), and assert HTTPS to
+/// `pypi.org` fails while `files.pythonhosted.org` succeeds.
 #[msb_test]
 async fn domain_policy_sni_disambiguates_shared_cdn_ip() {
     let name = "net-domain-policy-sni-shared-ip";

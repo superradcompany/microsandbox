@@ -298,12 +298,8 @@ pub fn smoltcp_poll_loop(
                             tracing::debug!(%dst, "alternative-DNS TCP port refused; stub should fall back to TCP/53");
                             false
                         }
-                        // Other: regular outbound — defer Domain /
-                        // DomainSuffix rules to first-flight (SNI) and
-                        // accept the SYN unless an IP-layer rule denies
-                        // outright. The plain-TCP and TLS proxy tasks
-                        // re-evaluate with the authoritative hostname
-                        // before connecting upstream.
+                        // Other: regular outbound — defer Domain rules to first-flight;
+                        // accept unless an IP-layer rule denies.
                         DnsPortType::Other => match network_policy.evaluate_egress_with_source(
                             dst,
                             Protocol::Tcp,
