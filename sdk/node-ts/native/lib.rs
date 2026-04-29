@@ -20,6 +20,7 @@ mod network_builder;
 mod patch_builder;
 mod registry_builder;
 mod sandbox;
+mod sandbox_builder;
 mod sandbox_handle;
 mod secret_builder;
 mod setup;

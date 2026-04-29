@@ -510,6 +510,112 @@ export declare class Sandbox {
   removePersisted(): Promise<void>
 }
 
+/**
+ * Fluent builder for a sandbox. Mirrors `microsandbox::sandbox::SandboxBuilder`
+ * 1:1; setters mutate in place and return `this`. Closure-style
+ * sub-builders (volume / patch / network / secret / registry / imageWith)
+ * receive a fresh napi-wrapped builder, let JS chain on it, and route
+ * the result back through the core SDK's closure callback.
+ */
+export declare class SandboxBuilder {
+  constructor(name: string)
+  /**
+   * Set the rootfs image source. Accepts an OCI reference or a host
+   * path (paths starting with `/`, `./`, `../` resolve as local; disk
+   * image extensions `.qcow2`/`.raw`/`.vmdk` resolve to virtio-blk).
+   */
+  image(image: string): this
+  /** Configure a disk-image rootfs explicitly via a callback. */
+  imageWith(configure: (arg: ImageBuilder) => ImageBuilder): this
+  /** Number of virtual CPUs. */
+  cpus(count: number): this
+  /** Guest memory in MiB. */
+  memory(mib: number): this
+  /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
+  logLevel(level: string): this
+  /** Suppress sandbox logs. */
+  quietLogs(): this
+  /** Default working directory for commands. */
+  workdir(path: string): this
+  /** Shell binary used by `Sandbox.shell(...)`. */
+  shell(shell: string): this
+  /** Configure registry connection settings via a callback. */
+  registry(configure: (arg: RegistryConfigBuilder) => RegistryConfigBuilder): this
+  /** Replace any existing sandbox with the same name. */
+  replace(): this
+  /** Override the image entrypoint. */
+  entrypoint(cmd: Array<string>): this
+  /** Override the guest hostname. */
+  hostname(name: string): this
+  /** Override the libkrunfw shared library path for this sandbox. */
+  libkrunfwPath(path: string): this
+  /** Default running user. */
+  user(user: string): this
+  /** Image pull policy: `"always" | "if-missing" | "never"`. */
+  pullPolicy(policy: string): this
+  /** Disable networking entirely. */
+  disableNetwork(): this
+  /** Configure networking via a callback. */
+  network(configure: (arg: NetworkBuilder) => NetworkBuilder): this
+  /** Publish a TCP port from host -> guest. */
+  port(hostPort: number, guestPort: number): this
+  /** Publish a UDP port from host -> guest. */
+  portUdp(hostPort: number, guestPort: number): this
+  /** Add a secret via a callback. */
+  secret(configure: (arg: JsSecretBuilder) => JsSecretBuilder): this
+  /**
+   * Shorthand: add a secret. Auto-generates the placeholder as
+   * `$MSB_<env_var>` and allows substitution only on `allowed_host`.
+   */
+  secretEnv(envVar: string, value: string, allowedHost: string): this
+  /** Set a single environment variable. */
+  env(key: string, value: string): this
+  /** Set environment variables from an object. */
+  envs(vars: Record<string, string>): this
+  /** Set a hard rlimit (soft = hard). */
+  rlimit(resource: string, limit: number): this
+  /** Set a separate soft and hard rlimit. */
+  rlimitRange(resource: string, soft: number, hard: number): this
+  /** Mount a script under `/.msb/scripts/<name>` inside the guest. */
+  script(name: string, content: string): this
+  /** Mount many scripts at once. */
+  scripts(scripts: Record<string, string>): this
+  /** Auto-stop after `secs` seconds. */
+  maxDuration(secs: number): this
+  /** Auto-stop after `secs` seconds of inactivity. */
+  idleTimeout(secs: number): this
+  /**
+   * Configure a volume mount via a callback. The callback receives a
+   * `MountBuilder` already pre-bound to `guestPath`.
+   */
+  volume(guestPath: string, configure: (arg: MountBuilder) => MountBuilder): this
+  /** Apply rootfs patches via a callback. */
+  patch(configure: (arg: PatchBuilder) => PatchBuilder): this
+  /**
+   * Materialize the built configuration without creating a sandbox.
+   * Returns the JSON-serialized `SandboxConfig` for inspection.
+   */
+  build(): string
+  /**
+   * Create and start the sandbox in attached mode.
+   *
+   * # Safety
+   * `&mut self` async is required because we drain `inner`
+   * synchronously before awaiting; napi-rs requires the `unsafe` tag
+   * regardless. JS callers see `create(): Promise<Sandbox>`.
+   */
+  create(): Promise<JsSandbox>
+  /**
+   * Create and start the sandbox in detached mode (survives the
+   * parent process).
+   *
+   * # Safety
+   * Same justification as `create`.
+   */
+  createDetached(): Promise<JsSandbox>
+}
+export type JsSandboxBuilder = SandboxBuilder
+
 /** Filesystem operations on a running sandbox (via agent protocol). */
 export declare class SandboxFs {
   /** Read a file as a Buffer. */
