@@ -517,18 +517,11 @@ impl NetworkPolicy {
     }
 
     /// Prepend `deny Domain(name)` egress rules for each input.
-    ///
-    /// Useful for augmenting a preset such as [`Self::default`] /
-    /// [`Self::public_only`] with deny entries: the new rules are
-    /// prepended (not appended) so they take precedence over any
-    /// catch-all allow rules already in the policy. Without that, a
-    /// `deny Domain("evil.com")` appended after `allow Public` would
-    /// never fire — `evil.com` is a public IP, so `allow Public` would
-    /// match first.
-    ///
-    /// Names are parsed via [`DomainName`]; the first invalid name
-    /// short-circuits with [`DomainNameError`]. Input order is
-    /// preserved within the prepended block.
+    /// Prepending (not appending) lets the deny outrank catch-all
+    /// allows already in the policy — without it, a deny placed after
+    /// `allow Public` would never fire for a domain on a public IP.
+    /// Names parse via [`DomainName`]; the first invalid input returns
+    /// [`DomainNameError`].
     pub fn deny_domains<I, S>(self, names: I) -> Result<Self, DomainNameError>
     where
         I: IntoIterator<Item = S>,
