@@ -16,6 +16,10 @@ LIB_DIR="$INSTALL_DIR/lib"
 LIBKRUNFW_VERSION="5.2.1"
 LIBKRUNFW_ABI="5"
 
+# Current Linux release bundles are built on GitHub Actions ubuntu-latest,
+# which currently maps to Ubuntu 24.04 (glibc 2.39).
+LINUX_GLIBC_MIN_VERSION="2.39"
+
 # Shell config markers
 MARKER_START="# >>> microsandbox >>>"
 MARKER_END="# <<< microsandbox <<<"
@@ -324,6 +328,65 @@ detect_platform() {
     TARGET="${OS}-${ARCH}"
 }
 
+parse_glibc_version() {
+    _value=$1
+    _version=$(printf '%s\n' "$_value" | sed -n 's/.* \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)
+    if [ -n "$_version" ]; then
+        printf '%s\n' "$_version"
+    fi
+}
+
+detect_glibc_version() {
+    if command -v getconf > /dev/null 2>&1; then
+        _glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
+        _version=$(parse_glibc_version "$_glibc")
+        if [ -n "$_version" ]; then
+            printf '%s\n' "$_version"
+            return 0
+        fi
+    fi
+
+    if command -v ldd > /dev/null 2>&1; then
+        _ldd_version=$(ldd --version 2>&1 || true)
+        case "$_ldd_version" in
+            *musl*) return 1 ;;
+        esac
+        _version=$(parse_glibc_version "$_ldd_version")
+        if [ -n "$_version" ]; then
+            printf '%s\n' "$_version"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+glibc_version_lt() {
+    _lhs_major=$(printf '%s\n' "$1" | cut -d. -f1)
+    _lhs_minor=$(printf '%s\n' "$1" | cut -d. -f2)
+    _rhs_major=$(printf '%s\n' "$2" | cut -d. -f1)
+    _rhs_minor=$(printf '%s\n' "$2" | cut -d. -f2)
+
+    if [ "$_lhs_major" -lt "$_rhs_major" ]; then
+        return 0
+    fi
+    if [ "$_lhs_major" -gt "$_rhs_major" ]; then
+        return 1
+    fi
+    [ "$_lhs_minor" -lt "$_rhs_minor" ]
+}
+
+verify_linux_compatibility() {
+    _glibc_version=$(detect_glibc_version || true)
+    if [ -z "$_glibc_version" ]; then
+        error "microsandbox Linux releases currently require glibc >= ${LINUX_GLIBC_MIN_VERSION}; could not detect a supported glibc runtime on this system"
+    fi
+
+    if glibc_version_lt "$_glibc_version" "$LINUX_GLIBC_MIN_VERSION"; then
+        error "microsandbox Linux releases currently require glibc >= ${LINUX_GLIBC_MIN_VERSION}; detected ${_glibc_version}"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Version resolution
 # ---------------------------------------------------------------------------
@@ -363,6 +426,10 @@ main() {
 
     detect_platform
     info "Detected platform: $TARGET"
+
+    if [ "$OS" = "linux" ]; then
+        verify_linux_compatibility
+    fi
 
     get_latest_version
     info "Latest version: $VERSION"
