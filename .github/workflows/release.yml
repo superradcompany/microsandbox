@@ -370,6 +370,9 @@ jobs:
             cp "node-artifacts/node-sdk-$dir/npm/$dir"/microsandbox.*.node "sdk/node-ts/npm/$dir/"
             cp "node-artifacts/node-sdk-$dir/npm/$dir/bin/msb" "sdk/node-ts/npm/$dir/bin/"
             cp "node-artifacts/node-sdk-$dir/npm/$dir/lib/"* "sdk/node-ts/npm/$dir/lib/"
+            # GitHub Actions artifacts strip Unix exec bits; restore before publish
+            # so the published tarball carries 0755 on the binary.
+            chmod +x "sdk/node-ts/npm/$dir/bin/msb"
           done
 
           # Copy napi-generated bindings into the root package's native/ dir
