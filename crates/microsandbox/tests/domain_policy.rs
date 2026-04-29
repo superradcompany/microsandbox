@@ -266,6 +266,63 @@ async fn domain_policy_deny_suffix_refuses_dns_apex_and_subdomain() {
     let _ = Sandbox::remove(name).await;
 }
 
+/// SNI-based enforcement for shared-CDN IPs (the over-allow fix).
+///
+/// `pypi.org` and `files.pythonhosted.org` are both served from Fastly
+/// and frequently share IPs. Allow only `files.pythonhosted.org` and
+/// resolve both names so the DNS cache associates the same Fastly IP
+/// with both. Cache-only matching (pre-SNI) would mis-allow a request
+/// for `pypi.org` whenever it lands on a Fastly IP previously cached
+/// for `files.pythonhosted.org`. With first-flight SNI deferral,
+/// `Sni="pypi.org"` no longer matches the `files.pythonhosted.org`
+/// rule and the connection is denied.
+///
+/// Real-CDN signal: depends on Fastly's IP allocation actually
+/// overlapping at test time. If the IPs diverge the negative probe
+/// degrades to "denied because no rule matched" rather than "denied
+/// because SNI disambiguated"; either way the assertion holds.
+#[msb_test]
+async fn domain_policy_sni_disambiguates_shared_cdn_ip() {
+    let name = "net-domain-policy-sni-shared-ip";
+    let policy = NetworkPolicy {
+        default_egress: Action::Deny,
+        default_ingress: Action::Allow,
+        // Allow only files.pythonhosted.org. pypi.org has no allow rule.
+        rules: vec![allow_domain_https("files.pythonhosted.org")],
+    };
+    let sb = setup_alpine(name, policy).await;
+
+    // Resolve both names so the DNS cache associates each with its IP
+    // (and any shared Fastly addresses with both names). The
+    // disallowed name's resolution succeeds because there is no deny
+    // rule for it — only its connection is gated.
+    sb.shell("getent hosts pypi.org > /dev/null")
+        .await
+        .expect("dns probe pypi.org");
+    sb.shell("getent hosts files.pythonhosted.org > /dev/null")
+        .await
+        .expect("dns probe files.pythonhosted.org");
+
+    // Allowed name: SNI matches the rule, connection proceeds.
+    let allowed = probe_https(&sb, "https://files.pythonhosted.org/").await;
+    assert!(
+        reached_server(&allowed),
+        "files.pythonhosted.org should be allowed: got `{allowed}`"
+    );
+
+    // Disallowed name: even if the destination IP is shared with the
+    // allowed name's cache entry, SNI disambiguates and the rule no
+    // longer matches.
+    let denied = probe_https(&sb, "https://pypi.org/simple/pip/").await;
+    assert_eq!(
+        denied, CURL_FAIL,
+        "pypi.org should be denied even on shared Fastly IP: got `{denied}`"
+    );
+
+    sb.stop_and_wait().await.expect("stop");
+    let _ = Sandbox::remove(name).await;
+}
+
 /// `Destination::DomainSuffix` must match subdomains but not unrelated
 /// hosts. One sandbox, two probes:
 ///
