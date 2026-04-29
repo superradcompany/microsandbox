@@ -469,10 +469,11 @@ pub fn smoltcp_poll_loop(
                 continue;
             }
             // Plain TCP proxy.
-            let dst = resolve_host_dst(conn.dst, config.gateway);
+            let connect_dst = resolve_host_dst(conn.dst, config.gateway);
             proxy::spawn_tcp_proxy(
                 &tokio_handle,
-                dst,
+                conn.dst,
+                connect_dst,
                 conn.from_smoltcp,
                 conn.to_smoltcp,
                 shared.clone(),

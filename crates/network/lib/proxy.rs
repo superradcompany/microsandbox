@@ -39,21 +39,31 @@ const PEEK_BUDGET: Duration = Duration::from_secs(5);
 
 /// Spawn a TCP proxy task for a newly established connection.
 ///
-/// Connects to `dst` via tokio, then bidirectionally relays data between
-/// the smoltcp socket (via channels) and the real server. Wakes the poll
-/// thread via `shared.proxy_wake` whenever data is sent toward the guest.
+/// `guest_dst` is what the guest dialed — the address policy rules
+/// match against. `connect_dst` is the host-side address tokio actually
+/// dials; for host-alias connections it's loopback (gateway rewritten).
+/// For everything else the two are identical.
 pub fn spawn_tcp_proxy(
     handle: &tokio::runtime::Handle,
-    dst: SocketAddr,
+    guest_dst: SocketAddr,
+    connect_dst: SocketAddr,
     from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
     network_policy: Arc<NetworkPolicy>,
 ) {
     handle.spawn(async move {
-        if let Err(e) = tcp_proxy_task(dst, from_smoltcp, to_smoltcp, shared, network_policy).await
+        if let Err(e) = tcp_proxy_task(
+            guest_dst,
+            connect_dst,
+            from_smoltcp,
+            to_smoltcp,
+            shared,
+            network_policy,
+        )
+        .await
         {
-            tracing::debug!(dst = %dst, error = %e, "TCP proxy task ended");
+            tracing::debug!(dst = %connect_dst, error = %e, "TCP proxy task ended");
         }
     });
 }
@@ -61,53 +71,58 @@ pub fn spawn_tcp_proxy(
 /// Core TCP proxy: peek for SNI, evaluate egress policy, then either
 /// connect and relay or drop the channels.
 async fn tcp_proxy_task(
-    dst: SocketAddr,
+    guest_dst: SocketAddr,
+    connect_dst: SocketAddr,
     mut from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
     network_policy: Arc<NetworkPolicy>,
 ) -> io::Result<()> {
     // Peek only when there's a Domain/DomainSuffix rule that could
-    // need an SNI to refine. Otherwise the SYN handler's decision
-    // already accepted this connection — re-evaluating here would be
-    // redundant (and wrong: the proxy receives a translated dst for
-    // host-alias connections, which the policy can't match against).
+    // need an SNI to refine. Otherwise the SYN handler's decision is
+    // authoritative.
     let (initial_buf, sni) = if network_policy.has_domain_rules() {
         peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await
     } else {
         (Vec::new(), None)
     };
 
-    // Re-evaluate egress only when we actually extracted an SNI. SNI
-    // can override an over-allow that matched the cache against a
-    // shared CDN IP, so this is the only refinement worth doing here.
-    if let Some(name) = sni.as_deref() {
-        let source = HostnameSource::Sni(name);
-        match network_policy.evaluate_egress_with_source(dst, Protocol::Tcp, &shared, source) {
+    // Re-evaluate egress against the *guest* dst — the address the
+    // guest dialed, not the post-rewrite host-side address. SNI
+    // refines over-allow when the cache matched a shared CDN IP;
+    // CacheOnly is the non-TLS fallback path so Domain rules still
+    // gate plain HTTP / SSH / etc.
+    if network_policy.has_domain_rules() {
+        let source = match sni.as_deref() {
+            Some(name) => HostnameSource::Sni(name),
+            None => HostnameSource::CacheOnly,
+        };
+        match network_policy.evaluate_egress_with_source(guest_dst, Protocol::Tcp, &shared, source)
+        {
             EgressEvaluation::Allow => {}
             EgressEvaluation::Deny => {
                 tracing::debug!(
-                    dst = %dst,
-                    sni = name,
-                    "TCP egress denied by SNI gate",
+                    dst = %guest_dst,
+                    source = source.label(),
+                    "TCP egress denied by domain policy",
                 );
                 return Ok(());
             }
             EgressEvaluation::DeferUntilHostname => {
-                debug_assert!(false, "DeferUntilHostname under HostnameSource::Sni");
+                debug_assert!(false, "DeferUntilHostname leaked into TCP proxy task");
                 return Ok(());
             }
         }
     }
 
-    let stream = TcpStream::connect(dst).await?;
+    let stream = TcpStream::connect(connect_dst).await?;
     let (mut server_rx, mut server_tx) = stream.into_split();
 
     // Replay the buffered first flight before relay starts.
     if !initial_buf.is_empty()
         && let Err(e) = server_tx.write_all(&initial_buf).await
     {
-        tracing::debug!(dst = %dst, error = %e, "replay of buffered first flight failed");
+        tracing::debug!(dst = %connect_dst, error = %e, "replay of buffered first flight failed");
         return Ok(());
     }
 
@@ -124,7 +139,7 @@ async fn tcp_proxy_task(
                 match data {
                     Some(bytes) => {
                         if let Err(e) = server_tx.write_all(&bytes).await {
-                            tracing::debug!(dst = %dst, error = %e, "write to server failed");
+                            tracing::debug!(dst = %connect_dst, error = %e, "write to server failed");
                             break;
                         }
                     }
@@ -148,7 +163,7 @@ async fn tcp_proxy_task(
                         shared.proxy_wake.wake();
                     }
                     Err(e) => {
-                        tracing::debug!(dst = %dst, error = %e, "read from server failed");
+                        tracing::debug!(dst = %connect_dst, error = %e, "read from server failed");
                         break;
                     }
                 }
