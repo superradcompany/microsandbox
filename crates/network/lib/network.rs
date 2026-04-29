@@ -9,7 +9,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use microsandbox_protocol::{ENV_HOST_ALIAS, ENV_NET, ENV_NET_IPV4, ENV_NET_IPV6};
+use microsandbox_protocol::{ENV_HOST_ALIAS, ENV_NET, ENV_NET_IPV4};
 use msb_krun::backends::net::NetBackend;
 
 use crate::backend::SmoltcpBackend;
@@ -50,7 +50,6 @@ pub struct SmoltcpNetwork {
     mtu: u16,
     guest_ipv4: Ipv4Addr,
     gateway_ipv4: Ipv4Addr,
-    guest_ipv6: Ipv6Addr,
     gateway_ipv6: Ipv6Addr,
 
     // TLS state (if enabled). Created in new(), used for ca_cert_pem().
@@ -129,7 +128,6 @@ impl SmoltcpNetwork {
             mtu,
             guest_ipv4,
             gateway_ipv4,
-            guest_ipv6,
             gateway_ipv6,
             tls_state,
         }
@@ -195,6 +193,12 @@ impl SmoltcpNetwork {
     ///
     /// The guest init (`agentd`) reads these to configure the network
     /// interface via ioctls + netlink.
+    ///
+    /// `MSB_NET_IPV6` is intentionally not emitted: outbound IPv6 from the
+    /// guest is unsupported, and assigning a non-link-local IPv6 to the guest
+    /// NIC would let `AI_ADDRCONFIG` surface AAAA records inside the guest,
+    /// causing async clients (e.g. `httpx.AsyncClient`) to pick an IPv6
+    /// destination that has no working route to the host.
     pub fn guest_env_vars(&self) -> Vec<(String, String)> {
         let mut vars = vec![
             (
@@ -210,13 +214,6 @@ impl SmoltcpNetwork {
                 format!(
                     "addr={}/30,gw={},dns={}",
                     self.guest_ipv4, self.gateway_ipv4, self.gateway_ipv4,
-                ),
-            ),
-            (
-                ENV_NET_IPV6.into(),
-                format!(
-                    "addr={}/64,gw={},dns={}",
-                    self.guest_ipv6, self.gateway_ipv6, self.gateway_ipv6,
                 ),
             ),
             (ENV_HOST_ALIAS.into(), crate::HOST_ALIAS.into()),
@@ -396,14 +393,23 @@ mod tests {
         let net = SmoltcpNetwork::new(config, 0);
         let vars = net.guest_env_vars();
 
-        assert_eq!(vars.len(), 4);
+        assert_eq!(vars.len(), 3);
         assert_eq!(vars[0].0, ENV_NET);
         assert!(vars[0].1.contains("iface=eth0"));
         assert_eq!(vars[1].0, ENV_NET_IPV4);
         assert!(vars[1].1.contains("/30"));
-        assert_eq!(vars[2].0, ENV_NET_IPV6);
-        assert!(vars[2].1.contains("/64"));
-        assert_eq!(vars[3].0, ENV_HOST_ALIAS);
-        assert_eq!(vars[3].1, crate::HOST_ALIAS);
+        assert_eq!(vars[2].0, ENV_HOST_ALIAS);
+        assert_eq!(vars[2].1, crate::HOST_ALIAS);
+    }
+
+    #[test]
+    fn guest_env_vars_omits_ipv6() {
+        let config = NetworkConfig::default();
+        let net = SmoltcpNetwork::new(config, 0);
+        let vars = net.guest_env_vars();
+        assert!(
+            !vars.iter().any(|(k, _)| k == "MSB_NET_IPV6"),
+            "MSB_NET_IPV6 must not be emitted to the guest",
+        );
     }
 }
