@@ -581,6 +581,14 @@ export interface NapiRuleBuilder {
   denyHost(): this;
   allowLocal(): this;
   denyLocal(): this;
+  allowDomain(name: string): this;
+  denyDomain(name: string): this;
+  allowDomains(names: string[]): this;
+  denyDomains(names: string[]): this;
+  allowDomainSuffix(suffix: string): this;
+  denyDomainSuffix(suffix: string): this;
+  allowDomainSuffixes(suffixes: string[]): this;
+  denyDomainSuffixes(suffixes: string[]): this;
   allow(configure: (d: NapiRuleDestinationBuilder) => NapiRuleDestinationBuilder): this;
   deny(configure: (d: NapiRuleDestinationBuilder) => NapiRuleDestinationBuilder): this;
 }

@@ -77,6 +77,10 @@ enum RuleOp {
     DenyGroup(RustDestinationGroup),
     AllowLocal,
     DenyLocal,
+    AllowDomains(Vec<String>),
+    DenyDomains(Vec<String>),
+    AllowDomainSuffixes(Vec<String>),
+    DenyDomainSuffixes(Vec<String>),
     Commit { action: RustAction, dest: DestKind },
 }
 
@@ -422,6 +426,66 @@ impl JsRuleBuilder {
         self
     }
 
+    // -- bulk-domain shortcuts --------------------------------------
+
+    /// Allow `Destination::Domain(name)`. One rule per call.
+    #[napi(js_name = "allowDomain")]
+    pub fn allow_domain(&mut self, name: String) -> &Self {
+        self.ops.push(RuleOp::AllowDomains(vec![name]));
+        self
+    }
+
+    /// Deny `Destination::Domain(name)`. One rule per call.
+    #[napi(js_name = "denyDomain")]
+    pub fn deny_domain(&mut self, name: String) -> &Self {
+        self.ops.push(RuleOp::DenyDomains(vec![name]));
+        self
+    }
+
+    /// Allow each name as a `Destination::Domain` rule.
+    #[napi(js_name = "allowDomains")]
+    pub fn allow_domains(&mut self, names: Vec<String>) -> &Self {
+        self.ops.push(RuleOp::AllowDomains(names));
+        self
+    }
+
+    /// Deny each name as a `Destination::Domain` rule.
+    #[napi(js_name = "denyDomains")]
+    pub fn deny_domains(&mut self, names: Vec<String>) -> &Self {
+        self.ops.push(RuleOp::DenyDomains(names));
+        self
+    }
+
+    /// Allow `Destination::DomainSuffix(suffix)`. Matches the apex and
+    /// any subdomain.
+    #[napi(js_name = "allowDomainSuffix")]
+    pub fn allow_domain_suffix(&mut self, suffix: String) -> &Self {
+        self.ops.push(RuleOp::AllowDomainSuffixes(vec![suffix]));
+        self
+    }
+
+    /// Deny `Destination::DomainSuffix(suffix)`. Matches the apex and
+    /// any subdomain.
+    #[napi(js_name = "denyDomainSuffix")]
+    pub fn deny_domain_suffix(&mut self, suffix: String) -> &Self {
+        self.ops.push(RuleOp::DenyDomainSuffixes(vec![suffix]));
+        self
+    }
+
+    /// Allow each suffix as a `Destination::DomainSuffix` rule.
+    #[napi(js_name = "allowDomainSuffixes")]
+    pub fn allow_domain_suffixes(&mut self, suffixes: Vec<String>) -> &Self {
+        self.ops.push(RuleOp::AllowDomainSuffixes(suffixes));
+        self
+    }
+
+    /// Deny each suffix as a `Destination::DomainSuffix` rule.
+    #[napi(js_name = "denyDomainSuffixes")]
+    pub fn deny_domain_suffixes(&mut self, suffixes: Vec<String>) -> &Self {
+        self.ops.push(RuleOp::DenyDomainSuffixes(suffixes));
+        self
+    }
+
     /// Begin an explicit-destination rule with action `Allow`. The
     /// closure receives a `RuleDestinationBuilder` and must call exactly
     /// one of `.ip()` / `.cidr()` / `.domain()` / `.domainSuffix()` /
@@ -613,6 +677,18 @@ fn apply_rule_ops(rb: &mut RustRuleBuilder, ops: Vec<RuleOp>) -> &mut RustRuleBu
             }
             RuleOp::DenyLocal => {
                 rb.deny_local();
+            }
+            RuleOp::AllowDomains(names) => {
+                rb.allow_domains(names);
+            }
+            RuleOp::DenyDomains(names) => {
+                rb.deny_domains(names);
+            }
+            RuleOp::AllowDomainSuffixes(suffixes) => {
+                rb.allow_domain_suffixes(suffixes);
+            }
+            RuleOp::DenyDomainSuffixes(suffixes) => {
+                rb.deny_domain_suffixes(suffixes);
             }
             RuleOp::Commit { action, dest } => {
                 let dab = match action {

@@ -537,6 +537,22 @@ export declare class RuleBuilder {
   allowLocal(): this
   /** Deny `Loopback + LinkLocal + Host`. */
   denyLocal(): this
+  /** Allow `Destination::Domain(name)`. One rule per call. */
+  allowDomain(name: string): this
+  /** Deny `Destination::Domain(name)`. One rule per call. */
+  denyDomain(name: string): this
+  /** Allow each name as a `Destination::Domain` rule. */
+  allowDomains(names: Array<string>): this
+  /** Deny each name as a `Destination::Domain` rule. */
+  denyDomains(names: Array<string>): this
+  /** Allow `Destination::DomainSuffix(suffix)`. */
+  allowDomainSuffix(suffix: string): this
+  /** Deny `Destination::DomainSuffix(suffix)`. */
+  denyDomainSuffix(suffix: string): this
+  /** Allow each suffix as a `Destination::DomainSuffix` rule. */
+  allowDomainSuffixes(suffixes: Array<string>): this
+  /** Deny each suffix as a `Destination::DomainSuffix` rule. */
+  denyDomainSuffixes(suffixes: Array<string>): this
   /**
    * Begin an explicit-destination rule with action `Allow`. The
    * closure receives a `RuleDestinationBuilder` and must call exactly
