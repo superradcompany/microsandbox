@@ -376,7 +376,7 @@ glibc_version_lt() {
     [ "$_lhs_minor" -lt "$_rhs_minor" ]
 }
 
-verify_linux_compatibility() {
+check_linux_compatibility() {
     _glibc_version=$(detect_glibc_version || true)
     _glibc_requirement="Microsandbox Linux releases require glibc ${LINUX_GLIBC_MIN_VERSION} or newer"
 
@@ -430,7 +430,7 @@ main() {
     info "Detected platform: $TARGET"
 
     if [ "$OS" = "linux" ]; then
-        verify_linux_compatibility
+        check_linux_compatibility
     fi
 
     get_latest_version
