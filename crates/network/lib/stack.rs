@@ -418,6 +418,7 @@ pub fn smoltcp_poll_loop(
                     conn.to_smoltcp,
                     shared.clone(),
                     tls_state.clone(),
+                    network_policy.clone(),
                 );
                 continue;
             }

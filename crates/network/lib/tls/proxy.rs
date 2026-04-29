@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 
 use super::sni;
 use super::state::TlsState;
+use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::secrets::handler::SecretsHandler;
 use crate::shared::SharedState;
 
@@ -42,9 +43,19 @@ pub fn spawn_tls_proxy(
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
     tls_state: Arc<TlsState>,
+    network_policy: Arc<NetworkPolicy>,
 ) {
     handle.spawn(async move {
-        if let Err(e) = tls_proxy_task(dst, from_smoltcp, to_smoltcp, shared, tls_state).await {
+        if let Err(e) = tls_proxy_task(
+            dst,
+            from_smoltcp,
+            to_smoltcp,
+            shared,
+            tls_state,
+            network_policy,
+        )
+        .await
+        {
             tracing::debug!(dst = %dst, error = %e, "TLS proxy task ended");
         }
     });
@@ -57,6 +68,7 @@ async fn tls_proxy_task(
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
     tls_state: Arc<TlsState>,
+    network_policy: Arc<NetworkPolicy>,
 ) -> io::Result<()> {
     // Phase 0: Buffer initial data to extract SNI from ClientHello.
     // Timeout prevents a slow/malicious guest from holding a proxy slot indefinitely.
@@ -67,6 +79,29 @@ async fn tls_proxy_task(
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "SNI extraction timed out"))?;
     let (sni_name, initial_buf) = sni_name?;
+
+    // Canonicalize once at the boundary so byte equality against rule
+    // destinations (which carry validated `DomainName` values) works
+    // directly. The existing `should_bypass` path already lowercases
+    // internally, so this is forwards-compatible with that.
+    let sni_name = sni_name.trim_end_matches('.').to_ascii_lowercase();
+
+    // Apply network-policy Domain / DomainSuffix rules with the SNI as
+    // the authoritative hostname. Distinct from the SYN-time IP-rule
+    // check (which deferred Domain rules) and from the TLS-bypass
+    // pattern list (which is interception config, not policy).
+    if matches!(
+        network_policy.evaluate_egress_with_source(
+            dst,
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Sni(&sni_name),
+        ),
+        EgressEvaluation::Deny,
+    ) {
+        tracing::debug!(sni = %sni_name, dst = %dst, "TLS egress denied by domain policy");
+        return Ok(());
+    }
 
     if tls_state.should_bypass(&sni_name) {
         tracing::debug!(sni = %sni_name, dst = %dst, "TLS bypass");
