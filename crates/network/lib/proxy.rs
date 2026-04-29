@@ -345,4 +345,193 @@ mod tests {
             buf.len()
         );
     }
+
+    //----------------------------------------------------------------------------------------------
+    // peek_for_sni × evaluate_egress_with_source — combined integration tests
+    //----------------------------------------------------------------------------------------------
+    //
+    // These exercise the path tcp_proxy_task takes after the SYN flip:
+    // peek the first flight, pick a HostnameSource, then walk policy
+    // rules. They cover the over-allow / over-block scenarios end-to-end
+    // at the proxy-task logic level (no real upstream TcpStream needed).
+
+    use std::net::IpAddr;
+    use std::time::Duration as StdDuration;
+
+    use crate::policy::{Action, Destination, NetworkPolicy, PortRange, Rule};
+    use crate::shared::{ResolvedHostnameFamily, SharedState};
+
+    const SHARED_FASTLY_IP: &str = "151.101.0.223";
+
+    fn shared_with(host: &str, ip: &str) -> SharedState {
+        let shared = SharedState::new(4);
+        shared.cache_resolved_hostname(
+            host,
+            ResolvedHostnameFamily::Ipv4,
+            [ip.parse::<IpAddr>().unwrap()],
+            StdDuration::from_secs(60),
+        );
+        shared
+    }
+
+    fn allow_https(domain: &str) -> Rule {
+        Rule {
+            direction: crate::policy::Direction::Egress,
+            destination: Destination::Domain(domain.parse().unwrap()),
+            protocols: vec![Protocol::Tcp],
+            ports: vec![PortRange::single(443)],
+            action: Action::Allow,
+        }
+    }
+
+    /// Over-allow case: cache associates a Fastly IP with the allowed
+    /// `pypi.org`; the guest opens a TLS connection to that IP carrying
+    /// SNI `evil.com`. Pre-SNI, the cache match would let the connection
+    /// through; with `peek_for_sni` + `Sni` source the policy walk denies.
+    #[tokio::test]
+    async fn integration_sni_overrides_cache_for_over_allow() {
+        let shared = shared_with("pypi.org", SHARED_FASTLY_IP);
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![allow_https("pypi.org")],
+        };
+        let dst = SocketAddr::new(SHARED_FASTLY_IP.parse().unwrap(), 443);
+
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Bytes::from(synthetic_client_hello("evil.com")))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let (initial_buf, sni) = peek_for_sni(&mut rx, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+        assert_eq!(sni.as_deref(), Some("evil.com"));
+        assert!(!initial_buf.is_empty());
+
+        let source = sni
+            .as_deref()
+            .map(HostnameSource::Sni)
+            .unwrap_or(HostnameSource::CacheOnly);
+        let eval = policy.evaluate_egress_with_source(dst, Protocol::Tcp, &shared, source);
+        assert_eq!(
+            eval,
+            EgressEvaluation::Deny,
+            "SNI=evil.com must not piggy-back on the cached pypi.org match",
+        );
+    }
+
+    /// Over-block case: cache associates an IP with the denied
+    /// `ads.example.com`; a connection lands on that IP with SNI
+    /// `api.example.com`. Pre-SNI, the cache match would deny;
+    /// with `Sni` source the unrelated SNI does not match the deny rule
+    /// and the connection is allowed under the default egress.
+    #[tokio::test]
+    async fn integration_sni_overrides_cache_for_over_block() {
+        let shared = shared_with("ads.example.com", SHARED_FASTLY_IP);
+        let policy = NetworkPolicy {
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::deny_egress(Destination::Domain(
+                "ads.example.com".parse().unwrap(),
+            ))],
+        };
+        let dst = SocketAddr::new(SHARED_FASTLY_IP.parse().unwrap(), 443);
+
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Bytes::from(synthetic_client_hello("api.example.com")))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let (_initial_buf, sni) = peek_for_sni(&mut rx, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+        assert_eq!(sni.as_deref(), Some("api.example.com"));
+
+        let source = sni
+            .as_deref()
+            .map(HostnameSource::Sni)
+            .unwrap_or(HostnameSource::CacheOnly);
+        let eval = policy.evaluate_egress_with_source(dst, Protocol::Tcp, &shared, source);
+        assert_eq!(
+            eval,
+            EgressEvaluation::Allow,
+            "SNI=api.example.com must not be caught by the deny on ads.example.com",
+        );
+    }
+
+    /// Non-TLS first-flight: peek_for_sni returns `(buf, None)`,
+    /// caller falls back to `HostnameSource::CacheOnly`, and the cache
+    /// match decides. Verifies the fallback path (PR #605 behaviour
+    /// preserved for non-TLS allow rules).
+    #[tokio::test]
+    async fn integration_non_tls_falls_back_to_cache() {
+        let shared = shared_with("pypi.org", SHARED_FASTLY_IP);
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![allow_https("pypi.org")],
+        };
+        let dst = SocketAddr::new(SHARED_FASTLY_IP.parse().unwrap(), 443);
+
+        let (tx, mut rx) = mpsc::channel(4);
+        // Plain HTTP request; not a TLS record.
+        tx.send(Bytes::from_static(
+            b"GET / HTTP/1.1\r\nHost: pypi.org\r\n\r\n",
+        ))
+        .await
+        .unwrap();
+        drop(tx);
+
+        let (initial_buf, sni) = peek_for_sni(&mut rx, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+        assert_eq!(sni, None, "non-TLS data → no SNI");
+        assert!(
+            !initial_buf.is_empty(),
+            "buffered bytes must survive for replay"
+        );
+
+        let source = sni
+            .as_deref()
+            .map(HostnameSource::Sni)
+            .unwrap_or(HostnameSource::CacheOnly);
+        let eval = policy.evaluate_egress_with_source(dst, Protocol::Tcp, &shared, source);
+        assert_eq!(
+            eval,
+            EgressEvaluation::Allow,
+            "cache-only fallback must still allow the cached hostname's IP",
+        );
+    }
+
+    /// SNI matches a `DomainSuffix` rule directly without hitting the
+    /// cache — pure SNI-side suffix logic at the proxy-task layer.
+    #[tokio::test]
+    async fn integration_sni_matches_domain_suffix_without_cache() {
+        let shared = SharedState::new(4); // empty cache
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule {
+                direction: crate::policy::Direction::Egress,
+                destination: Destination::DomainSuffix(".pythonhosted.org".parse().unwrap()),
+                protocols: vec![Protocol::Tcp],
+                ports: vec![PortRange::single(443)],
+                action: Action::Allow,
+            }],
+        };
+        let dst = SocketAddr::new(SHARED_FASTLY_IP.parse().unwrap(), 443);
+
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Bytes::from(synthetic_client_hello(
+            "files.pythonhosted.org",
+        )))
+        .await
+        .unwrap();
+        drop(tx);
+
+        let (_buf, sni) = peek_for_sni(&mut rx, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+        let source = sni
+            .as_deref()
+            .map(HostnameSource::Sni)
+            .unwrap_or(HostnameSource::CacheOnly);
+        let eval = policy.evaluate_egress_with_source(dst, Protocol::Tcp, &shared, source);
+        assert_eq!(eval, EgressEvaluation::Allow);
+    }
 }
