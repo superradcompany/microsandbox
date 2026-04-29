@@ -47,21 +47,21 @@ export class SandboxHandle {
   async start(): Promise<Sandbox> {
     const live = this.requireLive();
     const raw = await withMappedErrors(() => live.start());
-    return Sandbox["fromConnected"](raw, this.name, true);
+    return new Sandbox(raw, this.name, true);
   }
 
   /** Resume in detached mode. */
   async startDetached(): Promise<Sandbox> {
     const live = this.requireLive();
     const raw = await withMappedErrors(() => live.startDetached());
-    return Sandbox["fromConnected"](raw, this.name, false);
+    return new Sandbox(raw, this.name, false);
   }
 
   /** Connect to an already-running sandbox without taking lifecycle ownership. */
   async connect(): Promise<Sandbox> {
     const live = this.requireLive();
     const raw = await withMappedErrors(() => live.connect());
-    return Sandbox["fromConnected"](raw, this.name, false);
+    return new Sandbox(raw, this.name, false);
   }
 
   async stop(): Promise<void> {

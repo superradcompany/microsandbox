@@ -1,4 +1,3 @@
-use microsandbox::sandbox::ExecOptionsBuilder;
 use microsandbox::sandbox::exec::{ExecEvent as RustExecEvent, ExecHandle, ExecSink};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -228,41 +227,5 @@ fn exec_event_to_js(event: RustExecEvent) -> ExecEvent {
             data: None,
             code: Some(code),
         },
-    }
-}
-
-/// Convert a JS exec config into a builder closure.
-pub fn convert_exec_config(
-    config: &ExecConfig,
-) -> impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder + '_ {
-    |mut b: ExecOptionsBuilder| {
-        if let Some(ref args) = config.args {
-            b = b.args(args.clone());
-        }
-        if let Some(ref cwd) = config.cwd {
-            b = b.cwd(cwd);
-        }
-        if let Some(ref user) = config.user {
-            b = b.user(user);
-        }
-        if let Some(ref env) = config.env {
-            for (k, v) in env {
-                b = b.env(k, v);
-            }
-        }
-        if let Some(timeout_ms) = config.timeout_ms {
-            b = b.timeout(std::time::Duration::from_millis(timeout_ms as u64));
-        }
-        if let Some(ref stdin) = config.stdin {
-            match stdin.as_str() {
-                "pipe" => b = b.stdin_pipe(),
-                "null" => b = b.stdin_null(),
-                _ => b = b.stdin_bytes(stdin.as_bytes().to_vec()),
-            }
-        }
-        if let Some(tty) = config.tty {
-            b = b.tty(tty);
-        }
-        b
     }
 }

@@ -1,9 +1,22 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
-import type { NapiVolume } from "./internal/napi.js";
-import { napi } from "./internal/napi.js";
-import { VolumeBuilder } from "./volume-builder.js";
+import {
+  napi,
+  type NapiVolume,
+  type NapiVolumeBuilder,
+} from "./internal/napi.js";
 import { VolumeHandle, volumeInfoToHandle } from "./volume-handle.js";
 import { VolumeFs } from "./volume-fs.js";
+
+/**
+ * Fluent builder for a named volume. Returned by `Volume.builder(name)`.
+ *
+ * The instance IS the napi-rs `VolumeBuilder` class. The terminal
+ * `create()` is wrapped to return a TS `Volume` (so we can keep
+ * type-level distinction from the raw napi class).
+ */
+export type VolumeBuilder = Omit<NapiVolumeBuilder, "create"> & {
+  create(): Promise<Volume>;
+};
 
 export class Volume {
   /** @internal */
@@ -14,8 +27,15 @@ export class Volume {
     this.inner = inner;
   }
 
+  /** Begin building a new volume. */
   static builder(name: string): VolumeBuilder {
-    return new VolumeBuilder(name);
+    const nb = new napi.VolumeBuilder(name);
+    const origCreate = nb.create.bind(nb);
+    (nb as unknown as { create: () => Promise<Volume> }).create = async () => {
+      const inner = await withMappedErrors(() => origCreate());
+      return new Volume(inner);
+    };
+    return nb as unknown as VolumeBuilder;
   }
 
   /** Look up an existing volume by name. */

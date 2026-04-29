@@ -50,23 +50,6 @@ pub struct JsVolumeFsWriteSink {
 
 #[napi]
 impl JsVolume {
-    #[napi(factory)]
-    pub async fn create(config: VolumeConfig) -> Result<JsVolume> {
-        let mut builder = Volume::builder(&config.name);
-        if let Some(quota) = config.quota_mib {
-            builder = builder.quota(quota);
-        }
-        if let Some(ref labels) = config.labels {
-            for (k, v) in labels {
-                builder = builder.label(k, v);
-            }
-        }
-        let inner = builder.create().await.map_err(to_napi_error)?;
-        Ok(JsVolume {
-            inner: Arc::new(inner),
-        })
-    }
-
     #[napi]
     pub async fn get(name: String) -> Result<JsVolumeHandle> {
         let handle = Volume::get(&name).await.map_err(to_napi_error)?;

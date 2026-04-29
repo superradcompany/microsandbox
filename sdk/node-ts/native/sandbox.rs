@@ -1,21 +1,15 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use microsandbox::sandbox::{NetworkPolicy, PullPolicy, SandboxConfig as RustSandboxConfig};
-use microsandbox::{LogLevel, RegistryAuth as RustRegistryAuth};
-use microsandbox_network::dns::Nameserver;
-use microsandbox_network::policy::{
-    Action, Destination, DestinationGroup, Direction, PortRange, Protocol, Rule,
-};
-use microsandbox_network::secrets::config::ViolationAction;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use tokio::sync::Mutex;
 
+use crate::attach_options_builder::JsAttachOptionsBuilder;
 use crate::error::to_napi_error;
-use crate::exec::{ExecOutput, JsExecHandle, convert_exec_config};
+use crate::exec::{ExecOutput, JsExecHandle};
+use crate::exec_options_builder::JsExecOptionsBuilder;
 use crate::fs::JsSandboxFs;
 use crate::sandbox_handle::JsSandboxHandle;
 use crate::types::*;
@@ -64,30 +58,6 @@ impl Sandbox {
     //----------------------------------------------------------------------------------------------
     // Static Methods — Creation
     //----------------------------------------------------------------------------------------------
-
-    /// Create a sandbox from configuration (attached mode — stops on GC/process exit).
-    #[napi(factory)]
-    pub async fn create(config: SandboxConfig) -> Result<Sandbox> {
-        let rust_config = convert_config(config).await?;
-        let inner = microsandbox::sandbox::Sandbox::create(rust_config)
-            .await
-            .map_err(to_napi_error)?;
-        Ok(Sandbox {
-            inner: Arc::new(Mutex::new(Some(inner))),
-        })
-    }
-
-    /// Create a sandbox that survives the parent process (detached mode).
-    #[napi(factory)]
-    pub async fn create_detached(config: SandboxConfig) -> Result<Sandbox> {
-        let rust_config = convert_config(config).await?;
-        let inner = microsandbox::sandbox::Sandbox::create_detached(rust_config)
-            .await
-            .map_err(to_napi_error)?;
-        Ok(Sandbox {
-            inner: Arc::new(Mutex::new(Some(inner))),
-        })
-    }
 
     /// Start an existing stopped sandbox (attached mode).
     #[napi(factory)]
@@ -175,13 +145,21 @@ impl Sandbox {
         Ok(ExecOutput::from_rust(output))
     }
 
-    /// Execute a command with full configuration and wait for completion.
-    #[napi(js_name = "execWithConfig")]
-    pub async fn exec_with_config(&self, config: ExecConfig) -> Result<ExecOutput> {
+    /// Execute a command using a populated `ExecOptionsBuilder`. The TS
+    /// layer wraps this in a closure-callback API (`execWith(cmd, b => …)`).
+    #[napi(js_name = "execWithBuilder")]
+    pub async unsafe fn exec_with_builder(
+        &self,
+        cmd: String,
+        builder: &mut JsExecOptionsBuilder,
+    ) -> Result<ExecOutput> {
+        let opts_builder = builder.take_inner_builder()?;
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
-        let f = convert_exec_config(&config);
-        let output = sb.exec_with(&config.cmd, f).await.map_err(to_napi_error)?;
+        let output = sb
+            .exec_with(&cmd, |_default| opts_builder)
+            .await
+            .map_err(to_napi_error)?;
         Ok(ExecOutput::from_rust(output))
     }
 
@@ -202,20 +180,21 @@ impl Sandbox {
         Ok(JsExecHandle::from_rust(handle))
     }
 
-    /// Execute a command with streaming I/O and full configuration.
-    ///
-    /// Unlike `execStream`, this accepts an `ExecConfig` so callers can enable
-    /// a piped stdin (`stdin: "pipe"`), set a TTY, pass env vars, etc. Required
-    /// for bidirectional streaming protocols where the host writes to the
-    /// running process's stdin via `ExecHandle.takeStdin()` while concurrently
-    /// reading events via `ExecHandle.recv()`.
-    #[napi(js_name = "execStreamWithConfig")]
-    pub async fn exec_stream_with_config(&self, config: ExecConfig) -> Result<JsExecHandle> {
+    /// Execute a command with streaming I/O using a populated
+    /// `ExecOptionsBuilder`. The TS layer wraps this in a closure-callback
+    /// API (`execStreamWith(cmd, b => …)`). Set `b.stdinPipe()` on the
+    /// builder for bidirectional streams.
+    #[napi(js_name = "execStreamWithBuilder")]
+    pub async unsafe fn exec_stream_with_builder(
+        &self,
+        cmd: String,
+        builder: &mut JsExecOptionsBuilder,
+    ) -> Result<JsExecHandle> {
+        let opts_builder = builder.take_inner_builder()?;
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
-        let f = convert_exec_config(&config);
         let handle = sb
-            .exec_stream_with(&config.cmd, f)
+            .exec_stream_with(&cmd, |_default| opts_builder)
             .await
             .map_err(to_napi_error)?;
         Ok(JsExecHandle::from_rust(handle))
@@ -300,33 +279,20 @@ impl Sandbox {
         sb.attach(&cmd, args_owned).await.map_err(to_napi_error)
     }
 
-    /// Attach with full configuration options.
-    #[napi(js_name = "attachWithConfig")]
-    pub async fn attach_with_config(&self, config: AttachConfig) -> Result<i32> {
+    /// Attach using a populated `AttachOptionsBuilder`. The TS layer
+    /// wraps this in a closure-callback API (`attachWith(cmd, b => …)`).
+    #[napi(js_name = "attachWithBuilder")]
+    pub async unsafe fn attach_with_builder(
+        &self,
+        cmd: String,
+        builder: &mut JsAttachOptionsBuilder,
+    ) -> Result<i32> {
+        let opts_builder = builder.take_inner_builder()?;
         let guard = self.inner.lock().await;
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
-        sb.attach_with(&config.cmd, |mut b| {
-            if let Some(ref args) = config.args {
-                b = b.args(args.clone());
-            }
-            if let Some(ref cwd) = config.cwd {
-                b = b.cwd(cwd);
-            }
-            if let Some(ref user) = config.user {
-                b = b.user(user);
-            }
-            if let Some(ref env) = config.env {
-                for (k, v) in env {
-                    b = b.env(k, v);
-                }
-            }
-            if let Some(ref keys) = config.detach_keys {
-                b = b.detach_keys(keys);
-            }
-            b
-        })
-        .await
-        .map_err(to_napi_error)
+        sb.attach_with(&cmd, |_default| opts_builder)
+            .await
+            .map_err(to_napi_error)
     }
 
     /// Attach to the sandbox's default shell.
@@ -440,421 +406,6 @@ impl AsyncGenerator for JsMetricsStream {
     }
 }
 
-/// Convert a JS `SandboxConfig` to the Rust `SandboxConfig` via the builder pattern.
-async fn convert_config(config: SandboxConfig) -> Result<RustSandboxConfig> {
-    let mut builder =
-        microsandbox::sandbox::Sandbox::builder(&config.name).image(config.image.as_str());
-
-    if let Some(mem) = config.memory_mib {
-        builder = builder.memory(mem);
-    }
-    if let Some(cpus) = config.cpus {
-        builder = builder.cpus(cpus);
-    }
-    if let Some(ref workdir) = config.workdir {
-        builder = builder.workdir(workdir);
-    }
-    if let Some(ref shell) = config.shell {
-        builder = builder.shell(shell);
-    }
-    if let Some(ref entrypoint) = config.entrypoint {
-        builder = builder.entrypoint(entrypoint.clone());
-    }
-    if let Some(ref hostname) = config.hostname {
-        builder = builder.hostname(hostname);
-    }
-    if let Some(ref libkrunfw_path) = config.libkrunfw_path {
-        builder = builder.libkrunfw_path(libkrunfw_path);
-    }
-    if let Some(ref user) = config.user {
-        builder = builder.user(user);
-    }
-    if let Some(ref env) = config.env {
-        for (k, v) in env {
-            builder = builder.env(k, v);
-        }
-    }
-    if let Some(ref scripts) = config.scripts {
-        for (k, v) in scripts {
-            builder = builder.script(k, v);
-        }
-    }
-    if let Some(ref volumes) = config.volumes {
-        for (guest_path, mount) in volumes {
-            validate_mount_kinds(guest_path, mount)?;
-            // `format` is now a typed enum on the napi boundary, so no
-            // string parsing is needed here — convert_mount turns it into
-            // the underlying microsandbox::sandbox::DiskImageFormat via
-            // the From impl.
-            builder = builder.volume(guest_path, |b| convert_mount(b, mount));
-        }
-    }
-    if let Some(ref patches) = config.patches {
-        for patch in patches {
-            let rust_patch = convert_patch(patch)?;
-            builder = builder.add_patch(rust_patch);
-        }
-    }
-    if let Some(ref pull_policy) = config.pull_policy {
-        let policy = match pull_policy.as_str() {
-            "always" => PullPolicy::Always,
-            "never" => PullPolicy::Never,
-            _ => PullPolicy::IfMissing,
-        };
-        builder = builder.pull_policy(policy);
-    }
-    if let Some(ref log_level) = config.log_level {
-        let level = match log_level.as_str() {
-            "trace" => LogLevel::Trace,
-            "debug" => LogLevel::Debug,
-            "warn" => LogLevel::Warn,
-            "error" => LogLevel::Error,
-            _ => LogLevel::Info,
-        };
-        builder = builder.log_level(level);
-    }
-    if config.replace.unwrap_or(false) {
-        builder = builder.replace();
-    }
-    if config.quiet_logs.unwrap_or(false) {
-        builder = builder.quiet_logs();
-    }
-    if let Some(ref registry) = config.registry {
-        let auth = registry.auth.as_ref().map(|a| RustRegistryAuth::Basic {
-            username: a.username.clone(),
-            password: a.password.clone(),
-        });
-        let insecure = registry.insecure.unwrap_or(false);
-        let ca_certs = match &registry.ca_certs_path {
-            Some(path) => Some(tokio::fs::read(path).await.map_err(|e| {
-                napi::Error::from_reason(format!("failed to read CA certs from `{path}`: {e}"))
-            })?),
-            None => None,
-        };
-
-        builder = builder.registry(|mut r| {
-            if let Some(auth) = auth {
-                r = r.auth(auth);
-            }
-            if insecure {
-                r = r.insecure();
-            }
-            if let Some(data) = ca_certs {
-                r = r.ca_certs(data);
-            }
-            r
-        });
-    }
-    if let Some(ref ports) = config.ports {
-        for (host_str, guest) in ports {
-            let host: u16 = host_str.parse().map_err(|_| {
-                napi::Error::from_reason(format!("invalid port number: {host_str}"))
-            })?;
-            builder = builder.port(host, *guest as u16);
-        }
-    }
-    if let Some(ref network) = config.network {
-        let dns_nameservers = if let Some(ref dns) = network.dns
-            && let Some(ref nameservers) = dns.nameservers
-        {
-            parse_nameservers(nameservers)?
-        } else {
-            Vec::new()
-        };
-
-        builder = builder.network(|mut n| {
-            // Policy: preset or custom rules
-            if let Some(ref rules) = network.rules {
-                let parse_action = |s: Option<&str>, default: Action| match s {
-                    Some("deny") => Action::Deny,
-                    Some("allow") => Action::Allow,
-                    _ => default,
-                };
-                // Asymmetric defaults match today's behavior: egress defaults
-                // to Deny (the implicit allow-public rule comes via the rules
-                // list when present), ingress defaults to Allow (today's
-                // unfiltered published-port behavior).
-                let default_egress = parse_action(network.default_egress.as_deref(), Action::Deny);
-                let default_ingress =
-                    parse_action(network.default_ingress.as_deref(), Action::Allow);
-                let parsed_rules: Vec<_> = rules.iter().filter_map(convert_policy_rule).collect();
-                n = n.policy(NetworkPolicy {
-                    default_egress,
-                    default_ingress,
-                    rules: parsed_rules,
-                });
-            } else if let Some(ref policy) = network.policy {
-                n = n.policy(match policy.as_str() {
-                    "allow-all" => NetworkPolicy::allow_all(),
-                    "none" => NetworkPolicy::none(),
-                    _ => NetworkPolicy::public_only(),
-                });
-            }
-            // DNS
-            if let Some(ref dns) = network.dns {
-                let block_domains = dns.block_domains.clone();
-                let block_domain_suffixes = dns.block_domain_suffixes.clone();
-                let rebind_protection = dns.rebind_protection;
-                let query_timeout_ms = dns.query_timeout_ms;
-                n = n.dns(move |mut d| {
-                    if let Some(domains) = block_domains {
-                        for domain in &domains {
-                            d = d.block_domain(domain);
-                        }
-                    }
-                    if let Some(suffixes) = block_domain_suffixes {
-                        for suffix in &suffixes {
-                            d = d.block_domain_suffix(suffix);
-                        }
-                    }
-                    if let Some(rebind) = rebind_protection {
-                        d = d.rebind_protection(rebind);
-                    }
-                    if !dns_nameservers.is_empty() {
-                        d = d.nameservers(dns_nameservers);
-                    }
-                    if let Some(ms) = query_timeout_ms {
-                        d = d.query_timeout_ms(u64::from(ms));
-                    }
-                    d
-                });
-            }
-            // TLS
-            if let Some(ref tls) = network.tls {
-                n = n.tls(|mut t| {
-                    if let Some(ref bypass) = tls.bypass {
-                        for pattern in bypass {
-                            t = t.bypass(pattern);
-                        }
-                    }
-                    if let Some(verify) = tls.verify_upstream {
-                        t = t.verify_upstream(verify);
-                    }
-                    if let Some(ref ports) = tls.intercepted_ports {
-                        t = t.intercepted_ports(ports.iter().map(|&p| p as u16).collect());
-                    }
-                    if let Some(block) = tls.block_quic {
-                        t = t.block_quic(block);
-                    }
-                    if let Some(ref path) = tls.intercept_ca_cert {
-                        t = t.intercept_ca_cert(path);
-                    }
-                    if let Some(ref path) = tls.intercept_ca_key {
-                        t = t.intercept_ca_key(path);
-                    }
-                    if let Some(ref paths) = tls.upstream_ca_cert {
-                        for path in paths {
-                            t = t.upstream_ca_cert(path);
-                        }
-                    }
-                    t
-                });
-            }
-            // Max connections
-            if let Some(max) = network.max_connections {
-                n = n.max_connections(max as usize);
-            }
-            if let Some(trust) = network.trust_host_cas {
-                n = n.trust_host_cas(trust);
-            }
-            n
-        });
-    }
-    // Secrets — via Secret.env().
-    if let Some(ref secrets) = config.secrets {
-        for entry in secrets {
-            let env_var = entry.env_var.clone();
-            let value = entry.value.clone();
-            let allow_hosts = entry.allow_hosts.clone();
-            let allow_host_patterns = entry.allow_host_patterns.clone();
-            let placeholder = entry.placeholder.clone();
-            let require_tls = entry.require_tls;
-            let inject_headers = entry.inject.as_ref().and_then(|i| i.headers);
-            let inject_basic_auth = entry.inject.as_ref().and_then(|i| i.basic_auth);
-            let inject_query = entry.inject.as_ref().and_then(|i| i.query_params);
-            let inject_body = entry.inject.as_ref().and_then(|i| i.body);
-            builder = builder.secret(move |mut s| {
-                s = s.env(&env_var).value(value);
-                if let Some(hosts) = allow_hosts {
-                    for host in hosts {
-                        s = s.allow_host(host);
-                    }
-                }
-                if let Some(patterns) = allow_host_patterns {
-                    for pattern in patterns {
-                        s = s.allow_host_pattern(pattern);
-                    }
-                }
-                if let Some(p) = placeholder {
-                    s = s.placeholder(p);
-                }
-                if let Some(require) = require_tls {
-                    s = s.require_tls_identity(require);
-                }
-                if let Some(enabled) = inject_headers {
-                    s = s.inject_headers(enabled);
-                }
-                if let Some(enabled) = inject_basic_auth {
-                    s = s.inject_basic_auth(enabled);
-                }
-                if let Some(enabled) = inject_query {
-                    s = s.inject_query(enabled);
-                }
-                if let Some(enabled) = inject_body {
-                    s = s.inject_body(enabled);
-                }
-                s
-            });
-            if let Some(ref action_str) = entry.on_violation {
-                builder = builder.network(|n| {
-                    n.on_secret_violation(match action_str.as_str() {
-                        "block" => ViolationAction::Block,
-                        "block-and-terminate" => ViolationAction::BlockAndTerminate,
-                        _ => ViolationAction::BlockAndLog,
-                    })
-                });
-            }
-        }
-    }
-
-    builder.build().map_err(to_napi_error)
-}
-
-/// Validate that a `MountConfig` has exactly one mount kind set and that
-/// disk-only options are not paired with non-disk mounts.
-fn validate_mount_kinds(guest_path: &str, mount: &MountConfig) -> Result<()> {
-    let mut kinds: Vec<&'static str> = Vec::with_capacity(4);
-    if mount.bind.is_some() {
-        kinds.push("bind");
-    }
-    if mount.named.is_some() {
-        kinds.push("named");
-    }
-    if mount.tmpfs.unwrap_or(false) {
-        kinds.push("tmpfs");
-    }
-    if mount.disk.is_some() {
-        kinds.push("disk");
-    }
-    match kinds.len() {
-        0 => {
-            return Err(napi::Error::from_reason(format!(
-                "mount at {guest_path}: must set one of bind, named, tmpfs, or disk"
-            )));
-        }
-        1 => {}
-        _ => {
-            return Err(napi::Error::from_reason(format!(
-                "mount at {guest_path}: kinds {kinds:?} are mutually exclusive"
-            )));
-        }
-    }
-
-    let is_disk = mount.disk.is_some();
-    if !is_disk && mount.format.is_some() {
-        return Err(napi::Error::from_reason(format!(
-            "mount at {guest_path}: `format` is only valid with `disk`"
-        )));
-    }
-    if !is_disk && mount.fstype.is_some() {
-        return Err(napi::Error::from_reason(format!(
-            "mount at {guest_path}: `fstype` is only valid with `disk`"
-        )));
-    }
-    if mount.tmpfs.unwrap_or(false) {
-        // size_mib OK on tmpfs; nothing else to check here.
-    } else if mount.size_mib.is_some() {
-        return Err(napi::Error::from_reason(format!(
-            "mount at {guest_path}: `sizeMib` is only valid with `tmpfs`"
-        )));
-    }
-
-    Ok(())
-}
-
-/// Parse user-supplied nameserver strings into [`Nameserver`]s, wrapping any
-/// parse error in a napi `Error` so it surfaces as a JS exception.
-fn parse_nameservers(nameservers: &[String]) -> Result<Vec<Nameserver>> {
-    nameservers
-        .iter()
-        .map(|s| {
-            s.parse::<Nameserver>()
-                .map_err(|e| napi::Error::from_reason(e.to_string()))
-        })
-        .collect()
-}
-
-fn convert_mount(
-    builder: microsandbox::sandbox::MountBuilder,
-    mount: &MountConfig,
-) -> microsandbox::sandbox::MountBuilder {
-    let mut b = builder;
-    if let Some(ref bind_path) = mount.bind {
-        b = b.bind(PathBuf::from(bind_path));
-    } else if let Some(ref vol_name) = mount.named {
-        b = b.named(vol_name);
-    } else if mount.tmpfs.unwrap_or(false) {
-        b = b.tmpfs();
-    } else if let Some(ref disk_path) = mount.disk {
-        b = b.disk(PathBuf::from(disk_path));
-        if let Some(format) = mount.format {
-            b = b.format(format.into());
-        }
-        if let Some(ref fstype) = mount.fstype {
-            b = b.fstype(fstype);
-        }
-    }
-    if mount.readonly.unwrap_or(false) {
-        b = b.readonly();
-    }
-    if let Some(size) = mount.size_mib {
-        b = b.size(size);
-    }
-    b
-}
-
-fn convert_patch(patch: &PatchConfig) -> Result<microsandbox::sandbox::Patch> {
-    use microsandbox::sandbox::Patch;
-    match patch.kind.as_str() {
-        "text" => Ok(Patch::Text {
-            path: patch.path.clone().unwrap_or_default(),
-            content: patch.content.clone().unwrap_or_default(),
-            mode: patch.mode,
-            replace: patch.replace.unwrap_or(false),
-        }),
-        "copyFile" => Ok(Patch::CopyFile {
-            src: PathBuf::from(patch.src.clone().unwrap_or_default()),
-            dst: patch.dst.clone().unwrap_or_default(),
-            mode: patch.mode,
-            replace: patch.replace.unwrap_or(false),
-        }),
-        "copyDir" => Ok(Patch::CopyDir {
-            src: PathBuf::from(patch.src.clone().unwrap_or_default()),
-            dst: patch.dst.clone().unwrap_or_default(),
-            replace: patch.replace.unwrap_or(false),
-        }),
-        "symlink" => Ok(Patch::Symlink {
-            target: patch.target.clone().unwrap_or_default(),
-            link: patch.link.clone().unwrap_or_default(),
-            replace: patch.replace.unwrap_or(false),
-        }),
-        "mkdir" => Ok(Patch::Mkdir {
-            path: patch.path.clone().unwrap_or_default(),
-            mode: patch.mode,
-        }),
-        "remove" => Ok(Patch::Remove {
-            path: patch.path.clone().unwrap_or_default(),
-        }),
-        "append" => Ok(Patch::Append {
-            path: patch.path.clone().unwrap_or_default(),
-            content: patch.content.clone().unwrap_or_default(),
-        }),
-        other => Err(napi::Error::from_reason(format!(
-            "unknown patch kind: {other}"
-        ))),
-    }
-}
-
 pub fn metrics_to_js(m: &microsandbox::sandbox::SandboxMetrics) -> SandboxMetrics {
     SandboxMetrics {
         cpu_percent: m.cpu_percent as f64,
@@ -877,86 +428,6 @@ fn sandbox_handle_to_info(handle: &microsandbox::sandbox::SandboxHandle) -> Sand
         created_at: opt_datetime_to_ms(&handle.created_at()),
         updated_at: opt_datetime_to_ms(&handle.updated_at()),
     }
-}
-
-/// Convert a TS-side rule into the new single-list `Rule` shape with
-/// per-rule direction. The TS-side `direction` field accepts `"egress"`,
-/// `"ingress"`, `"any"`, or the legacy `"outbound"` / `"inbound"` aliases.
-fn convert_policy_rule(rule: &PolicyRule) -> Option<Rule> {
-    let action = match rule.action.as_str() {
-        "deny" => Action::Deny,
-        _ => Action::Allow,
-    };
-    let direction = match rule.direction.as_deref() {
-        Some("ingress") | Some("inbound") => Direction::Ingress,
-        Some("any") => Direction::Any,
-        // Default and "egress" / "outbound" map to Egress.
-        _ => Direction::Egress,
-    };
-    let destination = match rule.destination.as_deref() {
-        Some("*") | None => Destination::Any,
-        Some("loopback") => Destination::Group(DestinationGroup::Loopback),
-        Some("private") => Destination::Group(DestinationGroup::Private),
-        Some("link-local") => Destination::Group(DestinationGroup::LinkLocal),
-        Some("metadata") => Destination::Group(DestinationGroup::Metadata),
-        Some("multicast") => Destination::Group(DestinationGroup::Multicast),
-        Some("host") => Destination::Group(DestinationGroup::Host),
-        Some("public") => Destination::Group(DestinationGroup::Public),
-        Some(s) if s.starts_with('.') => Destination::DomainSuffix(s.parse().ok()?),
-        Some(s) if s.contains('/') => {
-            // CIDR notation
-            match s.parse() {
-                Ok(cidr) => Destination::Cidr(cidr),
-                Err(_) => return None,
-            }
-        }
-        Some(s) => Destination::Domain(s.parse().ok()?),
-    };
-    let mut protocols: Vec<Protocol> = Vec::new();
-    if let Some(ref protos) = rule.protocols {
-        for p in protos {
-            protocols.push(match p.as_str() {
-                "udp" => Protocol::Udp,
-                "icmpv4" => Protocol::Icmpv4,
-                "icmpv6" => Protocol::Icmpv6,
-                _ => Protocol::Tcp,
-            });
-        }
-    } else if let Some(p) = rule.protocol.as_deref() {
-        protocols.push(match p {
-            "udp" => Protocol::Udp,
-            "icmpv4" => Protocol::Icmpv4,
-            "icmpv6" => Protocol::Icmpv6,
-            _ => Protocol::Tcp,
-        });
-    }
-    let mut ports: Vec<PortRange> = Vec::new();
-    let parse_port = |s: &str| -> Option<PortRange> {
-        if let Some((start, end)) = s.split_once('-') {
-            Some(PortRange::range(start.parse().ok()?, end.parse().ok()?))
-        } else {
-            Some(PortRange::single(s.parse().ok()?))
-        }
-    };
-    if let Some(ref ps) = rule.ports {
-        for p in ps {
-            if let Some(range) = parse_port(p) {
-                ports.push(range);
-            }
-        }
-    } else if let Some(p) = rule.port.as_deref()
-        && let Some(range) = parse_port(p)
-    {
-        ports.push(range);
-    }
-
-    Some(Rule {
-        direction,
-        destination,
-        protocols,
-        ports,
-        action,
-    })
 }
 
 fn exit_status_to_js(status: std::process::ExitStatus) -> ExitStatus {

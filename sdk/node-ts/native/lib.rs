@@ -11,7 +11,6 @@ mod error;
 mod exec;
 mod exec_options_builder;
 mod fs;
-mod helpers;
 mod image;
 mod image_builder;
 mod metrics;

@@ -251,41 +251,6 @@ export declare class MetricsStream {
 export type JsMetricsStream = MetricsStream
 
 /**
- * Factory for creating volume mount configurations.
- *
- * ```js
- * import { Mount, Sandbox } from 'microsandbox'
- *
- * const sb = await Sandbox.create({
- *     name: "worker",
- *     image: "python",
- *     volumes: {
- *         "/app/src": Mount.bind("./src", { readonly: true }),
- *         "/data": Mount.named("my-data"),
- *         "/tmp": Mount.tmpfs({ sizeMib: 100 }),
- *     },
- * })
- * ```
- */
-export declare class Mount {
-  /** Create a bind mount (host directory → guest path). */
-  static bind(path: string, opts?: MountOptions | undefined | null): MountConfig
-  /** Create a named volume mount. */
-  static named(name: string, opts?: MountOptions | undefined | null): MountConfig
-  /** Create a tmpfs (in-memory) mount. */
-  static tmpfs(opts?: TmpfsOptions | undefined | null): MountConfig
-  /**
-   * Mount a host disk image as a virtio-blk device at a guest path.
-   *
-   * Format defaults to the file extension (`.qcow2` → Qcow2, `.vmdk` →
-   * Vmdk, anything else → Raw). Use `opts.format` to override. `fstype`
-   * (e.g. `"ext4"`) is the inner filesystem agentd will mount; when
-   * omitted, agentd probes `/proc/filesystems`.
-   */
-  static disk(path: string, opts?: DiskOptions | undefined | null): MountConfig
-}
-
-/**
  * Fluent builder for a sandbox volume mount.
  *
  * Pick exactly one mount kind via `.bind()`, `.named()`, `.tmpfs()`, or
@@ -357,46 +322,6 @@ export declare class NetworkBuilder {
 }
 export type JsNetworkBuilder = NetworkBuilder
 
-/**
- * Factory for creating rootfs patch configurations.
- *
- * ```js
- * import { Patch, Sandbox } from 'microsandbox'
- *
- * const sb = await Sandbox.create({
- *     name: "worker",
- *     image: "alpine",
- *     patches: [
- *         Patch.text("/etc/greeting.txt", "Hello!
-"),
- *         Patch.mkdir("/app", { mode: 0o755 }),
- *         Patch.append("/etc/hosts", "127.0.0.1 myapp.local
-"),
- *         Patch.copyFile("./config.json", "/app/config.json"),
- *         Patch.copyDir("./scripts", "/app/scripts"),
- *         Patch.symlink("/usr/bin/python3", "/usr/bin/python"),
- *         Patch.remove("/etc/motd"),
- *     ],
- * })
- * ```
- */
-export declare class Patch {
-  /** Write text content to a file in the guest filesystem. */
-  static text(path: string, content: string, opts?: PatchOptions | undefined | null): PatchConfig
-  /** Create a directory in the guest filesystem (idempotent). */
-  static mkdir(path: string, opts?: PatchOptions | undefined | null): PatchConfig
-  /** Append content to an existing file in the guest filesystem. */
-  static append(path: string, content: string): PatchConfig
-  /** Copy a file from the host into the guest filesystem. */
-  static copyFile(src: string, dst: string, opts?: PatchOptions | undefined | null): PatchConfig
-  /** Copy a directory from the host into the guest filesystem. */
-  static copyDir(src: string, dst: string, opts?: PatchReplaceOptions | undefined | null): PatchConfig
-  /** Create a symlink in the guest filesystem. */
-  static symlink(target: string, link: string, opts?: PatchReplaceOptions | undefined | null): PatchConfig
-  /** Remove a file or directory from the guest filesystem (idempotent). */
-  static remove(path: string): PatchConfig
-}
-
 /** Fluent builder for an ordered list of pre-boot rootfs patches. */
 export declare class PatchBuilder {
   constructor()
@@ -440,10 +365,6 @@ export type JsRegistryConfigBuilder = RegistryConfigBuilder
  * to the guest VM and can execute commands, access the filesystem, and query metrics.
  */
 export declare class Sandbox {
-  /** Create a sandbox from configuration (attached mode — stops on GC/process exit). */
-  static create(config: SandboxConfig): Promise<Sandbox>
-  /** Create a sandbox that survives the parent process (detached mode). */
-  static createDetached(config: SandboxConfig): Promise<Sandbox>
   /** Start an existing stopped sandbox (attached mode). */
   static start(name: string): Promise<Sandbox>
   /** Start an existing stopped sandbox (detached mode). */
@@ -460,20 +381,20 @@ export declare class Sandbox {
   get ownsLifecycle(): Promise<boolean>
   /** Execute a command and wait for completion. */
   exec(cmd: string, args?: Array<string> | undefined | null): Promise<ExecOutput>
-  /** Execute a command with full configuration and wait for completion. */
-  execWithConfig(config: ExecConfig): Promise<ExecOutput>
+  /**
+   * Execute a command using a populated `ExecOptionsBuilder`. The TS
+   * layer wraps this in a closure-callback API (`execWith(cmd, b => …)`).
+   */
+  execWithBuilder(cmd: string, builder: ExecOptionsBuilder): Promise<ExecOutput>
   /** Execute a command with streaming I/O. */
   execStream(cmd: string, args?: Array<string> | undefined | null): Promise<ExecHandle>
   /**
-   * Execute a command with streaming I/O and full configuration.
-   *
-   * Unlike `execStream`, this accepts an `ExecConfig` so callers can enable
-   * a piped stdin (`stdin: "pipe"`), set a TTY, pass env vars, etc. Required
-   * for bidirectional streaming protocols where the host writes to the
-   * running process's stdin via `ExecHandle.takeStdin()` while concurrently
-   * reading events via `ExecHandle.recv()`.
+   * Execute a command with streaming I/O using a populated
+   * `ExecOptionsBuilder`. The TS layer wraps this in a closure-callback
+   * API (`execStreamWith(cmd, b => …)`). Set `b.stdinPipe()` on the
+   * builder for bidirectional streams.
    */
-  execStreamWithConfig(config: ExecConfig): Promise<ExecHandle>
+  execStreamWithBuilder(cmd: string, builder: ExecOptionsBuilder): Promise<ExecHandle>
   /** Execute a shell command using the sandbox's configured shell. */
   shell(script: string): Promise<ExecOutput>
   /** Execute a shell command with streaming I/O. */
@@ -490,8 +411,11 @@ export declare class Sandbox {
    * Bridges the host terminal to the guest process. Returns the exit code.
    */
   attach(cmd: string, args?: Array<string> | undefined | null): Promise<number>
-  /** Attach with full configuration options. */
-  attachWithConfig(config: AttachConfig): Promise<number>
+  /**
+   * Attach using a populated `AttachOptionsBuilder`. The TS layer
+   * wraps this in a closure-callback API (`attachWith(cmd, b => …)`).
+   */
+  attachWithBuilder(cmd: string, builder: AttachOptionsBuilder): Promise<number>
   /** Attach to the sandbox's default shell. */
   attachShell(): Promise<number>
   /** Stop the sandbox gracefully (SIGTERM). */
@@ -684,29 +608,6 @@ export declare class SandboxHandle {
 }
 export type JsSandboxHandle = SandboxHandle
 
-/**
- * Factory for creating secret entries.
- *
- * ```js
- * import { Secret, Sandbox } from 'microsandbox'
- *
- * const sb = await Sandbox.create({
- *     name: "agent",
- *     image: "python",
- *     secrets: [
- *         Secret.env("OPENAI_API_KEY", {
- *             value: process.env.OPENAI_API_KEY,
- *             allowHosts: ["api.openai.com"],
- *         }),
- *     ],
- * })
- * ```
- */
-export declare class Secret {
-  /** Create a secret bound to an environment variable. */
-  static env(envVar: string, opts: SecretEnvOptions): SecretEntry
-}
-
 /** Fluent builder for a single secret entry. */
 export declare class SecretBuilder {
   constructor()
@@ -778,7 +679,6 @@ export declare class TlsBuilder {
 export type JsTlsBuilder = TlsBuilder
 
 export declare class Volume {
-  static create(config: VolumeConfig): Promise<Volume>
   static get(name: string): Promise<VolumeHandle>
   static list(): Promise<Array<VolumeInfo>>
   static remove(name: string): Promise<void>
@@ -864,22 +764,6 @@ export type JsVolumeHandle = VolumeHandle
 /** Get metrics for all running sandboxes. */
 export declare function allSandboxMetrics(): Promise<Record<string, SandboxMetrics>>
 
-/** Configuration for interactive attach sessions. */
-export interface AttachConfig {
-  /** Command to execute. */
-  cmd: string
-  /** Command arguments. */
-  args?: Array<string>
-  /** Working directory inside the sandbox. */
-  cwd?: string
-  /** User to run as. */
-  user?: string
-  /** Environment variables. */
-  env?: Record<string, string>
-  /** Detach key sequence (default: "ctrl-]"). Uses Docker-style syntax. */
-  detachKeys?: string
-}
-
 /**
  * Built rootfs patch (flat representation of the `Patch` enum: `kind`
  * + per-variant fields).
@@ -907,26 +791,6 @@ export interface BuiltPatch {
   replace?: boolean
 }
 
-/** Supported disk image formats for [`Mount.disk`] and the `disk()` rootfs. */
-export declare const enum DiskImageFormat {
-  Qcow2 = 'qcow2',
-  Raw = 'raw',
-  Vmdk = 'vmdk'
-}
-
-/** Options for disk-image volume mounts. */
-export interface DiskOptions {
-  /** Disk image format. When omitted, inferred from the file extension. */
-  format?: DiskImageFormat
-  /**
-   * Inner filesystem type the guest should mount (e.g. `"ext4"`). When
-   * omitted, agentd probes `/proc/filesystems`.
-   */
-  fstype?: string
-  /** Read-only mount. */
-  readonly?: boolean
-}
-
 /** DNS interception configuration produced by `DnsBuilder.build()`. */
 export interface DnsConfig {
   blockedDomains: Array<string>
@@ -941,44 +805,6 @@ export interface DnsConfig {
   queryTimeoutMs: number
 }
 
-/** DNS interception configuration. */
-export interface DnsConfig {
-  /** Block specific domains (returns REFUSED). */
-  blockDomains?: Array<string>
-  /** Block domain suffixes (returns REFUSED). */
-  blockDomainSuffixes?: Array<string>
-  /** Enable DNS rebinding protection (default: true). */
-  rebindProtection?: boolean
-  /**
-   * Nameservers to forward queries to. Accepts `IP`, `IP:PORT`,
-   * `HOST`, or `HOST:PORT`. When set, overrides the host's
-   * /etc/resolv.conf.
-   */
-  nameservers?: Array<string>
-  /** Per-DNS-query timeout in milliseconds (default: 5000). */
-  queryTimeoutMs?: number
-}
-
-/** Configuration for command execution. */
-export interface ExecConfig {
-  /** Command to execute. */
-  cmd: string
-  /** Command arguments. */
-  args?: Array<string>
-  /** Working directory inside the sandbox. */
-  cwd?: string
-  /** User to run as. */
-  user?: string
-  /** Environment variables. */
-  env?: Record<string, string>
-  /** Timeout in milliseconds. */
-  timeoutMs?: number
-  /** Stdin mode: "null" (default), "pipe", or a string to send as stdin bytes. */
-  stdin?: string
-  /** Enable pseudo-TTY. */
-  tty?: boolean
-}
-
 /** Execution event emitted by `ExecHandle.recv()`. */
 export interface ExecEvent {
   /** "started", "stdout", "stderr", or "exited". */
@@ -989,14 +815,6 @@ export interface ExecEvent {
   data?: Buffer
   /** Exit code (only for "exited" events). */
   code?: number
-}
-
-/** Execution event type. */
-export declare const enum ExecEventType {
-  Started = 'started',
-  Stdout = 'stdout',
-  Stderr = 'stderr',
-  Exited = 'exited'
 }
 
 /** Process exit status. */
@@ -1013,14 +831,6 @@ export interface FsEntry {
   size: number
   mode: number
   modified?: number
-}
-
-/** Filesystem entry kind. */
-export declare const enum FsEntryKind {
-  File = 'file',
-  Directory = 'directory',
-  Symlink = 'symlink',
-  Other = 'other'
 }
 
 /** Filesystem metadata returned by `fs.stat()`. */
@@ -1109,107 +919,6 @@ export declare function install(): Promise<void>
 /** Check if msb and libkrunfw are installed and available. */
 export declare function isInstalled(): boolean
 
-/** Log level for sandbox process output. */
-export declare const enum LogLevel {
-  Trace = 'trace',
-  Debug = 'debug',
-  Info = 'info',
-  Warn = 'warn',
-  Error = 'error'
-}
-
-/** Volume mount configuration. */
-export interface MountConfig {
-  /** Mount a host directory. Mutually exclusive with `named`, `tmpfs`, `disk`. */
-  bind?: string
-  /** Mount a named volume. Mutually exclusive with `bind`, `tmpfs`, `disk`. */
-  named?: string
-  /** Use tmpfs (memory-backed). Mutually exclusive with `bind`, `named`, `disk`. */
-  tmpfs?: boolean
-  /**
-   * Mount a host disk image as a virtio-blk device. Mutually exclusive
-   * with `bind`, `named`, `tmpfs`.
-   */
-  disk?: string
-  /**
-   * Disk image format. Inferred from the file extension when omitted
-   * (only meaningful with `disk`).
-   */
-  format?: DiskImageFormat
-  /**
-   * Inner filesystem type for disk image mounts (e.g. `"ext4"`). When
-   * omitted, agentd probes `/proc/filesystems`.
-   */
-  fstype?: string
-  /** Read-only mount. */
-  readonly?: boolean
-  /** Size limit in MiB (for tmpfs). */
-  sizeMib?: number
-}
-
-/** Options for bind and named volume mounts. */
-export interface MountOptions {
-  /** Read-only mount. */
-  readonly?: boolean
-}
-
-/** Network configuration. */
-export interface NetworkConfig {
-  /**
-   * Preset policy: "public-only" (default), "allow-all", or "none".
-   * Ignored if `rules` is provided.
-   */
-  policy?: string
-  /** Custom policy rules (first match wins). Overrides `policy` preset. */
-  rules?: Array<PolicyRule>
-  /**
-   * Default action for egress traffic when no rule matches: "allow" or
-   * "deny". When omitted, falls through to today's `public_only`
-   * behavior (deny + implicit allow public).
-   */
-  defaultEgress?: string
-  /**
-   * Default action for ingress traffic when no rule matches: "allow" or
-   * "deny". When omitted, defaults to "allow" (today's unfiltered
-   * published-port behavior).
-   */
-  defaultIngress?: string
-  /** DNS interception configuration. */
-  dns?: DnsConfig
-  /** TLS interception configuration. */
-  tls?: TlsConfig
-  /** Max concurrent connections (default: 256). */
-  maxConnections?: number
-  /**
-   * Ship the host's trusted CAs into the guest at boot so outbound TLS
-   * works behind corporate MITM proxies (Warp Zero Trust, Zscaler,
-   * etc.). Opt-in. Default: false.
-   */
-  trustHostCas?: boolean
-}
-
-/** Rootfs patch applied before VM startup. */
-export interface PatchConfig {
-  /** Patch kind: "text", "file", "copyFile", "copyDir", "symlink", "mkdir", "remove", "append". */
-  kind: string
-  /** Guest path (all kinds except symlink where it's `link`). */
-  path?: string
-  /** Text content (for "text" and "append" kinds). */
-  content?: string
-  /** Source host path (for "copyFile" and "copyDir" kinds). */
-  src?: string
-  /** Destination guest path (for "copyFile" and "copyDir" kinds). */
-  dst?: string
-  /** Symlink target path (for "symlink" kind). */
-  target?: string
-  /** Symlink link path (for "symlink" kind). */
-  link?: string
-  /** File permissions (e.g. 0o644). */
-  mode?: number
-  /** Allow replacing existing files. */
-  replace?: boolean
-}
-
 /** Optional knobs accepted by `text`, `file`, `copyFile`. */
 export interface PatchFileOptions {
   mode?: number
@@ -1221,67 +930,9 @@ export interface PatchModeOnly {
   mode?: number
 }
 
-/** Options for `Patch.text()` and `Patch.copyFile()`. */
-export interface PatchOptions {
-  /** File permissions (e.g. 0o644). */
-  mode?: number
-  /** Allow replacing existing files. */
-  replace?: boolean
-}
-
 /** Optional knobs accepted by `copyDir`, `symlink`. */
 export interface PatchReplaceOnly {
   replace?: boolean
-}
-
-/** Options for `Patch.copyDir()` and `Patch.symlink()`. */
-export interface PatchReplaceOptions {
-  /** Allow replacing existing files/directories. */
-  replace?: boolean
-}
-
-/** A network policy rule. */
-export interface PolicyRule {
-  /** "allow" or "deny". */
-  action: string
-  /**
-   * "egress", "ingress", or "any". Legacy "outbound"/"inbound" still
-   * accepted as aliases for "egress"/"ingress".
-   */
-  direction?: string
-  /**
-   * Destination filter. One of:
-   * - "*" — any destination
-   * - "1.2.3.4/24" — CIDR notation
-   * - "example.com" — exact domain
-   * - ".example.com" — domain suffix
-   * - "public", "loopback", "private", "link-local", "metadata", "multicast", "host" — destination group
-   */
-  destination?: string
-  /** Single-protocol filter (legacy). Prefer `protocols`. */
-  protocol?: string
-  /** Set of allowed protocols. Empty/missing = any. */
-  protocols?: Array<string>
-  /** Single port or range (legacy). Prefer `ports`. */
-  port?: string
-  /**
-   * Set of allowed ports/ranges (e.g. ["80", "443", "8000-9000"]).
-   * Empty/missing = any.
-   */
-  ports?: Array<string>
-}
-
-/** Image pull policy. */
-export declare const enum PullPolicy {
-  Always = 'always',
-  IfMissing = 'if-missing',
-  Never = 'never'
-}
-
-/** Registry authentication credentials. */
-export interface RegistryAuth {
-  username: string
-  password: string
 }
 
 /** Plain-object form of `RegistryAuth`. `kind: "anonymous" | "basic"`. */
@@ -1289,85 +940,6 @@ export interface RegistryAuthInput {
   kind: string
   username?: string
   password?: string
-}
-
-/** Registry connection settings. */
-export interface RegistryConfig {
-  /** Authentication credentials. */
-  auth?: RegistryAuth
-  /** Access the registry over plain HTTP instead of HTTPS. */
-  insecure?: boolean
-  /** Path to a PEM file containing additional CA root certificates to trust. */
-  caCertsPath?: string
-}
-
-/** Configuration for creating a sandbox. */
-export interface SandboxConfig {
-  /** Unique sandbox name. */
-  name: string
-  /** OCI image ref (e.g. "python:3.12"), host path, or disk image path. */
-  image: string
-  /** Guest memory in MiB (default: 512). */
-  memoryMib?: number
-  /** Virtual CPU count (default: 1). */
-  cpus?: number
-  /** Working directory inside the guest. */
-  workdir?: string
-  /** Default shell binary path. */
-  shell?: string
-  /** Override image entrypoint. */
-  entrypoint?: Array<string>
-  /** Override image cmd. */
-  cmd?: Array<string>
-  /** Guest hostname. */
-  hostname?: string
-  /**
-   * Override the libkrunfw shared library path for this sandbox.
-   * Defaults to the global resolver (config path, sibling of `msb`, or
-   * `~/.microsandbox/lib/`).
-   */
-  libkrunfwPath?: string
-  /** User to run as (UID or name). */
-  user?: string
-  /** Environment variables. */
-  env?: Record<string, string>
-  /** Named scripts that can be run via `sandbox.run(name)`. */
-  scripts?: Record<string, string>
-  /** Volume mounts keyed by guest path. */
-  volumes?: Record<string, MountConfig>
-  /** Rootfs patches applied before boot. */
-  patches?: Array<PatchConfig>
-  /** Image pull policy: "always", "if-missing", or "never". */
-  pullPolicy?: string
-  /** Log level: "trace", "debug", "info", "warn", "error". */
-  logLevel?: string
-  /** Kill any existing sandbox with the same name before creating. */
-  replace?: boolean
-  /** Suppress log output. */
-  quietLogs?: boolean
-  /** Arbitrary key-value labels. */
-  labels?: Record<string, string>
-  /** Signal to send on stop (default: SIGTERM). */
-  stopSignal?: string
-  /** Maximum run duration in seconds. */
-  maxDurationSecs?: number
-  /** Registry connection settings (auth, TLS, insecure). */
-  registry?: RegistryConfig
-  /** Port mappings: host_port → guest_port (TCP). */
-  ports?: Record<string, number>
-  /** Network configuration. */
-  network?: NetworkConfig
-  /**
-   * Secret entries. Created with `Secret.env()`.
-   *
-   * ```js
-   * import { Secret } from 'microsandbox'
-   * secrets: [
-   *     Secret.env("OPENAI_API_KEY", { value: "sk-...", allowHosts: ["api.openai.com"] }),
-   * ]
-   * ```
-   */
-  secrets?: Array<SecretEntry>
 }
 
 /** Lightweight handle info for a sandbox from the database. */
@@ -1395,14 +967,6 @@ export interface SandboxMetrics {
   timestampMs: number
 }
 
-/** Sandbox status. */
-export declare const enum SandboxStatus {
-  Running = 'running',
-  Stopped = 'stopped',
-  Crashed = 'crashed',
-  Draining = 'draining'
-}
-
 /** A secret entry produced by `SecretBuilder.build()`. */
 export interface SecretEntry {
   /** Environment variable name exposed to the sandbox (holds the placeholder). */
@@ -1423,94 +987,12 @@ export interface SecretEntry {
   injection: JsSecretInjection
 }
 
-/**
- * A secret entry for the `secrets` array on `SandboxConfig`.
- *
- * Created via `Secret.env()`:
- * ```js
- * import { Secret } from 'microsandbox'
- * Secret.env("OPENAI_API_KEY", { value: "sk-...", allowHosts: ["api.openai.com"] })
- * ```
- */
-export interface SecretEntry {
-  /** Environment variable name. */
-  envVar: string
-  /** The secret value (never enters the sandbox). */
-  value: string
-  /** Allowed hosts (exact match, e.g. `["api.openai.com"]`). */
-  allowHosts?: Array<string>
-  /** Allowed host patterns (wildcard, e.g. `["*.openai.com"]`). */
-  allowHostPatterns?: Array<string>
-  /** Custom placeholder (auto-generated as `$MSB_<ENV_VAR>` if omitted). */
-  placeholder?: string
-  /** Require verified TLS identity before substitution (default: true). */
-  requireTls?: boolean
-  /** Violation action: "block", "block-and-log" (default), "block-and-terminate". */
-  onViolation?: string
-  /**
-   * Where in the HTTP request the secret can be injected.
-   * Defaults to `{ headers: true, basicAuth: true, queryParams: false, body: false }`.
-   */
-  inject?: SecretInjection
-}
-
-/** Options for `Secret.env()`. */
-export interface SecretEnvOptions {
-  /** The secret value (never enters the sandbox). */
-  value: string
-  /** Allowed hosts (exact match, e.g. `["api.openai.com"]`). */
-  allowHosts?: Array<string>
-  /** Allowed host patterns (wildcard, e.g. `["*.openai.com"]`). */
-  allowHostPatterns?: Array<string>
-  /** Custom placeholder (auto-generated as `$MSB_<ENV_VAR>` if omitted). */
-  placeholder?: string
-  /** Require verified TLS identity before substitution (default: true). */
-  requireTls?: boolean
-  /** Violation action: "block", "block-and-log" (default), "block-and-terminate". */
-  onViolation?: string
-  /**
-   * Where in the HTTP request the secret can be injected. Defaults to
-   * headers + Basic Auth only; enable `queryParams` or `body` to widen scope.
-   */
-  inject?: SecretInjection
-}
-
 /** Injection sites for a secret value. */
 export interface SecretInjection {
   headers: boolean
   basicAuth: boolean
   queryParams: boolean
   body: boolean
-}
-
-/**
- * Controls where the secret placeholder is substituted by the TLS proxy.
- *
- * By default, substitution happens in HTTP headers (including the
- * `Authorization` header for Basic Auth). Enable `queryParams` or `body`
- * to expand the scope to the request line query string or the request body.
- * When `body` is enabled, the proxy also rewrites `Content-Length` to match.
- *
- * ```js
- * Secret.env("API_KEY", {
- *   value: "sk-...",
- *   allowHosts: ["api.example.com"],
- *   inject: { headers: false, body: true },
- * })
- * ```
- */
-export interface SecretInjection {
-  /** Substitute in HTTP headers (default: true). */
-  headers?: boolean
-  /** Substitute in HTTP Basic Auth (default: true). */
-  basicAuth?: boolean
-  /** Substitute in URL query parameters (default: false). */
-  queryParams?: boolean
-  /**
-   * Substitute in request body (default: false).
-   * When enabled, `Content-Length` is rewritten to match the new body size.
-   */
-  body?: boolean
 }
 
 /** TLS interception configuration produced by `TlsBuilder.build()`. */
@@ -1523,51 +1005,6 @@ export interface TlsConfig {
   upstreamCaCertPaths: Array<string>
   interceptCaCertPath?: string
   interceptCaKeyPath?: string
-}
-
-/** TLS interception configuration. */
-export interface TlsConfig {
-  /** Domains to bypass (no interception). Supports "*.suffix" wildcards. */
-  bypass?: Array<string>
-  /** Verify upstream server certificates (default: true). */
-  verifyUpstream?: boolean
-  /** Ports to intercept (default: [443]). */
-  interceptedPorts?: Array<number>
-  /** Block QUIC on intercepted ports (default: false). */
-  blockQuic?: boolean
-  /** Path to custom interception CA certificate PEM file. */
-  interceptCaCert?: string
-  /** Path to custom interception CA private key PEM file. */
-  interceptCaKey?: string
-  /** Paths to additional CA certificate PEM files to trust for upstream verification. */
-  upstreamCaCert?: Array<string>
-}
-
-/** Options for tmpfs mounts. */
-export interface TmpfsOptions {
-  /** Size limit in MiB. */
-  sizeMib?: number
-  /** Read-only mount. */
-  readonly?: boolean
-}
-
-/** Action to take when a secret is sent to a disallowed host. */
-export declare const enum ViolationAction {
-  /** Silently block the request. */
-  Block = 'block',
-  /** Block the request and log the violation. */
-  BlockAndLog = 'block-and-log',
-  /** Block the request and terminate the sandbox. */
-  BlockAndTerminate = 'block-and-terminate'
-}
-
-/** Volume configuration for creation. */
-export interface VolumeConfig {
-  name: string
-  /** Size quota in MiB. */
-  quotaMib?: number
-  /** Arbitrary key-value labels. */
-  labels?: Record<string, string>
 }
 
 /** Volume handle info from the database. */

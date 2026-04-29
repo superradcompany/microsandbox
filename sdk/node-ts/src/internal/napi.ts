@@ -1,8 +1,4 @@
 import { createRequire } from "node:module";
-import type { LogLevel } from "../log-level.js";
-import type { Action, Direction, Protocol } from "../policy/types.js";
-import type { PullPolicy } from "../pull-policy.js";
-import type { ViolationAction } from "../violation-action.js";
 import { msbPath } from "./resolve-binary.js";
 
 // Make the bundled msb visible to the Rust binding. `MSB_PATH` is the
@@ -21,11 +17,25 @@ const native = require("../../native/index.cjs") as NativeBindings;
 export const napi = native;
 
 // The native binding's true types are emitted into native/index.d.ts. We
-// don't import them directly to keep the TS surface independent of the
-// generated names; this hand-rolled subset documents what we actually call.
+// declare a hand-rolled subset of what the TS layer actually calls so we
+// can keep the FFI boundary cleanly typed without introducing a circular
+// dependency on the generated d.ts.
+
 export interface NativeBindings {
   readonly Sandbox: NapiSandboxStatic;
+  readonly SandboxBuilder: NapiSandboxBuilderCtor;
   readonly Volume: NapiVolumeStatic;
+  readonly VolumeBuilder: NapiVolumeBuilderCtor;
+  readonly ExecOptionsBuilder: NapiExecOptionsBuilderCtor;
+  readonly AttachOptionsBuilder: NapiAttachOptionsBuilderCtor;
+  readonly DnsBuilder: NapiBuilderCtor<NapiDnsBuilder>;
+  readonly TlsBuilder: NapiBuilderCtor<NapiTlsBuilder>;
+  readonly SecretBuilder: NapiBuilderCtor<NapiSecretBuilder>;
+  readonly NetworkBuilder: NapiBuilderCtor<NapiNetworkBuilder>;
+  readonly MountBuilder: new (guestPath: string) => NapiMountBuilder;
+  readonly PatchBuilder: NapiBuilderCtor<NapiPatchBuilder>;
+  readonly RegistryConfigBuilder: NapiBuilderCtor<NapiRegistryConfigBuilder>;
+  readonly ImageBuilder: NapiBuilderCtor<NapiImageBuilder>;
   readonly Setup: new () => NapiSetup;
   readonly imageGet: (reference: string) => Promise<NapiImageHandle>;
   readonly imageList: () => Promise<NapiImageInfo[]>;
@@ -38,9 +48,9 @@ export interface NativeBindings {
   readonly allSandboxMetrics: () => Promise<Record<string, NapiSandboxMetrics>>;
 }
 
+export type NapiBuilderCtor<T> = new () => T;
+
 export interface NapiSandboxStatic {
-  create(config: NapiSandboxConfig): Promise<NapiSandbox>;
-  createDetached(config: NapiSandboxConfig): Promise<NapiSandbox>;
   start(name: string): Promise<NapiSandbox>;
   startDetached(name: string): Promise<NapiSandbox>;
   get(name: string): Promise<NapiSandboxHandle>;
@@ -48,20 +58,68 @@ export interface NapiSandboxStatic {
   remove(name: string): Promise<void>;
 }
 
+export type NapiSandboxBuilderCtor = new (name: string) => NapiSandboxBuilder;
+
+/** The auto-generated native SandboxBuilder class. Each setter mutates
+ * in place and returns `this`; closure-callback sub-builders are typed
+ * loosely as `(b: any) => any` here because their full type is the
+ * generated one in `native/index.d.ts`. The TS public surface
+ * (`Sandbox.builder(...)`) re-types this with the real shapes. */
+export interface NapiSandboxBuilder {
+  image(s: string): this;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  imageWith(configure: (b: any) => any): this;
+  cpus(n: number): this;
+  memory(mib: number): this;
+  logLevel(level: string): this;
+  quietLogs(): this;
+  workdir(path: string): this;
+  shell(shell: string): this;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  registry(configure: (b: any) => any): this;
+  replace(): this;
+  entrypoint(cmd: string[]): this;
+  hostname(name: string): this;
+  libkrunfwPath(path: string): this;
+  user(user: string): this;
+  pullPolicy(policy: string): this;
+  disableNetwork(): this;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  network(configure: (b: any) => any): this;
+  port(host: number, guest: number): this;
+  portUdp(host: number, guest: number): this;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  secret(configure: (b: any) => any): this;
+  secretEnv(envVar: string, value: string, allowedHost: string): this;
+  env(key: string, value: string): this;
+  envs(vars: Record<string, string>): this;
+  rlimit(resource: string, limit: number): this;
+  rlimitRange(resource: string, soft: number, hard: number): this;
+  script(name: string, content: string): this;
+  scripts(scripts: Record<string, string>): this;
+  maxDuration(secs: number): this;
+  idleTimeout(secs: number): this;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  volume(guest: string, configure: (b: any) => any): this;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  patch(configure: (b: any) => any): this;
+  build(): string;
+  create(): Promise<NapiSandbox>;
+  createDetached(): Promise<NapiSandbox>;
+}
+
 export interface NapiSandbox {
-  readonly name: Promise<string>;
-  readonly ownsLifecycle: Promise<boolean>;
   exec(cmd: string, args?: string[]): Promise<NapiExecOutput>;
-  execWithConfig(config: NapiExecConfig): Promise<NapiExecOutput>;
+  execWithBuilder(cmd: string, builder: NapiExecOptionsBuilder): Promise<NapiExecOutput>;
   execStream(cmd: string, args?: string[]): Promise<NapiExecHandle>;
-  execStreamWithConfig(config: NapiExecConfig): Promise<NapiExecHandle>;
+  execStreamWithBuilder(cmd: string, builder: NapiExecOptionsBuilder): Promise<NapiExecHandle>;
   shell(script: string): Promise<NapiExecOutput>;
   shellStream(script: string): Promise<NapiExecHandle>;
   fs(): NapiSandboxFs;
   metrics(): Promise<NapiSandboxMetrics>;
   metricsStream(intervalMs: number): Promise<NapiMetricsStream>;
   attach(cmd: string, args?: string[]): Promise<number>;
-  attachWithConfig(config: NapiAttachConfig): Promise<number>;
+  attachWithBuilder(cmd: string, builder: NapiAttachOptionsBuilder): Promise<number>;
   attachShell(): Promise<number>;
   stop(): Promise<void>;
   stopAndWait(): Promise<NapiExitStatus>;
@@ -96,10 +154,17 @@ export interface NapiSandboxInfo {
 }
 
 export interface NapiVolumeStatic {
-  create(config: NapiVolumeConfig): Promise<NapiVolume>;
   get(name: string): Promise<NapiVolumeHandle>;
   list(): Promise<NapiVolumeInfo[]>;
   remove(name: string): Promise<void>;
+}
+
+export type NapiVolumeBuilderCtor = new (name: string) => NapiVolumeBuilder;
+
+export interface NapiVolumeBuilder {
+  quota(mib: number): this;
+  label(key: string, value: string): this;
+  create(): Promise<NapiVolume>;
 }
 
 export interface NapiVolume {
@@ -141,6 +206,14 @@ export interface NapiVolumeFsReadStream extends AsyncIterable<Buffer> {
 export interface NapiVolumeFsWriteSink {
   write(data: Buffer): Promise<void>;
   close(): Promise<void>;
+}
+
+export interface NapiVolumeInfo {
+  readonly name: string;
+  readonly quotaMib: number | null | undefined;
+  readonly usedBytes: number;
+  readonly labels: Record<string, string>;
+  readonly createdAt: number | null | undefined;
 }
 
 export interface NapiImageHandle {
@@ -198,15 +271,7 @@ export interface NapiSetup {
   install(): Promise<void>;
 }
 
-export interface NapiVolumeInfo {
-  readonly name: string;
-  readonly quotaMib: number | null | undefined;
-  readonly usedBytes: number;
-  readonly labels: Record<string, string>;
-  readonly createdAt: number | null | undefined;
-}
-
-export interface NapiExecHandle extends AsyncIterable<NapiSandboxMetrics> {
+export interface NapiExecHandle extends AsyncIterable<NapiExecEvent> {
   readonly id: Promise<string>;
   recv(): Promise<NapiExecEvent | null>;
   takeStdin(): Promise<NapiExecSink | null>;
@@ -303,143 +368,169 @@ export interface NapiMetricsStream extends AsyncIterable<NapiSandboxMetrics> {
   recv(): Promise<NapiSandboxMetrics | null>;
 }
 
-export interface NapiSandboxConfig {
-  name: string;
-  image: string;
-  memoryMib?: number;
-  cpus?: number;
-  workdir?: string;
-  shell?: string;
-  entrypoint?: string[];
-  cmd?: string[];
-  hostname?: string;
-  libkrunfwPath?: string;
-  user?: string;
-  env?: Record<string, string>;
-  scripts?: Record<string, string>;
-  volumes?: Record<string, NapiMountConfig>;
-  patches?: NapiPatchConfig[];
-  pullPolicy?: PullPolicy;
-  logLevel?: LogLevel;
-  replace?: boolean;
-  quietLogs?: boolean;
-  labels?: Record<string, string>;
-  stopSignal?: string;
-  maxDurationSecs?: number;
-  registry?: NapiRegistryConfig;
-  ports?: Record<string, number>;
-  network?: NapiNetworkConfig;
-  secrets?: NapiSecretEntry[];
+// Builder classes — opaque from the TS layer's POV. Setters return
+// `this`. The full method shapes are in `native/index.d.ts`; we use
+// loose typing here to keep this file decoupled from the generated d.ts.
+
+export type NapiExecOptionsBuilderCtor = new () => NapiExecOptionsBuilder;
+export interface NapiExecOptionsBuilder {
+  arg(arg: string): this;
+  args(args: string[]): this;
+  cwd(cwd: string): this;
+  user(user: string): this;
+  env(key: string, value: string): this;
+  envs(vars: Record<string, string>): this;
+  timeout(ms: number): this;
+  stdinNull(): this;
+  stdinPipe(): this;
+  stdinBytes(data: Buffer): this;
+  tty(enabled: boolean): this;
+  rlimit(resource: string, limit: number): this;
+  rlimitRange(resource: string, soft: number, hard: number): this;
 }
 
-export interface NapiMountConfig {
-  bind?: string;
-  named?: string;
-  tmpfs?: boolean;
-  disk?: string;
-  format?: "qcow2" | "raw" | "vmdk";
-  fstype?: string;
-  readonly?: boolean;
-  sizeMib?: number;
+export type NapiAttachOptionsBuilderCtor = new () => NapiAttachOptionsBuilder;
+export interface NapiAttachOptionsBuilder {
+  arg(arg: string): this;
+  args(args: string[]): this;
+  cwd(cwd: string): this;
+  user(user: string): this;
+  env(key: string, value: string): this;
+  envs(vars: Record<string, string>): this;
+  detachKeys(spec: string): this;
+  rlimit(resource: string, limit: number): this;
+  rlimitRange(resource: string, soft: number, hard: number): this;
 }
 
-export interface NapiPatchConfig {
-  kind: string;
-  path?: string;
-  content?: string;
-  src?: string;
-  dst?: string;
-  target?: string;
-  link?: string;
-  mode?: number;
-  replace?: boolean;
-}
-
-export interface NapiRegistryConfig {
-  auth?: { username: string; password: string };
-  insecure?: boolean;
-  caCertsPath?: string;
-}
-
-export interface NapiNetworkConfig {
-  policy?: string;
-  rules?: NapiPolicyRule[];
-  defaultEgress?: Action;
-  defaultIngress?: Action;
-  dns?: NapiDnsConfig;
-  tls?: NapiTlsConfig;
-  maxConnections?: number;
-  trustHostCas?: boolean;
-}
-
-export interface NapiPolicyRule {
-  action: Action;
-  direction?: Direction;
-  destination?: string;
-  protocol?: Protocol;
-  protocols?: Protocol[];
-  port?: string;
-  ports?: string[];
+export interface NapiDnsBuilder {
+  blockDomain(domain: string): this;
+  blockDomainSuffix(suffix: string): this;
+  rebindProtection(enabled: boolean): this;
+  nameservers(servers: string[]): this;
+  queryTimeoutMs(ms: number): this;
+  build(): NapiDnsConfig;
 }
 
 export interface NapiDnsConfig {
-  blockDomains?: string[];
-  blockDomainSuffixes?: string[];
-  rebindProtection?: boolean;
-  nameservers?: string[];
-  queryTimeoutMs?: number;
+  readonly blockedDomains: string[];
+  readonly blockedSuffixes: string[];
+  readonly rebindProtection: boolean;
+  readonly nameservers: string[];
+  readonly queryTimeoutMs: number;
+}
+
+export interface NapiTlsBuilder {
+  bypass(pattern: string): this;
+  verifyUpstream(verify: boolean): this;
+  interceptedPorts(ports: number[]): this;
+  blockQuic(block: boolean): this;
+  upstreamCaCert(path: string): this;
+  interceptCaCert(path: string): this;
+  interceptCaKey(path: string): this;
+  build(): NapiTlsConfig;
 }
 
 export interface NapiTlsConfig {
-  bypass?: string[];
-  verifyUpstream?: boolean;
-  interceptedPorts?: number[];
-  blockQuic?: boolean;
-  interceptCaCert?: string;
-  interceptCaKey?: string;
-  upstreamCaCert?: string[];
+  readonly enabled: boolean;
+  readonly bypass: string[];
+  readonly verifyUpstream: boolean;
+  readonly interceptedPorts: number[];
+  readonly blockQuic: boolean;
+  readonly upstreamCaCertPaths: string[];
+  readonly interceptCaCertPath: string | null;
+  readonly interceptCaKeyPath: string | null;
+}
+
+export interface NapiSecretBuilder {
+  env(varName: string): this;
+  value(value: string): this;
+  placeholder(placeholder: string): this;
+  allowHost(host: string): this;
+  allowHostPattern(pattern: string): this;
+  allowAnyHostDangerous(iUnderstand: boolean): this;
+  requireTlsIdentity(enabled: boolean): this;
+  injectHeaders(enabled: boolean): this;
+  injectBasicAuth(enabled: boolean): this;
+  injectQuery(enabled: boolean): this;
+  injectBody(enabled: boolean): this;
+  build(): NapiSecretEntry;
 }
 
 export interface NapiSecretEntry {
-  envVar: string;
-  value: string;
-  allowHosts?: string[];
-  allowHostPatterns?: string[];
-  placeholder?: string;
-  requireTls?: boolean;
-  onViolation?: ViolationAction;
-  inject?: NapiSecretInjection;
+  readonly envVar: string;
+  readonly value: string;
+  readonly placeholder: string;
+  readonly allowedHosts: string[];
+  readonly allowedHostPatterns: string[];
+  readonly allowAnyHost: boolean;
+  readonly requireTlsIdentity: boolean;
+  readonly injection: NapiSecretInjection;
 }
 
 export interface NapiSecretInjection {
-  headers?: boolean;
-  basicAuth?: boolean;
-  queryParams?: boolean;
-  body?: boolean;
+  readonly headers: boolean;
+  readonly basicAuth: boolean;
+  readonly queryParams: boolean;
+  readonly body: boolean;
 }
 
-export interface NapiExecConfig {
-  cmd: string;
-  args?: string[];
-  cwd?: string;
-  user?: string;
-  env?: Record<string, string>;
-  timeoutMs?: number;
-  stdin?: string;
-  tty?: boolean;
+export interface NapiNetworkBuilder {
+  enabled(enabled: boolean): this;
+  port(host: number, guest: number): this;
+  portUdp(host: number, guest: number): this;
+  policyJson(json: string): this;
+  dns(configure: (b: NapiDnsBuilder) => NapiDnsBuilder): this;
+  tls(configure: (b: NapiTlsBuilder) => NapiTlsBuilder): this;
+  secret(configure: (b: NapiSecretBuilder) => NapiSecretBuilder): this;
+  secretEnv(envVar: string, value: string, placeholder: string, allowedHost: string): this;
+  onSecretViolation(action: string): this;
+  maxConnections(max: number): this;
+  trustHostCAs(enabled: boolean): this;
 }
 
-export interface NapiAttachConfig {
-  cmd: string;
-  args?: string[];
-  cwd?: string;
-  user?: string;
-  env?: Record<string, string>;
-  detachKeys?: string;
+export interface NapiMountBuilder {
+  bind(host: string): this;
+  named(name: string): this;
+  tmpfs(): this;
+  disk(host: string): this;
+  format(format: string): this;
+  fstype(fstype: string): this;
+  readonly(): this;
+  size(mib: number): this;
 }
 
-export interface NapiVolumeConfig {
-  name: string;
-  quotaMib?: number;
-  labels?: Record<string, string>;
+export interface NapiPatchBuilder {
+  text(path: string, content: string, opts?: { mode?: number; replace?: boolean }): this;
+  file(path: string, content: Buffer, opts?: { mode?: number; replace?: boolean }): this;
+  copyFile(src: string, dst: string, opts?: { mode?: number; replace?: boolean }): this;
+  copyDir(src: string, dst: string, opts?: { replace?: boolean }): this;
+  symlink(target: string, link: string, opts?: { replace?: boolean }): this;
+  mkdir(path: string, opts?: { mode?: number }): this;
+  remove(path: string): this;
+  append(path: string, content: string): this;
+  build(): NapiBuiltPatch[];
+}
+
+export interface NapiBuiltPatch {
+  readonly kind: string;
+  readonly path?: string;
+  readonly src?: string;
+  readonly dst?: string;
+  readonly target?: string;
+  readonly link?: string;
+  readonly content?: string;
+  readonly contentBytes?: Buffer;
+  readonly mode?: number;
+  readonly replace?: boolean;
+}
+
+export interface NapiRegistryConfigBuilder {
+  auth(auth: { kind: string; username?: string; password?: string }): this;
+  insecure(): this;
+  caCerts(pem: Buffer): this;
+}
+
+export interface NapiImageBuilder {
+  disk(path: string): this;
+  fstype(fstype: string): this;
 }

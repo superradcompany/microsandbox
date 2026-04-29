@@ -1,54 +1,74 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
-import { napi } from "./internal/napi.js";
-import type { NapiSandbox } from "./internal/napi.js";
+import {
+  napi,
+  type NapiAttachOptionsBuilder,
+  type NapiExecOptionsBuilder,
+  type NapiSandbox,
+  type NapiSandboxBuilder,
+} from "./internal/napi.js";
 import { ExecHandle, ExecOutput } from "./exec.js";
 import { SandboxFs } from "./fs.js";
-import {
-  ExecOptionsBuilder,
-  execOptionsToNapi,
-} from "./exec-options-builder.js";
-import {
-  AttachOptionsBuilder,
-  attachOptionsToNapi,
-} from "./attach-options-builder.js";
 import type { ExitStatus } from "./exit-status.js";
-import { SandboxBuilder } from "./sandbox-builder.js";
 import { SandboxHandle, sandboxInfoToHandle } from "./sandbox-handle.js";
 import type { SandboxMetrics } from "./metrics.js";
 import { metricsFromNapi } from "./internal/metrics.js";
 import { MetricsStream } from "./metrics-stream.js";
-import type { SandboxConfig } from "./sandbox-config.js";
+
+/**
+ * Fluent builder for a sandbox. Returned by `Sandbox.builder(name)`.
+ *
+ * The instance IS the napi-rs `SandboxBuilder` class — every setter is a
+ * native call, no TS-side reimplementation. Only the terminal `create()`
+ * / `createDetached()` methods are wrapped here so they return a TS
+ * `Sandbox` (which adds `Symbol.asyncDispose`, error-mapping, and a few
+ * sync getters on top of the native handle).
+ */
+export type SandboxBuilder = Omit<
+  NapiSandboxBuilder,
+  "create" | "createDetached"
+> & {
+  create(): Promise<Sandbox>;
+  createDetached(): Promise<Sandbox>;
+};
 
 export class Sandbox implements AsyncDisposable {
   /** @internal */
   readonly inner: NapiSandbox;
   readonly name: string;
-  readonly config: Readonly<SandboxConfig>;
   readonly ownsLifecycle: boolean;
 
   /** @internal use `Sandbox.builder(name).create()` */
-  constructor(
-    inner: NapiSandbox,
-    name: string,
-    config: SandboxConfig,
-    ownsLifecycle = true,
-  ) {
+  constructor(inner: NapiSandbox, name: string, ownsLifecycle = true) {
     this.inner = inner;
     this.name = name;
-    this.config = Object.freeze(config);
     this.ownsLifecycle = ownsLifecycle;
   }
 
   // -- statics ------------------------------------------------------------
 
+  /** Begin building a new sandbox. */
   static builder(name: string): SandboxBuilder {
-    return new SandboxBuilder(name);
+    const nb = new napi.SandboxBuilder(name);
+    const origCreate = nb.create.bind(nb);
+    const origCreateDetached = nb.createDetached.bind(nb);
+    // Override the terminals so they return a TS Sandbox.
+    (nb as unknown as { create: () => Promise<Sandbox> }).create = async () => {
+      const inner = await withMappedErrors(() => origCreate());
+      return new Sandbox(inner, name, /*ownsLifecycle*/ true);
+    };
+    (
+      nb as unknown as { createDetached: () => Promise<Sandbox> }
+    ).createDetached = async () => {
+      const inner = await withMappedErrors(() => origCreateDetached());
+      return new Sandbox(inner, name, /*ownsLifecycle*/ false);
+    };
+    return nb as unknown as SandboxBuilder;
   }
 
   /** Resume an existing stopped sandbox in attached mode. */
   static async start(name: string): Promise<Sandbox> {
     const inner = await withMappedErrors(() => napi.Sandbox.start(name));
-    return Sandbox.fromConnected(inner, name, /*ownsLifecycle*/ true);
+    return new Sandbox(inner, name, /*ownsLifecycle*/ true);
   }
 
   /** Resume an existing stopped sandbox in detached mode. */
@@ -56,7 +76,7 @@ export class Sandbox implements AsyncDisposable {
     const inner = await withMappedErrors(() =>
       napi.Sandbox.startDetached(name),
     );
-    return Sandbox.fromConnected(inner, name, /*ownsLifecycle*/ false);
+    return new Sandbox(inner, name, /*ownsLifecycle*/ false);
   }
 
   /** Look up a database handle for an existing sandbox. */
@@ -76,47 +96,6 @@ export class Sandbox implements AsyncDisposable {
     await withMappedErrors(() => napi.Sandbox.remove(name));
   }
 
-  private static async fromConnected(
-    inner: NapiSandbox,
-    name: string,
-    ownsLifecycle: boolean,
-  ): Promise<Sandbox> {
-    // We don't have a `SandboxConfig` for a sandbox we didn't build —
-    // expose a minimal placeholder. Calling `.config` returns this stub;
-    // consumers wanting full config should round-trip through `Sandbox.get(name).config()`
-    // when that returns the parsed shape.
-    const placeholder: SandboxConfig = {
-      name,
-      image: { kind: "oci", reference: "" },
-      cpus: null,
-      memoryMib: null,
-      logLevel: null,
-      quietLogs: false,
-      workdir: null,
-      shell: null,
-      entrypoint: null,
-      cmd: null,
-      hostname: null,
-      user: null,
-      libkrunfwPath: null,
-      env: [],
-      scripts: [],
-      mounts: [],
-      patches: [],
-      pullPolicy: null,
-      replace: false,
-      maxDurationSecs: null,
-      idleTimeoutSecs: null,
-      portsTcp: [],
-      portsUdp: [],
-      registry: null,
-      network: null,
-      disableNetwork: false,
-      secrets: [],
-    };
-    return new Sandbox(inner, name, placeholder, ownsLifecycle);
-  }
-
   // -- exec ---------------------------------------------------------------
 
   async exec(cmd: string, args?: Iterable<string>): Promise<ExecOutput> {
@@ -127,19 +106,16 @@ export class Sandbox implements AsyncDisposable {
 
   async execWith(
     cmd: string,
-    configure: (b: ExecOptionsBuilder) => ExecOptionsBuilder,
+    configure: (b: NapiExecOptionsBuilder) => NapiExecOptionsBuilder,
   ): Promise<ExecOutput> {
-    const opts = configure(new ExecOptionsBuilder()).build();
+    const builder = configure(new napi.ExecOptionsBuilder());
     const raw = await withMappedErrors(() =>
-      this.inner.execWithConfig(execOptionsToNapi(cmd, opts)),
+      this.inner.execWithBuilder(cmd, builder),
     );
     return new ExecOutput(raw);
   }
 
-  async execStream(
-    cmd: string,
-    args?: Iterable<string>,
-  ): Promise<ExecHandle> {
+  async execStream(cmd: string, args?: Iterable<string>): Promise<ExecHandle> {
     const argv = args ? Array.from(args) : undefined;
     const raw = await withMappedErrors(() =>
       this.inner.execStream(cmd, argv),
@@ -149,11 +125,11 @@ export class Sandbox implements AsyncDisposable {
 
   async execStreamWith(
     cmd: string,
-    configure: (b: ExecOptionsBuilder) => ExecOptionsBuilder,
+    configure: (b: NapiExecOptionsBuilder) => NapiExecOptionsBuilder,
   ): Promise<ExecHandle> {
-    const opts = configure(new ExecOptionsBuilder()).build();
+    const builder = configure(new napi.ExecOptionsBuilder());
     const raw = await withMappedErrors(() =>
-      this.inner.execStreamWithConfig(execOptionsToNapi(cmd, opts)),
+      this.inner.execStreamWithBuilder(cmd, builder),
     );
     return new ExecHandle(raw);
   }
@@ -177,11 +153,11 @@ export class Sandbox implements AsyncDisposable {
 
   async attachWith(
     cmd: string,
-    configure: (b: AttachOptionsBuilder) => AttachOptionsBuilder,
+    configure: (b: NapiAttachOptionsBuilder) => NapiAttachOptionsBuilder,
   ): Promise<number> {
-    const opts = configure(new AttachOptionsBuilder()).build();
+    const builder = configure(new napi.AttachOptionsBuilder());
     return await withMappedErrors(() =>
-      this.inner.attachWithConfig(attachOptionsToNapi(cmd, opts)),
+      this.inner.attachWithBuilder(cmd, builder),
     );
   }
 

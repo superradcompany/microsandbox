@@ -1,30 +1,17 @@
+import { napi } from "./internal/napi.js";
+
 // Sandbox lifecycle and execution
 export { Sandbox } from "./sandbox.js";
-export { SandboxBuilder } from "./sandbox-builder.js";
+export type { SandboxBuilder } from "./sandbox.js";
 export { SandboxHandle } from "./sandbox-handle.js";
-export type { SandboxConfig } from "./sandbox-config.js";
 export { ExecHandle, ExecOutput, ExecSink } from "./exec.js";
-export { ExecOptionsBuilder } from "./exec-options-builder.js";
-export type { ExecOptions } from "./exec-options-builder.js";
-export { AttachOptionsBuilder } from "./attach-options-builder.js";
-export type { AttachOptions } from "./attach-options-builder.js";
-export { MountBuilder } from "./mount-builder.js";
-export { PatchBuilder } from "./patch-builder.js";
-export type {
-  PatchFileOptions,
-  PatchModeOnly,
-  PatchReplaceOnly,
-} from "./patch-builder.js";
-export { RegistryConfigBuilder } from "./registry-config-builder.js";
-export type { RegistryConfig } from "./registry-config-builder.js";
 
 // Filesystem
 export { FsReadStream, FsWriteSink, SandboxFs } from "./fs.js";
 
 // Volumes
 export { Volume } from "./volume.js";
-export { VolumeBuilder } from "./volume-builder.js";
-export type { VolumeConfig } from "./volume-builder.js";
+export type { VolumeBuilder } from "./volume.js";
 export { VolumeHandle } from "./volume-handle.js";
 export {
   VolumeFs,
@@ -43,19 +30,52 @@ export type {
 // Metrics streaming
 export { MetricsStream } from "./metrics-stream.js";
 
-// Networking
-export { NetworkBuilder } from "./network-builder.js";
-export { DnsBuilder } from "./dns-builder.js";
-export { TlsBuilder } from "./tls-builder.js";
-export { SecretBuilder } from "./secret-builder.js";
-export type {
-  DnsConfig,
-  NetworkConfig,
-  PublishedPort,
-  SecretEntry,
-  SecretInjection,
-  TlsConfig,
-} from "./network-config.js";
+// Native fluent builders. The classes themselves live in the napi-rs
+// binding (`native/index.cjs`); the TS layer just re-exports them so
+// `import { DnsBuilder } from "microsandbox"` keeps working.
+
+// Attach a JS-side `policy(NetworkPolicy)` method to the native
+// `NetworkBuilder.prototype` so callers can pass the plain
+// `NetworkPolicy` object produced by `NetworkPolicy.publicOnly()` /
+// `.allowAll()` / `.none()` / `.nonLocal()` and the custom-rule
+// factories. Native exposes `policyJson(string)`; this shim
+// serializes once.
+{
+  // The TS-side `NetworkPolicy` object uses camelCase (`defaultEgress`,
+  // `defaultIngress`); the Rust struct it deserializes into expects
+  // snake_case. Convert known top-level keys before serializing.
+  const camelToSnake = (k: string): string =>
+    k.replace(/[A-Z]/g, (c) => "_" + c.toLowerCase());
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const remapKeys = (v: any): any => {
+    if (Array.isArray(v)) return v.map(remapKeys);
+    if (v && typeof v === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(v)) out[camelToSnake(k)] = remapKeys(val);
+      return out;
+    }
+    return v;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const proto: any = napi.NetworkBuilder.prototype;
+  if (!proto.policy) {
+    proto.policy = function (p: unknown) {
+      this.policyJson(JSON.stringify(remapKeys(p)));
+      return this;
+    };
+  }
+}
+
+export const DnsBuilder = napi.DnsBuilder;
+export const TlsBuilder = napi.TlsBuilder;
+export const SecretBuilder = napi.SecretBuilder;
+export const NetworkBuilder = napi.NetworkBuilder;
+export const MountBuilder = napi.MountBuilder;
+export const PatchBuilder = napi.PatchBuilder;
+export const RegistryConfigBuilder = napi.RegistryConfigBuilder;
+export const ImageBuilder = napi.ImageBuilder;
+export const ExecOptionsBuilder = napi.ExecOptionsBuilder;
+export const AttachOptionsBuilder = napi.AttachOptionsBuilder;
 
 // Setup + module-level helpers
 export { Setup, install, isInstalled, setup } from "./setup.js";
