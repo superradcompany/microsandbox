@@ -317,6 +317,46 @@ export declare class MountBuilder {
 }
 export type JsMountBuilder = MountBuilder
 
+/** Fluent builder for sandbox network configuration. */
+export declare class NetworkBuilder {
+  constructor()
+  /** Enable or disable networking. */
+  enabled(enabled: boolean): this
+  /** Publish a TCP port. */
+  port(hostPort: number, guestPort: number): this
+  /** Publish a UDP port. */
+  portUdp(hostPort: number, guestPort: number): this
+  /**
+   * Set a policy. Construct via the JS-side `NetworkPolicy.publicOnly()`
+   * / `.allowAll()` / `.none()` / `.nonLocal()` factories or build a
+   * custom one and pass it through `JSON.stringify`-friendly JSON. Here
+   * we accept the canonical serialized form (a JSON string) to avoid
+   * re-modeling the rule schema across the FFI; Phase 7 reconciles.
+   */
+  policyJson(json: string): this
+  /**
+   * Configure DNS interception via a callback. The callback receives
+   * a fresh `DnsBuilder`; chain setters on it and return.
+   */
+  dns(configure: (arg: DnsBuilder) => DnsBuilder): this
+  /** Configure TLS interception via a callback. */
+  tls(configure: (arg: JsTlsBuilder) => JsTlsBuilder): this
+  /** Add a secret via a callback. */
+  secret(configure: (arg: JsSecretBuilder) => JsSecretBuilder): this
+  /** 4-arg shorthand: add a secret with explicit placeholder. */
+  secretEnv(envVar: string, value: string, placeholder: string, allowedHost: string): this
+  /**
+   * Set the violation action for secrets: `"block" | "block-and-log"
+   * | "block-and-terminate"`.
+   */
+  onSecretViolation(action: string): this
+  /** Set the maximum number of concurrent connections. */
+  maxConnections(max: number): this
+  /** Trust the host's root CAs inside the guest. Default: false. */
+  trustHostCAs(enabled: boolean): this
+}
+export type JsNetworkBuilder = NetworkBuilder
+
 /**
  * Factory for creating rootfs patch configurations.
  *

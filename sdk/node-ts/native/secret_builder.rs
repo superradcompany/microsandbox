@@ -165,7 +165,17 @@ impl JsSecretBuilder {
             .expect("SecretBuilder used after .build() consumed it")
     }
 
+    /// Internal: extract the underlying Rust builder. Used by
+    /// `NetworkBuilder.secret()` to route through the core SDK closure.
+    #[allow(dead_code)]
+    pub(crate) fn take_inner_builder(&mut self) -> Result<RustSecretBuilder> {
+        self.inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("SecretBuilder already consumed"))
+    }
+
     /// Internal: extract the built `SecretEntry`. Used by parent builders.
+    #[allow(dead_code)]
     pub(crate) fn take_built(&mut self) -> Result<RustSecretEntry> {
         let b = self.inner.take().ok_or_else(|| {
             napi::Error::from_reason("SecretBuilder.build() called more than once")

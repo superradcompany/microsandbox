@@ -16,6 +16,7 @@ mod image;
 mod image_builder;
 mod metrics;
 mod mount_builder;
+mod network_builder;
 mod patch_builder;
 mod registry_builder;
 mod sandbox;

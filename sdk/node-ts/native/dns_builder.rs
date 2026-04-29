@@ -119,4 +119,13 @@ impl JsDnsBuilder {
             .take()
             .expect("DnsBuilder used after .build() consumed it")
     }
+
+    /// Internal: extract the underlying Rust builder. Used by
+    /// `NetworkBuilder.dns()` to route through the core SDK closure.
+    #[allow(dead_code)]
+    pub(crate) fn take_inner_builder(&mut self) -> Result<RustDnsBuilder> {
+        self.inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("DnsBuilder already consumed"))
+    }
 }

@@ -118,7 +118,17 @@ impl JsTlsBuilder {
             .expect("TlsBuilder used after .build() consumed it")
     }
 
+    /// Internal: extract the underlying Rust builder. Used by
+    /// `NetworkBuilder.tls()` to route through the core SDK closure.
+    #[allow(dead_code)]
+    pub(crate) fn take_inner_builder(&mut self) -> Result<RustTlsBuilder> {
+        self.inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("TlsBuilder already consumed"))
+    }
+
     /// Internal: extract the built `TlsConfig`. Used by `NetworkBuilder.tls()`.
+    #[allow(dead_code)]
     pub(crate) fn take_built(&mut self) -> Result<RustTlsConfig> {
         let b = self
             .inner
