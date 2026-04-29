@@ -21,19 +21,9 @@ export declare class AttachOptionsBuilder {
 }
 export type JsAttachOptionsBuilder = AttachOptionsBuilder
 
-/**
- * Fluent builder for DNS interception settings.
- *
- * Mirrors `microsandbox_network::builder::DnsBuilder` 1:1; setters
- * mutate in place and return `this`. Errors from invalid block-domain
- * strings accumulate and surface from the terminal `.build()` call.
- */
+/** Fluent builder for DNS interception settings. */
 export declare class DnsBuilder {
   constructor()
-  /** Block a specific FQDN (returns REFUSED at the resolver). */
-  blockDomain(domain: string): this
-  /** Block any name ending in `suffix`. */
-  blockDomainSuffix(suffix: string): this
   /** Enable or disable DNS rebinding protection. Default: true. */
   rebindProtection(enabled: boolean): this
   /**
@@ -44,11 +34,7 @@ export declare class DnsBuilder {
   nameservers(servers: Array<string>): this
   /** Set the per-query timeout in milliseconds. Default: 5000. */
   queryTimeoutMs(ms: number): this
-  /**
-   * Materialize the accumulated state into a `DnsConfig`. Surfaces
-   * the first invalid-domain error accumulated by `blockDomain` /
-   * `blockDomainSuffix`, if any.
-   */
+  /** Materialize the accumulated state into a `DnsConfig`. */
   build(): DnsConfig
 }
 export type JsDnsBuilder = DnsBuilder
@@ -1038,8 +1024,6 @@ export interface AttachOptions {
 
 /** DNS interception configuration produced by `DnsBuilder.build()`. */
 export interface DnsConfig {
-  blockedDomains: Array<string>
-  blockedSuffixes: Array<string>
   rebindProtection: boolean
   /**
    * Nameservers serialized as their parse-roundtrippable string form

@@ -442,8 +442,6 @@ fn apply_network_opts(
         || opts.on_secret_violation.is_some();
 
     if has_network_config {
-        let dns_block_domain = opts.dns_block_domain.clone();
-        let dns_block_suffix = opts.dns_block_suffix.clone();
         let no_dns_rebind = opts.no_dns_rebind_protection;
         let dns_nameservers = opts
             .dns_nameserver
@@ -455,6 +453,8 @@ fn apply_network_opts(
             &opts.net_rule,
             opts.net_default_egress.as_deref(),
             opts.net_default_ingress.as_deref(),
+            &opts.dns_block_domain,
+            &opts.dns_block_suffix,
         )?;
         let max_conn = opts.max_connections;
         let trust_host_cas = opts.trust_host_cas;
@@ -468,19 +468,10 @@ fn apply_network_opts(
         let violation_action = parse_violation_action(&opts.on_secret_violation)?;
 
         builder = builder.network(move |mut n| {
-            let has_dns = !dns_block_domain.is_empty()
-                || !dns_block_suffix.is_empty()
-                || no_dns_rebind
-                || !dns_nameservers.is_empty()
-                || dns_query_timeout_ms.is_some();
+            let has_dns =
+                no_dns_rebind || !dns_nameservers.is_empty() || dns_query_timeout_ms.is_some();
             if has_dns {
                 n = n.dns(move |mut d| {
-                    for domain in &dns_block_domain {
-                        d = d.block_domain(domain);
-                    }
-                    for suffix in &dns_block_suffix {
-                        d = d.block_domain_suffix(suffix);
-                    }
                     if no_dns_rebind {
                         d = d.rebind_protection(false);
                     }
@@ -567,10 +558,17 @@ pub fn parse_duration_secs(s: &str) -> anyhow::Result<u64> {
     }
 }
 
-/// Assemble a [`NetworkPolicy`] from the new `--net-rule` /
-/// `--net-default-egress` / `--net-default-ingress` flag set, or
-/// `None` if no flag was set (caller falls back to the sandbox
-/// default).
+/// Assemble a [`NetworkPolicy`] from `--net-rule` / `--net-default-*`
+/// and the legacy `--dns-block-domain` / `--dns-block-suffix` flags.
+/// Returns `None` when no flag was set (caller falls back to the
+/// sandbox default).
+///
+/// `--dns-block-domain` and `--dns-block-suffix` are convenience
+/// shortcuts for `deny Domain(...)` / `deny DomainSuffix(...)` rules;
+/// they are prepended to the rule list so they take precedence over any
+/// later allow rules. When these are the only policy flags set, the
+/// defaults flip to Allow on egress to preserve the legacy "full
+/// network minus blocked domains" semantics.
 ///
 /// Multiple `--net-rule` invocations concatenate in argv order; tokens
 /// inside each value are comma-separated and likewise preserved.
@@ -579,16 +577,39 @@ fn build_network_policy(
     rule_args: &[String],
     default_egress: Option<&str>,
     default_ingress: Option<&str>,
+    dns_block_domain: &[String],
+    dns_block_suffix: &[String],
 ) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
-    use microsandbox_network::policy::{Action, NetworkPolicy};
+    use anyhow::Context;
+    use microsandbox_network::policy::{Action, Destination, DomainName, NetworkPolicy, Rule};
 
     use crate::net_rule::parse_rule_list;
 
-    if rule_args.is_empty() && default_egress.is_none() && default_ingress.is_none() {
+    let no_rule_flags =
+        rule_args.is_empty() && default_egress.is_none() && default_ingress.is_none();
+    let no_block_flags = dns_block_domain.is_empty() && dns_block_suffix.is_empty();
+    if no_rule_flags && no_block_flags {
         return Ok(None);
     }
 
     let mut rules = Vec::new();
+
+    // Prepend deny rules from --dns-block-domain / --dns-block-suffix
+    // so they take precedence over any later allow rules. The user's
+    // intent in writing these flags is unambiguous: refuse these names.
+    for d in dns_block_domain {
+        let domain: DomainName = d
+            .parse()
+            .with_context(|| format!("--dns-block-domain {d:?}"))?;
+        rules.push(Rule::deny_egress(Destination::Domain(domain)));
+    }
+    for s in dns_block_suffix {
+        let suffix: DomainName = s
+            .parse()
+            .with_context(|| format!("--dns-block-suffix {s:?}"))?;
+        rules.push(Rule::deny_egress(Destination::DomainSuffix(suffix)));
+    }
+
     for arg in rule_args {
         let parsed = parse_rule_list(arg).map_err(anyhow::Error::from)?;
         rules.extend(parsed);
@@ -604,9 +625,15 @@ fn build_network_policy(
 
     // When the user sets no defaults explicitly, preserve today's
     // asymmetric behavior: egress = Deny (rules open things);
-    // ingress = Allow (unfiltered published-port behavior).
+    // ingress = Allow (unfiltered published-port behavior). Exception:
+    // if only --dns-block-domain / --dns-block-suffix were set (no
+    // --net-rule, no --net-default-*), default egress flips to Allow so
+    // the rest of the network keeps working — these flags add deny
+    // entries on top of permissive defaults, mirroring the legacy
+    // DNS-only block list's lack of side effects on TCP egress.
     let default_egress = match default_egress {
         Some(raw) => parse_action("--net-default-egress", raw)?,
+        None if no_rule_flags => Action::Allow,
         None => Action::Deny,
     };
     let default_ingress = match default_ingress {

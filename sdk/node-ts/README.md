@@ -214,11 +214,15 @@ await using open = await Sandbox.builder("open")
   .network((n) => n.policy(NetworkPolicy.allowAll()))
   .create();
 
-// DNS filtering.
+// Domain filtering via policy rules.
 await using filtered = await Sandbox.builder("filtered")
   .image("alpine")
-  .network((n) => n.dns((d) =>
-    d.blockDomain("blocked.example.com").blockDomainSuffix(".evil.com"),
+  .network((n) => n.policy(
+    NetworkPolicy.builder()
+      .defaultAllow()
+      .denyDomain("blocked.example.com")
+      .denyDomainSuffix(".evil.com")
+      .build(),
   ))
   .create();
 

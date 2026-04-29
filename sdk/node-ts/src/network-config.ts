@@ -10,8 +10,6 @@ export interface PublishedPort {
 
 /** DNS interception configuration. */
 export interface DnsConfig {
-  readonly blockedDomains: readonly string[];
-  readonly blockedSuffixes: readonly string[];
   readonly nameservers: readonly string[];
   readonly rebindProtection: boolean | null;
   readonly queryTimeoutMs: number | null;

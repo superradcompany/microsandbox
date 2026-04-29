@@ -364,9 +364,45 @@ fn apply_network(
     mut builder: microsandbox::sandbox::SandboxBuilder,
     net: &Bound<'_, PyDict>,
 ) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+    // Pre-parse legacy `dns.blocked_domains` / `dns.blocked_suffixes`
+    // into deny-egress policy rules. They no longer flow through the
+    // DNS builder; instead they are prepended to whatever policy is
+    // selected so they take precedence over later allow rules.
+    let dns_deny_rules: Vec<microsandbox_network::policy::Rule> = if let Some(dns) =
+        net.get_item("dns")?
+        && !dns.is_none()
+    {
+        let dns = as_dict(&dns)?;
+        let mut rules = Vec::new();
+        if let Some(domains) = extract_opt::<Vec<String>>(&dns, "blocked_domains")? {
+            for d in domains {
+                let domain = d.parse().map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!("blocked_domains[{d:?}]: {e}"))
+                })?;
+                rules.push(microsandbox_network::policy::Rule::deny_egress(
+                    microsandbox_network::policy::Destination::Domain(domain),
+                ));
+            }
+        }
+        if let Some(suffixes) = extract_opt::<Vec<String>>(&dns, "blocked_suffixes")? {
+            for s in suffixes {
+                let suffix = s.parse().map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!("blocked_suffixes[{s:?}]: {e}"))
+                })?;
+                rules.push(microsandbox_network::policy::Rule::deny_egress(
+                    microsandbox_network::policy::Destination::DomainSuffix(suffix),
+                ));
+            }
+        }
+        rules
+    } else {
+        Vec::new()
+    };
+    let mut policy_set = false;
+
     // Check for preset policy string.
     if let Some(policy_str) = extract_opt::<String>(net, "policy")? {
-        let policy = match policy_str.as_str() {
+        let mut policy = match policy_str.as_str() {
             "none" => NetworkPolicy::none(),
             "public_only" | "public-only" => NetworkPolicy::public_only(),
             "allow_all" | "allow-all" => NetworkPolicy::allow_all(),
@@ -376,7 +412,11 @@ fn apply_network(
                 )));
             }
         };
+        let mut combined = dns_deny_rules.clone();
+        combined.extend(policy.rules);
+        policy.rules = combined;
         builder = builder.network(|n| n.policy(policy));
+        policy_set = true;
     }
 
     // Check for custom policy object.
@@ -526,22 +566,37 @@ fn apply_network(
             }
         }
 
+        let mut combined = dns_deny_rules.clone();
+        combined.extend(rules);
         let policy = NetworkPolicy {
             default_egress,
             default_ingress,
-            rules,
+            rules: combined,
+        };
+        builder = builder.network(|n| n.policy(policy));
+        policy_set = true;
+    }
+
+    // No preset / custom policy was specified, but legacy DNS block
+    // entries were. Use permissive defaults so the rest of the network
+    // keeps working — preserves the legacy "full network minus blocked
+    // domains" semantics.
+    if !policy_set && !dns_deny_rules.is_empty() {
+        let policy = NetworkPolicy {
+            default_egress: microsandbox_network::policy::Action::Allow,
+            default_ingress: microsandbox_network::policy::Action::Allow,
+            rules: dns_deny_rules,
         };
         builder = builder.network(|n| n.policy(policy));
     }
 
-    // DNS configuration (nested `dns` dict).
+    // DNS configuration (nested `dns` dict): rebind / nameservers /
+    // query timeout only — block lists are part of the policy now.
     if let Some(dns) = net.get_item("dns")?
         && !dns.is_none()
     {
         let dns = as_dict(&dns)?;
 
-        let block_domains = extract_opt::<Vec<String>>(&dns, "blocked_domains")?;
-        let block_suffixes = extract_opt::<Vec<String>>(&dns, "blocked_suffixes")?;
         let rebind = extract_opt::<bool>(&dns, "rebind_protection")?;
         let nameservers_raw = extract_opt::<Vec<String>>(&dns, "nameservers")?;
         let query_timeout_ms = extract_opt::<u64>(&dns, "query_timeout_ms")?;
@@ -553,30 +608,22 @@ fn apply_network(
             .collect::<Result<_, _>>()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
-        builder = builder.network(move |n| {
-            n.dns(move |mut d| {
-                if let Some(domains) = block_domains {
-                    for item in &domains {
-                        d = d.block_domain(item);
+        if rebind.is_some() || !nameservers.is_empty() || query_timeout_ms.is_some() {
+            builder = builder.network(move |n| {
+                n.dns(move |mut d| {
+                    if let Some(r) = rebind {
+                        d = d.rebind_protection(r);
                     }
-                }
-                if let Some(suffixes) = block_suffixes {
-                    for item in &suffixes {
-                        d = d.block_domain_suffix(item);
+                    if !nameservers.is_empty() {
+                        d = d.nameservers(nameservers);
                     }
-                }
-                if let Some(r) = rebind {
-                    d = d.rebind_protection(r);
-                }
-                if !nameservers.is_empty() {
-                    d = d.nameservers(nameservers);
-                }
-                if let Some(ms) = query_timeout_ms {
-                    d = d.query_timeout_ms(ms);
-                }
-                d
-            })
-        });
+                    if let Some(ms) = query_timeout_ms {
+                        d = d.query_timeout_ms(ms);
+                    }
+                    d
+                })
+            });
+        }
     }
 
     // Max connections.

@@ -1,22 +1,25 @@
-//! DNS filtering — block specific domains and suffixes.
+//! Domain filtering — block specific domains and suffixes via policy
+//! rules.
 //!
-//! Demonstrates the DNS interceptor's domain blocking. Blocked domains
-//! get a SERVFAIL response; allowed domains resolve normally.
+//! Demonstrates domain blocking through the network policy: blocked
+//! domains get REFUSED at the DNS forwarder; allowed domains resolve
+//! normally.
 
-use microsandbox::Sandbox;
+use microsandbox::{NetworkPolicy, Sandbox};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let policy = NetworkPolicy::builder()
+        .default_allow()
+        .rule(|r| r.egress().deny().domain("blocked.example.com"))
+        .rule(|r| r.egress().deny().domain_suffix(".evil.com"))
+        .build()?;
+
     let sandbox = Sandbox::builder("net-dns")
         .image("alpine")
         .cpus(1)
         .memory(512)
-        .network(|n| {
-            n.dns(|d| {
-                d.block_domain("blocked.example.com")
-                    .block_domain_suffix(".evil.com")
-            })
-        })
+        .network(|n| n.policy(policy))
         .replace()
         .create()
         .await?;

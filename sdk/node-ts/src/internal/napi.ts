@@ -426,8 +426,6 @@ export interface NapiAttachOptionsBuilder {
 }
 
 export interface NapiDnsBuilder {
-  blockDomain(domain: string): this;
-  blockDomainSuffix(suffix: string): this;
   rebindProtection(enabled: boolean): this;
   nameservers(servers: string[]): this;
   queryTimeoutMs(ms: number): this;
@@ -435,8 +433,6 @@ export interface NapiDnsBuilder {
 }
 
 export interface NapiDnsConfig {
-  readonly blockedDomains: string[];
-  readonly blockedSuffixes: string[];
   readonly rebindProtection: boolean;
   readonly nameservers: string[];
   readonly queryTimeoutMs: number;

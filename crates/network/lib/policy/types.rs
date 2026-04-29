@@ -344,15 +344,21 @@ impl NetworkPolicy {
     /// `Cidr` / `Group` / `Any` rules cannot match a hostname string and
     /// are skipped. `default_egress` is not consulted: deny-by-default
     /// does not refuse all DNS, only explicit deny rules do.
+    ///
+    /// `name` is canonicalized through [`DomainName`]. Inputs that fail
+    /// label validation can never match a (validated) rule destination,
+    /// so we fail-open and let the query proceed.
     pub fn dns_query_denied(&self, name: &str) -> bool {
-        let canonical = name.trim_end_matches('.').to_ascii_lowercase();
+        let Ok(canonical) = name.parse::<DomainName>() else {
+            return false;
+        };
         for rule in &self.rules {
             if !matches!(rule.direction, Direction::Egress | Direction::Any) {
                 continue;
             }
             let matched = match &rule.destination {
-                Destination::Domain(d) => canonical == d.as_str(),
-                Destination::DomainSuffix(s) => matches_suffix(&canonical, s.as_str()),
+                Destination::Domain(d) => canonical.as_str() == d.as_str(),
+                Destination::DomainSuffix(s) => matches_suffix(canonical.as_str(), s.as_str()),
                 _ => false,
             };
             if matched {

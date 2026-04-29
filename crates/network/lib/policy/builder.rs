@@ -96,24 +96,6 @@ pub enum BuildError {
         "rule #{rule_index}: ICMP protocols are egress-only; ingress and any-direction rules cannot include icmpv4 or icmpv6"
     )]
     IngressDoesNotSupportIcmp { rule_index: usize },
-
-    /// `DnsBuilder::block_domain(&str)` received a value that doesn't
-    /// parse as a [`DomainName`].
-    #[error("invalid blocked domain `{raw}`: {source}")]
-    InvalidBlockedDomain {
-        raw: String,
-        #[source]
-        source: DomainNameError,
-    },
-
-    /// `DnsBuilder::block_domain_suffix(&str)` received a value that
-    /// doesn't parse as a [`DomainName`].
-    #[error("invalid blocked domain suffix `{raw}`: {source}")]
-    InvalidBlockedDomainSuffix {
-        raw: String,
-        #[source]
-        source: DomainNameError,
-    },
 }
 
 //--------------------------------------------------------------------------------------------------
