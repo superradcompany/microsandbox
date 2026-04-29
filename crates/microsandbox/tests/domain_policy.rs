@@ -263,13 +263,10 @@ async fn domain_policy_deny_suffix_refuses_dns_apex_and_subdomain() {
         "www.example.com should be refused by .example.com suffix: got `{sub_out}`"
     );
 
-    // Companion: an unrelated suffix still resolves. The alpine mirror
-    // is a known-reachable name (resolved during setup_alpine).
-    let allowed_out = dns_lookup(&sb, "dl-cdn.alpinelinux.org").await;
-    assert!(
-        !allowed_out.is_empty(),
-        "dl-cdn.alpinelinux.org DNS lookup should succeed under default-allow: got `{allowed_out}`"
-    );
+    // No baseline lookup here — `domain_policy_deny_domain_refuses_dns`
+    // already covers "unrelated names still resolve under default-allow,"
+    // and rapid back-to-back queries trip the runner's egress DNS
+    // rate-limit.
 
     sb.stop_and_wait().await.expect("stop");
     let _ = Sandbox::remove(name).await;
