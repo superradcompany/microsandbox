@@ -70,8 +70,14 @@ export type NapiSandboxBuilderCtor = new (name: string) => NapiSandboxBuilder;
  * in place and returns `this`; closure-callback sub-builders are typed
  * loosely as `(b: any) => any` here because their full type is the
  * generated one in `native/index.d.ts`. The TS public surface
- * (`Sandbox.builder(...)`) re-types this with the real shapes. */
-export interface NapiSandboxBuilder {
+ * (`Sandbox.builder(...)`) re-types this with the real shapes.
+ *
+ * Split intentionally into a setters-only base and a terminals
+ * interface. The TS-side `SandboxBuilder` (in `src/sandbox.ts`)
+ * extends the setters base directly so polymorphic `this` rebinds to
+ * the wrapper type through chained calls — `Omit<...> & {...}` would
+ * not preserve `this` correctly. */
+export interface NapiSandboxBuilderSetters {
   image(s: string): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   imageWith(configure: (b: any) => any): this;
@@ -110,6 +116,9 @@ export interface NapiSandboxBuilder {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   patch(configure: (b: any) => any): this;
   build(): string;
+}
+
+export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<NapiSandbox>;
   createDetached(): Promise<NapiSandbox>;
   createWithPullProgress(): Promise<NapiPullProgressCreate>;
@@ -170,9 +179,14 @@ export interface NapiVolumeStatic {
 
 export type NapiVolumeBuilderCtor = new (name: string) => NapiVolumeBuilder;
 
-export interface NapiVolumeBuilder {
+// Same setters/terminal split as `NapiSandboxBuilder` — see comment
+// there for why.
+export interface NapiVolumeBuilderSetters {
   quota(mib: number): this;
   label(key: string, value: string): this;
+}
+
+export interface NapiVolumeBuilder extends NapiVolumeBuilderSetters {
   create(): Promise<NapiVolume>;
 }
 

@@ -7,7 +7,7 @@ import {
   type NapiPullProgressEvent,
   type NapiPullProgressStream,
   type NapiSandbox,
-  type NapiSandboxBuilder,
+  type NapiSandboxBuilderSetters,
 } from "./internal/napi.js";
 import { ExecHandle, ExecOutput } from "./exec.js";
 import { SandboxFs } from "./fs.js";
@@ -26,18 +26,21 @@ import { MetricsStream } from "./metrics-stream.js";
  * `Sandbox` (which adds `Symbol.asyncDispose`, error-mapping, and a few
  * sync getters on top of the native handle).
  */
-export type SandboxBuilder = Omit<
-  NapiSandboxBuilder,
-  | "create"
-  | "createDetached"
-  | "createWithPullProgress"
-  | "createDetachedWithPullProgress"
-> & {
+// `interface ... extends NapiSandboxBuilderSetters` is the form that
+// preserves polymorphic `this` through chained calls — the napi
+// builder is split into a setters-only base + a terminals interface
+// (`internal/napi.ts`) precisely so we can extend the base here and
+// add the TS-flavored terminals (which return TS `Sandbox` /
+// `PullProgressCreate` instead of the napi shapes). An `Omit<...> &
+// {...}` type alias would lose the override on every chained `this`
+// return, leaving `b.image(...).create()` inferred as
+// `Promise<NapiSandbox>`.
+export interface SandboxBuilder extends NapiSandboxBuilderSetters {
   create(): Promise<Sandbox>;
   createDetached(): Promise<Sandbox>;
   createWithPullProgress(): Promise<PullProgressCreate>;
   createDetachedWithPullProgress(): Promise<PullProgressCreate>;
-};
+}
 
 /**
  * Pair returned by `SandboxBuilder.createWithPullProgress()` —

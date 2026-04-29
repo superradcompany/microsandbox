@@ -2,7 +2,7 @@ import { withMappedErrors } from "./internal/error-mapping.js";
 import {
   napi,
   type NapiVolume,
-  type NapiVolumeBuilder,
+  type NapiVolumeBuilderSetters,
 } from "./internal/napi.js";
 import { VolumeHandle, volumeInfoToHandle } from "./volume-handle.js";
 import { VolumeFs } from "./volume-fs.js";
@@ -14,9 +14,12 @@ import { VolumeFs } from "./volume-fs.js";
  * `create()` is wrapped to return a TS `Volume` (so we can keep
  * type-level distinction from the raw napi class).
  */
-export type VolumeBuilder = Omit<NapiVolumeBuilder, "create"> & {
+// See the rationale in `sandbox.ts:SandboxBuilder` — extend a
+// setters-only base interface so polymorphic `this` rebinds to
+// `VolumeBuilder` through chained calls.
+export interface VolumeBuilder extends NapiVolumeBuilderSetters {
   create(): Promise<Volume>;
-};
+}
 
 export class Volume {
   /** @internal */
