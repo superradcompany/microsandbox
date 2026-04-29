@@ -197,14 +197,41 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
 }
 
 {
-  // The TS-side `NetworkPolicy` object uses camelCase (`defaultEgress`,
-  // `defaultIngress`); the Rust struct it deserializes into expects
-  // snake_case. Convert known top-level keys before serializing.
+  // The TS-side `NetworkPolicy` object uses camelCase struct keys
+  // (`defaultEgress`, `defaultIngress`); the Rust struct expects
+  // snake_case. The TS-side `Destination` factory produces an
+  // *internally* tagged shape (`{kind: "group", group: "public"}`)
+  // while the Rust `Destination` enum is *externally* tagged
+  // (`{group: "public"}` or just `"any"`). Convert both before
+  // serializing.
   const camelToSnake = (k: string): string =>
     k.replace(/[A-Z]/g, (c) => "_" + c.toLowerCase());
+  // Detect a TS-side Destination object (carries `kind` discriminator
+  // produced by `Destination.any/cidr/domain/domainSuffix/group`) and
+  // rewrite it to the Rust externally-tagged form.
+  const isDestination = (v: unknown): v is { kind: string } & Record<string, unknown> => {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+    const obj = v as Record<string, unknown>;
+    if (typeof obj.kind !== "string") return false;
+    return ["any", "cidr", "domain", "domainSuffix", "group"].includes(obj.kind);
+  };
+  const remapDestination = (
+    v: { kind: string } & Record<string, unknown>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    deep: (x: any) => any,
+  ): unknown => {
+    const tag = camelToSnake(v.kind);
+    if (v.kind === "any") return tag; // unit variant -> bare string
+    // The data field name in the TS factory varies by variant: cidr →
+    // `cidr`, domain → `domain`, domainSuffix → `suffix`, group → `group`.
+    // Map each to its Rust externally-tagged data slot.
+    const dataField = v.kind === "domainSuffix" ? "suffix" : v.kind;
+    return { [tag]: deep(v[dataField]) };
+  };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const remapKeys = (v: any): any => {
     if (Array.isArray(v)) return v.map(remapKeys);
+    if (isDestination(v)) return remapDestination(v, remapKeys);
     if (v && typeof v === "object") {
       const out: Record<string, unknown> = {};
       for (const [k, val] of Object.entries(v)) out[camelToSnake(k)] = remapKeys(val);
