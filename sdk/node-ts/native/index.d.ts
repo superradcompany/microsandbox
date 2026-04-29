@@ -192,6 +192,28 @@ export declare class FsWriteSink {
 }
 export type JsFsWriteSink = FsWriteSink
 
+/**
+ * Fluent builder for a disk-image rootfs source.
+ *
+ * Used inside `Sandbox.builder(...).imageWith((i) => i.disk(...).fstype(...))`
+ * to construct a `RootfsSource::DiskImage`. Standalone use is rare;
+ * `.image("./ubuntu.qcow2")` resolves the same way for the common case.
+ */
+export declare class ImageBuilder {
+  constructor()
+  /**
+   * Use a host disk image file as the root filesystem. The format is
+   * derived from the file extension: `.qcow2`, `.raw`, or `.vmdk`.
+   */
+  disk(path: string): this
+  /**
+   * Set the inner filesystem type (e.g. `"ext4"`). Omit to let agentd
+   * auto-detect by probing `/proc/filesystems`.
+   */
+  fstype(fstype: string): this
+}
+export type JsImageBuilder = ImageBuilder
+
 /** A lightweight handle to a cached image. */
 export declare class ImageHandle {
   get reference(): string
@@ -620,6 +642,31 @@ export declare class Volume {
   fs(): VolumeFs
 }
 export type JsVolume = Volume
+
+/** Fluent builder for a named persistent volume. */
+export declare class VolumeBuilder {
+  constructor(name: string)
+  /** Limit the volume's storage capacity (MiB). Omit for unlimited. */
+  quota(mib: number): this
+  /** Attach a key-value label. May be called multiple times. */
+  label(key: string, value: string): this
+  /**
+   * Create the volume.
+   *
+   * Marked `unsafe` only because `napi-rs` requires `&mut self` async
+   * methods to be tagged that way (a half-mutated struct could be
+   * observed mid-await). Practically it's safe: we take the inner
+   * builder synchronously before the await point, leaving an empty
+   * `Option` behind that subsequent calls reject. JS users do not see
+   * the `unsafe` marker.
+   *
+   * # Safety
+   * The await-point hazard does not apply here because we drain the
+   * inner builder before awaiting.
+   */
+  create(): Promise<Volume>
+}
+export type JsVolumeBuilder = VolumeBuilder
 
 export declare class VolumeFs {
   read(path: string): Promise<Buffer>

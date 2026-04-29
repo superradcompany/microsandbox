@@ -109,6 +109,13 @@ impl JsVolume {
     }
 }
 
+impl JsVolume {
+    /// Wrap a Rust `Volume`. Used by `VolumeBuilder.create()`.
+    pub(crate) fn from_rust(v: Volume) -> Self {
+        Self { inner: Arc::new(v) }
+    }
+}
+
 #[napi]
 impl JsVolumeHandle {
     #[napi(getter)]
