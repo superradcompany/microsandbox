@@ -67,7 +67,15 @@ async fn tcp_proxy_task(
     shared: Arc<SharedState>,
     network_policy: Arc<NetworkPolicy>,
 ) -> io::Result<()> {
-    let (initial_buf, sni) = peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+    // Skip the peek entirely when no Domain/DomainSuffix rule exists —
+    // peek can only refine those, and waiting for guest bytes before
+    // connecting upstream adds latency that breaks short-timeout
+    // clients on plain TCP (e.g. wget --timeout=N).
+    let (initial_buf, sni) = if network_policy.has_domain_rules() {
+        peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await
+    } else {
+        (Vec::new(), None)
+    };
     let source = match sni.as_deref() {
         Some(name) => HostnameSource::Sni(name),
         None => HostnameSource::CacheOnly,

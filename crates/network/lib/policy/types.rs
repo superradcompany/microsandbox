@@ -403,6 +403,18 @@ impl NetworkPolicy {
         self.default_ingress
     }
 
+    /// True if any rule references a `Domain` or `DomainSuffix`
+    /// destination. The TCP proxy uses this to skip its SNI peek when
+    /// no rule could possibly need a hostname for evaluation.
+    pub fn has_domain_rules(&self) -> bool {
+        self.rules.iter().any(|r| {
+            matches!(
+                r.destination,
+                Destination::Domain(_) | Destination::DomainSuffix(_)
+            )
+        })
+    }
+
     /// Should the DNS forwarder refuse a query for `name`?
     ///
     /// Returns `true` iff the first matching Domain / DomainSuffix
