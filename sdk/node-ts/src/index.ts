@@ -2,7 +2,7 @@ import { mapNapiError } from "./internal/error-mapping.js";
 import { napi } from "./internal/napi.js";
 
 // Sandbox lifecycle and execution
-export { Sandbox } from "./sandbox.js";
+export { PullProgressCreate, Sandbox } from "./sandbox.js";
 import { Sandbox as _Sandbox, type SandboxBuilder as _SBT } from "./sandbox.js";
 /**
  * Native fluent builder for a sandbox. `new SandboxBuilder(name)` is
@@ -155,6 +155,7 @@ function hideMethod(cls: { prototype: Record<string, unknown> }, name: string): 
 }
 hideMethod(napi.NetworkBuilder, "buildJson");
 hideMethod(napi.NetworkBuilder, "policyJson");
+hideMethod(napi.NetworkBuilder, "policyFromBuilder");
 hideMethod(napi.SandboxBuilder, "execWithBuilder");
 hideMethod(napi.SandboxBuilder, "execStreamWithBuilder");
 hideMethod(napi.SandboxBuilder, "attachWithBuilder");
@@ -243,6 +244,13 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
   const proto: any = napi.NetworkBuilder.prototype;
   if (!proto.policy) {
     proto.policy = function (p: unknown) {
+      // If `p` is a `NetworkPolicyBuilder` instance, route through the
+      // dedicated native bridge to skip the JSON round-trip and to
+      // surface lazy parse/validation errors at this call site.
+      if (p instanceof napi.NetworkPolicyBuilder) {
+        this.policyFromBuilder(p);
+        return this;
+      }
       this.policyJson(JSON.stringify(remapKeys(p)));
       return this;
     };
@@ -259,6 +267,26 @@ export const RegistryConfigBuilder = napi.RegistryConfigBuilder;
 export const ImageBuilder = napi.ImageBuilder;
 export const ExecOptionsBuilder = napi.ExecOptionsBuilder;
 export const AttachOptionsBuilder = napi.AttachOptionsBuilder;
+import type {
+  NapiNetworkPolicyBuilder,
+  NapiRuleBuilder,
+  NapiRuleDestinationBuilder,
+} from "./internal/napi.js";
+export const NetworkPolicyBuilder = napi.NetworkPolicyBuilder;
+export type NetworkPolicyBuilder = NapiNetworkPolicyBuilder;
+export const RuleBuilder = napi.RuleBuilder;
+export type RuleBuilder = NapiRuleBuilder;
+export const RuleDestinationBuilder = napi.RuleDestinationBuilder;
+export type RuleDestinationBuilder = NapiRuleDestinationBuilder;
+import type {
+  NapiInterfaceOverridesBuilder,
+  NapiPullProgressEvent,
+  NapiPullProgressStream,
+} from "./internal/napi.js";
+export const InterfaceOverridesBuilder = napi.InterfaceOverridesBuilder;
+export type InterfaceOverridesBuilder = NapiInterfaceOverridesBuilder;
+export type PullProgressEvent = NapiPullProgressEvent;
+export type PullProgressStream = NapiPullProgressStream;
 
 // Setup + module-level helpers
 export { Setup, install, isInstalled, setup } from "./setup.js";
@@ -384,7 +412,14 @@ import type * as _Types from "./policy/types.js";
 export const Destination = _Factories.Destination;
 export type Destination = _Types.Destination;
 
-export const NetworkPolicy = _Factories.NetworkPolicy;
+export const NetworkPolicy = {
+  ..._Factories.NetworkPolicy,
+  /**
+   * Start building a `NetworkPolicy` via the native fluent builder.
+   * Equivalent to `new NetworkPolicyBuilder()`.
+   */
+  builder: (): NapiNetworkPolicyBuilder => new napi.NetworkPolicyBuilder(),
+};
 export type NetworkPolicy = _Types.NetworkPolicy;
 
 export const PortRange = _Factories.PortRange;

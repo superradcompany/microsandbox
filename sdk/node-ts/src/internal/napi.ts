@@ -32,6 +32,12 @@ export interface NativeBindings {
   readonly TlsBuilder: NapiBuilderCtor<NapiTlsBuilder>;
   readonly SecretBuilder: NapiBuilderCtor<NapiSecretBuilder>;
   readonly NetworkBuilder: NapiBuilderCtor<NapiNetworkBuilder>;
+  readonly NetworkPolicyBuilder: NapiBuilderCtor<NapiNetworkPolicyBuilder>;
+  readonly RuleBuilder: NapiBuilderCtor<NapiRuleBuilder>;
+  readonly RuleDestinationBuilder: NapiBuilderCtor<NapiRuleDestinationBuilder>;
+  readonly InterfaceOverridesBuilder: NapiBuilderCtor<NapiInterfaceOverridesBuilder>;
+  readonly PullProgressStream: { prototype: NapiPullProgressStream };
+  readonly PullProgressCreate: { prototype: NapiPullProgressCreate };
   readonly MountBuilder: new (guestPath: string) => NapiMountBuilder;
   readonly PatchBuilder: NapiBuilderCtor<NapiPatchBuilder>;
   readonly RegistryConfigBuilder: NapiBuilderCtor<NapiRegistryConfigBuilder>;
@@ -106,9 +112,12 @@ export interface NapiSandboxBuilder {
   build(): string;
   create(): Promise<NapiSandbox>;
   createDetached(): Promise<NapiSandbox>;
+  createWithPullProgress(): Promise<NapiPullProgressCreate>;
+  createDetachedWithPullProgress(): Promise<NapiPullProgressCreate>;
 }
 
 export interface NapiSandbox {
+  configJson(): Promise<string>;
   exec(cmd: string, args?: string[]): Promise<NapiExecOutput>;
   execWithBuilder(cmd: string, builder: NapiExecOptionsBuilder): Promise<NapiExecOutput>;
   execStream(cmd: string, args?: string[]): Promise<NapiExecHandle>;
@@ -479,13 +488,122 @@ export interface NapiNetworkBuilder {
   port(host: number, guest: number): this;
   portUdp(host: number, guest: number): this;
   policyJson(json: string): this;
+  policyFromBuilder(builder: NapiNetworkPolicyBuilder): this;
   dns(configure: (b: NapiDnsBuilder) => NapiDnsBuilder): this;
   tls(configure: (b: NapiTlsBuilder) => NapiTlsBuilder): this;
   secret(configure: (b: NapiSecretBuilder) => NapiSecretBuilder): this;
   secretEnv(envVar: string, value: string, placeholder: string, allowedHost: string): this;
+  secretEnvSimple(envVar: string, value: string, allowedHost: string): this;
+  interface(
+    configure: (b: NapiInterfaceOverridesBuilder) => NapiInterfaceOverridesBuilder,
+  ): this;
   onSecretViolation(action: string): this;
   maxConnections(max: number): this;
   trustHostCAs(enabled: boolean): this;
+}
+
+export interface NapiInterfaceOverridesBuilder {
+  mac(mac: string): this;
+  mtu(mtu: number): this;
+  ipv4(address: string): this;
+  ipv6(address: string): this;
+}
+
+export interface NapiPullProgressEvent {
+  readonly kind: string;
+  readonly reference?: string;
+  readonly manifestDigest?: string;
+  readonly layerCount?: number;
+  readonly totalDownloadBytes?: number;
+  readonly layerIndex?: number;
+  readonly digest?: string;
+  readonly diffId?: string;
+  readonly downloadedBytes?: number;
+  readonly totalBytes?: number;
+  readonly bytesRead?: number;
+}
+
+export interface NapiPullProgressStream extends AsyncIterable<NapiPullProgressEvent> {
+  recv(): Promise<NapiPullProgressEvent | null>;
+}
+
+export interface NapiPullProgressCreate {
+  readonly progress: NapiPullProgressStream;
+  awaitSandbox(): Promise<NapiSandbox>;
+}
+
+export interface NapiNetworkPolicyBuilder {
+  defaultAllow(): this;
+  defaultDeny(): this;
+  defaultEgress(action: string): this;
+  defaultIngress(action: string): this;
+  rule(configure: (rb: NapiRuleBuilder) => NapiRuleBuilder): this;
+  egress(configure: (rb: NapiRuleBuilder) => NapiRuleBuilder): this;
+  ingress(configure: (rb: NapiRuleBuilder) => NapiRuleBuilder): this;
+  any(configure: (rb: NapiRuleBuilder) => NapiRuleBuilder): this;
+  build(): NapiBuiltNetworkPolicy;
+}
+
+export interface NapiRuleBuilder {
+  egress(): this;
+  ingress(): this;
+  any(): this;
+  tcp(): this;
+  udp(): this;
+  icmpv4(): this;
+  icmpv6(): this;
+  port(port: number): this;
+  portRange(lo: number, hi: number): this;
+  ports(ports: number[]): this;
+  allowPublic(): this;
+  denyPublic(): this;
+  allowPrivate(): this;
+  denyPrivate(): this;
+  allowLoopback(): this;
+  denyLoopback(): this;
+  allowLinkLocal(): this;
+  denyLinkLocal(): this;
+  allowMeta(): this;
+  denyMeta(): this;
+  allowMulticast(): this;
+  denyMulticast(): this;
+  allowHost(): this;
+  denyHost(): this;
+  allowLocal(): this;
+  denyLocal(): this;
+  allow(configure: (d: NapiRuleDestinationBuilder) => NapiRuleDestinationBuilder): this;
+  deny(configure: (d: NapiRuleDestinationBuilder) => NapiRuleDestinationBuilder): this;
+}
+
+export interface NapiRuleDestinationBuilder {
+  ip(ip: string): this;
+  cidr(cidr: string): this;
+  domain(domain: string): this;
+  domainSuffix(suffix: string): this;
+  group(group: string): this;
+  any(): this;
+}
+
+export interface NapiBuiltNetworkPolicy {
+  readonly defaultEgress: string;
+  readonly defaultIngress: string;
+  readonly rules: readonly NapiBuiltNetworkPolicyRule[];
+}
+
+export interface NapiBuiltNetworkPolicyRule {
+  readonly direction: string;
+  readonly destination: NapiBuiltNetworkPolicyDestination;
+  readonly protocols: readonly string[];
+  readonly ports: readonly { readonly start: number; readonly end: number }[];
+  readonly action: string;
+}
+
+export interface NapiBuiltNetworkPolicyDestination {
+  readonly kind: string;
+  readonly cidr?: string;
+  readonly domain?: string;
+  readonly suffix?: string;
+  readonly group?: string;
 }
 
 export interface NapiMountBuilder {

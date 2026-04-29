@@ -218,6 +218,29 @@ export declare class ImageHandle {
 export type JsImageHandle = ImageHandle
 
 /**
+ * Fluent builder for per-NIC overrides on the guest interface
+ * (`microsandbox_network::config::InterfaceOverrides`). Chainable
+ * setters mutate in place; `.build()` is implicit when passed to
+ * `NetworkBuilder.interface(b => b.mtu(9000))`.
+ */
+export declare class InterfaceOverridesBuilder {
+  constructor()
+  /**
+   * Set the guest MAC address from a colon- or dash-delimited 6-byte
+   * string (e.g. `"aa:bb:cc:dd:ee:ff"`). Invalid input is recorded
+   * and surfaced when the parent `NetworkBuilder.build()` runs.
+   */
+  mac(mac: string): this
+  /** Set the interface MTU. Default: 1500. */
+  mtu(mtu: number): this
+  /** Set the guest IPv4 address (e.g. `"100.96.0.5"`). */
+  ipv4(address: string): this
+  /** Set the guest IPv6 address (e.g. `"fd42:6d73:62::5"`). */
+  ipv6(address: string): this
+}
+export type JsInterfaceOverridesBuilder = InterfaceOverridesBuilder
+
+/**
  * A streaming subscription for sandbox metrics at a regular interval.
  *
  * Supports both manual `recv()` calls and `for await...of` iteration:
@@ -295,6 +318,12 @@ export declare class NetworkBuilder {
    */
   policyJson(json: string): this
   /**
+   * Set a policy from a `NetworkPolicyBuilder`. Equivalent to
+   * calling `builder.build()` and passing the result through
+   * `.policy()`, but skips the JSON round-trip.
+   */
+  policyFromBuilder(builder: JsNetworkPolicyBuilder): this
+  /**
    * Configure DNS interception via a callback. The callback receives
    * a fresh `DnsBuilder`; chain setters on it and return.
    */
@@ -305,6 +334,18 @@ export declare class NetworkBuilder {
   secret(configure: (arg: JsSecretBuilder) => JsSecretBuilder): this
   /** 4-arg shorthand: add a secret with explicit placeholder. */
   secretEnv(envVar: string, value: string, placeholder: string, allowedHost: string): this
+  /**
+   * 3-arg shorthand matching the Rust core's `secret_env(env_var,
+   * value, allowed_host)`. The placeholder defaults to the original
+   * value (env-var injection only — header injection is disabled
+   * without an explicit placeholder).
+   */
+  secretEnvSimple(envVar: string, value: string, allowedHost: string): this
+  /**
+   * Set per-NIC overrides (MAC / MTU / IPv4 / IPv6) for the guest
+   * interface. The closure receives a fresh `InterfaceOverridesBuilder`.
+   */
+  interface(configure: (arg: InterfaceOverridesBuilder) => InterfaceOverridesBuilder): this
   /**
    * Set the violation action for secrets: `"block" | "block-and-log"
    * | "block-and-terminate"`.
@@ -322,6 +363,49 @@ export declare class NetworkBuilder {
   buildJson(): string
 }
 export type JsNetworkBuilder = NetworkBuilder
+
+/**
+ * Fluent builder for `NetworkPolicy`.
+ *
+ * Mirrors `microsandbox_network::policy::NetworkPolicyBuilder`. All
+ * inputs are recorded eagerly; `.build()` replays them onto the Rust
+ * builder, which lazily parses string IPs/CIDRs/domains and validates
+ * `direction`-set + ICMP-egress-only invariants. The first error is
+ * surfaced from `.build()`.
+ */
+export declare class NetworkPolicyBuilder {
+  constructor()
+  /** Set both `default_egress` and `default_ingress` to `Allow`. */
+  defaultAllow(): this
+  /** Set both `default_egress` and `default_ingress` to `Deny`. */
+  defaultDeny(): this
+  /**
+   * Per-direction override for the egress default action.
+   * `action` is `"allow"` or `"deny"`.
+   */
+  defaultEgress(action: string): this
+  /** Per-direction override for the ingress default action. */
+  defaultIngress(action: string): this
+  /**
+   * Open a multi-rule batch closure. Direction must be set inside via
+   * `.egress()` / `.ingress()` / `.any()` before any rule-adder.
+   */
+  rule(configure: (arg: RuleBuilder) => RuleBuilder): this
+  /** Sugar for `.rule()` with direction pre-set to `Egress`. */
+  egress(configure: (arg: RuleBuilder) => RuleBuilder): this
+  /** Sugar for `.rule()` with direction pre-set to `Ingress`. */
+  ingress(configure: (arg: RuleBuilder) => RuleBuilder): this
+  /** Sugar for `.rule()` with direction pre-set to `Any`. */
+  any(configure: (arg: RuleBuilder) => RuleBuilder): this
+  /**
+   * Materialize into a `NetworkPolicy` (camelCase JS object). Lazily
+   * parses every recorded `.ip()` / `.cidr()` / `.domain()` /
+   * `.domainSuffix()` input, validates `direction`-set + ICMP-egress-
+   * only invariants, and surfaces the first failure.
+   */
+  build(): NetworkPolicy
+}
+export type JsNetworkPolicyBuilder = NetworkPolicyBuilder
 
 /** Fluent builder for an ordered list of pre-boot rootfs patches. */
 export declare class PatchBuilder {
@@ -346,6 +430,53 @@ export declare class PatchBuilder {
   build(): Array<Patch>
 }
 export type JsPatchBuilder = PatchBuilder
+
+/**
+ * Pair returned by `createWithPullProgress`: the progress event stream
+ * plus a method to await the final `Sandbox`.
+ */
+export declare class PullProgressCreate {
+  /**
+   * The progress event stream. Iterate with `for await...of` or
+   * poll with `.recv()`. The stream closes once the pull completes.
+   */
+  get progress(): PullProgressStream
+  /**
+   * Await the sandbox. Resolves once the pull + boot finishes.
+   * Calling more than once errors.
+   */
+  awaitSandbox(): Promise<JsSandbox>
+}
+export type JsPullProgressCreate = PullProgressCreate
+
+/**
+ * Streaming subscription for image-pull progress events.
+ *
+ * Supports both manual `recv()` and `for await...of` iteration:
+ * ```js
+ * const { sandbox, progress } = await Sandbox.builder("demo")
+ *   .image("alpine:latest")
+ *   .createWithPullProgress();
+ * for await (const ev of progress) {
+ *   if (ev.kind === "layerDownloadProgress") { … }
+ * }
+ * const sb = await sandbox; // resolves once create finishes
+ * ```
+ *
+ * This type implements JavaScript's async iterable protocol.
+ * It can be used with `for await...of` loops.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
+ */
+export declare class PullProgressStream {
+  /**
+   * Receive the next progress event. Returns `null` when the pull
+   * completes (channel closed).
+   */
+  recv(): Promise<PullProgressEvent | null>
+  [Symbol.asyncIterator](): AsyncGenerator<PullProgressEvent, void, undefined>
+}
+export type JsPullProgressStream = PullProgressStream
 
 /** Fluent builder for OCI registry connection settings. */
 export declare class RegistryConfigBuilder {
@@ -372,6 +503,102 @@ export declare class RegistryConfigBuilder {
 export type JsRegistryConfigBuilder = RegistryConfigBuilder
 
 /**
+ * Per-rule-batch builder. Lives only inside the closure passed to
+ * `.rule()` / `.egress()` / `.ingress()` / `.any()`. State (direction,
+ * protocols, ports) accumulates across rule-adders within the closure
+ * and is **not reset** between them — separate `.rule()` calls are how
+ * you reset state.
+ */
+export declare class RuleBuilder {
+  /** Set direction to `Egress` for subsequent rule-adders. Last-write-wins. */
+  egress(): this
+  /** Set direction to `Ingress` for subsequent rule-adders. */
+  ingress(): this
+  /** Set direction to `Any` (rules apply in both directions). */
+  any(): this
+  /** Add `Tcp` to the protocols set. */
+  tcp(): this
+  /** Add `Udp` to the protocols set. */
+  udp(): this
+  /** Add `Icmpv4` to the protocols set. Egress-only. */
+  icmpv4(): this
+  /** Add `Icmpv6` to the protocols set. Egress-only. */
+  icmpv6(): this
+  /** Add a single port to the ports set. `0..=65535`. */
+  port(port: number): this
+  /**
+   * Add an inclusive port range. `lo > hi` records an error surfaced
+   * at `.build()` time.
+   */
+  portRange(lo: number, hi: number): this
+  /** Add multiple single ports. */
+  ports(ports: Array<number>): this
+  allowPublic(): this
+  denyPublic(): this
+  allowPrivate(): this
+  denyPrivate(): this
+  allowLoopback(): this
+  denyLoopback(): this
+  allowLinkLocal(): this
+  denyLinkLocal(): this
+  allowMeta(): this
+  denyMeta(): this
+  allowMulticast(): this
+  denyMulticast(): this
+  allowHost(): this
+  denyHost(): this
+  /** Allow `Loopback + LinkLocal + Host` (no `Metadata`). */
+  allowLocal(): this
+  /** Deny `Loopback + LinkLocal + Host`. */
+  denyLocal(): this
+  /**
+   * Begin an explicit-destination rule with action `Allow`. The
+   * closure receives a `RuleDestinationBuilder` and must call exactly
+   * one of `.ip()` / `.cidr()` / `.domain()` / `.domainSuffix()` /
+   * `.group()` / `.any()` to commit the rule.
+   */
+  allow(configure: (arg: RuleDestinationBuilder) => RuleDestinationBuilder): this
+  /** Begin an explicit-destination rule with action `Deny`. */
+  deny(configure: (arg: RuleDestinationBuilder) => RuleDestinationBuilder): this
+}
+export type JsRuleBuilder = RuleBuilder
+
+/**
+ * Terminal builder returned by `RuleBuilder.allow(d => ...)` /
+ * `.deny(d => ...)`. Exactly one destination call (`.ip`, `.cidr`,
+ * `.domain`, `.domainSuffix`, `.group`, `.any`) commits the rule;
+ * dropping without a destination call silently does nothing.
+ */
+export declare class RuleDestinationBuilder {
+  /**
+   * Commit the rule with destination `Ip(<addr>)`. Parsed at
+   * `.build()` time; invalid IPs surface as `InvalidIp` then.
+   */
+  ip(ip: string): this
+  /** Commit the rule with destination `Cidr(<network>)`. */
+  cidr(cidr: string): this
+  /**
+   * Commit the rule with destination `Domain(<name>)`. Matches only
+   * when a cached hostname for the remote IP equals this name.
+   */
+  domain(domain: string): this
+  /**
+   * Commit the rule with destination `DomainSuffix(<name>)`. Matches
+   * the apex domain itself and any subdomain.
+   */
+  domainSuffix(suffix: string): this
+  /**
+   * Commit the rule with destination `Group(<group>)`. `group` is
+   * one of the `DestinationGroup` strings (`"public" | "private" |
+   * "loopback" | "link-local" | "metadata" | "multicast" | "host"`).
+   */
+  group(group: string): this
+  /** Commit the rule with destination `Any` (matches every remote). */
+  any(): this
+}
+export type JsRuleDestinationBuilder = RuleDestinationBuilder
+
+/**
  * A running sandbox instance.
  *
  * Created via `Sandbox.create()` or `Sandbox.start()`. Holds a live connection
@@ -392,6 +619,12 @@ export declare class Sandbox {
   get name(): Promise<string>
   /** Whether this handle owns the sandbox lifecycle (attached mode). */
   get ownsLifecycle(): Promise<boolean>
+  /**
+   * Get the full configuration this sandbox was created with
+   * (image, cpus, memory, env, mounts, etc.) as a JSON string.
+   * The TS layer parses + camelCase-remaps this into a plain object.
+   */
+  configJson(): Promise<string>
   /** Execute a command and wait for completion. */
   exec(cmd: string, args?: Array<string> | undefined | null): Promise<ExecOutput>
   /**
@@ -552,6 +785,24 @@ export declare class SandboxBuilder {
    * Same justification as `create`.
    */
   createDetached(): Promise<JsSandbox>
+  /**
+   * Create the sandbox with image-pull progress reporting. Returns
+   * a `PullProgressStream` of per-layer download/materialization
+   * events. The actual `Sandbox` is awaited via `.awaitSandbox()`
+   * on the returned object — the TS layer wraps this with a
+   * closure-callback API on the public surface.
+   *
+   * # Safety
+   * Same justification as `create`.
+   */
+  createWithPullProgress(): Promise<JsPullProgressCreate>
+  /**
+   * Detached variant of `createWithPullProgress`.
+   *
+   * # Safety
+   * Same justification as `create`.
+   */
+  createDetachedWithPullProgress(): Promise<JsPullProgressCreate>
 }
 export type JsSandboxBuilder = SandboxBuilder
 
@@ -925,6 +1176,34 @@ export declare function install(): Promise<void>
 /** Check if msb and libkrunfw are installed and available. */
 export declare function isInstalled(): boolean
 
+export interface NetworkPolicy {
+  defaultEgress: string
+  defaultIngress: string
+  rules: Array<NetworkPolicyRule>
+}
+
+export interface NetworkPolicyDestination {
+  /** `"any" | "cidr" | "domain" | "domainSuffix" | "group"`. */
+  kind: string
+  cidr?: string
+  domain?: string
+  suffix?: string
+  group?: string
+}
+
+export interface NetworkPolicyPortRange {
+  start: number
+  end: number
+}
+
+export interface NetworkPolicyRule {
+  direction: string
+  destination: NetworkPolicyDestination
+  protocols: Array<string>
+  ports: Array<NetworkPolicyPortRange>
+  action: string
+}
+
 /**
  * Rootfs patch produced by `PatchBuilder.build()`. Flat representation
  * of the `Patch` enum: `kind` discriminator + per-variant fields.
@@ -966,6 +1245,35 @@ export interface PatchModeOnly {
 /** Optional knobs accepted by `copyDir`, `symlink`. */
 export interface PatchReplaceOnly {
   replace?: boolean
+}
+
+/**
+ * One progress event emitted during image pull and EROFS materialization.
+ *
+ * `kind` discriminates the event; the per-variant fields below are
+ * `null` when not applicable to that kind.
+ */
+export interface PullProgressEvent {
+  /**
+   * Event kind: one of
+   * `"resolving" | "resolved" | "layerDownloadProgress" |
+   *  "layerDownloadComplete" | "layerDownloadVerifying" |
+   *  "layerMaterializeStarted" | "layerMaterializeProgress" |
+   *  "layerMaterializeWriting" | "layerMaterializeComplete" |
+   *  "stitchMergingTrees" | "stitchWritingFsmeta" |
+   *  "stitchWritingVmdk" | "stitchComplete" | "complete"`.
+   */
+  kind: string
+  reference?: string
+  manifestDigest?: string
+  layerCount?: number
+  totalDownloadBytes?: number
+  layerIndex?: number
+  digest?: string
+  diffId?: string
+  downloadedBytes?: number
+  totalBytes?: number
+  bytesRead?: number
 }
 
 /** Plain-object form of `RegistryAuth`. `kind: "anonymous" | "basic"`. */

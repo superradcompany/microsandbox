@@ -3,6 +3,9 @@ import {
   napi,
   type NapiAttachOptionsBuilder,
   type NapiExecOptionsBuilder,
+  type NapiPullProgressCreate,
+  type NapiPullProgressEvent,
+  type NapiPullProgressStream,
   type NapiSandbox,
   type NapiSandboxBuilder,
 } from "./internal/napi.js";
@@ -25,11 +28,59 @@ import { MetricsStream } from "./metrics-stream.js";
  */
 export type SandboxBuilder = Omit<
   NapiSandboxBuilder,
-  "create" | "createDetached"
+  | "create"
+  | "createDetached"
+  | "createWithPullProgress"
+  | "createDetachedWithPullProgress"
 > & {
   create(): Promise<Sandbox>;
   createDetached(): Promise<Sandbox>;
+  createWithPullProgress(): Promise<PullProgressCreate>;
+  createDetachedWithPullProgress(): Promise<PullProgressCreate>;
 };
+
+/**
+ * Pair returned by `SandboxBuilder.createWithPullProgress()` —
+ * the per-layer progress event stream plus a method to await the
+ * final `Sandbox`.
+ */
+export class PullProgressCreate {
+  /** @internal */
+  private readonly inner: NapiPullProgressCreate;
+  /** @internal */
+  private readonly name: string;
+  /** @internal */
+  private readonly attached: boolean;
+
+  /** @internal */
+  constructor(inner: NapiPullProgressCreate, name: string, attached: boolean) {
+    this.inner = inner;
+    this.name = name;
+    this.attached = attached;
+  }
+
+  /**
+   * The progress event stream. Iterate with `for await...of` or poll
+   * with `.recv()`. The stream closes once the pull completes.
+   */
+  get progress(): NapiPullProgressStream {
+    return this.inner.progress;
+  }
+
+  /**
+   * Async iterator helper: equivalent to `for await (const ev of c.progress)`.
+   * Lets you write `for await (const ev of c) { … }` directly.
+   */
+  [Symbol.asyncIterator](): AsyncIterator<NapiPullProgressEvent> {
+    return this.inner.progress[Symbol.asyncIterator]();
+  }
+
+  /** Await the sandbox. Resolves once pull + boot finishes. */
+  async awaitSandbox(): Promise<Sandbox> {
+    const inner = await withMappedErrors(() => this.inner.awaitSandbox());
+    return new Sandbox(inner, this.name, this.attached);
+  }
+}
 
 export class Sandbox implements AsyncDisposable {
   /** @internal */
@@ -51,6 +102,9 @@ export class Sandbox implements AsyncDisposable {
     const nb = new napi.SandboxBuilder(name);
     const origCreate = nb.create.bind(nb);
     const origCreateDetached = nb.createDetached.bind(nb);
+    const origCreateWithPP = nb.createWithPullProgress.bind(nb);
+    const origCreateDetachedWithPP =
+      nb.createDetachedWithPullProgress.bind(nb);
     // Override the terminals so they return a TS Sandbox.
     (nb as unknown as { create: () => Promise<Sandbox> }).create = async () => {
       const inner = await withMappedErrors(() => origCreate());
@@ -61,6 +115,22 @@ export class Sandbox implements AsyncDisposable {
     ).createDetached = async () => {
       const inner = await withMappedErrors(() => origCreateDetached());
       return new Sandbox(inner, name, /*ownsLifecycle*/ false);
+    };
+    (
+      nb as unknown as {
+        createWithPullProgress: () => Promise<PullProgressCreate>;
+      }
+    ).createWithPullProgress = async () => {
+      const raw = await withMappedErrors(() => origCreateWithPP());
+      return new PullProgressCreate(raw, name, /*attached*/ true);
+    };
+    (
+      nb as unknown as {
+        createDetachedWithPullProgress: () => Promise<PullProgressCreate>;
+      }
+    ).createDetachedWithPullProgress = async () => {
+      const raw = await withMappedErrors(() => origCreateDetachedWithPP());
+      return new PullProgressCreate(raw, name, /*attached*/ false);
     };
     return nb as unknown as SandboxBuilder;
   }
@@ -171,6 +241,17 @@ export class Sandbox implements AsyncDisposable {
     return new SandboxFs(this.inner.fs());
   }
 
+  // -- config -------------------------------------------------------------
+
+  /**
+   * The full configuration this sandbox was created with — image, cpus,
+   * memory, env, mounts, etc. The shape mirrors `SandboxBuilder.build()`.
+   */
+  async config(): Promise<unknown> {
+    const json = await withMappedErrors(() => this.inner.configJson());
+    return remapKeysToCamel(JSON.parse(json));
+  }
+
   // -- metrics ------------------------------------------------------------
 
   async metrics(): Promise<SandboxMetrics> {
@@ -224,4 +305,18 @@ export class Sandbox implements AsyncDisposable {
       // best-effort dispose
     }
   }
+}
+
+const snakeToCamel = (k: string): string =>
+  k.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function remapKeysToCamel(v: any): any {
+  if (Array.isArray(v)) return v.map(remapKeysToCamel);
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v)) out[snakeToCamel(k)] = remapKeysToCamel(val);
+    return out;
+  }
+  return v;
 }

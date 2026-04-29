@@ -6,6 +6,8 @@ use microsandbox_network::policy::NetworkPolicy as RustNetworkPolicy;
 use microsandbox_network::secrets::config::ViolationAction as RustViolationAction;
 
 use crate::dns_builder::JsDnsBuilder;
+use crate::interface_overrides_builder::JsInterfaceOverridesBuilder;
+use crate::network_policy_builder::JsNetworkPolicyBuilder;
 use crate::secret_builder::JsSecretBuilder;
 use crate::tls_builder::JsTlsBuilder;
 
@@ -78,6 +80,17 @@ impl JsNetworkBuilder {
         Ok(self)
     }
 
+    /// Set a policy from a `NetworkPolicyBuilder`. Equivalent to
+    /// calling `builder.build()` and passing the result through
+    /// `.policy()`, but skips the JSON round-trip.
+    #[napi(js_name = "policyFromBuilder")]
+    pub fn policy_from_builder(&mut self, builder: &JsNetworkPolicyBuilder) -> Result<&Self> {
+        let policy = builder.build_rust_policy()?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.policy(policy));
+        Ok(self)
+    }
+
     /// Configure DNS interception via a callback. The callback receives
     /// a fresh `DnsBuilder`; chain setters on it and return.
     #[napi]
@@ -136,6 +149,42 @@ impl JsNetworkBuilder {
         let prev = self.take_inner();
         self.inner = Some(prev.secret_env(env_var, value, placeholder, allowed_host));
         self
+    }
+
+    /// 3-arg shorthand matching the Rust core's `secret_env(env_var,
+    /// value, allowed_host)`. The placeholder defaults to the original
+    /// value (env-var injection only — header injection is disabled
+    /// without an explicit placeholder).
+    #[napi(js_name = "secretEnvSimple")]
+    pub fn secret_env_simple(
+        &mut self,
+        env_var: String,
+        value: String,
+        allowed_host: String,
+    ) -> &Self {
+        let placeholder = value.clone();
+        let prev = self.take_inner();
+        self.inner = Some(prev.secret_env(env_var, value, placeholder, allowed_host));
+        self
+    }
+
+    /// Set per-NIC overrides (MAC / MTU / IPv4 / IPv6) for the guest
+    /// interface. The closure receives a fresh `InterfaceOverridesBuilder`.
+    #[napi]
+    pub fn interface(
+        &mut self,
+        env: &Env,
+        configure: Function<
+            ClassInstance<JsInterfaceOverridesBuilder>,
+            ClassInstance<JsInterfaceOverridesBuilder>,
+        >,
+    ) -> Result<&Self> {
+        let initial = JsInterfaceOverridesBuilder::new().into_instance(env)?;
+        let mut returned = configure.call(initial)?;
+        let overrides = returned.take_built()?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.interface(overrides));
+        Ok(self)
     }
 
     /// Set the violation action for secrets: `"block" | "block-and-log"

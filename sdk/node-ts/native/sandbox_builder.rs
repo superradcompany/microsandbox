@@ -16,6 +16,7 @@ use crate::image_builder::JsImageBuilder;
 use crate::mount_builder::JsMountBuilder;
 use crate::network_builder::JsNetworkBuilder;
 use crate::patch_builder::JsPatchBuilder;
+use crate::pull_progress::JsPullProgressStream;
 use crate::registry_builder::JsRegistryConfigBuilder;
 use crate::sandbox::Sandbox as JsSandbox;
 use crate::secret_builder::JsSecretBuilder;
@@ -444,6 +445,85 @@ impl JsSandboxBuilder {
             .take()
             .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
         let inner: RustSandbox = b.create_detached().await.map_err(to_napi_error)?;
+        Ok(JsSandbox::from_rust(inner))
+    }
+
+    /// Create the sandbox with image-pull progress reporting. Returns
+    /// a `PullProgressStream` of per-layer download/materialization
+    /// events. The actual `Sandbox` is awaited via `.awaitSandbox()`
+    /// on the returned object — the TS layer wraps this with a
+    /// closure-callback API on the public surface.
+    ///
+    /// # Safety
+    /// Same justification as `create`.
+    #[napi(js_name = "createWithPullProgress")]
+    pub async unsafe fn create_with_pull_progress(&mut self) -> Result<JsPullProgressCreate> {
+        let b = self
+            .inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
+        let (handle, task) = b.create_with_pull_progress().map_err(to_napi_error)?;
+        Ok(JsPullProgressCreate {
+            stream: JsPullProgressStream::from_handle(handle),
+            task: std::sync::Arc::new(tokio::sync::Mutex::new(Some(task))),
+        })
+    }
+
+    /// Detached variant of `createWithPullProgress`.
+    ///
+    /// # Safety
+    /// Same justification as `create`.
+    #[napi(js_name = "createDetachedWithPullProgress")]
+    pub async unsafe fn create_detached_with_pull_progress(
+        &mut self,
+    ) -> Result<JsPullProgressCreate> {
+        let b = self
+            .inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
+        let (handle, task) = b
+            .create_detached_with_pull_progress()
+            .map_err(to_napi_error)?;
+        Ok(JsPullProgressCreate {
+            stream: JsPullProgressStream::from_handle(handle),
+            task: std::sync::Arc::new(tokio::sync::Mutex::new(Some(task))),
+        })
+    }
+}
+
+/// Pair returned by `createWithPullProgress`: the progress event stream
+/// plus a method to await the final `Sandbox`.
+#[napi(js_name = "PullProgressCreate")]
+pub struct JsPullProgressCreate {
+    stream: JsPullProgressStream,
+    task: std::sync::Arc<
+        tokio::sync::Mutex<
+            Option<tokio::task::JoinHandle<microsandbox::MicrosandboxResult<RustSandbox>>>,
+        >,
+    >,
+}
+
+#[napi]
+impl JsPullProgressCreate {
+    /// The progress event stream. Iterate with `for await...of` or
+    /// poll with `.recv()`. The stream closes once the pull completes.
+    #[napi(getter)]
+    pub fn progress(&self) -> JsPullProgressStream {
+        self.stream.clone()
+    }
+
+    /// Await the sandbox. Resolves once the pull + boot finishes.
+    /// Calling more than once errors.
+    #[napi(js_name = "awaitSandbox")]
+    pub async fn await_sandbox(&self) -> Result<JsSandbox> {
+        let mut guard = self.task.lock().await;
+        let task = guard
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("awaitSandbox already called"))?;
+        let inner = task
+            .await
+            .map_err(|e| napi::Error::from_reason(format!("create task panicked: {e}")))?
+            .map_err(to_napi_error)?;
         Ok(JsSandbox::from_rust(inner))
     }
 }

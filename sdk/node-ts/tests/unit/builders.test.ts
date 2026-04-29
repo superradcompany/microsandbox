@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   GiB,
+  InterfaceOverridesBuilder,
   intoRootfsSource,
   InvalidConfigError,
   MiB,
   MountBuilder,
+  NetworkBuilder,
   PatchBuilder,
   Sandbox,
   Stdin,
@@ -175,6 +177,55 @@ describe("SandboxBuilder.build", () => {
       .image("alpine")
       .volume("/bad", (m) => m.bind("/host").size(MiB(1)));
     expect(() => builder.build()).toThrow(InvalidConfigError);
+  });
+});
+
+describe("InterfaceOverridesBuilder", () => {
+  it("constructs cleanly and accepts MTU + IPv4 + IPv6 + MAC", () => {
+    const b = new InterfaceOverridesBuilder()
+      .mtu(9000)
+      .ipv4("100.96.0.5")
+      .ipv6("fd42:6d73:62::5")
+      .mac("aa:bb:cc:dd:ee:ff");
+    expect(b).toBeInstanceOf(InterfaceOverridesBuilder);
+  });
+
+  it("MTU out of range rejected at the call", () => {
+    expect(() => new InterfaceOverridesBuilder().mtu(70_000)).toThrow();
+  });
+
+  it("invalid IPv4 surfaces at .interface() drain", () => {
+    expect(() =>
+      new NetworkBuilder().interface((io) => io.ipv4("999.999.999.999")),
+    ).toThrow(/invalid IPv4/);
+  });
+
+  it("invalid MAC surfaces", () => {
+    expect(() =>
+      new NetworkBuilder().interface((io) => io.mac("zz:zz:zz:zz:zz:zz")),
+    ).toThrow(/MAC/);
+  });
+
+  it("valid overrides flow through NetworkBuilder.build()", () => {
+    const cfg = new NetworkBuilder()
+      .interface((io) => io.mtu(9000).ipv4("100.96.0.5"))
+      .build() as { interface: { mtu: number; ipv4Address: string } };
+    expect(cfg.interface.mtu).toBe(9000);
+    expect(cfg.interface.ipv4Address).toBe("100.96.0.5");
+  });
+});
+
+describe("NetworkBuilder.secretEnvSimple (3-arg shorthand)", () => {
+  it("accepts the 3-arg form mirroring Rust core", () => {
+    const cfg = new NetworkBuilder()
+      .secretEnvSimple("API_KEY", "sk-abc", "api.example.com")
+      .build() as {
+        secrets: { secrets: ReadonlyArray<{ envVar: string; placeholder: string }> };
+      };
+    expect(cfg.secrets.secrets).toHaveLength(1);
+    expect(cfg.secrets.secrets[0].envVar).toBe("API_KEY");
+    // Placeholder defaults to the value when omitted.
+    expect(cfg.secrets.secrets[0].placeholder).toBe("sk-abc");
   });
 });
 

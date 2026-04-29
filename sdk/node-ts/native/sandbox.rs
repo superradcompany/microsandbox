@@ -131,6 +131,17 @@ impl Sandbox {
         Ok(sb.owns_lifecycle())
     }
 
+    /// Get the full configuration this sandbox was created with
+    /// (image, cpus, memory, env, mounts, etc.) as a JSON string.
+    /// The TS layer parses + camelCase-remaps this into a plain object.
+    #[napi(js_name = "configJson")]
+    pub async fn config_json(&self) -> Result<String> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        serde_json::to_string(sb.config())
+            .map_err(|e| napi::Error::from_reason(format!("failed to serialize config: {e}")))
+    }
+
     //----------------------------------------------------------------------------------------------
     // Execution
     //----------------------------------------------------------------------------------------------

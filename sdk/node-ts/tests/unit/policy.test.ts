@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   Destination,
   NetworkPolicy,
+  NetworkPolicyBuilder,
   PortRange,
   Rule,
 } from "../../dist/index.js";
@@ -92,5 +93,101 @@ describe("PortRange factory", () => {
 
   it("range carries both endpoints", () => {
     expect(PortRange.range(8000, 9000)).toEqual({ start: 8000, end: 9000 });
+  });
+});
+
+describe("NetworkPolicyBuilder", () => {
+  it("empty builder produces the asymmetric default", () => {
+    const p = NetworkPolicy.builder().build();
+    expect(p.defaultEgress).toBe("deny");
+    expect(p.defaultIngress).toBe("allow");
+    expect(p.rules).toHaveLength(0);
+  });
+
+  it("defaultDeny + per-direction override", () => {
+    const p = NetworkPolicy.builder()
+      .defaultDeny()
+      .defaultIngress("allow")
+      .build();
+    expect(p.defaultEgress).toBe("deny");
+    expect(p.defaultIngress).toBe("allow");
+  });
+
+  it("egress closure commits one rule per group shortcut, sharing state", () => {
+    const p = NetworkPolicy.builder()
+      .egress((e) => e.tcp().port(443).allowPublic().allowPrivate())
+      .build();
+    expect(p.rules).toHaveLength(2);
+    expect(p.rules[0]).toMatchObject({
+      direction: "egress",
+      action: "allow",
+      destination: { kind: "group", group: "public" },
+      protocols: ["tcp"],
+    });
+    expect(p.rules[0].ports[0]).toEqual({ start: 443, end: 443 });
+    expect(p.rules[1].destination.group).toBe("private");
+  });
+
+  it("explicit-ip rule via allow(d => d.ip(...))", () => {
+    const p = NetworkPolicy.builder()
+      .any((a) => a.deny((d) => d.ip("198.51.100.5")))
+      .build();
+    expect(p.rules).toHaveLength(1);
+    expect(p.rules[0]).toMatchObject({
+      direction: "any",
+      action: "deny",
+      destination: { kind: "cidr", cidr: "198.51.100.5/32" },
+    });
+  });
+
+  it("invalid IP surfaces at .build()", () => {
+    const npb = NetworkPolicy.builder().egress((e) =>
+      e.allow((d) => d.ip("not-an-ip")),
+    );
+    expect(() => npb.build()).toThrow(/invalid IP/i);
+  });
+
+  it("invalid port range surfaces at .build()", () => {
+    const npb = NetworkPolicy.builder().egress((e) =>
+      e.tcp().portRange(443, 80).allowPublic(),
+    );
+    expect(() => npb.build()).toThrow(/invalid port range/i);
+  });
+
+  it("missing direction surfaces at .build()", () => {
+    const npb = NetworkPolicy.builder().rule((r) =>
+      r.tcp().port(443).allowPublic(),
+    );
+    expect(() => npb.build()).toThrow(/direction not set/i);
+  });
+
+  it("ICMP in ingress rejected at .build()", () => {
+    const npb = NetworkPolicy.builder().ingress((i) => i.icmpv4().allowPublic());
+    expect(() => npb.build()).toThrow(/ICMP/);
+  });
+
+  it("allowLocal commits Loopback + LinkLocal + Host", () => {
+    const p = NetworkPolicy.builder().egress((e) => e.allowLocal()).build();
+    expect(p.rules.map((r) => r.destination.group)).toEqual([
+      "loopback",
+      "link-local",
+      "host",
+    ]);
+  });
+
+  it("can be used directly as input to NetworkBuilder.policy()", async () => {
+    const { NetworkBuilder } = await import("../../dist/index.js");
+    const nb = new NetworkBuilder();
+    const npb = NetworkPolicy.builder()
+      .defaultDeny()
+      .egress((e) => e.tcp().port(443).allowPublic());
+    // Should not throw — accepts both factory-produced objects and builder
+    // instances.
+    nb.policy(npb);
+  });
+
+  it("instanceof NetworkPolicyBuilder", () => {
+    const npb = NetworkPolicy.builder();
+    expect(npb).toBeInstanceOf(NetworkPolicyBuilder);
   });
 });
