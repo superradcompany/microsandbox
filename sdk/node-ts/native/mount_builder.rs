@@ -15,10 +15,11 @@ use crate::error::to_napi_error;
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Built volume mount specification (flat representation of the
-/// `VolumeMount` enum: `kind` discriminator + per-variant fields).
+/// Volume mount specification produced by `MountBuilder.build()`.
+/// Flat representation of the `VolumeMount` enum: `kind`
+/// discriminator + per-variant fields.
 #[derive(Clone)]
-#[napi(object, js_name = "BuiltVolumeMount")]
+#[napi(object, js_name = "VolumeMount")]
 pub struct JsBuiltVolumeMount {
     pub kind: String,
     pub guest: String,

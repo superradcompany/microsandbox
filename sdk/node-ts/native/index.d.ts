@@ -283,7 +283,7 @@ export declare class MountBuilder {
    * Materialize the mount spec. Returns a flat `BuiltVolumeMount`
    * with a `kind` discriminator and per-variant fields.
    */
-  build(): BuiltVolumeMount
+  build(): VolumeMount
 }
 export type JsMountBuilder = MountBuilder
 
@@ -347,7 +347,7 @@ export declare class PatchBuilder {
   /** Append text to an existing file. */
   append(path: string, content: string): this
   /** Materialize into the ordered list of patches. */
-  build(): Array<BuiltPatch>
+  build(): Array<Patch>
 }
 export type JsPatchBuilder = PatchBuilder
 
@@ -769,48 +769,6 @@ export type JsVolumeHandle = VolumeHandle
 /** Get metrics for all running sandboxes. */
 export declare function allSandboxMetrics(): Promise<Record<string, SandboxMetrics>>
 
-/**
- * Built rootfs patch (flat representation of the `Patch` enum: `kind`
- * + per-variant fields).
- */
-export interface BuiltPatch {
-  /** `"text" | "file" | "copyFile" | "copyDir" | "symlink" | "mkdir" | "remove" | "append"`. */
-  kind: string
-  /** Absolute guest path (text/file/mkdir/remove/append). */
-  path?: string
-  /** Host source path (copyFile/copyDir). */
-  src?: string
-  /** Guest destination path (copyFile/copyDir). */
-  dst?: string
-  /** Symlink target. */
-  target?: string
-  /** Symlink link path. */
-  link?: string
-  /** Text content (text/append). */
-  content?: string
-  /** Raw byte content (file). */
-  contentBytes?: Array<number>
-  /** File / directory permissions. */
-  mode?: number
-  /** Allow replacing an existing path. */
-  replace?: boolean
-}
-
-/**
- * Built volume mount specification (flat representation of the
- * `VolumeMount` enum: `kind` discriminator + per-variant fields).
- */
-export interface BuiltVolumeMount {
-  kind: string
-  guest: string
-  readonly: boolean
-  host?: string
-  name?: string
-  sizeMib?: number
-  format?: string
-  fstype?: string
-}
-
 /** DNS interception configuration produced by `DnsBuilder.build()`. */
 export interface DnsConfig {
   blockedDomains: Array<string>
@@ -939,6 +897,33 @@ export declare function install(): Promise<void>
 /** Check if msb and libkrunfw are installed and available. */
 export declare function isInstalled(): boolean
 
+/**
+ * Rootfs patch produced by `PatchBuilder.build()`. Flat representation
+ * of the `Patch` enum: `kind` discriminator + per-variant fields.
+ */
+export interface Patch {
+  /** `"text" | "file" | "copyFile" | "copyDir" | "symlink" | "mkdir" | "remove" | "append"`. */
+  kind: string
+  /** Absolute guest path (text/file/mkdir/remove/append). */
+  path?: string
+  /** Host source path (copyFile/copyDir). */
+  src?: string
+  /** Guest destination path (copyFile/copyDir). */
+  dst?: string
+  /** Symlink target. */
+  target?: string
+  /** Symlink link path. */
+  link?: string
+  /** Text content (text/append). */
+  content?: string
+  /** Raw byte content (file). */
+  contentBytes?: Array<number>
+  /** File / directory permissions. */
+  mode?: number
+  /** Allow replacing an existing path. */
+  replace?: boolean
+}
+
 /** Optional knobs accepted by `text`, `file`, `copyFile`. */
 export interface PatchFileOptions {
   mode?: number
@@ -1034,4 +1019,20 @@ export interface VolumeInfo {
   usedBytes: number
   labels: Record<string, string>
   createdAt?: number
+}
+
+/**
+ * Volume mount specification produced by `MountBuilder.build()`.
+ * Flat representation of the `VolumeMount` enum: `kind`
+ * discriminator + per-variant fields.
+ */
+export interface VolumeMount {
+  kind: string
+  guest: string
+  readonly: boolean
+  host?: string
+  name?: string
+  sizeMib?: number
+  format?: string
+  fstype?: string
 }

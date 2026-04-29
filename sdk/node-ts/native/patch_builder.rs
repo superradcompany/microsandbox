@@ -9,10 +9,10 @@ use microsandbox::sandbox::{Patch as RustPatch, PatchBuilder as RustPatchBuilder
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Built rootfs patch (flat representation of the `Patch` enum: `kind`
-/// + per-variant fields).
+/// Rootfs patch produced by `PatchBuilder.build()`. Flat representation
+/// of the `Patch` enum: `kind` discriminator + per-variant fields.
 #[derive(Clone)]
-#[napi(object, js_name = "BuiltPatch")]
+#[napi(object, js_name = "Patch")]
 pub struct JsBuiltPatch {
     /// `"text" | "file" | "copyFile" | "copyDir" | "symlink" | "mkdir" | "remove" | "append"`.
     pub kind: String,

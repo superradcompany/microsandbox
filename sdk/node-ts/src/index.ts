@@ -235,10 +235,37 @@ export type {
   RootfsSource,
   RootfsSourceKind,
 } from "./rootfs.js";
-export { VolumeMountKinds } from "./mount.js";
-export type { VolumeMount, VolumeMountKind } from "./mount.js";
-export { PatchKinds } from "./patch.js";
-export type { Patch, PatchKind } from "./patch.js";
+// Volume mount + patch types come from the napi-emitted .d.ts so the
+// MountBuilder.build() / PatchBuilder.build() return types are
+// consistent with what each other native builder emits (TlsConfig /
+// DnsConfig / SecretEntry / VolumeMount / Patch — all flat shapes
+// with `kind` discriminator + per-variant fields).
+export type VolumeMountKind = "bind" | "named" | "tmpfs" | "disk";
+export const VolumeMountKinds: readonly VolumeMountKind[] = [
+  "bind",
+  "named",
+  "tmpfs",
+  "disk",
+] as const;
+export type PatchKind =
+  | "text"
+  | "file"
+  | "copyFile"
+  | "copyDir"
+  | "symlink"
+  | "mkdir"
+  | "remove"
+  | "append";
+export const PatchKinds: readonly PatchKind[] = [
+  "text",
+  "file",
+  "copyFile",
+  "copyDir",
+  "symlink",
+  "mkdir",
+  "remove",
+  "append",
+] as const;
 export { RegistryAuthKinds } from "./registry.js";
 export type { RegistryAuth, RegistryAuthKind } from "./registry.js";
 
