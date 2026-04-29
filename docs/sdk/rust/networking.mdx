@@ -165,8 +165,6 @@ Configure DNS interception. Errors accumulated by [`DnsBuilder`](#dnsbuilder) ca
 )
 ```
 
-Domain blocking is expressed as policy rules — see [`NetworkPolicyBuilder::deny_domains`](#deny_domains) — not on `DnsBuilder`.
-
 #### max_connections()
 
 ```rust
@@ -203,9 +201,7 @@ Set the action taken when a secret placeholder is detected in traffic destined f
 
 ## DnsBuilder
 
-Builder for DNS interception settings. Used in `NetworkBuilder::dns(|d| d...)`.
-
-Domain blocking is no longer here — express it as policy rules via [`NetworkPolicyBuilder::deny_domains`](#deny_domains) / [`deny_domain_suffixes`](#deny_domain_suffixes) instead. The DnsBuilder still owns rebind protection, nameserver pinning, and query timeouts.
+Builder for DNS interception settings. Used in `NetworkBuilder::dns(|d| d...)`. Owns rebind protection, nameserver pinning, and the per-query timeout.
 
 #### rebind_protection()
 

@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::shared::SharedState;
 
 use super::destination::{matches_cidr, matches_group};
-use super::name::DomainName;
+use super::name::{DomainName, DomainNameError};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -490,6 +490,106 @@ impl NetworkPolicy {
             }
         }
         false
+    }
+
+    /// Prepend a single `deny Domain(name)` egress rule. Sugar over
+    /// [`Self::deny_domains`] for the one-name case.
+    pub fn deny_domain<S: AsRef<str>>(self, name: S) -> Result<Self, DomainNameError> {
+        self.deny_domains([name])
+    }
+
+    /// Prepend a single `allow Domain(name)` egress rule. Sugar over
+    /// [`Self::allow_domains`].
+    pub fn allow_domain<S: AsRef<str>>(self, name: S) -> Result<Self, DomainNameError> {
+        self.allow_domains([name])
+    }
+
+    /// Prepend a single `deny DomainSuffix(suffix)` egress rule. Sugar
+    /// over [`Self::deny_domain_suffixes`].
+    pub fn deny_domain_suffix<S: AsRef<str>>(self, suffix: S) -> Result<Self, DomainNameError> {
+        self.deny_domain_suffixes([suffix])
+    }
+
+    /// Prepend a single `allow DomainSuffix(suffix)` egress rule.
+    /// Sugar over [`Self::allow_domain_suffixes`].
+    pub fn allow_domain_suffix<S: AsRef<str>>(self, suffix: S) -> Result<Self, DomainNameError> {
+        self.allow_domain_suffixes([suffix])
+    }
+
+    /// Prepend `deny Domain(name)` egress rules for each input.
+    ///
+    /// Useful for augmenting a preset such as [`Self::default`] /
+    /// [`Self::public_only`] with deny entries: the new rules are
+    /// prepended (not appended) so they take precedence over any
+    /// catch-all allow rules already in the policy. Without that, a
+    /// `deny Domain("evil.com")` appended after `allow Public` would
+    /// never fire — `evil.com` is a public IP, so `allow Public` would
+    /// match first.
+    ///
+    /// Names are parsed via [`DomainName`]; the first invalid name
+    /// short-circuits with [`DomainNameError`]. Input order is
+    /// preserved within the prepended block.
+    pub fn deny_domains<I, S>(self, names: I) -> Result<Self, DomainNameError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.prepend_egress_rules(names, |d| Rule::deny_egress(Destination::Domain(d)))
+    }
+
+    /// Prepend `allow Domain(name)` egress rules for each input. See
+    /// [`Self::deny_domains`] for ordering semantics.
+    pub fn allow_domains<I, S>(self, names: I) -> Result<Self, DomainNameError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.prepend_egress_rules(names, |d| Rule::allow_egress(Destination::Domain(d)))
+    }
+
+    /// Prepend `deny DomainSuffix(suffix)` egress rules for each input.
+    /// Each suffix matches the apex itself and any subdomain
+    /// (label-aligned). See [`Self::deny_domains`] for ordering.
+    pub fn deny_domain_suffixes<I, S>(self, suffixes: I) -> Result<Self, DomainNameError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.prepend_egress_rules(suffixes, |d| {
+            Rule::deny_egress(Destination::DomainSuffix(d))
+        })
+    }
+
+    /// Prepend `allow DomainSuffix(suffix)` egress rules for each
+    /// input. See [`Self::deny_domains`] for ordering.
+    pub fn allow_domain_suffixes<I, S>(self, suffixes: I) -> Result<Self, DomainNameError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.prepend_egress_rules(suffixes, |d| {
+            Rule::allow_egress(Destination::DomainSuffix(d))
+        })
+    }
+
+    fn prepend_egress_rules<I, S, F>(
+        mut self,
+        names: I,
+        mk_rule: F,
+    ) -> Result<Self, DomainNameError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+        F: Fn(DomainName) -> Rule,
+    {
+        let mut new_rules = Vec::new();
+        for name in names {
+            let domain: DomainName = name.as_ref().parse()?;
+            new_rules.push(mk_rule(domain));
+        }
+        new_rules.extend(std::mem::take(&mut self.rules));
+        self.rules = new_rules;
+        Ok(self)
     }
 }
 
@@ -1634,5 +1734,132 @@ mod tests {
     #[should_panic(expected = "DeferUntilHostname")]
     fn defer_through_action_conversion_debug_panics() {
         let _: Action = EgressEvaluation::DeferUntilHostname.into();
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // NetworkPolicy::deny_domains / deny_domain_suffixes (and allow_*)
+    //----------------------------------------------------------------------------------------------
+
+    #[test]
+    fn deny_domains_prepends_one_rule_per_name() {
+        let policy = NetworkPolicy {
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::allow_egress(Destination::Group(
+                DestinationGroup::Public,
+            ))],
+        };
+        let policy = policy
+            .deny_domains(["evil.com", "tracker.example"])
+            .unwrap();
+        assert_eq!(policy.rules.len(), 3);
+        // Prepended in input order; existing allow Public moves to the back.
+        assert!(matches!(
+            &policy.rules[0],
+            Rule { action: Action::Deny, destination: Destination::Domain(d), .. }
+                if d.as_str() == "evil.com"
+        ));
+        assert!(matches!(
+            &policy.rules[1],
+            Rule { action: Action::Deny, destination: Destination::Domain(d), .. }
+                if d.as_str() == "tracker.example"
+        ));
+        assert!(matches!(
+            &policy.rules[2].destination,
+            Destination::Group(DestinationGroup::Public),
+        ));
+    }
+
+    /// Prepending matters: appended denies are shadowed by an earlier
+    /// `allow Public` rule when the denied domain resolves to a public
+    /// IP. Verifies the helper makes the deny actually fire.
+    #[test]
+    fn deny_domains_outranks_existing_allow_public() {
+        let shared = shared_with_host("evil.com", PYPI_V4);
+        let policy = NetworkPolicy::default().deny_domains(["evil.com"]).unwrap();
+        assert!(egress_tcp(&policy, PYPI_V4, &shared).is_deny());
+    }
+
+    #[test]
+    fn deny_domain_suffixes_prepends_suffix_rules() {
+        let policy = NetworkPolicy {
+            default_egress: Action::Allow,
+            default_ingress: Action::Allow,
+            rules: vec![],
+        };
+        let policy = policy.deny_domain_suffixes([".evil.com"]).unwrap();
+        assert!(matches!(
+            &policy.rules[0],
+            Rule {
+                action: Action::Deny,
+                destination: Destination::DomainSuffix(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn allow_domains_and_deny_domains_chain() {
+        let policy = NetworkPolicy::default()
+            .deny_domains(["evil.com"])
+            .unwrap()
+            .allow_domains(["pypi.org"])
+            .unwrap();
+        // Last call prepends, so allow pypi.org comes before deny evil.com.
+        assert!(matches!(
+            &policy.rules[0],
+            Rule { action: Action::Allow, destination: Destination::Domain(d), .. }
+                if d.as_str() == "pypi.org"
+        ));
+        assert!(matches!(
+            &policy.rules[1],
+            Rule { action: Action::Deny, destination: Destination::Domain(d), .. }
+                if d.as_str() == "evil.com"
+        ));
+    }
+
+    #[test]
+    fn deny_domains_invalid_input_returns_error() {
+        let result = NetworkPolicy::default().deny_domains(["not a domain!"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deny_domains_empty_input_is_noop() {
+        let before = NetworkPolicy::default();
+        let after = before.clone().deny_domains(Vec::<&str>::new()).unwrap();
+        assert_eq!(after.rules.len(), before.rules.len());
+    }
+
+    #[test]
+    fn singular_domain_helpers_match_plural_one_element_form() {
+        let plural = NetworkPolicy::default().deny_domains(["evil.com"]).unwrap();
+        let singular = NetworkPolicy::default().deny_domain("evil.com").unwrap();
+        assert_eq!(plural.rules.len(), singular.rules.len());
+        assert!(matches!(
+            (&plural.rules[0], &singular.rules[0]),
+            (
+                Rule { destination: Destination::Domain(a), .. },
+                Rule { destination: Destination::Domain(b), .. },
+            ) if a == b
+        ));
+    }
+
+    #[test]
+    fn singular_domain_suffix_helper_chains() {
+        let policy = NetworkPolicy::default()
+            .deny_domain("evil.com")
+            .unwrap()
+            .deny_domain_suffix(".tracking.example")
+            .unwrap();
+        // Last call prepends, so the suffix rule sits at index 0.
+        assert!(matches!(
+            &policy.rules[0].destination,
+            Destination::DomainSuffix(_),
+        ));
+        assert!(matches!(
+            &policy.rules[1].destination,
+            Destination::Domain(_),
+        ));
     }
 }
