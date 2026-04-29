@@ -469,6 +469,7 @@ pub fn smoltcp_poll_loop(
                 conn.from_smoltcp,
                 conn.to_smoltcp,
                 shared.clone(),
+                network_policy.clone(),
             );
         }
 
