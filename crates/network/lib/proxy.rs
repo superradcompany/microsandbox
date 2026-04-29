@@ -175,6 +175,13 @@ async fn peek_for_sni(
                 match data {
                     Some(bytes) => {
                         buf.extend_from_slice(&bytes);
+                        // First byte of a TLS record is the ContentType;
+                        // 0x16 is handshake. Anything else can't be a
+                        // ClientHello, so don't burn the full budget on
+                        // plain HTTP / SSH / etc.
+                        if buf.first() != Some(&0x16) {
+                            break None;
+                        }
                         if let Some(name) = sni::extract_sni(&buf) {
                             break Some(name);
                         }
@@ -300,11 +307,14 @@ mod tests {
     #[tokio::test]
     async fn peek_for_sni_caps_at_max_bytes() {
         let (tx, mut rx) = mpsc::channel(4);
-        // Hand over more than the cap with no SNI in sight.
-        let chunk = vec![0u8; 8192];
-        tx.send(Bytes::from(chunk.clone())).await.unwrap();
-        tx.send(Bytes::from(chunk.clone())).await.unwrap();
-        tx.send(Bytes::from(chunk)).await.unwrap();
+        // First byte 0x16 keeps the peek collecting past the early
+        // non-TLS bail. Padding bytes are zero so the SNI parser never
+        // matches and the loop drives to the size cap.
+        let mut first = vec![0u8; 8192];
+        first[0] = 0x16;
+        tx.send(Bytes::from(first)).await.unwrap();
+        tx.send(Bytes::from(vec![0u8; 8192])).await.unwrap();
+        tx.send(Bytes::from(vec![0u8; 8192])).await.unwrap();
         drop(tx);
 
         let (buf, sni) = peek_for_sni(&mut rx, PEEK_BUF_SIZE, PEEK_BUDGET).await;
@@ -313,6 +323,28 @@ mod tests {
             buf.len() >= PEEK_BUF_SIZE,
             "buffer must hit the cap before bail-out: got {}",
             buf.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn peek_for_sni_bails_immediately_on_non_tls_first_byte() {
+        let (tx, mut rx) = mpsc::channel(4);
+        // Plain HTTP request: first byte 'G' (0x47) — clearly not TLS.
+        tx.send(Bytes::from_static(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"))
+            .await
+            .unwrap();
+        drop(tx);
+
+        // 5-second nominal budget; assert we returned in well under
+        // that — the early-bail must not wait for the full window.
+        let started = std::time::Instant::now();
+        let (buf, sni) = peek_for_sni(&mut rx, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+        let elapsed = started.elapsed();
+        assert_eq!(sni, None);
+        assert!(buf.starts_with(b"GET"));
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "non-TLS bail must be fast: took {elapsed:?}"
         );
     }
 
