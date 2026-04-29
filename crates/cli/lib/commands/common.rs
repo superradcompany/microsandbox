@@ -101,14 +101,28 @@ pub struct SandboxOpts {
     #[arg(long = "no-net")]
     pub no_net: bool,
 
-    /// Block DNS lookups for a domain (returns REFUSED).
+    /// Deny egress to a domain (DNS REFUSED + TCP block by SNI).
+    /// Repeatable. Equivalent to a `deny Domain("...")` policy rule.
     #[cfg(feature = "net")]
-    #[arg(long)]
+    #[arg(long = "deny-domain", value_name = "NAME")]
+    pub deny_domain: Vec<String>,
+
+    /// Deny egress to all subdomains of a suffix (e.g. `.ads.example`).
+    /// Repeatable. Equivalent to a `deny DomainSuffix("...")` policy rule.
+    #[cfg(feature = "net")]
+    #[arg(long = "deny-domain-suffix", value_name = "SUFFIX")]
+    pub deny_domain_suffix: Vec<String>,
+
+    /// Deprecated alias for `--deny-domain`. Kept for back-compat;
+    /// emits a warning on use.
+    #[cfg(feature = "net")]
+    #[arg(long, hide = true)]
     pub dns_block_domain: Vec<String>,
 
-    /// Block DNS lookups for all subdomains of a suffix (e.g. .ads.com).
+    /// Deprecated alias for `--deny-domain-suffix`. Kept for
+    /// back-compat; emits a warning on use.
     #[cfg(feature = "net")]
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub dns_block_suffix: Vec<String>,
 
     /// Allow DNS responses pointing to private/internal IP addresses.
@@ -243,6 +257,8 @@ impl SandboxOpts {
         #[cfg(feature = "net")]
         let net = !self.port.is_empty()
             || self.no_net
+            || !self.deny_domain.is_empty()
+            || !self.deny_domain_suffix.is_empty()
             || !self.dns_block_domain.is_empty()
             || !self.dns_block_suffix.is_empty()
             || self.no_dns_rebind_protection
@@ -422,7 +438,9 @@ fn apply_network_opts(
     }
 
     // DNS, TLS, and other network configuration.
-    let has_network_config = !opts.dns_block_domain.is_empty()
+    let has_network_config = !opts.deny_domain.is_empty()
+        || !opts.deny_domain_suffix.is_empty()
+        || !opts.dns_block_domain.is_empty()
         || !opts.dns_block_suffix.is_empty()
         || opts.no_dns_rebind_protection
         || !opts.dns_nameserver.is_empty()
@@ -442,6 +460,21 @@ fn apply_network_opts(
         || opts.on_secret_violation.is_some();
 
     if has_network_config {
+        // Warn on the deprecated aliases, but accept them. New flags
+        // and old flags concatenate into a single deny-rule list.
+        if !opts.dns_block_domain.is_empty() {
+            eprintln!("warning: --dns-block-domain is deprecated; use --deny-domain instead");
+        }
+        if !opts.dns_block_suffix.is_empty() {
+            eprintln!(
+                "warning: --dns-block-suffix is deprecated; use --deny-domain-suffix instead"
+            );
+        }
+        let mut deny_domains = opts.deny_domain.clone();
+        deny_domains.extend(opts.dns_block_domain.iter().cloned());
+        let mut deny_domain_suffixes = opts.deny_domain_suffix.clone();
+        deny_domain_suffixes.extend(opts.dns_block_suffix.iter().cloned());
+
         let no_dns_rebind = opts.no_dns_rebind_protection;
         let dns_nameservers = opts
             .dns_nameserver
@@ -453,8 +486,8 @@ fn apply_network_opts(
             &opts.net_rule,
             opts.net_default_egress.as_deref(),
             opts.net_default_ingress.as_deref(),
-            &opts.dns_block_domain,
-            &opts.dns_block_suffix,
+            &deny_domains,
+            &deny_domain_suffixes,
         )?;
         let max_conn = opts.max_connections;
         let trust_host_cas = opts.trust_host_cas;
@@ -559,16 +592,16 @@ pub fn parse_duration_secs(s: &str) -> anyhow::Result<u64> {
 }
 
 /// Assemble a [`NetworkPolicy`] from `--net-rule` / `--net-default-*`
-/// and the legacy `--dns-block-domain` / `--dns-block-suffix` flags.
-/// Returns `None` when no flag was set (caller falls back to the
-/// sandbox default).
+/// and the bulk-deny flags (`--deny-domain` / `--deny-domain-suffix`,
+/// plus the deprecated `--dns-block-domain` / `--dns-block-suffix`
+/// aliases the caller has already merged in). Returns `None` when no
+/// flag was set (caller falls back to the sandbox default).
 ///
-/// `--dns-block-domain` and `--dns-block-suffix` are convenience
-/// shortcuts for `deny Domain(...)` / `deny DomainSuffix(...)` rules;
-/// they are prepended to the rule list so they take precedence over any
-/// later allow rules. When these are the only policy flags set, the
-/// defaults flip to Allow on egress to preserve the legacy "full
-/// network minus blocked domains" semantics.
+/// Bulk-deny flags are convenience shortcuts for `deny Domain(...)` /
+/// `deny DomainSuffix(...)` rules; they are prepended to the rule list
+/// so they take precedence over any later allow rules. When these are
+/// the only policy flags set, the defaults flip to Allow on egress to
+/// preserve the legacy "full network minus blocked domains" semantics.
 ///
 /// Multiple `--net-rule` invocations concatenate in argv order; tokens
 /// inside each value are comma-separated and likewise preserved.
@@ -577,8 +610,8 @@ fn build_network_policy(
     rule_args: &[String],
     default_egress: Option<&str>,
     default_ingress: Option<&str>,
-    dns_block_domain: &[String],
-    dns_block_suffix: &[String],
+    deny_domains: &[String],
+    deny_domain_suffixes: &[String],
 ) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
     use anyhow::Context;
     use microsandbox_network::policy::{Action, Destination, DomainName, NetworkPolicy, Rule};
@@ -587,26 +620,24 @@ fn build_network_policy(
 
     let no_rule_flags =
         rule_args.is_empty() && default_egress.is_none() && default_ingress.is_none();
-    let no_block_flags = dns_block_domain.is_empty() && dns_block_suffix.is_empty();
+    let no_block_flags = deny_domains.is_empty() && deny_domain_suffixes.is_empty();
     if no_rule_flags && no_block_flags {
         return Ok(None);
     }
 
     let mut rules = Vec::new();
 
-    // Prepend deny rules from --dns-block-domain / --dns-block-suffix
-    // so they take precedence over any later allow rules. The user's
-    // intent in writing these flags is unambiguous: refuse these names.
-    for d in dns_block_domain {
-        let domain: DomainName = d
-            .parse()
-            .with_context(|| format!("--dns-block-domain {d:?}"))?;
+    // Prepend deny rules from the bulk-deny flags so they take
+    // precedence over any later allow rules. The user's intent in
+    // writing these flags is unambiguous: refuse these names.
+    for d in deny_domains {
+        let domain: DomainName = d.parse().with_context(|| format!("--deny-domain {d:?}"))?;
         rules.push(Rule::deny_egress(Destination::Domain(domain)));
     }
-    for s in dns_block_suffix {
+    for s in deny_domain_suffixes {
         let suffix: DomainName = s
             .parse()
-            .with_context(|| format!("--dns-block-suffix {s:?}"))?;
+            .with_context(|| format!("--deny-domain-suffix {s:?}"))?;
         rules.push(Rule::deny_egress(Destination::DomainSuffix(suffix)));
     }
 
