@@ -163,6 +163,23 @@ impl JsNetworkBuilder {
         self.inner = Some(prev.trust_host_cas(enabled));
         self
     }
+
+    /// Snapshot the accumulated configuration as a JSON string. The TS
+    /// layer parses + key-remaps to camelCase before returning to the
+    /// caller.
+    #[napi(js_name = "buildJson")]
+    pub fn build_json(&self) -> Result<String> {
+        let cloned = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("NetworkBuilder already consumed"))?
+            .clone();
+        let cfg = cloned
+            .build()
+            .map_err(|e| napi::Error::from_reason(format!("{e}")))?;
+        serde_json::to_string(&cfg)
+            .map_err(|e| napi::Error::from_reason(format!("network config serialize: {e}")))
+    }
 }
 
 impl JsNetworkBuilder {

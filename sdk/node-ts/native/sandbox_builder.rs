@@ -375,6 +375,15 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
+    /// Add a single rootfs patch built externally.
+    #[napi(js_name = "addPatch")]
+    pub fn add_patch(&mut self, patch: crate::patch_builder::JsBuiltPatch) -> Result<&Self> {
+        let p = crate::patch_builder::js_patch_to_rust(patch)?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.add_patch(p));
+        Ok(self)
+    }
+
     /// Apply rootfs patches via a callback.
     #[napi]
     pub fn patch(

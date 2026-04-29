@@ -130,7 +130,69 @@ wrapMethodWithErrorMap(napi.VolumeBuilder, "create");
       }
       return remapKeys(JSON.parse(json));
     };
-    proto.__buildWrapped = true;
+    Object.defineProperty(proto, "__buildWrapped", {
+      value: true,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+  }
+}
+
+// Hide native-only helper methods from enumeration so user-facing
+// iteration (`Object.keys`, `for...in`) sees only the documented
+// surface. The methods still work; they're just not advertised.
+function hideMethod(cls: { prototype: Record<string, unknown> }, name: string): void {
+  if (Object.prototype.hasOwnProperty.call(cls.prototype, name)) {
+    const value = cls.prototype[name];
+    Object.defineProperty(cls.prototype, name, {
+      value,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+  }
+}
+hideMethod(napi.NetworkBuilder, "buildJson");
+hideMethod(napi.NetworkBuilder, "policyJson");
+hideMethod(napi.SandboxBuilder, "execWithBuilder");
+hideMethod(napi.SandboxBuilder, "execStreamWithBuilder");
+hideMethod(napi.SandboxBuilder, "attachWithBuilder");
+
+// `NetworkBuilder.build()` natively returns a JSON-serialized
+// `NetworkConfig` (snake_case from Rust serde). Wrap with parse +
+// camelCase remap so callers get a plain JS object.
+{
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const proto: any = napi.NetworkBuilder.prototype;
+  if (!proto.__buildWrapped) {
+    const snakeToCamel = (k: string): string =>
+      k.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const remapKeys = (v: any): any => {
+      if (Array.isArray(v)) return v.map(remapKeys);
+      if (v && typeof v === "object") {
+        const out: Record<string, unknown> = {};
+        for (const [k, val] of Object.entries(v)) out[snakeToCamel(k)] = remapKeys(val);
+        return out;
+      }
+      return v;
+    };
+    proto.build = function () {
+      let json: string;
+      try {
+        json = this.buildJson();
+      } catch (e) {
+        throw mapNapiError(e);
+      }
+      return remapKeys(JSON.parse(json));
+    };
+    Object.defineProperty(proto, "__buildWrapped", {
+      value: true,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
   }
 }
 

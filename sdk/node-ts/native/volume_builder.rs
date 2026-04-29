@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -11,10 +13,22 @@ use crate::volume::JsVolume;
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Built volume configuration produced by `VolumeBuilder.build()`.
+#[derive(Clone)]
+#[napi(object, js_name = "VolumeConfig")]
+pub struct JsVolumeConfig {
+    pub name: String,
+    pub quota_mib: Option<u32>,
+    pub labels: HashMap<String, String>,
+}
+
 /// Fluent builder for a named persistent volume.
 #[napi(js_name = "VolumeBuilder")]
 pub struct JsVolumeBuilder {
     inner: Option<RustVolumeBuilder>,
+    name: String,
+    quota_mib: Option<u32>,
+    labels: Vec<(String, String)>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -26,7 +40,10 @@ impl JsVolumeBuilder {
     #[napi(constructor)]
     pub fn new(name: String) -> Self {
         Self {
-            inner: Some(RustVolumeBuilder::new(name)),
+            inner: Some(RustVolumeBuilder::new(&name)),
+            name,
+            quota_mib: None,
+            labels: Vec::new(),
         }
     }
 
@@ -35,6 +52,7 @@ impl JsVolumeBuilder {
     pub fn quota(&mut self, mib: u32) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.quota(Mebibytes::from(mib)));
+        self.quota_mib = Some(mib);
         self
     }
 
@@ -42,22 +60,27 @@ impl JsVolumeBuilder {
     #[napi]
     pub fn label(&mut self, key: String, value: String) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.label(key, value));
+        self.inner = Some(prev.label(&key, &value));
+        self.labels.push((key, value));
         self
+    }
+
+    /// Snapshot the accumulated configuration.
+    #[napi]
+    pub fn build(&self) -> JsVolumeConfig {
+        JsVolumeConfig {
+            name: self.name.clone(),
+            quota_mib: self.quota_mib,
+            labels: self.labels.iter().cloned().collect(),
+        }
     }
 
     /// Create the volume.
     ///
-    /// Marked `unsafe` only because `napi-rs` requires `&mut self` async
-    /// methods to be tagged that way (a half-mutated struct could be
-    /// observed mid-await). Practically it's safe: we take the inner
-    /// builder synchronously before the await point, leaving an empty
-    /// `Option` behind that subsequent calls reject. JS users do not see
-    /// the `unsafe` marker.
-    ///
     /// # Safety
-    /// The await-point hazard does not apply here because we drain the
-    /// inner builder before awaiting.
+    /// `&mut self` async requires the napi-rs `unsafe` tag. We drain the
+    /// inner builder synchronously before awaiting, so it's effectively
+    /// safe. JS callers see a normal `create(): Promise<Volume>`.
     #[napi]
     pub async unsafe fn create(&mut self) -> Result<JsVolume> {
         let b = self

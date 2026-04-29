@@ -16,6 +16,7 @@ use crate::tls::TlsConfig;
 //--------------------------------------------------------------------------------------------------
 
 /// Fluent builder for [`NetworkConfig`].
+#[derive(Clone)]
 pub struct NetworkBuilder {
     config: NetworkConfig,
     errors: Vec<BuildError>,

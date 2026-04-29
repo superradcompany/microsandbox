@@ -3,27 +3,21 @@
 /** Fluent builder for interactive attach options. */
 export declare class AttachOptionsBuilder {
   constructor()
-  /** Append a single command argument. */
   arg(arg: string): this
-  /** Append a list of command arguments. */
   args(args: Array<string>): this
-  /** Override the working directory. */
   cwd(cwd: string): this
-  /** Override the running user. */
   user(user: string): this
-  /** Set a single environment variable. */
   env(key: string, value: string): this
-  /** Set environment variables from an object. */
   envs(vars: Record<string, string>): this
   /**
-   * Override the detach key sequence (Docker-style spec, e.g. `"ctrl-]"` or
-   * `"ctrl-p,ctrl-q"`). Default: `Ctrl+]`.
+   * Override the detach key sequence (Docker-style spec, e.g.
+   * `"ctrl-]"` or `"ctrl-p,ctrl-q"`). Default: `Ctrl+]`.
    */
   detachKeys(keys: string): this
-  /** Set a hard rlimit (soft = hard). */
   rlimit(resource: string, limit: number): this
-  /** Set a separate soft and hard rlimit. */
   rlimitRange(resource: string, soft: number, hard: number): this
+  /** Snapshot the accumulated configuration. */
+  build(): AttachOptions
 }
 export type JsAttachOptionsBuilder = AttachOptionsBuilder
 
@@ -96,9 +90,9 @@ export declare class ExecOptionsBuilder {
   arg(arg: string): this
   /** Append a list of command arguments. */
   args(args: Array<string>): this
-  /** Override the working directory for this exec. */
+  /** Override the working directory. */
   cwd(cwd: string): this
-  /** Override the running user for this exec. */
+  /** Override the running user. */
   user(user: string): this
   /** Set a single environment variable. */
   env(key: string, value: string): this
@@ -106,18 +100,14 @@ export declare class ExecOptionsBuilder {
   envs(vars: Record<string, string>): this
   /** Kill the process if it hasn't exited within `ms` milliseconds. */
   timeout(ms: number): this
-  /** Connect stdin to /dev/null (default). */
   stdinNull(): this
-  /** Open a writable stdin pipe (use `ExecHandle.takeStdin()`). */
   stdinPipe(): this
-  /** Pipe a fixed byte payload as stdin. */
   stdinBytes(data: Buffer): this
-  /** Allocate a pseudo-terminal (default: false). */
   tty(enabled: boolean): this
-  /** Set a hard rlimit (soft = hard). */
   rlimit(resource: string, limit: number): this
-  /** Set a separate soft and hard rlimit. */
   rlimitRange(resource: string, soft: number, hard: number): this
+  /** Snapshot the accumulated configuration. */
+  build(): ExecOptions
 }
 export type JsExecOptionsBuilder = ExecOptionsBuilder
 
@@ -324,6 +314,12 @@ export declare class NetworkBuilder {
   maxConnections(max: number): this
   /** Trust the host's root CAs inside the guest. Default: false. */
   trustHostCAs(enabled: boolean): this
+  /**
+   * Snapshot the accumulated configuration as a JSON string. The TS
+   * layer parses + key-remaps to camelCase before returning to the
+   * caller.
+   */
+  buildJson(): string
 }
 export type JsNetworkBuilder = NetworkBuilder
 
@@ -358,8 +354,20 @@ export declare class RegistryConfigBuilder {
   auth(auth: RegistryAuthInput): this
   /** Use plain HTTP (no TLS). */
   insecure(): this
-  /** Add a PEM-encoded CA root certificate to trust. May be called repeatedly. */
+  /**
+   * Add a PEM-encoded CA root certificate (raw bytes). May be called
+   * repeatedly to add several CAs.
+   */
   caCerts(pemData: Buffer): this
+  /**
+   * Read a PEM CA root certificate from `path` and add it. Convenience
+   * shorthand over `caCerts(buffer)`. Panics on read failure deferred
+   * to the next async call site if the path doesn't exist (we surface
+   * it as a typed error there).
+   */
+  caCertsPath(path: string): this
+  /** Snapshot the accumulated configuration. */
+  build(): RegistryConfig
 }
 export type JsRegistryConfigBuilder = RegistryConfigBuilder
 
@@ -518,6 +526,8 @@ export declare class SandboxBuilder {
    * `MountBuilder` already pre-bound to `guestPath`.
    */
   volume(guestPath: string, configure: (arg: MountBuilder) => MountBuilder): this
+  /** Add a single rootfs patch built externally. */
+  addPatch(patch: Patch): this
   /** Apply rootfs patches via a callback. */
   patch(configure: (arg: PatchBuilder) => PatchBuilder): this
   /**
@@ -701,19 +711,15 @@ export declare class VolumeBuilder {
   quota(mib: number): this
   /** Attach a key-value label. May be called multiple times. */
   label(key: string, value: string): this
+  /** Snapshot the accumulated configuration. */
+  build(): VolumeConfig
   /**
    * Create the volume.
    *
-   * Marked `unsafe` only because `napi-rs` requires `&mut self` async
-   * methods to be tagged that way (a half-mutated struct could be
-   * observed mid-await). Practically it's safe: we take the inner
-   * builder synchronously before the await point, leaving an empty
-   * `Option` behind that subsequent calls reject. JS users do not see
-   * the `unsafe` marker.
-   *
    * # Safety
-   * The await-point hazard does not apply here because we drain the
-   * inner builder before awaiting.
+   * `&mut self` async requires the napi-rs `unsafe` tag. We drain the
+   * inner builder synchronously before awaiting, so it's effectively
+   * safe. JS callers see a normal `create(): Promise<Volume>`.
    */
   create(): Promise<Volume>
 }
@@ -769,6 +775,16 @@ export type JsVolumeHandle = VolumeHandle
 /** Get metrics for all running sandboxes. */
 export declare function allSandboxMetrics(): Promise<Record<string, SandboxMetrics>>
 
+/** Built attach options produced by `AttachOptionsBuilder.build()`. */
+export interface AttachOptions {
+  args: Array<string>
+  cwd?: string
+  user?: string
+  env: Record<string, string>
+  detachKeys?: string
+  rlimits: Array<JsRlimit>
+}
+
 /** DNS interception configuration produced by `DnsBuilder.build()`. */
 export interface DnsConfig {
   blockedDomains: Array<string>
@@ -793,6 +809,18 @@ export interface ExecEvent {
   data?: Buffer
   /** Exit code (only for "exited" events). */
   code?: number
+}
+
+/** Built exec options produced by `ExecOptionsBuilder.build()`. */
+export interface ExecOptions {
+  args: Array<string>
+  cwd?: string
+  user?: string
+  env: Record<string, string>
+  timeoutMs?: number
+  stdin: StdinMode
+  tty: boolean
+  rlimits: Array<Rlimit>
 }
 
 /** Process exit status. */
@@ -947,6 +975,26 @@ export interface RegistryAuthInput {
   password?: string
 }
 
+/** Built registry configuration produced by `RegistryConfigBuilder.build()`. */
+export interface RegistryConfig {
+  auth?: RegistryAuthInput
+  insecure: boolean
+  /**
+   * Number of PEM CA certs accumulated via `caCerts(buffer)`. Bytes
+   * themselves are not echoed back.
+   */
+  caCertsCount: number
+  /** Filesystem path passed to `caCertsPath(path)`, if any. */
+  caCertsPath?: string
+}
+
+/** A single rlimit entry. */
+export interface Rlimit {
+  resource: string
+  soft: number
+  hard: number
+}
+
 /** Lightweight handle info for a sandbox from the database. */
 export interface SandboxInfo {
   name: string
@@ -1000,6 +1048,14 @@ export interface SecretInjection {
   body: boolean
 }
 
+/** Stdin mode for an exec. */
+export interface StdinMode {
+  /** `"null" | "pipe" | "bytes"`. */
+  kind: string
+  /** Raw bytes piped as stdin (only for kind `"bytes"`). */
+  data?: Array<number>
+}
+
 /** TLS interception configuration produced by `TlsBuilder.build()`. */
 export interface TlsConfig {
   enabled: boolean
@@ -1010,6 +1066,13 @@ export interface TlsConfig {
   upstreamCaCertPaths: Array<string>
   interceptCaCertPath?: string
   interceptCaKeyPath?: string
+}
+
+/** Built volume configuration produced by `VolumeBuilder.build()`. */
+export interface VolumeConfig {
+  name: string
+  quotaMib?: number
+  labels: Record<string, string>
 }
 
 /** Volume handle info from the database. */

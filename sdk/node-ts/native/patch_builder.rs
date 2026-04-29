@@ -216,6 +216,63 @@ impl JsPatchBuilder {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Convert a JS-shape `Patch` (`{ kind, path?, content?, ... }`) into a
+/// Rust `microsandbox::sandbox::Patch`. Used by `SandboxBuilder.addPatch`.
+pub(crate) fn js_patch_to_rust(p: JsBuiltPatch) -> Result<RustPatch> {
+    use std::path::PathBuf;
+    let need = |opt: Option<String>, field: &str| {
+        opt.ok_or_else(|| {
+            napi::Error::from_reason(format!("patch kind `{}` requires `{}`", p.kind, field))
+        })
+    };
+    match p.kind.as_str() {
+        "text" => Ok(RustPatch::Text {
+            path: need(p.path.clone(), "path")?,
+            content: need(p.content.clone(), "content")?,
+            mode: p.mode,
+            replace: p.replace.unwrap_or(false),
+        }),
+        "file" => Ok(RustPatch::File {
+            path: need(p.path.clone(), "path")?,
+            content: p.content_bytes.clone().ok_or_else(|| {
+                napi::Error::from_reason("patch kind `file` requires `contentBytes`")
+            })?,
+            mode: p.mode,
+            replace: p.replace.unwrap_or(false),
+        }),
+        "copyFile" => Ok(RustPatch::CopyFile {
+            src: PathBuf::from(need(p.src.clone(), "src")?),
+            dst: need(p.dst.clone(), "dst")?,
+            mode: p.mode,
+            replace: p.replace.unwrap_or(false),
+        }),
+        "copyDir" => Ok(RustPatch::CopyDir {
+            src: PathBuf::from(need(p.src.clone(), "src")?),
+            dst: need(p.dst.clone(), "dst")?,
+            replace: p.replace.unwrap_or(false),
+        }),
+        "symlink" => Ok(RustPatch::Symlink {
+            target: need(p.target.clone(), "target")?,
+            link: need(p.link.clone(), "link")?,
+            replace: p.replace.unwrap_or(false),
+        }),
+        "mkdir" => Ok(RustPatch::Mkdir {
+            path: need(p.path.clone(), "path")?,
+            mode: p.mode,
+        }),
+        "remove" => Ok(RustPatch::Remove {
+            path: need(p.path.clone(), "path")?,
+        }),
+        "append" => Ok(RustPatch::Append {
+            path: need(p.path.clone(), "path")?,
+            content: need(p.content.clone(), "content")?,
+        }),
+        other => Err(napi::Error::from_reason(format!(
+            "unknown patch kind `{other}`"
+        ))),
+    }
+}
+
 pub(crate) fn to_js_patch(p: RustPatch) -> JsBuiltPatch {
     let blank = || JsBuiltPatch {
         kind: String::new(),
