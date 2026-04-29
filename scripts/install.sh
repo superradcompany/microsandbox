@@ -378,12 +378,14 @@ glibc_version_lt() {
 
 verify_linux_compatibility() {
     _glibc_version=$(detect_glibc_version || true)
+    _glibc_requirement="Microsandbox Linux releases require glibc ${LINUX_GLIBC_MIN_VERSION} or newer"
+
     if [ -z "$_glibc_version" ]; then
-        error "microsandbox Linux releases currently require glibc >= ${LINUX_GLIBC_MIN_VERSION}; could not detect a supported glibc runtime on this system"
+        error "${_glibc_requirement}, but a compatible glibc runtime was not detected. Please use a glibc-based Linux environment."
     fi
 
     if glibc_version_lt "$_glibc_version" "$LINUX_GLIBC_MIN_VERSION"; then
-        error "microsandbox Linux releases currently require glibc >= ${LINUX_GLIBC_MIN_VERSION}; detected ${_glibc_version}"
+        error "${_glibc_requirement}, but this system has glibc ${_glibc_version}. Please use a newer glibc-based Linux environment."
     fi
 }
 
