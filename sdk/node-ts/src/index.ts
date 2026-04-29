@@ -2,7 +2,19 @@ import { napi } from "./internal/napi.js";
 
 // Sandbox lifecycle and execution
 export { Sandbox } from "./sandbox.js";
-export type { SandboxBuilder } from "./sandbox.js";
+import { Sandbox as _Sandbox, type SandboxBuilder as _SBT } from "./sandbox.js";
+/**
+ * Native fluent builder for a sandbox. `new SandboxBuilder(name)` is
+ * equivalent to `Sandbox.builder(name)` — both return the same shape
+ * with `.create()` resolving to a TS `Sandbox`.
+ */
+export const SandboxBuilder = function SandboxBuilder(
+  this: unknown,
+  name: string,
+) {
+  return _Sandbox.builder(name);
+} as unknown as new (name: string) => _SBT;
+export type SandboxBuilder = _SBT;
 export { SandboxHandle } from "./sandbox-handle.js";
 export { ExecHandle, ExecOutput, ExecSink } from "./exec.js";
 
@@ -11,7 +23,18 @@ export { FsReadStream, FsWriteSink, SandboxFs } from "./fs.js";
 
 // Volumes
 export { Volume } from "./volume.js";
-export type { VolumeBuilder } from "./volume.js";
+import { Volume as _Volume, type VolumeBuilder as _VBT } from "./volume.js";
+/**
+ * Native fluent builder for a named volume. `new VolumeBuilder(name)`
+ * is equivalent to `Volume.builder(name)`.
+ */
+export const VolumeBuilder = function VolumeBuilder(
+  this: unknown,
+  name: string,
+) {
+  return _Volume.builder(name);
+} as unknown as new (name: string) => _VBT;
+export type VolumeBuilder = _VBT;
 export { VolumeHandle } from "./volume-handle.js";
 export {
   VolumeFs,
