@@ -44,7 +44,7 @@ use super::common::config::NormalizedDnsConfig;
 use super::common::filter::{is_private_ipv4, is_private_ipv6};
 use super::common::transport::Transport;
 use super::nameserver::{read_host_dns_servers, resolve_nameservers};
-use crate::policy::NetworkPolicy;
+use crate::policy::{DomainName, NetworkPolicy};
 use crate::shared::{ResolvedHostnameFamily, SharedState};
 use crate::stack::GatewayIps;
 
@@ -161,7 +161,12 @@ impl DnsForwarder {
         let domain = domain.trim_end_matches('.').to_owned();
 
         // Network policy `deny Domain` / `deny DomainSuffix`: synthesize REFUSED.
-        if self.network_policy.dns_query_denied(&domain) {
+        // Wire-form names that fail DomainName validation can never match a
+        // (validated) rule destination, so we fail-open and let the query
+        // proceed to host-alias synthesis / upstream forwarding.
+        if let Ok(canonical) = domain.parse::<DomainName>()
+            && self.network_policy.dns_query_denied(&canonical)
+        {
             tracing::debug!(domain = %domain, "DNS query refused by network policy");
             return build_status_response(&query_msg, ResponseCode::Refused);
         }

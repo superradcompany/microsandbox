@@ -345,20 +345,19 @@ impl NetworkPolicy {
     /// are skipped. `default_egress` is not consulted: deny-by-default
     /// does not refuse all DNS, only explicit deny rules do.
     ///
-    /// `name` is canonicalized through [`DomainName`]. Inputs that fail
-    /// label validation can never match a (validated) rule destination,
-    /// so we fail-open and let the query proceed.
-    pub fn dns_query_denied(&self, name: &str) -> bool {
-        let Ok(canonical) = name.parse::<DomainName>() else {
-            return false;
-        };
+    /// `name` is a validated [`DomainName`] (lowercase ASCII, no
+    /// trailing dot) so matching collapses to byte equality. Callers
+    /// that hold a wire-form string parse it via [`str::parse`] first;
+    /// names that fail to parse cannot match any (validated) rule and
+    /// the caller should fail-open by skipping the check.
+    pub fn dns_query_denied(&self, name: &DomainName) -> bool {
         for rule in &self.rules {
             if !matches!(rule.direction, Direction::Egress | Direction::Any) {
                 continue;
             }
             let matched = match &rule.destination {
-                Destination::Domain(d) => canonical.as_str() == d.as_str(),
-                Destination::DomainSuffix(s) => matches_suffix(canonical.as_str(), s.as_str()),
+                Destination::Domain(d) => name.as_str() == d.as_str(),
+                Destination::DomainSuffix(s) => matches_suffix(name.as_str(), s.as_str()),
                 _ => false,
             };
             if matched {
@@ -1128,31 +1127,38 @@ mod tests {
         }
     }
 
+    fn name(s: &str) -> DomainName {
+        s.parse().expect("valid domain name")
+    }
+
     #[test]
     fn dns_query_denied_matches_exact_domain() {
-        let policy = deny_domain_policy(Destination::Domain("evil.com".parse().unwrap()));
-        assert!(policy.dns_query_denied("evil.com"));
-        assert!(!policy.dns_query_denied("good.com"));
+        let policy = deny_domain_policy(Destination::Domain(name("evil.com")));
+        assert!(policy.dns_query_denied(&name("evil.com")));
+        assert!(!policy.dns_query_denied(&name("good.com")));
     }
 
     #[test]
     fn dns_query_denied_matches_suffix_apex_and_subdomain() {
-        let policy = deny_domain_policy(Destination::DomainSuffix(".evil.com".parse().unwrap()));
-        assert!(policy.dns_query_denied("evil.com"), "apex must match");
+        let policy = deny_domain_policy(Destination::DomainSuffix(name(".evil.com")));
         assert!(
-            policy.dns_query_denied("foo.evil.com"),
+            policy.dns_query_denied(&name("evil.com")),
+            "apex must match"
+        );
+        assert!(
+            policy.dns_query_denied(&name("foo.evil.com")),
             "subdomain must match"
         );
         assert!(
-            policy.dns_query_denied("deep.sub.evil.com"),
+            policy.dns_query_denied(&name("deep.sub.evil.com")),
             "deeper subdomain must match"
         );
     }
 
     #[test]
     fn dns_query_denied_does_not_match_disjoint_suffix() {
-        let policy = deny_domain_policy(Destination::DomainSuffix(".evil.com".parse().unwrap()));
-        assert!(!policy.dns_query_denied("notevil.com"));
+        let policy = deny_domain_policy(Destination::DomainSuffix(name(".evil.com")));
+        assert!(!policy.dns_query_denied(&name("notevil.com")));
     }
 
     #[test]
@@ -1166,7 +1172,7 @@ mod tests {
                 Rule::deny_egress(Destination::Group(DestinationGroup::Public)),
             ],
         };
-        assert!(!policy.dns_query_denied("anything.example"));
+        assert!(!policy.dns_query_denied(&name("anything.example")));
     }
 
     #[test]
@@ -1175,14 +1181,14 @@ mod tests {
             default_egress: Action::Allow,
             default_ingress: Action::Allow,
             rules: vec![
-                Rule::allow_egress(Destination::Domain("evil.com".parse().unwrap())),
-                Rule::deny_egress(Destination::DomainSuffix(".evil.com".parse().unwrap())),
+                Rule::allow_egress(Destination::Domain(name("evil.com"))),
+                Rule::deny_egress(Destination::DomainSuffix(name(".evil.com"))),
             ],
         };
         // Allow rule comes first; DNS resolution must proceed.
-        assert!(!policy.dns_query_denied("evil.com"));
+        assert!(!policy.dns_query_denied(&name("evil.com")));
         // Deny suffix still catches subdomains the allow rule didn't cover.
-        assert!(policy.dns_query_denied("foo.evil.com"));
+        assert!(policy.dns_query_denied(&name("foo.evil.com")));
     }
 
     #[test]
@@ -1194,13 +1200,13 @@ mod tests {
             default_ingress: Action::Allow,
             rules: vec![Rule {
                 direction: Direction::Egress,
-                destination: Destination::Domain("evil.com".parse().unwrap()),
+                destination: Destination::Domain(name("evil.com")),
                 protocols: vec![Protocol::Tcp],
                 ports: vec![PortRange::single(443)],
                 action: Action::Deny,
             }],
         };
-        assert!(policy.dns_query_denied("evil.com"));
+        assert!(policy.dns_query_denied(&name("evil.com")));
     }
 
     #[test]
@@ -1211,15 +1217,7 @@ mod tests {
             default_ingress: Action::Allow,
             rules: vec![],
         };
-        assert!(!policy.dns_query_denied("anything.example"));
-    }
-
-    #[test]
-    fn dns_query_denied_normalizes_case_and_trailing_dot() {
-        let policy = deny_domain_policy(Destination::Domain("evil.com".parse().unwrap()));
-        assert!(policy.dns_query_denied("Evil.COM"));
-        assert!(policy.dns_query_denied("evil.com."));
-        assert!(policy.dns_query_denied("EVIL.COM."));
+        assert!(!policy.dns_query_denied(&name("anything.example")));
     }
 
     #[test]
@@ -1227,11 +1225,9 @@ mod tests {
         let policy = NetworkPolicy {
             default_egress: Action::Allow,
             default_ingress: Action::Allow,
-            rules: vec![Rule::deny_ingress(Destination::Domain(
-                "evil.com".parse().unwrap(),
-            ))],
+            rules: vec![Rule::deny_ingress(Destination::Domain(name("evil.com")))],
         };
-        assert!(!policy.dns_query_denied("evil.com"));
+        assert!(!policy.dns_query_denied(&name("evil.com")));
     }
 
     #[test]
@@ -1239,10 +1235,8 @@ mod tests {
         let policy = NetworkPolicy {
             default_egress: Action::Allow,
             default_ingress: Action::Allow,
-            rules: vec![Rule::deny_any(Destination::Domain(
-                "evil.com".parse().unwrap(),
-            ))],
+            rules: vec![Rule::deny_any(Destination::Domain(name("evil.com")))],
         };
-        assert!(policy.dns_query_denied("evil.com"));
+        assert!(policy.dns_query_denied(&name("evil.com")));
     }
 }
