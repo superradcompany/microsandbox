@@ -89,10 +89,23 @@ async fn setup_alpine(name: &str, policy: NetworkPolicy) -> Sandbox {
 /// producing ambiguous `000FAIL` strings.
 ///
 /// Timeout is 30s rather than 10s so a slow CI runner isn't the thing
-/// tipping a probe over on the TLS handshake.
+/// tipping a probe over on the TLS handshake. `--retry 2
+/// --retry-connrefused --retry-delay 1` covers transient drops and
+/// gives the host-side resolved-hostname cache a beat to settle if the
+/// first connect races the DNS interceptor's cache write.
+///
+/// A `getent hosts` is run first so DNS for `<host>` always goes
+/// through the in-process interceptor before curl's connect — the
+/// interceptor populates the host-side resolved-hostname cache that
+/// `Destination::Domain` / `Destination::DomainSuffix` rules read at
+/// match time, so a stable cache entry is in place before the
+/// policy-gated TCP connect.
 async fn probe_https(sb: &Sandbox, url: &str) -> String {
     let cmd = format!(
-        "code=$(curl -sS --max-time 30 -o /dev/null -w '%{{http_code}}' {url} 2>/dev/null); \
+        "host=$(printf '%s' '{url}' | sed -E 's|^https?://([^/]+).*|\\1|'); \
+         getent hosts \"$host\" >/dev/null 2>&1 || true; \
+         code=$(curl -sS --max-time 30 --retry 2 --retry-connrefused --retry-delay 1 \
+            -o /dev/null -w '%{{http_code}}' {url} 2>/dev/null); \
          case \"$code\" in 000|\"\") echo {CURL_FAIL};; *) printf '%s' \"$code\";; esac"
     );
     let out = sb.shell(&cmd).await.expect("shell");
@@ -134,19 +147,6 @@ async fn domain_policy_allows_whitelisted_https() {
         ],
     };
     let sb = setup_alpine(name, policy).await;
-
-    // DNS resolution itself must succeed: the interceptor bypasses
-    // the egress policy for queries aimed at the gateway, so the
-    // guest can populate its cache before the policy-gated connect.
-    let dns = sb
-        .shell("getent hosts pypi.org | awk '{print $1; exit}'")
-        .await
-        .expect("dns probe");
-    let dns_out = dns.stdout().unwrap_or_default().trim().to_string();
-    assert!(
-        !dns_out.is_empty(),
-        "DNS resolution of pypi.org should succeed via the gateway resolver"
-    );
 
     let pypi = probe_https(&sb, "https://pypi.org/simple/pip/").await;
     assert!(

@@ -34,6 +34,10 @@ rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
 rustls-pemfile = "2"
 serde = { workspace = true }
+# Used for the `SO_LINGER(0)` (RST-on-drop) trick on rejected inbound
+# connections in `publisher.rs`. tokio's `TcpStream::set_linger` is
+# deprecated; `socket2::SockRef::from(&stream)` is the supported path.
+socket2 = { workspace = true }
 smoltcp = { workspace = true, features = [
     "alloc",
     "async",

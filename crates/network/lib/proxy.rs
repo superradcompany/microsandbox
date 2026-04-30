@@ -8,6 +8,7 @@
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -32,15 +33,29 @@ const SERVER_READ_BUF_SIZE: usize = 16384;
 /// Connects to `dst` via tokio, then bidirectionally relays data between
 /// the smoltcp socket (via channels) and the real server. Wakes the poll
 /// thread via `shared.proxy_wake` whenever data is sent toward the guest.
+///
+/// # Arguments
+///
+/// * `handle` - Tokio runtime the task is spawned on.
+/// * `dst` - Host-side destination the proxy dials.
+/// * `from_smoltcp` / `to_smoltcp` - Channels to the smoltcp socket.
+/// * `shared` - Stack-wide shared state; used to wake the poll thread.
+/// * `upstream_connected` - Flag the task flips to `true` after the
+///   upstream `TcpStream::connect` succeeds. The connection tracker
+///   reads this on proxy exit to decide between FIN (clean close) and
+///   RST (upstream never reached).
 pub fn spawn_tcp_proxy(
     handle: &tokio::runtime::Handle,
     dst: SocketAddr,
     from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
+    upstream_connected: Arc<AtomicBool>,
 ) {
     handle.spawn(async move {
-        if let Err(e) = tcp_proxy_task(dst, from_smoltcp, to_smoltcp, shared).await {
+        if let Err(e) =
+            tcp_proxy_task(dst, from_smoltcp, to_smoltcp, shared, upstream_connected).await
+        {
             tracing::debug!(dst = %dst, error = %e, "TCP proxy task ended");
         }
     });
@@ -52,8 +67,10 @@ async fn tcp_proxy_task(
     mut from_smoltcp: mpsc::Receiver<Bytes>,
     to_smoltcp: mpsc::Sender<Bytes>,
     shared: Arc<SharedState>,
+    upstream_connected: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let stream = TcpStream::connect(dst).await?;
+    upstream_connected.store(true, Ordering::Release);
     let (mut server_rx, mut server_tx) = stream.into_split();
 
     let mut server_buf = vec![0u8; SERVER_READ_BUF_SIZE];
