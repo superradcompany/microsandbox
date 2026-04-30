@@ -55,9 +55,16 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub tmpfs: Vec<String>,
 
-    /// Mount a host file as a named script inside the sandbox (NAME:PATH).
-    #[arg(long)]
+    /// Register an inline script in the sandbox (NAME=BODY). The body is
+    /// taken literally as the script content. Available at `/.msb/scripts/<name>`
+    /// and on `PATH`.
+    #[arg(long, value_name = "NAME=BODY")]
     pub script: Vec<String>,
+
+    /// Register a script from a host file (NAME:PATH). Same destination as
+    /// `--script`; the file's contents are read at launch time.
+    #[arg(long, value_name = "NAME:PATH")]
+    pub script_path: Vec<String>,
 
     // --- Image/Runtime overrides ---
     /// Override the image's default entrypoint command.
@@ -235,6 +242,7 @@ impl SandboxOpts {
             || !self.env.is_empty()
             || !self.tmpfs.is_empty()
             || !self.script.is_empty()
+            || !self.script_path.is_empty()
             || self.entrypoint.is_some()
             || self.hostname.is_some()
             || self.user.is_some()
@@ -321,8 +329,7 @@ pub fn apply_sandbox_opts(
     }
 
     // --- Scripts ---
-    for script_str in &opts.script {
-        let (name, content) = parse_script(script_str)?;
+    for (name, content) in collect_scripts(&opts.script, &opts.script_path)? {
         builder = builder.script(name, content);
     }
 
@@ -709,11 +716,53 @@ fn parse_tmpfs(spec: &str) -> anyhow::Result<(String, Option<u32>)> {
     }
 }
 
-/// Parse a script spec: `NAME:PATH` and read file content.
-fn parse_script(spec: &str) -> anyhow::Result<(String, String)> {
+/// Resolve `--script` / `--script-path` specs into a deduped list of
+/// `(name, content)` pairs preserving argv order. Inline entries are
+/// processed first, then path entries; duplicate names across either
+/// flag are rejected.
+fn collect_scripts(inline: &[String], paths: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    use std::collections::HashSet;
+
+    let mut out = Vec::with_capacity(inline.len() + paths.len());
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for spec in inline {
+        let (name, content) = parse_script_inline(spec)?;
+        if !seen.insert(name.clone()) {
+            anyhow::bail!("script name '{name}' specified more than once");
+        }
+        out.push((name, content));
+    }
+    for spec in paths {
+        let (name, content) = parse_script_path(spec)?;
+        if !seen.insert(name.clone()) {
+            anyhow::bail!("script name '{name}' specified more than once");
+        }
+        out.push((name, content));
+    }
+    Ok(out)
+}
+
+/// Parse an inline script spec: `NAME=BODY`. Splits on the first `=` so
+/// bodies may freely contain `=`.
+fn parse_script_inline(spec: &str) -> anyhow::Result<(String, String)> {
+    let (name, body) = spec
+        .split_once('=')
+        .ok_or_else(|| anyhow::anyhow!("script must be in format NAME=BODY"))?;
+    if name.is_empty() {
+        anyhow::bail!("script name must not be empty (NAME=BODY)");
+    }
+    Ok((name.to_string(), body.to_string()))
+}
+
+/// Parse a script-from-file spec: `NAME:PATH` and read file content.
+fn parse_script_path(spec: &str) -> anyhow::Result<(String, String)> {
     let (name, path) = spec
         .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("script must be in format NAME:PATH"))?;
+        .ok_or_else(|| anyhow::anyhow!("script-path must be in format NAME:PATH"))?;
+    if name.is_empty() {
+        anyhow::bail!("script name must not be empty (NAME:PATH)");
+    }
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("failed to read script file '{path}': {e}"))?;
     Ok((name.to_string(), content))
@@ -834,4 +883,166 @@ pub fn parse_rlimit(
         RlimitResource::try_from(rlimit.resource.as_str()).map_err(anyhow::Error::msg)?;
 
     Ok((resource, rlimit.soft, rlimit.hard))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    /// Write a temp file with unique name, return its path.
+    fn write_temp(content: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("msb-script-test-{}-{}.sh", std::process::id(), n));
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        path
+    }
+
+    // --- parse_script_inline ---
+
+    #[test]
+    fn inline_basic() {
+        let (name, body) = parse_script_inline("greet=echo hi").unwrap();
+        assert_eq!(name, "greet");
+        assert_eq!(body, "echo hi");
+    }
+
+    #[test]
+    fn inline_body_may_contain_equals() {
+        let (name, body) = parse_script_inline("kv=K=V test: a=b=c").unwrap();
+        assert_eq!(name, "kv");
+        assert_eq!(body, "K=V test: a=b=c");
+    }
+
+    #[test]
+    fn inline_empty_body_is_allowed() {
+        let (name, body) = parse_script_inline("noop=").unwrap();
+        assert_eq!(name, "noop");
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn inline_missing_equals_errors() {
+        let err = parse_script_inline("noequals").unwrap_err();
+        assert!(err.to_string().contains("NAME=BODY"), "got: {err}");
+    }
+
+    #[test]
+    fn inline_empty_name_errors() {
+        let err = parse_script_inline("=echo hi").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "got: {err}");
+    }
+
+    // --- parse_script_path ---
+
+    #[test]
+    fn path_basic() {
+        let p = write_temp("#!/bin/sh\necho hi\n");
+        let spec = format!("hello:{}", p.display());
+        let (name, body) = parse_script_path(&spec).unwrap();
+        assert_eq!(name, "hello");
+        assert_eq!(body, "#!/bin/sh\necho hi\n");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn path_missing_colon_errors() {
+        let err = parse_script_path("nocolons").unwrap_err();
+        assert!(err.to_string().contains("NAME:PATH"), "got: {err}");
+    }
+
+    #[test]
+    fn path_empty_name_errors() {
+        let err = parse_script_path(":/tmp/whatever").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn path_missing_file_errors() {
+        let err = parse_script_path("foo:/no/such/file-msb.sh").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("failed to read script file"), "got: {msg}");
+        assert!(msg.contains("/no/such/file-msb.sh"), "got: {msg}");
+    }
+
+    // --- collect_scripts (duplicate logic) ---
+
+    #[test]
+    fn collect_inline_only_preserves_order() {
+        let inline = vec!["a=echo a".to_string(), "b=echo b".to_string()];
+        let out = collect_scripts(&inline, &[]).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                ("a".to_string(), "echo a".to_string()),
+                ("b".to_string(), "echo b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_combines_inline_then_paths() {
+        let p = write_temp("from-file");
+        let inline = vec!["a=echo a".to_string()];
+        let paths = vec![format!("b:{}", p.display())];
+        let out = collect_scripts(&inline, &paths).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], ("a".to_string(), "echo a".to_string()));
+        assert_eq!(out[1], ("b".to_string(), "from-file".to_string()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn collect_rejects_duplicate_within_inline() {
+        let inline = vec!["foo=echo a".to_string(), "foo=echo b".to_string()];
+        let err = collect_scripts(&inline, &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("'foo' specified more than once"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn collect_rejects_duplicate_within_path() {
+        let p = write_temp("x");
+        let paths = vec![
+            format!("foo:{}", p.display()),
+            format!("foo:{}", p.display()),
+        ];
+        let err = collect_scripts(&[], &paths).unwrap_err();
+        assert!(
+            err.to_string().contains("'foo' specified more than once"),
+            "got: {err}"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn collect_rejects_duplicate_across_flags() {
+        let p = write_temp("x");
+        let inline = vec!["foo=echo a".to_string()];
+        let paths = vec![format!("foo:{}", p.display())];
+        let err = collect_scripts(&inline, &paths).unwrap_err();
+        assert!(
+            err.to_string().contains("'foo' specified more than once"),
+            "got: {err}"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn collect_empty_inputs_ok() {
+        let out = collect_scripts(&[], &[]).unwrap();
+        assert!(out.is_empty());
+    }
 }
