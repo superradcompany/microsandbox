@@ -9,8 +9,7 @@
   "files": [
     "microsandbox.linux-x64-gnu.node",
     "bin/msb",
-    "lib/libkrunfw.so",
-    "lib/libkrunfw.so.5"
+    "lib/libkrunfw.so.*"
   ],
   "license": "Apache-2.0",
   "engines": {

@@ -8,8 +8,7 @@
   "files": [
     "microsandbox.darwin-arm64.node",
     "bin/msb",
-    "lib/libkrunfw.dylib",
-    "lib/libkrunfw.5.dylib"
+    "lib/libkrunfw.*.dylib"
   ],
   "license": "Apache-2.0",
   "engines": {
