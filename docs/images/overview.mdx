@@ -14,9 +14,9 @@ By default, microsandbox pulls an image only if it isn't already cached. You can
 
 | Policy | Behavior |
 |--------|----------|
-| `IfMissing` | Pull only if not cached (default) |
-| `Always` | Always check the registry for updates |
-| `Never` | Use local cache only, fail if missing |
+| `"if-missing"` | Pull only if not cached (default) |
+| `"always"` | Always check the registry for updates |
+| `"never"` | Use local cache only, fail if missing |
 
 <CodeGroup>
 ```rust Rust
@@ -28,13 +28,12 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-import { PullPolicy, Sandbox } from 'microsandbox'
+import { Sandbox } from "microsandbox";
 
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "python",
-    pullPolicy: PullPolicy.Always,
-})
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .pullPolicy("always")
+    .create();
 ```
 
 ```python Python
@@ -66,12 +65,15 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "registry.corp.io/team/app:latest",
-    registry: { auth: { username: "deploy", password: process.env.REGISTRY_TOKEN } },
-    pullPolicy: PullPolicy.Always,
-})
+await using sb = await Sandbox.builder("worker")
+    .image("registry.corp.io/team/app:latest")
+    .registry((r) => r.auth({
+        kind: "basic",
+        username: "deploy",
+        password: process.env.REGISTRY_TOKEN!,
+    }))
+    .pullPolicy("always")
+    .create();
 ```
 
 ```python Python
@@ -152,11 +154,10 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "localhost:5050/my-app:latest",
-    registry: { insecure: true },
-})
+await using sb = await Sandbox.builder("worker")
+    .image("localhost:5050/my-app:latest")
+    .registry((r) => r.insecure())
+    .create();
 ```
 </CodeGroup>
 

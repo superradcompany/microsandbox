@@ -21,10 +21,9 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "python",
-})
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .create();
 ```
 
 ```python Python
@@ -56,21 +55,18 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-import { Mount, Sandbox } from 'microsandbox'
+import { Sandbox } from "microsandbox";
 
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "python",
-    memoryMib: 1024,
-    cpus: 2,
-
-    env: { DEBUG: "true", API_PORT: "8000" },
-    volumes: {
-        "/app/src": Mount.bind("./src", { readonly: true }),
-        "/data": Mount.named("my-data"),
-        "/tmp/scratch": Mount.tmpfs({ sizeMib: 100 }),
-    },
-})
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .memory(1024)
+    .cpus(2)
+    .env("DEBUG", "true")
+    .env("API_PORT", "8000")
+    .volume("/app/src",     (m) => m.bind("./src").readonly())
+    .volume("/data",        (m) => m.named("my-data"))
+    .volume("/tmp/scratch", (m) => m.tmpfs().size(100))
+    .create();
 ```
 
 ```python Python
@@ -134,7 +130,7 @@ Sandbox::builder("worker").image("python").create().await?;
 ```
 
 ```typescript TypeScript
-await Sandbox.create({ name: "worker", image: "python" })
+await Sandbox.builder("worker").image("python").create();
 ```
 
 ```python Python
@@ -157,7 +153,7 @@ Sandbox::builder("worker").image("./my-rootfs").create().await?;
 ```
 
 ```typescript TypeScript
-await Sandbox.create({ name: "worker", image: "./my-rootfs" })
+await Sandbox.builder("worker").image("./my-rootfs").create();
 ```
 
 ```python Python
@@ -194,10 +190,10 @@ Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-await Sandbox.create({
-    name: "worker",
-    image: "./alpine.qcow2",
-})
+// Auto-detect the disk image format from the file extension.
+await Sandbox.builder("worker")
+    .image("./alpine.qcow2")
+    .create();
 ```
 
 ```python Python
@@ -234,11 +230,10 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "python",
-    replace: true,
-})
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .replace()
+    .create();
 ```
 
 ```python Python
@@ -271,14 +266,17 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-import { PullPolicy, Sandbox } from 'microsandbox'
+import { Sandbox } from "microsandbox";
 
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "private.registry.io/org/app:v1",
-    registryAuth: { username: "deploy", password: process.env.REGISTRY_TOKEN! },
-    pullPolicy: PullPolicy.Always,
-})
+await using sb = await Sandbox.builder("worker")
+    .image("private.registry.io/org/app:v1")
+    .registry((r) => r.auth({
+        kind: "basic",
+        username: "deploy",
+        password: process.env.REGISTRY_TOKEN!,
+    }))
+    .pullPolicy("always")
+    .create();
 ```
 
 ```python Python
@@ -303,9 +301,9 @@ msb create private.registry.io/org/app:v1 \
 
 | Policy | Behavior |
 |--------|----------|
-| `Always` | Pull the image every time, even if cached locally |
-| `IfMissing` | Pull only if the image is not already cached (default) |
-| `Never` | Never pull; fail if the image is not cached |
+| `"always"` | Pull the image every time, even if cached locally |
+| `"if-missing"` | Pull only if the image is not already cached (default) |
+| `"never"` | Never pull; fail if the image is not cached |
 
 <Tip>
   Once an OCI image is resolved, microsandbox pins the exact layers. A `python` reference is resolved to an immutable set of layers at first pull. Subsequent `start()` calls use the pinned layers without re-resolving the mutable tag, so your sandbox is reproducible even if the upstream tag is updated.
@@ -327,14 +325,11 @@ let sb = Sandbox::create(config).await?;
 ```
 
 ```typescript TypeScript
-const config = Sandbox.buildConfig({
-    name: "preview",
-    image: "python",
-    memoryMib: 1024,
-})
+const builder = Sandbox.builder("preview").image("python").memory(1024);
+const config = builder.build();
 
-console.log(JSON.stringify(config, null, 2))
-const sb = await Sandbox.create(config)
+console.log(JSON.stringify(config, null, 2));
+const sb = await builder.create();
 ```
 
 ```python Python

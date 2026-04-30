@@ -36,17 +36,14 @@ let sb = Sandbox::builder("agent")
 ```
 
 ```typescript TypeScript
-import { Sandbox } from 'microsandbox'
+import { Sandbox } from "microsandbox";
 
-const sb = await Sandbox.create({
-    name: "agent",
-    image: "python",
-    network: {
-        tls: {
-            bypass: ["pinned-api.example.com", "*.gov"],
-        },
-    },
-})
+await using sb = await Sandbox.builder("agent")
+    .image("python")
+    .network((n) => n.tls((t) =>
+        t.bypass("pinned-api.example.com").bypass("*.gov"),
+    ))
+    .create();
 ```
 
 ```python Python
@@ -105,11 +102,10 @@ let sb = Sandbox::builder("agent")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-  name: "agent",
-  image: "alpine",
-  network: { trustHostCas: true },
-});
+await using sb = await Sandbox.builder("agent")
+    .image("alpine")
+    .network((n) => n.trustHostCAs(true))
+    .create();
 ```
 
 ```python Python

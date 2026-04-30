@@ -17,8 +17,8 @@ println!("CPU: {:.1}%, Mem: {} MB", metrics.cpu_percent, metrics.memory_bytes / 
 ```
 
 ```typescript TypeScript
-const metrics = await sb.metrics()
-console.log(`CPU: ${metrics.cpuPercent.toFixed(1)}%, Mem: ${Math.floor(metrics.memoryBytes / 1024 / 1024)} MB`)
+const metrics = await sb.metrics();
+console.log(`CPU: ${metrics.cpuPercent.toFixed(1)}%, Mem: ${Math.floor(metrics.memoryBytes / 1024 / 1024)} MB`);
 ```
 
 ```python Python
@@ -45,8 +45,8 @@ while let Some(m) = stream.next().await {
 ```
 
 ```typescript TypeScript
-for await (const m of sb.metricsStream(1000)) {
-    console.log(`[${m.timestampMs}] CPU: ${m.cpuPercent.toFixed(1)}%`)
+for await (const m of await sb.metricsStream(1000)) {
+    console.log(`[${m.timestamp.toISOString()}] CPU: ${m.cpuPercent.toFixed(1)}%`);
 }
 ```
 
@@ -69,9 +69,9 @@ let all = all_sandbox_metrics().await?;
 ```
 
 ```typescript TypeScript
-import { allSandboxMetrics } from 'microsandbox'
+import { allSandboxMetrics } from "microsandbox";
 
-const all = await allSandboxMetrics()
+const all = await allSandboxMetrics();
 ```
 
 ```python Python

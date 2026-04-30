@@ -43,6 +43,7 @@ class Action(enum.StrEnum):
 class Direction(enum.StrEnum):
     EGRESS = "egress"
     INGRESS = "ingress"
+    ANY = "any"
 
 class Protocol(enum.StrEnum):
     TCP = "tcp"
@@ -490,12 +491,23 @@ class Rule:
 
 @dataclass(frozen=True, slots=True)
 class NetworkPolicy:
-    """Custom network policy with rules. Mirrors Rust's NetworkPolicy { default_action, rules }."""
-    default_action: Action = Action.ALLOW
+    """Custom network policy with rules.
+
+    Mirrors Rust's `NetworkPolicy { default_egress, default_ingress, rules }`.
+    The defaults are asymmetric to preserve today's behavior:
+    egress falls through to deny (today's `public_only` reachability when
+    paired with the implicit allow-public rule); ingress falls through
+    to allow (today's unfiltered published-port behavior).
+    """
+    default_egress: Action = Action.DENY
+    default_ingress: Action = Action.ALLOW
     rules: tuple[Rule, ...] = ()
 
     def _to_dict(self) -> dict:
-        d: dict = {"default_action": str(self.default_action)}
+        d: dict = {
+            "default_egress": str(self.default_egress),
+            "default_ingress": str(self.default_ingress),
+        }
         if self.rules:
             d["rules"] = [
                 {

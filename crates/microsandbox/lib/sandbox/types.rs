@@ -364,7 +364,7 @@ impl MountBuilder {
     }
 
     /// Build the volume mount.
-    pub(crate) fn build(self) -> crate::MicrosandboxResult<VolumeMount> {
+    pub fn build(self) -> crate::MicrosandboxResult<VolumeMount> {
         if let Some(err) = self.error {
             return Err(err);
         }
@@ -719,7 +719,7 @@ impl ImageBuilder {
     }
 
     /// Consume the builder and return the resolved [`RootfsSource`].
-    pub(crate) fn build(self) -> crate::MicrosandboxResult<RootfsSource> {
+    pub fn build(self) -> crate::MicrosandboxResult<RootfsSource> {
         if let Some(e) = self.error {
             return Err(e);
         }

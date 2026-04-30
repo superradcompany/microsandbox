@@ -22,7 +22,6 @@ Block lookups by exact match or suffix (e.g. `*.tracking.com`). Blocked queries 
 let sb = Sandbox::builder("safe-agent")
     .image("python")
     .network(|n| n
-        .policy(NetworkPolicy::public_only())
         .dns(|d| d
             .block_domain("malware.example.com")
             .block_domain_suffix(".tracking.com")
@@ -33,17 +32,18 @@ let sb = Sandbox::builder("safe-agent")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "safe-agent",
-    image: "python",
-    network: {
-        ...NetworkPolicy.publicOnly(),
-        dns: {
-            blockDomains: ["malware.example.com"],
-            blockDomainSuffixes: [".tracking.com"],
-        },
-    },
-})
+import { NetworkPolicy, Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("safe-agent")
+    .image("python")
+    .network((n) => n
+        .policy(NetworkPolicy.publicOnly())
+        .dns((d) => d
+            .blockDomain("malware.example.com")
+            .blockDomainSuffix(".tracking.com"),
+        ),
+    )
+    .create();
 ```
 
 ```python Python
@@ -100,15 +100,13 @@ let sb = Sandbox::builder("safe-agent")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create("safe-agent", {
-    image: "python",
-    network: {
-        dns: {
-            nameservers: ["1.1.1.1", "1.0.0.1"],
-            queryTimeoutMs: 3000,
-        },
-    },
-})
+await using sb = await Sandbox.builder("safe-agent")
+    .image("python")
+    .network((n) => n.dns((d) =>
+        d.nameservers(["1.1.1.1", "1.0.0.1"])
+            .queryTimeoutMs(3000),
+    ))
+    .create();
 ```
 
 ```python Python
@@ -151,7 +149,7 @@ The block list and rebind protection only apply to queries the gateway can see. 
 **Not distinguishable from regular traffic** (operator must filter via network policy):
 - DNS over HTTPS (DoH, TCP/443)
 
-For strict DNS integrity, combine DoT interception with a network policy denying outbound `UDP/53`, `TCP/53`, and `TCP/853` to anything except the gateway.
+For strict DNS integrity, combine DoT interception with a network policy denying egress `UDP/53`, `TCP/53`, and `TCP/853` to anything except the gateway.
 
 ## Domain-based policy rules
 

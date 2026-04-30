@@ -64,18 +64,15 @@ icon: "bolt"
     ```
 
     ```typescript TypeScript
-    import { Sandbox } from 'microsandbox'
+    import { Sandbox } from "microsandbox";
 
-    const sb = await Sandbox.create({
-        name: "hello",
-        image: "python",
-        memoryMib: 512,
-    })
+    await using sb = await Sandbox.builder("hello")
+        .image("python")
+        .memory(512)
+        .create();
 
-    const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"])
-    console.log(output.stdout()) // Hello from a microVM!
-
-    await sb.stop()
+    const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
+    console.log(output.stdout()); // Hello from a microVM!
     ```
 
     ```python Python
@@ -107,7 +104,7 @@ icon: "bolt"
 
 ## What just happened?
 
-Here's what actually happened behind that `Sandbox.create` call:
+Here's what actually happened behind that `Sandbox.builder(...).create()` call:
 
 1. **Pulled the image** from Docker Hub (or skipped this if it was already cached, since shared layers are deduplicated).
 2. **Assembled the filesystem** by stacking the image layers into a copy-on-write filesystem, so nothing you do inside the sandbox modifies the base image.

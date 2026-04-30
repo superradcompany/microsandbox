@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 pub struct DomainName(String);
 
 /// Errors reported when a string cannot be turned into a [`DomainName`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum DomainNameError {
     /// Input was empty (or contained only dots).
     #[error("domain name is empty")]

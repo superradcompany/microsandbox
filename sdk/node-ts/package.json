@@ -1,11 +1,21 @@
 {
   "name": "microsandbox",
-  "version": "0.3.14",
-  "main": "index.cjs",
-  "module": "index.mjs",
-  "types": "index.d.cts",
+  "version": "0.4.2",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./native": {
+      "types": "./native/index.d.ts",
+      "default": "./native/index.cjs"
+    }
+  },
   "bin": {
-    "microsandbox": "bin/microsandbox.js"
+    "microsandbox": "bin/microsandbox.cjs"
   },
   "napi": {
     "binaryName": "microsandbox",
@@ -18,31 +28,34 @@
   },
   "license": "Apache-2.0",
   "engines": {
-    "node": ">= 18"
+    "node": ">= 22"
   },
   "scripts": {
-    "build": "napi build --release --platform --js index.cjs --dts index.d.cts",
-    "build:debug": "napi build --platform --js index.cjs --dts index.d.cts",
+    "build:native": "napi build --release --platform --js index.cjs --dts index.d.ts --output-dir native",
+    "build:native:debug": "napi build --platform --js index.cjs --dts index.d.ts --output-dir native",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "npm run build:native && npm run build:ts",
     "test": "vitest run",
-    "postinstall": "node postinstall.js"
+    "test:unit": "vitest run tests/unit",
+    "test:smoke": "vitest run tests/smoke.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3",
     "@types/node": "^25.5.2",
+    "typescript": "^5.6",
     "vitest": "^4.1"
   },
   "optionalDependencies": {
-    "@superradcompany/microsandbox-darwin-arm64": "0.3.14",
-    "@superradcompany/microsandbox-linux-arm64-gnu": "0.3.14",
-    "@superradcompany/microsandbox-linux-x64-gnu": "0.3.14"
+    "@superradcompany/microsandbox-darwin-arm64": "0.4.2",
+    "@superradcompany/microsandbox-linux-arm64-gnu": "0.4.2",
+    "@superradcompany/microsandbox-linux-x64-gnu": "0.4.2"
   },
   "files": [
-    "index.cjs",
-    "index.mjs",
-    "index.d.cts",
-    "postinstall.js",
-    "bin/microsandbox.js",
-    "lib/install.js",
+    "dist",
+    "native/index.cjs",
+    "native/index.d.ts",
+    "bin/microsandbox.cjs",
     "README.md"
   ]
 }

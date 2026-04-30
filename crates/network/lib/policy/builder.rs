@@ -51,7 +51,7 @@ use super::{
 /// failure is returned. The same enum covers both rule-grammar
 /// failures (with a `rule_index`) and DNS-block-list failures (no
 /// rule index, since DNS blocks aren't rules).
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum BuildError {
     /// A rule was committed without setting a direction first.
     #[error(

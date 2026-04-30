@@ -1,12 +1,19 @@
 {
   "name": "@superradcompany/microsandbox-linux-arm64-gnu",
-  "version": "0.3.14",
+  "version": "0.4.2",
+  "description": "Bundled msb + libkrunfw + napi binding for microsandbox on Linux arm64 (glibc).",
   "os": ["linux"],
   "cpu": ["arm64"],
+  "libc": ["glibc"],
   "main": "microsandbox.linux-arm64-gnu.node",
-  "files": ["microsandbox.linux-arm64-gnu.node"],
+  "files": [
+    "microsandbox.linux-arm64-gnu.node",
+    "bin/msb",
+    "lib/libkrunfw.so",
+    "lib/libkrunfw.so.5"
+  ],
   "license": "Apache-2.0",
   "engines": {
-    "node": ">= 18"
+    "node": ">= 22"
   }
 }

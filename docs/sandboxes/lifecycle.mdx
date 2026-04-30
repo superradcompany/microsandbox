@@ -4,7 +4,7 @@ description: Create, start, stop, and manage sandbox state
 icon: "rotate"
 ---
 
-Each sandbox runs as a child process of whatever application creates it. `Sandbox.create` boots a microVM, starts the guest agent inside it, and establishes a communication channel back to the host.
+Each sandbox runs as a child process of whatever application creates it. `Sandbox.builder(...).create()` boots a microVM, starts the guest agent inside it, and establishes a communication channel back to the host.
 
 Understanding the lifecycle is useful once you start managing long-running sandboxes, graceful shutdown, or resilient agent workflows.
 
@@ -48,11 +48,11 @@ let sb = Sandbox::builder("worker").image("python").create_detached().await?;
 ```
 
 ```typescript TypeScript
-// Standard creation (attached, sandbox stops when your process exits)
-const sb = await Sandbox.create({ name: "worker", image: "python" })
+// Attached: sandbox stops when your process exits
+await using sb = await Sandbox.builder("worker").image("python").create();
 
-// Detached creation (sandbox survives after your process exits)
-const sb = await Sandbox.createDetached({ name: "worker", image: "python" })
+// Detached: sandbox survives after your process exits
+const detached = await Sandbox.builder("worker").image("python").createDetached();
 ```
 
 ```python Python
@@ -246,13 +246,13 @@ for handle in Sandbox::list().await? {
 ```
 
 ```typescript TypeScript
-const sandboxes = await Sandbox.list()
-for (const info of sandboxes) {
-    console.log(`${info.name}: ${info.status}`)
+const sandboxes = await Sandbox.list();
+for (const handle of sandboxes) {
+    console.log(`${handle.name}: ${handle.status}`);
 }
 
-const handle = await Sandbox.get("worker")
-console.log(handle.status) // "Running" | "Stopped" | ...
+const handle = await Sandbox.get("worker");
+console.log(handle.status); // "running" | "stopped" | ...
 ```
 
 ```python Python
@@ -325,16 +325,16 @@ match tokio::time::timeout(Duration::from_secs(30), handle.stop()).await {
 ```
 
 ```typescript TypeScript
-import { Sandbox } from 'microsandbox'
+import { Sandbox } from "microsandbox";
 
-const sb = await Sandbox.get("worker")
+const sb = await Sandbox.get("worker");
 try {
     await Promise.race([
         sb.stop(),
         new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 30_000)),
-    ])
+    ]);
 } catch {
-    await sb.kill()
+    await sb.kill();
 }
 ```
 
@@ -367,11 +367,11 @@ let sb = Sandbox::builder("worker")
 ```
 
 ```typescript TypeScript
-const sb = await Sandbox.create({
-    name: "worker",
-    image: "python",
-    maxDurationSecs: 3600,  // maximum sandbox lifetime in seconds
-})
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .maxDuration(3600)   // maximum sandbox lifetime in seconds
+    .idleTimeout(300)    // auto-drain after 5 minutes of inactivity
+    .create();
 ```
 
 ```python Python
