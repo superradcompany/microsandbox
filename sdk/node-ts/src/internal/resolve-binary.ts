@@ -44,34 +44,25 @@ function resolvePlatformRoot(): string | null {
   return null;
 }
 
-let cached: { binDir: string; libDir: string } | null = null;
+let cachedBinDir: string | null = null;
 
-function resolvePlatformPaths(): { binDir: string; libDir: string } {
-  if (cached) return cached;
+function resolveBinDir(): string {
+  if (cachedBinDir) return cachedBinDir;
   const root = resolvePlatformRoot();
   if (root) {
-    cached = { binDir: join(root, "bin"), libDir: join(root, "lib") };
-    return cached;
+    cachedBinDir = join(root, "bin");
+    return cachedBinDir;
   }
   // Fall back to ~/.microsandbox if no platform package carries binaries.
   const home = process.env.HOME ?? "";
-  const fallback = join(home, ".microsandbox");
-  cached = { binDir: join(fallback, "bin"), libDir: join(fallback, "lib") };
-  return cached;
+  cachedBinDir = join(home, ".microsandbox", "bin");
+  return cachedBinDir;
 }
 
 /** Path to the bundled `msb` binary, or null if not yet installed. */
 export function msbPath(): string | null {
   const explicit = process.env.MSB_PATH;
   if (explicit) return existsSync(explicit) ? explicit : null;
-  const p = join(resolvePlatformPaths().binDir, "msb");
-  return existsSync(p) ? p : null;
-}
-
-/** Path to the bundled `libkrunfw` shared library, or null. */
-export function libkrunfwPath(): string | null {
-  const filename =
-    process.platform === "darwin" ? "libkrunfw.dylib" : "libkrunfw.so";
-  const p = join(resolvePlatformPaths().libDir, filename);
+  const p = join(resolveBinDir(), "msb");
   return existsSync(p) ? p : null;
 }

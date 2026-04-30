@@ -238,18 +238,14 @@ jobs:
           cache-dependency-glob: "sdk/python/uv.lock"
 
       - name: Stage runtime bundle (Python SDK)
+        # Ship only the canonical libkrunfw filename — _runtime.py resolves
+        # to that exact name. Maturin would dereference symlinks and bloat
+        # the wheel by ~40MB on Linux / ~20MB on macOS for no benefit.
         run: |
           mkdir -p sdk/python/microsandbox/_bundled/bin
           mkdir -p sdk/python/microsandbox/_bundled/lib
           cp build/msb sdk/python/microsandbox/_bundled/bin/
           cp build/${{ matrix.libkrunfw_file }} sdk/python/microsandbox/_bundled/lib/
-          cd sdk/python/microsandbox/_bundled/lib
-          if [ "${{ matrix.os }}" = "darwin" ]; then
-            ln -sf ${{ matrix.libkrunfw_file }} libkrunfw.dylib
-          else
-            ln -sf ${{ matrix.libkrunfw_file }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
-            ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
-          fi
 
       - name: Build Python wheel
         uses: PyO3/maturin-action@v1

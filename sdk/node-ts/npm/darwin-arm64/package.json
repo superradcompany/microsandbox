@@ -1,6 +1,6 @@
 {
   "name": "@superradcompany/microsandbox-darwin-arm64",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Bundled msb + libkrunfw + napi binding for microsandbox on macOS arm64.",
   "os": ["darwin"],
   "cpu": ["arm64"],
@@ -8,8 +8,7 @@
   "files": [
     "microsandbox.darwin-arm64.node",
     "bin/msb",
-    "lib/libkrunfw.dylib",
-    "lib/libkrunfw.5.dylib"
+    "lib/libkrunfw.*.dylib"
   ],
   "license": "Apache-2.0",
   "engines": {
