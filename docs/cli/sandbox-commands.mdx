@@ -51,7 +51,8 @@ msb run -d --name worker python -- python worker.py
 | `--pull` | When to pull the image: `always`, `if-missing` (default), `never` |
 | `--log-level` | Log verbosity for the sandbox runtime (`error`, `warn`, `info`, `debug`, `trace`) |
 | `--tmpfs` | Mount a temporary in-memory filesystem (`PATH` or `PATH:SIZE`) |
-| `--script` | Mount a host file as a named script (`NAME:PATH`) |
+| `--script` | Register an inline script (`NAME=BODY`). Available at `/.msb/scripts/<name>` and on `PATH` |
+| `--script-path` | Register a script from a host file (`NAME:PATH`). Same destination as `--script` |
 | `--max-duration` | Kill the entire sandbox after this duration (e.g. `30s`, `5m`, `1h`). Sandbox-level lifetime limit |
 | `--idle-timeout` | Stop the sandbox after this period of inactivity (e.g. `30s`, `5m`, `1h`) |
 | `--no-network` | Disable all network access |
