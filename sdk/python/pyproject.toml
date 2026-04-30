@@ -28,6 +28,7 @@ keywords = ["sandbox", "microvm", "isolation", "security", "vm"]
 
 [project.scripts]
 microsandbox = "microsandbox._cli:main"
+msb = "microsandbox._cli:main"
 
 [project.urls]
 Homepage = "https://github.com/superradcompany/microsandbox"
