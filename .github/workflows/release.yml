@@ -19,7 +19,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-kernel:
     name: Build kernel.c (aarch64)
-    runs-on: ubuntu-24.04-arm
+    runs-on: blacksmith-16vcpu-ubuntu-2404-arm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,7 +53,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-agentd-aarch64:
     name: Build agentd (aarch64-linux-musl)
-    runs-on: ubuntu-24.04-arm
+    runs-on: blacksmith-8vcpu-ubuntu-2404-arm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -92,7 +92,7 @@ jobs:
       matrix:
         include:
           - target: linux-x86_64
-            runner: ubuntu-latest
+            runner: blacksmith-16vcpu-ubuntu-2404
             arch: x86_64
             os: linux
             agentd_target: x86_64-unknown-linux-musl
@@ -102,7 +102,7 @@ jobs:
             node_file: microsandbox.linux-x64-gnu.node
             npm_dir: linux-x64-gnu
           - target: linux-aarch64
-            runner: ubuntu-24.04-arm
+            runner: blacksmith-16vcpu-ubuntu-2404-arm
             arch: aarch64
             os: linux
             agentd_target: aarch64-unknown-linux-musl
@@ -112,7 +112,7 @@ jobs:
             node_file: microsandbox.linux-arm64-gnu.node
             npm_dir: linux-arm64-gnu
           - target: darwin-aarch64
-            runner: macos-14
+            runner: blacksmith-12vcpu-macos-15
             arch: aarch64
             os: darwin
             agentd_target: ""
@@ -298,7 +298,7 @@ jobs:
   assemble:
     name: Assemble Release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
 
@@ -332,7 +332,7 @@ jobs:
   sync-mintlify:
     name: Sync mintlify branch
     needs: assemble
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: write
     steps:
@@ -347,7 +347,7 @@ jobs:
   npm-publish:
     name: Publish npm packages
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
 
@@ -453,7 +453,7 @@ jobs:
   mcp-publish:
     name: Publish MCP server
     needs: npm-publish
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
         with:
@@ -480,7 +480,7 @@ jobs:
   crates-publish:
     name: Publish crates
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
         with:
@@ -514,7 +514,7 @@ jobs:
   pypi-publish:
     name: Publish Python SDK
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       id-token: write
     environment:
@@ -551,12 +551,12 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-latest
+            runner: blacksmith-4vcpu-ubuntu-2404
             artifact: release-linux-x86_64
             msb_asset: msb-linux-x86_64
             libkrunfw_asset: libkrunfw-linux-x86_64.so
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
             artifact: release-linux-aarch64
             msb_asset: msb-linux-aarch64
             libkrunfw_asset: libkrunfw-linux-aarch64.so
@@ -576,7 +576,8 @@ jobs:
           cp release-artifacts/${{ matrix.libkrunfw_asset }} packaging/docker/build/${{ matrix.arch }}/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
           chmod +x packaging/docker/build/${{ matrix.arch }}/msb
 
-      - uses: docker/setup-buildx-action@v3
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
 
       - uses: docker/login-action@v3
         with:
@@ -584,13 +585,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v6
+      - uses: useblacksmith/build-push-action@v2
         id: push
         with:
           context: packaging/docker
           platforms: linux/${{ matrix.arch }}
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
           outputs: type=image,name=ghcr.io/superradcompany/microsandbox,push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
@@ -610,7 +609,7 @@ jobs:
   docker-manifest:
     name: Docker manifest
     needs: docker-build
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4

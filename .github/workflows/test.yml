@@ -19,7 +19,7 @@ jobs:
   # ---------------------------------------------------------------------------
   changes:
     name: Detect code changes
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
@@ -38,7 +38,7 @@ jobs:
     name: Build kernel.c (aarch64)
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: blacksmith-16vcpu-ubuntu-2404-arm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,7 +74,7 @@ jobs:
     name: Build agentd (aarch64-linux-musl)
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: blacksmith-8vcpu-ubuntu-2404-arm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -113,17 +113,17 @@ jobs:
       matrix:
         include:
           - target: linux-x86_64
-            runner: ubuntu-latest
+            runner: blacksmith-16vcpu-ubuntu-2404
             arch: x86_64
             os: linux
             agentd_target: x86_64-unknown-linux-musl
           - target: linux-aarch64
-            runner: ubuntu-24.04-arm
+            runner: blacksmith-16vcpu-ubuntu-2404-arm
             arch: aarch64
             os: linux
             agentd_target: aarch64-unknown-linux-musl
           - target: darwin-aarch64
-            runner: macos-14
+            runner: blacksmith-12vcpu-macos-15
             arch: aarch64
             os: darwin
 
