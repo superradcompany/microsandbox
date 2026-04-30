@@ -27,7 +27,7 @@ microsandbox-filesystem = { version = "0.4.2", path = "../filesystem", default-f
 microsandbox-network = { version = "0.4.2", path = "../network", optional = true }
 microsandbox-protocol = { version = "0.4.2", path = "../protocol" }
 microsandbox-utils = { version = "0.4.2", path = "../utils" }
-msb_krun = { git = "https://github.com/superradcompany/libkrun.git", branch = "krun", features = ["blk"] }
+msb_krun = { version = "0.1.12", features = ["blk"] }
 nix = { workspace = true, features = ["process", "signal"] }
 rustls = { workspace = true }
 sea-orm.workspace = true
