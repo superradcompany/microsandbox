@@ -4,7 +4,6 @@
 
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 
 const TRIPLES = {
@@ -33,22 +32,14 @@ function resolveMsb() {
     }
   }
 
-  const home = os.homedir();
-  if (home) {
-    const fallback = path.join(home, ".microsandbox", "bin", "msb");
-    if (fs.existsSync(fallback)) {
-      return { path: fallback, source: "home-dir" };
-    }
-  }
-
   return null;
 }
 
 const resolved = resolveMsb();
 if (!resolved) {
   console.error(
-    "microsandbox: msb binary not found. Run `npx microsandbox install` " +
-      "or set MSB_PATH to a working binary.",
+    "microsandbox: msb binary not found. Reinstall the package " +
+      "(npm i -g microsandbox) or set MSB_PATH to a working binary.",
   );
   process.exit(127);
 }

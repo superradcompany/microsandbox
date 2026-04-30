@@ -15,7 +15,8 @@
     }
   },
   "bin": {
-    "microsandbox": "bin/microsandbox.cjs"
+    "microsandbox": "bin/microsandbox.cjs",
+    "msb": "bin/microsandbox.cjs"
   },
   "napi": {
     "binaryName": "microsandbox",
