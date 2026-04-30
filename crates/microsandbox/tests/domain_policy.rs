@@ -305,13 +305,19 @@ async fn domain_policy_sni_disambiguates_shared_cdn_ip() {
     // Resolve both names so the DNS cache associates each with its IP
     // (and any shared Fastly addresses with both names). The
     // disallowed name's resolution succeeds because there is no deny
-    // rule for it — only its connection is gated.
-    sb.shell("getent hosts pypi.org > /dev/null")
-        .await
-        .expect("dns probe pypi.org");
-    sb.shell("getent hosts files.pythonhosted.org > /dev/null")
-        .await
-        .expect("dns probe files.pythonhosted.org");
+    // rule for it — only its connection is gated. Retry the priming
+    // lookups so a single transient forward doesn't leave curl
+    // resolving from scratch.
+    let pypi_ip = dns_lookup(&sb, "pypi.org").await;
+    let files_ip = dns_lookup(&sb, "files.pythonhosted.org").await;
+    assert!(
+        !pypi_ip.is_empty(),
+        "pypi.org should resolve under default-allow"
+    );
+    assert!(
+        !files_ip.is_empty(),
+        "files.pythonhosted.org should resolve under default-allow"
+    );
 
     // Allowed name: SNI matches the rule, connection proceeds.
     let allowed = probe_https_with_retry(&sb, "https://files.pythonhosted.org/").await;
