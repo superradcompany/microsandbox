@@ -25,7 +25,7 @@
 //! [`DnsInterceptor`]: super::interceptor::DnsInterceptor
 
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -545,12 +545,14 @@ fn should_suppress_aaaa(domain: &str, query_type: RecordType, host_ipv6_egress: 
 
 /// Probe whether the host has an external IPv6 route.
 fn host_has_ipv6_egress() -> bool {
-    let probe_addr = Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
-    TcpStream::connect_timeout(
-        &SocketAddr::new(IpAddr::V6(probe_addr), 443),
-        Duration::from_millis(250),
-    )
-    .is_ok()
+    let probe_addr = SocketAddr::new(
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1)),
+        443,
+    );
+
+    std::net::UdpSocket::bind("[::]:0")
+        .and_then(|socket| socket.connect(probe_addr))
+        .is_ok()
 }
 
 /// Synthesize an A/AAAA response for `host.microsandbox.internal`. Returns
