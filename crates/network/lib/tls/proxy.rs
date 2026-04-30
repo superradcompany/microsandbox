@@ -96,10 +96,8 @@ async fn tls_proxy_task(
     }
 
     if tls_state.should_bypass(&sni_name) {
-        tracing::debug!(sni = %sni_name, dst = %dst, "TLS bypass");
         bypass_relay(dst, initial_buf, from_smoltcp, to_smoltcp, shared).await
     } else {
-        tracing::debug!(sni = %sni_name, dst = %dst, "TLS intercept");
         intercept_relay(
             dst,
             &sni_name,

@@ -25,7 +25,7 @@
 //! [`DnsInterceptor`]: super::interceptor::DnsInterceptor
 
 use std::collections::HashSet;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -109,6 +109,8 @@ pub(crate) struct DnsForwarder {
     /// Gateway IPs returned as A / AAAA answers when the guest asks for
     /// `host.microsandbox.internal`.
     gateway: GatewayIps,
+    /// Whether the host can route external IPv6 traffic.
+    host_ipv6_egress: bool,
     config: Arc<NormalizedDnsConfig>,
 }
 
@@ -175,6 +177,16 @@ impl DnsForwarder {
                 synthesize_host_alias_response(&query_msg, self.gateway, query_type)
         {
             return Some(response);
+        }
+
+        if should_suppress_aaaa(&domain, query_type, self.host_ipv6_egress) {
+            tracing::debug!(
+                domain = %domain,
+                "suppressing external AAAA response because host IPv6 egress is unavailable"
+            );
+            self.shared
+                .clear_resolved_hostname(&domain, ResolvedHostnameFamily::Ipv6);
+            return build_empty_noerror_response(&query_msg);
         }
 
         // Pick upstream client based on where the guest aimed and the
@@ -392,6 +404,8 @@ impl DnsForwarder {
         // nameserver.
         let upstream = upstreams[0];
         let configured_udp = build_udp_client(upstream, config.query_timeout).await?;
+        let host_ipv6_egress = host_has_ipv6_egress();
+        tracing::debug!(host_ipv6_egress, "detected host IPv6 egress capability");
 
         Some(Arc::new(Self {
             configured_udp,
@@ -401,6 +415,7 @@ impl DnsForwarder {
             network_policy,
             shared,
             gateway,
+            host_ipv6_egress,
             config,
         }))
     }
@@ -476,6 +491,11 @@ fn build_status_response(query: &Message, rcode: ResponseCode) -> Option<Bytes> 
     response.to_bytes().ok().map(Bytes::from)
 }
 
+/// Build a NoError response with the original question but no answers.
+fn build_empty_noerror_response(query: &Message) -> Option<Bytes> {
+    build_status_response(query, ResponseCode::NoError)
+}
+
 /// Map a DNS query type to a [`ResolvedHostnameFamily`] for policy caching.
 fn family_for_query_type(query_type: RecordType) -> Option<ResolvedHostnameFamily> {
     match query_type {
@@ -516,6 +536,23 @@ fn is_host_alias_query(query_name: &str) -> bool {
     query_name
         .trim_end_matches('.')
         .eq_ignore_ascii_case(crate::HOST_ALIAS)
+}
+
+/// Returns true when an external AAAA query should be hidden from the guest.
+fn should_suppress_aaaa(domain: &str, query_type: RecordType, host_ipv6_egress: bool) -> bool {
+    query_type == RecordType::AAAA && !host_ipv6_egress && !is_host_alias_query(domain)
+}
+
+/// Probe whether the host has an external IPv6 route.
+fn host_has_ipv6_egress() -> bool {
+    let probe_addr = SocketAddr::new(
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1)),
+        443,
+    );
+
+    std::net::UdpSocket::bind("[::]:0")
+        .and_then(|socket| socket.connect(probe_addr))
+        .is_ok()
 }
 
 /// Synthesize an A/AAAA response for `host.microsandbox.internal`. Returns
@@ -592,11 +629,15 @@ mod tests {
         msg
     }
 
+    fn parse_response(bytes: Bytes) -> Message {
+        Message::from_bytes(&bytes).expect("parse response")
+    }
+
     #[test]
     fn build_status_response_preserves_header_and_question() {
         let query = make_query("slack.com.", RecordType::AAAA);
         let bytes = build_status_response(&query, ResponseCode::Refused).expect("built");
-        let msg = Message::from_bytes(&bytes).expect("parse response");
+        let msg = parse_response(bytes);
         assert_eq!(msg.id(), 0x4242);
         assert_eq!(msg.response_code(), ResponseCode::Refused);
         assert_eq!(msg.message_type(), MessageType::Response);
@@ -612,9 +653,26 @@ mod tests {
     fn build_status_response_servfail_variant() {
         let query = make_query("example.com.", RecordType::A);
         let bytes = build_status_response(&query, ResponseCode::ServFail).expect("built");
-        let msg = Message::from_bytes(&bytes).expect("parse response");
+        let msg = parse_response(bytes);
         assert_eq!(msg.response_code(), ResponseCode::ServFail);
         assert_eq!(msg.answers().len(), 0);
+    }
+
+    #[test]
+    fn build_empty_noerror_response_preserves_question_without_answers() {
+        let query = make_query("openrouter.ai.", RecordType::AAAA);
+        let bytes = build_empty_noerror_response(&query).expect("built");
+        let msg = parse_response(bytes);
+
+        assert_eq!(msg.id(), 0x4242);
+        assert_eq!(msg.response_code(), ResponseCode::NoError);
+        assert_eq!(msg.message_type(), MessageType::Response);
+        assert_eq!(msg.op_code(), OpCode::Query);
+        assert!(msg.recursion_desired());
+        assert!(msg.recursion_available());
+        assert_eq!(msg.queries().len(), 1);
+        assert_eq!(msg.queries()[0].query_type(), RecordType::AAAA);
+        assert!(msg.answers().is_empty());
     }
 
     #[test]
@@ -660,6 +718,80 @@ mod tests {
         let query = make_query("example.com.", RecordType::A);
         assert!(query.extensions().is_none());
         assert_eq!(query.max_payload(), 512);
+    }
+
+    #[test]
+    fn should_suppress_external_aaaa_when_host_ipv6_unavailable() {
+        assert!(should_suppress_aaaa(
+            "openrouter.ai",
+            RecordType::AAAA,
+            false
+        ));
+    }
+
+    #[test]
+    fn should_not_suppress_a_records_when_host_ipv6_unavailable() {
+        assert!(!should_suppress_aaaa("openrouter.ai", RecordType::A, false));
+    }
+
+    #[test]
+    fn should_not_suppress_external_aaaa_when_host_ipv6_available() {
+        assert!(!should_suppress_aaaa(
+            "openrouter.ai",
+            RecordType::AAAA,
+            true
+        ));
+    }
+
+    #[test]
+    fn should_not_suppress_host_alias_aaaa() {
+        assert!(!should_suppress_aaaa(
+            crate::HOST_ALIAS,
+            RecordType::AAAA,
+            false
+        ));
+    }
+
+    #[test]
+    fn host_ipv6_egress_probe_returns_a_boolean() {
+        let _ = host_has_ipv6_egress();
+    }
+
+    #[test]
+    fn suppressed_external_aaaa_returns_nodata_shape() {
+        let query = make_query("openrouter.ai.", RecordType::AAAA);
+        assert!(should_suppress_aaaa(
+            "openrouter.ai",
+            RecordType::AAAA,
+            false
+        ));
+
+        let msg = parse_response(build_empty_noerror_response(&query).expect("built"));
+
+        assert_eq!(msg.response_code(), ResponseCode::NoError);
+        assert_eq!(msg.queries()[0].query_type(), RecordType::AAAA);
+        assert!(msg.answers().is_empty());
+    }
+
+    #[test]
+    fn host_alias_aaaa_is_not_suppressed_without_host_ipv6_egress() {
+        let query = make_query(crate::HOST_ALIAS, RecordType::AAAA);
+        assert!(!should_suppress_aaaa(
+            crate::HOST_ALIAS,
+            RecordType::AAAA,
+            false
+        ));
+
+        let gateway = GatewayIps {
+            ipv4: std::net::Ipv4Addr::new(100, 96, 0, 1),
+            ipv6: "fd42:6d73:62::1".parse().unwrap(),
+        };
+        let bytes =
+            synthesize_host_alias_response(&query, gateway, RecordType::AAAA).expect("built");
+        let msg = parse_response(bytes);
+
+        assert_eq!(msg.response_code(), ResponseCode::NoError);
+        assert_eq!(msg.answers().len(), 1);
     }
 
     fn gateway_set() -> HashSet<IpAddr> {
