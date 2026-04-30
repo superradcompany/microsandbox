@@ -25,7 +25,7 @@ libc = { workspace = true }
 lru = { workspace = true }
 microsandbox-protocol = { version = "0.4.2", path = "../protocol" }
 microsandbox-utils = { version = "0.4.2", path = "../utils" }
-msb_krun = { git = "https://github.com/superradcompany/libkrun.git", branch = "toks/disable-inet-hijack", features = ["net"] }
+msb_krun = { git = "https://github.com/superradcompany/libkrun.git", branch = "krun", features = ["net"] }
 parking_lot = { workspace = true }
 pem = "3"
 rcgen = { workspace = true }
