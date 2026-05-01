@@ -545,9 +545,15 @@ export declare class RuleBuilder {
   allowDomains(names: Array<string>): this
   /** Deny each name as a `Destination::Domain` rule. */
   denyDomains(names: Array<string>): this
-  /** Allow `Destination::DomainSuffix(suffix)`. */
+  /**
+   * Allow `Destination::DomainSuffix(suffix)`. Matches the apex and
+   * any subdomain.
+   */
   allowDomainSuffix(suffix: string): this
-  /** Deny `Destination::DomainSuffix(suffix)`. */
+  /**
+   * Deny `Destination::DomainSuffix(suffix)`. Matches the apex and
+   * any subdomain.
+   */
   denyDomainSuffix(suffix: string): this
   /** Allow each suffix as a `Destination::DomainSuffix` rule. */
   allowDomainSuffixes(suffixes: Array<string>): this
@@ -680,6 +686,14 @@ export declare class Sandbox {
   detach(): Promise<void>
   /** Remove the persisted database record after stopping. */
   removePersisted(): Promise<void>
+  /**
+   * Read captured output from `exec.log` for this sandbox.
+   *
+   * Reads the on-disk JSON Lines file the runtime writes via the
+   * relay tap. Works on running and stopped sandboxes alike — no
+   * protocol traffic.
+   */
+  logs(opts?: LogOptions | undefined | null): Promise<Array<LogEntry>>
 }
 
 /**
@@ -873,6 +887,12 @@ export declare class SandboxHandle {
   kill(): Promise<void>
   /** Remove the sandbox from the database. */
   remove(): Promise<void>
+  /**
+   * Read captured output from `exec.log` for this sandbox.
+   *
+   * Works without starting the sandbox.
+   */
+  logs(opts?: LogOptions | undefined | null): Promise<Array<LogEntry>>
 }
 export type JsSandboxHandle = SandboxHandle
 
@@ -1175,6 +1195,48 @@ export declare function install(): Promise<void>
 
 /** Check if msb and libkrunfw are installed and available. */
 export declare function isInstalled(): boolean
+
+/** One captured log entry from `exec.log`. */
+export interface LogEntry {
+  /** Wall-clock timestamp when the chunk was captured (ms since epoch). */
+  timestampMs: number
+  /** `"stdout"`, `"stderr"`, `"output"`, or `"system"`. */
+  source: string
+  /**
+   * Relay-monotonic session id. `null` for `system` entries
+   * (lifecycle markers aren't tied to a specific session).
+   * Exposed as `f64` so it survives JS's number type without
+   * requiring BigInt; session ids stay small in practice
+   * (start at 1, +1 per session opened).
+   */
+  sessionId?: number
+  /**
+   * Body bytes. UTF-8 lossy decoded by default; raw mode (future)
+   * preserves bytes via base64 round-trip on the host side.
+   */
+  data: Buffer
+}
+
+/**
+ * Filters applied by `Sandbox.logs()`.
+ *
+ * All fields optional. Defaults: tail = unset (return everything),
+ * since/until = unset (no time filter), sources = `["stdout", "stderr", "output"]`.
+ */
+export interface LogOptions {
+  /** Show only the last N entries. */
+  tail?: number
+  /** Inclusive lower bound (ms since epoch). */
+  sinceMs?: number
+  /** Exclusive upper bound (ms since epoch). */
+  untilMs?: number
+  /**
+   * Sources to include. Each element is `"stdout"`, `"stderr"`,
+   * `"output"`, `"system"`, or `"all"`. Defaults to
+   * `["stdout", "stderr", "output"]` when omitted.
+   */
+  sources?: Array<string>
+}
 
 export interface NetworkPolicy {
   defaultEgress: string

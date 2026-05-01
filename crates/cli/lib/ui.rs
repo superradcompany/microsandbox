@@ -284,34 +284,36 @@ pub fn error_context(msg: &str, context: &[&str]) {
 
 /// One context line in a styled error block.
 ///
-/// `Cause` lines describe what went wrong (rendered in white). `Hint`
-/// lines are actionable suggestions (rendered in dim cyan), per the
-/// `design/cli/output-style.md` Error Messages section.
+/// Both `Cause` and `Hint` lines render with plain (uncolored) text
+/// to keep the error block calm and readable; only the leading `→`
+/// arrow bullet is dim. The variant is still kept so callers can
+/// signal *intent* (cause vs. suggestion) without imposing color —
+/// useful if we ever want to add per-line decorations like a screen
+/// reader hint or an indent shift.
 #[derive(Debug, Clone, Copy)]
 pub enum ErrorLine<'a> {
-    /// A line describing the cause of the error (white).
+    /// A line describing the cause of the error.
     Cause(&'a str),
 
-    /// A line offering an actionable suggestion (dim cyan).
+    /// A line offering an actionable suggestion.
     Hint(&'a str),
 }
 
-/// Print an error message with mixed cause / hint context lines.
+/// Print an error message with `→`-prefixed context lines.
 ///
-/// Use this in place of [`error_context`] when at least one line is an
-/// actionable hint that should be styled distinctly. The arrow bullet
-/// is dim; cause lines are white; hint lines are dim cyan.
+/// The `error:` label is bold red; the message and all `→` body
+/// text render uncolored. Only the arrow bullet is dim. This
+/// keeps the error block readable across terminal themes (cyan
+/// renders inconsistently as teal/green-ish on Solarized,
+/// macOS Terminal default, etc., which previously made hints
+/// look like success messages).
 pub fn error_with_lines(msg: &str, lines: &[ErrorLine<'_>]) {
     eprintln!("{} {msg}", style("error:").red().bold());
     for line in lines {
-        match line {
-            ErrorLine::Cause(text) => {
-                eprintln!("  {} {}", style("→").dim(), text);
-            }
-            ErrorLine::Hint(text) => {
-                eprintln!("  {} {}", style("→").dim(), style(text).cyan().dim());
-            }
-        }
+        let text = match line {
+            ErrorLine::Cause(t) | ErrorLine::Hint(t) => t,
+        };
+        eprintln!("  {} {}", style("→").dim(), text);
     }
 }
 
