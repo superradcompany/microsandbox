@@ -250,11 +250,8 @@ async fn handle_message(
                             stage: None,
                         },
                     };
-                    let reply =
-                        Message::with_payload(MessageType::ExecFailed, msg.id, &payload)
-                            .map_err(|e| {
-                                AgentdError::ExecSession(format!("encode failed: {e}"))
-                            })?;
+                    let reply = Message::with_payload(MessageType::ExecFailed, msg.id, &payload)
+                        .map_err(|e| AgentdError::ExecSession(format!("encode failed: {e}")))?;
                     codec::encode_to_buf(&reply, out_buf).map_err(|e| {
                         AgentdError::ExecSession(format!("encode failed frame: {e}"))
                     })?;

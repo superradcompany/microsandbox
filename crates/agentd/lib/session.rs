@@ -70,9 +70,7 @@ fn classify_spawn_errno(errno: i32) -> ExecFailureKind {
         libc::ENOEXEC => ExecFailureKind::NotExecutable,
         libc::EISDIR => ExecFailureKind::NotExecutable,
         libc::ETXTBSY => ExecFailureKind::NotExecutable,
-        libc::E2BIG | libc::ELOOP | libc::ENAMETOOLONG | libc::EFAULT => {
-            ExecFailureKind::BadArgs
-        }
+        libc::E2BIG | libc::ELOOP | libc::ENAMETOOLONG | libc::EFAULT => ExecFailureKind::BadArgs,
         libc::EMFILE | libc::ENFILE => ExecFailureKind::ResourceLimit,
         libc::EAGAIN => ExecFailureKind::ResourceLimit,
         libc::ENOMEM => ExecFailureKind::OutOfMemory,
@@ -82,11 +80,7 @@ fn classify_spawn_errno(errno: i32) -> ExecFailureKind {
 }
 
 /// Build a `ExecFailed` payload from a spawn-time `io::Error`.
-fn exec_failed_from_io_error(
-    err: &std::io::Error,
-    cmd: &str,
-    stage: &str,
-) -> ExecFailed {
+fn exec_failed_from_io_error(err: &std::io::Error, cmd: &str, stage: &str) -> ExecFailed {
     let errno = err.raw_os_error();
     let kind = errno
         .map(classify_spawn_errno)
@@ -316,9 +310,7 @@ impl ExecSession {
         if pid < 0 {
             let io_err = std::io::Error::last_os_error();
             return Err(AgentdError::ExecSpawnFailed(exec_failed_from_io_error(
-                &io_err,
-                &req.cmd,
-                "fork",
+                &io_err, &req.cmd, "fork",
             )));
         }
 
@@ -404,9 +396,7 @@ impl ExecSession {
             let _ = wait_for_exec_failure_child(pid);
             let io_err = std::io::Error::from_raw_os_error(exec_errno);
             return Err(AgentdError::ExecSpawnFailed(exec_failed_from_io_error(
-                &io_err,
-                &req.cmd,
-                "execvp",
+                &io_err, &req.cmd, "execvp",
             )));
         }
 
