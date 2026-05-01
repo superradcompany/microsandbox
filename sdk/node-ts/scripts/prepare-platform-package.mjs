@@ -4,16 +4,25 @@
 // npm run build:native`) and CI (run on each matrix runner before publish).
 //
 // Layout produced:
-//   npm/<triple>/microsandbox.<triple>.node    (the napi binding)
-//   npm/<triple>/bin/msb                        (the msb CLI)
-//   npm/<triple>/lib/libkrunfw.{dylib|so}       (the krun shared library)
+//   npm/<triple>/microsandbox.<triple>.node            (the napi binding)
+//   npm/<triple>/bin/msb                                (the msb CLI)
+//   npm/<triple>/lib/libkrunfw.<ABI>.dylib              (macOS only)
+//   npm/<triple>/lib/libkrunfw.so.<VERSION>             (Linux only)
 //
 // Refuses to run when the host triple doesn't match the requested target,
 // since we don't cross-compile here — CI orchestrates that matrix.
 
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+} from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -69,8 +78,8 @@ const msbSrc = msbCandidates.find((p) => existsSync(p));
 if (!msbSrc) {
   console.error(
     `missing msb binary; run \`just build\` from the repo root first.\n` +
-      `looked in:\n` +
-      msbCandidates.map((p) => `  ${p}`).join("\n"),
+    `looked in:\n` +
+    msbCandidates.map((p) => `  ${p}`).join("\n"),
   );
   process.exit(1);
 }
@@ -96,40 +105,36 @@ if (triple === "darwin-arm64") {
 }
 
 // 3. libkrunfw shared library --------------------------------------------
-// `just build` lands these in build/. Match the {dylib,so} filename for the host.
+// `just build` lays down one real file (e.g. libkrunfw.so.5.2.1 or
+// libkrunfw.5.dylib) plus SONAME / unversioned symlinks pointing at it.
+// We pick any matching entry, follow symlinks to the real file, and ship
+// it under its canonical name — no version constants in this script.
+// libkrunfw bumps already touch enough places (Rust constants, install.sh,
+// CI env, vendor submodule); this script doesn't need to be one of them.
+// Reset libDir first so prior runs don't leave a stale file behind that
+// the package.json `files` glob would then pick up.
 const buildDir = join(repoRoot, "build");
-let krunfw;
-let krunfwVersioned; // e.g. libkrunfw.5.dylib or libkrunfw.so.5
-if (existsSync(buildDir)) {
-  const entries = readdirSync(buildDir);
-  // Pick the ABI-versioned name that the npm package manifest includes.
-  const real = entries
-    .filter((e) =>
-      process.platform === "darwin"
-        ? /^libkrunfw\.\d+\.dylib$/.test(e)
-        : /^libkrunfw\.so\.\d+$/.test(e),
-    )
-    .sort()
-    .reverse()[0];
-  if (real) {
-    krunfwVersioned = real;
-    krunfw = process.platform === "darwin" ? "libkrunfw.dylib" : "libkrunfw.so";
-  }
-}
-if (!krunfwVersioned) {
+rmSync(libDir, { recursive: true, force: true });
+mkdirSync(libDir, { recursive: true });
+
+const krunfwPattern =
+  process.platform === "darwin"
+    ? /^libkrunfw\..+\.dylib$/
+    : /^libkrunfw\.so\..+$/;
+const krunfwEntry = existsSync(buildDir)
+  ? readdirSync(buildDir).find((entry) => krunfwPattern.test(entry))
+  : undefined;
+if (!krunfwEntry) {
   console.error(
     `missing libkrunfw in ${buildDir}; run \`just build-libkrunfw\` first.`,
   );
   process.exit(1);
 }
-
-// Copy the versioned dylib AND a duplicate under the unversioned name.
-// We can't ship a symlink because `npm pack` doesn't preserve them.
-copyFileSync(join(buildDir, krunfwVersioned), join(libDir, krunfwVersioned));
-const unversionedPath = join(libDir, krunfw);
-if (existsSync(unversionedPath)) unlinkSync(unversionedPath);
-copyFileSync(join(buildDir, krunfwVersioned), unversionedPath);
-console.log(`copied ${krunfwVersioned} + ${krunfw} (duplicate)`);
+const krunfwSrc = realpathSync(join(buildDir, krunfwEntry));
+const krunfwName = basename(krunfwSrc);
+const krunfwDst = join(libDir, krunfwName);
+copyFileSync(krunfwSrc, krunfwDst);
+console.log(`copied ${krunfwName}`);
 
 // 4. Summary --------------------------------------------------------------
 function du(p) {
@@ -138,4 +143,4 @@ function du(p) {
 console.log(`\npopulated npm/${triple}:`);
 console.log(`  ${nodeFile}     ${du(join(pkgDir, nodeFile))} KiB`);
 console.log(`  bin/msb         ${du(msbDst)} KiB`);
-console.log(`  lib/${krunfwVersioned}  ${du(join(libDir, krunfwVersioned))} KiB`);
+console.log(`  lib/${krunfwName}  ${du(krunfwDst)} KiB`);

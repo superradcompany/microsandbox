@@ -5,12 +5,10 @@ use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const PREBUILT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const LIBKRUNFW_ABI: &str = "5";
-const LIBKRUNFW_VERSION: &str = "5.2.1";
-const GITHUB_ORG: &str = "superradcompany";
-const REPO: &str = "microsandbox";
-const MSB_BINARY: &str = "msb";
+use microsandbox_utils::{
+    LIBKRUNFW_ABI, MSB_BINARY, PREBUILT_VERSION, bundle_download_url,
+    libkrunfw_filename as utils_libkrunfw_filename,
+};
 
 fn main() {
     // Re-run if the binaries are deleted so we can re-download.
@@ -92,23 +90,22 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 fn libkrunfw_filename() -> String {
-    if cfg!(target_os = "macos") {
-        format!("libkrunfw.{LIBKRUNFW_ABI}.dylib")
+    let os = if cfg!(target_os = "macos") {
+        "macos"
     } else {
-        format!("libkrunfw.so.{LIBKRUNFW_VERSION}")
-    }
+        "linux"
+    };
+    utils_libkrunfw_filename(os)
 }
 
 fn bundle_url() -> String {
     let arch = std::env::consts::ARCH;
-    let target_os = if cfg!(target_os = "macos") {
-        "darwin"
+    let os = if cfg!(target_os = "macos") {
+        "macos"
     } else {
         "linux"
     };
-    format!(
-        "https://github.com/{GITHUB_ORG}/{REPO}/releases/download/v{PREBUILT_VERSION}/{REPO}-{target_os}-{arch}.tar.gz"
-    )
+    bundle_download_url(PREBUILT_VERSION, arch, os)
 }
 
 fn installed_msb_version(path: &Path) -> Option<String> {
