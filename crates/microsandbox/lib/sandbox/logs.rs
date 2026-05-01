@@ -118,7 +118,10 @@ pub fn read_logs(name: &str, opts: &LogOptions) -> MicrosandboxResult<Vec<LogEnt
 
 /// Compute the on-disk log directory for a sandbox name.
 pub fn log_dir_for(name: &str) -> PathBuf {
-    crate::config::config().sandboxes_dir().join(name).join("logs")
+    crate::config::config()
+        .sandboxes_dir()
+        .join(name)
+        .join("logs")
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -1259,9 +1259,7 @@ async fn event_mapper_task(
                 break;
             }
             MessageType::ExecFailed => {
-                if let Ok(failed) =
-                    msg.payload::<microsandbox_protocol::exec::ExecFailed>()
-                {
+                if let Ok(failed) = msg.payload::<microsandbox_protocol::exec::ExecFailed>() {
                     let _ = tx.send(ExecEvent::Failed(failed));
                 }
                 break;

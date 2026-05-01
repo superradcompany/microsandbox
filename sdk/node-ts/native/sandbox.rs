@@ -389,8 +389,8 @@ impl Sandbox {
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
         let name = sb.name().to_string();
         let rust_opts = log_options_from_js(opts).map_err(napi::Error::from_reason)?;
-        let entries = microsandbox::sandbox::logs::read_logs(&name, &rust_opts)
-            .map_err(to_napi_error)?;
+        let entries =
+            microsandbox::sandbox::logs::read_logs(&name, &rust_opts).map_err(to_napi_error)?;
         Ok(entries.into_iter().map(log_entry_to_js).collect())
     }
 }
@@ -448,7 +448,9 @@ pub fn log_entry_to_js(entry: microsandbox::sandbox::LogEntry) -> LogEntry {
     }
 }
 
-pub fn log_options_from_js(opts: Option<LogOptions>) -> std::result::Result<microsandbox::sandbox::LogOptions, String> {
+pub fn log_options_from_js(
+    opts: Option<LogOptions>,
+) -> std::result::Result<microsandbox::sandbox::LogOptions, String> {
     let Some(o) = opts else {
         return Ok(microsandbox::sandbox::LogOptions::default());
     };

@@ -493,11 +493,7 @@ fn decode_frame(mut buf: Vec<u8>) -> RuntimeResult<Message> {
 /// Tap a guest-originated frame into `exec.log` if it belongs to the
 /// primary session. Best-effort: any decode error is logged and
 /// dropped — capture failures must never disrupt the routing path.
-fn tap_frame_into_log(
-    frame: &RawFrame,
-    writer: &LogWriter,
-    session_registry: &SessionRegistry,
-) {
+fn tap_frame_into_log(frame: &RawFrame, writer: &LogWriter, session_registry: &SessionRegistry) {
     // Decode the message envelope to learn the type. The full CBOR
     // decode is small (the envelope is a 3-field map; the heavy
     // payload is left as opaque bytes in `Message::p`).
@@ -513,7 +509,10 @@ fn tap_frame_into_log(
     // the ExecRequest arrived. Returns `None` for frames whose
     // session predates the relay's lifetime or whose ExecRequest
     // we missed (defensive — shouldn't happen in normal operation).
-    let session_info = session_registry.lock().ok().and_then(|m| m.get(&msg.id).copied());
+    let session_info = session_registry
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&msg.id).copied());
 
     match msg.t {
         // ExecRequest flows host→guest, observed in `client_reader_task`.
@@ -765,10 +764,7 @@ async fn client_reader_task(
             && let Ok(msg) = decode_frame(frame.data.to_vec())
             && msg.t == MessageType::ExecRequest
         {
-            let pty = msg
-                .payload::<ExecRequest>()
-                .map(|r| r.tty)
-                .unwrap_or(false);
+            let pty = msg.payload::<ExecRequest>().map(|r| r.tty).unwrap_or(false);
             let session_id = next_session_id.fetch_add(1, Ordering::SeqCst);
             if let Ok(mut registry) = session_registry.lock() {
                 registry.insert(

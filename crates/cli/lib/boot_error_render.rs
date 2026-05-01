@@ -75,10 +75,9 @@ fn stage_hint(err: &BootError) -> Option<String> {
         }
 
         // Network + EADDRINUSE → port collision.
-        (BootErrorStage::Network, Some(48)) | (BootErrorStage::Network, Some(98)) => {
-            Some("a port is already bound — try a different host port or stop the other process"
-                .into())
-        }
+        (BootErrorStage::Network, Some(48)) | (BootErrorStage::Network, Some(98)) => Some(
+            "a port is already bound — try a different host port or stop the other process".into(),
+        ),
 
         _ => None,
     }

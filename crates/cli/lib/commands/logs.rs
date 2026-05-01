@@ -269,11 +269,7 @@ impl SourceMask {
 // Functions: Helpers — boot-error block
 //--------------------------------------------------------------------------------------------------
 
-fn render_boot_error_if_present(
-    log_dir: &Path,
-    name: &str,
-    json_mode: bool,
-) -> anyhow::Result<()> {
+fn render_boot_error_if_present(log_dir: &Path, name: &str, json_mode: bool) -> anyhow::Result<()> {
     let boot_err = match microsandbox_runtime::boot_error::BootError::read(log_dir) {
         Ok(Some(b)) => b,
         Ok(None) => return Ok(()),
@@ -335,9 +331,7 @@ fn read_all_entries(log_dir: &Path, sources: SourceMask) -> anyhow::Result<Vec<L
         // RFC 3339 (`.615119Z`) while exec.log uses millisecond
         // (`.969Z`) — lexical compare across mixed precisions gives
         // the wrong order.
-        entries.sort_by_key(|e| {
-            parse_entry_time(&e.t).unwrap_or(DateTime::<Utc>::MIN_UTC)
-        });
+        entries.sort_by_key(|e| parse_entry_time(&e.t).unwrap_or(DateTime::<Utc>::MIN_UTC));
     }
 
     Ok(entries)
@@ -485,8 +479,9 @@ fn parse_time_arg(input: Option<&str>) -> anyhow::Result<Option<DateTime<Utc>>> 
         return Ok(Some(dt.with_timezone(&Utc)));
     }
     // Relative duration like 5m / 2h / 1d / 30s.
-    let dur = parse_duration(raw)
-        .with_context(|| format!("could not parse time {raw:?} (expected RFC 3339 or `5m` etc.)"))?;
+    let dur = parse_duration(raw).with_context(|| {
+        format!("could not parse time {raw:?} (expected RFC 3339 or `5m` etc.)")
+    })?;
     Ok(Some(Utc::now() - chrono::Duration::from_std(dur)?))
 }
 
@@ -507,18 +502,16 @@ fn parse_duration(raw: &str) -> Option<Duration> {
 }
 
 fn parse_entry_time(t: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(t).ok().map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(t)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers — rendering
 //--------------------------------------------------------------------------------------------------
 
-fn render_entries(
-    entries: &[LogEntry],
-    args: &LogsArgs,
-    color: ColorMode,
-) -> anyhow::Result<()> {
+fn render_entries(entries: &[LogEntry], args: &LogsArgs, color: ColorMode) -> anyhow::Result<()> {
     if args.json {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
@@ -563,9 +556,7 @@ fn render_one(entry: &LogEntry, args: &LogsArgs, color: ColorMode) -> anyhow::Re
     let want_id_prefix = args.show_id || args.color_sessions;
     let want_session_color = args.color_sessions && color_active(color);
 
-    let body = if want_session_color
-        && let Some(id) = entry.id
-    {
+    let body = if want_session_color && let Some(id) = entry.id {
         wrap_in_session_color(&body, id)
     } else {
         body
@@ -604,8 +595,9 @@ fn color_active(mode: ColorMode) -> bool {
     match mode {
         ColorMode::Always => true,
         ColorMode::Never => false,
-        ColorMode::Auto => std::io::stdout().is_terminal()
-            && std::env::var_os("NO_COLOR").is_none(),
+        ColorMode::Auto => {
+            std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+        }
     }
 }
 
@@ -912,7 +904,9 @@ mod tests {
 
     #[test]
     fn parse_time_accepts_rfc3339() {
-        let parsed = parse_time_arg(Some("2026-04-30T20:32:59.690Z")).unwrap().unwrap();
+        let parsed = parse_time_arg(Some("2026-04-30T20:32:59.690Z"))
+            .unwrap()
+            .unwrap();
         let expected = DateTime::parse_from_rfc3339("2026-04-30T20:32:59.690Z")
             .unwrap()
             .with_timezone(&Utc);

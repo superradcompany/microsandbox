@@ -116,6 +116,9 @@ impl JsSandboxHandle {
         let rust_opts =
             crate::sandbox::log_options_from_js(opts).map_err(napi::Error::from_reason)?;
         let entries = self.inner.logs(&rust_opts).map_err(to_napi_error)?;
-        Ok(entries.into_iter().map(crate::sandbox::log_entry_to_js).collect())
+        Ok(entries
+            .into_iter()
+            .map(crate::sandbox::log_entry_to_js)
+            .collect())
     }
 }

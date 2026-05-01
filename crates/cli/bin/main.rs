@@ -157,8 +157,7 @@ fn main() {
             // Honor TTY detection + NO_COLOR; we set `ansi` explicitly
             // since with_ansi(true) overrides tracing-subscriber's
             // built-in detection.
-            let ansi =
-                std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+            let ansi = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
             log_args::init_tracing(log_level, ansi);
             match run_async_command_anyhow(command, log_level) {
                 Ok(()) => 0,

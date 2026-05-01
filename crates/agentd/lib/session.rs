@@ -1129,9 +1129,25 @@ mod tests {
         };
 
         let err = ExecSession::spawn(9, &req, tx, None).expect_err("spawn should fail");
-        let message = err.to_string();
 
-        assert!(message.contains("spawn pipe"));
+        // Spawn failures now produce the typed `ExecSpawnFailed` so
+        // the host can render a useful message + hint. The classifier
+        // maps ENOENT on the binary path to `NotFound`.
+        let payload = match &err {
+            AgentdError::ExecSpawnFailed(p) => p,
+            other => panic!("expected ExecSpawnFailed, got: {other:?}"),
+        };
+        assert_eq!(payload.kind, ExecFailureKind::NotFound);
+        assert_eq!(payload.errno, Some(libc::ENOENT));
+        assert_eq!(payload.errno_name.as_deref(), Some("ENOENT"));
+
+        // The original intent of the test: probe internals leak into
+        // the error message. The format is now
+        // `spawn "<cmd>": <io::Error>` from
+        // `exec_failed_from_io_error`. Verify that none of the old
+        // probe-detail keys snuck back into the message.
+        let message = &payload.message;
+        assert!(message.contains("spawn"));
         assert!(!message.contains("symlink_metadata="));
         assert!(!message.contains("metadata="));
         assert!(!message.contains("magic="));
