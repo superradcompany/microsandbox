@@ -13,7 +13,7 @@ path = "lib/lib.rs"
 [dependencies]
 libc.workspace = true
 microsandbox-utils = { version = "0.4.3", path = "../utils" }
-msb_krun = "0.1.11"
+msb_krun = "0.1.12"
 scopeguard.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
