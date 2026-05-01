@@ -51,6 +51,10 @@ export type {
   ImageLayerDetail,
 } from "./image.js";
 
+// Logs
+export { LogEntry } from "./logs.js";
+export type { LogReadOptions, LogReadSource, LogSource } from "./logs.js";
+
 // Metrics streaming
 export { MetricsStream } from "./metrics-stream.js";
 

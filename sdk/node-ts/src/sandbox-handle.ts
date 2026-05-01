@@ -4,6 +4,12 @@ import type {
   NapiSandboxHandle,
   NapiSandboxInfo,
 } from "./internal/napi.js";
+import {
+  LogEntry,
+  type LogReadOptions,
+  logEntryFromNapi,
+  logReadOptionsToNapi,
+} from "./logs.js";
 import { Sandbox } from "./sandbox.js";
 import type { SandboxStatus } from "./sandbox-status.js";
 import type { SandboxMetrics } from "./metrics.js";
@@ -77,6 +83,21 @@ export class SandboxHandle {
   async remove(): Promise<void> {
     const live = this.requireLive();
     await withMappedErrors(() => live.remove());
+  }
+
+  /**
+   * Read captured output from `exec.log` for this sandbox.
+   *
+   * Works without starting the sandbox. Defaults to user output:
+   * `stdout`, `stderr`, and pty-merged `output`. Pass
+   * `{ sources: ["system"] }` for runtime/kernel diagnostics or
+   * `{ sources: ["all"] }` for everything.
+   */
+  async logs(opts?: LogReadOptions): Promise<LogEntry[]> {
+    const live = this.requireLive();
+    const napiOpts = logReadOptionsToNapi(opts);
+    const raw = await withMappedErrors(() => live.logs(napiOpts));
+    return raw.map(logEntryFromNapi);
   }
 }
 

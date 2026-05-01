@@ -45,6 +45,7 @@
               "sandboxes/secrets",
               "sandboxes/customization",
               "sandboxes/metrics",
+              "sandboxes/logs",
               "sandboxes/snapshots",
               "sandboxes/events"
             ]

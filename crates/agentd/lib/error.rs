@@ -36,6 +36,13 @@ pub enum AgentdError {
     #[error("exec session error: {0}")]
     ExecSession(String),
 
+    /// A spawn-time exec failure with classified payload, ready to
+    /// be shipped to the host as `ExecFailed`. Distinct from
+    /// `ExecSession` (which is a free-form internal error) — this
+    /// variant carries typed information the host can act on.
+    #[error("exec spawn failed: {}", .0.message)]
+    ExecSpawnFailed(microsandbox_protocol::exec::ExecFailed),
+
     /// A config parse error at startup (malformed `MSB_*` env var).
     #[error("config error: {0}")]
     Config(String),

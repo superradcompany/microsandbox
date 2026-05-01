@@ -85,6 +85,14 @@ impl SandboxHandle {
         self.updated_at
     }
 
+    /// Read captured output from `exec.log` for this sandbox.
+    ///
+    /// Same backing data as [`Sandbox::logs`](super::Sandbox::logs).
+    /// Works without starting the sandbox.
+    pub fn logs(&self, opts: &super::LogOptions) -> MicrosandboxResult<Vec<super::LogEntry>> {
+        super::logs::read_logs(&self.name, opts)
+    }
+
     /// Get the latest metrics snapshot for this sandbox.
     pub async fn metrics(&self) -> MicrosandboxResult<super::SandboxMetrics> {
         if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {

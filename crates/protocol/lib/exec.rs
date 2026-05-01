@@ -138,6 +138,80 @@ pub struct ExecExited {
     pub code: i32,
 }
 
+/// Notification that a command failed to start (the user's program
+/// never got to run). Distinct from `ExecExited`, which means the
+/// process ran and reported an exit code.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecFailed {
+    /// Coarse classification used by the CLI/SDK to pick hints.
+    pub kind: ExecFailureKind,
+
+    /// `errno` if the underlying failure was a syscall.
+    #[serde(default)]
+    pub errno: Option<i32>,
+
+    /// Standard errno name like `"ENOENT"`. Easier to grep than the
+    /// raw number; populated by the agentd classifier.
+    #[serde(default)]
+    pub errno_name: Option<String>,
+
+    /// Human-readable description from agentd. Always populated.
+    pub message: String,
+
+    /// Which step failed when the kind alone isn't enough — e.g.
+    /// `"execvp"`, `"setrlimit(RLIMIT_NOFILE)"`, `"posix_openpt"`.
+    #[serde(default)]
+    pub stage: Option<String>,
+}
+
+/// Coarse classification of an `ExecFailed` cause. The CLI's
+/// stage-to-hint mapper keys off this; the SDK exposes it directly
+/// for programmatic consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecFailureKind {
+    /// Binary not found on PATH or at the explicit path. ENOENT on
+    /// the binary path itself (not on the cwd — see `BadCwd`).
+    NotFound,
+
+    /// Binary found but not executable: EACCES or EPERM on file.
+    PermissionDenied,
+
+    /// File exists but the kernel can't run it: bad ELF, missing
+    /// interpreter for a shebang script, wrong architecture, etc.
+    /// ENOEXEC.
+    NotExecutable,
+
+    /// Working directory unusable: doesn't exist (ENOENT on cwd),
+    /// not a directory (ENOTDIR), or no permission to chdir.
+    BadCwd,
+
+    /// Argument or env list too large (E2BIG), too many symlinks
+    /// resolving the path (ELOOP), path too long (ENAMETOOLONG),
+    /// or invalid bytes in argv (e.g. interior NUL — EINVAL).
+    BadArgs,
+
+    /// Resource limit prevented the spawn: rejected `setrlimit`
+    /// (EPERM/EINVAL), per-process fork limit (EAGAIN with NPROC),
+    /// fd table exhaustion (EMFILE/ENFILE).
+    ResourceLimit,
+
+    /// User/group setup failed: requested user doesn't exist in the
+    /// sandbox, or `setuid`/`setgid` rejected (EPERM).
+    UserSetupFailed,
+
+    /// Memory pressure: kernel couldn't allocate (ENOMEM, or EAGAIN
+    /// on fork without an explicit rlimit cause).
+    OutOfMemory,
+
+    /// PTY allocation or attachment failed (pty mode only).
+    PtySetupFailed,
+
+    /// Anything else: `errno` is carried verbatim, `message` and
+    /// `stage` describe the specifics.
+    Other,
+}
+
 /// Request to resize the PTY of a running command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecResize {

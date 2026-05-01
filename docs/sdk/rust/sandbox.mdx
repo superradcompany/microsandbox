@@ -234,6 +234,70 @@ Stream resource metrics at a regular interval. Returns an async stream that yiel
 
 ---
 
+#### logs()
+
+```rust
+fn logs(&self, opts: &LogOptions) -> MicrosandboxResult<Vec<LogEntry>>
+```
+
+Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike — there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
+
+The default sources are `Stdout`, `Stderr`, and `Output` (PTY-merged). Pass `LogSource::System` to also include synthetic lifecycle markers and runtime/kernel diagnostic lines.
+
+```rust
+use microsandbox::sandbox::{LogOptions, LogSource, Sandbox};
+
+let handle = Sandbox::get("web").await?;
+
+// Default — all user-program output, regardless of pipe/pty mode
+let entries = handle.logs(&LogOptions::default())?;
+
+for e in entries {
+    let source = match e.source {
+        LogSource::Stdout => "OUT",
+        LogSource::Stderr => "ERR",
+        LogSource::Output => "PTY",
+        LogSource::System => "SYS",
+    };
+    println!(
+        "[{}] {} {:?}: {}",
+        e.timestamp.to_rfc3339(),
+        source,
+        e.session_id,
+        String::from_utf8_lossy(&e.data).trim_end()
+    );
+}
+
+// Filtered: last 50 entries from the past hour, including system lines
+let recent = handle.logs(&LogOptions {
+    tail: Some(50),
+    since: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+    sources: vec![
+        LogSource::Stdout,
+        LogSource::Stderr,
+        LogSource::Output,
+        LogSource::System,
+    ],
+    ..Default::default()
+})?;
+```
+
+`logs()` is **synchronous** because it's a pure file read.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| opts | `&`[`LogOptions`](#logoptions) | Filters: `tail`, `since`, `until`, `sources`. `LogOptions::default()` returns everything for the default sources. |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Vec<`[`LogEntry`](#logentry)`>` | Matching entries in chronological order |
+
+---
+
 #### name()
 
 ```rust
@@ -753,6 +817,17 @@ Set the default working directory for all commands.
 
 ## Types
 
+### LogEntry
+
+A single captured log entry returned by [`logs()`](#logs).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| timestamp | `DateTime<Utc>` | Wall-clock capture time on the host |
+| source | [`LogSource`](#logsource) | Where the chunk came from |
+| session_id | `Option<u64>` | Relay-monotonic session id; `None` for `System` entries |
+| data | `Bytes` | The chunk's bytes (UTF-8 lossy decoded by default; raw bytes if `--raw` mode was used) |
+
 ### LogLevel
 
 Sandbox process log verbosity.
@@ -764,6 +839,28 @@ Sandbox process log verbosity.
 | `Info` | Info and higher |
 | `Debug` | Debug and higher |
 | `Trace` | Most verbose - all diagnostic output |
+
+### LogOptions
+
+Filters passed to [`logs()`](#logs). All fields optional. `LogOptions::default()` returns everything for the default sources (`Stdout` + `Stderr` + `Output`).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| tail | `Option<usize>` | Show only the last N entries after other filters apply |
+| since | `Option<DateTime<Utc>>` | Inclusive lower bound on entry timestamp |
+| until | `Option<DateTime<Utc>>` | Exclusive upper bound on entry timestamp |
+| sources | `Vec<`[`LogSource`](#logsource)`>` | Sources to include. Empty = `[Stdout, Stderr, Output]` (the default user-program sources). Add `System` to merge runtime/kernel diagnostics. |
+
+### LogSource
+
+Tag indicating where a captured log entry came from.
+
+| Value | Description |
+|-------|-------------|
+| `Stdout` | Captured from a session's stdout (pipe mode — streams stayed separated) |
+| `Stderr` | Captured from a session's stderr (pipe mode) |
+| `Output` | Captured from a session running in pty mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `Output` rather than mislabelled as `Stdout`. |
+| `System` | Synthetic entry: lifecycle markers in `exec.log` plus runtime/kernel diagnostic lines merged in at read time when `System` is requested. |
 
 ### PullPolicy
 
@@ -813,6 +910,7 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 | connect() | `Result<`[`Sandbox`](#instance-methods)`>` | Connect to a running sandbox |
 | created_at() | `Option<DateTime<Utc>>` | Creation timestamp |
 | kill() | `Result<()>` | Force terminate |
+| logs() | `Result<Vec<`[`LogEntry`](#logentry)`>>` | Read captured `exec.log` (works without starting) |
 | metrics() | `Result<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
 | name() | `&str` | Sandbox name |
 | remove() | `Result<()>` | Delete sandbox and state |

@@ -282,6 +282,39 @@ pub fn error_context(msg: &str, context: &[&str]) {
     }
 }
 
+/// One context line in a styled error block.
+///
+/// `Cause` lines describe what went wrong (rendered in white). `Hint`
+/// lines are actionable suggestions (rendered in dim cyan), per the
+/// `design/cli/output-style.md` Error Messages section.
+#[derive(Debug, Clone, Copy)]
+pub enum ErrorLine<'a> {
+    /// A line describing the cause of the error (white).
+    Cause(&'a str),
+
+    /// A line offering an actionable suggestion (dim cyan).
+    Hint(&'a str),
+}
+
+/// Print an error message with mixed cause / hint context lines.
+///
+/// Use this in place of [`error_context`] when at least one line is an
+/// actionable hint that should be styled distinctly. The arrow bullet
+/// is dim; cause lines are white; hint lines are dim cyan.
+pub fn error_with_lines(msg: &str, lines: &[ErrorLine<'_>]) {
+    eprintln!("{} {msg}", style("error:").red().bold());
+    for line in lines {
+        match line {
+            ErrorLine::Cause(text) => {
+                eprintln!("  {} {}", style("→").dim(), text);
+            }
+            ErrorLine::Hint(text) => {
+                eprintln!("  {} {}", style("→").dim(), style(text).cyan().dim());
+            }
+        }
+    }
+}
+
 /// Print a styled warning message to stderr.
 pub fn warn(msg: &str) {
     eprintln!("{} {msg}", style("warn:").yellow().bold());

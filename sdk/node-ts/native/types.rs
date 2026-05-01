@@ -13,6 +13,48 @@ pub struct ExitStatus {
     pub success: bool,
 }
 
+/// One captured log entry from `exec.log`.
+#[napi(object)]
+pub struct LogEntry {
+    /// Wall-clock timestamp when the chunk was captured (ms since epoch).
+    pub timestamp_ms: f64,
+
+    /// `"stdout"`, `"stderr"`, `"output"`, or `"system"`.
+    pub source: String,
+
+    /// Relay-monotonic session id. `null` for `system` entries
+    /// (lifecycle markers aren't tied to a specific session).
+    /// Exposed as `f64` so it survives JS's number type without
+    /// requiring BigInt; session ids stay small in practice
+    /// (start at 1, +1 per session opened).
+    pub session_id: Option<f64>,
+
+    /// Body bytes. UTF-8 lossy decoded by default; raw mode (future)
+    /// preserves bytes via base64 round-trip on the host side.
+    pub data: napi::bindgen_prelude::Buffer,
+}
+
+/// Filters applied by `Sandbox.logs()`.
+///
+/// All fields optional. Defaults: tail = unset (return everything),
+/// since/until = unset (no time filter), sources = `["stdout", "stderr", "output"]`.
+#[napi(object)]
+pub struct LogOptions {
+    /// Show only the last N entries.
+    pub tail: Option<u32>,
+
+    /// Inclusive lower bound (ms since epoch).
+    pub since_ms: Option<f64>,
+
+    /// Exclusive upper bound (ms since epoch).
+    pub until_ms: Option<f64>,
+
+    /// Sources to include. Each element is `"stdout"`, `"stderr"`,
+    /// `"output"`, `"system"`, or `"all"`. Defaults to
+    /// `["stdout", "stderr", "output"]` when omitted.
+    pub sources: Option<Vec<String>>,
+}
+
 /// Filesystem entry metadata returned by `fs.list()`.
 #[napi(object)]
 pub struct FsEntry {

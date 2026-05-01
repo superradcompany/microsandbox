@@ -11,6 +11,7 @@ mod config;
 pub mod exec;
 pub mod fs;
 mod handle;
+pub mod logs;
 mod metrics;
 mod patch;
 mod types;
@@ -57,6 +58,7 @@ pub use config::SandboxConfig;
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
 pub use handle::SandboxHandle;
+pub use logs::{LogEntry, LogOptions, LogSource};
 pub use metrics::{SandboxMetrics, all_sandbox_metrics};
 pub use microsandbox_image::{PullPolicy, PullProgress, PullProgressHandle};
 #[cfg(feature = "net")]
@@ -359,7 +361,7 @@ impl Sandbox {
         let (mut handle, agent_sock_path) = spawn_sandbox(&config, sandbox_id, mode).await?;
 
         // Wait for the relay socket to become available.
-        let client = wait_for_relay(&agent_sock_path, &mut handle).await?;
+        let client = wait_for_relay(&agent_sock_path, &mut handle, &config.name).await?;
 
         let ready = client.ready();
         tracing::info!(
@@ -459,6 +461,17 @@ impl Sandbox {
     /// memory, env, mounts, etc.).
     pub fn config(&self) -> &SandboxConfig {
         &self.config
+    }
+
+    /// Read captured output from `exec.log` for this sandbox.
+    ///
+    /// Backed by the on-disk JSON Lines file the runtime writes via the
+    /// relay tap (see `crates/runtime/lib/exec_log.rs`). Works on
+    /// running and stopped sandboxes alike — there is no protocol
+    /// traffic. Pass `LogOptions::default()` for "everything,
+    /// stdout+stderr".
+    pub fn logs(&self, opts: &LogOptions) -> MicrosandboxResult<Vec<LogEntry>> {
+        logs::read_logs(self.name(), opts)
     }
 
     /// Low-level access to the guest agent client. Use this for custom
@@ -853,6 +866,7 @@ impl Sandbox {
                 .map_err(|e| crate::MicrosandboxError::Runtime(format!("sigwinch: {e}")))?;
 
         let mut exit_code: i32 = -1;
+        let mut spawn_failure: Option<microsandbox_protocol::exec::ExecFailed> = None;
         let detach_seq = detach_keys.sequence();
         let mut match_pos = 0usize;
 
@@ -934,6 +948,14 @@ impl Sandbox {
                             }
                             should_break = true;
                         }
+                        MessageType::ExecFailed => {
+                            if let Ok(failed) =
+                                msg.payload::<microsandbox_protocol::exec::ExecFailed>()
+                            {
+                                spawn_failure = Some(failed);
+                            }
+                            should_break = true;
+                        }
                         _ => {}
                     }
 
@@ -949,6 +971,15 @@ impl Sandbox {
                                 MessageType::ExecExited => {
                                     if let Ok(exited) = next.payload::<ExecExited>() {
                                         exit_code = exited.code;
+                                    }
+                                    should_break = true;
+                                    break;
+                                }
+                                MessageType::ExecFailed => {
+                                    if let Ok(failed) = next
+                                        .payload::<microsandbox_protocol::exec::ExecFailed>()
+                                    {
+                                        spawn_failure = Some(failed);
                                     }
                                     should_break = true;
                                     break;
@@ -978,6 +1009,9 @@ impl Sandbox {
         }
 
         // Guards restore: non-blocking → blocking, raw mode → cooked.
+        if let Some(failure) = spawn_failure {
+            return Err(crate::MicrosandboxError::ExecFailed(failure));
+        }
         Ok(exit_code)
     }
 
@@ -1003,6 +1037,7 @@ impl Sandbox {
 async fn wait_for_relay(
     sock_path: &std::path::Path,
     handle: &mut ProcessHandle,
+    sandbox_name: &str,
 ) -> MicrosandboxResult<AgentClient> {
     tracing::debug!(
         sock = %sock_path.display(),
@@ -1014,11 +1049,22 @@ async fn wait_for_relay(
     let mut backoff = std::time::Duration::from_millis(1);
     let mut attempts = 0u32;
 
+    let log_dir = sock_path
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("logs"));
+
     loop {
         attempts += 1;
         match AgentClient::connect(sock_path).await {
             Ok(client) => {
                 tracing::debug!(attempts, "wait_for_relay: connected");
+                // The relay is up — clear any stale boot-error.json from
+                // a previous failed attempt so it cannot misattribute a
+                // future crash.
+                if let Some(ref dir) = log_dir {
+                    let _ = microsandbox_runtime::boot_error::BootError::delete(dir);
+                }
                 return Ok(client);
             }
             Err(_) if tokio::time::Instant::now() < deadline => {
@@ -1026,13 +1072,25 @@ async fn wait_for_relay(
                 // If it crashed, there's no point waiting for the socket.
                 if let Some(status) = handle.try_wait()? {
                     tracing::debug!(attempts, ?status, "wait_for_relay: sandbox process exited");
+
+                    // Prefer the structured boot-error record if the
+                    // sandbox got far enough to write one.
+                    if let Some(ref dir) = log_dir
+                        && let Ok(Some(boot_err)) =
+                            microsandbox_runtime::boot_error::BootError::read(dir)
+                    {
+                        return Err(crate::MicrosandboxError::BootStart {
+                            name: sandbox_name.to_string(),
+                            err: boot_err,
+                        });
+                    }
+
                     return Err(crate::MicrosandboxError::Runtime(format!(
                         "sandbox process exited ({status}) before agent relay became available \
                          (check logs at {})",
-                        sock_path
-                            .parent()
-                            .and_then(|p| p.parent())
-                            .map(|p| p.join("logs").display().to_string())
+                        log_dir
+                            .as_ref()
+                            .map(|p| p.display().to_string())
                             .unwrap_or_default()
                     )));
                 }
@@ -1197,6 +1255,14 @@ async fn event_mapper_task(
             MessageType::ExecExited => {
                 if let Ok(exited) = msg.payload::<ExecExited>() {
                     let _ = tx.send(ExecEvent::Exited { code: exited.code });
+                }
+                break;
+            }
+            MessageType::ExecFailed => {
+                if let Ok(failed) =
+                    msg.payload::<microsandbox_protocol::exec::ExecFailed>()
+                {
+                    let _ = tx.send(ExecEvent::Failed(failed));
                 }
                 break;
             }

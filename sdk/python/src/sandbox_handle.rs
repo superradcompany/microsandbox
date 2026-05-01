@@ -91,6 +91,33 @@ impl PySandboxHandle {
         })
     }
 
+    /// Read captured output from `exec.log`.
+    ///
+    /// Works without starting the sandbox. Defaults to `stdout +
+    /// stderr` sources when `sources` is `None`.
+    #[pyo3(signature = (tail = None, since_ms = None, until_ms = None, sources = None))]
+    fn logs<'py>(
+        &self,
+        py: Python<'py>,
+        tail: Option<usize>,
+        since_ms: Option<f64>,
+        until_ms: Option<f64>,
+        sources: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let name = guard.name().to_string();
+            drop(guard);
+            let entries = tokio::task::spawn_blocking(move || {
+                crate::logs::read_logs_blocking(&name, tail, since_ms, until_ms, sources)
+            })
+            .await
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))??;
+            Ok(entries)
+        })
+    }
+
     /// Start the sandbox.
     #[pyo3(signature = (*, detached = false))]
     fn start<'py>(&self, py: Python<'py>, detached: bool) -> PyResult<Bound<'py, PyAny>> {

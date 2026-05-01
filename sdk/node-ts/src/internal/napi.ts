@@ -146,6 +146,7 @@ export interface NapiSandbox {
   wait(): Promise<NapiExitStatus>;
   detach(): Promise<void>;
   removePersisted(): Promise<void>;
+  logs(opts?: LogOptions): Promise<LogEntry[]>;
 }
 
 export interface NapiSandboxHandle {
@@ -161,6 +162,23 @@ export interface NapiSandboxHandle {
   stop(): Promise<void>;
   kill(): Promise<void>;
   remove(): Promise<void>;
+  logs(opts?: LogOptions): Promise<LogEntry[]>;
+}
+
+/** Native shape returned by `Sandbox.logs()` / `SandboxHandle.logs()`. */
+export interface LogEntry {
+  readonly timestampMs: number;
+  readonly source: string;
+  readonly sessionId: number | null;
+  readonly data: Buffer;
+}
+
+/** Native filter object accepted by `logs()`. */
+export interface LogOptions {
+  tail?: number;
+  sinceMs?: number;
+  untilMs?: number;
+  sources?: string[];
 }
 
 export interface NapiSandboxInfo {

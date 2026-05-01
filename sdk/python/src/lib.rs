@@ -3,6 +3,7 @@ mod error;
 mod exec;
 mod fs;
 mod helpers;
+mod logs;
 mod metrics;
 mod sandbox;
 mod sandbox_handle;
@@ -35,6 +36,7 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<volume::PyVolumeFs>()?;
     m.add_class::<metrics::PyMetricsStream>()?;
     m.add_class::<metrics::PySandboxMetrics>()?;
+    m.add_class::<logs::PyLogEntry>()?;
     m.add_class::<sandbox::PyPullSession>()?;
     m.add_class::<exec::PyExecEvent>()?;
     m.add_class::<fs::PyFsEntry>()?;

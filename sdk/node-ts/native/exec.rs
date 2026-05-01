@@ -227,5 +227,15 @@ fn exec_event_to_js(event: RustExecEvent) -> ExecEvent {
             data: None,
             code: Some(code),
         },
+        // Spawn-time failure: surface as a synthetic exec event so
+        // existing JS consumers iterating events see something. The
+        // canonical way to surface this is via the `ExecFailed`
+        // typed error returned from `exec()`/`exec_with()`/`collect()`.
+        RustExecEvent::Failed(payload) => ExecEvent {
+            event_type: "failed".to_string(),
+            pid: None,
+            data: Some(payload.message.into_bytes().into()),
+            code: payload.errno,
+        },
     }
 }

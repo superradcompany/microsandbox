@@ -307,6 +307,21 @@ The sandbox process also handles:
 
 The sandbox process does not execute guest commands itself. It only relays traffic between your application and the guest agent.
 
+## Logs and diagnostics
+
+Each sandbox keeps four files under `<sandbox-dir>/logs/`:
+
+| File | Producer | Contents |
+|------|----------|----------|
+| `exec.log` | Host relay (tap on guest frames) | User-program stdout/stderr/output as JSON Lines |
+| `runtime.log` | Sandbox process (host) | Runtime tracing — relay setup, lifecycle, network |
+| `kernel.log` | Guest VM virtio-console | Kernel boot messages and `agentd` console |
+| `boot-error.json` | Sandbox process | Present only when the most recent start failed before the agent came up |
+
+The user-facing surface for these is [`msb logs`](/cli/sandbox-commands#msb-logs) and the SDK [`logs()`](/sandboxes/logs) method — both work on running and stopped sandboxes alike. See the [Logs](/sandboxes/logs) page for the capture model, source semantics, and diagnostic flows.
+
+When a sandbox is in the **Crashed** state, its log directory is left in place so you can read what happened. Use `msb logs --source system <name>` to see the runtime/kernel diagnostic merge.
+
 ## Graceful shutdown with timeout fallback
 
 Attempt a graceful stop, then force-kill if the sandbox doesn't shut down in time.

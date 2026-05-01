@@ -7,7 +7,9 @@
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+pub mod boot_error_render;
 pub mod commands;
+pub mod exec_error_render;
 pub mod log_args;
 #[cfg(feature = "net")]
 pub mod net_rule;

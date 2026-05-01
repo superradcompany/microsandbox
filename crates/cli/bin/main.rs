@@ -1,10 +1,12 @@
 //! Entry point for the `msb` CLI binary.
 
+use std::io::IsTerminal;
+
 use clap::{CommandFactory, Parser, Subcommand};
 use microsandbox_cli::{
     commands::{
-        create, exec, image, inspect, install, list, metrics, ps, pull, registry, remove, run,
-        self_cmd, start, stop, uninstall, volume,
+        create, exec, image, inspect, install, list, logs, metrics, ps, pull, registry, remove,
+        run, self_cmd, start, stop, uninstall, volume,
     },
     log_args::{self, LogArgs},
     sandbox_cmd::{self, SandboxArgs},
@@ -71,6 +73,9 @@ enum Commands {
     /// Run a command in a running sandbox.
     Exec(exec::ExecArgs),
 
+    /// Show captured output from a sandbox.
+    Logs(logs::LogsArgs),
+
     /// Manage OCI images.
     Image(image::ImageArgs),
 
@@ -134,32 +139,114 @@ fn main() {
     let cli = Cli::parse();
     let log_level = cli.logs.selected_level();
 
-    let result: Result<(), Box<dyn std::error::Error>> = match cli.command {
+    let exit_code = match cli.command {
         // Sandbox process entry — never returns (VMM takes over).
         // Always install tracing for sandbox processes: default to info when
         // no explicit level is set so lifecycle events and VMM diagnostics
-        // are captured in host.log for post-mortem debugging.
+        // are captured in runtime.log for post-mortem debugging.
         Commands::Sandbox(args) => {
             let sandbox_level = log_level.or(Some(microsandbox_runtime::logging::LogLevel::Info));
-            log_args::init_tracing(sandbox_level);
-            sandbox_cmd::run(*args, log_level)
+            // The sandbox subprocess's stderr is redirected into
+            // runtime.log via setup_log_capture(), so disable ANSI —
+            // color escapes have nowhere useful to render.
+            log_args::init_tracing(sandbox_level, false);
+            sandbox_cmd::run(*args, log_level); // returns `!`
         }
         command => {
-            log_args::init_tracing(log_level);
-            run_async_command(command, log_level)
+            // CLI commands write tracing to the user's terminal.
+            // Honor TTY detection + NO_COLOR; we set `ansi` explicitly
+            // since with_ansi(true) overrides tracing-subscriber's
+            // built-in detection.
+            let ansi =
+                std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+            log_args::init_tracing(log_level, ansi);
+            match run_async_command_anyhow(command, log_level) {
+                Ok(()) => 0,
+                Err(e) => render_anyhow_error(&e),
+            }
         }
     };
 
-    if let Err(e) = result {
-        microsandbox_cli::ui::error(&e.to_string());
-        std::process::exit(1);
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
 }
 
-fn run_async_command(
+/// Render an `anyhow::Error`, preferring the structured boot-error
+/// block when the chain contains a `MicrosandboxError::BootStart`,
+/// or the styled exec-failed block when the chain contains a
+/// `MicrosandboxError::ExecFailed`. Returns the appropriate exit
+/// code so callers don't conflate "rendered an error" with "1".
+fn render_anyhow_error(err: &anyhow::Error) -> i32 {
+    if let Some((name, boot_err)) = find_boot_start_in_chain(err) {
+        microsandbox_cli::boot_error_render::render(&name, &boot_err);
+        return 1;
+    }
+    if let Some(failed) = find_exec_failed_in_chain(err) {
+        // Try the chain first (callers wrap with `failed to exec
+        // "<cmd>"`); fall back to the cmd embedded in the ExecFailed
+        // payload's message (agentd writes `spawn "<cmd>": ...`).
+        let cmd = extract_quoted_token_str(&err.to_string())
+            .or_else(|| extract_quoted_token_str(&failed.message))
+            .unwrap_or_else(|| "<unknown>".into());
+        microsandbox_cli::exec_error_render::render(&cmd, &failed);
+        return microsandbox_cli::exec_error_render::exit_code_for(failed.kind);
+    }
+    microsandbox_cli::ui::error(&err.to_string());
+    1
+}
+
+/// Walk the anyhow chain looking for a `MicrosandboxError::BootStart`.
+///
+/// anyhow's `chain()` iterates every cause in the chain; downcasting
+/// each lets us find the typed inner error regardless of how many
+/// `.context(...)` layers wrap it.
+fn find_boot_start_in_chain(
+    err: &anyhow::Error,
+) -> Option<(String, microsandbox_runtime::boot_error::BootError)> {
+    for cause in err.chain() {
+        if let Some(microsandbox::MicrosandboxError::BootStart { name, err: b }) =
+            cause.downcast_ref::<microsandbox::MicrosandboxError>()
+        {
+            return Some((name.clone(), b.clone()));
+        }
+    }
+    None
+}
+
+/// Walk the chain looking for `MicrosandboxError::ExecFailed`.
+fn find_exec_failed_in_chain(
+    err: &anyhow::Error,
+) -> Option<microsandbox_protocol::exec::ExecFailed> {
+    for cause in err.chain() {
+        if let Some(microsandbox::MicrosandboxError::ExecFailed(payload)) =
+            cause.downcast_ref::<microsandbox::MicrosandboxError>()
+        {
+            return Some(payload.clone());
+        }
+    }
+    None
+}
+
+/// Pull the first non-empty quoted token from a message. Used to
+/// recover the command name for `ExecFailed` rendering — checked
+/// against the top-level `anyhow::Error` display string and the
+/// `ExecFailed.message` (agentd writes `spawn "<cmd>": ...`).
+fn extract_quoted_token_str(s: &str) -> Option<String> {
+    let start = s.find('"')? + 1;
+    let rest = &s[start..];
+    let end = rest.find('"')?;
+    let name = &rest[..end];
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+fn run_async_command_anyhow(
     command: Commands,
     _log_level: Option<microsandbox::LogLevel>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> anyhow::Result<()> {
     // Pull and create can overlap network I/O, decompression, and progress UI.
     // Use a small-but-not-tiny worker pool so foreground UI tasks still get
     // scheduled while multiple layers are downloading and materializing.
@@ -180,25 +267,26 @@ fn run_async_command(
         match command {
             Commands::Sandbox(_) => unreachable!("handled before Tokio starts"),
 
-            Commands::Run(args) => run::run(args).await.map_err(Into::into),
-            Commands::Create(args) => create::run(args).await.map_err(Into::into),
-            Commands::Start(args) => start::run(args).await.map_err(Into::into),
-            Commands::Stop(args) => stop::run(args).await.map_err(Into::into),
-            Commands::List(args) => list::run(args).await.map_err(Into::into),
-            Commands::Status(args) => ps::run(args).await.map_err(Into::into),
-            Commands::Metrics(args) => metrics::run(args).await.map_err(Into::into),
-            Commands::Remove(args) => remove::run(args).await.map_err(Into::into),
-            Commands::Exec(args) => exec::run(args).await.map_err(Into::into),
-            Commands::Image(args) => image::run(args).await.map_err(Into::into),
-            Commands::Pull(args) => image::run_pull(args).await.map_err(Into::into),
-            Commands::Registry(args) => registry::run(args).await.map_err(Into::into),
-            Commands::Images(args) => image::run_list(args).await.map_err(Into::into),
-            Commands::Rmi(args) => image::run_remove(args).await.map_err(Into::into),
-            Commands::Inspect(args) => inspect::run(args).await.map_err(Into::into),
-            Commands::Volume(args) => volume::run(args).await.map_err(Into::into),
-            Commands::Install(args) => install::run(args).await.map_err(Into::into),
-            Commands::Uninstall(args) => uninstall::run(args).await.map_err(Into::into),
-            Commands::Self_(args) => self_cmd::run(args).await.map_err(Into::into),
+            Commands::Run(args) => run::run(args).await,
+            Commands::Create(args) => create::run(args).await,
+            Commands::Start(args) => start::run(args).await,
+            Commands::Stop(args) => stop::run(args).await,
+            Commands::List(args) => list::run(args).await,
+            Commands::Status(args) => ps::run(args).await,
+            Commands::Metrics(args) => metrics::run(args).await,
+            Commands::Remove(args) => remove::run(args).await,
+            Commands::Exec(args) => exec::run(args).await,
+            Commands::Logs(args) => logs::run(args).await,
+            Commands::Image(args) => image::run(args).await,
+            Commands::Pull(args) => image::run_pull(args).await,
+            Commands::Registry(args) => registry::run(args).await,
+            Commands::Images(args) => image::run_list(args).await,
+            Commands::Rmi(args) => image::run_remove(args).await,
+            Commands::Inspect(args) => inspect::run(args).await,
+            Commands::Volume(args) => volume::run(args).await,
+            Commands::Install(args) => install::run(args).await,
+            Commands::Uninstall(args) => uninstall::run(args).await,
+            Commands::Self_(args) => self_cmd::run(args).await,
         }
     })
 }

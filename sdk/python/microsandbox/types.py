@@ -5,6 +5,7 @@ from __future__ import annotations
 import enum
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Literal, TypeAlias
 
 #--------------------------------------------------------------------------------------------------
 # Constants
@@ -102,6 +103,9 @@ class RlimitResource(enum.StrEnum):
     NICE = "nice"
     RTPRIO = "rtprio"
     RTTIME = "rttime"
+
+LogSource: TypeAlias = Literal["stdout", "stderr", "output", "system"]
+LogReadSource: TypeAlias = Literal["stdout", "stderr", "output", "system", "all"]
 
 #--------------------------------------------------------------------------------------------------
 # Types: Size

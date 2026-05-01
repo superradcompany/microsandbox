@@ -13,7 +13,8 @@ use tokio::time::{self, Duration};
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::Ready;
 use microsandbox_protocol::exec::{
-    ExecExited, ExecRequest, ExecResize, ExecSignal, ExecStarted, ExecStderr, ExecStdin, ExecStdout,
+    ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
+    ExecStderr, ExecStdin, ExecStdout,
 };
 use microsandbox_protocol::fs::{FsData, FsRequest};
 use microsandbox_protocol::message::{Message, MessageType};
@@ -234,15 +235,28 @@ async fn handle_message(
                     sessions.insert(msg.id, session);
                 }
                 Err(e) => {
-                    // Send an immediate exit with code -1 on spawn failure.
-                    let reply = Message::with_payload(
-                        MessageType::ExecExited,
-                        msg.id,
-                        &ExecExited { code: -1 },
-                    )
-                    .map_err(|e| AgentdError::ExecSession(format!("encode exited: {e}")))?;
+                    // Send a typed `ExecFailed` so the host can render a
+                    // useful message + hint. `ExecSpawnFailed` already
+                    // carries the structured payload; other error
+                    // variants (free-form `ExecSession(_)` etc.) get
+                    // wrapped as `Other` with the message preserved.
+                    let payload = match &e {
+                        AgentdError::ExecSpawnFailed(p) => p.clone(),
+                        other => ExecFailed {
+                            kind: ExecFailureKind::Other,
+                            errno: None,
+                            errno_name: None,
+                            message: other.to_string(),
+                            stage: None,
+                        },
+                    };
+                    let reply =
+                        Message::with_payload(MessageType::ExecFailed, msg.id, &payload)
+                            .map_err(|e| {
+                                AgentdError::ExecSession(format!("encode failed: {e}"))
+                            })?;
                     codec::encode_to_buf(&reply, out_buf).map_err(|e| {
-                        AgentdError::ExecSession(format!("encode exited frame: {e}"))
+                        AgentdError::ExecSession(format!("encode failed frame: {e}"))
                     })?;
                     eprintln!("failed to spawn exec session {}: {e}", msg.id);
                 }
