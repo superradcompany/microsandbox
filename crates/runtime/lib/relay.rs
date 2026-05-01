@@ -721,6 +721,14 @@ async fn read_raw_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> RuntimeResul
 
 /// Background task that reads frames from a client and forwards them to the
 /// ring writer channel. Handles client disconnect with session cleanup.
+///
+/// The argument count is over the clippy default (7) because the task
+/// shares per-relay state across both tasks: client routing
+/// (`agent_tx`, `clients`, `used_slots`, `drain_tx`) plus the
+/// session registry / monotonic id atomic for the log capture path.
+/// Bundling them into a struct would be more boilerplate than the
+/// lint guards against — there's a single call site.
+#[allow(clippy::too_many_arguments)]
 async fn client_reader_task(
     slot: u32,
     mut reader: OwnedReadHalf,

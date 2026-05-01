@@ -184,9 +184,7 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
         None => None,
     };
 
-    let color_policy = if args.no_color {
-        ColorMode::Never
-    } else if std::env::var_os("NO_COLOR").is_some() {
+    let color_policy = if args.no_color || std::env::var_os("NO_COLOR").is_some() {
         ColorMode::Never
     } else {
         args.color
@@ -415,9 +413,7 @@ fn split_leading_timestamp(line: &str) -> Option<(&str, &str)> {
     // in `Z` followed by whitespace. We don't strictly validate — just
     // peel off the first whitespace-delimited token if it ends with Z
     // and is at least 20 chars long.
-    let mut split = line.splitn(2, char::is_whitespace);
-    let first = split.next()?;
-    let rest = split.next()?;
+    let (first, rest) = line.split_once(char::is_whitespace)?;
     if first.len() >= 20 && first.ends_with('Z') {
         Some((first, rest))
     } else {
@@ -695,7 +691,7 @@ fn base64_decode(s: &str) -> Option<String> {
     if bytes.is_empty() {
         return Some(String::new());
     }
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return None;
     }
     let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
@@ -783,7 +779,7 @@ pub(crate) fn strip_ansi(input: &str) -> String {
         match chars.next() {
             Some('[') => {
                 // CSI: skip until final byte in 0x40..=0x7e.
-                while let Some(c) = chars.next() {
+                for c in chars.by_ref() {
                     if matches!(c, '\x40'..='\x7e') {
                         break;
                     }

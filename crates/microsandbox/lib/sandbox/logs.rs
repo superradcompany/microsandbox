@@ -197,7 +197,7 @@ fn append_jsonl_file(
             "system" => LogSource::System,
             _ => continue,
         };
-        if !sources.iter().any(|s| *s == source) {
+        if !sources.contains(&source) {
             continue;
         }
         let timestamp = match DateTime::parse_from_rfc3339(&raw.t) {
@@ -288,7 +288,7 @@ fn strip_ansi(input: &str) -> String {
         match chars.next() {
             Some('[') => {
                 // CSI: skip until final byte in 0x40..=0x7e.
-                while let Some(c) = chars.next() {
+                for c in chars.by_ref() {
                     if matches!(c, '\x40'..='\x7e') {
                         break;
                     }
@@ -315,9 +315,7 @@ fn strip_ansi(input: &str) -> String {
 }
 
 fn split_leading_timestamp(line: &str) -> Option<(&str, &str)> {
-    let mut split = line.splitn(2, char::is_whitespace);
-    let first = split.next()?;
-    let rest = split.next()?;
+    let (first, rest) = line.split_once(char::is_whitespace)?;
     if first.len() >= 20 && first.ends_with('Z') {
         Some((first, rest))
     } else {
@@ -346,7 +344,7 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     if bytes.is_empty() {
         return Some(Vec::new());
     }
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return None;
     }
     let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
