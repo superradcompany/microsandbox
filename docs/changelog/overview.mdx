@@ -1,0 +1,80 @@
+---
+title: Changelog
+description: Product updates and releases for microsandbox.
+mode: center
+---
+
+<Update label="May 1, 2026" tags={["release"]}>
+
+## New features
+
+**Redesigned TypeScript SDK with builder API**
+
+The TypeScript SDK has been rewritten to match the ergonomics of the Rust SDK. Configure sandboxes with fluent builders like `Sandbox.builder(name).image(...).cpus(...).create()`, use `await using` for automatic cleanup, and benefit from typed errors and async iterables. Native binaries are now bundled per-platform, so installs no longer need a postinstall download step. See the [TypeScript SDK reference](/sdk/typescript/sandbox).
+
+**Redesigned network policy with per-rule direction**
+
+The network policy schema has been overhauled. Each rule now carries its own direction (egress or ingress), action, target, protocol, and ports through a unified grammar. The CLI replaces `--network-policy` with four new flags:
+
+- `--net-rule <TOKEN>[,<TOKEN>...]` (repeatable)
+- `--net-default-egress allow|deny`
+- `--net-default-ingress allow|deny`
+- `--no-net` (sugar for deny-all)
+
+Targets support `any`, group keywords (`public`, `private`, `loopback`, `link-local`, `meta`, `multicast`, `host`), bare IPs, CIDRs, domains, plus `domain=` and `suffix=` escape hatches. Domain rules are now enforced consistently across DNS, SNI, and policy layers. See the [networking overview](/networking/overview).
+
+**Disk-image volume mounts**
+
+Attach host disk images (qcow2, raw, or vmdk) directly to sandboxes as virtio-blk devices at any guest path. Format auto-detects from the file extension and `readonly` is now a consistent property across every volume type. See [Sandbox volumes](/sandboxes/volumes).
+
+**Inline `--script` flag**
+
+Register sandbox scripts directly on the command line with `--script NAME=BODY`, no host file required. The previous file-based form is now `--script-path NAME:PATH`. See the [CLI reference](/cli/sandbox-commands).
+
+**`msb` alias for the CLI**
+
+Installing microsandbox via npm, pip, or cargo now puts both `microsandbox` and `msb` on your PATH, so you can use the shorter alias interchangeably.
+
+**`host.microsandbox.internal` alias**
+
+Sandboxes can now reach the host machine through the well-known DNS name `host.microsandbox.internal`, mirroring the Docker convention.
+
+**Trust host CAs inside sandboxes (opt-in)**
+
+Sandboxes can now opt in to trusting the host's CA bundle, making it easier to talk to internal TLS endpoints from inside a sandbox. See [Networking TLS](/networking/tls).
+
+**DNS interception over TCP and DoT**
+
+The in-sandbox DNS resolver now intercepts queries over TCP/53 and DNS-over-TLS on 853, in addition to UDP/53. This closes gaps where applications would bypass policy by switching transports. See [Networking DNS](/networking/dns).
+
+**Custom TLS certs and insecure registries for images**
+
+`msb` can now pull images from registries that use custom CAs or that you want to mark as insecure. Useful for self-hosted registries. See the [images overview](/images/overview).
+
+**Per-sandbox `libkrunfw` override**
+
+SDK callers can now point an individual sandbox at a specific `libkrunfw` shared library instead of relying on the global resolver, useful when developing against unreleased firmware builds.
+
+**Installer rejects unsupported glibc**
+
+The installer now detects unsupported glibc versions up-front and fails with a clear message, instead of producing confusing runtime errors later.
+
+## Bug fixes
+
+**Domain and domain-suffix rule enforcement**
+
+Domain and `suffix=` rules now match consistently at the DNS, SNI, and policy layers, fixing edge cases where some traffic could slip through.
+
+**TypeScript SDK secret injection**
+
+The Node/TypeScript SDK now supports the same secret injection options as the Rust SDK.
+
+**DNS nameserver discovery on macOS**
+
+On macOS, microsandbox now reads the system nameservers via `SCDynamicStore`, matching what the OS actually uses and avoiding stale configurations.
+
+**`libkrunfw` packaging in npm**
+
+The npm platform package now ships `libkrunfw` under its canonical name, fixing load failures on some Linux distributions.
+
+</Update>
