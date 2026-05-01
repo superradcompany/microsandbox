@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn test_detach_keys_single_char() {
         let keys = DetachKeys::parse("q").unwrap();
-        assert_eq!(keys.sequence(), &[b'q']);
+        assert_eq!(keys.sequence(), b"q");
     }
 
     #[test]

@@ -12,4 +12,8 @@ path = "lib/lib.rs"
 
 [dependencies]
 libc.workspace = true
+reflink-copy.workspace = true
 scopeguard.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

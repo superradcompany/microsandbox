@@ -73,6 +73,7 @@ nix = "0.30"
 oci-client = "0.16"
 oci-spec = "0.9.0"
 rand = "0.10.1"
+reflink-copy = "0.1"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 resolv-conf = "0.7"
 scopeguard = "1.2"

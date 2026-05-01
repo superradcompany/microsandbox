@@ -256,11 +256,11 @@ mod tests {
         // Compression methods length + null
         body.extend_from_slice(&[0x01, 0x00]);
         // Extensions length
-        body.extend_from_slice(&(extensions_total as u16).to_be_bytes());
+        body.extend_from_slice(&extensions_total.to_be_bytes());
         // SNI extension: type 0x0000
         body.extend_from_slice(&[0x00, 0x00]);
-        body.extend_from_slice(&(extension_data_len as u16).to_be_bytes());
-        body.extend_from_slice(&(server_name_list_len as u16).to_be_bytes());
+        body.extend_from_slice(&extension_data_len.to_be_bytes());
+        body.extend_from_slice(&server_name_list_len.to_be_bytes());
         body.push(0x00); // host_name type
         body.extend_from_slice(&host_len.to_be_bytes());
         body.extend_from_slice(host_bytes);

@@ -158,6 +158,22 @@ impl SandboxHandle {
         })
     }
 
+    /// Snapshot this sandbox to a content-addressed artifact directory.
+    ///
+    /// The sandbox must be stopped (or crashed); running sandboxes are
+    /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. The
+    /// destination accepts either a bare name (resolved under
+    /// `~/.microsandbox/snapshots/`) or an explicit path.
+    pub async fn snapshot(
+        &self,
+        destination: super::super::snapshot::SnapshotDestination,
+    ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
+        super::super::snapshot::Snapshot::builder(&self.name)
+            .destination(destination)
+            .create()
+            .await
+    }
+
     /// Stop the sandbox gracefully (SIGTERM).
     pub async fn stop(&self) -> MicrosandboxResult<()> {
         if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {

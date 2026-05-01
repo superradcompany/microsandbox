@@ -1,5 +1,6 @@
 //! Shared constants and utilities for the microsandbox project.
 
+pub mod copy;
 pub mod log_text;
 pub mod size;
 pub mod ttl_reverse_index;
@@ -29,6 +30,9 @@ pub const SANDBOXES_SUBDIR: &str = "sandboxes";
 
 /// Subdirectory for named volumes.
 pub const VOLUMES_SUBDIR: &str = "volumes";
+
+/// Subdirectory for snapshot artifacts.
+pub const SNAPSHOTS_SUBDIR: &str = "snapshots";
 
 /// Subdirectory for logs.
 pub const LOGS_SUBDIR: &str = "logs";

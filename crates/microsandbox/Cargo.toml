@@ -22,6 +22,8 @@ prebuilt = ["microsandbox-filesystem/prebuilt", "microsandbox-runtime/prebuilt"]
 net = ["dep:microsandbox-network", "microsandbox-runtime/net"]
 
 [dependencies]
+astral-tokio-tar.workspace = true
+async-compression = { workspace = true, features = ["tokio", "zstd", "gzip"] }
 bytes.workspace = true
 chrono.workspace = true
 crossterm.workspace = true
@@ -29,6 +31,7 @@ dirs.workspace = true
 docker_credential = "1.3.2"
 flate2.workspace = true
 futures.workspace = true
+hex.workspace = true
 libc.workspace = true
 microsandbox-db = { version = "0.4.3", path = "../db" }
 microsandbox-filesystem = { version = "0.4.3", path = "../filesystem", default-features = false }

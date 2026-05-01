@@ -17,6 +17,7 @@ pub mod image;
 pub mod runtime;
 pub mod sandbox;
 pub mod setup;
+pub mod snapshot;
 pub mod volume;
 
 pub use error::*;
@@ -27,4 +28,7 @@ pub use microsandbox_utils::size;
 pub use sandbox::NetworkPolicy;
 pub use sandbox::exec::{ExecEvent, ExecHandle};
 pub use sandbox::{ExecOutput, Sandbox, SandboxConfig};
+pub use snapshot::{
+    Snapshot, SnapshotBuilder, SnapshotConfig, SnapshotDestination, SnapshotFormat, SnapshotHandle,
+};
 pub use volume::Volume;

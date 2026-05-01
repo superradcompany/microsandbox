@@ -176,7 +176,7 @@ impl Sandbox {
         Self::start_with_mode(name, SpawnMode::Detached).await
     }
 
-    async fn create_with_mode(
+    pub(crate) async fn create_with_mode(
         mut config: SandboxConfig,
         mode: SpawnMode,
         progress: Option<PullProgressSender>,
@@ -247,7 +247,25 @@ impl Sandbox {
             // Create upper.ext4 for the writable overlay upper layer.
             tokio::fs::create_dir_all(&sandbox_dir).await?;
             let upper_path = sandbox_dir.join("upper.ext4");
-            if !upper_path.exists() || upper_tree.is_some() {
+            if let Some(snap_upper) = config.snapshot_upper_source.take() {
+                // Booting from a snapshot: copy the captured upper into
+                // place, preserving sparseness. Patches are not
+                // compatible with this path because they'd need to be
+                // re-baked into the snapshot's upper, which we don't do.
+                if upper_tree.is_some() {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "patches cannot be combined with from_snapshot".into(),
+                    ));
+                }
+                let dst = upper_path.clone();
+                tokio::task::spawn_blocking(move || {
+                    microsandbox_utils::copy::fast_copy(&snap_upper, &dst)
+                })
+                .await
+                .map_err(|e| {
+                    crate::MicrosandboxError::Custom(format!("snapshot copy task: {e}"))
+                })??;
+            } else if !upper_path.exists() || upper_tree.is_some() {
                 create_upper_ext4(&upper_path, upper_tree).await?;
             }
 

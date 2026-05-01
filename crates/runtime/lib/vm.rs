@@ -81,6 +81,26 @@ pub struct Config {
     pub vm: VmConfig,
 }
 
+/// Specification for the writable upper layer attached as virtio-blk.
+///
+/// In v1 the upper is always a flat raw ext4 file, so `format = Raw`
+/// and `backing` is empty. The shape is forward-compatible with
+/// qcow2 backing chains: when chains land, `format = Qcow2` and
+/// `backing` lists ancestor files that the VMM must also map. The
+/// runtime walks `backing` and attaches each as a read-only disk.
+#[derive(Debug, Clone)]
+pub struct UpperSpec {
+    /// Path to the head upper file. Mounted writable.
+    pub primary: PathBuf,
+    /// On-disk format. `Raw` in v1; `Qcow2` once chains land.
+    pub format: msb_krun::DiskImageFormat,
+    /// Ancestor files in the backing chain, oldest-first. Empty in v1.
+    pub backing: Vec<PathBuf>,
+    /// Whether the head file is read-only. Should be `false` for the
+    /// running sandbox's upper.
+    pub read_only: bool,
+}
+
 /// Specification for a disk-image volume mount attached to the guest.
 ///
 /// Each entry becomes one extra virtio-blk device. Agentd consumes the
@@ -135,7 +155,20 @@ pub struct VmConfig {
     pub rootfs_vmdk: Option<PathBuf>,
 
     /// Upper ext4 disk path for writable overlay (paired with rootfs_vmdk).
+    ///
+    /// Convenience field equivalent to `rootfs_upper_spec` with format
+    /// `Raw` and no backing chain. When `rootfs_upper_spec` is set, it
+    /// takes precedence; this field is the v1 fast-path.
     pub rootfs_upper: Option<PathBuf>,
+
+    /// Full spec for the writable upper layer.
+    ///
+    /// Forward-compat seam for qcow2 backing chains. v1 always
+    /// produces `Raw` with an empty backing chain — equivalent to
+    /// `rootfs_upper`. The qcow2 future populates `format = Qcow2`
+    /// and a non-empty `backing` chain without touching every call
+    /// site.
+    pub rootfs_upper_spec: Option<UpperSpec>,
 
     /// Additional mounts as `tag:host_path[:ro]` strings.
     pub mounts: Vec<String>,
@@ -201,6 +234,7 @@ impl std::fmt::Debug for VmConfig {
             .field("rootfs_path", &self.rootfs_path)
             .field("rootfs_vmdk", &self.rootfs_vmdk)
             .field("rootfs_upper", &self.rootfs_upper)
+            .field("rootfs_upper_spec", &self.rootfs_upper_spec)
             .field("rootfs_disk", &self.rootfs_disk)
             .field("rootfs_disk_format", &self.rootfs_disk_format)
             .field("rootfs_disk_readonly", &self.rootfs_disk_readonly)
@@ -540,8 +574,23 @@ fn build_vm(
                 .read_only(true)
         });
 
-        // Attach upper.ext4 as writable raw block device.
-        if let Some(ref upper) = vm.rootfs_upper {
+        // Attach the writable upper. Prefer the typed `UpperSpec` if
+        // provided; otherwise fall back to the legacy raw-only field.
+        // When chains are populated (qcow2 future), each ancestor is
+        // attached read-only ahead of the head file.
+        if let Some(ref spec) = vm.rootfs_upper_spec {
+            for backing in spec.backing.clone() {
+                builder = builder.disk(move |d| {
+                    d.path(&backing)
+                        .format(msb_krun::DiskImageFormat::Qcow2)
+                        .read_only(true)
+                });
+            }
+            let primary = spec.primary.clone();
+            let format = spec.format;
+            let read_only = spec.read_only;
+            builder = builder.disk(move |d| d.path(&primary).format(format).read_only(read_only));
+        } else if let Some(ref upper) = vm.rootfs_upper {
             let upper = upper.clone();
             builder = builder.disk(move |d| {
                 d.path(&upper)

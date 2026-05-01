@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn validate_name_rejects_empty() {
-        let name = unsafe { CStr::from_bytes_with_nul_unchecked(b"\0") };
+        let name = c"";
         assert!(validate_name(name).is_err());
     }
 

@@ -17,7 +17,18 @@ use crate::ui;
 #[derive(Debug, Args)]
 pub struct RunArgs {
     /// Image to use (e.g. alpine, python, ./rootfs, ./disk.qcow2).
-    pub image: String,
+    ///
+    /// Mutually exclusive with `--snapshot`; one of the two is required.
+    #[arg(required_unless_present = "snapshot", conflicts_with = "snapshot")]
+    pub image: Option<String>,
+
+    /// Boot a fresh sandbox from a snapshot artifact (path or name).
+    ///
+    /// The snapshot pins the image; passing `--snapshot` is equivalent
+    /// to specifying the snapshot's image plus pre-populating the
+    /// upper layer from the artifact.
+    #[arg(long, value_name = "PATH_OR_NAME")]
+    pub snapshot: Option<String>,
 
     /// Start the sandbox in the background and print its name.
     #[arg(short, long)]
@@ -133,7 +144,14 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
 
 /// Create a new sandbox and run in it.
 async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<()> {
-    let builder = Sandbox::builder(&name).image(args.image.as_str());
+    let mut builder = Sandbox::builder(&name);
+    if let Some(ref snap) = args.snapshot {
+        builder = builder.from_snapshot(snap.clone());
+    } else if let Some(ref image) = args.image {
+        builder = builder.image(image.as_str());
+    } else {
+        anyhow::bail!("either an image or --snapshot is required");
+    }
     let builder = apply_sandbox_opts(builder, &args.sandbox)?;
 
     // Create sandbox with pull progress — select attached vs detached mode.
@@ -143,10 +161,15 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
         builder.create_with_pull_progress()?
     };
 
+    let display_label = args
+        .snapshot
+        .clone()
+        .or_else(|| args.image.clone())
+        .unwrap_or_else(|| name.clone());
     let mut display = if args.sandbox.quiet {
-        ui::PullProgressDisplay::quiet(&args.image)
+        ui::PullProgressDisplay::quiet(&display_label)
     } else {
-        ui::PullProgressDisplay::new(&args.image)
+        ui::PullProgressDisplay::new(&display_label)
     };
 
     while let Some(event) = progress.recv().await {

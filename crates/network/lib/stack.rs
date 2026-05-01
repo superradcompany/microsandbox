@@ -869,8 +869,8 @@ mod tests {
         data: &[u8],
     ) -> Vec<u8> {
         let ipv4_repr = Ipv4Repr {
-            src_addr: Ipv4Addr::from(src_ip).into(),
-            dst_addr: Ipv4Addr::from(dst_ip).into(),
+            src_addr: Ipv4Addr::from(src_ip),
+            dst_addr: Ipv4Addr::from(dst_ip),
             next_header: IpProtocol::Icmp,
             payload_len: 8 + data.len(),
             hop_limit: 64,
@@ -918,9 +918,9 @@ mod tests {
         ArpRepr::EthernetIpv4 {
             operation: ArpOperation::Request,
             source_hardware_addr: EthernetAddress(src_mac),
-            source_protocol_addr: Ipv4Addr::from(src_ip).into(),
+            source_protocol_addr: Ipv4Addr::from(src_ip),
             target_hardware_addr: EthernetAddress([0x00; 6]),
-            target_protocol_addr: Ipv4Addr::from(target_ip).into(),
+            target_protocol_addr: Ipv4Addr::from(target_ip),
         }
         .emit(&mut ArpPacket::new_unchecked(&mut frame[14..]));
 
@@ -1069,8 +1069,8 @@ mod tests {
         assert_eq!(eth.ethertype(), EthernetProtocol::Ipv4);
 
         let ipv4 = Ipv4Packet::new_checked(eth.payload()).expect("valid IPv4 packet");
-        assert_eq!(Ipv4Addr::from(ipv4.src_addr()), poll_config.gateway.ipv4);
-        assert_eq!(Ipv4Addr::from(ipv4.dst_addr()), poll_config.guest_ipv4);
+        assert_eq!(ipv4.src_addr(), poll_config.gateway.ipv4);
+        assert_eq!(ipv4.dst_addr(), poll_config.guest_ipv4);
         assert_eq!(ipv4.next_header(), IpProtocol::Icmp);
 
         let icmp = Icmpv4Packet::new_checked(ipv4.payload()).expect("valid ICMP packet");
