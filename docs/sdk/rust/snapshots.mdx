@@ -22,7 +22,7 @@ use microsandbox::snapshot::ExportOpts;
 #### from_snapshot()
 
 ```rust
-fn from_snapshot(self, src: impl AsRef<str>) -> Self
+fn from_snapshot(self, src: impl Into<String>) -> Self
 ```
 
 Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`image()`](/sdk/rust/sandbox#image) and [`image_with()`](/sdk/rust/sandbox#image-with) — the snapshot already pins the image.
@@ -31,7 +31,7 @@ Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`image()
 
 | Name | Type | Description |
 |------|------|-------------|
-| src | `impl AsRef<str>` | Bare name (resolved under `~/.microsandbox/snapshots/`) or filesystem path to an artifact directory |
+| src | `impl Into<String>` | Bare name (resolved under `~/.microsandbox/snapshots/`) or filesystem path to an artifact directory |
 
 ---
 

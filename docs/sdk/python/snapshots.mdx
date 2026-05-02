@@ -33,9 +33,7 @@ sb = await Sandbox.create("worker", image="python:3.12")
 
 **Errors**
 
-- `ValueError` — both `image=` and `snapshot=` were passed, or neither
-- `SnapshotNotFoundError` — the snapshot artifact doesn't exist
-- `SnapshotIntegrityError` — the artifact's manifest validation failed
+- `ValueError` — both `image=` and `snapshot=` were passed or neither, the snapshot artifact doesn't exist, or the artifact's manifest failed validation
 
 ---
 
