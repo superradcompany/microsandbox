@@ -1103,14 +1103,24 @@ async fn wait_for_relay(
                         });
                     }
 
-                    return Err(crate::MicrosandboxError::Runtime(format!(
-                        "sandbox process exited ({status}) before agent relay became available \
-                         (check logs at {})",
-                        log_dir
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_default()
-                    )));
+                    // No structured boot-error.json — the sandbox died
+                    // too early or too violently (e.g. a Rust panic exits
+                    // 101 without running our atomic-writer). Synthesize
+                    // an `Other`-stage record so the CLI still renders
+                    // the styled error block with the `msb logs` hint
+                    // instead of dumping a raw log directory path.
+                    let synthetic = microsandbox_runtime::boot_error::BootError {
+                        t: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        stage: microsandbox_runtime::boot_error::BootErrorStage::Other,
+                        errno: None,
+                        message: format!(
+                            "sandbox process exited ({status}) before agent relay became available"
+                        ),
+                    };
+                    return Err(crate::MicrosandboxError::BootStart {
+                        name: sandbox_name.to_string(),
+                        err: synthetic,
+                    });
                 }
 
                 // Keep early retries tight so relay readiness doesn't inherit a
