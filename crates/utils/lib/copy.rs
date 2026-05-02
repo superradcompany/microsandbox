@@ -115,11 +115,20 @@ pub fn sparse_copy(src: &Path, dst: &Path) -> io::Result<u64> {
 /// Reflink can fail with several different errnos depending on the
 /// filesystem and platform. Treat them all as "fall through to Tier 2"
 /// rather than propagating to the caller.
+///
+/// On Linux `ENOTSUP == EOPNOTSUPP`, so a single arm covers both;
+/// macOS / BSDs assign them distinct values and need both arms.
 fn is_reflink_unsupported(e: &io::Error) -> bool {
-    matches!(
-        e.raw_os_error(),
-        Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) | Some(libc::EXDEV) | Some(libc::EINVAL)
-    )
+    let Some(code) = e.raw_os_error() else {
+        return false;
+    };
+
+    #[cfg(target_os = "linux")]
+    let aliases: &[i32] = &[libc::ENOTSUP, libc::EXDEV, libc::EINVAL];
+    #[cfg(not(target_os = "linux"))]
+    let aliases: &[i32] = &[libc::ENOTSUP, libc::EOPNOTSUPP, libc::EXDEV, libc::EINVAL];
+
+    aliases.contains(&code)
 }
 
 #[cfg(target_os = "linux")]
