@@ -74,6 +74,12 @@ pub fn build_config_from_kwargs(
     if let Some(entrypoint) = extract_opt::<Vec<String>>(kwargs, "entrypoint")? {
         builder = builder.entrypoint(entrypoint);
     }
+    if let Some(init_obj) = kwargs.get_item("init")?
+        && !init_obj.is_none()
+    {
+        let (program, args, env) = parse_init_kwarg(&init_obj)?;
+        builder = builder.init_with(program, |i| i.args(args).envs(env));
+    }
     if let Some(replace) = extract_opt::<bool>(kwargs, "replace")?
         && replace
     {
@@ -223,6 +229,115 @@ pub fn build_config_from_kwargs(
         config.stop_signal = Some(sig);
     }
     Ok(config)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Init
+//--------------------------------------------------------------------------------------------------
+
+/// Tuple returned by [`parse_init_kwarg`]: `(program, args, env)`.
+type ParsedInit = (String, Vec<String>, Vec<(String, String)>);
+
+/// Parse the `init=` kwarg into `(program, args, env)`.
+///
+/// Accepted forms:
+/// - `"/sbin/init"` — bare string, no args/env
+/// - `("/sbin/init", ["arg1", "arg2"])` — tuple of (path, args)
+/// - `("/sbin/init", {"args": [...], "env": {...}})` — tuple of
+///   (path, options dict)
+/// - `{"program": "/sbin/init", "args": [...], "env": {...}}` — dict
+fn parse_init_kwarg(obj: &Bound<'_, PyAny>) -> PyResult<ParsedInit> {
+    // Bare string.
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok((s, Vec::new(), Vec::new()));
+    }
+
+    // Tuple/list of (program, args_or_options).
+    if let Ok(seq) = obj.downcast::<PyList>() {
+        return parse_init_pair(seq.as_any());
+    }
+    if let Ok(seq) = obj.downcast::<pyo3::types::PyTuple>() {
+        return parse_init_pair(seq.as_any());
+    }
+
+    // Dict form, or any object exposing `_to_dict()` (e.g. InitConfig).
+    let dict_owned = if let Ok(d) = obj.downcast::<PyDict>() {
+        Some(d.clone())
+    } else if let Ok(method) = obj.getattr("_to_dict") {
+        Some(method.call0()?.downcast::<PyDict>()?.clone())
+    } else {
+        None
+    };
+    if let Some(dict) = dict_owned {
+        let dict = &dict;
+        let program: String = dict
+            .get_item("program")?
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("init dict requires 'program'"))?
+            .extract()?;
+        let args = dict
+            .get_item("args")?
+            .filter(|v| !v.is_none())
+            .map(|v| v.extract::<Vec<String>>())
+            .transpose()?
+            .unwrap_or_default();
+        let env = match dict.get_item("env")? {
+            Some(env_obj) if !env_obj.is_none() => {
+                let env_dict: &Bound<'_, PyDict> = env_obj.downcast()?;
+                env_dict
+                    .iter()
+                    .map(|(k, v)| Ok::<_, PyErr>((k.extract::<String>()?, v.extract::<String>()?)))
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+            _ => Vec::new(),
+        };
+        return Ok((program, args, env));
+    }
+
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "init must be str, tuple of (path, args_or_options), dict, or InitConfig",
+    ))
+}
+
+/// Parse the `(program, args_or_options)` 2-element form.
+fn parse_init_pair(seq: &Bound<'_, PyAny>) -> PyResult<ParsedInit> {
+    let len: usize = seq.len()?;
+    if !(1..=2).contains(&len) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "init tuple must be (program,) or (program, args_or_options)",
+        ));
+    }
+    let program: String = seq.get_item(0)?.extract()?;
+    if len == 1 {
+        return Ok((program, Vec::new(), Vec::new()));
+    }
+    let second = seq.get_item(1)?;
+    if second.is_none() {
+        return Ok((program, Vec::new(), Vec::new()));
+    }
+    // Second element is either a list of args or a dict of options.
+    if let Ok(args) = second.extract::<Vec<String>>() {
+        return Ok((program, args, Vec::new()));
+    }
+    let dict: &Bound<'_, PyDict> = second.downcast().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err("init second element must be list[str] or dict")
+    })?;
+    let args = dict
+        .get_item("args")?
+        .filter(|v| !v.is_none())
+        .map(|v| v.extract::<Vec<String>>())
+        .transpose()?
+        .unwrap_or_default();
+    let env = match dict.get_item("env")? {
+        Some(env_obj) if !env_obj.is_none() => {
+            let env_dict: &Bound<'_, PyDict> = env_obj.downcast()?;
+            env_dict
+                .iter()
+                .map(|(k, v)| Ok::<_, PyErr>((k.extract::<String>()?, v.extract::<String>()?)))
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        _ => Vec::new(),
+    };
+    Ok((program, args, env))
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -1,10 +1,10 @@
 ---
 title: Customization
-description: Inject scripts and modify the rootfs before boot
+description: Inject scripts, modify the rootfs, and choose your own init
 icon: "scroll"
 ---
 
-Before a sandbox starts doing real work, you can prepare it in two ways: **scripts** that bundle reusable commands, and **patches** that modify the rootfs before the VM boots. Both are defined at creation time and keep the base image untouched.
+Before a sandbox starts doing real work, you can prepare it three ways: **scripts** that bundle reusable commands, **patches** that modify the rootfs before the VM boots, and **init handoff** that lets you run a real init system (systemd, OpenRC, s6) as PID 1 instead of microsandbox's minimal agent. All three are defined at creation time and keep the base image untouched.
 
 ## Scripts
 
@@ -144,3 +144,148 @@ The patch builder is invoked through `SandboxBuilder.patch(p => ...)`. Each meth
 | `remove(path)` | Delete a file or directory (idempotent) |
 
 `opts` accepts `{ mode?: number; replace?: boolean }` for `text` / `file` / `copyFile`, `{ replace?: boolean }` for `copyDir` / `symlink`, and `{ mode?: number }` for `mkdir`.
+
+## Init handoff
+
+By default the microsandbox agent runs as PID 1 inside the guest — small, fast, and minimal. For workloads that expect a real init (systemd, OpenRC, s6, runit) — long-lived daemons, system service tests, dbus-using tools — you can hand PID 1 over to the init binary of your choice. The agent does the boot-time setup (mount filesystems, configure network, prepare runtime dirs), then forks. The parent execs your init and becomes PID 1; the agent continues as a normal child process serving host requests over the same channel.
+
+<CodeGroup>
+```bash CLI
+msb run jrei/systemd-debian:12 \
+  -m 1G -c 2 \
+  --init /lib/systemd/systemd \
+  -- bash
+```
+
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("worker")
+    .image("jrei/systemd-debian:12")
+    .memory(1024)
+    .cpus(2)
+    .init("/lib/systemd/systemd", Vec::<String>::new())
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { MiB, Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+    .image("jrei/systemd-debian:12")
+    .memory(MiB(1024))
+    .cpus(2)
+    .init("/lib/systemd/systemd")
+    .create();
+```
+
+```python Python
+from microsandbox import Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="jrei/systemd-debian:12",
+    memory=1024,
+    cpus=2,
+    init="/lib/systemd/systemd",
+)
+```
+</CodeGroup>
+
+To verify the handoff worked, check `/proc/1/comm` inside the sandbox — it should print the init's name (`systemd`, `init`, etc.):
+
+```bash
+$ msb run jrei/systemd-debian:12 --init /lib/systemd/systemd -- cat /proc/1/comm
+systemd
+```
+
+### Argv and env
+
+Pass extra argv to the init via `init_with` (Rust/TypeScript) or by giving `init=` a tuple/dict (Python). On the CLI, repeat `--init-arg` once per entry and `--init-env KEY=VAL` for env vars. Argv defaults to `[<program>]` when no `--init-arg` is given; env is merged on top of the inherited environment.
+
+<CodeGroup>
+```bash CLI
+msb run jrei/systemd-debian:12 \
+  --init /lib/systemd/systemd \
+  --init-arg --unit=multi-user.target \
+  --init-env container=microsandbox \
+  -- bash
+```
+
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("jrei/systemd-debian:12")
+    .init_with("/lib/systemd/systemd", |i| i
+        .args(["--unit=multi-user.target"])
+        .env("container", "microsandbox"))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("jrei/systemd-debian:12")
+    .initWith("/lib/systemd/systemd", (i) => i
+        .args(["--unit=multi-user.target"])
+        .env("container", "microsandbox"))
+    .create();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="jrei/systemd-debian:12",
+    init=("/lib/systemd/systemd", {
+        "args": ["--unit=multi-user.target"],
+        "env":  {"container": "microsandbox"},
+    }),
+)
+```
+</CodeGroup>
+
+### Picking an image
+
+Most slim Docker base images (`debian:bookworm-slim`, `ubuntu:24.04`, `python:3.12-slim`) are stripped of init binaries — they're built for "one process per container" and don't ship systemd at all. If you point `--init` at a path the image doesn't contain, the agent's pre-flight check fails boot with a clear error in the kernel log, no kernel panic.
+
+Two ways to get an image with an init:
+
+**Build a small custom image:**
+
+```dockerfile
+# Dockerfile.systemd
+FROM debian:bookworm
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends systemd \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+```bash
+docker buildx build -t local-systemd:debian -f Dockerfile.systemd .
+msb run local-systemd:debian --init /lib/systemd/systemd -- bash
+```
+
+**Use a community-built systemd image** (e.g. `jrei/systemd-debian:12`, `jrei/systemd-ubuntu:22.04`). These work out of the box but are published by community maintainers, not the distros themselves — vet them like any other third-party image before running real workloads.
+
+For a sanity check that doesn't need systemd, `alpine:3.20` ships BusyBox at `/sbin/init`, which is enough to exercise the handoff mechanics:
+
+```bash
+msb run alpine:3.20 --init /sbin/init -- sh -c "cat /proc/1/comm"
+# busybox
+```
+
+### Shutdown semantics
+
+In default (no-handoff) mode, microsandbox shuts the guest down by remounting root read-only and calling `reboot(RB_POWER_OFF)` — typically <100 ms. With handoff, the agent isn't PID 1 anymore, so it asks your init to shut down via `SIGRTMIN+4` (systemd's poweroff signal) with a `SIGTERM` fallback. Your init then runs its own teardown — stop services, unmount, halt — which is **slower**:
+
+| Init | Typical shutdown |
+|------|------------------|
+| BusyBox / s6 / runit | <100 ms |
+| OpenRC | 50–500 ms |
+| systemd | 1–5 s |
+
+This is the price of a real init. If your test harness measures end-to-end sandbox lifecycle and you're comparing to a no-handoff baseline, account for this.
+
+### Init and entrypoint
+
+`--init` and `--entrypoint` are orthogonal. `--init` controls **PID 1** — what runs the system. `--entrypoint` (and the trailing `-- cmd`) controls **what your workload runs**. They can be combined: boot systemd as PID 1 and have microsandbox `exec` calls land your shell, scripts, or app inside the systemd-managed environment.

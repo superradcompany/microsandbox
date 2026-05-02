@@ -17,6 +17,7 @@ mod rlimit;
 pub mod agent;
 pub mod clock;
 pub mod fs;
+pub mod handoff;
 pub mod heartbeat;
 pub mod init;
 pub mod network;
@@ -24,5 +25,5 @@ pub mod serial;
 pub mod session;
 pub mod tls;
 
-pub use config::{AgentdConfig, BootParams};
+pub use config::{AgentdConfig, BootParams, HandoffInit};
 pub use error::*;

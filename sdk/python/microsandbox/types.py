@@ -239,6 +239,33 @@ class ExecOptions:
         return d
 
 #--------------------------------------------------------------------------------------------------
+# Types: Init Handoff
+#--------------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class InitConfig:
+    """Guest init-handoff configuration.
+
+    When passed as the `init=` kwarg to ``Sandbox.create``, agentd hands
+    off PID 1 to ``program`` after performing initial setup. Equivalent
+    to passing ``(program, {"args": [...], "env": {...}})``.
+
+    The path must be absolute and refer to an executable inside the
+    guest rootfs.
+    """
+    program: str
+    args: tuple[str, ...] = ()
+    env: Mapping[str, str] = field(default_factory=dict)
+
+    def _to_dict(self) -> dict:
+        d: dict = {"program": self.program}
+        if self.args:
+            d["args"] = list(self.args)
+        if self.env:
+            d["env"] = dict(self.env)
+        return d
+
+#--------------------------------------------------------------------------------------------------
 # Types: Attach
 #--------------------------------------------------------------------------------------------------
 

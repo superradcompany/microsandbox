@@ -13,6 +13,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use super::{
     config::SandboxConfig,
     exec::{Rlimit, RlimitResource},
+    init::{HandoffInit, InitOptionsBuilder},
     types::{
         ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource, VolumeMount,
     },
@@ -209,6 +210,59 @@ impl SandboxBuilder {
     /// Override the OCI image entrypoint.
     pub fn entrypoint(mut self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.config.entrypoint = Some(cmd.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Hand off PID 1 to a guest init binary after agentd's setup.
+    ///
+    /// The path must be absolute and refer to an executable inside the
+    /// guest rootfs. Mirrors [`Sandbox::exec`](super::Sandbox::exec) in
+    /// shape: positional `program` + optional argv list.
+    ///
+    /// ```ignore
+    /// .init("/lib/systemd/systemd", ["--unit=multi-user.target"])
+    /// ```
+    ///
+    /// `--init` and `--entrypoint` are orthogonal: `init` is the
+    /// guest's PID 1; `entrypoint` is the user workload that agentd
+    /// exec's per request. They can be combined freely.
+    pub fn init(
+        mut self,
+        program: impl Into<std::path::PathBuf>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.config.init = Some(HandoffInit {
+            program: program.into(),
+            args: args.into_iter().map(Into::into).collect(),
+            env: Vec::new(),
+        });
+        self
+    }
+
+    /// Hand off PID 1 with a closure-builder for argv and env. Mirrors
+    /// [`Sandbox::exec_with`](super::Sandbox::exec_with).
+    ///
+    /// ```ignore
+    /// .init_with("/lib/systemd/systemd", |i| {
+    ///     i.args(["--unit=multi-user.target"])
+    ///      .env("container", "microsandbox")
+    /// })
+    /// ```
+    ///
+    /// Calling `.init` or `.init_with` more than once overwrites
+    /// (different from `.env`, which appends). The init is
+    /// pre-boot and one-shot.
+    pub fn init_with(
+        mut self,
+        program: impl Into<std::path::PathBuf>,
+        f: impl FnOnce(InitOptionsBuilder) -> InitOptionsBuilder,
+    ) -> Self {
+        let (args, env) = f(InitOptionsBuilder::default()).build();
+        self.config.init = Some(HandoffInit {
+            program: program.into(),
+            args,
+            env,
+        });
         self
     }
 

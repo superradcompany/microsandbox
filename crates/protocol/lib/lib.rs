@@ -217,6 +217,46 @@ pub const ENV_HOST_ALIAS: &str = "MSB_HOST_ALIAS";
 /// inherits the raised baseline instead of having to opt into per-exec rlimits.
 pub const ENV_RLIMITS: &str = "MSB_RLIMITS";
 
+/// Separator byte for argv/env entries in handoff-init env vars.
+///
+/// ASCII Unit Separator (`0x1F`). Argv entries and `KEY=VAL` env pairs
+/// are arbitrary user strings, so the `;` separator other MSB_* vars use
+/// is unsafe — they collide with realistic shell input. `0x1F` is
+/// purpose-built for this and absent from any printable string.
+pub const HANDOFF_INIT_SEP: char = '\x1f';
+
+/// Environment variable selecting a guest init binary for PID 1 handoff.
+///
+/// When set, agentd performs initial setup (mounts, runtime dirs), then
+/// forks. The parent execs the binary at this path, becoming the new
+/// PID 1. The child stays alive as a normal grandchild process serving
+/// host requests over virtio-serial.
+///
+/// Format: bare absolute path inside the guest rootfs.
+///
+/// Example:
+/// - `MSB_HANDOFF_INIT=/lib/systemd/systemd`
+pub const ENV_HANDOFF_INIT: &str = "MSB_HANDOFF_INIT";
+
+/// Argv list for the handoff init binary.
+///
+/// Format: entries separated by [`HANDOFF_INIT_SEP`] (ASCII `0x1F`).
+/// Empty or unset means the init is exec'd with `argv = [program]`.
+///
+/// Example:
+/// - `MSB_HANDOFF_INIT_ARGS=--unit=multi-user.target\x1f--log-level=warning`
+pub const ENV_HANDOFF_INIT_ARGS: &str = "MSB_HANDOFF_INIT_ARGS";
+
+/// Extra environment variables for the handoff init binary.
+///
+/// Format: `KEY=VAL` pairs separated by [`HANDOFF_INIT_SEP`]
+/// (ASCII `0x1F`). Each entry must contain at least one `=`. Merged on
+/// top of the inherited env.
+///
+/// Example:
+/// - `MSB_HANDOFF_INIT_ENV=container=microsandbox\x1fLANG=C.UTF-8`
+pub const ENV_HANDOFF_INIT_ENV: &str = "MSB_HANDOFF_INIT_ENV";
+
 /// Guest-side path to the CA certificate for TLS interception.
 ///
 /// Placed by the sandbox process via the runtime virtiofs mount.

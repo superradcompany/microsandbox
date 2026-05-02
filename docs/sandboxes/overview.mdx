@@ -44,7 +44,6 @@ let sb = Sandbox::builder("worker")
     .image("python")
     .memory(1024)
     .cpus(2)
-
     .env("DEBUG", "true")
     .env("API_PORT", "8000")
     .volume("/app/src", |v| v.bind("./src").readonly())

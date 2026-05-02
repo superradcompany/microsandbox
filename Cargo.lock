@@ -5021,6 +5021,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-init"
+version = "0.4.3"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "test-macros"
 version = "0.4.3"
 dependencies = [

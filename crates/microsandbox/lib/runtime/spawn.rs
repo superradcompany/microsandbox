@@ -22,8 +22,9 @@ use tokio::{io::AsyncBufReadExt, process::Command};
 
 use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_protocol::{
-    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HOSTNAME, ENV_TMPFS,
-    ENV_USER,
+    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
+    ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOSTNAME, ENV_TMPFS, ENV_USER,
+    HANDOFF_INIT_SEP,
 };
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
@@ -721,6 +722,39 @@ fn sandbox_cli_args(
         let hostname = config.hostname.as_deref().unwrap_or(&config.name);
         args.push(OsString::from("--env"));
         args.push(OsString::from(format!("{}={hostname}", ENV_HOSTNAME)));
+    }
+
+    // Handoff-init: PID 1 hand-off to a user-supplied init binary.
+    if let Some(ref init) = config.init {
+        args.push(OsString::from("--env"));
+        args.push(OsString::from(format!(
+            "{}={}",
+            ENV_HANDOFF_INIT,
+            init.program.display()
+        )));
+
+        if !init.args.is_empty() {
+            let argv_val = init.args.join(&HANDOFF_INIT_SEP.to_string());
+            args.push(OsString::from("--env"));
+            args.push(OsString::from(format!(
+                "{}={argv_val}",
+                ENV_HANDOFF_INIT_ARGS
+            )));
+        }
+
+        if !init.env.is_empty() {
+            let env_val = init
+                .env
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(&HANDOFF_INIT_SEP.to_string());
+            args.push(OsString::from("--env"));
+            args.push(OsString::from(format!(
+                "{}={env_val}",
+                ENV_HANDOFF_INIT_ENV
+            )));
+        }
     }
 
     if let Some(ref workdir) = config.workdir {

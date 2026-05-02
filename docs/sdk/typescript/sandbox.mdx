@@ -394,6 +394,8 @@ Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter r
 | `workdir(path)` | Default working directory for commands |
 | `shell(shell)` | Shell binary used by `sandbox.shell(...)` |
 | `entrypoint(iter)` | Override the image entrypoint |
+| `init(program, args?)` | Hand off PID 1 to `program` (absolute path) after agentd setup. See [Init handoff](/sandboxes/customization#init-handoff) |
+| `initWith(program, i => ...)` | Like `init` but with a closure-builder for argv and env (`.arg`, `.args`, `.env`, `.envs`) |
 | `hostname(name)` | Guest hostname |
 | `user(user)` | Default guest user |
 | `pullPolicy(policy)` | Image pull behavior |

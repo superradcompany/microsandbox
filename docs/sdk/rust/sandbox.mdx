@@ -503,6 +503,72 @@ fn idle_timeout(self, secs: u64) -> Self
 
 Auto-drain the sandbox after this many seconds of inactivity (no active exec sessions). Enforced on the host side.
 
+---
+
+#### init()
+
+```rust
+fn init(
+    self,
+    program: impl Into<PathBuf>,
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> Self
+```
+
+Hand off PID 1 inside the guest to `program` after agentd finishes its boot-time setup. The agent forks; the parent execs the init and becomes PID 1, the agent continues as a child process. See [Init handoff](/sandboxes/customization#init-handoff) for image picks, shutdown semantics, and tradeoffs.
+
+`program` must be an absolute path inside the guest rootfs. Pass an empty array for `args` if the init takes no extra argv.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| program | `impl Into<PathBuf>` | Absolute path to the init binary inside the guest |
+| args | `impl IntoIterator<Item = impl Into<String>>` | Supplemental argv (`argv[0]` is implicitly `program`) |
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("jrei/systemd-debian:12")
+    .init("/lib/systemd/systemd", Vec::<String>::new())
+    .create()
+    .await?;
+```
+
+---
+
+#### init_with()
+
+```rust
+fn init_with(
+    self,
+    program: impl Into<PathBuf>,
+    f: impl FnOnce(InitOptionsBuilder) -> InitOptionsBuilder,
+) -> Self
+```
+
+Like [`init`](#init), but with a closure-builder for argv and env vars. Mirrors `exec_with` in shape.
+
+The builder exposes `arg`, `args`, `env`, and `envs`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| program | `impl Into<PathBuf>` | Absolute path to the init binary inside the guest |
+| f | `FnOnce(InitOptionsBuilder) -> InitOptionsBuilder` | Closure populating argv and env |
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("jrei/systemd-debian:12")
+    .init_with("/lib/systemd/systemd", |i| i
+        .args(["--unit=multi-user.target"])
+        .env("container", "microsandbox"))
+    .create()
+    .await?;
+```
+
+Calling `init` or `init_with` more than once overwrites — different from `env`, which appends. The init is one-shot pre-boot.
+
 **Parameters**
 
 | Name | Type | Description |

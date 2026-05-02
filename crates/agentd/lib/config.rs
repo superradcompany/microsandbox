@@ -14,11 +14,15 @@
 //! [`init::init`]: crate::init::init
 
 use std::env;
+use std::ffi::OsString;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::path::PathBuf;
 
 use microsandbox_protocol::{
-    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HOST_ALIAS, ENV_HOSTNAME,
-    ENV_NET, ENV_NET_IPV4, ENV_NET_IPV6, ENV_RLIMITS, ENV_TMPFS, ENV_USER, exec::ExecRlimit,
+    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
+    ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOST_ALIAS, ENV_HOSTNAME, ENV_NET,
+    ENV_NET_IPV4, ENV_NET_IPV6, ENV_RLIMITS, ENV_TMPFS, ENV_USER, HANDOFF_INIT_SEP,
+    exec::ExecRlimit,
 };
 
 use crate::error::{AgentdError, AgentdResult};
@@ -72,6 +76,30 @@ pub struct BootParams {
     /// Parsed `MSB_RLIMITS` — sandbox-wide resource limits applied to PID 1
     /// so every guest process inherits the raised baseline (empty when unset).
     pub(crate) rlimits: Vec<ExecRlimit>,
+
+    /// Parsed `MSB_HANDOFF_INIT[_ARGS|_ENV]` — guest init binary to which
+    /// agentd hands off PID 1 after `init::init()`. `None` means agentd
+    /// remains PID 1 (the default).
+    pub(crate) handoff_init: Option<HandoffInit>,
+}
+
+/// Parsed handoff-init specification.
+///
+/// When present in [`BootParams`], agentd performs setup, forks, the
+/// parent execs `program` (becoming the new PID 1), and the child
+/// continues as the agent loop.
+#[derive(Debug)]
+pub struct HandoffInit {
+    /// Absolute path inside the guest rootfs.
+    pub(crate) program: PathBuf,
+
+    /// argv past `argv[0]` — i.e., the supplemental arguments. Empty
+    /// means the init is exec'd with `argv = [program]`.
+    pub(crate) argv: Vec<OsString>,
+
+    /// Extra env vars merged on top of the inherited env. Empty means
+    /// inherit-only.
+    pub(crate) env: Vec<(OsString, OsString)>,
 }
 
 /// Runtime configuration surviving past init; referenced by the agent loop.
@@ -223,7 +251,16 @@ impl BootParams {
                 .map(|v| parse_rlimits(&v))
                 .transpose()?
                 .unwrap_or_default(),
+            handoff_init: parse_handoff_init()?,
         })
+    }
+
+    /// Take the handoff-init spec out of the boot params.
+    ///
+    /// Used by `bin/main.rs` before `init::init` consumes `BootParams`
+    /// by value, since the handoff hook fires after init returns.
+    pub fn take_handoff_init(&mut self) -> Option<HandoffInit> {
+        self.handoff_init.take()
     }
 
     /// Borrows the three `MSB_NET*` specs as a single bundle.
@@ -744,6 +781,56 @@ fn parse_cidr_v6(s: &str) -> AgentdResult<(Ipv6Addr, u8)> {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Parse Functions: Handoff Init
+//--------------------------------------------------------------------------------------------------
+
+/// Reads `MSB_HANDOFF_INIT[_ARGS|_ENV]` and assembles a [`HandoffInit`].
+///
+/// Returns `Ok(None)` when `MSB_HANDOFF_INIT` is unset/empty (the
+/// default no-handoff path). Returns `Err` when the program path is
+/// not absolute, or when `MSB_HANDOFF_INIT_ENV` contains an entry
+/// without an `=`.
+fn parse_handoff_init() -> AgentdResult<Option<HandoffInit>> {
+    let Some(program_str) = read_env_raw(ENV_HANDOFF_INIT) else {
+        return Ok(None);
+    };
+    if program_str.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let program = PathBuf::from(&program_str);
+    if !program.is_absolute() {
+        return Err(AgentdError::Config(format!(
+            "{ENV_HANDOFF_INIT} must be an absolute path, got: {program_str}"
+        )));
+    }
+
+    let argv = match read_env_raw(ENV_HANDOFF_INIT_ARGS) {
+        Some(val) if !val.is_empty() => val.split(HANDOFF_INIT_SEP).map(OsString::from).collect(),
+        _ => Vec::new(),
+    };
+
+    let env = match read_env_raw(ENV_HANDOFF_INIT_ENV) {
+        Some(val) if !val.is_empty() => val
+            .split(HANDOFF_INIT_SEP)
+            .map(|entry| {
+                entry
+                    .split_once('=')
+                    .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+                    .ok_or_else(|| {
+                        AgentdError::Config(format!(
+                            "{ENV_HANDOFF_INIT_ENV} entry missing '=': {entry}"
+                        ))
+                    })
+            })
+            .collect::<AgentdResult<Vec<_>>>()?,
+        _ => Vec::new(),
+    };
+
+    Ok(Some(HandoffInit { program, argv, env }))
+}
+
+//--------------------------------------------------------------------------------------------------
 // Helper Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -753,6 +840,14 @@ fn read_env(key: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+}
+
+/// Reads a single environment variable without trimming whitespace.
+///
+/// Used for the handoff-init vars where the `\x1f` separator and argv
+/// content are sensitive to byte-exact preservation.
+fn read_env_raw(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|v| !v.is_empty())
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1163,5 +1258,141 @@ mod tests {
         assert!(parse_rlimits("nofile").is_err());
         assert!(parse_rlimits("nofile=abc").is_err());
         assert!(parse_rlimits("nofile=65535:1024").is_err()); // soft > hard
+    }
+
+    // ── Handoff Init ──────────────────────────────────────────────────
+
+    /// Mutex serialising tests that touch `MSB_HANDOFF_INIT*` env vars,
+    /// since `parse_handoff_init` reads them from the process env.
+    static HANDOFF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_handoff_env<R>(
+        program: Option<&str>,
+        args: Option<&str>,
+        env_var: Option<&str>,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let _guard = HANDOFF_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            match program {
+                Some(v) => env::set_var(ENV_HANDOFF_INIT, v),
+                None => env::remove_var(ENV_HANDOFF_INIT),
+            }
+            match args {
+                Some(v) => env::set_var(ENV_HANDOFF_INIT_ARGS, v),
+                None => env::remove_var(ENV_HANDOFF_INIT_ARGS),
+            }
+            match env_var {
+                Some(v) => env::set_var(ENV_HANDOFF_INIT_ENV, v),
+                None => env::remove_var(ENV_HANDOFF_INIT_ENV),
+            }
+        }
+        let out = f();
+        unsafe {
+            env::remove_var(ENV_HANDOFF_INIT);
+            env::remove_var(ENV_HANDOFF_INIT_ARGS);
+            env::remove_var(ENV_HANDOFF_INIT_ENV);
+        }
+        out
+    }
+
+    #[test]
+    fn test_parse_handoff_init_unset_returns_none() {
+        let res = with_handoff_env(None, None, None, parse_handoff_init).unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn test_parse_handoff_init_empty_returns_none() {
+        let res = with_handoff_env(Some(""), None, None, parse_handoff_init).unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn test_parse_handoff_init_program_only() {
+        let res = with_handoff_env(Some("/lib/systemd/systemd"), None, None, parse_handoff_init)
+            .unwrap()
+            .unwrap();
+        assert_eq!(res.program, PathBuf::from("/lib/systemd/systemd"));
+        assert!(res.argv.is_empty());
+        assert!(res.env.is_empty());
+    }
+
+    #[test]
+    fn test_parse_handoff_init_with_argv() {
+        let argv = format!("--unit=multi-user.target{HANDOFF_INIT_SEP}--log-level=warning");
+        let res = with_handoff_env(
+            Some("/lib/systemd/systemd"),
+            Some(&argv),
+            None,
+            parse_handoff_init,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            res.argv,
+            vec![
+                OsString::from("--unit=multi-user.target"),
+                OsString::from("--log-level=warning"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_handoff_init_with_env() {
+        let envs = format!("container=microsandbox{HANDOFF_INIT_SEP}LANG=C.UTF-8");
+        let res = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            res.env,
+            vec![
+                (OsString::from("container"), OsString::from("microsandbox")),
+                (OsString::from("LANG"), OsString::from("C.UTF-8")),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_handoff_init_argv_with_spaces_preserved() {
+        // Argv entries can contain any characters except '\x1f' and NUL.
+        let argv = format!("--label=hello world{HANDOFF_INIT_SEP}--config=/etc/foo;bar");
+        let res = with_handoff_env(Some("/sbin/init"), Some(&argv), None, parse_handoff_init)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            res.argv,
+            vec![
+                OsString::from("--label=hello world"),
+                OsString::from("--config=/etc/foo;bar"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_handoff_init_rejects_relative_path() {
+        let err = with_handoff_env(Some("sbin/init"), None, None, parse_handoff_init).unwrap_err();
+        assert!(err.to_string().contains("absolute path"));
+    }
+
+    #[test]
+    fn test_parse_handoff_init_env_entry_missing_equals() {
+        let envs = format!("KEY=value{HANDOFF_INIT_SEP}NOEQUALS");
+        let err = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
+            .unwrap_err();
+        assert!(err.to_string().contains("missing '='"));
+    }
+
+    #[test]
+    fn test_parse_handoff_init_env_value_with_equals_is_value() {
+        // Only the first '=' splits; the rest is part of the value.
+        let envs = "PATH=/a:/b=/c".to_string();
+        let res = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            res.env,
+            vec![(OsString::from("PATH"), OsString::from("/a:/b=/c"))]
+        );
     }
 }

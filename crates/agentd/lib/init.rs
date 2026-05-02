@@ -664,9 +664,15 @@ mod linux {
         Ok(())
     }
 
-    /// Creates the `/run` directory.
+    /// Creates `/run` and `/run/microsandbox` directories.
+    ///
+    /// `/run/microsandbox` is the canonical directory for agentd-owned
+    /// runtime files (e.g. the post-handoff stderr log). Creating it
+    /// here keeps the ownership in `init::init` regardless of whether
+    /// handoff is configured.
     pub fn create_run_dir() -> AgentdResult<()> {
         mkdir_ignore_exists("/run")?;
+        mkdir_ignore_exists("/run/microsandbox")?;
         Ok(())
     }
 

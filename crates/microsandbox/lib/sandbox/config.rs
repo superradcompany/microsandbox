@@ -10,6 +10,7 @@ use microsandbox_image::{ImageConfig, PullPolicy, RegistryAuth};
 
 use super::{
     exec::Rlimit,
+    init::HandoffInit,
     types::{Patch, RootfsSource, SecretsConfig, SshConfig, VolumeMount},
 };
 
@@ -135,6 +136,19 @@ pub struct SandboxConfig {
     /// Signal for graceful shutdown (inherited from image config, overridable).
     #[serde(default)]
     pub stop_signal: Option<String>,
+
+    /// Hand off PID 1 to a guest init binary after agentd's setup.
+    ///
+    /// When set, agentd performs initial setup (mounts, runtime
+    /// directories), then forks. The parent execs the configured init
+    /// (typically `systemd`, but any init works) and becomes PID 1.
+    /// The child stays alive as a normal grandchild, serving host
+    /// requests over virtio-serial.
+    ///
+    /// `None` (the default) means agentd remains PID 1 — the existing
+    /// minimal-init behaviour.
+    #[serde(default)]
+    pub init: Option<HandoffInit>,
 
     /// Pull policy for OCI images. Default: `IfMissing`.
     #[serde(default)]
@@ -341,6 +355,7 @@ impl Default for SandboxConfig {
             user: None,
             labels: HashMap::new(),
             stop_signal: None,
+            init: None,
             pull_policy: PullPolicy::default(),
             policy: SandboxPolicy::default(),
             registry_auth: None,
