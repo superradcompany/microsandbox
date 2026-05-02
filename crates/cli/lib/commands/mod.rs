@@ -78,7 +78,7 @@ pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbo
                     Ok(s)
                 }
                 Err(e) => {
-                    spinner.finish_error();
+                    spinner.finish_clear();
                     Err(e.into())
                 }
             }

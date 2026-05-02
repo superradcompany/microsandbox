@@ -156,7 +156,7 @@ async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
             done(&format!("Updated libkrunfw in {}/", lib_dir.display()));
         }
         Err(e) => {
-            spinner.finish_error();
+            spinner.finish_clear();
             anyhow::bail!("update failed: {e}");
         }
     }

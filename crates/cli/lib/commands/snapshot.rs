@@ -213,7 +213,7 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
             Ok(())
         }
         Err(e) => {
-            spinner.finish_error();
+            spinner.finish_clear();
             Err(e.into())
         }
     }
@@ -323,7 +323,7 @@ async fn remove(args: SnapshotRemoveArgs) -> anyhow::Result<()> {
         match Snapshot::remove(s, args.force).await {
             Ok(()) => spinner.finish_success("Removed"),
             Err(e) => {
-                spinner.finish_error();
+                spinner.finish_clear();
                 if !args.quiet {
                     ui::error(&format!("{e}"));
                 }

@@ -49,7 +49,7 @@ pub async fn run(args: StopArgs) -> anyhow::Result<()> {
                 spinner.finish_success("Stopped");
             }
             Err(e) => {
-                spinner.finish_error();
+                spinner.finish_clear();
                 ui::error(&format!("{e}"));
                 failed = true;
             }
