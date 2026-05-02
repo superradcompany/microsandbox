@@ -78,7 +78,10 @@ pub struct SandboxOpts {
 
     /// Append an argv entry to the handoff init. Repeatable. Defaults
     /// to `[<--init>]` when empty.
-    #[arg(long = "init-arg", value_name = "STR")]
+    ///
+    /// `allow_hyphen_values` lets values like `--unit=multi-user.target`
+    /// pass through without clap trying to interpret them as flags.
+    #[arg(long = "init-arg", value_name = "STR", allow_hyphen_values = true)]
     pub init_arg: Vec<String>,
 
     /// Set an env var for the handoff init (KEY=VALUE). Repeatable.
