@@ -41,11 +41,18 @@ use std::path::Path;
 /// **Blocking.** Callers in async contexts should wrap in
 /// `tokio::task::spawn_blocking`.
 pub fn fast_copy(src: &Path, dst: &Path) -> io::Result<u64> {
+    // Stat the source up front. This makes the missing-source error
+    // kind platform-consistent (`NotFound` everywhere); without it,
+    // reflink-copy on Linux surfaces `InvalidInput` with no errno
+    // for a non-existent path, which our `is_reflink_unsupported`
+    // check can't recognize as a fall-through.
+    let src_len = std::fs::metadata(src)?.len();
+
     // Tier 1: reflink. Errors on unsupported FSes; we fall through to
     // Tier 2. We do NOT use `reflink_or_copy`, which densifies on
     // fallback via `std::fs::copy`.
     match reflink_copy::reflink(src, dst) {
-        Ok(()) => return Ok(std::fs::metadata(src)?.len()),
+        Ok(()) => return Ok(src_len),
         Err(e) if is_reflink_unsupported(&e) => {
             // fall through to sparse copy
         }
