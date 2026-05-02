@@ -11,13 +11,14 @@
 //! stripped on pipes by default (matching `ls`/`grep` convention).
 
 use std::io::{IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use chrono::{DateTime, Utc};
 use clap::{Args, ValueEnum};
 use console::style;
+use microsandbox_utils::log_text::{base64_decode, split_leading_timestamp, strip_ansi};
 use regex::Regex;
 use serde::Deserialize;
 
@@ -154,21 +155,13 @@ struct LogEntry {
     e: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum EffectiveSource {
-    Stdout,
-    Stderr,
-    Output,
-    System,
-}
-
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
 /// Execute the `msb logs` command.
 pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
-    let log_dir = resolve_log_dir(&args.name)?;
+    let log_dir = microsandbox::sandbox::logs::log_dir_for(&args.name);
     if !log_dir.exists() {
         return Err(anyhow!(
             "no logs directory for sandbox {:?} (sandbox not found?)",
@@ -202,7 +195,15 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
     // Optional follow mode — poll the file for new entries.
     if args.follow {
         let last_t = entries.last().map(|e| e.t.clone());
-        follow_loop(&log_dir, sources, &args, color_policy, last_t)?;
+        follow_loop(
+            &log_dir,
+            sources,
+            &args,
+            color_policy,
+            last_t,
+            grep_re.as_ref(),
+        )
+        .await?;
     }
 
     Ok(())
@@ -211,13 +212,6 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers — discovery
 //--------------------------------------------------------------------------------------------------
-
-fn resolve_log_dir(name: &str) -> anyhow::Result<PathBuf> {
-    Ok(microsandbox::config::config()
-        .sandboxes_dir()
-        .join(name)
-        .join("logs"))
-}
 
 fn resolve_sources(picked: &[SourceFilter]) -> SourceMask {
     if picked.is_empty() {
@@ -276,11 +270,13 @@ fn render_boot_error_if_present(log_dir: &Path, name: &str, json_mode: bool) -> 
 
     if json_mode {
         // Emit as a synthetic JSON Lines entry tagged s: "boot-error".
-        // Consumers can branch on `s` to detect failed-start sandboxes.
+        // `d` is a string per the documented schema; consumers that
+        // need the structured fields can `JSON.parse(d)`.
+        let payload = serde_json::to_string(&boot_err).unwrap_or_default();
         let line = serde_json::json!({
             "t": boot_err.t,
             "s": "boot-error",
-            "d": serde_json::to_value(&boot_err).unwrap_or(serde_json::Value::Null),
+            "d": payload,
         });
         println!("{line}");
         return Ok(());
@@ -408,19 +404,6 @@ fn append_text_log_as_system(path: &Path, out: &mut Vec<LogEntry>) {
     }
 }
 
-fn split_leading_timestamp(line: &str) -> Option<(&str, &str)> {
-    // Tracing default format starts with an RFC 3339 timestamp ending
-    // in `Z` followed by whitespace. We don't strictly validate — just
-    // peel off the first whitespace-delimited token if it ends with Z
-    // and is at least 20 chars long.
-    let (first, rest) = line.split_once(char::is_whitespace)?;
-    if first.len() >= 20 && first.ends_with('Z') {
-        Some((first, rest))
-    } else {
-        None
-    }
-}
-
 fn file_mtime_rfc3339(path: &Path) -> Option<String> {
     let meta = std::fs::metadata(path).ok()?;
     let modified = meta.modified().ok()?;
@@ -534,15 +517,6 @@ fn render_entries(entries: &[LogEntry], args: &LogsArgs, color: ColorMode) -> an
 }
 
 fn render_one(entry: &LogEntry, args: &LogsArgs, color: ColorMode) -> anyhow::Result<()> {
-    let source = match entry.s.as_str() {
-        "stdout" => EffectiveSource::Stdout,
-        "stderr" => EffectiveSource::Stderr,
-        "output" => EffectiveSource::Output,
-        "system" => EffectiveSource::System,
-        _ => EffectiveSource::Stdout,
-    };
-    let _ = source;
-
     // Resolve the body bytes (decode base64 if e == "b64"; else use d).
     let body = decode_body(entry);
     let body = apply_color_policy(&body, color);
@@ -673,53 +647,11 @@ fn prefix_each_line(prefix: &str, body: &str) -> String {
 
 fn decode_body(entry: &LogEntry) -> String {
     match entry.e.as_deref() {
-        Some("b64") => {
-            // base64 decode if present. Use the standard alphabet.
-            // We accept either the engine-style or "STANDARD" decoder.
-            // Fall back to the encoded form if decode fails.
-            base64_decode(&entry.d).unwrap_or_else(|| entry.d.clone())
-        }
+        Some("b64") => base64_decode(&entry.d)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_else(|| entry.d.clone()),
         _ => entry.d.clone(),
     }
-}
-
-fn base64_decode(s: &str) -> Option<String> {
-    // Very small decoder using the standard alphabet so we don't have
-    // to add the `base64` crate just for the rare opt-in raw mode.
-    static TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = s.trim().as_bytes();
-    if bytes.is_empty() {
-        return Some(String::new());
-    }
-    if !bytes.len().is_multiple_of(4) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    for chunk in bytes.chunks(4) {
-        let mut vals = [0u8; 4];
-        let mut pad = 0usize;
-        for (i, &b) in chunk.iter().enumerate() {
-            if b == b'=' {
-                pad += 1;
-                vals[i] = 0;
-            } else {
-                let idx = TABLE.iter().position(|&t| t == b)?;
-                vals[i] = idx as u8;
-            }
-        }
-        let n = (vals[0] as u32) << 18
-            | (vals[1] as u32) << 12
-            | (vals[2] as u32) << 6
-            | (vals[3] as u32);
-        out.push(((n >> 16) & 0xff) as u8);
-        if pad < 2 {
-            out.push(((n >> 8) & 0xff) as u8);
-        }
-        if pad < 1 {
-            out.push((n & 0xff) as u8);
-        }
-    }
-    Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 fn apply_color_policy(body: &str, mode: ColorMode) -> String {
@@ -762,72 +694,32 @@ fn prefix_with_timestamp(t: &str, id_prefix: Option<&str>, body: &str) -> String
     out
 }
 
-/// Strip ANSI escape sequences (CSI, OSC, two-byte C1).
-///
-/// Hand-rolled state machine. We keep the `regex` crate around for
-/// `--grep` (actual user-supplied regex matching), but a regex is
-/// overkill for a fixed-shape ANSI stripper — this is ~25 lines and
-/// handles all three sequence classes cleanly.
-pub(crate) fn strip_ansi(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\x1b' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('[') => {
-                // CSI: skip until final byte in 0x40..=0x7e.
-                for c in chars.by_ref() {
-                    if matches!(c, '\x40'..='\x7e') {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                // OSC: skip until BEL or ESC '\'.
-                while let Some(c) = chars.next() {
-                    if c == '\x07' {
-                        break;
-                    }
-                    if c == '\x1b' && chars.peek() == Some(&'\\') {
-                        chars.next();
-                        break;
-                    }
-                }
-            }
-            // Two-byte C1 (or stray ESC) — drop the next char.
-            Some(_) => {}
-            None => break,
-        }
-    }
-    out
-}
-
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers — follow mode
 //--------------------------------------------------------------------------------------------------
 
-fn follow_loop(
+async fn follow_loop(
     log_dir: &Path,
     sources: SourceMask,
     args: &LogsArgs,
     color: ColorMode,
     mut last_t: Option<String>,
+    grep_re: Option<&Regex>,
 ) -> anyhow::Result<()> {
     let path = log_dir.join("exec.log");
-    let mut last_size: u64 = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    let mut last_inode: u64 = inode_of(&path);
+    let (mut last_size, mut last_inode) = match std::fs::metadata(&path) {
+        Ok(m) => (m.len(), inode_from_meta(&m)),
+        Err(_) => (0u64, 0u64),
+    };
 
     loop {
-        std::thread::sleep(Duration::from_millis(200));
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
         let Ok(meta) = std::fs::metadata(&path) else {
             // File missing — sandbox stopped or removed. Exit cleanly.
             break;
         };
-        let inode = inode_of(&path);
+        let inode = inode_from_meta(&meta);
         let size = meta.len();
 
         // Detect rotation (inode changed, or size shrank): re-read the
@@ -850,11 +742,7 @@ fn follow_loop(
             None => true,
         });
 
-        let grep_re = match args.grep.as_deref() {
-            Some(p) => Regex::new(p).ok(),
-            None => None,
-        };
-        if let Some(re) = grep_re.as_ref() {
+        if let Some(re) = grep_re {
             new_entries.retain(|e| re.is_match(&e.d));
         }
 
@@ -870,13 +758,13 @@ fn follow_loop(
 }
 
 #[cfg(unix)]
-fn inode_of(path: &Path) -> u64 {
+fn inode_from_meta(meta: &std::fs::Metadata) -> u64 {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).map(|m| m.ino()).unwrap_or(0)
+    meta.ino()
 }
 
 #[cfg(not(unix))]
-fn inode_of(_path: &Path) -> u64 {
+fn inode_from_meta(_meta: &std::fs::Metadata) -> u64 {
     0
 }
 
@@ -947,28 +835,6 @@ mod tests {
     fn source_mask_output_only() {
         let mask = resolve_sources(&[SourceFilter::Output]);
         assert!(mask.output && !mask.stdout && !mask.stderr && !mask.system);
-    }
-
-    #[test]
-    fn base64_decode_round_trip() {
-        // "hello" → "aGVsbG8="
-        assert_eq!(base64_decode("aGVsbG8=").unwrap(), "hello");
-        // "" → ""
-        assert_eq!(base64_decode("").unwrap(), "");
-    }
-
-    #[test]
-    fn split_leading_timestamp_picks_first_token() {
-        let line = "2026-04-30T20:32:59.690Z  INFO some message";
-        let (t, rest) = split_leading_timestamp(line).unwrap();
-        assert_eq!(t, "2026-04-30T20:32:59.690Z");
-        assert!(rest.trim_start().starts_with("INFO"));
-    }
-
-    #[test]
-    fn split_leading_timestamp_returns_none_for_unstructured() {
-        let line = "[ 0.123] kernel boot message";
-        assert!(split_leading_timestamp(line).is_none());
     }
 
     #[test]

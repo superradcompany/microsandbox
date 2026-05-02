@@ -395,10 +395,9 @@ impl AgentRelay {
             }
         }
 
-        // The exec.log "--- sandbox stopped ---" marker is written by
-        // the VMM's `on_exit` observer in `vm.rs`, which runs before
-        // `_exit()` and is reliable in both clean-shutdown and
-        // crash paths. We don't double-write it here.
+        // The "--- sandbox stopped ---" marker is written by the VMM's
+        // `on_exit` observer (runs before `_exit()`), so we don't
+        // double-write it here.
 
         // Clean up the socket file.
         let _ = std::fs::remove_file(&self.sock_path);
@@ -539,13 +538,17 @@ fn tap_frame_into_log(frame: &RawFrame, writer: &LogWriter, session_registry: &S
                 Err(err) => tracing::debug!(error = %err, "exec_log: stderr payload decode failed"),
             }
         }
-        MessageType::ExecExited => {
-            // Drop the registry entry to bound memory.
-            if let Ok(mut registry) = session_registry.lock() {
-                registry.remove(&msg.id);
-            }
-        }
         _ => {}
+    }
+
+    // Drop the registry entry on any terminal frame (ExecExited,
+    // ExecFailed) so we don't leak `SessionInfo` for the lifetime of
+    // the relay. The flag is set on both — checking it here covers
+    // every terminal exec frame uniformly.
+    if (frame.flags & FLAG_TERMINAL) != 0
+        && let Ok(mut registry) = session_registry.lock()
+    {
+        registry.remove(&msg.id);
     }
 }
 
