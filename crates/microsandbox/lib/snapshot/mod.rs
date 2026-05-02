@@ -14,6 +14,7 @@
 mod archive;
 mod create;
 mod store;
+mod verify;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -61,6 +62,11 @@ pub struct SnapshotConfig {
     pub labels: Vec<(String, String)>,
     /// Overwrite an existing artifact at the destination.
     pub force: bool,
+    /// Compute and record upper-layer content integrity at creation time.
+    ///
+    /// Disabled by default so dense uppers do not make snapshot creation
+    /// unexpectedly linear in file size.
+    pub record_integrity: bool,
 }
 
 /// Builder for [`SnapshotConfig`].
@@ -69,6 +75,7 @@ pub struct SnapshotBuilder {
     destination: Option<SnapshotDestination>,
     labels: Vec<(String, String)>,
     force: bool,
+    record_integrity: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -83,6 +90,7 @@ impl Snapshot {
             destination: None,
             labels: Vec::new(),
             force: false,
+            record_integrity: false,
         }
     }
 
@@ -101,10 +109,17 @@ impl Snapshot {
     ///
     /// Bare names (no path separator) resolve under the default
     /// snapshots directory; anything else is treated as a path.
-    /// Verifies the manifest's structure and the upper file's
-    /// integrity (recomputes `upper.sha256`).
+    /// This is a fast metadata operation: it verifies the manifest
+    /// structure, recomputes the manifest digest, and checks that the
+    /// upper file exists with the recorded size. It does not read the
+    /// full upper contents.
     pub async fn open(path_or_name: impl AsRef<str>) -> MicrosandboxResult<Self> {
         store::open_snapshot(path_or_name.as_ref()).await
+    }
+
+    /// Verify recorded content integrity for this snapshot, if present.
+    pub async fn verify(&self) -> MicrosandboxResult<SnapshotVerifyReport> {
+        verify::verify_snapshot(self).await
     }
 
     /// Path to the artifact directory.
@@ -185,7 +200,8 @@ impl Snapshot {
 /// Lightweight handle backed by an index row.
 ///
 /// Returned by [`Snapshot::list`]. Use [`open`](SnapshotHandle::open)
-/// to read the artifact and verify integrity.
+/// to read the artifact metadata, and [`Snapshot::verify`] for explicit
+/// content verification.
 #[derive(Debug, Clone)]
 pub struct SnapshotHandle {
     pub(crate) digest: String,
@@ -239,7 +255,7 @@ impl SnapshotHandle {
         &self.artifact_path
     }
 
-    /// Open and verify the underlying artifact.
+    /// Open the underlying artifact metadata.
     pub async fn open(&self) -> MicrosandboxResult<Snapshot> {
         Snapshot::open(self.artifact_path.to_string_lossy().as_ref()).await
     }
@@ -283,6 +299,12 @@ impl SnapshotBuilder {
         self
     }
 
+    /// Compute and record upper-layer content integrity during creation.
+    pub fn record_integrity(mut self) -> Self {
+        self.record_integrity = true;
+        self
+    }
+
     /// Build the [`SnapshotConfig`].
     pub fn build(self) -> MicrosandboxResult<SnapshotConfig> {
         let destination = self.destination.ok_or_else(|| {
@@ -295,6 +317,7 @@ impl SnapshotBuilder {
             destination,
             labels: self.labels,
             force: self.force,
+            record_integrity: self.record_integrity,
         })
     }
 
@@ -309,7 +332,8 @@ impl SnapshotBuilder {
 //--------------------------------------------------------------------------------------------------
 
 pub use archive::ExportOpts;
-pub use microsandbox_image::snapshot::{ImageRef, SnapshotFormat, UpperLayer};
+pub use microsandbox_image::snapshot::{ImageRef, SnapshotFormat, UpperIntegrity, UpperLayer};
+pub use verify::{SnapshotVerifyReport, UpperVerifyStatus};
 
 //--------------------------------------------------------------------------------------------------
 // Internal — used by submodules

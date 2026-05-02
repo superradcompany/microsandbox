@@ -1,7 +1,7 @@
 //! Snapshot creation from a stopped sandbox.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use chrono::Utc;
 use microsandbox_image::snapshot::{
@@ -9,8 +9,6 @@ use microsandbox_image::snapshot::{
     UpperLayer,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-use sha2::{Digest as _, Sha256};
-use tokio::io::AsyncReadExt;
 
 use crate::db::entity::sandbox as sandbox_entity;
 use crate::sandbox::{SandboxConfig, SandboxStatus};
@@ -29,6 +27,7 @@ pub(super) async fn create_snapshot(config: SnapshotConfig) -> MicrosandboxResul
         destination,
         labels,
         force,
+        record_integrity,
     } = config;
 
     let db = crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
@@ -94,9 +93,11 @@ pub(super) async fn create_snapshot(config: SnapshotConfig) -> MicrosandboxResul
     .await
     .map_err(|e| MicrosandboxError::Custom(format!("snapshot copy task: {e}")))??;
 
-    // Hash the captured upper file. Sparse holes hash as zeros, which
-    // matches what every reader will see when streaming the file.
-    let upper_sha256 = sha256_file(&dst_upper).await?;
+    let integrity = if record_integrity {
+        Some(super::verify::compute_sparse_integrity(&dst_upper).await?)
+    } else {
+        None
+    };
 
     // Build the manifest.
     let mut label_map: BTreeMap<String, String> = BTreeMap::new();
@@ -118,7 +119,7 @@ pub(super) async fn create_snapshot(config: SnapshotConfig) -> MicrosandboxResul
         upper: UpperLayer {
             file: DEFAULT_UPPER_FILE.into(),
             size_bytes: copied_len,
-            sha256: upper_sha256,
+            integrity,
         },
         source_sandbox: Some(source_sandbox.clone()),
     };
@@ -184,18 +185,4 @@ fn resolve_destination(dest: &SnapshotDestination) -> MicrosandboxResult<PathBuf
             Ok(crate::config::config().snapshots_dir().join(name))
         }
     }
-}
-
-async fn sha256_file(path: &Path) -> MicrosandboxResult<String> {
-    let mut f = tokio::fs::File::open(path).await?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        let n = f.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }

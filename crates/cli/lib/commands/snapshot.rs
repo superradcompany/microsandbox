@@ -30,6 +30,9 @@ pub enum SnapshotCommands {
     /// Show detailed snapshot information.
     Inspect(SnapshotInspectArgs),
 
+    /// Verify recorded snapshot content integrity.
+    Verify(SnapshotVerifyArgs),
+
     /// Delete one or more snapshots.
     #[command(visible_alias = "rm")]
     Remove(SnapshotRemoveArgs),
@@ -63,6 +66,10 @@ pub struct SnapshotCreateArgs {
     #[arg(short = 'f', long)]
     pub force: bool,
 
+    /// Compute and record content integrity while creating the snapshot.
+    #[arg(long)]
+    pub integrity: bool,
+
     /// Suppress output.
     #[arg(short, long)]
     pub quiet: bool,
@@ -84,6 +91,17 @@ pub struct SnapshotListArgs {
 #[derive(Debug, Args)]
 pub struct SnapshotInspectArgs {
     /// Snapshot to inspect (path, name, or digest).
+    pub snapshot: String,
+
+    /// Also verify recorded content integrity.
+    #[arg(long)]
+    pub verify: bool,
+}
+
+/// Arguments for `msb snapshot verify`.
+#[derive(Debug, Args)]
+pub struct SnapshotVerifyArgs {
+    /// Snapshot to verify (path, name, or digest).
     pub snapshot: String,
 }
 
@@ -154,6 +172,7 @@ pub async fn run(args: SnapshotArgs) -> anyhow::Result<()> {
         SnapshotCommands::Create(args) => create(args).await,
         SnapshotCommands::List(args) => list(args).await,
         SnapshotCommands::Inspect(args) => inspect(args).await,
+        SnapshotCommands::Verify(args) => verify(args).await,
         SnapshotCommands::Remove(args) => remove(args).await,
         SnapshotCommands::Reindex(args) => reindex(args).await,
         SnapshotCommands::Export(args) => export(args).await,
@@ -173,6 +192,9 @@ async fn create(args: SnapshotCreateArgs) -> anyhow::Result<()> {
     }
     if args.force {
         builder = builder.force();
+    }
+    if args.integrity {
+        builder = builder.record_integrity();
     }
 
     let spinner = if args.quiet {
@@ -261,7 +283,11 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
     ui::detail_kv("Created", &m.created_at);
     ui::detail_kv("Upper File", &m.upper.file);
     ui::detail_kv("Upper Size", &format_size(m.upper.size_bytes));
-    ui::detail_kv("Upper SHA256", &m.upper.sha256);
+    ui::detail_kv("Integrity", &format_integrity(m.upper.integrity.as_ref()));
+    if args.verify {
+        let report = snap.verify().await?;
+        ui::detail_kv("Verification", &format_verify_status(&report.upper));
+    }
     if let Some(ref src) = m.source_sandbox {
         ui::detail_kv("Source Sandbox", src);
     }
@@ -274,6 +300,15 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
             .join(", ");
         ui::detail_kv("Labels", &labels);
     }
+    Ok(())
+}
+
+async fn verify(args: SnapshotVerifyArgs) -> anyhow::Result<()> {
+    let snap = Snapshot::open(&args.snapshot).await?;
+    let report = snap.verify().await?;
+    ui::detail_kv("Digest", &report.digest);
+    ui::detail_kv("Path", &report.path.display().to_string());
+    ui::detail_kv("Verification", &format_verify_status(&report.upper));
     Ok(())
 }
 
@@ -371,5 +406,23 @@ fn short_digest(d: &str) -> String {
         format!("sha256:{}", &hex[..hex.len().min(12)])
     } else {
         d.chars().take(20).collect()
+    }
+}
+
+fn format_integrity(integrity: Option<&microsandbox::UpperIntegrity>) -> String {
+    match integrity {
+        Some(integrity) => format!("{} {}", integrity.algorithm, integrity.digest),
+        None => "not recorded".into(),
+    }
+}
+
+fn format_verify_status(status: &microsandbox::snapshot::UpperVerifyStatus) -> String {
+    match status {
+        microsandbox::snapshot::UpperVerifyStatus::NotRecorded => {
+            "not recorded (metadata checks only)".into()
+        }
+        microsandbox::snapshot::UpperVerifyStatus::Verified { algorithm, digest } => {
+            format!("verified ({algorithm} {digest})")
+        }
     }
 }

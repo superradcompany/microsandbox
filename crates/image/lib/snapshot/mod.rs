@@ -14,6 +14,6 @@ pub mod manifest;
 //--------------------------------------------------------------------------------------------------
 
 pub use manifest::{
-    DEFAULT_UPPER_FILE, ImageRef, MANIFEST_FILENAME, Manifest, SCHEMA_VERSION, SnapshotFormat,
-    UpperLayer,
+    DEFAULT_UPPER_FILE, ImageRef, MANIFEST_FILENAME, Manifest, SCHEMA_VERSION, SPARSE_SHA256_V1,
+    SnapshotFormat, UpperIntegrity, UpperLayer,
 };

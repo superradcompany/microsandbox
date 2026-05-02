@@ -52,7 +52,7 @@ enum Commands {
     /// Start a stopped sandbox.
     Start(start::StartArgs),
 
-    /// Stop a running sandbox.
+    /// Stop one or more running sandboxes.
     Stop(stop::StopArgs),
 
     /// List all sandboxes.

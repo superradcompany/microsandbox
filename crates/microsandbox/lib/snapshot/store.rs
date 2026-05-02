@@ -8,8 +8,6 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
     QueryOrder,
 };
-use sha2::{Digest as _, Sha256};
-use tokio::io::AsyncReadExt;
 
 use crate::db::entity::snapshot as snapshot_entity;
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -20,7 +18,7 @@ use super::{Snapshot, SnapshotFormat, SnapshotHandle};
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Open and verify a snapshot artifact.
+/// Open and validate snapshot artifact metadata.
 ///
 /// `path_or_name` is treated as a path if it contains `/` or starts
 /// with `.` or `~`; otherwise as a bare name resolved under the
@@ -54,26 +52,29 @@ pub(super) async fn open_snapshot(path_or_name: &str) -> MicrosandboxResult<Snap
         .digest()
         .map_err(|e| MicrosandboxError::SnapshotIntegrity(format!("{e}")))?;
 
-    // Verify the upper file is present and matches the recorded hash.
+    // Verify the upper file is present and matches the recorded size.
+    // Content verification is an explicit operation because raw upper
+    // files may be multi-GiB, dense files.
     let upper_path = dir.join(&manifest.upper.file);
-    if !upper_path.exists() {
+    let upper_meta = tokio::fs::symlink_metadata(&upper_path)
+        .await
+        .map_err(|e| {
+            MicrosandboxError::SnapshotIntegrity(format!(
+                "missing upper file: {}: {e}",
+                upper_path.display()
+            ))
+        })?;
+    if !upper_meta.file_type().is_file() {
         return Err(MicrosandboxError::SnapshotIntegrity(format!(
-            "missing upper file: {}",
+            "upper is not a regular file: {}",
             upper_path.display()
         )));
     }
-    let actual_size = tokio::fs::metadata(&upper_path).await?.len();
+    let actual_size = upper_meta.len();
     if actual_size != manifest.upper.size_bytes {
         return Err(MicrosandboxError::SnapshotIntegrity(format!(
             "upper size mismatch: manifest says {}, file is {}",
             manifest.upper.size_bytes, actual_size
-        )));
-    }
-    let actual_sha = sha256_file(&upper_path).await?;
-    if actual_sha != manifest.upper.sha256 {
-        return Err(MicrosandboxError::SnapshotIntegrity(format!(
-            "upper sha256 mismatch: manifest={}, file={}",
-            manifest.upper.sha256, actual_sha
         )));
     }
 
@@ -107,9 +108,26 @@ pub(super) async fn index_upsert(
         .unwrap_or_else(|_| Utc::now().naive_utc());
     let indexed_at = Utc::now().naive_utc();
 
-    // Delete any prior row for this digest, then insert. Avoids the
-    // upsert dance with sea-orm and keeps semantics obvious.
+    let artifact_path_str = artifact_path.display().to_string();
+    let artifact_name = artifact_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string());
+
+    // Delete any prior row for this digest, name, or path, then insert.
+    // This keeps the rebuildable index aligned when an artifact is
+    // replaced in-place or when a manifest rewrite changes its digest.
     snapshot_entity::Entity::delete_by_id(digest.to_string())
+        .exec(db)
+        .await?;
+    if let Some(name) = artifact_name.as_ref() {
+        snapshot_entity::Entity::delete_many()
+            .filter(snapshot_entity::Column::Name.eq(name.clone()))
+            .exec(db)
+            .await?;
+    }
+    snapshot_entity::Entity::delete_many()
+        .filter(snapshot_entity::Column::ArtifactPath.eq(artifact_path_str.clone()))
         .exec(db)
         .await?;
 
@@ -120,16 +138,13 @@ pub(super) async fn index_upsert(
 
     let row = snapshot_entity::ActiveModel {
         digest: Set(digest.to_string()),
-        name: Set(artifact_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string())),
+        name: Set(artifact_name),
         parent_digest: Set(manifest.parent.clone()),
         image_ref: Set(manifest.image.reference.clone()),
         image_manifest_digest: Set(manifest.image.manifest_digest.clone()),
         format: Set(format_str.into()),
         fstype: Set(manifest.fstype.clone()),
-        artifact_path: Set(artifact_path.display().to_string()),
+        artifact_path: Set(artifact_path_str),
         size_bytes: Set(Some(manifest.upper.size_bytes as i64)),
         created_at: Set(created_at),
         indexed_at: Set(indexed_at),
@@ -329,18 +344,4 @@ fn handle_from_model(m: snapshot_entity::Model) -> SnapshotHandle {
         created_at: m.created_at,
         artifact_path: PathBuf::from(m.artifact_path),
     }
-}
-
-async fn sha256_file(path: &Path) -> MicrosandboxResult<String> {
-    let mut f = tokio::fs::File::open(path).await?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        let n = f.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }

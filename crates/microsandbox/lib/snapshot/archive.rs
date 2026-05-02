@@ -47,6 +47,7 @@ pub(super) async fn export_snapshot(
     // Collect the artifact dirs we need to ship: the head snapshot
     // and (optionally) all ancestors via parent_digest.
     let head = Snapshot::open(name_or_path).await?;
+    head.verify().await?;
     let mut dirs: Vec<(PathBuf, String)> = Vec::new();
     let head_prefix = digest_prefix(head.digest());
     dirs.push((head.path().to_path_buf(), head_prefix));
@@ -56,6 +57,7 @@ pub(super) async fn export_snapshot(
         while let Some(parent_digest) = current {
             let parent_path = resolve_parent_artifact(&parent_digest).await?;
             let parent = Snapshot::open(parent_path.to_string_lossy().as_ref()).await?;
+            parent.verify().await?;
             let prefix = digest_prefix(parent.digest());
             dirs.push((parent.path().to_path_buf(), prefix));
             current = parent.manifest().parent.clone();
@@ -173,6 +175,7 @@ pub(super) async fn import_snapshot(
         MicrosandboxError::Custom("archive contained no snapshot manifest".into())
     })?;
     let snap = Snapshot::open(head_path.to_string_lossy().as_ref()).await?;
+    snap.verify().await?;
 
     // Index this and any sibling artifacts that landed in the dest dir.
     let _ = Snapshot::reindex(&snapshots_dir).await;

@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::error::{ImageError, ImageResult};
@@ -25,6 +25,9 @@ pub const MANIFEST_FILENAME: &str = "manifest.json";
 
 /// Default filename for the upper-layer file when format is `raw`.
 pub const DEFAULT_UPPER_FILE: &str = "upper.ext4";
+
+/// Sparse representation-aware digest for raw upper files.
+pub const SPARSE_SHA256_V1: &str = "msb-sparse-sha256-v1";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -49,6 +52,7 @@ pub enum SnapshotFormat {
 /// the VMDK descriptor; if not cached, it re-pulls `reference` and
 /// verifies the resulting digest matches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImageRef {
     /// Human-readable image reference (e.g. `docker.io/library/python:3.12`).
     #[serde(rename = "ref")]
@@ -59,13 +63,28 @@ pub struct ImageRef {
 
 /// Captured upper-layer file metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpperLayer {
     /// Filename inside the artifact directory.
     pub file: String,
     /// Apparent size in bytes (the ext4 virtual size; sparse on disk).
     pub size_bytes: u64,
-    /// `sha256:hex` digest over the file's bytes (holes hashed as zeros).
-    pub sha256: String,
+    /// Optional content integrity descriptor.
+    ///
+    /// Local hot paths are allowed to leave this as `None`; explicit verify
+    /// and import/export boundaries use it when present.
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub integrity: Option<UpperIntegrity>,
+}
+
+/// Content integrity descriptor for the captured upper layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpperIntegrity {
+    /// Digest algorithm name.
+    pub algorithm: String,
+    /// Algorithm output, in `sha256:hex` form for current algorithms.
+    pub digest: String,
 }
 
 /// Snapshot artifact manifest.
@@ -73,6 +92,7 @@ pub struct UpperLayer {
 /// Field order matters: it determines the byte layout of the canonical
 /// form, and therefore the manifest digest. Do not reorder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     /// Schema version of this manifest. Readers reject unknown values.
     pub schema: u32,
@@ -84,6 +104,7 @@ pub struct Manifest {
     pub image: ImageRef,
     /// Manifest digest of the parent snapshot, or `null` for a root.
     /// v1 always writes `null`.
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub parent: Option<String>,
     /// RFC 3339 timestamp when the snapshot was created.
     pub created_at: String,
@@ -92,6 +113,7 @@ pub struct Manifest {
     /// The captured upper layer.
     pub upper: UpperLayer,
     /// Best-effort name of the source sandbox (informational).
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub source_sandbox: Option<String>,
 }
 
@@ -130,7 +152,14 @@ impl Manifest {
                 "snapshot manifest: empty upper.file".into(),
             ));
         }
-        validate_digest_form(&self.upper.sha256, "upper.sha256")?;
+        if let Some(ref integrity) = self.upper.integrity {
+            if integrity.algorithm.is_empty() {
+                return Err(ImageError::ManifestParse(
+                    "snapshot manifest: empty upper.integrity.algorithm".into(),
+                ));
+            }
+            validate_digest_form(&integrity.digest, "upper.integrity.digest")?;
+        }
         Ok(())
     }
 
@@ -147,11 +176,10 @@ impl Manifest {
         })
     }
 
-    /// Parse a manifest from canonical (or compatible) byte form.
+    /// Parse a manifest from canonical byte form.
     ///
-    /// Validates the schema version and required fields. The input is
-    /// not required to be byte-identical to the canonical form — only
-    /// the parsed manifest's *re-serialized* form is digested.
+    /// Validates the schema version and required fields. Unknown fields
+    /// are rejected so schema mistakes are surfaced immediately.
     pub fn from_bytes(bytes: &[u8]) -> ImageResult<Self> {
         let m: Manifest = serde_json::from_slice(bytes).map_err(|e| {
             ImageError::ManifestParse(format!("snapshot manifest: parse failed: {e}"))
@@ -191,6 +219,14 @@ fn validate_digest_form(s: &str, field: &str) -> ImageResult<()> {
     Ok(())
 }
 
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -218,8 +254,12 @@ mod tests {
             upper: UpperLayer {
                 file: DEFAULT_UPPER_FILE.into(),
                 size_bytes: 4_294_967_296,
-                sha256: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                    .into(),
+                integrity: Some(UpperIntegrity {
+                    algorithm: SPARSE_SHA256_V1.into(),
+                    digest:
+                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .into(),
+                }),
             },
             source_sandbox: Some("build-1".into()),
         }
@@ -307,6 +347,34 @@ mod tests {
         let bytes = m.to_canonical_bytes().unwrap();
         let s = std::str::from_utf8(&bytes).unwrap();
         assert!(s.contains("\"format\":\"raw\""));
+    }
+
+    #[test]
+    fn integrity_can_be_absent() {
+        let mut m = sample_manifest();
+        m.upper.integrity = None;
+        let bytes = m.to_canonical_bytes().unwrap();
+        let parsed = Manifest::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.upper.integrity, None);
+        assert!(
+            std::str::from_utf8(&bytes)
+                .unwrap()
+                .contains("\"integrity\":null")
+        );
+    }
+
+    #[test]
+    fn rejects_missing_integrity_field() {
+        let bytes = br#"{"schema":1,"format":"raw","fstype":"ext4","image":{"ref":"docker.io/library/python:3.12","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"parent":null,"created_at":"2026-05-01T12:00:00Z","labels":{},"upper":{"file":"upper.ext4","size_bytes":4294967296},"source_sandbox":null}"#;
+        let err = Manifest::from_bytes(bytes).unwrap_err();
+        assert!(format!("{err}").contains("integrity"));
+    }
+
+    #[test]
+    fn rejects_legacy_upper_sha256_field() {
+        let bytes = br#"{"schema":1,"format":"raw","fstype":"ext4","image":{"ref":"docker.io/library/python:3.12","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"parent":null,"created_at":"2026-05-01T12:00:00Z","labels":{},"upper":{"file":"upper.ext4","size_bytes":4294967296,"sha256":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"source_sandbox":null}"#;
+        let err = Manifest::from_bytes(bytes).unwrap_err();
+        assert!(format!("{err}").contains("sha256"));
     }
 
     #[test]
