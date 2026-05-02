@@ -204,6 +204,26 @@ export declare class ImageHandle {
 export type JsImageHandle = ImageHandle
 
 /**
+ * Fluent builder for the args + env portion of a guest init handoff.
+ *
+ * The program path is supplied positionally to
+ * `SandboxBuilder.init_with`, mirroring how `ExecOptionsBuilder` omits
+ * the command name.
+ */
+export declare class InitOptionsBuilder {
+  constructor()
+  /** Append a single argv entry. */
+  arg(arg: string): this
+  /** Append multiple argv entries. */
+  args(args: Array<string>): this
+  /** Set a single env var for the init process. */
+  env(key: string, value: string): this
+  /** Set multiple env vars at once. */
+  envs(vars: Record<string, string>): this
+}
+export type JsInitOptionsBuilder = InitOptionsBuilder
+
+/**
  * Fluent builder for per-NIC overrides on the guest interface
  * (`microsandbox_network::config::InterfaceOverrides`). Chainable
  * setters mutate in place; `.build()` is implicit when passed to
@@ -731,6 +751,20 @@ export declare class SandboxBuilder {
   replace(): this
   /** Override the image entrypoint. */
   entrypoint(cmd: Array<string>): this
+  /**
+   * Hand off PID 1 to a guest init binary after agentd's setup.
+   *
+   * `program` must be an absolute path inside the guest rootfs.
+   * Mirrors `Sandbox.exec(cmd, args)` in shape: positional program +
+   * optional argv list.
+   */
+  init(program: string, args?: Array<string> | undefined | null): this
+  /**
+   * Hand off PID 1 with a closure-builder for argv and env. Mirrors
+   * `imageWith` — the closure is invoked synchronously and returns
+   * the populated `InitOptionsBuilder`.
+   */
+  initWith(program: string, configure: (arg: InitOptionsBuilder) => InitOptionsBuilder): this
   /** Override the guest hostname. */
   hostname(name: string): this
   /** Override the libkrunfw shared library path for this sandbox. */

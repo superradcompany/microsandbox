@@ -15,6 +15,7 @@ members = [
     "crates/test-utils",
     "crates/utils",
     "examples/rust/fs-read-stream",
+    "examples/rust/init-handoff",
     "examples/rust/logs-read",
     "examples/rust/metrics-stream",
     "examples/rust/net-basic",

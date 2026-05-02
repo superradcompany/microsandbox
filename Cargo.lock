@@ -2177,6 +2177,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "init-handoff"
+version = "0.1.0"
+dependencies = [
+ "microsandbox",
+ "tokio",
+]
+
+[[package]]
 name = "inout"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
