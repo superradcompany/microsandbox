@@ -172,4 +172,30 @@ impl PySandboxHandle {
             Ok(())
         })
     }
+
+    /// Snapshot this (stopped) sandbox under a bare name. Resolves
+    /// under `~/.microsandbox/snapshots/<name>/`. For an explicit
+    /// filesystem destination, see `snapshot_to`.
+    fn snapshot<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let snap = guard.snapshot(&name).await.map_err(to_py_err)?;
+            Ok(crate::snapshot::PySnapshot::from_rust(snap))
+        })
+    }
+
+    /// Snapshot this (stopped) sandbox to an explicit filesystem path.
+    fn snapshot_to<'py>(
+        &self,
+        py: Python<'py>,
+        path: std::path::PathBuf,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let snap = guard.snapshot_to(path).await.map_err(to_py_err)?;
+            Ok(crate::snapshot::PySnapshot::from_rust(snap))
+        })
+    }
 }

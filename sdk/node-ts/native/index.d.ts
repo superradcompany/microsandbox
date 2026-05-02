@@ -713,6 +713,12 @@ export declare class SandboxBuilder {
   image(image: string): this
   /** Configure a disk-image rootfs explicitly via a callback. */
   imageWith(configure: (arg: ImageBuilder) => ImageBuilder): this
+  /**
+   * Boot a fresh sandbox from a snapshot artifact (path or name).
+   * Mutually exclusive with `image()` / `imageWith()` — the
+   * snapshot already pins the image reference and digest.
+   */
+  fromSnapshot(pathOrName: string): this
   /** Number of virtual CPUs. */
   cpus(count: number): this
   /** Guest memory in MiB. */
@@ -893,6 +899,16 @@ export declare class SandboxHandle {
    * Works without starting the sandbox.
    */
   logs(opts?: LogOptions | undefined | null): Promise<Array<LogEntry>>
+  /**
+   * Snapshot this (stopped) sandbox under a bare name.
+   *
+   * Resolves under `~/.microsandbox/snapshots/<name>/`. Use
+   * [`snapshotTo`](Self::snapshot_to) for an explicit filesystem
+   * destination.
+   */
+  snapshot(name: string): Promise<JsSnapshot>
+  /** Snapshot this (stopped) sandbox to an explicit filesystem path. */
+  snapshotTo(path: string): Promise<JsSnapshot>
 }
 export type JsSandboxHandle = SandboxHandle
 
@@ -943,6 +959,80 @@ export declare class Setup {
   install(): Promise<void>
 }
 export type JsSetup = Setup
+
+/** A snapshot artifact on disk. */
+export declare class Snapshot {
+  static open(pathOrName: string): Promise<Snapshot>
+  static get(nameOrDigest: string): Promise<SnapshotHandle>
+  static list(): Promise<Array<SnapshotInfo>>
+  /**
+   * Walk `dir` and parse each subdirectory's `manifest.json`. Does
+   * not touch the local index — useful for inspecting external
+   * snapshot collections (e.g. a mounted volume of artifacts that
+   * were never imported).
+   */
+  static listDir(dir: string): Promise<Array<Snapshot>>
+  static remove(pathOrName: string, opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
+  static reindex(dir?: string | undefined | null): Promise<number>
+  static export(nameOrPath: string, out: string, opts?: ExportOpts | undefined | null): Promise<void>
+  static import(archive: string, dest?: string | undefined | null): Promise<SnapshotHandle>
+  get path(): string
+  get digest(): string
+  get sizeBytes(): bigint
+  get imageRef(): string
+  get imageManifestDigest(): string
+  get format(): string
+  get fstype(): string
+  get parent(): string | null
+  get createdAt(): string
+  get labels(): Record<string, string>
+  get sourceSandbox(): string | null
+  verify(): Promise<SnapshotVerifyReport>
+}
+export type JsSnapshot = Snapshot
+
+/** Fluent builder for a snapshot. Returned by `Snapshot.builder(name)`. */
+export declare class SnapshotBuilder {
+  constructor(sourceSandbox: string)
+  /** Set a bare name (resolved under the default snapshots dir). */
+  name(name: string): this
+  /** Set an explicit destination path. */
+  path(path: string): this
+  /** Attach a key-value label. May be called multiple times. */
+  label(key: string, value: string): this
+  /** Overwrite an existing artifact at the destination. */
+  force(): this
+  /** Compute and record content integrity at create time. */
+  recordIntegrity(): this
+  /** Snapshot the accumulated configuration. */
+  build(): SnapshotConfig
+  /**
+   * Create the snapshot.
+   *
+   * # Safety
+   * `&mut self` async requires the napi-rs `unsafe` tag. We drain
+   * the inner builder synchronously before awaiting, so it's
+   * effectively safe. JS callers see a normal
+   * `create(): Promise<Snapshot>`.
+   */
+  create(): Promise<Snapshot>
+}
+export type JsSnapshotBuilder = SnapshotBuilder
+
+/** Lightweight snapshot handle from the local index. */
+export declare class SnapshotHandle {
+  get digest(): string
+  get name(): string | null
+  get parentDigest(): string | null
+  get imageRef(): string
+  get format(): string
+  get sizeBytes(): bigint | null
+  get createdAt(): number
+  get path(): string
+  open(): Promise<Snapshot>
+  remove(opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
+}
+export type JsSnapshotHandle = SnapshotHandle
 
 /** Fluent builder for TLS interception settings. */
 export declare class TlsBuilder {
@@ -1098,6 +1188,16 @@ export interface ExecOptions {
 export interface ExitStatus {
   code: number
   success: boolean
+}
+
+/** Options for `Snapshot.export()`. */
+export interface ExportOpts {
+  /** Walk the parent chain and include each ancestor (no-op in v1). */
+  withParents?: boolean
+  /** Bundle the OCI image cache for offline transport. */
+  withImage?: boolean
+  /** Skip zstd compression and write a plain `.tar`. */
+  plainTar?: boolean
 }
 
 /** Filesystem entry metadata returned by `fs.list()`. */
@@ -1416,6 +1516,55 @@ export interface SecretInjection {
   basicAuth: boolean
   queryParams: boolean
   body: boolean
+}
+
+/** Built snapshot configuration produced by `SnapshotBuilder.build()`. */
+export interface SnapshotConfig {
+  sourceSandbox: string
+  destinationKind: string
+  destinationValue?: string
+  labels: Array<JsSnapshotLabel>
+  force: boolean
+  recordIntegrity: boolean
+}
+
+/** Snapshot index info from the local DB cache. */
+export interface SnapshotInfo {
+  digest: string
+  name?: string
+  parentDigest?: string
+  imageRef: string
+  /** `"raw"` or `"qcow2"`. */
+  format: string
+  sizeBytes?: number
+  createdAt: number
+  path: string
+}
+
+export interface SnapshotLabel {
+  key: string
+  value: string
+}
+
+/** Options for `Snapshot.remove()` (instance and static). */
+export interface SnapshotRemoveOptions {
+  force?: boolean
+}
+
+/**
+ * Result of `Snapshot.verify()`.
+ *
+ * `upperKind` is `"notRecorded"` when no integrity hash was stored,
+ * or `"verified"` when the recorded hash matched the recomputed one.
+ * `upperAlgorithm` and `upperDigest` are populated only when
+ * `upperKind === "verified"`.
+ */
+export interface SnapshotVerifyReport {
+  digest: string
+  path: string
+  upperKind: string
+  upperAlgorithm?: string
+  upperDigest?: string
 }
 
 /** Stdin mode for an exec. */

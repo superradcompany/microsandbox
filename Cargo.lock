@@ -4674,6 +4674,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "snapshot-fork"
+version = "0.1.0"
+dependencies = [
+ "microsandbox",
+ "tokio",
+]
+
+[[package]]
 name = "socket2"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -28,6 +28,7 @@ members = [
     "examples/rust/root-oci",
     "examples/rust/rootfs-patch",
     "examples/rust/shell-attach",
+    "examples/rust/snapshot-fork",
     "examples/rust/volume-disk",
     "examples/rust/volume-named",
     "sdk/node-ts",

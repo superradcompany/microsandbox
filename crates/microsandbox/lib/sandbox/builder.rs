@@ -508,6 +508,24 @@ impl SandboxBuilder {
         self
     }
 
+    /// Pre-populate the snapshot resolution for callers that opened
+    /// the artifact synchronously and don't want the async
+    /// [`resolve_pending`](Self::resolve_pending) step.
+    ///
+    /// Used by the Python SDK helpers, where kwargs-style config
+    /// construction has to stay synchronous. Callers that take this
+    /// route are expected to also call [`image`](Self::image) with
+    /// the snapshot's pinned image reference.
+    pub fn snapshot_resolved(
+        mut self,
+        image_manifest_digest: impl Into<String>,
+        upper_source: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.config.manifest_digest = Some(image_manifest_digest.into());
+        self.config.snapshot_upper_source = Some(upper_source.into());
+        self
+    }
+
     /// Build the configuration without creating the sandbox.
     ///
     /// **Caller responsibility**: if the builder was configured via

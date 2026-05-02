@@ -22,8 +22,6 @@ mod verify;
 
 use std::path::{Path, PathBuf};
 
-use microsandbox_image::snapshot::Manifest;
-
 use crate::MicrosandboxResult;
 
 /// A snapshot artifact on disk.
@@ -332,7 +330,9 @@ impl SnapshotBuilder {
 //--------------------------------------------------------------------------------------------------
 
 pub use archive::ExportOpts;
-pub use microsandbox_image::snapshot::{ImageRef, SnapshotFormat, UpperIntegrity, UpperLayer};
+pub use microsandbox_image::snapshot::{
+    ImageRef, MANIFEST_FILENAME, Manifest, SnapshotFormat, UpperIntegrity, UpperLayer,
+};
 pub use verify::{SnapshotVerifyReport, UpperVerifyStatus};
 
 //--------------------------------------------------------------------------------------------------

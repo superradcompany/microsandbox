@@ -158,18 +158,37 @@ impl SandboxHandle {
         })
     }
 
-    /// Snapshot this sandbox to a content-addressed artifact directory.
+    /// Snapshot this sandbox to a bare name under the default snapshots
+    /// directory (`~/.microsandbox/snapshots/<name>/`).
     ///
     /// The sandbox must be stopped (or crashed); running sandboxes are
-    /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. The
-    /// destination accepts either a bare name (resolved under
-    /// `~/.microsandbox/snapshots/`) or an explicit path.
+    /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. For
+    /// an explicit filesystem destination, see
+    /// [`snapshot_to`](Self::snapshot_to).
     pub async fn snapshot(
         &self,
-        destination: super::super::snapshot::SnapshotDestination,
+        name: &str,
     ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
-        super::super::snapshot::Snapshot::builder(&self.name)
-            .destination(destination)
+        use super::super::snapshot::{Snapshot, SnapshotDestination};
+        Snapshot::builder(&self.name)
+            .destination(SnapshotDestination::Name(name.to_string()))
+            .create()
+            .await
+    }
+
+    /// Snapshot this sandbox to an explicit filesystem path.
+    ///
+    /// The sandbox must be stopped (or crashed); running sandboxes are
+    /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. For
+    /// the common case of writing under the default snapshots
+    /// directory, see [`snapshot`](Self::snapshot).
+    pub async fn snapshot_to(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
+        use super::super::snapshot::{Snapshot, SnapshotDestination};
+        Snapshot::builder(&self.name)
+            .destination(SnapshotDestination::Path(path.as_ref().to_path_buf()))
             .create()
             .await
     }
