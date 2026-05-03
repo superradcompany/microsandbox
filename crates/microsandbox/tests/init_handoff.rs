@@ -23,12 +23,10 @@
 //! What they verify:
 //! - `/proc/1/comm` matches the test init (i.e. handoff happened)
 //! - `getppid()` from a host-issued exec returns 1 (the new init)
-//! - `/.msb/heartbeat.json` keeps updating post-handoff (agentd still
-//!   alive in the child)
 //! - graceful shutdown via host `Sandbox::stop_and_wait` actually
 //!   tears the VM down (signal-based shutdown path works)
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use microsandbox::Sandbox;
 use test_utils::msb_test;
@@ -55,7 +53,7 @@ fn require_test_init() -> Option<PathBuf> {
 }
 
 /// Build a sandbox with the test init patched in at `/sbin/init`.
-async fn boot_with_test_init(name: &str, init_bin: &PathBuf) -> Sandbox {
+async fn boot_with_test_init(name: &str, init_bin: &Path) -> Sandbox {
     Sandbox::builder(name)
         .image("mirror.gcr.io/library/alpine")
         .cpus(1)
@@ -162,7 +160,7 @@ async fn shutdown_via_signal_path_terminates_guest() {
     let _ = Sandbox::remove(name).await;
 
     assert!(
-        status.code().is_some() || status.success(),
-        "guest should have exited cleanly, got {status:?}"
+        status.success(),
+        "guest should have exited cleanly via the signal path, got {status:?}"
     );
 }

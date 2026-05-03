@@ -81,12 +81,17 @@ pub struct SandboxOpts {
     ///
     /// `allow_hyphen_values` lets values like `--unit=multi-user.target`
     /// pass through without clap trying to interpret them as flags.
-    #[arg(long = "init-arg", value_name = "STR", allow_hyphen_values = true)]
+    #[arg(
+        long = "init-arg",
+        value_name = "STR",
+        allow_hyphen_values = true,
+        requires = "init"
+    )]
     pub init_arg: Vec<String>,
 
     /// Set an env var for the handoff init (KEY=VALUE). Repeatable.
     /// Merged on top of the inherited env.
-    #[arg(long = "init-env", value_name = "KEY=VALUE")]
+    #[arg(long = "init-env", value_name = "KEY=VALUE", requires = "init")]
     pub init_env: Vec<String>,
 
     /// Set the guest hostname (defaults to sandbox name).
@@ -369,8 +374,10 @@ pub fn apply_sandbox_opts(
     }
 
     // --- Handoff init ---
+    // clap's `requires = "init"` already enforces that --init-arg /
+    // --init-env can't appear without --init, so we don't re-check here.
     if let Some(ref init_path) = opts.init {
-        if !init_path.starts_with('/') {
+        if !std::path::Path::new(init_path).is_absolute() {
             anyhow::bail!("--init path must be absolute: {init_path}");
         }
         let mut init_envs = Vec::with_capacity(opts.init_env.len());
@@ -378,11 +385,8 @@ pub fn apply_sandbox_opts(
             let (k, v) = ui::parse_env(entry).map_err(anyhow::Error::msg)?;
             init_envs.push((k, v));
         }
-        builder = builder.init_with(init_path, |i| {
-            i.args(opts.init_arg.iter().cloned()).envs(init_envs)
-        });
-    } else if !opts.init_arg.is_empty() || !opts.init_env.is_empty() {
-        anyhow::bail!("--init-arg/--init-env require --init <PATH>");
+        let init_args = opts.init_arg.clone();
+        builder = builder.init_with(init_path, |i| i.args(init_args).envs(init_envs));
     }
 
     // --- Log level ---

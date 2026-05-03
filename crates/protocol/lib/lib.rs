@@ -225,6 +225,11 @@ pub const ENV_RLIMITS: &str = "MSB_RLIMITS";
 /// purpose-built for this and absent from any printable string.
 pub const HANDOFF_INIT_SEP: char = '\x1f';
 
+/// String form of [`HANDOFF_INIT_SEP`] for use with `&str`-friendly
+/// APIs like `[T]::join`. Avoids per-call `char.to_string()` allocations
+/// on the host's encoder side.
+pub const HANDOFF_INIT_SEP_STR: &str = "\x1f";
+
 /// Environment variable selecting a guest init binary for PID 1 handoff.
 ///
 /// When set, agentd performs initial setup (mounts, runtime dirs), then

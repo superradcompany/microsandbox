@@ -814,14 +814,17 @@ fn parse_handoff_init() -> AgentdResult<Option<HandoffInit>> {
         Some(val) if !val.is_empty() => val
             .split(HANDOFF_INIT_SEP)
             .map(|entry| {
-                entry
-                    .split_once('=')
-                    .map(|(k, v)| (OsString::from(k), OsString::from(v)))
-                    .ok_or_else(|| {
-                        AgentdError::Config(format!(
-                            "{ENV_HANDOFF_INIT_ENV} entry missing '=': {entry}"
-                        ))
-                    })
+                let (k, v) = entry.split_once('=').ok_or_else(|| {
+                    AgentdError::Config(format!(
+                        "{ENV_HANDOFF_INIT_ENV} entry missing '=': {entry}"
+                    ))
+                })?;
+                if k.is_empty() {
+                    return Err(AgentdError::Config(format!(
+                        "{ENV_HANDOFF_INIT_ENV} entry has empty key: {entry}"
+                    )));
+                }
+                Ok((OsString::from(k), OsString::from(v)))
             })
             .collect::<AgentdResult<Vec<_>>>()?,
         _ => Vec::new(),
@@ -1381,6 +1384,15 @@ mod tests {
         let err = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
             .unwrap_err();
         assert!(err.to_string().contains("missing '='"));
+    }
+
+    #[test]
+    fn test_parse_handoff_init_env_entry_empty_key_rejected() {
+        // `=value` (empty key) used to silently produce a nameless env entry.
+        let envs = "=value".to_string();
+        let err = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
+            .unwrap_err();
+        assert!(err.to_string().contains("empty key"));
     }
 
     #[test]

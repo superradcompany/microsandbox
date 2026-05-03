@@ -42,6 +42,10 @@ const SERIAL_READ_BUF_SIZE: usize = 64 * 1024;
 /// Maximum allowed input buffer size (frame size limit + 4 bytes for length prefix).
 const MAX_INPUT_BUF_SIZE: usize = MAX_FRAME_SIZE as usize + 4;
 
+/// Grace period between the SIGRTMIN+4 shutdown request and the
+/// SIGTERM fallback in the post-handoff shutdown path.
+const HANDOFF_SHUTDOWN_GRACE_SECS: u64 = 5;
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -453,8 +457,7 @@ fn request_guest_poweroff() -> AgentdResult<()> {
     // exiting causes the kernel to panic the guest, which the VMM
     // observes as a clean shutdown.
     if crate::handoff::signal_init_shutdown().is_ok() {
-        // Give the init up to 5s to act, then fall through to SIGTERM.
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        std::thread::sleep(std::time::Duration::from_secs(HANDOFF_SHUTDOWN_GRACE_SECS));
     }
 
     // SIGTERM fallback for inits that didn't act on SIGRTMIN+4. If

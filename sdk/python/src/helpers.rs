@@ -246,16 +246,17 @@ type ParsedInit = (String, Vec<String>, Vec<(String, String)>);
 /// - `("/sbin/init", {"args": [...], "env": {...}})` — tuple of
 ///   (path, options dict)
 /// - `{"program": "/sbin/init", "args": [...], "env": {...}}` — dict
+/// - `InitConfig(...)` (any object with `_to_dict()` returning the dict
+///   form above)
 fn parse_init_kwarg(obj: &Bound<'_, PyAny>) -> PyResult<ParsedInit> {
     // Bare string.
     if let Ok(s) = obj.extract::<String>() {
         return Ok((s, Vec::new(), Vec::new()));
     }
 
-    // Tuple/list of (program, args_or_options).
-    if let Ok(seq) = obj.downcast::<PyList>() {
-        return parse_init_pair(seq.as_any());
-    }
+    // 2-element tuple of (program, args_or_options). Lists are NOT
+    // accepted to avoid `init=["arg1", "arg2"]` parsing as
+    // `program="arg1", args=["arg2"]`.
     if let Ok(seq) = obj.downcast::<pyo3::types::PyTuple>() {
         return parse_init_pair(seq.as_any());
     }
@@ -264,52 +265,41 @@ fn parse_init_kwarg(obj: &Bound<'_, PyAny>) -> PyResult<ParsedInit> {
     let dict_owned = if let Ok(d) = obj.downcast::<PyDict>() {
         Some(d.clone())
     } else if let Ok(method) = obj.getattr("_to_dict") {
-        Some(method.call0()?.downcast::<PyDict>()?.clone())
+        let returned = method.call0()?;
+        Some(
+            returned
+                .downcast::<PyDict>()
+                .map_err(|_| {
+                    pyo3::exceptions::PyTypeError::new_err("init._to_dict() must return a dict")
+                })?
+                .clone(),
+        )
     } else {
         None
     };
     if let Some(dict) = dict_owned {
-        let dict = &dict;
         let program: String = dict
             .get_item("program")?
             .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("init dict requires 'program'"))?
             .extract()?;
-        let args = dict
-            .get_item("args")?
-            .filter(|v| !v.is_none())
-            .map(|v| v.extract::<Vec<String>>())
-            .transpose()?
-            .unwrap_or_default();
-        let env = match dict.get_item("env")? {
-            Some(env_obj) if !env_obj.is_none() => {
-                let env_dict: &Bound<'_, PyDict> = env_obj.downcast()?;
-                env_dict
-                    .iter()
-                    .map(|(k, v)| Ok::<_, PyErr>((k.extract::<String>()?, v.extract::<String>()?)))
-                    .collect::<Result<Vec<_>, _>>()?
-            }
-            _ => Vec::new(),
-        };
+        let (args, env) = parse_args_env(&dict)?;
         return Ok((program, args, env));
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(
-        "init must be str, tuple of (path, args_or_options), dict, or InitConfig",
+        "init must be str, 2-tuple of (path, args_or_options), dict, or InitConfig",
     ))
 }
 
-/// Parse the `(program, args_or_options)` 2-element form.
+/// Parse the `(program, args_or_options)` 2-element tuple form.
 fn parse_init_pair(seq: &Bound<'_, PyAny>) -> PyResult<ParsedInit> {
     let len: usize = seq.len()?;
-    if !(1..=2).contains(&len) {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "init tuple must be (program,) or (program, args_or_options)",
-        ));
+    if len != 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "init tuple must have exactly 2 elements (path, args_or_options); got {len}"
+        )));
     }
     let program: String = seq.get_item(0)?.extract()?;
-    if len == 1 {
-        return Ok((program, Vec::new(), Vec::new()));
-    }
     let second = seq.get_item(1)?;
     if second.is_none() {
         return Ok((program, Vec::new(), Vec::new()));
@@ -321,6 +311,17 @@ fn parse_init_pair(seq: &Bound<'_, PyAny>) -> PyResult<ParsedInit> {
     let dict: &Bound<'_, PyDict> = second.downcast().map_err(|_| {
         pyo3::exceptions::PyTypeError::new_err("init second element must be list[str] or dict")
     })?;
+    let (args, env) = parse_args_env(dict)?;
+    Ok((program, args, env))
+}
+
+/// `(args, env)` pair extracted from a Python init-options dict.
+type ArgsEnv = (Vec<String>, Vec<(String, String)>);
+
+/// Pull `args: list[str]` and `env: dict[str, str]` from a dict that
+/// also carries `program` (or just the args/env keys, for the
+/// 2-tuple-options form). Both keys are optional.
+fn parse_args_env(dict: &Bound<'_, PyDict>) -> PyResult<ArgsEnv> {
     let args = dict
         .get_item("args")?
         .filter(|v| !v.is_none())
@@ -337,7 +338,7 @@ fn parse_init_pair(seq: &Bound<'_, PyAny>) -> PyResult<ParsedInit> {
         }
         _ => Vec::new(),
     };
-    Ok((program, args, env))
+    Ok((args, env))
 }
 
 //--------------------------------------------------------------------------------------------------

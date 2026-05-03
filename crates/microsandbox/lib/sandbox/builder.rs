@@ -228,7 +228,7 @@ impl SandboxBuilder {
     /// exec's per request. They can be combined freely.
     pub fn init(
         mut self,
-        program: impl Into<std::path::PathBuf>,
+        program: impl Into<PathBuf>,
         args: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.config.init = Some(HandoffInit {
@@ -254,7 +254,7 @@ impl SandboxBuilder {
     /// pre-boot and one-shot.
     pub fn init_with(
         mut self,
-        program: impl Into<std::path::PathBuf>,
+        program: impl Into<PathBuf>,
         f: impl FnOnce(InitOptionsBuilder) -> InitOptionsBuilder,
     ) -> Self {
         let (args, env) = f(InitOptionsBuilder::default()).build();
@@ -637,6 +637,10 @@ impl SandboxBuilder {
                     rlimit.hard
                 )));
             }
+        }
+
+        if let Some(spec) = &self.config.init {
+            super::init::validate(spec)?;
         }
 
         // Reject any two DiskImage mounts pointing at the same host file.

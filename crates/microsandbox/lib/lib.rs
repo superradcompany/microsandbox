@@ -2,9 +2,6 @@
 
 #![warn(missing_docs)]
 #![allow(clippy::module_inception)]
-// New lint in rustc 1.95 fires on a single test fixture
-// (`&[b'q']`); cleanup tracked separately.
-#![allow(clippy::byte_char_slices)]
 
 mod error;
 

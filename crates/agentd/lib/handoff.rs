@@ -27,8 +27,8 @@ use std::ffi::{CString, OsString};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::fd::AsRawFd;
-use std::os::unix::ffi::OsStringExt;
-use std::path::{Path, PathBuf};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::Path;
 use std::process;
 
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, sigprocmask};
@@ -130,21 +130,34 @@ fn preflight(program: &Path) -> AgentdResult<()> {
 /// Builds the C argv list for execve.
 ///
 /// `argv[0]` is the program path itself; supplemental args follow.
+/// argv values come from the host SDK's validated wire format and from
+/// the program path which `path_to_cstring` already screens for NUL, so
+/// the [`CString::new`] calls here are infallible in practice. Any
+/// NUL-bearing value is silently skipped rather than corrupting argv.
 fn build_argv(program: &Path, supplemental: &[OsString]) -> Vec<CString> {
     let mut out = Vec::with_capacity(1 + supplemental.len());
-    out.push(path_to_cstring_lossy(program));
+    if let Ok(c) = CString::new(program.as_os_str().as_encoded_bytes()) {
+        out.push(c);
+    }
     for arg in supplemental {
-        out.push(osstring_to_cstring_lossy(arg.clone()));
+        if let Ok(c) = CString::new(arg.as_bytes()) {
+            out.push(c);
+        }
     }
     out
 }
 
 /// Builds the C envp list: inherited env + spec.env, with later
-/// entries overriding earlier ones by key.
+/// entries overriding earlier ones by key. Order is unspecified
+/// (execve doesn't care).
+///
+/// Entries whose `KEY=VALUE` encoding contains a NUL byte are skipped
+/// rather than substituted — a malformed entry would confuse the new
+/// init in subtle ways.
 fn build_envp(extras: &[(OsString, OsString)]) -> Vec<CString> {
-    use std::collections::BTreeMap;
+    use std::collections::HashMap;
 
-    let mut env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+    let mut env: HashMap<OsString, OsString> = std::env::vars_os().collect();
 
     // Strip our own boot params from the inherited env so the new
     // init doesn't see stale MSB_* values that referred to agentd's
@@ -162,16 +175,11 @@ fn build_envp(extras: &[(OsString, OsString)]) -> Vec<CString> {
     }
 
     env.into_iter()
-        .map(|(k, v)| {
+        .filter_map(|(k, v)| {
             let mut bytes = k.into_vec();
             bytes.push(b'=');
             bytes.extend(v.into_vec());
-            CString::new(bytes).unwrap_or_else(|_| {
-                // NUL byte in env value — drop it. CString::new only
-                // fails on interior NULs which can't appear in valid
-                // env vars; treat as a defensive default.
-                CString::new("").unwrap()
-            })
+            CString::new(bytes).ok()
         })
         .collect()
 }
@@ -182,29 +190,6 @@ fn path_to_cstring(path: &Path) -> AgentdResult<CString> {
     CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| {
         AgentdError::Config(format!("init path contains NUL byte: {}", path.display()))
     })
-}
-
-/// Converts a `Path` to a `CString` for argv, replacing interior NULs
-/// with `?`. Used past the pre-flight check, where the path has
-/// already been validated.
-fn path_to_cstring_lossy(path: &Path) -> CString {
-    let bytes: Vec<u8> = path
-        .as_os_str()
-        .as_encoded_bytes()
-        .iter()
-        .copied()
-        .map(|b| if b == 0 { b'?' } else { b })
-        .collect();
-    CString::new(bytes).expect("NUL stripped above")
-}
-
-fn osstring_to_cstring_lossy(s: OsString) -> CString {
-    let bytes: Vec<u8> = s
-        .into_vec()
-        .into_iter()
-        .map(|b| if b == 0 { b'?' } else { b })
-        .collect();
-    CString::new(bytes).expect("NUL stripped above")
 }
 
 /// Resets all signal dispositions to SIG_DFL and clears the blocked
@@ -282,11 +267,4 @@ pub fn signal_init_term() -> AgentdResult<()> {
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())
-}
-
-/// Convert a `PathBuf` to a `String` for diagnostic messages where
-/// non-UTF8 paths are unlikely.
-#[allow(dead_code)]
-fn pathbuf_display(p: &PathBuf) -> String {
-    p.display().to_string()
 }
