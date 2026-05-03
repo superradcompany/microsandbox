@@ -21,8 +21,8 @@ use std::path::PathBuf;
 use microsandbox_protocol::{
     ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
     ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOST_ALIAS, ENV_HOSTNAME, ENV_NET,
-    ENV_NET_IPV4, ENV_NET_IPV6, ENV_RLIMITS, ENV_TMPFS, ENV_USER, HANDOFF_INIT_SEP,
-    exec::ExecRlimit,
+    ENV_NET_IPV4, ENV_NET_IPV6, ENV_RLIMITS, ENV_TMPFS, ENV_USER, HANDOFF_INIT_AUTO,
+    HANDOFF_INIT_SEP, exec::ExecRlimit,
 };
 
 use crate::error::{AgentdError, AgentdResult};
@@ -799,9 +799,12 @@ fn parse_handoff_init() -> AgentdResult<Option<HandoffInit>> {
     }
 
     let program = PathBuf::from(&program_str);
-    if !program.is_absolute() {
+    // The sentinel `auto` is resolved lazily in `handoff::do_handoff`
+    // by probing `HANDOFF_INIT_AUTO_CANDIDATES`; everything else must
+    // be an absolute path.
+    if program_str != HANDOFF_INIT_AUTO && !program.is_absolute() {
         return Err(AgentdError::Config(format!(
-            "{ENV_HANDOFF_INIT} must be an absolute path, got: {program_str}"
+            "{ENV_HANDOFF_INIT} must be an absolute path or `auto`, got: {program_str}"
         )));
     }
 

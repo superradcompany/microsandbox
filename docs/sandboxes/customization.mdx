@@ -149,11 +149,13 @@ The patch builder is invoked through `SandboxBuilder.patch(p => ...)`. Each meth
 
 By default the microsandbox agent runs as PID 1 inside the guest — small, fast, and minimal. For workloads that expect a real init (systemd, OpenRC, s6, runit) — long-lived daemons, system service tests, dbus-using tools — you can hand PID 1 over to the init binary of your choice. The agent does the boot-time setup (mount filesystems, configure network, prepare runtime dirs), then forks. The parent execs your init and becomes PID 1; the agent continues as a normal child process serving host requests over the same channel.
 
+The simplest entry point is `auto`, which asks the agent to probe a small list of well-known paths inside the guest rootfs (`/sbin/init`, `/lib/systemd/systemd`, `/usr/lib/systemd/systemd`) and pick the first one that exists. If you need an exact path (e.g. for reproducible CI), pass an absolute path instead.
+
 <CodeGroup>
 ```bash CLI
 msb run jrei/systemd-debian:12 \
   -m 1G -c 2 \
-  --init /lib/systemd/systemd \
+  --init auto \
   -- bash
 ```
 
@@ -164,7 +166,7 @@ let sb = Sandbox::builder("worker")
     .image("jrei/systemd-debian:12")
     .memory(1024)
     .cpus(2)
-    .init("/lib/systemd/systemd", Vec::<String>::new())
+    .init("auto", Vec::<String>::new())
     .create()
     .await?;
 ```
@@ -176,7 +178,7 @@ await using sb = await Sandbox.builder("worker")
     .image("jrei/systemd-debian:12")
     .memory(MiB(1024))
     .cpus(2)
-    .init("/lib/systemd/systemd")
+    .init("auto")
     .create();
 ```
 
@@ -188,7 +190,7 @@ sb = await Sandbox.create(
     image="jrei/systemd-debian:12",
     memory=1024,
     cpus=2,
-    init="/lib/systemd/systemd",
+    init="auto",
 )
 ```
 </CodeGroup>
@@ -196,9 +198,11 @@ sb = await Sandbox.create(
 To verify the handoff worked, check `/proc/1/comm` inside the sandbox — it should print the init's name (`systemd`, `init`, etc.):
 
 ```bash
-$ msb run jrei/systemd-debian:12 --init /lib/systemd/systemd -- cat /proc/1/comm
+$ msb run jrei/systemd-debian:12 --init auto -- cat /proc/1/comm
 systemd
 ```
+
+If `--init=auto` can't find anything in its candidate list, agentd fails boot with a clear error in `kernel.log` listing every path it checked. Switch to an explicit path (`--init=/lib/systemd/systemd`) when you know exactly where the init lives, or follow the image-picking guidance below to choose an image that actually ships one.
 
 ### Argv and env
 

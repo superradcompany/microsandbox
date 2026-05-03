@@ -14,14 +14,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Creating sandbox with init handoff (image=jrei/systemd-debian:12)");
 
     // Boot a microVM and hand PID 1 off to systemd after agentd's setup.
-    // The agent forks; the parent execve's into systemd and becomes PID 1,
-    // and the child stays alive serving host requests.
+    // `"auto"` asks agentd to probe `/sbin/init`, `/lib/systemd/systemd`,
+    // `/usr/lib/systemd/systemd` and pick the first that exists. For
+    // reproducible CI, pass an absolute path instead.
     let sandbox = Sandbox::builder("init-handoff")
         .image("mirror.gcr.io/jrei/systemd-debian:12")
         .cpus(2)
         .memory(1024)
         .replace()
-        .init("/lib/systemd/systemd", Vec::<String>::new())
+        .init("auto", Vec::<String>::new())
         .create()
         .await?;
 

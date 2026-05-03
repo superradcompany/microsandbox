@@ -237,11 +237,38 @@ pub const HANDOFF_INIT_SEP_STR: &str = "\x1f";
 /// PID 1. The child stays alive as a normal grandchild process serving
 /// host requests over virtio-serial.
 ///
-/// Format: bare absolute path inside the guest rootfs.
+/// Format: bare absolute path inside the guest rootfs, or the literal
+/// sentinel [`HANDOFF_INIT_AUTO`] which triggers a candidate probe in
+/// agentd (see [`HANDOFF_INIT_AUTO_CANDIDATES`]).
 ///
-/// Example:
+/// Examples:
 /// - `MSB_HANDOFF_INIT=/lib/systemd/systemd`
+/// - `MSB_HANDOFF_INIT=auto`
 pub const ENV_HANDOFF_INIT: &str = "MSB_HANDOFF_INIT";
+
+/// Sentinel value for [`ENV_HANDOFF_INIT`] requesting auto-detection.
+///
+/// When the env var matches this exact string, agentd probes
+/// [`HANDOFF_INIT_AUTO_CANDIDATES`] in order and uses the first path
+/// that exists and is executable. If none match, boot fails with a
+/// clear error in `kernel.log` listing the paths it checked.
+pub const HANDOFF_INIT_AUTO: &str = "auto";
+
+/// Ordered list of init-binary paths agentd probes when
+/// [`ENV_HANDOFF_INIT`] is set to [`HANDOFF_INIT_AUTO`].
+///
+/// Order matters: the first match wins. The list covers the three
+/// well-known locations across major distros:
+/// - `/sbin/init` — BusyBox (Alpine), sysvinit, OpenRC's wrapper.
+///   Usually a symlink to the actual init on systemd distros, so it
+///   resolves naturally on Debian/Ubuntu too.
+/// - `/lib/systemd/systemd` — Debian, Ubuntu, derivatives.
+/// - `/usr/lib/systemd/systemd` — Fedora, RHEL, modern Debian.
+pub const HANDOFF_INIT_AUTO_CANDIDATES: &[&str] = &[
+    "/sbin/init",
+    "/lib/systemd/systemd",
+    "/usr/lib/systemd/systemd",
+];
 
 /// Argv list for the handoff init binary.
 ///

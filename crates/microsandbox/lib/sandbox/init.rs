@@ -26,7 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
-use microsandbox_protocol::HANDOFF_INIT_SEP;
+use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_SEP};
 use serde::{Deserialize, Serialize};
 
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -114,6 +114,8 @@ impl InitOptionsBuilder {
 /// Constraints (each violation produces an `InvalidConfig` error):
 /// - `program` must be valid UTF-8 (the host→guest transport is
 ///   `String`-only and `PathBuf` JSON serde drops non-UTF-8 bytes).
+/// - `program` must be either an absolute path or the literal sentinel
+///   [`HANDOFF_INIT_AUTO`] (which agentd resolves at boot time).
 /// - `program` must not contain a NUL byte (CString incompatibility).
 /// - Each argv entry must be free of `\x1f` and `\0` (the wire-format
 ///   separator and CString terminator respectively).
@@ -141,6 +143,13 @@ fn validate_program(program: &Path) -> MicrosandboxResult<()> {
     if s.contains('\0') {
         return Err(MicrosandboxError::InvalidConfig(format!(
             "init program path must not contain a NUL byte: {s:?}"
+        )));
+    }
+    // The sentinel `auto` is resolved guest-side; everything else must
+    // be an absolute path so the eventual `execve` knows where to look.
+    if s != HANDOFF_INIT_AUTO && !program.is_absolute() {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "init program must be an absolute path or `{HANDOFF_INIT_AUTO}`, got: {s:?}"
         )));
     }
     Ok(())
@@ -246,6 +255,19 @@ mod tests {
         let spec = ok("/sbin/init", &["foo\0bar"], &[]);
         let err = validate(&spec).unwrap_err();
         assert!(format!("{err}").contains("NUL"));
+    }
+
+    #[test]
+    fn validate_accepts_auto_sentinel() {
+        let spec = ok("auto", &[], &[]);
+        assert!(validate(&spec).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_relative_program_path() {
+        let spec = ok("sbin/init", &[], &[]);
+        let err = validate(&spec).unwrap_err();
+        assert!(format!("{err}").contains("absolute path or `auto`"));
     }
 
     #[cfg(unix)]

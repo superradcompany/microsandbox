@@ -28,11 +28,13 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, sigprocmask};
 use nix::unistd::{ForkResult, fork};
+
+use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_AUTO_CANDIDATES};
 
 use crate::config::HandoffInit;
 use crate::error::{AgentdError, AgentdResult};
@@ -65,11 +67,12 @@ const POST_HANDOFF_STDERR: &str = "/run/microsandbox/agentd.log";
 /// returns `Ok(())`, after which the caller falls through to the
 /// runtime build and the agent loop.
 pub fn do_handoff(spec: HandoffInit) -> AgentdResult<()> {
-    preflight(&spec.program)?;
+    let program = resolve_program(&spec.program)?;
+    preflight(&program)?;
 
-    let argv = build_argv(&spec.program, &spec.argv);
+    let argv = build_argv(&program, &spec.argv);
     let envp = build_envp(&spec.env);
-    let program_c = path_to_cstring(&spec.program)?;
+    let program_c = path_to_cstring(&program)?;
 
     // SAFETY: `fork()` in a single-threaded process with no opened
     // serial fds and no async runtime. The agent loop has not started
@@ -90,7 +93,7 @@ pub fn do_handoff(spec: HandoffInit) -> AgentdResult<()> {
             let _ = writeln!(
                 std::io::stderr(),
                 "agentd: execve({}) failed: {err}",
-                spec.program.display()
+                program.display()
             );
             process::exit(127);
         }
@@ -99,6 +102,30 @@ pub fn do_handoff(spec: HandoffInit) -> AgentdResult<()> {
             Ok(())
         }
     }
+}
+
+/// Resolves the user-supplied program path, expanding the `auto`
+/// sentinel into the first existing entry from
+/// [`HANDOFF_INIT_AUTO_CANDIDATES`].
+///
+/// Non-`auto` paths are returned unchanged; downstream `preflight`
+/// validates them.
+fn resolve_program(program: &Path) -> AgentdResult<PathBuf> {
+    if program != Path::new(HANDOFF_INIT_AUTO) {
+        return Ok(program.to_path_buf());
+    }
+
+    for candidate in HANDOFF_INIT_AUTO_CANDIDATES {
+        let p = Path::new(candidate);
+        if p.exists() {
+            return Ok(p.to_path_buf());
+        }
+    }
+
+    Err(AgentdError::Init(format!(
+        "{HANDOFF_INIT_AUTO}: no init binary found, checked: {}",
+        HANDOFF_INIT_AUTO_CANDIDATES.join(", ")
+    )))
 }
 
 /// Verifies the init binary exists and is executable. Runs in the
@@ -267,4 +294,56 @@ pub fn signal_init_term() -> AgentdResult<()> {
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_program_passes_explicit_path_through() {
+        let p = Path::new("/lib/systemd/systemd");
+        let resolved = resolve_program(p).unwrap();
+        assert_eq!(resolved, PathBuf::from("/lib/systemd/systemd"));
+    }
+
+    #[test]
+    fn resolve_program_passes_through_non_existent_explicit_paths() {
+        // Resolution intentionally doesn't `stat` non-`auto` paths;
+        // `preflight` is responsible for that. This keeps the resolver
+        // testable without a real filesystem layout.
+        let p = Path::new("/no/such/init");
+        let resolved = resolve_program(p).unwrap();
+        assert_eq!(resolved, PathBuf::from("/no/such/init"));
+    }
+
+    #[test]
+    fn resolve_program_auto_returns_first_existing_candidate_or_errors() {
+        // Whichever happens on the host running the test: at least one
+        // of the candidates likely exists on a real Linux box, but the
+        // test box may also be macOS where none do. Either branch is
+        // a valid outcome — assert only that the API behaves correctly.
+        match resolve_program(Path::new(HANDOFF_INIT_AUTO)) {
+            Ok(p) => {
+                assert!(
+                    HANDOFF_INIT_AUTO_CANDIDATES
+                        .iter()
+                        .any(|c| Path::new(c) == p),
+                    "resolved path {p:?} not in candidate list"
+                );
+                assert!(p.exists(), "resolved path must exist");
+            }
+            Err(AgentdError::Init(msg)) => {
+                assert!(msg.contains("no init binary found"));
+                for c in HANDOFF_INIT_AUTO_CANDIDATES {
+                    assert!(msg.contains(c), "error should list {c}");
+                }
+            }
+            Err(e) => panic!("unexpected error variant: {e}"),
+        }
+    }
 }

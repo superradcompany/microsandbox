@@ -72,8 +72,10 @@ pub struct SandboxOpts {
     pub entrypoint: Option<String>,
 
     /// Hand off PID 1 to this init binary inside the guest after agentd
-    /// finishes setup. Absolute path required.
-    #[arg(long, value_name = "PATH")]
+    /// finishes setup. Use `auto` to probe `/sbin/init`,
+    /// `/lib/systemd/systemd`, `/usr/lib/systemd/systemd` (first hit
+    /// wins), or supply an explicit absolute path.
+    #[arg(long, value_name = "PATH|auto")]
     pub init: Option<String>,
 
     /// Append an argv entry to the handoff init. Repeatable. Defaults
@@ -377,8 +379,13 @@ pub fn apply_sandbox_opts(
     // clap's `requires = "init"` already enforces that --init-arg /
     // --init-env can't appear without --init, so we don't re-check here.
     if let Some(ref init_path) = opts.init {
-        if !std::path::Path::new(init_path).is_absolute() {
-            anyhow::bail!("--init path must be absolute: {init_path}");
+        // `auto` is the magic sentinel that asks agentd to probe a
+        // candidate list inside the guest rootfs. Anything else must
+        // be an absolute path so the eventual execve can find it.
+        if init_path != microsandbox_protocol::HANDOFF_INIT_AUTO
+            && !std::path::Path::new(init_path).is_absolute()
+        {
+            anyhow::bail!("--init must be an absolute path or `auto`, got: {init_path}");
         }
         let mut init_envs = Vec::with_capacity(opts.init_env.len());
         for entry in &opts.init_env {

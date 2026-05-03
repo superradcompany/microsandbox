@@ -17,13 +17,16 @@ async def main():
     # Boot a microVM and hand PID 1 off to systemd after agentd's setup.
     # The agent forks; the parent execve's into systemd and becomes PID 1,
     # and the child stays alive serving host requests.
+    # `"auto"` asks agentd to probe /sbin/init, /lib/systemd/systemd,
+    # /usr/lib/systemd/systemd and pick the first that exists. For
+    # reproducible CI, pass an absolute path instead.
     sb = await Sandbox.create(
         "init-handoff",
         image="mirror.gcr.io/jrei/systemd-debian:12",
         cpus=2,
         memory=1024,
         replace=True,
-        init="/lib/systemd/systemd",
+        init="auto",
     )
 
     # Verify the handoff worked: PID 1 should now be systemd.
