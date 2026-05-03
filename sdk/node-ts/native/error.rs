@@ -42,6 +42,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::SnapshotSandboxRunning(_) => "SnapshotSandboxRunning",
         MicrosandboxError::SnapshotImageMissing(_) => "SnapshotImageMissing",
         MicrosandboxError::SnapshotIntegrity(_) => "SnapshotIntegrity",
+        MicrosandboxError::MetricsDisabled(_) => "MetricsDisabled",
         MicrosandboxError::Custom(_) => "Custom",
     }
 }

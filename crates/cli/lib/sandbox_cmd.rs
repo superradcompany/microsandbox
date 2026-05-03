@@ -72,6 +72,10 @@ pub struct SandboxArgs {
     #[arg(long, default_value_t = 512)]
     pub memory_mib: u32,
 
+    /// Metrics sampling interval in milliseconds. `0` disables sampling entirely.
+    #[arg(long = "metrics-sample-interval-ms", default_value_t = 1000)]
+    pub metrics_sample_interval_ms: u64,
+
     /// Root filesystem path for direct passthrough mounts.
     #[arg(long)]
     pub rootfs_path: Option<PathBuf>,
@@ -190,6 +194,7 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
         forward_output: args.forward_output,
         idle_timeout_secs: args.idle_timeout,
         max_duration_secs: args.max_duration,
+        metrics_sample_interval_ms: args.metrics_sample_interval_ms,
         vm: vm_config,
     };
 

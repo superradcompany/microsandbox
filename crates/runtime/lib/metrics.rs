@@ -11,8 +11,8 @@ use crate::{RuntimeError, RuntimeResult};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Fixed sampling interval for persisted sandbox metrics.
-pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+/// Default sampling interval used when the caller does not configure one.
+pub const DEFAULT_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -62,12 +62,21 @@ struct ProcessSample {
 //--------------------------------------------------------------------------------------------------
 
 /// Run the background metrics sampler until the sandbox process exits.
+///
+/// `interval` controls how often samples are persisted. Passing
+/// `Duration::ZERO` disables sampling and the function returns immediately.
 pub async fn run_metrics_sampler(
     db: DatabaseConnection,
     sandbox_id: i32,
     pid: u32,
+    interval: Duration,
     network_metrics: Option<Box<dyn NetworkMetrics>>,
 ) {
+    if interval.is_zero() {
+        tracing::debug!(sandbox_id, pid, "metrics sampler disabled (interval = 0)");
+        return;
+    }
+
     let pid = pid as i32;
 
     let mut previous = match sample_process(pid) {
@@ -86,7 +95,7 @@ pub async fn run_metrics_sampler(
     }
 
     loop {
-        tokio::time::sleep(SAMPLE_INTERVAL).await;
+        tokio::time::sleep(interval).await;
 
         let current = match sample_process(pid) {
             Ok(sample) => sample,

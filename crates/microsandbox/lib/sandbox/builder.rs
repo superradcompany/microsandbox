@@ -17,7 +17,8 @@ use super::{
         ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource, VolumeMount,
     },
 };
-use crate::{LogLevel, MicrosandboxResult, size::Mebibytes};
+use crate::{LogLevel, MicrosandboxError, MicrosandboxResult, size::Mebibytes};
+use std::time::Duration;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -151,6 +152,21 @@ impl SandboxBuilder {
     /// Disable runtime logs for this sandbox, even if a global default exists.
     pub fn quiet_logs(mut self) -> Self {
         self.config.log_level = None;
+        self
+    }
+
+    /// Override the metrics sampling interval for this sandbox.
+    pub fn metrics_sample_interval(mut self, interval: Duration) -> Self {
+        let ms = interval.as_millis();
+        if ms > u128::from(u64::MAX) {
+            if self.build_error.is_none() {
+                self.build_error = Some(MicrosandboxError::InvalidConfig(format!(
+                    "metrics sample interval {interval:?} overflows u64 milliseconds"
+                )));
+            }
+            return self;
+        }
+        self.config.metrics_sample_interval_ms = ms as u64;
         self
     }
 
@@ -784,6 +800,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.log_level, None);
+    }
+
+    #[test]
+    fn test_builder_metrics_sample_interval_sets_ms() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .metrics_sample_interval(std::time::Duration::from_millis(750))
+            .build()
+            .unwrap();
+
+        assert_eq!(config.metrics_sample_interval_ms, 750);
+    }
+
+    #[test]
+    fn test_builder_metrics_sample_interval_zero_is_disabled() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .metrics_sample_interval(std::time::Duration::ZERO)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.metrics_sample_interval_ms, 0);
     }
 
     #[test]

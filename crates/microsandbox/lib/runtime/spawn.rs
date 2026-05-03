@@ -534,6 +534,10 @@ fn sandbox_cli_args(
     args.push(OsString::from(config.cpus.to_string()));
     args.push(OsString::from("--memory-mib"));
     args.push(OsString::from(config.memory_mib.to_string()));
+    args.push(OsString::from("--metrics-sample-interval-ms"));
+    args.push(OsString::from(
+        config.metrics_sample_interval_ms.to_string(),
+    ));
 
     match &config.image {
         RootfsSource::Bind(path) => {
@@ -896,6 +900,59 @@ mod tests {
         assert_eq!(parsed[1].resource, "nproc");
         assert_eq!(parsed[1].soft, 1024);
         assert_eq!(parsed[1].hard, 1024);
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_include_default_metrics_sample_interval() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .unwrap();
+
+        let rendered = render_args(&config);
+
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair == ["--metrics-sample-interval-ms", "1000"]),
+            "expected default metrics interval flag in {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_include_custom_metrics_sample_interval() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .metrics_sample_interval(std::time::Duration::from_millis(2500))
+            .build()
+            .unwrap();
+
+        let rendered = render_args(&config);
+
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair == ["--metrics-sample-interval-ms", "2500"]),
+            "expected custom metrics interval flag in {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_disabled_metrics_emit_zero() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .metrics_sample_interval(std::time::Duration::ZERO)
+            .build()
+            .unwrap();
+
+        let rendered = render_args(&config);
+
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair == ["--metrics-sample-interval-ms", "0"]),
+            "expected disabled metrics flag in {rendered:?}"
+        );
     }
 
     #[test]

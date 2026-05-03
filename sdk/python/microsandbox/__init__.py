@@ -43,6 +43,7 @@ from microsandbox.errors import (
     ImagePullFailedError,
     InvalidConfigError,
     IoError,
+    MetricsDisabledError,
     MicrosandboxError,
     NetworkPolicyError,
     PathNotFoundError,
@@ -212,6 +213,7 @@ __all__ = [
     "SecretViolationError",
     "TlsError",
     "IoError",
+    "MetricsDisabledError",
     # Setup
     "install",
     "is_installed",

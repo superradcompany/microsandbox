@@ -33,6 +33,12 @@ fn default_log_level() -> Option<LogLevel> {
     crate::config::config().log_level
 }
 
+fn default_metrics_sample_interval_ms() -> u64 {
+    crate::config::config()
+        .sandbox_defaults
+        .metrics_sample_interval_ms
+}
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -63,6 +69,10 @@ pub struct SandboxConfig {
     /// `None` means the sandbox process stays silent.
     #[serde(default = "default_log_level")]
     pub log_level: Option<LogLevel>,
+
+    /// Metrics sampling interval in milliseconds. `0` disables sampling entirely.
+    #[serde(default = "default_metrics_sample_interval_ms")]
+    pub metrics_sample_interval_ms: u64,
 
     /// Working directory inside the sandbox.
     #[serde(default)]
@@ -333,6 +343,7 @@ impl Default for SandboxConfig {
             cpus: default_cpus(),
             memory_mib: default_memory_mib(),
             log_level: default_log_level(),
+            metrics_sample_interval_ms: default_metrics_sample_interval_ms(),
             workdir: None,
             shell: None,
             scripts: HashMap::new(),

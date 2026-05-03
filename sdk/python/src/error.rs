@@ -29,6 +29,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             ImageNotFound(_) => ("ImageNotFoundError", err.to_string()),
             VolumeNotFound(_) => ("VolumeNotFoundError", err.to_string()),
             Io(_) => ("IoError", err.to_string()),
+            MetricsDisabled(_) => ("MetricsDisabledError", err.to_string()),
             Terminal(_) => ("MicrosandboxError", err.to_string()),
             _ => ("MicrosandboxError", err.to_string()),
         };

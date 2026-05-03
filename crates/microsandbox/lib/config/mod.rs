@@ -32,6 +32,9 @@ pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 5;
 /// Default database connection acquisition timeout in seconds.
 pub(crate) const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
 
+/// Default sandbox metrics sampling interval in milliseconds. `0` disables sampling entirely.
+pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
+
 /// Service name for microsandbox-managed registry credentials in the OS keyring.
 #[cfg(all(
     feature = "keyring",
@@ -131,6 +134,9 @@ pub struct SandboxDefaults {
 
     /// Default working directory inside the sandbox.
     pub workdir: Option<String>,
+
+    /// Default metrics sampling interval in milliseconds. `0` disables sampling entirely.
+    pub metrics_sample_interval_ms: u64,
 }
 
 /// Registry configuration.
@@ -423,6 +429,7 @@ impl Default for SandboxDefaults {
             memory_mib: DEFAULT_MEMORY_MIB,
             shell: "/bin/sh".into(),
             workdir: None,
+            metrics_sample_interval_ms: DEFAULT_METRICS_SAMPLE_INTERVAL_MS,
         }
     }
 }
@@ -895,6 +902,10 @@ mod tests {
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
         assert_eq!(cfg.sandbox_defaults.shell, "/bin/sh");
+        assert_eq!(
+            cfg.sandbox_defaults.metrics_sample_interval_ms,
+            DEFAULT_METRICS_SAMPLE_INTERVAL_MS
+        );
         assert_eq!(cfg.log_level, None);
         assert_eq!(cfg.database.max_connections, 5);
         assert_eq!(cfg.database.connect_timeout_secs, 30);

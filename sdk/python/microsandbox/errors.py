@@ -90,3 +90,8 @@ class TlsError(MicrosandboxError):
 class IoError(MicrosandboxError):
     """I/O error."""
     code = "io-error"
+
+
+class MetricsDisabledError(MicrosandboxError):
+    """Metrics sampling is disabled for this sandbox."""
+    code = "metrics-disabled"

@@ -102,12 +102,17 @@ impl SandboxHandle {
             )));
         }
 
+        let config = self.config()?;
+        if config.metrics_sample_interval_ms == 0 {
+            return Err(crate::MicrosandboxError::MetricsDisabled(self.name.clone()));
+        }
+
         let db =
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
         super::metrics::metrics_for_sandbox(
             db,
             self.db_id,
-            u64::from(self.config()?.memory_mib) * 1024 * 1024,
+            u64::from(config.memory_mib) * 1024 * 1024,
         )
         .await
     }

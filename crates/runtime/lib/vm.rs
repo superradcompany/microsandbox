@@ -77,6 +77,9 @@ pub struct Config {
     /// Maximum sandbox lifetime in seconds (None = no limit).
     pub max_duration_secs: Option<u64>,
 
+    /// Metrics sampling interval in milliseconds. `0` disables sampling entirely.
+    pub metrics_sample_interval_ms: u64,
+
     /// VM hardware and rootfs configuration.
     pub vm: VmConfig,
 }
@@ -429,13 +432,27 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         }));
     }
 
-    tokio_rt.spawn(run_metrics_sampler(
-        db.clone(),
-        config.sandbox_id,
-        pid,
-        network_metrics_handle
-            .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
-    ));
+    if config.metrics_sample_interval_ms == 0 {
+        tracing::debug!(
+            sandbox = %config.sandbox_name,
+            "metrics sampling disabled (interval = 0); not spawning sampler"
+        );
+    } else {
+        let interval = Duration::from_millis(config.metrics_sample_interval_ms);
+        tracing::debug!(
+            sandbox = %config.sandbox_name,
+            interval_ms = config.metrics_sample_interval_ms,
+            "starting metrics sampler"
+        );
+        tokio_rt.spawn(run_metrics_sampler(
+            db.clone(),
+            config.sandbox_id,
+            pid,
+            interval,
+            network_metrics_handle
+                .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
+        ));
+    }
 
     // Spawn background tasks.
     let (_relay_shutdown_tx, relay_shutdown_rx) = tokio::sync::watch::channel(false);
