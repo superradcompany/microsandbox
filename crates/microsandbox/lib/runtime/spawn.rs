@@ -1258,7 +1258,7 @@ mod tests {
     fn test_handoff_init_emits_only_program_when_args_and_env_empty() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
-            .init("/lib/systemd/systemd", Vec::<String>::new())
+            .init("/lib/systemd/systemd")
             .build()
             .unwrap();
 
@@ -1276,10 +1276,9 @@ mod tests {
     fn test_handoff_init_joins_argv_with_unit_separator() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
-            .init(
-                "/lib/systemd/systemd",
-                ["--unit=multi-user.target", "--log-level=warning"],
-            )
+            .init_with("/lib/systemd/systemd", |i| {
+                i.args(["--unit=multi-user.target", "--log-level=warning"])
+            })
             .build()
             .unwrap();
 
@@ -1323,7 +1322,7 @@ mod tests {
     fn test_handoff_init_separator_in_arg_rejected_at_build_time() {
         let err = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
-            .init("/sbin/init", ["foo\x1fbar"])
+            .init_with("/sbin/init", |i| i.args(["foo\x1fbar"]))
             .build()
             .unwrap_err();
         assert!(format!("{err}").contains("0x1F"));

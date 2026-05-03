@@ -7,13 +7,12 @@ use microsandbox::Sandbox;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `"auto"` probes /sbin/init, /lib/systemd/systemd, /usr/lib/systemd/systemd.
-    // `[""; 0]` is a typed empty array; bare `[]` can't infer the item type.
     let sandbox = Sandbox::builder("init-handoff")
         .image("mirror.gcr.io/jrei/systemd-debian:12")
         .cpus(2)
         .memory(1024)
         .replace()
-        .init("auto", [""; 0])
+        .init("auto")
         .create()
         .await?;
 

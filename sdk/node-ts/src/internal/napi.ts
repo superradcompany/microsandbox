@@ -95,7 +95,7 @@ export interface NapiSandboxBuilderSetters {
   registry(configure: (b: any) => any): this;
   replace(): this;
   entrypoint(cmd: string[]): this;
-  init(program: string, args?: string[]): this;
+  init(program: string): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   initWith(program: string, configure: (b: any) => any): this;
   hostname(name: string): this;

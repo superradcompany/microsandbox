@@ -387,13 +387,17 @@ pub fn apply_sandbox_opts(
         {
             anyhow::bail!("--init must be an absolute path or `auto`, got: {init_path}");
         }
-        let mut init_envs = Vec::with_capacity(opts.init_env.len());
-        for entry in &opts.init_env {
-            let (k, v) = ui::parse_env(entry).map_err(anyhow::Error::msg)?;
-            init_envs.push((k, v));
+        if opts.init_arg.is_empty() && opts.init_env.is_empty() {
+            builder = builder.init(init_path);
+        } else {
+            let mut init_envs = Vec::with_capacity(opts.init_env.len());
+            for entry in &opts.init_env {
+                let (k, v) = ui::parse_env(entry).map_err(anyhow::Error::msg)?;
+                init_envs.push((k, v));
+            }
+            let init_args = opts.init_arg.clone();
+            builder = builder.init_with(init_path, |i| i.args(init_args).envs(init_envs));
         }
-        let init_args = opts.init_arg.clone();
-        builder = builder.init_with(init_path, |i| i.args(init_args).envs(init_envs));
     }
 
     // --- Log level ---

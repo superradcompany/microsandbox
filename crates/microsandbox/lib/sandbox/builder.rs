@@ -219,32 +219,33 @@ impl SandboxBuilder {
 
     /// Hand off PID 1 to a guest init binary after agentd's setup.
     ///
-    /// The path must be absolute and refer to an executable inside the
-    /// guest rootfs. Mirrors [`Sandbox::exec`](super::Sandbox::exec) in
-    /// shape: positional `program` + optional argv list.
+    /// `program` is either an absolute path inside the guest rootfs or
+    /// the literal `"auto"` (probes `/sbin/init`,
+    /// `/lib/systemd/systemd`, `/usr/lib/systemd/systemd`).
     ///
     /// ```ignore
-    /// .init("/lib/systemd/systemd", ["--unit=multi-user.target"])
+    /// .init("auto")
+    /// .init("/lib/systemd/systemd")
     /// ```
     ///
-    /// `--init` and `--entrypoint` are orthogonal: `init` is the
-    /// guest's PID 1; `entrypoint` is the user workload that agentd
-    /// exec's per request. They can be combined freely.
-    pub fn init(
-        mut self,
-        program: impl Into<PathBuf>,
-        args: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
+    /// For init binaries that take argv or extra env (rare in
+    /// practice), use [`init_with`](Self::init_with).
+    ///
+    /// `init` and `entrypoint` are orthogonal: `init` is the guest's
+    /// PID 1; `entrypoint` is the user workload that agentd exec's
+    /// per request. They can be combined freely.
+    pub fn init(mut self, program: impl Into<PathBuf>) -> Self {
         self.config.init = Some(HandoffInit {
             program: program.into(),
-            args: args.into_iter().map(Into::into).collect(),
+            args: Vec::new(),
             env: Vec::new(),
         });
         self
     }
 
-    /// Hand off PID 1 with a closure-builder for argv and env. Mirrors
-    /// [`Sandbox::exec_with`](super::Sandbox::exec_with).
+    /// Hand off PID 1 with a closure-builder for argv and env. Use this
+    /// when the init binary takes flags (e.g. systemd's
+    /// `--unit=multi-user.target`) or needs extra env vars.
     ///
     /// ```ignore
     /// .init_with("/lib/systemd/systemd", |i| {

@@ -60,7 +60,7 @@ async fn boot_with_test_init(name: &str, init_bin: &Path) -> Sandbox {
         .memory(256)
         .replace()
         .patch(|p| p.copy_file(init_bin, "/sbin/init", Some(0o755), true))
-        .init("/sbin/init", Vec::<String>::new())
+        .init("/sbin/init")
         .create()
         .await
         .expect("create sandbox with handoff")

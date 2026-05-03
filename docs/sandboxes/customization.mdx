@@ -166,7 +166,7 @@ let sb = Sandbox::builder("worker")
     .image("jrei/systemd-debian:12")
     .memory(1024)
     .cpus(2)
-    .init("auto", Vec::<String>::new())
+    .init("auto")
     .create()
     .await?;
 ```

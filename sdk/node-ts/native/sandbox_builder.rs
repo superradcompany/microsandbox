@@ -194,13 +194,13 @@ impl JsSandboxBuilder {
 
     /// Hand off PID 1 to a guest init binary after agentd's setup.
     ///
-    /// `program` must be an absolute path inside the guest rootfs.
-    /// Mirrors `Sandbox.exec(cmd, args)` in shape: positional program +
-    /// optional argv list.
+    /// `program` is either an absolute path inside the guest rootfs or
+    /// the literal `"auto"`. For init binaries that take argv or extra
+    /// env vars, use `initWith` instead.
     #[napi]
-    pub fn init(&mut self, program: String, args: Option<Vec<String>>) -> &Self {
+    pub fn init(&mut self, program: String) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.init(PathBuf::from(program), args.unwrap_or_default()));
+        self.inner = Some(prev.init(PathBuf::from(program)));
         self
     }
 
