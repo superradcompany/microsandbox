@@ -214,38 +214,64 @@ sb = await Sandbox.create(
 
 </CodeGroup>
 
-### Snapshot, fork, restore <sup><sup>coming soon</sup></sup>
+### Snapshot and reuse setup state
 
-Take a snapshot of a running sandbox (full VM state, memory, filesystem, everything) and fork hundreds of identical copies from that single baseline. Install dependencies once, snapshot, then spin up workers that skip the entire setup phase. Each fork gets its own copy-on-write filesystem and can override memory, CPUs, or environment variables.
+Capture a stopped sandbox's writable upper layer as a portable artifact, then boot fresh sandboxes from it. Install dependencies once, snapshot, and `msb run --snapshot ...` workers that skip the setup phase. The artifact is a directory you can `scp` between machines or bundle into a `.tar.zst`. v1 is disk-only and stopped-only; live VM-state snapshots are tracked as future work.
 
 <CodeGroup>
 
 ```rust Rust
-let sb = Sandbox::builder("base")
+let sb = Sandbox::builder("baseline")
     .image("python")
     .create()
     .await?;
 
 sb.exec("pip", ["install", "-r", "requirements.txt"]).await?;
+sb.stop_and_wait().await?;
 
-let snapshot = sb.snapshot().await?;
+// Snapshot the stopped sandbox under a bare name
+let h = Sandbox::get("baseline").await?;
+let _snap = h.snapshot("after-pip-install").await?;
 
-// Fork 10 workers (skips pip install entirely)
+// Boot 10 workers from the same snapshot (each gets its own upper layer)
 let workers: Vec<Sandbox> = futures::future::try_join_all(
-    (0..10).map(|i| snapshot.restore(format!("worker-{i}")))
+    (0..10).map(|i| async move {
+        Sandbox::builder(format!("worker-{i}"))
+            .from_snapshot("after-pip-install")
+            .create()
+            .await
+    })
 ).await?;
 ```
 
+```bash CLI
+msb run --name baseline --detach python -- sleep 3600
+msb exec baseline -- pip install -r requirements.txt
+msb stop baseline
+
+msb snapshot create after-pip-install --from baseline
+
+# Boot 10 workers from the snapshot
+for i in $(seq 1 10); do
+    msb run --name worker-$i --detach --snapshot after-pip-install -- sleep 3600
+done
+```
+
 ```typescript TypeScript
-const sb = await Sandbox.builder("base").image("python").create();
+import { Sandbox } from "microsandbox";
+
+const sb = await Sandbox.builder("baseline").image("python").create();
 await sb.exec("pip", ["install", "-r", "requirements.txt"]);
+await sb.stopAndWait();
 
-// Snapshots are coming soon — the snippet below shows the planned API.
-const snapshot = await sb.snapshot();
+const h = await Sandbox.get("baseline");
+await h.snapshot("after-pip-install");
 
-// Fork 10 workers (skips pip install entirely)
+// Boot 10 workers from the same snapshot
 const workers = await Promise.all(
-    Array.from({ length: 10 }, (_, i) => snapshot.restore(`worker-${i}`)),
+    Array.from({ length: 10 }, (_, i) =>
+        Sandbox.builder(`worker-${i}`).fromSnapshot("after-pip-install").create(),
+    ),
 );
 ```
 
@@ -253,14 +279,16 @@ const workers = await Promise.all(
 import asyncio
 from microsandbox import Sandbox
 
-sb = await Sandbox.create("base", image="python")
+sb = await Sandbox.create("baseline", image="python")
 await sb.exec("pip", ["install", "-r", "requirements.txt"])
+await sb.stop_and_wait()
 
-snapshot = await sb.snapshot()
+h = await Sandbox.get("baseline")
+await h.snapshot("after-pip-install")
 
-# Fork 10 workers (skips pip install entirely)
+# Boot 10 workers from the same snapshot
 workers = await asyncio.gather(
-    *(snapshot.restore(f"worker-{i}") for i in range(10))
+    *(Sandbox.create(f"worker-{i}", snapshot="after-pip-install") for i in range(10))
 )
 ```
 

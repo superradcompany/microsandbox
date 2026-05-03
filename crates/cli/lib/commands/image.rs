@@ -508,7 +508,7 @@ pub async fn run_remove(args: ImageRemoveArgs) -> anyhow::Result<()> {
                 spinner.finish_success("Removed");
             }
             Err(e) => {
-                spinner.finish_error();
+                spinner.finish_clear();
                 if !args.quiet {
                     ui::error(&format!("{e}"));
                 }

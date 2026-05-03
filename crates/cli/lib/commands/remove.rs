@@ -52,7 +52,7 @@ pub async fn run(args: RemoveArgs) -> anyhow::Result<()> {
                 spinner.finish_success("Removed");
             }
             Err(e) => {
-                spinner.finish_error();
+                spinner.finish_clear();
                 if !args.quiet {
                     ui::error(&format!("{e}"));
                 }

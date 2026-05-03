@@ -1,0 +1,15 @@
+{
+  "name": "snapshot-fork",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "npx tsx main.ts"
+  },
+  "dependencies": {
+    "microsandbox": "0.4.3"
+  },
+  "devDependencies": {
+    "tsx": "^4"
+  }
+}

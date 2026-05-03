@@ -26,6 +26,8 @@ export interface NativeBindings {
   readonly SandboxBuilder: NapiSandboxBuilderCtor;
   readonly Volume: NapiVolumeStatic;
   readonly VolumeBuilder: NapiVolumeBuilderCtor;
+  readonly Snapshot: NapiSnapshotStatic;
+  readonly SnapshotBuilder: NapiSnapshotBuilderCtor;
   readonly ExecOptionsBuilder: NapiExecOptionsBuilderCtor;
   readonly InitOptionsBuilder: NapiInitOptionsBuilderCtor;
   readonly AttachOptionsBuilder: NapiAttachOptionsBuilderCtor;
@@ -80,6 +82,7 @@ export type NapiSandboxBuilderCtor = new (name: string) => NapiSandboxBuilder;
  * not preserve `this` correctly. */
 export interface NapiSandboxBuilderSetters {
   image(s: string): this;
+  fromSnapshot(pathOrName: string): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   imageWith(configure: (b: any) => any): this;
   cpus(n: number): this;
@@ -167,6 +170,8 @@ export interface NapiSandboxHandle {
   kill(): Promise<void>;
   remove(): Promise<void>;
   logs(opts?: LogOptions): Promise<LogEntry[]>;
+  snapshot(name: string): Promise<NapiSnapshot>;
+  snapshotTo(path: string): Promise<NapiSnapshot>;
 }
 
 /** Native shape returned by `Sandbox.logs()` / `SandboxHandle.logs()`. */
@@ -259,6 +264,92 @@ export interface NapiVolumeInfo {
   readonly usedBytes: number;
   readonly labels: Record<string, string>;
   readonly createdAt: number | null | undefined;
+}
+
+//-----------------------------------------------------------------------------
+// Snapshot
+//-----------------------------------------------------------------------------
+
+export interface NapiSnapshotStatic {
+  open(pathOrName: string): Promise<NapiSnapshot>;
+  get(nameOrDigest: string): Promise<NapiSnapshotHandle>;
+  list(): Promise<NapiSnapshotInfo[]>;
+  listDir(dir: string): Promise<NapiSnapshot[]>;
+  remove(pathOrName: string, opts?: NapiSnapshotRemoveOptions): Promise<void>;
+  reindex(dir?: string): Promise<number>;
+  export(name: string, out: string, opts?: NapiExportOpts): Promise<void>;
+  import(archive: string, dest?: string): Promise<NapiSnapshotHandle>;
+}
+
+export type NapiSnapshotBuilderCtor = new (sourceSandbox: string) => NapiSnapshotBuilder;
+
+export interface NapiSnapshotBuilderSetters {
+  name(name: string): this;
+  path(path: string): this;
+  label(key: string, value: string): this;
+  force(): this;
+  recordIntegrity(): this;
+}
+
+export interface NapiSnapshotBuilder extends NapiSnapshotBuilderSetters {
+  create(): Promise<NapiSnapshot>;
+}
+
+export interface NapiSnapshot {
+  readonly path: string;
+  readonly digest: string;
+  readonly sizeBytes: bigint;
+  readonly imageRef: string;
+  readonly imageManifestDigest: string;
+  readonly format: string; // "raw" | "qcow2"
+  readonly fstype: string;
+  readonly parent: string | null | undefined;
+  readonly createdAt: string; // RFC 3339 UTC
+  readonly labels: Record<string, string>;
+  readonly sourceSandbox: string | null | undefined;
+  verify(): Promise<NapiSnapshotVerifyReport>;
+}
+
+export interface NapiSnapshotHandle {
+  readonly digest: string;
+  readonly name: string | null | undefined;
+  readonly parentDigest: string | null | undefined;
+  readonly imageRef: string;
+  readonly format: string;
+  readonly sizeBytes: bigint | null | undefined;
+  readonly createdAt: number;
+  readonly path: string;
+  open(): Promise<NapiSnapshot>;
+  remove(opts?: NapiSnapshotRemoveOptions): Promise<void>;
+}
+
+export interface NapiSnapshotInfo {
+  readonly digest: string;
+  readonly name: string | null | undefined;
+  readonly parentDigest: string | null | undefined;
+  readonly imageRef: string;
+  readonly format: string;
+  readonly sizeBytes: number | null | undefined;
+  readonly createdAt: number;
+  readonly path: string;
+}
+
+export interface NapiExportOpts {
+  withParents?: boolean;
+  withImage?: boolean;
+  plainTar?: boolean;
+}
+
+export interface NapiSnapshotRemoveOptions {
+  force?: boolean;
+}
+
+export interface NapiSnapshotVerifyReport {
+  readonly digest: string;
+  readonly path: string;
+  readonly upperKind: string; // "notRecorded" | "verified"
+  readonly upperAlgorithm: string | null | undefined;
+  readonly upperDigest: string | null | undefined;
 }
 
 export interface NapiImageHandle {

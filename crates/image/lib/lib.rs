@@ -31,6 +31,7 @@ mod platform;
 mod progress;
 mod pull;
 mod registry;
+pub mod snapshot;
 mod store;
 pub mod tar_ingest;
 pub mod vmdk;

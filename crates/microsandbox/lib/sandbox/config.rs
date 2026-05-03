@@ -197,6 +197,15 @@ pub struct SandboxConfig {
     /// from the global cache. `None` for non-OCI rootfs sources.
     #[serde(default)]
     pub(crate) manifest_digest: Option<String>,
+
+    /// Path to a snapshot's `upper.ext4` file to copy into the new
+    /// sandbox's upper layer at create time, replacing the fresh-format
+    /// step.
+    ///
+    /// Transient: set by `SandboxBuilder::from_snapshot` and consumed
+    /// during `create_with_mode`. Never persisted.
+    #[serde(skip)]
+    pub(crate) snapshot_upper_source: Option<PathBuf>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -364,6 +373,7 @@ impl Default for SandboxConfig {
             ca_certs: Vec::new(),
             replace_existing: false,
             manifest_digest: None,
+            snapshot_upper_source: None,
         }
     }
 }

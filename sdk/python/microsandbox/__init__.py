@@ -26,6 +26,8 @@ from microsandbox._microsandbox import (
     SandboxFs,
     SandboxHandle,
     SandboxMetrics,
+    Snapshot,
+    SnapshotHandle,
     Volume,
     VolumeHandle,
     all_sandbox_metrics,
@@ -156,6 +158,9 @@ __all__ = [
     "VolumeHandle",
     "MountConfig",
     "MountKind",
+    # Snapshots
+    "Snapshot",
+    "SnapshotHandle",
     # Network
     "Network",
     "NetworkPolicy",

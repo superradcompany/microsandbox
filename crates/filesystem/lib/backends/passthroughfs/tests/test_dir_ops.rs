@@ -154,10 +154,7 @@ fn test_readdir_large_dir() {
     // Should have all 100 files + init.krun + . + ..
     for i in 0..100 {
         let expected = format!("file_{i:03}.txt");
-        assert!(
-            names.iter().any(|n| *n == expected.as_bytes()),
-            "missing {expected}"
-        );
+        assert!(names.contains(&expected.as_bytes()), "missing {expected}");
     }
     assert!(names.iter().any(|n| *n == b"init.krun"));
 }

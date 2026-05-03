@@ -37,6 +37,11 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::Image(_) => "Image",
         MicrosandboxError::NetworkBuilder(_) => "NetworkBuilder",
         MicrosandboxError::PatchFailed(_) => "PatchFailed",
+        MicrosandboxError::SnapshotNotFound(_) => "SnapshotNotFound",
+        MicrosandboxError::SnapshotAlreadyExists(_) => "SnapshotAlreadyExists",
+        MicrosandboxError::SnapshotSandboxRunning(_) => "SnapshotSandboxRunning",
+        MicrosandboxError::SnapshotImageMissing(_) => "SnapshotImageMissing",
+        MicrosandboxError::SnapshotIntegrity(_) => "SnapshotIntegrity",
         MicrosandboxError::Custom(_) => "Custom",
     }
 }

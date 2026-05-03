@@ -1806,7 +1806,7 @@ mod tests {
 
         // Root inode at inode_table_block * 4096 + (2-1)*256
         let inode_offset = layout.inode_table_block as usize * EXT4_BLOCK_SIZE as usize
-            + 1 * EXT4_INODE_SIZE as usize;
+            + (EXT4_INODE_SIZE as usize);
         let mode = u16::from_le_bytes([data[inode_offset], data[inode_offset + 1]]);
         assert_eq!(mode, S_IFDIR | 0o755);
     }

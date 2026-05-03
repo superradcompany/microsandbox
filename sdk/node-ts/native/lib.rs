@@ -27,6 +27,8 @@ mod sandbox_builder;
 mod sandbox_handle;
 mod secret_builder;
 mod setup;
+mod snapshot;
+mod snapshot_builder;
 mod tls_builder;
 mod types;
 mod volume;

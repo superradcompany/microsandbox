@@ -81,6 +81,21 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
+    /// Boot a fresh sandbox from a snapshot artifact (path or name).
+    /// Mutually exclusive with `image()` / `imageWith()` — the
+    /// snapshot already pins the image reference and digest.
+    #[napi(js_name = "fromSnapshot")]
+    // Naming mirrors the Rust SDK (`SandboxBuilder::from_snapshot`),
+    // not Rust's `from_*` constructor convention. Clippy's
+    // wrong_self_convention lint trips on the `from_` prefix here;
+    // the alternative name would diverge from the rest of the SDK.
+    #[allow(clippy::wrong_self_convention)]
+    pub fn from_snapshot(&mut self, path_or_name: String) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.from_snapshot(path_or_name));
+        self
+    }
+
     /// Number of virtual CPUs.
     #[napi]
     pub fn cpus(&mut self, count: u32) -> Result<&Self> {

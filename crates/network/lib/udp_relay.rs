@@ -482,11 +482,8 @@ mod tests {
         );
 
         let ipv4 = Ipv4Packet::new_checked(eth.payload()).unwrap();
-        assert_eq!(Ipv4Addr::from(ipv4.src_addr()), Ipv4Addr::new(8, 8, 8, 8));
-        assert_eq!(
-            Ipv4Addr::from(ipv4.dst_addr()),
-            Ipv4Addr::new(100, 96, 0, 2)
-        );
+        assert_eq!(ipv4.src_addr(), Ipv4Addr::new(8, 8, 8, 8));
+        assert_eq!(ipv4.dst_addr(), Ipv4Addr::new(100, 96, 0, 2));
         assert_eq!(ipv4.next_header(), IpProtocol::Udp);
 
         let udp = UdpPacket::new_checked(ipv4.payload()).unwrap();

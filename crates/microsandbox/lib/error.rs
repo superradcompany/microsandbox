@@ -118,6 +118,26 @@ pub enum MicrosandboxError {
     #[error("patch failed: {0}")]
     PatchFailed(String),
 
+    /// A snapshot artifact was not found.
+    #[error("snapshot not found: {0}")]
+    SnapshotNotFound(String),
+
+    /// A snapshot artifact already exists at the given path.
+    #[error("snapshot already exists: {0}")]
+    SnapshotAlreadyExists(String),
+
+    /// Snapshotting requires the source sandbox to be stopped.
+    #[error("snapshot source sandbox '{0}' is not stopped")]
+    SnapshotSandboxRunning(String),
+
+    /// The image referenced by a snapshot is not in the local cache.
+    #[error("snapshot image missing from cache: {0}")]
+    SnapshotImageMissing(String),
+
+    /// The snapshot artifact failed integrity verification.
+    #[error("snapshot integrity check failed: {0}")]
+    SnapshotIntegrity(String),
+
     /// A custom error message.
     #[error("{0}")]
     Custom(String),

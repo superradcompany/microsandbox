@@ -28,7 +28,6 @@ const BRAILLE_TICKS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦"
 pub struct Spinner {
     pb: Option<ProgressBar>,
     start: Instant,
-    label: String,
     target: String,
     quiet: bool,
     _echo_guard: Option<EchoGuard>,
@@ -76,7 +75,6 @@ impl Spinner {
         Self {
             pb,
             start: Instant::now(),
-            label: label.to_string(),
             target: target.to_string(),
             quiet: false,
             _echo_guard: echo_guard,
@@ -88,7 +86,6 @@ impl Spinner {
         Self {
             pb: None,
             start: Instant::now(),
-            label: String::new(),
             target: String::new(),
             quiet: true,
             _echo_guard: None,
@@ -120,20 +117,13 @@ impl Spinner {
     }
 
     /// Finish and clear entirely — no output remains on screen.
-    /// Use before handing the terminal to guest output.
+    ///
+    /// Used on both success and failure paths: errors are presented by
+    /// the top-level error renderer, so the spinner has no failure
+    /// state of its own.
     pub fn finish_clear(self) {
         if let Some(pb) = self.pb {
             pb.finish_and_clear();
-        }
-    }
-
-    /// Finish with error. Shows `✗ <label> <target>`.
-    pub fn finish_error(self) {
-        if let Some(pb) = self.pb {
-            pb.finish_and_clear();
-        }
-        if !self.quiet {
-            eprintln!("   {} {:<12} {}", style("✗").red(), self.label, self.target);
         }
     }
 }

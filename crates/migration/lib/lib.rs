@@ -5,6 +5,7 @@ mod m20260305_000002_create_sandbox_tables;
 mod m20260305_000003_create_storage_tables;
 mod m20260305_000004_create_sandbox_images_table;
 mod m20260410_000001_erofs_image_schema;
+mod m20260501_000001_create_snapshot_index;
 
 use sea_orm_migration::prelude::*;
 
@@ -34,6 +35,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260305_000003_create_storage_tables::Migration),
             Box::new(m20260305_000004_create_sandbox_images_table::Migration),
             Box::new(m20260410_000001_erofs_image_schema::Migration),
+            Box::new(m20260501_000001_create_snapshot_index::Migration),
         ]
     }
 }
