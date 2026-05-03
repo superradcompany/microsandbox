@@ -51,7 +51,7 @@ use microsandbox::Sandbox;
 
 let h = Sandbox::get("baseline").await?;
 
-// bare name resolves under ~/.microsandbox/snapshots/<name>/
+// Bare name resolves under ~/.microsandbox/snapshots/<name>/
 let snap = h.snapshot("after-pip-install").await?;
 
 // Or write to an explicit path
@@ -90,7 +90,7 @@ print(snap.digest)  # sha256:...
 
 ```bash CLI
 msb snapshot create after-pip-install --from baseline
-msb snapshot create ./snaps/v1     --from baseline   # explicit path
+msb snapshot create ./snaps/v1     --from baseline   # Explicit path
 msb snapshot create after-pip-install --from baseline --label stage=ready
 ```
 
@@ -141,8 +141,8 @@ Booting validates the snapshot's manifest, re-resolves the pinned image from the
 ```rust Rust
 use microsandbox::Snapshot;
 
-let all = Snapshot::list().await?; // indexed snapshots
-let h = Snapshot::get("after-pip-install").await?; // by name, digest, or path
+let all = Snapshot::list().await?; // Indexed snapshots
+let h = Snapshot::get("after-pip-install").await?; // By name, digest, or path
 println!("{} ({})", h.name().unwrap_or("-"), h.digest());
 
 Snapshot::remove("after-pip-install", false).await?;
@@ -152,8 +152,8 @@ Snapshot::reindex("~/.microsandbox/snapshots").await?;
 ```typescript TypeScript
 import { Snapshot } from "microsandbox";
 
-const all = await Snapshot.list();                       // indexed snapshots
-const h = await Snapshot.get("after-pip-install");       // by name, digest, or path
+const all = await Snapshot.list();                       // Indexed snapshots
+const h = await Snapshot.get("after-pip-install");       // By name, digest, or path
 console.log(`${h.name ?? "-"} (${h.digest})`);
 
 await Snapshot.remove("after-pip-install");
@@ -163,8 +163,8 @@ await Snapshot.reindex("~/.microsandbox/snapshots");
 ```python Python
 from microsandbox import Snapshot
 
-all = await Snapshot.list()                              # indexed snapshots
-h = await Snapshot.get("after-pip-install")              # by name, digest, or path
+all = await Snapshot.list()                              # Indexed snapshots
+h = await Snapshot.get("after-pip-install")              # By name, digest, or path
 print(f"{h.name or '-'} ({h.digest})")
 
 await Snapshot.remove("after-pip-install")
@@ -176,7 +176,7 @@ msb snapshot ls
 msb snapshot inspect after-pip-install
 msb snapshot rm after-pip-install
 
-# also if it has indexed children
+# Also if it has indexed children
 msb snapshot rm after-pip-install --force
 
 # Rebuild the index from artifacts on disk
@@ -194,16 +194,16 @@ Opening a snapshot is cheap: it validates the manifest and checks the upper file
 The artifact is a directory containing `manifest.json` (canonical JSON; identity is the SHA-256 of these bytes) plus the captured `upper.ext4`. The directory **is** the snapshot; there's no hidden daemon state, so any of these three transports work:
 
 ```bash
-# scp the directory directly (image must be cached or pullable on the target)
+# Copy the directory directly with scp (image must be cached or pullable on the target)
 scp -r ~/.microsandbox/snapshots/after-pip-install \
     other-host:~/.microsandbox/snapshots/
 
-# bundle into a .tar.zst, transport, then import
+# Bundle into a .tar.zst, transport, then import
 msb snapshot export after-pip-install /tmp/snap.tar.zst
 scp /tmp/snap.tar.zst other-host:
 ssh other-host msb snapshot import /tmp/snap.tar.zst
 
-# fully offline: include the OCI image cache so the target needs no network
+# Fully offline: include the OCI image cache so the target needs no network
 msb snapshot export after-pip-install /tmp/snap.tar.zst --with-image
 ssh other-host msb snapshot import /tmp/snap.tar.zst
 ```
@@ -249,7 +249,7 @@ await Snapshot.export(
     with_image=True,
 )
 
-snap = await Snapshot.import_("/tmp/snap.tar.zst")  # trailing _ avoids the keyword
+snap = await Snapshot.import_("/tmp/snap.tar.zst")  # Trailing _ avoids the keyword
 ```
 
 ```bash CLI
