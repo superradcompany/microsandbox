@@ -4,10 +4,10 @@ description: Capture a stopped sandbox's writable layer as a portable artifact
 icon: "code-branch"
 ---
 
-A snapshot is a stopped sandbox's writable layer, captured as a portable directory you can move with `scp`, archive as `.tar.zst`, or boot fresh sandboxes from.
+A snapshot is a portable, on-disk capture of a sandbox's writable filesystem. Move it with `scp`, archive it as `.tar.zst`, or boot fresh sandboxes from it.
 
 <Note>
-Snapshots are **disk-only and stopped-only**: they capture the writable filesystem layer of a sandbox that's not currently running. Live snapshots (memory + CPU state) and qcow2-backed checkpoint chains are future work.
+Snapshots are **disk-only and stopped-only**: the sandbox can't be running when you take one. Memory and CPU state, plus qcow2 backing chains, are future work.
 </Note>
 
 ## What gets captured
@@ -33,10 +33,13 @@ msb stop baseline
 msb snapshot create after-pip-install --from baseline
 
 # 3. Boot a fresh sandbox from the snapshot
-msb run --name worker --snapshot after-pip-install -- python -c "import requests; print(requests.__version__)"
+msb run --name worker --snapshot after-pip-install \
+    -- python -c "import requests; print(requests.__version__)"
 ```
 
-The snapshot lives at `~/.microsandbox/snapshots/after-pip-install/`.
+<Tip>
+The snapshot lives at `~/.microsandbox/snapshots/after-pip-install/`. That whole directory is the snapshot.
+</Tip>
 
 ## Snapshot a stopped sandbox
 
@@ -55,7 +58,6 @@ let snap = h.snapshot("after-pip-install").await?;
 let snap = h.snapshot_to("/tmp/snaps/v1").await?;
 
 println!("{}", snap.digest()); // sha256:...
-
 ```
 
 ```typescript TypeScript
@@ -108,7 +110,6 @@ let sb = Sandbox::builder("worker")
     .from_snapshot("after-pip-install")
     .create()
     .await?;
-
 ```
 
 ```typescript TypeScript
@@ -146,7 +147,6 @@ println!("{} ({})", h.name().unwrap_or("-"), h.digest());
 
 Snapshot::remove("after-pip-install", false).await?;
 Snapshot::reindex("~/.microsandbox/snapshots").await?;
-
 ```
 
 ```typescript TypeScript
@@ -175,7 +175,9 @@ await Snapshot.reindex("~/.microsandbox/snapshots")
 msb snapshot ls
 msb snapshot inspect after-pip-install
 msb snapshot rm after-pip-install
-msb snapshot rm after-pip-install --force         # also if it has indexed children
+
+# also if it has indexed children
+msb snapshot rm after-pip-install --force
 
 # Rebuild the index from artifacts on disk
 msb snapshot reindex
@@ -222,8 +224,10 @@ Snapshot::export(
     ExportOpts { with_image: true, ..Default::default() },
 ).await?;
 
-let h = Snapshot::import(Path::new("/tmp/snap.tar.zst"), None).await?;
-
+let snap = Snapshot::import(
+    Path::new("/tmp/snap.tar.zst"),
+    None,
+).await?;
 ```
 
 ```typescript TypeScript
@@ -233,7 +237,7 @@ await Snapshot.export("after-pip-install", "/tmp/snap.tar.zst", {
   withImage: true,
 });
 
-const h = await Snapshot.import("/tmp/snap.tar.zst");
+const snap = await Snapshot.import("/tmp/snap.tar.zst");
 ```
 
 ```python Python
@@ -245,7 +249,7 @@ await Snapshot.export(
     with_image=True,
 )
 
-h = await Snapshot.import_("/tmp/snap.tar.zst")  # trailing _ avoids the keyword
+snap = await Snapshot.import_("/tmp/snap.tar.zst")  # trailing _ avoids the keyword
 ```
 
 ```bash CLI
