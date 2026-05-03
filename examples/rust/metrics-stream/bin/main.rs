@@ -7,8 +7,6 @@ use microsandbox::Sandbox;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Creating sandbox (image=alpine)");
-
     let sandbox = Sandbox::builder("metrics-stream")
         .image("alpine")
         .cpus(1)
@@ -17,12 +15,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create()
         .await?;
 
-    // Generate some CPU load in the background.
+    // Background load so CPU/disk metrics aren't all zero.
     sandbox
         .shell("dd if=/dev/urandom of=/dev/null bs=1M count=100 &")
         .await?;
 
-    // Stream metrics every second, print 5 samples.
     let mut stream = Box::pin(sandbox.metrics_stream(Duration::from_secs(1)));
     let mut count = 0;
 
@@ -41,10 +38,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("Collected {count} metric samples");
-
     sandbox.stop_and_wait().await?;
-    println!("Sandbox stopped.");
-
     Ok(())
 }

@@ -82,8 +82,8 @@ pub(super) async fn export_snapshot(
             ));
         }
         // Best-effort: walk fsmeta + layers dirs and ship anything
-        // referenced by the VMDK descriptor. For v1 simplicity, ship
-        // all files in the cache subdirs that match the image digest's
+        // referenced by the VMDK descriptor. For now, ship all files
+        // in the cache subdirs that match the image digest's
         // dependent layers.
         for entry in std::fs::read_dir(cache_dir.join("fsmeta"))
             .into_iter()
