@@ -725,16 +725,16 @@ fn sandbox_cli_args(
     }
 
     // Handoff-init: PID 1 hand-off to a user-supplied init binary.
-    // The builder's `validate()` rejects non-UTF-8 program paths, args/env
+    // The builder's `validate()` rejects non-UTF-8 cmd paths, args/env
     // containing the separator byte (\x1f) or NUL, and env keys containing
     // `=`, so the joins below can't produce a corrupted wire format.
     if let Some(ref init) = config.init {
-        let program = init
-            .program
+        let cmd = init
+            .cmd
             .to_str()
-            .expect("validate() rejects non-UTF-8 program paths");
+            .expect("validate() rejects non-UTF-8 cmd paths");
         args.push(OsString::from("--env"));
-        args.push(OsString::from(format!("{ENV_HANDOFF_INIT}={program}")));
+        args.push(OsString::from(format!("{ENV_HANDOFF_INIT}={cmd}")));
 
         if !init.args.is_empty() {
             let argv_val = init.args.join(HANDOFF_INIT_SEP_STR);
@@ -1255,7 +1255,7 @@ mod tests {
     }
 
     #[test]
-    fn test_handoff_init_emits_only_program_when_args_and_env_empty() {
+    fn test_handoff_init_emits_only_cmd_when_args_and_env_empty() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .init("/lib/systemd/systemd")

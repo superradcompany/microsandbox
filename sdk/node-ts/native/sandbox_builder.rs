@@ -194,13 +194,17 @@ impl JsSandboxBuilder {
 
     /// Hand off PID 1 to a guest init binary after agentd's setup.
     ///
-    /// `program` is either an absolute path inside the guest rootfs or
-    /// the literal `"auto"`. For init binaries that take argv or extra
-    /// env vars, use `initWith` instead.
+    /// `cmd` is either an absolute path inside the guest rootfs or
+    /// the literal `"auto"`. `args` is the supplemental argv;
+    /// `argv[0]` is implicitly `cmd`. For env vars, use `initWith`.
     #[napi]
-    pub fn init(&mut self, program: String) -> &Self {
+    pub fn init(&mut self, cmd: String, args: Option<Vec<String>>) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.init(PathBuf::from(program)));
+        let cmd_path = PathBuf::from(cmd);
+        self.inner = Some(match args {
+            Some(args) if !args.is_empty() => prev.init_with(cmd_path, |i| i.args(args)),
+            _ => prev.init(cmd_path),
+        });
         self
     }
 
@@ -211,7 +215,7 @@ impl JsSandboxBuilder {
     pub fn init_with(
         &mut self,
         env: &Env,
-        program: String,
+        cmd: String,
         configure: Function<
             ClassInstance<JsInitOptionsBuilder>,
             ClassInstance<JsInitOptionsBuilder>,
@@ -221,7 +225,7 @@ impl JsSandboxBuilder {
         let mut returned = configure.call(initial)?;
         let init_builder = returned.take_inner_builder()?;
         let prev = self.take_inner();
-        self.inner = Some(prev.init_with(PathBuf::from(program), |_default| init_builder));
+        self.inner = Some(prev.init_with(PathBuf::from(cmd), |_default| init_builder));
         Ok(self)
     }
 

@@ -206,7 +206,7 @@ If `--init=auto` can't find anything in its candidate list, agentd fails boot wi
 
 ### Argv and env
 
-Pass extra argv to the init via `init_with` (Rust/TypeScript) or by giving `init=` a tuple/dict (Python). On the CLI, repeat `--init-arg` once per entry and `--init-env KEY=VAL` for env vars. Argv defaults to `[<program>]` when no `--init-arg` is given; env is merged on top of the inherited environment.
+Pass extra argv to the init via `init_with` (Rust/TypeScript) or by giving `init=` an `InitConfig` (Python). On the CLI, repeat `--init-arg` once per entry and `--init-env KEY=VAL` for env vars. Argv defaults to `[<cmd>]` when no `--init-arg` is given; env is merged on top of the inherited environment.
 
 <CodeGroup>
 ```bash CLI
@@ -237,13 +237,16 @@ await using sb = await Sandbox.builder("worker")
 ```
 
 ```python Python
+from microsandbox import InitConfig, Sandbox
+
 sb = await Sandbox.create(
     "worker",
     image="jrei/systemd-debian:12",
-    init=("/lib/systemd/systemd", {
-        "args": ["--unit=multi-user.target"],
-        "env":  {"container": "microsandbox"},
-    }),
+    init=InitConfig(
+        cmd="/lib/systemd/systemd",
+        args=("--unit=multi-user.target",),
+        env={"container": "microsandbox"},
+    ),
 )
 ```
 </CodeGroup>

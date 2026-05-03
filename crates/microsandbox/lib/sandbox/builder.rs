@@ -219,7 +219,7 @@ impl SandboxBuilder {
 
     /// Hand off PID 1 to a guest init binary after agentd's setup.
     ///
-    /// `program` is either an absolute path inside the guest rootfs or
+    /// `cmd` is either an absolute path inside the guest rootfs or
     /// the literal `"auto"` (probes `/sbin/init`,
     /// `/lib/systemd/systemd`, `/usr/lib/systemd/systemd`).
     ///
@@ -234,9 +234,9 @@ impl SandboxBuilder {
     /// `init` and `entrypoint` are orthogonal: `init` is the guest's
     /// PID 1; `entrypoint` is the user workload that agentd exec's
     /// per request. They can be combined freely.
-    pub fn init(mut self, program: impl Into<PathBuf>) -> Self {
+    pub fn init(mut self, cmd: impl Into<PathBuf>) -> Self {
         self.config.init = Some(HandoffInit {
-            program: program.into(),
+            cmd: cmd.into(),
             args: Vec::new(),
             env: Vec::new(),
         });
@@ -259,12 +259,12 @@ impl SandboxBuilder {
     /// pre-boot and one-shot.
     pub fn init_with(
         mut self,
-        program: impl Into<PathBuf>,
+        cmd: impl Into<PathBuf>,
         f: impl FnOnce(InitOptionsBuilder) -> InitOptionsBuilder,
     ) -> Self {
         let (args, env) = f(InitOptionsBuilder::default()).build();
         self.config.init = Some(HandoffInit {
-            program: program.into(),
+            cmd: cmd.into(),
             args,
             env,
         });

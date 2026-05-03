@@ -40,10 +40,11 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 /// spawn time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandoffInit {
-    /// Absolute path inside the guest rootfs.
-    pub program: PathBuf,
+    /// Init binary: absolute path inside the guest rootfs, or the
+    /// literal `"auto"` (resolved guest-side).
+    pub cmd: PathBuf,
 
-    /// Supplemental argv. `argv[0]` is implicitly `program`.
+    /// Supplemental argv. `argv[0]` is implicitly `cmd`.
     #[serde(default)]
     pub args: Vec<String>,
 
@@ -54,7 +55,7 @@ pub struct HandoffInit {
 
 /// Builder for the `args` + `env` portion of [`HandoffInit`].
 ///
-/// The program path is supplied positionally to
+/// The cmd is supplied positionally to
 /// [`super::SandboxBuilder::init_with`], not stored in this builder —
 /// matching how [`super::ExecOptionsBuilder`] omits the command name.
 #[derive(Default)]
@@ -112,18 +113,18 @@ impl InitOptionsBuilder {
 /// vars.
 ///
 /// Constraints (each violation produces an `InvalidConfig` error):
-/// - `program` must be valid UTF-8 (the host→guest transport is
+/// - `cmd` must be valid UTF-8 (the host→guest transport is
 ///   `String`-only and `PathBuf` JSON serde drops non-UTF-8 bytes).
-/// - `program` must be either an absolute path or the literal sentinel
+/// - `cmd` must be either an absolute path or the literal sentinel
 ///   [`HANDOFF_INIT_AUTO`] (which agentd resolves at boot time).
-/// - `program` must not contain a NUL byte (CString incompatibility).
+/// - `cmd` must not contain a NUL byte (CString incompatibility).
 /// - Each argv entry must be free of `\x1f` and `\0` (the wire-format
 ///   separator and CString terminator respectively).
 /// - Each env key must be non-empty, free of `=`, `\x1f`, and `\0`
 ///   (POSIX disallows `=` in keys; `\x1f` is the separator).
 /// - Each env value must be free of `\x1f` and `\0`.
 pub(crate) fn validate(spec: &HandoffInit) -> MicrosandboxResult<()> {
-    validate_program(&spec.program)?;
+    validate_cmd(&spec.cmd)?;
     for (i, arg) in spec.args.iter().enumerate() {
         validate_arg(i, arg)?;
     }
@@ -133,23 +134,23 @@ pub(crate) fn validate(spec: &HandoffInit) -> MicrosandboxResult<()> {
     Ok(())
 }
 
-fn validate_program(program: &Path) -> MicrosandboxResult<()> {
-    let s = program.to_str().ok_or_else(|| {
+fn validate_cmd(cmd: &Path) -> MicrosandboxResult<()> {
+    let s = cmd.to_str().ok_or_else(|| {
         MicrosandboxError::InvalidConfig(format!(
-            "init program path must be valid UTF-8: {}",
-            program.display()
+            "init cmd path must be valid UTF-8: {}",
+            cmd.display()
         ))
     })?;
     if s.contains('\0') {
         return Err(MicrosandboxError::InvalidConfig(format!(
-            "init program path must not contain a NUL byte: {s:?}"
+            "init cmd path must not contain a NUL byte: {s:?}"
         )));
     }
     // The sentinel `auto` is resolved guest-side; everything else must
     // be an absolute path so the eventual `execve` knows where to look.
-    if s != HANDOFF_INIT_AUTO && !program.is_absolute() {
+    if s != HANDOFF_INIT_AUTO && !cmd.is_absolute() {
         return Err(MicrosandboxError::InvalidConfig(format!(
-            "init program must be an absolute path or `{HANDOFF_INIT_AUTO}`, got: {s:?}"
+            "init cmd must be an absolute path or `{HANDOFF_INIT_AUTO}`, got: {s:?}"
         )));
     }
     Ok(())
@@ -201,9 +202,9 @@ fn validate_env_pair(key: &str, value: &str) -> MicrosandboxResult<()> {
 mod tests {
     use super::*;
 
-    fn ok(program: &str, args: &[&str], env: &[(&str, &str)]) -> HandoffInit {
+    fn ok(cmd: &str, args: &[&str], env: &[(&str, &str)]) -> HandoffInit {
         HandoffInit {
-            program: PathBuf::from(program),
+            cmd: PathBuf::from(cmd),
             args: args.iter().map(|s| s.to_string()).collect(),
             env: env
                 .iter()
@@ -264,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_relative_program_path() {
+    fn validate_rejects_relative_cmd_path() {
         let spec = ok("sbin/init", &[], &[]);
         let err = validate(&spec).unwrap_err();
         assert!(format!("{err}").contains("absolute path or `auto`"));
@@ -272,11 +273,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn validate_rejects_non_utf8_program() {
+    fn validate_rejects_non_utf8_cmd() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
         let mut spec = ok("/sbin/init", &[], &[]);
-        spec.program = PathBuf::from(OsStr::from_bytes(b"/\xff/init"));
+        spec.cmd = PathBuf::from(OsStr::from_bytes(b"/\xff/init"));
         let err = validate(&spec).unwrap_err();
         assert!(format!("{err}").contains("valid UTF-8"));
     }

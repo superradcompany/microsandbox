@@ -246,19 +246,20 @@ class ExecOptions:
 class InitConfig:
     """Guest init-handoff configuration.
 
-    When passed as the `init=` kwarg to ``Sandbox.create``, agentd hands
-    off PID 1 to ``program`` after performing initial setup. Equivalent
-    to passing ``(program, {"args": [...], "env": {...}})``.
+    Pass to ``Sandbox.create(init=...)`` when the init binary takes
+    argv or extra env vars. For the simple case, just pass the cmd
+    as a bare string: ``init="auto"``.
 
-    The path must be absolute and refer to an executable inside the
-    guest rootfs.
+    ``cmd`` is either an absolute path inside the guest rootfs or the
+    literal ``"auto"`` (probes /sbin/init, /lib/systemd/systemd,
+    /usr/lib/systemd/systemd).
     """
-    program: str
+    cmd: str
     args: tuple[str, ...] = ()
     env: Mapping[str, str] = field(default_factory=dict)
 
     def _to_dict(self) -> dict:
-        d: dict = {"program": self.program}
+        d: dict = {"cmd": self.cmd}
         if self.args:
             d["args"] = list(self.args)
         if self.env:

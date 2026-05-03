@@ -9,9 +9,8 @@ use microsandbox::sandbox::InitOptionsBuilder as RustInitOptionsBuilder;
 
 /// Fluent builder for the args + env portion of a guest init handoff.
 ///
-/// The program path is supplied positionally to
-/// `SandboxBuilder.init_with`, mirroring how `ExecOptionsBuilder` omits
-/// the command name.
+/// The cmd is supplied positionally to `SandboxBuilder.initWith`,
+/// mirroring how `ExecOptionsBuilder` omits the command name.
 #[napi(js_name = "InitOptionsBuilder")]
 pub struct JsInitOptionsBuilder {
     inner: Option<RustInitOptionsBuilder>,

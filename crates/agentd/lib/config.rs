@@ -86,15 +86,16 @@ pub struct BootParams {
 /// Parsed handoff-init specification.
 ///
 /// When present in [`BootParams`], agentd performs setup, forks, the
-/// parent execs `program` (becoming the new PID 1), and the child
+/// parent execs `cmd` (becoming the new PID 1), and the child
 /// continues as the agent loop.
 #[derive(Debug)]
 pub struct HandoffInit {
-    /// Absolute path inside the guest rootfs.
-    pub(crate) program: PathBuf,
+    /// Absolute path inside the guest rootfs, or the literal `"auto"`
+    /// (resolved via [`HANDOFF_INIT_AUTO_CANDIDATES`] in `do_handoff`).
+    pub(crate) cmd: PathBuf,
 
     /// argv past `argv[0]` — i.e., the supplemental arguments. Empty
-    /// means the init is exec'd with `argv = [program]`.
+    /// means the init is exec'd with `argv = [cmd]`.
     pub(crate) argv: Vec<OsString>,
 
     /// Extra env vars merged on top of the inherited env. Empty means
@@ -787,24 +788,24 @@ fn parse_cidr_v6(s: &str) -> AgentdResult<(Ipv6Addr, u8)> {
 /// Reads `MSB_HANDOFF_INIT[_ARGS|_ENV]` and assembles a [`HandoffInit`].
 ///
 /// Returns `Ok(None)` when `MSB_HANDOFF_INIT` is unset/empty (the
-/// default no-handoff path). Returns `Err` when the program path is
+/// default no-handoff path). Returns `Err` when the cmd path is
 /// not absolute, or when `MSB_HANDOFF_INIT_ENV` contains an entry
 /// without an `=`.
 fn parse_handoff_init() -> AgentdResult<Option<HandoffInit>> {
-    let Some(program_str) = read_env_raw(ENV_HANDOFF_INIT) else {
+    let Some(cmd_str) = read_env_raw(ENV_HANDOFF_INIT) else {
         return Ok(None);
     };
-    if program_str.trim().is_empty() {
+    if cmd_str.trim().is_empty() {
         return Ok(None);
     }
 
-    let program = PathBuf::from(&program_str);
+    let cmd = PathBuf::from(&cmd_str);
     // The sentinel `auto` is resolved lazily in `handoff::do_handoff`
     // by probing `HANDOFF_INIT_AUTO_CANDIDATES`; everything else must
     // be an absolute path.
-    if program_str != HANDOFF_INIT_AUTO && !program.is_absolute() {
+    if cmd_str != HANDOFF_INIT_AUTO && !cmd.is_absolute() {
         return Err(AgentdError::Config(format!(
-            "{ENV_HANDOFF_INIT} must be an absolute path or `auto`, got: {program_str}"
+            "{ENV_HANDOFF_INIT} must be an absolute path or `auto`, got: {cmd_str}"
         )));
     }
 
@@ -833,7 +834,7 @@ fn parse_handoff_init() -> AgentdResult<Option<HandoffInit>> {
         _ => Vec::new(),
     };
 
-    Ok(Some(HandoffInit { program, argv, env }))
+    Ok(Some(HandoffInit { cmd, argv, env }))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1273,14 +1274,14 @@ mod tests {
     static HANDOFF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn with_handoff_env<R>(
-        program: Option<&str>,
+        cmd: Option<&str>,
         args: Option<&str>,
         env_var: Option<&str>,
         f: impl FnOnce() -> R,
     ) -> R {
         let _guard = HANDOFF_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
-            match program {
+            match cmd {
                 Some(v) => env::set_var(ENV_HANDOFF_INIT, v),
                 None => env::remove_var(ENV_HANDOFF_INIT),
             }
@@ -1315,11 +1316,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_handoff_init_program_only() {
+    fn test_parse_handoff_init_cmd_only() {
         let res = with_handoff_env(Some("/lib/systemd/systemd"), None, None, parse_handoff_init)
             .unwrap()
             .unwrap();
-        assert_eq!(res.program, PathBuf::from("/lib/systemd/systemd"));
+        assert_eq!(res.cmd, PathBuf::from("/lib/systemd/systemd"));
         assert!(res.argv.is_empty());
         assert!(res.env.is_empty());
     }

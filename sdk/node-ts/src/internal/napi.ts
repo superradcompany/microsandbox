@@ -95,9 +95,9 @@ export interface NapiSandboxBuilderSetters {
   registry(configure: (b: any) => any): this;
   replace(): this;
   entrypoint(cmd: string[]): this;
-  init(program: string): this;
+  init(cmd: string, args?: string[]): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  initWith(program: string, configure: (b: any) => any): this;
+  initWith(cmd: string, configure: (b: any) => any): this;
   hostname(name: string): this;
   libkrunfwPath(path: string): this;
   user(user: string): this;

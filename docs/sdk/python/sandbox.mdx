@@ -32,7 +32,7 @@ Create and boot a sandbox. The first argument is either a name (`str`) or a full
 | hostname | `str` | Guest hostname |
 | user | `str` | Default guest user |
 | entrypoint | `list[str]` | Override image entrypoint |
-| init | `str \| tuple \| dict \|` [`InitConfig`](#initconfig) | Hand off PID 1 to a guest init binary. See [Init handoff](/sandboxes/customization#init-handoff) and [`InitConfig`](#initconfig) for accepted shapes |
+| init | `str \| dict \|` [`InitConfig`](#initconfig) | Hand off PID 1 to a guest init binary. See [Init handoff](/sandboxes/customization#init-handoff) and [`InitConfig`](#initconfig) for accepted shapes |
 | replace | `bool` | Replace existing sandbox with same name |
 | max_duration | `float` | Maximum sandbox lifetime in seconds |
 | idle_timeout | `float` | Idle timeout in seconds |
@@ -637,7 +637,7 @@ The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`San
 | hostname | `str` | - | Guest hostname |
 | user | `str` | - | Default guest user |
 | entrypoint | `list[str]` | - | Override image entrypoint |
-| init | `str \| tuple \| dict \|` [`InitConfig`](#initconfig) | - | Hand off PID 1 to a guest init binary. See [Init handoff](/sandboxes/customization#init-handoff) |
+| init | `str \| dict \|` [`InitConfig`](#initconfig) | - | Hand off PID 1 to a guest init binary. See [Init handoff](/sandboxes/customization#init-handoff) |
 | replace | `bool` | `False` | Replace existing sandbox with same name |
 | max_duration | `float` | - | Maximum sandbox lifetime in seconds |
 | idle_timeout | `float` | - | Idle timeout in seconds |
@@ -662,45 +662,37 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class InitConfig:
-    program: str
+    cmd: str
     args: tuple[str, ...] = ()
     env: Mapping[str, str] = {}
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| program | `str` | Absolute path to the init binary inside the guest rootfs |
-| args | `tuple[str, ...]` | Supplemental argv (`argv[0]` is implicitly `program`) |
+| cmd | `str` | Absolute path or `"auto"` to the init binary inside the guest rootfs |
+| args | `tuple[str, ...]` | Supplemental argv (`argv[0]` is implicitly `cmd`) |
 | env | `dict[str, str]` | Extra env vars merged on top of the inherited env |
 
-The `init=` kwarg accepts four shapes for convenience:
+The `init=` kwarg follows the same shape as other `Sandbox.create` kwargs that carry structured values (`image=`, `network=`, etc.): a bare scalar for the simple case, or a dataclass / dict for the rich case.
 
 | Form | Equivalent to |
 |------|---------------|
-| `init="/sbin/init"` | `InitConfig(program="/sbin/init")` |
-| `init=("/sbin/init", ["--foo"])` | `InitConfig(program="/sbin/init", args=("--foo",))` |
-| `init=("/sbin/init", {"args": [...], "env": {...}})` | full `InitConfig` |
-| `init=InitConfig(program="/sbin/init", args=("--foo",))` | itself |
+| `init="auto"` or `init="/sbin/init"` | `InitConfig(cmd=...)` |
+| `init={"cmd": ..., "args": [...], "env": {...}}` | dict equivalent of `InitConfig` |
+| `init=InitConfig(cmd="/sbin/init", args=("--foo",))` | itself |
 
 ```python
 from microsandbox import InitConfig, Sandbox
 
-# Bare string
-sb = await Sandbox.create("worker", image="alpine", init="/sbin/init")
+# Common case: bare string.
+sb = await Sandbox.create("worker", image="jrei/systemd-debian:12", init="auto")
 
-# Tuple shorthand
-sb = await Sandbox.create(
-    "worker",
-    image="jrei/systemd-debian:12",
-    init=("/lib/systemd/systemd", ["--unit=multi-user.target"]),
-)
-
-# Full dataclass
+# Argv / env: dataclass.
 sb = await Sandbox.create(
     "worker",
     image="jrei/systemd-debian:12",
     init=InitConfig(
-        program="/lib/systemd/systemd",
+        cmd="/lib/systemd/systemd",
         args=("--unit=multi-user.target",),
         env={"container": "microsandbox"},
     ),

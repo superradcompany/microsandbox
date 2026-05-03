@@ -508,18 +508,18 @@ Auto-drain the sandbox after this many seconds of inactivity (no active exec ses
 #### init()
 
 ```rust
-fn init(self, program: impl Into<PathBuf>) -> Self
+fn init(self, cmd: impl Into<PathBuf>) -> Self
 ```
 
-Hand off PID 1 inside the guest to `program` after agentd finishes its boot-time setup. The agent forks; the parent execs the init and becomes PID 1, the agent continues as a child process. See [Init handoff](/sandboxes/customization#init-handoff) for image picks, shutdown semantics, and tradeoffs.
+Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time setup. The agent forks; the parent execs the init and becomes PID 1, the agent continues as a child process. See [Init handoff](/sandboxes/customization#init-handoff) for image picks, shutdown semantics, and tradeoffs.
 
-`program` is either an absolute path inside the guest rootfs or the literal `"auto"` (probes `/sbin/init`, `/lib/systemd/systemd`, `/usr/lib/systemd/systemd`). For init binaries that take argv or extra env (rare), use [`init_with`](#init_with).
+`cmd` is either an absolute path inside the guest rootfs or the literal `"auto"` (probes `/sbin/init`, `/lib/systemd/systemd`, `/usr/lib/systemd/systemd`). For init binaries that take argv or extra env (rare), use [`init_with`](#init_with).
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
-| program | `impl Into<PathBuf>` | Absolute path inside the guest, or `"auto"` |
+| cmd | `impl Into<PathBuf>` | Absolute path inside the guest, or `"auto"` |
 
 ```rust
 let sb = Sandbox::builder("worker")
@@ -536,7 +536,7 @@ let sb = Sandbox::builder("worker")
 ```rust
 fn init_with(
     self,
-    program: impl Into<PathBuf>,
+    cmd: impl Into<PathBuf>,
     f: impl FnOnce(InitOptionsBuilder) -> InitOptionsBuilder,
 ) -> Self
 ```
@@ -549,7 +549,7 @@ The builder exposes `arg`, `args`, `env`, and `envs`.
 
 | Name | Type | Description |
 |------|------|-------------|
-| program | `impl Into<PathBuf>` | Absolute path to the init binary inside the guest |
+| cmd | `impl Into<PathBuf>` | Absolute path to the init binary inside the guest |
 | f | `FnOnce(InitOptionsBuilder) -> InitOptionsBuilder` | Closure populating argv and env |
 
 ```rust

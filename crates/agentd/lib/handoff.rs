@@ -67,12 +67,12 @@ const POST_HANDOFF_STDERR: &str = "/run/microsandbox/agentd.log";
 /// returns `Ok(())`, after which the caller falls through to the
 /// runtime build and the agent loop.
 pub fn do_handoff(spec: HandoffInit) -> AgentdResult<()> {
-    let program = resolve_program(&spec.program)?;
-    preflight(&program)?;
+    let cmd = resolve_cmd(&spec.cmd)?;
+    preflight(&cmd)?;
 
-    let argv = build_argv(&program, &spec.argv);
+    let argv = build_argv(&cmd, &spec.argv);
     let envp = build_envp(&spec.env);
-    let program_c = path_to_cstring(&program)?;
+    let cmd_c = path_to_cstring(&cmd)?;
 
     // SAFETY: `fork()` in a single-threaded process with no opened
     // serial fds and no async runtime. The agent loop has not started
@@ -86,14 +86,14 @@ pub fn do_handoff(spec: HandoffInit) -> AgentdResult<()> {
             reset_signals();
             // SAFETY: arrays are NUL-terminated; pointers live until
             // execve consumes them or returns with an error.
-            let err = nix::unistd::execve(&program_c, &argv, &envp).unwrap_err();
+            let err = nix::unistd::execve(&cmd_c, &argv, &envp).unwrap_err();
             // Past this point, exec has failed. Write a diagnostic to
             // the kernel console and exit non-zero so the kernel
             // panics PID 1 and the VMM tears the guest down.
             let _ = writeln!(
                 std::io::stderr(),
                 "agentd: execve({}) failed: {err}",
-                program.display()
+                cmd.display()
             );
             process::exit(127);
         }
@@ -104,15 +104,15 @@ pub fn do_handoff(spec: HandoffInit) -> AgentdResult<()> {
     }
 }
 
-/// Resolves the user-supplied program path, expanding the `auto`
-/// sentinel into the first existing entry from
+/// Resolves the user-supplied cmd, expanding the `auto` sentinel
+/// into the first existing entry from
 /// [`HANDOFF_INIT_AUTO_CANDIDATES`].
 ///
 /// Non-`auto` paths are returned unchanged; downstream `preflight`
 /// validates them.
-fn resolve_program(program: &Path) -> AgentdResult<PathBuf> {
-    if program != Path::new(HANDOFF_INIT_AUTO) {
-        return Ok(program.to_path_buf());
+fn resolve_cmd(cmd: &Path) -> AgentdResult<PathBuf> {
+    if cmd != Path::new(HANDOFF_INIT_AUTO) {
+        return Ok(cmd.to_path_buf());
     }
 
     for candidate in HANDOFF_INIT_AUTO_CANDIDATES {
@@ -131,24 +131,24 @@ fn resolve_program(program: &Path) -> AgentdResult<PathBuf> {
 /// Verifies the init binary exists and is executable. Runs in the
 /// parent (pre-fork) so failures surface via the normal init-failure
 /// path rather than a kernel panic on PID 1 exit.
-fn preflight(program: &Path) -> AgentdResult<()> {
-    let metadata = std::fs::metadata(program).map_err(|e| {
+fn preflight(cmd: &Path) -> AgentdResult<()> {
+    let metadata = std::fs::metadata(cmd).map_err(|e| {
         AgentdError::Init(format!(
             "handoff init binary not found at {}: {e}",
-            program.display()
+            cmd.display()
         ))
     })?;
     if !metadata.is_file() {
         return Err(AgentdError::Init(format!(
             "handoff init path is not a regular file: {}",
-            program.display()
+            cmd.display()
         )));
     }
     use std::os::unix::fs::PermissionsExt;
     if metadata.permissions().mode() & 0o111 == 0 {
         return Err(AgentdError::Init(format!(
             "handoff init binary is not executable: {}",
-            program.display()
+            cmd.display()
         )));
     }
     Ok(())
@@ -156,14 +156,14 @@ fn preflight(program: &Path) -> AgentdResult<()> {
 
 /// Builds the C argv list for execve.
 ///
-/// `argv[0]` is the program path itself; supplemental args follow.
+/// `argv[0]` is the cmd path itself; supplemental args follow.
 /// argv values come from the host SDK's validated wire format and from
-/// the program path which `path_to_cstring` already screens for NUL, so
+/// the cmd path which `path_to_cstring` already screens for NUL, so
 /// the [`CString::new`] calls here are infallible in practice. Any
 /// NUL-bearing value is silently skipped rather than corrupting argv.
-fn build_argv(program: &Path, supplemental: &[OsString]) -> Vec<CString> {
+fn build_argv(cmd: &Path, supplemental: &[OsString]) -> Vec<CString> {
     let mut out = Vec::with_capacity(1 + supplemental.len());
-    if let Ok(c) = CString::new(program.as_os_str().as_encoded_bytes()) {
+    if let Ok(c) = CString::new(cmd.as_os_str().as_encoded_bytes()) {
         out.push(c);
     }
     for arg in supplemental {
@@ -305,29 +305,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_program_passes_explicit_path_through() {
+    fn resolve_cmd_passes_explicit_path_through() {
         let p = Path::new("/lib/systemd/systemd");
-        let resolved = resolve_program(p).unwrap();
+        let resolved = resolve_cmd(p).unwrap();
         assert_eq!(resolved, PathBuf::from("/lib/systemd/systemd"));
     }
 
     #[test]
-    fn resolve_program_passes_through_non_existent_explicit_paths() {
+    fn resolve_cmd_passes_through_non_existent_explicit_paths() {
         // Resolution intentionally doesn't `stat` non-`auto` paths;
         // `preflight` is responsible for that. This keeps the resolver
         // testable without a real filesystem layout.
         let p = Path::new("/no/such/init");
-        let resolved = resolve_program(p).unwrap();
+        let resolved = resolve_cmd(p).unwrap();
         assert_eq!(resolved, PathBuf::from("/no/such/init"));
     }
 
     #[test]
-    fn resolve_program_auto_returns_first_existing_candidate_or_errors() {
+    fn resolve_cmd_auto_returns_first_existing_candidate_or_errors() {
         // Whichever happens on the host running the test: at least one
         // of the candidates likely exists on a real Linux box, but the
         // test box may also be macOS where none do. Either branch is
         // a valid outcome — assert only that the API behaves correctly.
-        match resolve_program(Path::new(HANDOFF_INIT_AUTO)) {
+        match resolve_cmd(Path::new(HANDOFF_INIT_AUTO)) {
             Ok(p) => {
                 assert!(
                     HANDOFF_INIT_AUTO_CANDIDATES
