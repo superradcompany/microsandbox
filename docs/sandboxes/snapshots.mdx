@@ -44,7 +44,7 @@ The snapshot lives at `~/.microsandbox/snapshots/after-pip-install/`. Move that 
 
 ## Snapshot a stopped sandbox
 
-The Rust SDK exposes two methods on the looked-up sandbox handle so you don't have to import a destination enum:
+Resolve a handle for the stopped sandbox, then snapshot it under a bare name or to an explicit path:
 
 <CodeGroup>
 ```rust Rust
@@ -60,12 +60,6 @@ let snap = h.snapshot("after-pip-install").await?;
 let snap = h.snapshot_to("/tmp/snaps/v1").await?;
 
 println!("{}", snap.digest()); // sha256:...
-```
-
-```bash CLI
-msb snapshot create after-pip-install --from baseline
-msb snapshot create ./snaps/v1     --from baseline   # explicit path
-msb snapshot create after-pip-install --from baseline --label stage=ready
 ```
 
 ```typescript TypeScript
@@ -96,6 +90,12 @@ snap2 = await h.snapshot_to("/tmp/snaps/v1")
 print(snap.digest)  # sha256:...
 ```
 
+```bash CLI
+msb snapshot create after-pip-install --from baseline
+msb snapshot create ./snaps/v1     --from baseline   # explicit path
+msb snapshot create after-pip-install --from baseline --label stage=ready
+```
+
 </CodeGroup>
 
 The sandbox must be stopped (or crashed). Running sandboxes are rejected with `MicrosandboxError::SnapshotSandboxRunning`.
@@ -114,10 +114,6 @@ let sb = Sandbox::builder("worker")
     .await?;
 ```
 
-```bash CLI
-msb run --name worker --snapshot after-pip-install -- python -V
-```
-
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
@@ -133,6 +129,10 @@ from microsandbox import Sandbox
 sb = await Sandbox.create("worker", snapshot="after-pip-install")
 ```
 
+```bash CLI
+msb run --name worker --snapshot after-pip-install -- python -V
+```
+
 </CodeGroup>
 
 The boot path:
@@ -144,16 +144,6 @@ The boot path:
 ## List, inspect, and remove
 
 <CodeGroup>
-```bash CLI
-msb snapshot ls
-msb snapshot inspect after-pip-install
-msb snapshot rm after-pip-install
-msb snapshot rm after-pip-install --force         # also if it has indexed children
-
-# Rebuild the index from artifacts on disk
-msb snapshot reindex
-```
-
 ```rust Rust
 use microsandbox::Snapshot;
 
@@ -163,6 +153,38 @@ println!("{} ({})", h.name().unwrap_or("-"), h.digest());
 
 Snapshot::remove("after-pip-install", false).await?;
 Snapshot::reindex("~/.microsandbox/snapshots").await?;
+```
+
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+const all = await Snapshot.list();                       // indexed snapshots
+const h = await Snapshot.get("after-pip-install");       // by name, digest, or path
+console.log(`${h.name ?? "-"} (${h.digest})`);
+
+await Snapshot.remove("after-pip-install");
+await Snapshot.reindex("~/.microsandbox/snapshots");
+```
+
+```python Python
+from microsandbox import Snapshot
+
+all = await Snapshot.list()                              # indexed snapshots
+h = await Snapshot.get("after-pip-install")              # by name, digest, or path
+print(f"{h.name or '-'} ({h.digest})")
+
+await Snapshot.remove("after-pip-install")
+await Snapshot.reindex("~/.microsandbox/snapshots")
+```
+
+```bash CLI
+msb snapshot ls
+msb snapshot inspect after-pip-install
+msb snapshot rm after-pip-install
+msb snapshot rm after-pip-install --force         # also if it has indexed children
+
+# Rebuild the index from artifacts on disk
+msb snapshot reindex
 ```
 
 </CodeGroup>
@@ -190,13 +212,101 @@ ssh other-host msb snapshot import /tmp/snap.tar.zst   # no network needed
 
 Archives default to `.tar.zst` because zstd collapses sparse upper-layer zero runs cheaply. Pass `--plain-tar` if you need a plain `.tar`. Both formats are accepted on import via magic-byte detection.
 
+The `export` and `import` calls are exposed in every SDK if you need to drive bundling from code:
+
+<CodeGroup>
+```rust Rust
+use std::path::Path;
+use microsandbox::Snapshot;
+use microsandbox::snapshot::ExportOpts;
+
+Snapshot::export(
+    "after-pip-install",
+    Path::new("/tmp/snap.tar.zst"),
+    ExportOpts { with_image: true, ..Default::default() },
+).await?;
+
+let h = Snapshot::import(Path::new("/tmp/snap.tar.zst"), None).await?;
+```
+
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+await Snapshot.export("after-pip-install", "/tmp/snap.tar.zst", {
+  withImage: true,
+});
+
+const h = await Snapshot.import("/tmp/snap.tar.zst");
+```
+
+```python Python
+from microsandbox import Snapshot
+
+await Snapshot.export(
+    "after-pip-install",
+    "/tmp/snap.tar.zst",
+    with_image=True,
+)
+
+h = await Snapshot.import_("/tmp/snap.tar.zst")  # trailing _ avoids the keyword
+```
+
+```bash CLI
+msb snapshot export after-pip-install /tmp/snap.tar.zst --with-image
+msb snapshot import /tmp/snap.tar.zst
+```
+
+</CodeGroup>
+
 ## Integrity verification
 
 By default, snapshot creation does **not** hash the upper file. The artifact carries its size and the OCI image's manifest digest, which together catch corruption that would prevent it from booting. Hashing 4 GiB of mostly-zero sparse bytes on every `inspect` would dominate latency and add no real safety for a file we just wrote on the same disk.
 
 Opt in to a content-integrity hash when crossing trust boundaries:
 
-```bash
+<CodeGroup>
+```rust Rust
+use microsandbox::Snapshot;
+
+// Compute and record an integrity hash at create time
+let snap = Snapshot::builder("baseline")
+    .name("after-pip-install")
+    .record_integrity()
+    .create()
+    .await?;
+
+// Verify a snapshot's recorded integrity on demand
+let report = snap.verify().await?;
+```
+
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+// Compute and record an integrity hash at create time
+const snap = await Snapshot.builder("baseline")
+  .name("after-pip-install")
+  .recordIntegrity()
+  .create();
+
+// Verify a snapshot's recorded integrity on demand
+const report = await snap.verify();
+```
+
+```python Python
+from microsandbox import Snapshot
+
+# Compute and record an integrity hash at create time
+snap = await Snapshot.create(
+    "baseline",
+    name="after-pip-install",
+    record_integrity=True,
+)
+
+# Verify a snapshot's recorded integrity on demand
+report = await snap.verify()
+```
+
+```bash CLI
 # Compute and record an integrity hash at create time
 msb snapshot create after-pip-install --from baseline --integrity
 
@@ -204,6 +314,8 @@ msb snapshot create after-pip-install --from baseline --integrity
 msb snapshot verify after-pip-install
 msb snapshot inspect after-pip-install --verify
 ```
+
+</CodeGroup>
 
 `msb snapshot export` automatically populates the integrity hash before bundling, and `msb snapshot import` verifies it on the way in. The local index path stays fast; the cross-machine path stays trustworthy.
 
