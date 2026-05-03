@@ -267,8 +267,8 @@ impl DnsForwarder {
 
     /// Resolve a routing decision into a concrete upstream client.
     /// Per-query client build for the direct path. UDP socket bind is
-    /// cheap; TCP pays a handshake. Pooling is a deliberate v1 omission
-    /// — add an LRU keyed by (ip, transport) if profiling shows it
+    /// cheap; TCP pays a handshake. Pooling is intentionally omitted —
+    /// add an LRU keyed by (ip, transport) if profiling shows it
     /// matters.
     async fn select_upstream(
         &self,

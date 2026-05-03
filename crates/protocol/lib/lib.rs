@@ -217,6 +217,78 @@ pub const ENV_HOST_ALIAS: &str = "MSB_HOST_ALIAS";
 /// inherits the raised baseline instead of having to opt into per-exec rlimits.
 pub const ENV_RLIMITS: &str = "MSB_RLIMITS";
 
+/// Separator byte for argv/env entries in handoff-init env vars.
+///
+/// ASCII Unit Separator (`0x1F`). Argv entries and `KEY=VAL` env pairs
+/// are arbitrary user strings, so the `;` separator other MSB_* vars use
+/// is unsafe — they collide with realistic shell input. `0x1F` is
+/// purpose-built for this and absent from any printable string.
+pub const HANDOFF_INIT_SEP: char = '\x1f';
+
+/// String form of [`HANDOFF_INIT_SEP`] for use with `&str`-friendly
+/// APIs like `[T]::join`. Avoids per-call `char.to_string()` allocations
+/// on the host's encoder side.
+pub const HANDOFF_INIT_SEP_STR: &str = "\x1f";
+
+/// Environment variable selecting a guest init binary for PID 1 handoff.
+///
+/// When set, agentd performs initial setup (mounts, runtime dirs), then
+/// forks. The parent execs the binary at this path, becoming the new
+/// PID 1. The child stays alive as a normal grandchild process serving
+/// host requests over virtio-serial.
+///
+/// Format: bare absolute path inside the guest rootfs, or the literal
+/// sentinel [`HANDOFF_INIT_AUTO`] which triggers a candidate probe in
+/// agentd (see [`HANDOFF_INIT_AUTO_CANDIDATES`]).
+///
+/// Examples:
+/// - `MSB_HANDOFF_INIT=/lib/systemd/systemd`
+/// - `MSB_HANDOFF_INIT=auto`
+pub const ENV_HANDOFF_INIT: &str = "MSB_HANDOFF_INIT";
+
+/// Sentinel value for [`ENV_HANDOFF_INIT`] requesting auto-detection.
+///
+/// When the env var matches this exact string, agentd probes
+/// [`HANDOFF_INIT_AUTO_CANDIDATES`] in order and uses the first path
+/// that exists and is executable. If none match, boot fails with a
+/// clear error in `kernel.log` listing the paths it checked.
+pub const HANDOFF_INIT_AUTO: &str = "auto";
+
+/// Ordered list of init-binary paths agentd probes when
+/// [`ENV_HANDOFF_INIT`] is set to [`HANDOFF_INIT_AUTO`].
+///
+/// Order matters: the first match wins. The list covers the three
+/// well-known locations across major distros:
+/// - `/sbin/init` — BusyBox (Alpine), sysvinit, OpenRC's wrapper.
+///   Usually a symlink to the actual init on systemd distros, so it
+///   resolves naturally on Debian/Ubuntu too.
+/// - `/lib/systemd/systemd` — Debian, Ubuntu, derivatives.
+/// - `/usr/lib/systemd/systemd` — Fedora, RHEL, modern Debian.
+pub const HANDOFF_INIT_AUTO_CANDIDATES: &[&str] = &[
+    "/sbin/init",
+    "/lib/systemd/systemd",
+    "/usr/lib/systemd/systemd",
+];
+
+/// Argv list for the handoff init binary.
+///
+/// Format: entries separated by [`HANDOFF_INIT_SEP`] (ASCII `0x1F`).
+/// Empty or unset means the init is exec'd with `argv = [program]`.
+///
+/// Example:
+/// - `MSB_HANDOFF_INIT_ARGS=--unit=multi-user.target\x1f--log-level=warning`
+pub const ENV_HANDOFF_INIT_ARGS: &str = "MSB_HANDOFF_INIT_ARGS";
+
+/// Extra environment variables for the handoff init binary.
+///
+/// Format: `KEY=VAL` pairs separated by [`HANDOFF_INIT_SEP`]
+/// (ASCII `0x1F`). Each entry must contain at least one `=`. Merged on
+/// top of the inherited env.
+///
+/// Example:
+/// - `MSB_HANDOFF_INIT_ENV=container=microsandbox\x1fLANG=C.UTF-8`
+pub const ENV_HANDOFF_INIT_ENV: &str = "MSB_HANDOFF_INIT_ENV";
+
 /// Guest-side path to the CA certificate for TLS interception.
 ///
 /// Placed by the sandbox process via the runtime virtiofs mount.

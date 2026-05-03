@@ -41,6 +41,7 @@ uv run --project sdk/python python examples/python/fs-read-stream/main.py
 | `root-bind` | Bind-mounted local directory |
 | `root-block` | qcow2 disk image |
 | `rootfs-patch` | Pre-boot filesystem patches |
+| `init-handoff` | Hand PID 1 off to systemd |
 | `volume-named` | Named volumes shared across sandboxes |
 | `volume-disk` | Disk image volumes (raw / qcow2) at guest paths |
 | `snapshot-fork` | Snapshot a stopped sandbox and boot a fresh one from it |

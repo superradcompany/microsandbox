@@ -84,6 +84,7 @@ from microsandbox.types import (
     GiB,
     Image,
     ImageSource,
+    InitConfig,
     LogLevel,
     LogReadSource,
     LogSource,
@@ -187,6 +188,8 @@ __all__ = [
     "Patch",
     "PatchConfig",
     "AttachOptions",
+    # Init handoff
+    "InitConfig",
     # Metrics
     "SandboxMetrics",
     "all_sandbox_metrics",

@@ -503,6 +503,67 @@ fn idle_timeout(self, secs: u64) -> Self
 
 Auto-drain the sandbox after this many seconds of inactivity (no active exec sessions). Enforced on the host side.
 
+---
+
+#### init()
+
+```rust
+fn init(self, cmd: impl Into<PathBuf>) -> Self
+```
+
+Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time setup. The agent forks; the parent execs the init and becomes PID 1, the agent continues as a child process. See [Init handoff](/sandboxes/customization#init-handoff) for image picks, shutdown semantics, and tradeoffs.
+
+`cmd` is either an absolute path inside the guest rootfs or the literal `"auto"` (probes `/sbin/init`, `/lib/systemd/systemd`, `/usr/lib/systemd/systemd`). For init binaries that take argv or extra env (rare), use [`init_with`](#init_with).
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `impl Into<PathBuf>` | Absolute path inside the guest, or `"auto"` |
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("jrei/systemd-debian:12")
+    .init("auto")
+    .create()
+    .await?;
+```
+
+---
+
+#### init_with()
+
+```rust
+fn init_with(
+    self,
+    cmd: impl Into<PathBuf>,
+    f: impl FnOnce(InitOptionsBuilder) -> InitOptionsBuilder,
+) -> Self
+```
+
+Like [`init`](#init), but with a closure-builder for argv and env vars. Mirrors `exec_with` in shape.
+
+The builder exposes `arg`, `args`, `env`, and `envs`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `impl Into<PathBuf>` | Absolute path to the init binary inside the guest |
+| f | `FnOnce(InitOptionsBuilder) -> InitOptionsBuilder` | Closure populating argv and env |
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("jrei/systemd-debian:12")
+    .init_with("/lib/systemd/systemd", |i| i
+        .args(["--unit=multi-user.target"])
+        .env("container", "microsandbox"))
+    .create()
+    .await?;
+```
+
+Calling `init` or `init_with` more than once overwrites — different from `env`, which appends. The init is one-shot pre-boot.
+
 **Parameters**
 
 | Name | Type | Description |

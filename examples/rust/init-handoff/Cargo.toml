@@ -1,0 +1,13 @@
+[package]
+name = "init-handoff"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "init-handoff"
+path = "bin/main.rs"
+
+[dependencies]
+microsandbox = { path = "../../../crates/microsandbox" }
+tokio = { version = "1.42", features = ["full"] }

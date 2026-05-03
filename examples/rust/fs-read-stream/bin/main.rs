@@ -6,8 +6,6 @@ const FILE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Creating sandbox (image=alpine)");
-
     let sandbox = Sandbox::builder("fs-read-stream")
         .image("alpine")
         .cpus(1)
@@ -16,12 +14,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create()
         .await?;
 
-    // Create a 10 MiB file with random data inside the sandbox.
     sandbox
         .shell("dd if=/dev/urandom of=/tmp/data.bin bs=1M count=10")
         .await?;
 
-    // Stream the file back in chunks.
     let mut stream = sandbox.fs().read_stream("/tmp/data.bin").await?;
     let mut total_bytes = 0;
     let mut chunk_count = 0;
@@ -39,7 +35,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     sandbox.stop_and_wait().await?;
-    println!("Sandbox stopped.");
-
     Ok(())
 }

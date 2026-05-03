@@ -239,6 +239,34 @@ class ExecOptions:
         return d
 
 #--------------------------------------------------------------------------------------------------
+# Types: Init Handoff
+#--------------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class InitConfig:
+    """Guest init-handoff configuration.
+
+    Pass to ``Sandbox.create(init=...)`` when the init binary takes
+    argv or extra env vars. For the simple case, just pass the cmd
+    as a bare string: ``init="auto"``.
+
+    ``cmd`` is either an absolute path inside the guest rootfs or the
+    literal ``"auto"`` (probes /sbin/init, /lib/systemd/systemd,
+    /usr/lib/systemd/systemd).
+    """
+    cmd: str
+    args: tuple[str, ...] = ()
+    env: Mapping[str, str] = field(default_factory=dict)
+
+    def _to_dict(self) -> dict:
+        d: dict = {"cmd": self.cmd}
+        if self.args:
+            d["args"] = list(self.args)
+        if self.env:
+            d["env"] = dict(self.env)
+        return d
+
+#--------------------------------------------------------------------------------------------------
 # Types: Attach
 #--------------------------------------------------------------------------------------------------
 

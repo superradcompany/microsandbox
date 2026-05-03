@@ -26,6 +26,7 @@ git submodule update --init --recursive
 | `root-bind` | Create a sandbox from a local bind-mounted directory |
 | `root-block` | Create a sandbox from a qcow2 disk image |
 | `rootfs-patch` | Pre-boot filesystem modifications (files, dirs, appends) |
+| `init-handoff` | Hand PID 1 inside the guest off to systemd |
 | `volume-named` | Persistent named volume shared between sandboxes |
 | `volume-disk` | Mount raw / qcow2 disk images at arbitrary guest paths |
 | `fs-read-stream` | Stream a large file from the sandbox in chunks |

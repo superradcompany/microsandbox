@@ -29,6 +29,7 @@ export interface NativeBindings {
   readonly Snapshot: NapiSnapshotStatic;
   readonly SnapshotBuilder: NapiSnapshotBuilderCtor;
   readonly ExecOptionsBuilder: NapiExecOptionsBuilderCtor;
+  readonly InitOptionsBuilder: NapiInitOptionsBuilderCtor;
   readonly AttachOptionsBuilder: NapiAttachOptionsBuilderCtor;
   readonly DnsBuilder: NapiBuilderCtor<NapiDnsBuilder>;
   readonly TlsBuilder: NapiBuilderCtor<NapiTlsBuilder>;
@@ -94,6 +95,9 @@ export interface NapiSandboxBuilderSetters {
   registry(configure: (b: any) => any): this;
   replace(): this;
   entrypoint(cmd: string[]): this;
+  init(cmd: string, args?: string[]): this;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  initWith(cmd: string, configure: (b: any) => any): this;
   hostname(name: string): this;
   libkrunfwPath(path: string): this;
   user(user: string): this;
@@ -519,6 +523,14 @@ export interface NapiExecOptionsBuilder {
   tty(enabled: boolean): this;
   rlimit(resource: string, limit: number): this;
   rlimitRange(resource: string, soft: number, hard: number): this;
+}
+
+export type NapiInitOptionsBuilderCtor = new () => NapiInitOptionsBuilder;
+export interface NapiInitOptionsBuilder {
+  arg(arg: string): this;
+  args(args: string[]): this;
+  env(key: string, value: string): this;
+  envs(vars: Record<string, string>): this;
 }
 
 export type NapiAttachOptionsBuilderCtor = new () => NapiAttachOptionsBuilder;

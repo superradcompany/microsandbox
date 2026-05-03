@@ -71,6 +71,31 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub entrypoint: Option<String>,
 
+    /// Hand off PID 1 to this init binary inside the guest after agentd
+    /// finishes setup. Use `auto` to probe `/sbin/init`,
+    /// `/lib/systemd/systemd`, `/usr/lib/systemd/systemd` (first hit
+    /// wins), or supply an explicit absolute path.
+    #[arg(long, value_name = "PATH|auto")]
+    pub init: Option<String>,
+
+    /// Append an argv entry to the handoff init. Repeatable. Defaults
+    /// to `[<--init>]` when empty.
+    ///
+    /// `allow_hyphen_values` lets values like `--unit=multi-user.target`
+    /// pass through without clap trying to interpret them as flags.
+    #[arg(
+        long = "init-arg",
+        value_name = "STR",
+        allow_hyphen_values = true,
+        requires = "init"
+    )]
+    pub init_arg: Vec<String>,
+
+    /// Set an env var for the handoff init (KEY=VALUE). Repeatable.
+    /// Merged on top of the inherited env.
+    #[arg(long = "init-env", value_name = "KEY=VALUE", requires = "init")]
+    pub init_env: Vec<String>,
+
     /// Set the guest hostname (defaults to sandbox name).
     #[arg(short = 'H', long)]
     pub hostname: Option<String>,
@@ -244,6 +269,9 @@ impl SandboxOpts {
             || !self.script.is_empty()
             || !self.script_path.is_empty()
             || self.entrypoint.is_some()
+            || self.init.is_some()
+            || !self.init_arg.is_empty()
+            || !self.init_env.is_empty()
             || self.hostname.is_some()
             || self.user.is_some()
             || self.pull.is_some()
@@ -345,6 +373,31 @@ pub fn apply_sandbox_opts(
     }
     if let Some(ref pull) = opts.pull {
         builder = builder.pull_policy(parse_pull_policy(pull)?);
+    }
+
+    // --- Handoff init ---
+    // clap's `requires = "init"` already enforces that --init-arg /
+    // --init-env can't appear without --init, so we don't re-check here.
+    if let Some(ref init_path) = opts.init {
+        // `auto` is the magic sentinel that asks agentd to probe a
+        // candidate list inside the guest rootfs. Anything else must
+        // be an absolute path so the eventual execve can find it.
+        if init_path != microsandbox_protocol::HANDOFF_INIT_AUTO
+            && !std::path::Path::new(init_path).is_absolute()
+        {
+            anyhow::bail!("--init must be an absolute path or `auto`, got: {init_path}");
+        }
+        if opts.init_arg.is_empty() && opts.init_env.is_empty() {
+            builder = builder.init(init_path);
+        } else {
+            let mut init_envs = Vec::with_capacity(opts.init_env.len());
+            for entry in &opts.init_env {
+                let (k, v) = ui::parse_env(entry).map_err(anyhow::Error::msg)?;
+                init_envs.push((k, v));
+            }
+            let init_args = opts.init_arg.clone();
+            builder = builder.init_with(init_path, |i| i.args(init_args).envs(init_envs));
+        }
     }
 
     // --- Log level ---

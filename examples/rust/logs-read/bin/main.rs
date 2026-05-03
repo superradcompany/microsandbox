@@ -1,13 +1,9 @@
-//! Read captured exec.log entries from the sandbox.
-//!
-//! Creates a sandbox, runs a small script that emits stdout + stderr,
-//! then enumerates the captured entries via `Sandbox::logs()`.
+//! Read captured exec.log entries from a stopped sandbox.
 
 use microsandbox::sandbox::{LogOptions, LogSource, Sandbox};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    println!("Creating sandbox (image=alpine)");
     let sb = Sandbox::builder("logs-read")
         .image("alpine")
         .cpus(1)
@@ -16,18 +12,15 @@ async fn main() -> anyhow::Result<()> {
         .create()
         .await?;
 
-    // Generate some captured output across stdout and stderr.
-    println!("Running a small shell script to generate output");
     let _ = sb
         .shell("echo line one; echo line two; echo error line 1>&2; echo line three")
         .await?;
 
-    // Stop the sandbox so we read a closed log. exec.log persists on disk.
     sb.stop_and_wait().await?;
 
     let handle = Sandbox::get("logs-read").await?;
 
-    // Default sources: stdout + stderr + output (user-program output).
+    // Default sources are user-program output (stdout/stderr/output).
     let entries = handle.logs(&LogOptions::default())?;
     println!(
         "\n== default sources (stdout+stderr+output): {} entries",
@@ -37,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
         print_entry(e);
     }
 
-    // Include system markers + runtime/kernel diagnostics.
+    // Adding `System` mixes in lifecycle markers and runtime/kernel diagnostics.
     let with_system = handle.logs(&LogOptions {
         sources: vec![
             LogSource::Stdout,
@@ -52,7 +45,6 @@ async fn main() -> anyhow::Result<()> {
         with_system.len()
     );
 
-    // Tail the last entry.
     let tail = handle.logs(&LogOptions {
         tail: Some(1),
         ..Default::default()

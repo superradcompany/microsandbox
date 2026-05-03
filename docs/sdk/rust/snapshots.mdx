@@ -12,7 +12,7 @@ use microsandbox::snapshot::ExportOpts;
 ```
 
 <Note>
-  v1 is **disk-only and stopped-only**. Live snapshots and qcow2 backing chains are tracked as future work.
+  Snapshots are **disk-only and stopped-only**. Live snapshots and qcow2 backing chains are tracked as future work.
 </Note>
 
 ## SandboxBuilder
@@ -263,7 +263,7 @@ Bundle a snapshot into a `.tar.zst` archive. Computes and embeds the integrity h
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `with_parents` | `bool` | Walk the parent chain and include each ancestor (no-op in v1) |
+| `with_parents` | `bool` | Walk the parent chain and include each ancestor (no-op today) |
 | `with_image` | `bool` | Bundle the OCI image cache (`cache/{layers,fsmeta,vmdk}`) for offline transport |
 | `plain_tar` | `bool` | Skip zstd compression and write a plain `.tar` |
 
@@ -288,7 +288,7 @@ let h = Snapshot::get("after-pip-install").await?;
 
 h.digest();           // &str — sha256:...
 h.name();             // Option<&str>
-h.parent_digest();    // Option<&str> — None in v1
+h.parent_digest();    // Option<&str> — None today; populated when chains land
 h.image_ref();        // &str
 h.format();           // SnapshotFormat::Raw | Qcow2
 h.size_bytes();       // Option<u64>
@@ -323,7 +323,7 @@ pub enum SnapshotFormat {
 }
 ```
 
-v1 always emits `Raw`. The `Qcow2` variant is reserved for backing-chain checkpoints.
+Always emits `Raw` today. The `Qcow2` variant is reserved for backing-chain checkpoints.
 
 #### SnapshotVerifyReport
 

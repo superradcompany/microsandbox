@@ -13,6 +13,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use super::{
     config::SandboxConfig,
     exec::{Rlimit, RlimitResource},
+    init::{HandoffInit, InitOptionsBuilder},
     types::{
         ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource, VolumeMount,
     },
@@ -213,6 +214,60 @@ impl SandboxBuilder {
     /// Override the OCI image entrypoint.
     pub fn entrypoint(mut self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.config.entrypoint = Some(cmd.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Hand off PID 1 to a guest init binary after agentd's setup.
+    ///
+    /// `cmd` is either an absolute path inside the guest rootfs or
+    /// the literal `"auto"` (probes `/sbin/init`,
+    /// `/lib/systemd/systemd`, `/usr/lib/systemd/systemd`).
+    ///
+    /// ```ignore
+    /// .init("auto")
+    /// .init("/lib/systemd/systemd")
+    /// ```
+    ///
+    /// For init binaries that take argv or extra env (rare in
+    /// practice), use [`init_with`](Self::init_with).
+    ///
+    /// `init` and `entrypoint` are orthogonal: `init` is the guest's
+    /// PID 1; `entrypoint` is the user workload that agentd exec's
+    /// per request. They can be combined freely.
+    pub fn init(mut self, cmd: impl Into<PathBuf>) -> Self {
+        self.config.init = Some(HandoffInit {
+            cmd: cmd.into(),
+            args: Vec::new(),
+            env: Vec::new(),
+        });
+        self
+    }
+
+    /// Hand off PID 1 with a closure-builder for argv and env. Use this
+    /// when the init binary takes flags (e.g. systemd's
+    /// `--unit=multi-user.target`) or needs extra env vars.
+    ///
+    /// ```ignore
+    /// .init_with("/lib/systemd/systemd", |i| {
+    ///     i.args(["--unit=multi-user.target"])
+    ///      .env("container", "microsandbox")
+    /// })
+    /// ```
+    ///
+    /// Calling `.init` or `.init_with` more than once overwrites
+    /// (different from `.env`, which appends). The init is
+    /// pre-boot and one-shot.
+    pub fn init_with(
+        mut self,
+        cmd: impl Into<PathBuf>,
+        f: impl FnOnce(InitOptionsBuilder) -> InitOptionsBuilder,
+    ) -> Self {
+        let (args, env) = f(InitOptionsBuilder::default()).build();
+        self.config.init = Some(HandoffInit {
+            cmd: cmd.into(),
+            args,
+            env,
+        });
         self
     }
 
@@ -704,6 +759,10 @@ impl SandboxBuilder {
                     rlimit.hard
                 )));
             }
+        }
+
+        if let Some(spec) = &self.config.init {
+            super::init::validate(spec)?;
         }
 
         // Reject any two DiskImage mounts pointing at the same host file.

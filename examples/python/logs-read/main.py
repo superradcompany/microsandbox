@@ -6,8 +6,6 @@ from microsandbox import Sandbox
 
 
 async def main():
-    print("Creating sandbox (image=alpine)")
-
     sb = await Sandbox.create(
         "logs-read",
         image="alpine",
@@ -16,24 +14,22 @@ async def main():
         replace=True,
     )
 
-    # Generate some captured output across stdout and stderr.
-    print("Running a small shell script to generate output")
     await sb.shell(
         "echo line one; echo line two; echo error line 1>&2; echo line three"
     )
 
-    # Stop the sandbox so we read a closed log. exec.log persists on disk.
+    # exec.log is read after the sandbox is stopped; it persists on disk.
     await sb.stop_and_wait()
 
     handle = await Sandbox.get("logs-read")
 
-    # Default sources: stdout + stderr + output (user-program output).
+    # Default sources are user-program output (stdout/stderr/output).
     entries = await handle.logs()
     print(f"\n== default sources (stdout+stderr+output): {len(entries)} entries")
     for e in entries:
         print_entry(e)
 
-    # Include system markers + runtime/kernel diagnostics.
+    # Adding `system` mixes in lifecycle markers and runtime/kernel diagnostics.
     with_system = await handle.logs(
         sources=["stdout", "stderr", "output", "system"]
     )
@@ -42,7 +38,6 @@ async def main():
         f"{len(with_system)} entries"
     )
 
-    # Tail the last entry.
     tail = await handle.logs(tail=1)
     print(f"\n== tail=1: {len(tail)} entries")
     if tail:

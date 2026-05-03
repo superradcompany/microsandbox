@@ -12,7 +12,7 @@ import type { ExportOpts, SnapshotVerifyReport } from "microsandbox";
 ```
 
 <Note>
-  v1 is **disk-only and stopped-only**. Live snapshots and qcow2 backing chains are tracked as future work.
+  Snapshots are **disk-only and stopped-only**. Live snapshots and qcow2 backing chains are tracked as future work.
 </Note>
 
 ## SandboxBuilder
@@ -124,7 +124,7 @@ OCI manifest digest of the pinned image.
 readonly format: "raw" | "qcow2"
 ```
 
-On-disk format of the upper layer. Always `"raw"` in v1.
+On-disk format of the upper layer. Always `"raw"` today.
 
 ---
 
@@ -294,7 +294,7 @@ Bundle a snapshot into a `.tar.zst` archive. Computes and embeds the integrity h
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `withParents` | `boolean` | Walk the parent chain (no-op in v1) |
+| `withParents` | `boolean` | Walk the parent chain (no-op today) |
 | `withImage` | `boolean` | Bundle the OCI image cache for offline transport |
 | `plainTar` | `boolean` | Skip zstd compression and write a plain `.tar` |
 
@@ -319,7 +319,7 @@ const h = await Snapshot.get("after-pip-install");
 
 h.digest;          // string ("sha256:...")
 h.name;            // string | null
-h.parentDigest;    // string | null — null in v1
+h.parentDigest;    // string | null — null today
 h.imageRef;        // string
 h.format;          // "raw" | "qcow2"
 h.sizeBytes;       // bigint | null

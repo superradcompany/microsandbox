@@ -35,7 +35,7 @@ pub const SPARSE_SHA256_V1: &str = "msb-sparse-sha256-v1";
 
 /// On-disk format of the captured upper layer.
 ///
-/// v1 only ever produces `Raw`. The field exists so qcow2 chains
+/// Today only `Raw` is produced. The field exists so qcow2 chains
 /// (future) drop in without a schema migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -103,7 +103,7 @@ pub struct Manifest {
     /// Image the snapshot was taken from.
     pub image: ImageRef,
     /// Manifest digest of the parent snapshot, or `null` for a root.
-    /// v1 always writes `null`.
+    /// Always `null` today; populated once chained snapshots land.
     #[serde(deserialize_with = "deserialize_required_option")]
     pub parent: Option<String>,
     /// RFC 3339 timestamp when the snapshot was created.

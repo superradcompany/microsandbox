@@ -1,6 +1,4 @@
-//! Disk image volume example — attach raw and qcow2 host images at guest paths.
-//!
-//! See [examples/README.md](../../../README.md) for prerequisites and usage.
+//! Disk image volume — attach raw and qcow2 host images at guest paths.
 
 use std::path::PathBuf;
 

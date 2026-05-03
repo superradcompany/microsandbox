@@ -31,7 +31,7 @@ pub struct JsSnapshotHandle {
 #[derive(Default)]
 #[napi(object, js_name = "ExportOpts")]
 pub struct JsExportOpts {
-    /// Walk the parent chain and include each ancestor (no-op in v1).
+    /// Walk the parent chain and include each ancestor (no-op today).
     pub with_parents: Option<bool>,
     /// Bundle the OCI image cache for offline transport.
     pub with_image: Option<bool>,

@@ -13,6 +13,7 @@ mod exec_options_builder;
 mod fs;
 mod image;
 mod image_builder;
+mod init_options_builder;
 mod interface_overrides_builder;
 mod metrics;
 mod mount_builder;
