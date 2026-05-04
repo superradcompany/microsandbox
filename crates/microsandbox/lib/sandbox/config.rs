@@ -41,6 +41,12 @@ fn default_metrics_sample_interval_ms() -> Option<NonZero<u64>> {
         .metrics_sample_interval_ms
 }
 
+fn default_disable_metrics_sample() -> bool {
+    crate::config::config()
+        .sandbox_defaults
+        .disable_metrics_sample
+}
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -72,9 +78,16 @@ pub struct SandboxConfig {
     #[serde(default = "default_log_level")]
     pub log_level: Option<LogLevel>,
 
-    /// Metrics sampling interval in milliseconds. `None` (`null` in JSON) disables sampling: the runtime never spawns the sampler.
-    #[serde(default = "default_metrics_sample_interval_ms")]
+    /// Metrics sampling interval in milliseconds; `0` disables sampling.
+    #[serde(
+        default = "default_metrics_sample_interval_ms",
+        with = "crate::config::metrics_interval_serde"
+    )]
     pub metrics_sample_interval_ms: Option<NonZero<u64>>,
+
+    /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
+    #[serde(default = "default_disable_metrics_sample")]
+    pub disable_metrics_sample: bool,
 
     /// Working directory inside the sandbox.
     #[serde(default)]
@@ -224,6 +237,15 @@ pub struct SandboxConfig {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxConfig {
+    /// Resolve the effective metrics sampling interval, accounting for the disable override.
+    pub fn effective_metrics_interval(&self) -> Option<NonZero<u64>> {
+        if self.disable_metrics_sample {
+            None
+        } else {
+            self.metrics_sample_interval_ms
+        }
+    }
+
     /// Apply OCI image config as defaults. User-provided values take precedence.
     ///
     /// - `env`: image env vars form the base; user env vars override by key, otherwise append.
@@ -359,6 +381,7 @@ impl Default for SandboxConfig {
             memory_mib: default_memory_mib(),
             log_level: default_log_level(),
             metrics_sample_interval_ms: default_metrics_sample_interval_ms(),
+            disable_metrics_sample: default_disable_metrics_sample(),
             workdir: None,
             shell: None,
             scripts: HashMap::new(),

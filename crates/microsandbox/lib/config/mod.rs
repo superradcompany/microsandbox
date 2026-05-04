@@ -41,6 +41,20 @@ pub fn default_metrics_sample_interval() -> Option<NonZero<u64>> {
     NonZero::new(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
 }
 
+/// Serde adapter mapping the `metrics_sample_interval_ms` wire format `u64` to `Option<NonZero<u64>>` (`0` ↔ `None`).
+pub(crate) mod metrics_interval_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::num::NonZero;
+
+    pub fn serialize<S: Serializer>(v: &Option<NonZero<u64>>, s: S) -> Result<S::Ok, S::Error> {
+        v.map(|n| n.get()).unwrap_or(0).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<NonZero<u64>>, D::Error> {
+        Ok(NonZero::new(u64::deserialize(d)?))
+    }
+}
+
 /// Service name for microsandbox-managed registry credentials in the OS keyring.
 #[cfg(all(
     feature = "keyring",
@@ -141,9 +155,16 @@ pub struct SandboxDefaults {
     /// Default working directory inside the sandbox.
     pub workdir: Option<String>,
 
-    /// Default metrics sampling interval in milliseconds. `None` (`null` in JSON) disables sampling globally.
-    #[serde(default = "default_metrics_sample_interval")]
+    /// Default metrics sampling interval in milliseconds; `0` disables sampling globally.
+    #[serde(
+        default = "default_metrics_sample_interval",
+        with = "metrics_interval_serde"
+    )]
     pub metrics_sample_interval_ms: Option<NonZero<u64>>,
+
+    /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
+    #[serde(default)]
+    pub disable_metrics_sample: bool,
 }
 
 /// Registry configuration.
@@ -437,6 +458,7 @@ impl Default for SandboxDefaults {
             shell: "/bin/sh".into(),
             workdir: None,
             metrics_sample_interval_ms: default_metrics_sample_interval(),
+            disable_metrics_sample: false,
         }
     }
 }
@@ -944,8 +966,8 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_metrics_interval_null_disables() {
-        let json = r#"{"sandbox_defaults": {"metrics_sample_interval_ms": null}}"#;
+    fn test_deserialize_metrics_interval_zero_disables() {
+        let json = r#"{"sandbox_defaults": {"metrics_sample_interval_ms": 0}}"#;
         let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.sandbox_defaults.metrics_sample_interval_ms.is_none());
     }
@@ -961,27 +983,29 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_metrics_interval_zero_is_rejected() {
-        let json = r#"{"sandbox_defaults": {"metrics_sample_interval_ms": 0}}"#;
-        let err = serde_json::from_str::<GlobalConfig>(json).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("zero") || msg.contains("nonzero") || msg.contains("non-zero"),
-            "expected nonzero rejection, got: {msg}"
-        );
-    }
-
-    #[test]
     fn test_serialize_metrics_interval_disabled_round_trips() {
         let mut cfg = GlobalConfig::default();
         cfg.sandbox_defaults.metrics_sample_interval_ms = None;
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(
-            json.contains("\"metrics_sample_interval_ms\":null"),
-            "expected null serialization, got: {json}"
+            json.contains("\"metrics_sample_interval_ms\":0"),
+            "expected `0` serialization, got: {json}"
         );
         let round: GlobalConfig = serde_json::from_str(&json).unwrap();
         assert!(round.sandbox_defaults.metrics_sample_interval_ms.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_disable_metrics_sample_default_false() {
+        let cfg: GlobalConfig = serde_json::from_str("{}").unwrap();
+        assert!(!cfg.sandbox_defaults.disable_metrics_sample);
+    }
+
+    #[test]
+    fn test_deserialize_disable_metrics_sample_true() {
+        let json = r#"{"sandbox_defaults": {"disable_metrics_sample": true}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.sandbox_defaults.disable_metrics_sample);
     }
 
     #[test]

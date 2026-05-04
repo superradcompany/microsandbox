@@ -192,12 +192,22 @@ describe("SandboxBuilder.build", () => {
     expect(cfg.metricsSampleIntervalMs).toBe(5000);
   });
 
-  it("metricsSampleIntervalMs(null) disables sampling", () => {
+  it("metricsSampleIntervalMs(0) disables sampling", () => {
     const cfg = Sandbox.builder("x")
       .image("alpine")
-      .metricsSampleIntervalMs(null)
+      .metricsSampleIntervalMs(0)
       .build();
-    expect(cfg.metricsSampleIntervalMs).toBeNull();
+    expect(cfg.metricsSampleIntervalMs).toBe(0);
+  });
+
+  it("disableMetricsSample overrides metricsSampleIntervalMs", () => {
+    const cfg = Sandbox.builder("x")
+      .image("alpine")
+      .metricsSampleIntervalMs(5000)
+      .disableMetricsSample()
+      .build();
+    expect(cfg.metricsSampleIntervalMs).toBe(5000);
+    expect(cfg.disableMetricsSample).toBe(true);
   });
 });
 

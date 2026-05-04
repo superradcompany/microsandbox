@@ -746,8 +746,10 @@ export declare class SandboxBuilder {
   logLevel(level: string): this
   /** Suppress sandbox logs. */
   quietLogs(): this
-  /** Override the metrics sampling interval in milliseconds; pass `null` to disable. */
-  metricsSampleIntervalMs(ms?: number | undefined | null): this
+  /** Override the metrics sampling interval in milliseconds; pass `0` to disable. */
+  metricsSampleIntervalMs(ms: number): this
+  /** Force-disable metrics sampling regardless of `metricsSampleIntervalMs`. */
+  disableMetricsSample(): this
   /** Default working directory for commands. */
   workdir(path: string): this
   /** Shell binary used by `Sandbox.shell(...)`. */

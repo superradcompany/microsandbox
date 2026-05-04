@@ -94,24 +94,8 @@ Defaults applied to every sandbox unless overridden per-sandbox.
 | `memory_mib` | `512` | Guest memory in MiB |
 | `shell` | `"/bin/sh"` | Shell for interactive sessions and scripts |
 | `workdir` | `null` | Working directory inside the sandbox |
-| `metrics_sample_interval_ms` | `1000` | Runtime metrics sampling interval in milliseconds. Set to `null` to disable sampling entirely (no `sandbox_metric` rows; `Sandbox.metrics()` returns `MetricsDisabled`). |
-
-This is the default for all sandboxes. Per-sandbox overrides via the SDK
-builder (`SandboxBuilder::metrics_sample_interval` — pass `Duration::ZERO`
-to disable) take precedence.
-
-The runtime sampling interval is independent of the SDK `metrics_stream`
-polling interval — the former controls DB writes, the latter controls how
-often callers poll the DB.
-
-<Note>
-  Set the field to `null` to disable sampling. Omitting the field uses
-  the default (`1000` ms). Any positive integer enables sampling at
-  that interval; `0` is not accepted in JSON — use `null` instead.
-  Very small intervals are valid but produce a heavy stream of
-  `sandbox_metric` rows; intervals below `500` ms are discouraged in
-  production.
-</Note>
+| `metrics_sample_interval_ms` | `1000` | Runtime metrics sampling interval in milliseconds. Set to `0` to disable sampling. |
+| `disable_metrics_sample` | `false` | Force-disable metrics sampling regardless of `metrics_sample_interval_ms`. |
 
 ## `registries`
 

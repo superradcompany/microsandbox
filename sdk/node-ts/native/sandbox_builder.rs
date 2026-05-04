@@ -143,12 +143,19 @@ impl JsSandboxBuilder {
         self
     }
 
-    /// Override the metrics sampling interval in milliseconds; pass `null` to disable.
+    /// Override the metrics sampling interval in milliseconds; pass `0` to disable.
     #[napi(js_name = "metricsSampleIntervalMs")]
-    pub fn metrics_sample_interval_ms(&mut self, ms: Option<u32>) -> &Self {
+    pub fn metrics_sample_interval_ms(&mut self, ms: u32) -> &Self {
         let prev = self.take_inner();
-        let interval = ms.map(|n| Duration::from_millis(u64::from(n)));
-        self.inner = Some(prev.metrics_sample_interval(interval));
+        self.inner = Some(prev.metrics_sample_interval(Duration::from_millis(u64::from(ms))));
+        self
+    }
+
+    /// Force-disable metrics sampling regardless of `metricsSampleIntervalMs`.
+    #[napi(js_name = "disableMetricsSample")]
+    pub fn disable_metrics_sample(&mut self) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.disable_metrics_sample());
         self
     }
 

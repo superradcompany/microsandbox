@@ -72,13 +72,13 @@ pub struct SandboxArgs {
     #[arg(long, default_value_t = 512)]
     pub memory_mib: u32,
 
-    /// Metrics sampling interval in milliseconds; pass `null` to disable.
-    #[arg(
-        long = "metrics-sample-interval-ms",
-        default_value = "1000",
-        value_parser = parse_metrics_sample_interval,
-    )]
-    pub metrics_sample_interval_ms: Option<std::num::NonZero<u64>>,
+    /// Metrics sampling interval in milliseconds; `0` disables sampling.
+    #[arg(long = "metrics-sample-interval-ms", default_value_t = 1000)]
+    pub metrics_sample_interval_ms: u64,
+
+    /// Disable metrics sampling; overrides `--metrics-sample-interval-ms`.
+    #[arg(long = "disable-metrics-sample")]
+    pub disable_metrics_sample: bool,
 
     /// Root filesystem path for direct passthrough mounts.
     #[arg(long)]
@@ -198,24 +198,15 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
         forward_output: args.forward_output,
         idle_timeout_secs: args.idle_timeout,
         max_duration_secs: args.max_duration,
-        metrics_sample_interval_ms: args.metrics_sample_interval_ms,
+        metrics_sample_interval_ms: if args.disable_metrics_sample {
+            None
+        } else {
+            std::num::NonZero::new(args.metrics_sample_interval_ms)
+        },
         vm: vm_config,
     };
 
     microsandbox_runtime::vm::enter(config)
-}
-
-/// Parse `--metrics-sample-interval-ms`: positive integer or `null`/`none` to disable.
-fn parse_metrics_sample_interval(s: &str) -> Result<Option<std::num::NonZero<u64>>, String> {
-    if s.eq_ignore_ascii_case("null") || s.eq_ignore_ascii_case("none") {
-        return Ok(None);
-    }
-    let n: u64 = s
-        .parse()
-        .map_err(|e: std::num::ParseIntError| e.to_string())?;
-    std::num::NonZero::new(n)
-        .map(Some)
-        .ok_or_else(|| "interval must be non-zero (use 'null' to disable)".into())
 }
 
 /// Parse `--disk id:host_path:format[:ro]` entries into typed specs.
