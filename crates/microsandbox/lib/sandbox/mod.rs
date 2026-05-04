@@ -37,8 +37,11 @@ use microsandbox_image::{
 use crate::{
     MicrosandboxResult,
     agent::AgentClient,
-    db::entity::{
-        run as run_entity, sandbox as sandbox_entity, sandbox_rootfs as sandbox_rootfs_entity,
+    db::{
+        self,
+        entity::{
+            run as run_entity, sandbox as sandbox_entity, sandbox_rootfs as sandbox_rootfs_entity,
+        },
     },
     runtime::{ProcessHandle, SpawnMode, spawn_sandbox},
 };
@@ -196,8 +199,7 @@ impl Sandbox {
 
         // Initialize the database before any expensive image pull so we can
         // fail fast on conflicting persisted sandbox state.
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = db::init_global(Some(crate::config::config().database.max_connections)).await?;
         let sandbox_dir = crate::config::config().sandboxes_dir().join(&config.name);
         prepare_create_target(db, &config, &sandbox_dir).await?;
 
@@ -317,8 +319,7 @@ impl Sandbox {
 
     pub(super) async fn start_with_mode(name: &str, mode: SpawnMode) -> MicrosandboxResult<Self> {
         tracing::debug!(sandbox = name, ?mode, "start_with_mode: loading record");
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = db::init_global(Some(crate::config::config().database.max_connections)).await?;
         let model = load_sandbox_record_reconciled(db, name).await?;
         tracing::debug!(sandbox = name, status = ?model.status, "start_with_mode: current status");
 
@@ -378,8 +379,7 @@ impl Sandbox {
 
     /// Get a sandbox handle by name from the database.
     pub async fn get(name: &str) -> MicrosandboxResult<SandboxHandle> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
         let model = sandbox_entity::Entity::find()
             .filter(sandbox_entity::Column::Name.eq(name))
@@ -393,8 +393,7 @@ impl Sandbox {
 
     /// List all sandboxes from the database.
     pub async fn list() -> MicrosandboxResult<Vec<SandboxHandle>> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
         let sandboxes = sandbox_entity::Entity::find()
             .order_by_desc(sandbox_entity::Column::CreatedAt)
@@ -435,8 +434,7 @@ impl Sandbox {
 impl Sandbox {
     /// Remove this sandbox's persisted state after it has fully stopped.
     pub async fn remove_persisted(self) -> MicrosandboxResult<()> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
         remove_dir_if_exists(
             &crate::config::config()
@@ -1214,17 +1212,19 @@ pub(super) async fn update_sandbox_status(
     sandbox_id: i32,
     status: SandboxStatus,
 ) -> MicrosandboxResult<()> {
-    sandbox_entity::Entity::update_many()
-        .col_expr(sandbox_entity::Column::Status, Expr::value(status))
-        .col_expr(
-            sandbox_entity::Column::UpdatedAt,
-            Expr::value(chrono::Utc::now().naive_utc()),
-        )
-        .filter(sandbox_entity::Column::Id.eq(sandbox_id))
-        .exec(db)
-        .await?;
-
-    Ok(())
+    db::with_retry_transaction(db, "update_sandbox_status", |txn| async move {
+        sandbox_entity::Entity::update_many()
+            .col_expr(sandbox_entity::Column::Status, Expr::value(status))
+            .col_expr(
+                sandbox_entity::Column::UpdatedAt,
+                Expr::value(chrono::Utc::now().naive_utc()),
+            )
+            .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+            .exec(&txn)
+            .await?;
+        Ok((txn, ()))
+    })
+    .await
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1242,7 +1242,7 @@ pub(super) async fn update_sandbox_status(
 /// from updating the database on exit are cleaned up without blocking the
 /// main path.
 pub async fn reap_stale_sandboxes() -> MicrosandboxResult<()> {
-    let db = crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+    let db = db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
     let stale = sandbox_entity::Entity::find()
         .filter(
@@ -1742,20 +1742,25 @@ async fn insert_sandbox_record(
     db: &sea_orm::DatabaseConnection,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<i32> {
-    let now = chrono::Utc::now().naive_utc();
     let config_json = serde_json::to_string(config)?;
 
-    let model = sandbox_entity::ActiveModel {
-        name: Set(config.name.clone()),
-        config: Set(config_json),
-        status: Set(SandboxStatus::Running),
-        created_at: Set(Some(now)),
-        updated_at: Set(Some(now)),
-        ..Default::default()
-    };
-
-    let result = sandbox_entity::Entity::insert(model).exec(db).await?;
-    Ok(result.last_insert_id)
+    db::with_retry_transaction(db, "insert_sandbox_record", |txn| {
+        let config_json = config_json.clone();
+        async move {
+            let now = chrono::Utc::now().naive_utc();
+            let model = sandbox_entity::ActiveModel {
+                name: Set(config.name.clone()),
+                config: Set(config_json),
+                status: Set(SandboxStatus::Running),
+                created_at: Set(Some(now)),
+                updated_at: Set(Some(now)),
+                ..Default::default()
+            };
+            let result = sandbox_entity::Entity::insert(model).exec(&txn).await?;
+            Ok((txn, result.last_insert_id))
+        }
+    })
+    .await
 }
 
 async fn persist_oci_manifest_pin(
@@ -1763,16 +1768,11 @@ async fn persist_oci_manifest_pin(
     sandbox_id: i32,
     manifest_digest: &str,
 ) -> MicrosandboxResult<()> {
-    let manifest_digest = manifest_digest.to_string();
-
-    db.transaction::<_, (), crate::MicrosandboxError>(|txn| {
-        Box::pin(async move { replace_oci_manifest_pin(txn, sandbox_id, &manifest_digest).await })
+    db::with_retry_transaction(db, "persist_oci_manifest_pin", |txn| async move {
+        replace_oci_manifest_pin(&txn, sandbox_id, manifest_digest).await?;
+        Ok((txn, ()))
     })
     .await
-    .map_err(|err| match err {
-        sea_orm::TransactionError::Connection(db_err) => db_err.into(),
-        sea_orm::TransactionError::Transaction(err) => err,
-    })
 }
 
 /// Pin a sandbox to its resolved OCI manifest.

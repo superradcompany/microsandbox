@@ -1,6 +1,6 @@
 [package]
 name = "microsandbox-db"
-description = "Shared database entity definitions for the microsandbox project."
+description = "Shared database entity definitions and connection helpers for the microsandbox project."
 version.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -13,3 +13,4 @@ path = "lib/lib.rs"
 
 [dependencies]
 sea-orm.workspace = true
+sqlx.workspace = true

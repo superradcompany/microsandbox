@@ -1,7 +1,9 @@
-//! Shared database entity definitions for the microsandbox project.
+//! Shared database entity definitions and connection helpers for the
+//! microsandbox project.
 //!
-//! This crate contains SeaORM entity models and status enums used by both
-//! `microsandbox` and `microsandbox-runtime`.
+//! Used by both `microsandbox` (host CLI) and `microsandbox-runtime`
+//! (in-VM supervisor). They share the same SQLite file, so the connection
+//! builder lives here to keep PRAGMAs in one place.
 
 #![warn(missing_docs)]
 
@@ -11,3 +13,5 @@
 
 #[allow(missing_docs)]
 pub mod entity;
+pub mod pool;
+pub mod retry;
