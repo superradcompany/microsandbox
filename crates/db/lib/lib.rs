@@ -11,7 +11,10 @@
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+pub mod connection;
 #[allow(missing_docs)]
 pub mod entity;
 pub mod pool;
 pub mod retry;
+
+pub use connection::{DbReadConnection, DbWriteConnection};
