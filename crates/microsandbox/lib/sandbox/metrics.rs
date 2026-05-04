@@ -64,10 +64,16 @@ impl Sandbox {
         &self,
         interval: Duration,
     ) -> impl futures::Stream<Item = MicrosandboxResult<SandboxMetrics>> + Send + 'static {
+        use futures::StreamExt;
+
+        if self.config.effective_metrics_interval().is_none() {
+            let name = self.config.name.clone();
+            return stream::once(async move { Err(MicrosandboxError::MetricsDisabled(name)) })
+                .left_stream();
+        }
+
         let db_id = self.db_id;
         let memory_limit_bytes = memory_limit_bytes(&self.config);
-        let sandbox_name = self.config.name.clone();
-        let metrics_disabled = self.config.effective_metrics_interval().is_none();
         let interval = if interval.is_zero() {
             Duration::from_millis(1)
         } else {
@@ -75,33 +81,20 @@ impl Sandbox {
         };
 
         stream::unfold(
-            (tokio::time::interval(interval), false, metrics_disabled),
-            move |(mut ticker, mut emitted, disabled)| {
-                let sandbox_name = sandbox_name.clone();
-                async move {
-                    if disabled {
-                        if emitted {
-                            return None;
-                        }
-                        emitted = true;
-                        return Some((
-                            Err(MicrosandboxError::MetricsDisabled(sandbox_name)),
-                            (ticker, emitted, disabled),
-                        ));
-                    }
-                    ticker.tick().await;
-                    let db = crate::db::init_global(Some(
-                        crate::config::config().database.max_connections,
-                    ))
-                    .await;
-                    let item = match db {
-                        Ok(db) => metrics_for_sandbox(db, db_id, memory_limit_bytes).await,
-                        Err(err) => Err(err),
-                    };
-                    Some((item, (ticker, emitted, disabled)))
-                }
+            tokio::time::interval(interval),
+            move |mut ticker| async move {
+                ticker.tick().await;
+                let db =
+                    crate::db::init_global(Some(crate::config::config().database.max_connections))
+                        .await;
+                let item = match db {
+                    Ok(db) => metrics_for_sandbox(db, db_id, memory_limit_bytes).await,
+                    Err(err) => Err(err),
+                };
+                Some((item, ticker))
             },
         )
+        .right_stream()
     }
 }
 
