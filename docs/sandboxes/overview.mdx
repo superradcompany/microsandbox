@@ -351,5 +351,5 @@ sb = await Sandbox.create(config)
 
 If you need to run setup logic, install packages, or inject files before a sandbox starts doing real work, there are two ways to do it without building a custom image:
 
-- **[Scripts](/sandboxes/customization#scripts)** are files mounted into the sandbox at `/.msb/scripts/` and added to `PATH`. Define them at creation time and call them by name with `exec()` or `shell()`. Good for multi-step setup procedures or named entry points.
-- **[Patches](/sandboxes/customization#patches)** modify the rootfs before the VM boots: write config files, copy directories from the host, create symlinks, append to existing files, etc. The base image stays untouched since patches go into the writable layer.
+- **[Scripts](/sandboxes/customize#scripts)** are files mounted into the sandbox at `/.msb/scripts/` and added to `PATH`. Define them at creation time and call them by name with `exec()` or `shell()`. Good for multi-step setup procedures or named entry points.
+- **[Patches](/sandboxes/customize#patches)** modify the rootfs before the VM boots: write config files, copy directories from the host, create symlinks, append to existing files, etc. The base image stays untouched since patches go into the writable layer.
