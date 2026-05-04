@@ -1,5 +1,5 @@
 ---
-title: Security model
+title: Security Model
 description: What the networking stack defends against
 icon: "shield-halved"
 ---
@@ -62,7 +62,7 @@ msb create python --name dev --no-dns-rebind-protection
 
 ## DNS-to-IP binding (TOCTOU)
 
-Even without rebinding tricks, a classic time-of-check/time-of-use race exists: an allowlisted domain resolves to an allowed IP when the policy is checked, then the guest looks it up again at connect time and reaches a different IP.
+Even without rebinding tricks, a classic time-of-check/time-of-use race exists. An allowlisted domain resolves to an allowed IP when the policy is checked. The guest then looks it up again at connect time and reaches a different IP.
 
 Domain-based policy rules close this by maintaining a pin set of observed DNS answers. A connection only matches a domain rule if its destination IP was actually returned as an answer to a DNS query for that domain from this sandbox. A guest that hard-codes an IP it didn't resolve through the interceptor can't slip past a domain-based allowlist.
 
@@ -70,7 +70,7 @@ The same mechanism gates host-scoped secret injection. When a `SecretEntry` is r
 
 ## DNS bypass surface
 
-DNS-based defenses (block list, rebind protection, domain pinning) only work on queries the interceptor sees. The gateway intercepts UDP/53 and TCP/53 directly, and DoT (TCP/853) when TLS interception is enabled. Alternative transports are either refused at the port layer (DoQ, mDNS, LLMNR, NetBIOS-NS) or indistinguishable from regular traffic (DoH on TCP/443), and tunneled DNS (VPN, SOCKS5 hostname mode, HTTP `CONNECT`) is carried inside the outer encrypted flow and never reaches the forwarder.
+DNS-based defenses (block list, rebind protection, domain pinning) only work on queries the interceptor sees. The gateway intercepts UDP/53 and TCP/53 directly, and DoT (TCP/853) when TLS interception is enabled. Alternative transports are either refused at the port layer (DoQ, mDNS, LLMNR, NetBIOS-NS) or indistinguishable from regular traffic (DoH on TCP/443). Tunneled DNS (VPN, SOCKS5 hostname mode, HTTP `CONNECT`) is carried inside the outer encrypted flow and never reaches the forwarder.
 
 For workloads where DNS integrity matters, pair DoT interception with a network policy that denies egress `UDP/53`, `TCP/53`, and `TCP/853` to anything except the gateway. Tunneled DNS is a network-layer concern: close it by restricting egress to an allowlist that excludes tunnel destinations. See [DNS](/networking/dns) for the transport-by-transport breakdown.
 

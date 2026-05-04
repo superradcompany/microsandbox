@@ -208,7 +208,7 @@ NetworkPolicy::builder()
 
 If you're coming from Docker and reach for `.allow_loopback()` to "let the sandbox talk to my host's localhost," that's the trap — you want `.allow_host()` instead. `.allow_loopback()` only fires for traffic *inside* the guest, which doesn't reach the policy gate under normal kernel routing anyway.
 
-`.deny_loopback()` does have a real use case: in `--net-default-egress allow` configurations, a process inside the guest could craft a packet bound to `eth0` with `dst=127.0.0.1`, route it past the guest kernel, and have smoltcp on the host land it on the host's loopback. `.deny_loopback()` blocks that vector. Default policies (with the implicit deny on egress) already cover this.
+`.deny_loopback()` does have a real use case. In `--net-default-egress allow` configurations, a process inside the guest could craft a packet bound to `eth0` with `dst=127.0.0.1`, route it past the guest kernel, and have smoltcp on the host land it on the host's loopback. `.deny_loopback()` blocks that vector. Default policies (with the implicit deny on egress) already cover this.
 
 If you want "everything near the sandbox" — guest loopback, link-local, and the host machine — `.allow_local()` is sugar for that triple. `Metadata` is deliberately excluded so cloud-IMDS isn't quietly exposed; opt in via `.allow_meta()` if you need it.
 

@@ -4,7 +4,7 @@ description: Inject scripts, modify the rootfs, and choose your own init
 icon: "scroll"
 ---
 
-Before a sandbox starts doing real work, you can prepare it three ways: **scripts** that bundle reusable commands, **patches** that modify the rootfs before the VM boots, and **init handoff** that lets you run a real init system (systemd, OpenRC, s6) as PID 1 instead of microsandbox's minimal agent. All three are defined at creation time and keep the base image untouched.
+Before a sandbox starts doing real work, you can prepare it three ways. **Scripts** bundle reusable commands. **Patches** modify the rootfs before the VM boots. **Init handoff** lets you run a real init system (systemd, OpenRC, s6) as PID 1 instead of microsandbox's minimal agent. All three are defined at creation time and keep the base image untouched.
 
 ## Scripts
 
