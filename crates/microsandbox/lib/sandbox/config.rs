@@ -1,6 +1,7 @@
 //! Sandbox configuration.
 
 use std::collections::{HashMap, HashSet};
+use std::num::NonZero;
 use std::path::PathBuf;
 
 use microsandbox_runtime::{logging::LogLevel, policy::SandboxPolicy};
@@ -33,7 +34,7 @@ fn default_log_level() -> Option<LogLevel> {
     crate::config::config().log_level
 }
 
-fn default_metrics_sample_interval_ms() -> u64 {
+fn default_metrics_sample_interval_ms() -> Option<NonZero<u64>> {
     crate::config::config()
         .sandbox_defaults
         .metrics_sample_interval_ms
@@ -70,9 +71,9 @@ pub struct SandboxConfig {
     #[serde(default = "default_log_level")]
     pub log_level: Option<LogLevel>,
 
-    /// Metrics sampling interval in milliseconds. `0` disables sampling entirely.
+    /// Metrics sampling interval in milliseconds. `None` (`null` in JSON) disables sampling: the runtime never spawns the sampler.
     #[serde(default = "default_metrics_sample_interval_ms")]
-    pub metrics_sample_interval_ms: u64,
+    pub metrics_sample_interval_ms: Option<NonZero<u64>>,
 
     /// Working directory inside the sandbox.
     #[serde(default)]

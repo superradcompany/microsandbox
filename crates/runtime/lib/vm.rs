@@ -6,6 +6,7 @@
 //! `_exit()` on guest shutdown after running exit observers.
 
 use std::io::Write;
+use std::num::NonZero;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -77,8 +78,8 @@ pub struct Config {
     /// Maximum sandbox lifetime in seconds (None = no limit).
     pub max_duration_secs: Option<u64>,
 
-    /// Metrics sampling interval in milliseconds. `0` disables sampling entirely.
-    pub metrics_sample_interval_ms: u64,
+    /// Metrics sampling interval in milliseconds; `None` disables sampling.
+    pub metrics_sample_interval_ms: Option<NonZero<u64>>,
 
     /// VM hardware and rootfs configuration.
     pub vm: VmConfig,
@@ -432,26 +433,26 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         }));
     }
 
-    if config.metrics_sample_interval_ms == 0 {
-        tracing::debug!(
+    match config.metrics_sample_interval_ms {
+        None => tracing::debug!(
             sandbox = %config.sandbox_name,
-            "metrics sampling disabled (interval = 0); not spawning sampler"
-        );
-    } else {
-        let interval = Duration::from_millis(config.metrics_sample_interval_ms);
-        tracing::debug!(
-            sandbox = %config.sandbox_name,
-            interval_ms = config.metrics_sample_interval_ms,
-            "starting metrics sampler"
-        );
-        tokio_rt.spawn(run_metrics_sampler(
-            db.clone(),
-            config.sandbox_id,
-            pid,
-            interval,
-            network_metrics_handle
-                .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
-        ));
+            "metrics sampling disabled; not spawning sampler"
+        ),
+        Some(interval_ms) => {
+            tracing::debug!(
+                sandbox = %config.sandbox_name,
+                interval_ms = interval_ms.get(),
+                "starting metrics sampler"
+            );
+            tokio_rt.spawn(run_metrics_sampler(
+                db.clone(),
+                config.sandbox_id,
+                pid,
+                interval_ms,
+                network_metrics_handle
+                    .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
+            ));
+        }
     }
 
     // Spawn background tasks.

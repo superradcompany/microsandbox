@@ -94,7 +94,7 @@ Defaults applied to every sandbox unless overridden per-sandbox.
 | `memory_mib` | `512` | Guest memory in MiB |
 | `shell` | `"/bin/sh"` | Shell for interactive sessions and scripts |
 | `workdir` | `null` | Working directory inside the sandbox |
-| `metrics_sample_interval_ms` | `1000` | Runtime metrics sampling interval in milliseconds. `0` disables sampling entirely (no `sandbox_metric` rows; `Sandbox.metrics()` returns `MetricsDisabled`). |
+| `metrics_sample_interval_ms` | `1000` | Runtime metrics sampling interval in milliseconds. Set to `null` to disable sampling entirely (no `sandbox_metric` rows; `Sandbox.metrics()` returns `MetricsDisabled`). |
 
 This is the default for all sandboxes. Per-sandbox overrides via the SDK
 builder (`SandboxBuilder::metrics_sample_interval` — pass `Duration::ZERO`
@@ -105,9 +105,12 @@ polling interval — the former controls DB writes, the latter controls how
 often callers poll the DB.
 
 <Note>
-  Very small intervals are accepted but will produce a heavy stream of
-  `sandbox_metric` rows. The default `1000` ms is recommended for most
-  workloads; intervals below `500` ms are discouraged.
+  Set the field to `null` to disable sampling. Omitting the field uses
+  the default (`1000` ms). Any positive integer enables sampling at
+  that interval; `0` is not accepted in JSON — use `null` instead.
+  Very small intervals are valid but produce a heavy stream of
+  `sandbox_metric` rows; intervals below `500` ms are discouraged in
+  production.
 </Note>
 
 ## `registries`

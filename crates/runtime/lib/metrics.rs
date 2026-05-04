@@ -1,5 +1,6 @@
 //! Sandbox process metrics sampling and persistence.
 
+use std::num::NonZero;
 use std::time::{Duration, Instant};
 
 use microsandbox_db::entity::sandbox_metric as sandbox_metric_entity;
@@ -62,21 +63,14 @@ struct ProcessSample {
 //--------------------------------------------------------------------------------------------------
 
 /// Run the background metrics sampler until the sandbox process exits.
-///
-/// `interval` controls how often samples are persisted. Passing
-/// `Duration::ZERO` disables sampling and the function returns immediately.
 pub async fn run_metrics_sampler(
     db: DatabaseConnection,
     sandbox_id: i32,
     pid: u32,
-    interval: Duration,
+    interval_ms: NonZero<u64>,
     network_metrics: Option<Box<dyn NetworkMetrics>>,
 ) {
-    if interval.is_zero() {
-        tracing::debug!(sandbox_id, pid, "metrics sampler disabled (interval = 0)");
-        return;
-    }
-
+    let interval = Duration::from_millis(interval_ms.get());
     let pid = pid as i32;
 
     let mut previous = match sample_process(pid) {

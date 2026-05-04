@@ -49,9 +49,9 @@ impl Sandbox {
     ///
     /// Returns [`MicrosandboxError::MetricsDisabled`] when the sandbox
     /// was created with metrics sampling disabled
-    /// (`metrics_sample_interval_ms == 0`).
+    /// (`metrics_sample_interval_ms == None`).
     pub async fn metrics(&self) -> MicrosandboxResult<SandboxMetrics> {
-        if self.config.metrics_sample_interval_ms == 0 {
+        if self.config.metrics_sample_interval_ms.is_none() {
             return Err(MicrosandboxError::MetricsDisabled(self.config.name.clone()));
         }
         let db =
@@ -67,7 +67,7 @@ impl Sandbox {
         let db_id = self.db_id;
         let memory_limit_bytes = memory_limit_bytes(&self.config);
         let sandbox_name = self.config.name.clone();
-        let metrics_disabled = self.config.metrics_sample_interval_ms == 0;
+        let metrics_disabled = self.config.metrics_sample_interval_ms.is_none();
         let interval = if interval.is_zero() {
             Duration::from_millis(1)
         } else {
@@ -131,7 +131,7 @@ pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, Sandbox
         }
 
         let config: SandboxConfig = serde_json::from_str(&sandbox.config)?;
-        if config.metrics_sample_interval_ms == 0 {
+        if config.metrics_sample_interval_ms.is_none() {
             continue;
         }
         let snapshot = metrics_for_sandbox(db, sandbox.id, memory_limit_bytes(&config)).await?;

@@ -103,7 +103,7 @@ impl SandboxHandle {
         }
 
         let config = self.config()?;
-        if config.metrics_sample_interval_ms == 0 {
+        if config.metrics_sample_interval_ms.is_none() {
             return Err(crate::MicrosandboxError::MetricsDisabled(self.name.clone()));
         }
 

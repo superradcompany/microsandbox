@@ -536,7 +536,10 @@ fn sandbox_cli_args(
     args.push(OsString::from(config.memory_mib.to_string()));
     args.push(OsString::from("--metrics-sample-interval-ms"));
     args.push(OsString::from(
-        config.metrics_sample_interval_ms.to_string(),
+        config
+            .metrics_sample_interval_ms
+            .map(|ms| ms.get().to_string())
+            .unwrap_or_else(|| "null".to_string()),
     ));
 
     match &config.image {
@@ -938,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_cli_args_disabled_metrics_emit_zero() {
+    fn test_sandbox_cli_args_disabled_metrics_emit_null() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .metrics_sample_interval(std::time::Duration::ZERO)
@@ -950,8 +953,8 @@ mod tests {
         assert!(
             rendered
                 .windows(2)
-                .any(|pair| pair == ["--metrics-sample-interval-ms", "0"]),
-            "expected disabled metrics flag in {rendered:?}"
+                .any(|pair| pair == ["--metrics-sample-interval-ms", "null"]),
+            "expected disabled metrics to emit `null`; got {rendered:?}"
         );
     }
 

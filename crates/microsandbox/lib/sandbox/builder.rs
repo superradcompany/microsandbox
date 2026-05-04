@@ -166,7 +166,7 @@ impl SandboxBuilder {
             }
             return self;
         }
-        self.config.metrics_sample_interval_ms = ms as u64;
+        self.config.metrics_sample_interval_ms = std::num::NonZero::new(ms as u64);
         self
     }
 
@@ -810,7 +810,10 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(config.metrics_sample_interval_ms, 750);
+        assert_eq!(
+            config.metrics_sample_interval_ms,
+            std::num::NonZero::new(750)
+        );
     }
 
     #[test]
@@ -821,7 +824,7 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(config.metrics_sample_interval_ms, 0);
+        assert!(config.metrics_sample_interval_ms.is_none());
     }
 
     #[test]

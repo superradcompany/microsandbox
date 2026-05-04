@@ -5,6 +5,7 @@
 
 use std::{
     collections::HashMap,
+    num::NonZero,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -32,8 +33,13 @@ pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 5;
 /// Default database connection acquisition timeout in seconds.
 pub(crate) const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
 
-/// Default sandbox metrics sampling interval in milliseconds. `0` disables sampling entirely.
+/// Default sandbox metrics sampling interval in milliseconds.
 pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
+
+/// Default value for `metrics_sample_interval_ms` fields.
+pub fn default_metrics_sample_interval() -> Option<NonZero<u64>> {
+    NonZero::new(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
+}
 
 /// Service name for microsandbox-managed registry credentials in the OS keyring.
 #[cfg(all(
@@ -135,8 +141,9 @@ pub struct SandboxDefaults {
     /// Default working directory inside the sandbox.
     pub workdir: Option<String>,
 
-    /// Default metrics sampling interval in milliseconds. `0` disables sampling entirely.
-    pub metrics_sample_interval_ms: u64,
+    /// Default metrics sampling interval in milliseconds. `None` (`null` in JSON) disables sampling globally.
+    #[serde(default = "default_metrics_sample_interval")]
+    pub metrics_sample_interval_ms: Option<NonZero<u64>>,
 }
 
 /// Registry configuration.
@@ -429,7 +436,7 @@ impl Default for SandboxDefaults {
             memory_mib: DEFAULT_MEMORY_MIB,
             shell: "/bin/sh".into(),
             workdir: None,
-            metrics_sample_interval_ms: DEFAULT_METRICS_SAMPLE_INTERVAL_MS,
+            metrics_sample_interval_ms: default_metrics_sample_interval(),
         }
     }
 }
@@ -904,7 +911,7 @@ mod tests {
         assert_eq!(cfg.sandbox_defaults.shell, "/bin/sh");
         assert_eq!(
             cfg.sandbox_defaults.metrics_sample_interval_ms,
-            DEFAULT_METRICS_SAMPLE_INTERVAL_MS
+            NonZero::new(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
         );
         assert_eq!(cfg.log_level, None);
         assert_eq!(cfg.database.max_connections, 5);
@@ -924,6 +931,57 @@ mod tests {
         let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.sandbox_defaults.cpus, 4);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
+    }
+
+    #[test]
+    fn test_deserialize_metrics_interval_missing_uses_default() {
+        let json = r#"{"sandbox_defaults": {}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.sandbox_defaults.metrics_sample_interval_ms,
+            NonZero::new(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
+        );
+    }
+
+    #[test]
+    fn test_deserialize_metrics_interval_null_disables() {
+        let json = r#"{"sandbox_defaults": {"metrics_sample_interval_ms": null}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.sandbox_defaults.metrics_sample_interval_ms.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_metrics_interval_positive() {
+        let json = r#"{"sandbox_defaults": {"metrics_sample_interval_ms": 2500}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.sandbox_defaults.metrics_sample_interval_ms,
+            NonZero::new(2500)
+        );
+    }
+
+    #[test]
+    fn test_deserialize_metrics_interval_zero_is_rejected() {
+        let json = r#"{"sandbox_defaults": {"metrics_sample_interval_ms": 0}}"#;
+        let err = serde_json::from_str::<GlobalConfig>(json).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("zero") || msg.contains("nonzero") || msg.contains("non-zero"),
+            "expected nonzero rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_serialize_metrics_interval_disabled_round_trips() {
+        let mut cfg = GlobalConfig::default();
+        cfg.sandbox_defaults.metrics_sample_interval_ms = None;
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(
+            json.contains("\"metrics_sample_interval_ms\":null"),
+            "expected null serialization, got: {json}"
+        );
+        let round: GlobalConfig = serde_json::from_str(&json).unwrap();
+        assert!(round.sandbox_defaults.metrics_sample_interval_ms.is_none());
     }
 
     #[test]
