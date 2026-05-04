@@ -7,7 +7,7 @@
     "dark": "/images/microsandbox-banner-dark.svg",
     "href": "https://microsandbox.dev"
   },
-  "favicon": "/logo/light.svg",
+  "favicon": "/logo/favicon.png",
   "colors": {
     "primary": "#BF84FE",
     "light": "#BF84FE",

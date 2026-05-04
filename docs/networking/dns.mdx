@@ -135,7 +135,7 @@ msb create python --name safe-agent \
 
 </CodeGroup>
 
-If the guest aims a query at a specific resolver (`dig @1.1.1.1`, an `/etc/resolv.conf` entry inside the guest, or a library call that takes a resolver IP), the interceptor forwards the query to that resolver directly instead of redirecting it to the pinned defaults. The network policy still applies: the query only goes through if the destination IP is allowed.
+If the guest aims a query at a specific resolver (`dig @1.1.1.1`, an `/etc/resolv.conf` entry inside the guest, or a library call that takes a resolver IP), the interceptor forwards it to that resolver directly. The pinned defaults aren't used in this case. The network policy still applies: the query only goes through if the destination IP is allowed.
 
 ## DNS over alternative transports
 
@@ -150,7 +150,7 @@ The block list and rebind protection only apply to queries the gateway can see. 
 - DNS over QUIC (DoQ, UDP/853)
 - mDNS (UDP/5353), LLMNR (UDP/5355), NetBIOS-NS (UDP/137)
 
-**Not distinguishable from regular traffic** (operator must filter via network policy):
+**Not distinguishable from regular traffic** (you must filter via network policy):
 - DNS over HTTPS (DoH, TCP/443)
 
 For strict DNS integrity, combine DoT interception with a network policy denying egress `UDP/53`, `TCP/53`, and `TCP/853` to anything except the gateway.
