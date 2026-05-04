@@ -43,10 +43,10 @@
               "sandboxes/filesystem",
               "sandboxes/volumes",
               "sandboxes/secrets",
-              "sandboxes/customization",
-              "sandboxes/metrics",
-              "sandboxes/logs",
+              "sandboxes/customize",
               "sandboxes/snapshots",
+              "sandboxes/logs",
+              "sandboxes/metrics",
               "sandboxes/events"
             ]
           },

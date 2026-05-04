@@ -1,10 +1,10 @@
 ---
-title: Customization
+title: Customize
 description: Inject scripts, modify the rootfs, and choose your own init
-icon: "scroll"
+icon: "wand-magic-sparkles"
 ---
 
-Before a sandbox starts doing real work, you can prepare it three ways. **Scripts** bundle reusable commands. **Patches** modify the rootfs before the VM boots. **Init handoff** lets you run a real init system (systemd, OpenRC, s6) as PID 1 instead of microsandbox's minimal agent. All three are defined at creation time and keep the base image untouched.
+Before a sandbox starts doing real work, you can prepare it three ways. **Scripts** bundle reusable commands. **Patches** modify the rootfs before the VM boots. A **custom init system** (systemd, OpenRC, s6) can run as PID 1 instead of microsandbox's minimal agent. All three are defined at creation time and keep the base image untouched.
 
 ## Scripts
 
@@ -145,7 +145,7 @@ The patch builder is invoked through `SandboxBuilder.patch(p => ...)`. Each meth
 
 `opts` accepts `{ mode?: number; replace?: boolean }` for `text` / `file` / `copyFile`, `{ replace?: boolean }` for `copyDir` / `symlink`, and `{ mode?: number }` for `mkdir`.
 
-## Init handoff
+## Custom init system
 
 By default the microsandbox agent runs as PID 1 inside the guest — small, fast, and minimal. For workloads that expect a real init (systemd, OpenRC, s6, runit) — long-lived daemons, system service tests, dbus-using tools — you can hand PID 1 over to the init binary of your choice. The agent does the boot-time setup (mount filesystems, configure network, prepare runtime dirs), then forks. The parent execs your init and becomes PID 1; the agent continues as a normal child process serving host requests over the same channel.
 
