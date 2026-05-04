@@ -74,6 +74,13 @@
             "pages": [
               "configuration"
             ]
+          },
+          {
+            "group": "Changelog",
+            "icon": "rss",
+            "pages": [
+              "changelog/overview"
+            ]
           }
         ]
       },

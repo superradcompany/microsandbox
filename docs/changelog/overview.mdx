@@ -1,0 +1,180 @@
+---
+title: "Changelog"
+description: "Weekly summary of notable changes to microsandbox over the past three months."
+icon: "rss"
+---
+
+This changelog highlights notable changes to microsandbox from early February through early May 2026, grouped by week. Each entry links the merged pull request on GitHub.
+
+<Update label="May 4 – May 10, 2026" tags={["docs", "v0.4.4"]}>
+  ## Week of May 4
+
+  - **Snapshot docs unified across SDKs** — Aligned language order and filled in missing examples. ([#658](https://github.com/superradcompany/microsandbox/pull/658))
+</Update>
+
+<Update label="Apr 27 – May 3, 2026" tags={["release", "v0.4.4", "v0.4.3", "agentd", "snapshot", "logs", "cli", "networking"]}>
+  ## Week of April 27
+
+  ### Releases
+
+  - **v0.4.4** — Routine release. ([#655](https://github.com/superradcompany/microsandbox/pull/655))
+
+  ### Features
+
+  - **Guest init handoff** — `agentd` now hands off PID 1 to a guest init binary, improving signal handling and child reaping. ([#653](https://github.com/superradcompany/microsandbox/pull/653))
+  - **File-first disk snapshots** — Unified snapshot API across CLI, Rust, TypeScript, and Python. ([#652](https://github.com/superradcompany/microsandbox/pull/652))
+  - **Exec log capture** — Adds `exec.log` capture, `boot-error.json`, and a typed `ExecFailed` error. ([#650](https://github.com/superradcompany/microsandbox/pull/650))
+  - **Inline `--script`** — `msb` now accepts an inline `--script` flag; the file form is renamed to `--script-path`. ([#643](https://github.com/superradcompany/microsandbox/pull/643))
+  - **`msb` alias** — The packaging step installs an `msb` alias alongside the `microsandbox` CLI. ([#642](https://github.com/superradcompany/microsandbox/pull/642))
+
+  ### Fixes
+
+  - **`--no-net` air-gaps the guest** — Disabling networking now fully isolates the guest. ([#647](https://github.com/superradcompany/microsandbox/pull/647))
+  - **Documentation** — MDX parse error fixed in `sandboxes/customization`, favicon corrected, and style consistency tightened across pages. ([#659](https://github.com/superradcompany/microsandbox/pull/659), [#657](https://github.com/superradcompany/microsandbox/pull/657), [#660](https://github.com/superradcompany/microsandbox/pull/660))
+</Update>
+
+<Update label="Apr 20 – Apr 26, 2026" tags={["release", "v0.4.0", "v0.4.1", "v0.4.2", "v0.4.3", "networking", "sdk-node", "volumes"]}>
+  ## Week of April 20
+
+  ### Releases
+
+  - **v0.4.0**, **v0.4.1**, **v0.4.2**, **v0.4.3** — Major networking redesign and TypeScript SDK rewrite. ([#627](https://github.com/superradcompany/microsandbox/pull/627), [#638](https://github.com/superradcompany/microsandbox/pull/638), [#640](https://github.com/superradcompany/microsandbox/pull/640))
+
+  ### Breaking changes
+
+  - **TypeScript SDK redesign** — Builders are now native NAPI classes; the SDK ships with a builder API and bundled binaries. ([#623](https://github.com/superradcompany/microsandbox/pull/623), [#634](https://github.com/superradcompany/microsandbox/pull/634))
+
+  ### Features
+
+  - **Domain-rule enforcement** — Domain rules are now enforced consistently at the DNS, SNI, and policy layers. ([#633](https://github.com/superradcompany/microsandbox/pull/633))
+  - **Network policy redesign** — Per-rule direction in the policy schema, new `--net-rule` grammar, and policy + DNS builders with a lazy-parse error model. ([#618](https://github.com/superradcompany/microsandbox/pull/618), [#619](https://github.com/superradcompany/microsandbox/pull/619), [#620](https://github.com/superradcompany/microsandbox/pull/620))
+  - **Disk-image volume mounts** — Volumes can now be backed by disk images, with unified read-only handling. ([#609](https://github.com/superradcompany/microsandbox/pull/609))
+  - **`host.microsandbox.internal` alias** — New DNS alias for reaching the host from inside a sandbox. ([#602](https://github.com/superradcompany/microsandbox/pull/602))
+  - **Per-sandbox `libkrunfw_path`** — SDK now exposes a per-sandbox override. ([#599](https://github.com/superradcompany/microsandbox/pull/599))
+
+  ### Fixes
+
+  - **Domain & domain-suffix rules** — Improved enforcement. ([#605](https://github.com/superradcompany/microsandbox/pull/605))
+  - **Installer** — Reject unsupported glibc versions. ([#635](https://github.com/superradcompany/microsandbox/pull/635))
+  - **Node SDK packaging** — Ship `libkrunfw` under its canonical name in the npm platform package. ([#648](https://github.com/superradcompany/microsandbox/pull/648))
+
+  ### Docs
+
+  - **Networking docs aligned with new policy** — Adds the TypeScript builder. ([#616](https://github.com/superradcompany/microsandbox/pull/616))
+</Update>
+
+<Update label="Apr 13 – Apr 19, 2026" tags={["dns", "tls", "image", "agentd", "networking"]}>
+  ## Week of April 13
+
+  ### Breaking changes
+
+  - **Block-backed OCI rootfs** — Container rootfs is now backed by a VMDK with EROFS `fsmeta`. ([#548](https://github.com/superradcompany/microsandbox/pull/548))
+
+  ### Features
+
+  - **DNS over TCP/53 and DoT/853** — `agentd` intercepts both. ([#585](https://github.com/superradcompany/microsandbox/pull/585))
+  - **Trust host CAs inside sandbox guests** — Opt-in trust of the host CA bundle. ([#583](https://github.com/superradcompany/microsandbox/pull/583))
+  - **Custom TLS certs and insecure registries** — Image pulls now support custom TLS certs and insecure registries. ([#496](https://github.com/superradcompany/microsandbox/pull/496))
+  - **Secret injection in TS SDK** — TypeScript SDK gains the same secret injection options as the Rust SDK. ([#586](https://github.com/superradcompany/microsandbox/pull/586))
+  - **Sandbox-wide guest rlimits** — Set rlimits across the guest. ([#549](https://github.com/superradcompany/microsandbox/pull/549))
+  - **`AgentdConfig`** — `agentd` now reads env vars once at startup via `AgentdConfig`. ([#507](https://github.com/superradcompany/microsandbox/pull/507))
+  - **Keyring feature flag** — Adds an opt-in keyring feature. ([#563](https://github.com/superradcompany/microsandbox/pull/563))
+
+  ### Fixes
+
+  - **macOS DNS resolver** — Fetch nameservers via `SCDynamicStore` on macOS. ([#582](https://github.com/superradcompany/microsandbox/pull/582))
+  - **VM boot regression** — Restore VM boot and `agentd` Docker build. ([#579](https://github.com/superradcompany/microsandbox/pull/579))
+
+  ### Docs
+
+  - **Networking section split** — Networking docs split into overview, DNS, TLS, and security model pages. ([#584](https://github.com/superradcompany/microsandbox/pull/584))
+  - **Recipes section** — New recipes section, plus updated registry, CLI, and SDK docs. ([#474](https://github.com/superradcompany/microsandbox/pull/474))
+</Update>
+
+<Update label="Apr 6 – Apr 12, 2026" tags={["release", "v0.3.13", "v0.3.14", "sdk", "python", "tls", "docker"]}>
+  ## Week of April 6
+
+  ### Releases
+
+  - **v0.3.13**, **v0.3.14** — Python SDK GA and Docker image publishing. ([#554](https://github.com/superradcompany/microsandbox/pull/554), [#573](https://github.com/superradcompany/microsandbox/pull/573))
+
+  ### Features
+
+  - **Python SDK** — New Python SDK with `pyo3` bindings. ([#539](https://github.com/superradcompany/microsandbox/pull/539))
+  - **`execStreamWithConfig` for TS SDK** — Configurable streaming exec. ([#569](https://github.com/superradcompany/microsandbox/pull/569))
+  - **CLI entry points** — `microsandbox` CLI is now reachable via `cargo`, `npx`, and `pipx`. ([#570](https://github.com/superradcompany/microsandbox/pull/570))
+  - **Docker image publishing** — Release pipeline now publishes Docker images. ([#560](https://github.com/superradcompany/microsandbox/pull/560))
+  - **Interactive uninstall** — `msb self uninstall` adds an interactive multi-select. ([#551](https://github.com/superradcompany/microsandbox/pull/551))
+  - **Upstream CA trust** — Adds upstream CA trust and renames TLS CA config. ([#533](https://github.com/superradcompany/microsandbox/pull/533))
+
+  ### Fixes
+
+  - **TLS handshake races** — Drain buffered plaintext after TLS 1.3 handshake; resolve intermittent `CERT_NOT_YET_VALID` on fast-booting sandboxes. ([#542](https://github.com/superradcompany/microsandbox/pull/542), [#543](https://github.com/superradcompany/microsandbox/pull/543))
+  - **Self-heal SDK shims** — SDK regenerates shims when the `msb` binary is missing. ([#575](https://github.com/superradcompany/microsandbox/pull/575))
+  - **`msb exec` interactive mode** — Command argument is now optional. ([#540](https://github.com/superradcompany/microsandbox/pull/540))
+
+  ### Docs
+
+  - **Python SDK reference** — New snippets and reference pages. ([#553](https://github.com/superradcompany/microsandbox/pull/553))
+  - **AI Agents page** — Added under Getting Started, alongside reorganization. ([#541](https://github.com/superradcompany/microsandbox/pull/541))
+</Update>
+
+<Update label="Mar 30 – Apr 5, 2026" tags={["release", "v0.3.8", "v0.3.9", "v0.3.10", "v0.3.11", "v0.3.12", "rewrite", "filesystem"]}>
+  ## Week of March 30
+
+  ### Releases
+
+  - **v0.3.8 – v0.3.12** — Stabilization releases following the rewrite. ([#479](https://github.com/superradcompany/microsandbox/pull/479), [#489](https://github.com/superradcompany/microsandbox/pull/489), [#492](https://github.com/superradcompany/microsandbox/pull/492), [#501](https://github.com/superradcompany/microsandbox/pull/501), [#506](https://github.com/superradcompany/microsandbox/pull/506))
+
+  ### Breaking changes
+
+  - **microsandbox rewrite** — Rewritten with an embeddable SDK, `smoltcp` networking, and a composable filesystem. ([#455](https://github.com/superradcompany/microsandbox/pull/455))
+
+  ### Features
+
+  - **File-level volume mounts** — Sandboxes can now mount individual files. ([#504](https://github.com/superradcompany/microsandbox/pull/504))
+  - **Filesystem readStream in TS SDK** — Adds streaming reads. ([#521](https://github.com/superradcompany/microsandbox/pull/521))
+  - **`metricsStream` in TS SDK** — Attach to live metrics. ([#523](https://github.com/superradcompany/microsandbox/pull/523))
+  - **`--allow-private-ips`** — New CLI flag for `NetworkPolicy::allow_all`. ([#520](https://github.com/superradcompany/microsandbox/pull/520))
+  - **Per-command exec flags** — `msb run` accepts per-command exec flags; new AI Agents section in the README. ([#485](https://github.com/superradcompany/microsandbox/pull/485))
+  - **Filesystem benchmark harness** — Docker vs microsandbox harness. ([#525](https://github.com/superradcompany/microsandbox/pull/525))
+
+  ### Refactors
+
+  - **Reopen-on-demand filesystem** — Replaces per-inode FD pinning with a reopen-on-demand model. ([#505](https://github.com/superradcompany/microsandbox/pull/505))
+  - **Simplified sandbox APIs** — `exec`/`attach`/`image` gain `_with` variants. ([#484](https://github.com/superradcompany/microsandbox/pull/484))
+  - **Removed `msb shell`** — The legacy shell command was removed. ([#509](https://github.com/superradcompany/microsandbox/pull/509))
+
+  ### Fixes
+
+  - **TLS MITM proxy data loss** — Fixes data loss under parallel connections. ([#534](https://github.com/superradcompany/microsandbox/pull/534))
+  - **Body secret substitution** — Updates `Content-Length` after substitution. ([#530](https://github.com/superradcompany/microsandbox/pull/530))
+  - **Workdir validation** — Validate workdir at sandbox creation and default cwd to root. ([#475](https://github.com/superradcompany/microsandbox/pull/475))
+  - **Self-update** — Download the latest version bundle during `msb self update`. ([#490](https://github.com/superradcompany/microsandbox/pull/490))
+  - **Symlink xattr ops** — Fix symlink xattr ops and initialize `listxattr`. ([#493](https://github.com/superradcompany/microsandbox/pull/493))
+  - **VM logs split** — Route VM logs to `guest.log` and `host.log`. ([#488](https://github.com/superradcompany/microsandbox/pull/488))
+
+  ### Docs
+
+  - **Navigation restructure** — SDK reference is split by language. ([#535](https://github.com/superradcompany/microsandbox/pull/535))
+  - **Global `config.json` reference** — New page documenting global config. ([#511](https://github.com/superradcompany/microsandbox/pull/511))
+  - **Rust as primary SDK** — README examples now lead with Rust. ([#481](https://github.com/superradcompany/microsandbox/pull/481))
+</Update>
+
+<Update label="Feb 9 – Feb 15, 2026" tags={["security", "namespaces", "image"]}>
+  ## Week of February 9
+
+  ### Features
+
+  - **Optimized health check** — Reduced overhead on the sandbox health probe. ([#361](https://github.com/superradcompany/microsandbox/pull/361))
+  - **Image layer recovery** — Handle layers with missing parent directories for files. ([#351](https://github.com/superradcompany/microsandbox/pull/351))
+
+  ### Deprecations
+
+  - **Namespaces** — The namespaces concept is deprecated. ([#371](https://github.com/superradcompany/microsandbox/pull/371))
+
+  ### Fixes
+
+  - **Security advisories** — Address `RUSTSEC-2026-0007` and `RUSTSEC-2026-0009`. ([#374](https://github.com/superradcompany/microsandbox/pull/374))
+  - **Config defaults** — Deserialize null fields to default. ([#373](https://github.com/superradcompany/microsandbox/pull/373))
+</Update>
