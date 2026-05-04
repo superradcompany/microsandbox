@@ -85,6 +85,14 @@ impl SandboxHandle {
         self.updated_at
     }
 
+    /// Read captured output from `exec.log` for this sandbox.
+    ///
+    /// Same backing data as [`Sandbox::logs`](super::Sandbox::logs).
+    /// Works without starting the sandbox.
+    pub fn logs(&self, opts: &super::LogOptions) -> MicrosandboxResult<Vec<super::LogEntry>> {
+        super::logs::read_logs(&self.name, opts)
+    }
+
     /// Get the latest metrics snapshot for this sandbox.
     pub async fn metrics(&self) -> MicrosandboxResult<super::SandboxMetrics> {
         if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
@@ -147,6 +155,41 @@ impl SandboxHandle {
             handle: None,
             client: Arc::new(client),
         })
+    }
+
+    /// Snapshot this sandbox to a bare name under the default snapshots
+    /// directory (`~/.microsandbox/snapshots/<name>/`).
+    ///
+    /// The sandbox must be stopped (or crashed); running sandboxes are
+    /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. For
+    /// an explicit filesystem destination, see
+    /// [`snapshot_to`](Self::snapshot_to).
+    pub async fn snapshot(
+        &self,
+        name: &str,
+    ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
+        use super::super::snapshot::{Snapshot, SnapshotDestination};
+        Snapshot::builder(&self.name)
+            .destination(SnapshotDestination::Name(name.to_string()))
+            .create()
+            .await
+    }
+
+    /// Snapshot this sandbox to an explicit filesystem path.
+    ///
+    /// The sandbox must be stopped (or crashed); running sandboxes are
+    /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. For
+    /// the common case of writing under the default snapshots
+    /// directory, see [`snapshot`](Self::snapshot).
+    pub async fn snapshot_to(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
+        use super::super::snapshot::{Snapshot, SnapshotDestination};
+        Snapshot::builder(&self.name)
+            .destination(SnapshotDestination::Path(path.as_ref().to_path_buf()))
+            .create()
+            .await
     }
 
     /// Stop the sandbox gracefully (SIGTERM).

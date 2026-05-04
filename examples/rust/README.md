@@ -30,8 +30,10 @@ cargo run -p fs-read-stream
 | `root-bind` | `cargo run -p root-bind` | Bind-mounted local directory |
 | `root-block` | `cargo run -p root-block` | qcow2 disk image |
 | `rootfs-patch` | `cargo run -p rootfs-patch` | Pre-boot filesystem patches |
+| `init-handoff` | `cargo run -p init-handoff` | Hand PID 1 off to systemd |
 | `volume-named` | `cargo run -p volume-named` | Named volumes shared across sandboxes |
 | `volume-disk` | `cargo run -p volume-disk` | Disk image volumes (raw / qcow2) at guest paths |
+| `snapshot-fork` | `cargo run -p snapshot-fork` | Snapshot a stopped sandbox and boot a fresh one from it |
 | `fs-read-stream` | `cargo run -p fs-read-stream` | Streaming file read |
 | `metrics-stream` | `cargo run -p metrics-stream` | Streaming resource metrics |
 | `shell-attach` | `cargo run -p shell-attach` | Interactive shell attach |

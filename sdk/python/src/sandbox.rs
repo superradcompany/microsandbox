@@ -8,6 +8,7 @@ use crate::config::resolve_config;
 use crate::error::to_py_err;
 use crate::exec::{PyExecHandle, PyExecOutput};
 use crate::fs::PySandboxFs;
+use crate::logs::read_logs_blocking;
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
 use crate::sandbox_handle::PySandboxHandle;
@@ -358,6 +359,36 @@ impl PySandbox {
             let sandbox = Self::clone_sandbox(&inner).await?;
             let m = sandbox.metrics().await.map_err(to_py_err)?;
             Ok(convert_metrics(&m))
+        })
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Logs
+    //----------------------------------------------------------------------------------------------
+
+    /// Read captured output from `exec.log`.
+    ///
+    /// File-backed; works on running and stopped sandboxes alike.
+    /// Defaults to `stdout + stderr` sources when `sources` is `None`.
+    #[pyo3(signature = (tail = None, since_ms = None, until_ms = None, sources = None))]
+    fn logs<'py>(
+        &self,
+        py: Python<'py>,
+        tail: Option<usize>,
+        since_ms: Option<f64>,
+        until_ms: Option<f64>,
+        sources: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let name = sandbox.name().to_string();
+            let entries = tokio::task::spawn_blocking(move || {
+                read_logs_blocking(&name, tail, since_ms, until_ms, sources)
+            })
+            .await
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))??;
+            Ok(entries)
         })
     }
 

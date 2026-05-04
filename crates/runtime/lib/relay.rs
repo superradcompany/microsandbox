@@ -13,10 +13,11 @@ use std::collections::{HashMap, HashSet};
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::{Bytes, BytesMut};
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
-use microsandbox_protocol::exec::ExecSignal;
+use microsandbox_protocol::exec::{ExecRequest, ExecSignal, ExecStderr, ExecStdout};
 use microsandbox_protocol::message::{
     FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message, MessageType,
 };
@@ -26,7 +27,35 @@ use tokio::net::unix::OwnedReadHalf;
 use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::console::ConsoleSharedState;
+use crate::exec_log::{LogSource, LogWriter};
 use crate::{RuntimeError, RuntimeResult};
+
+//--------------------------------------------------------------------------------------------------
+// Types: capture
+//--------------------------------------------------------------------------------------------------
+
+/// Metadata recorded for each observed exec session. Populated by
+/// `client_reader_task` when an `ExecRequest` arrives, consumed by
+/// the ring reader's tap, and removed on `ExecExited`.
+#[derive(Debug, Clone, Copy)]
+struct SessionInfo {
+    /// Monotonic per-relay session id. Distinct from the protocol
+    /// correlation id, which can be reused across slot recycling
+    /// (each `msb exec` is a separate client; slot 0 is freed and
+    /// reassigned, so the same correlation id can appear twice
+    /// within a sandbox lifetime). The monotonic counter gives every
+    /// session a unique id within the relay's lifetime, which is
+    /// what users see in `exec.log` entries.
+    session_id: u64,
+
+    /// Whether the session was opened in pty mode (drives
+    /// `LogSource::Output` vs `Stdout` tagging).
+    is_pty: bool,
+}
+
+/// Per-session bookkeeping for the log tap. Keyed by protocol
+/// correlation id (which is what subsequent `Exec*` frames carry).
+type SessionRegistry = std::sync::Mutex<HashMap<u32, SessionInfo>>;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -72,6 +101,9 @@ pub struct AgentRelay {
     sock_path: PathBuf,
     /// Cached `core.ready` frame bytes (length-prefixed wire format).
     ready_frame: Option<Vec<u8>>,
+    /// Optional `exec.log` writer. When set, the ring reader task
+    /// captures the primary session's stdout/stderr to JSON Lines.
+    log_writer: Option<Arc<LogWriter>>,
 }
 
 /// A frame extracted from the byte stream, kept as raw bytes for transparent
@@ -117,7 +149,23 @@ impl AgentRelay {
             listener,
             sock_path: agent_sock_path.to_path_buf(),
             ready_frame: None,
+            log_writer: None,
         })
+    }
+
+    /// Attach a log writer for `exec.log` capture.
+    ///
+    /// Must be called before [`run()`](Self::run). When attached, the
+    /// ring reader captures the primary session's stdout/stderr into
+    /// the writer's JSON Lines file (see
+    /// `design/runtime/sandbox-logs.md` D3 / D3a). The
+    /// `--- sandbox started ---` marker is **not** written here — it
+    /// is written from [`wait_ready`](Self::wait_ready) once agentd
+    /// signals `core.ready`, so the marker only appears when the
+    /// guest has actually finished booting.
+    pub fn with_log_writer(mut self, writer: Arc<LogWriter>) -> Self {
+        self.log_writer = Some(writer);
+        self
     }
 
     /// Read frames from the console ring buffer until `core.ready` is
@@ -148,6 +196,15 @@ impl AgentRelay {
                 if msg.t == MessageType::Ready {
                     tracing::info!("agent relay: received core.ready from agentd");
                     self.ready_frame = Some(raw_data);
+                    // Now that agentd has signalled readiness, mark the
+                    // exec.log lifecycle. Doing this here (rather than
+                    // in `with_log_writer`) means the marker only shows
+                    // up when the guest actually came up — pre-relay
+                    // failures (mount errors, etc.) leave exec.log empty
+                    // and let `boot-error.json` carry the story alone.
+                    if let Some(ref writer) = self.log_writer {
+                        writer.write_system("--- sandbox started ---");
+                    }
                     return Ok(());
                 }
 
@@ -205,10 +262,32 @@ impl AgentRelay {
         let ring_writer_handle = tokio::spawn(ring_writer_task(shared_for_writer, agent_rx));
 
         // Spawn the ring reader task (tx_ring → guest frames → clients).
+        // When a log writer is attached, the reader also captures
+        // every exec session's stdout/stderr into `exec.log` (tagged
+        // with a relay-monotonic session id so readers can group or
+        // filter by session — the protocol correlation id can be
+        // reused across slot recycling, so we mint our own).
+        //
+        // `session_registry` is shared between the per-client reader
+        // (records pty flag and assigns the monotonic id from
+        // `next_session_id` on observed ExecRequest payloads) and
+        // the ring reader's tap (looks up the session info for each
+        // Exec* frame).
+        let session_registry: Arc<SessionRegistry> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        // Counter starts at 1 so 0 is unambiguously "not a session"
+        // for any out-of-band tooling that might compare against it.
+        let next_session_id: Arc<AtomicU64> = Arc::new(AtomicU64::new(1));
         let clients_for_reader = Arc::clone(&clients);
         let shared_for_reader = Arc::clone(&self.shared);
-        let ring_reader_handle =
-            tokio::spawn(ring_reader_task(shared_for_reader, clients_for_reader));
+        let log_writer_for_reader = self.log_writer.clone();
+        let registry_for_reader = Arc::clone(&session_registry);
+        let ring_reader_handle = tokio::spawn(ring_reader_task(
+            shared_for_reader,
+            clients_for_reader,
+            log_writer_for_reader,
+            registry_for_reader,
+        ));
 
         // Accept loop.
         loop {
@@ -288,6 +367,8 @@ impl AgentRelay {
                             let clients_clone = Arc::clone(&clients);
                             let used_slots_clone = Arc::clone(&used_slots);
                             let drain_tx_clone = drain_tx.clone();
+                            let registry_clone = Arc::clone(&session_registry);
+                            let next_id_clone = Arc::clone(&next_session_id);
 
                             tokio::spawn(client_reader_task(
                                 slot,
@@ -296,6 +377,8 @@ impl AgentRelay {
                                 clients_clone,
                                 used_slots_clone,
                                 drain_tx_clone,
+                                registry_clone,
+                                next_id_clone,
                             ));
                         }
                         Err(e) => {
@@ -311,6 +394,10 @@ impl AgentRelay {
                 }
             }
         }
+
+        // The "--- sandbox stopped ---" marker is written by the VMM's
+        // `on_exit` observer (runs before `_exit()`), so we don't
+        // double-write it here.
 
         // Clean up the socket file.
         let _ = std::fs::remove_file(&self.sock_path);
@@ -402,6 +489,69 @@ fn decode_frame(mut buf: Vec<u8>) -> RuntimeResult<Message> {
         .ok_or_else(|| RuntimeError::Custom("decode frame: incomplete frame".into()))
 }
 
+/// Tap a guest-originated frame into `exec.log` if it belongs to the
+/// primary session. Best-effort: any decode error is logged and
+/// dropped — capture failures must never disrupt the routing path.
+fn tap_frame_into_log(frame: &RawFrame, writer: &LogWriter, session_registry: &SessionRegistry) {
+    // Decode the message envelope to learn the type. The full CBOR
+    // decode is small (the envelope is a 3-field map; the heavy
+    // payload is left as opaque bytes in `Message::p`).
+    let msg = match decode_frame(frame.data.to_vec()) {
+        Ok(m) => m,
+        Err(err) => {
+            tracing::debug!(error = %err, "exec_log: skipping frame with decode error");
+            return;
+        }
+    };
+
+    // Look up the session info recorded by `client_reader_task` when
+    // the ExecRequest arrived. Returns `None` for frames whose
+    // session predates the relay's lifetime or whose ExecRequest
+    // we missed (defensive — shouldn't happen in normal operation).
+    let session_info = session_registry
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&msg.id).copied());
+
+    match msg.t {
+        // ExecRequest flows host→guest, observed in `client_reader_task`.
+        MessageType::ExecStdout => {
+            let Some(info) = session_info else { return };
+            // pty mode merges stdout+stderr into a single stream
+            // shipped over ExecStdout frames; tag as `Output`
+            // accordingly.
+            let tag = if info.is_pty {
+                LogSource::Output
+            } else {
+                LogSource::Stdout
+            };
+            match msg.payload::<ExecStdout>() {
+                Ok(p) => writer.write_chunk(tag, info.session_id, &p.data),
+                Err(err) => tracing::debug!(error = %err, "exec_log: stdout payload decode failed"),
+            }
+        }
+        MessageType::ExecStderr => {
+            // ExecStderr frames are pipe-mode-only by construction.
+            let Some(info) = session_info else { return };
+            match msg.payload::<ExecStderr>() {
+                Ok(p) => writer.write_chunk(LogSource::Stderr, info.session_id, &p.data),
+                Err(err) => tracing::debug!(error = %err, "exec_log: stderr payload decode failed"),
+            }
+        }
+        _ => {}
+    }
+
+    // Drop the registry entry on any terminal frame (ExecExited,
+    // ExecFailed) so we don't leak `SessionInfo` for the lifetime of
+    // the relay. The flag is set on both — checking it here covers
+    // every terminal exec frame uniformly.
+    if (frame.flags & FLAG_TERMINAL) != 0
+        && let Ok(mut registry) = session_registry.lock()
+    {
+        registry.remove(&msg.id);
+    }
+}
+
 /// Background task that pushes client frames into the rx_ring for the guest.
 /// Retries on full ring with backoff to avoid dropping frames.
 async fn ring_writer_task(shared: Arc<ConsoleSharedState>, mut rx: mpsc::Receiver<Vec<u8>>) {
@@ -430,9 +580,17 @@ async fn ring_writer_task(shared: Arc<ConsoleSharedState>, mut rx: mpsc::Receive
 
 /// Background task that reads frames from the tx_ring (written by the guest
 /// agent) and routes them to the correct client based on correlation ID range.
+///
+/// When `log_writer` is `Some`, the task also taps the primary session's
+/// `ExecStdout` / `ExecStderr` payloads into `exec.log`. The "primary"
+/// session is the first one whose `ExecRequest` arrives after the relay
+/// starts, recorded via CAS into `primary_session_id`. See
+/// `design/runtime/sandbox-logs.md` D3a.
 async fn ring_reader_task(
     shared: Arc<ConsoleSharedState>,
     clients: Arc<Mutex<HashMap<u32, ClientState>>>,
+    log_writer: Option<Arc<LogWriter>>,
+    session_registry: Arc<SessionRegistry>,
 ) {
     // Wrap the tx_wake read fd in AsyncFd for tokio-driven notification.
     let wake_fd = shared.tx_wake.as_raw_fd();
@@ -475,6 +633,14 @@ async fn ring_reader_task(
             let client_slot = client_slot.min(MAX_CLIENTS - 1);
 
             let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
+
+            // Tap every exec session's stdout/stderr into `exec.log`
+            // when a log writer is attached. The CBOR decode is only
+            // done when there is a writer, so the no-capture path is
+            // unchanged.
+            if let Some(writer) = log_writer.as_ref() {
+                tap_frame_into_log(&frame, writer, &session_registry);
+            }
 
             // Acquire lock briefly to get session bookkeeping + clone writer.
             // Then release before the async write to avoid blocking other clients.
@@ -558,6 +724,14 @@ async fn read_raw_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> RuntimeResul
 
 /// Background task that reads frames from a client and forwards them to the
 /// ring writer channel. Handles client disconnect with session cleanup.
+///
+/// The argument count is over the clippy default (7) because the task
+/// shares per-relay state across both tasks: client routing
+/// (`agent_tx`, `clients`, `used_slots`, `drain_tx`) plus the
+/// session registry / monotonic id atomic for the log capture path.
+/// Bundling them into a struct would be more boilerplate than the
+/// lint guards against — there's a single call site.
+#[allow(clippy::too_many_arguments)]
 async fn client_reader_task(
     slot: u32,
     mut reader: OwnedReadHalf,
@@ -565,6 +739,8 @@ async fn client_reader_task(
     clients: Arc<Mutex<HashMap<u32, ClientState>>>,
     used_slots: Arc<Mutex<HashSet<u32>>>,
     drain_tx: mpsc::Sender<()>,
+    session_registry: Arc<SessionRegistry>,
+    next_session_id: Arc<AtomicU64>,
 ) {
     loop {
         let frame = match read_raw_frame(&mut reader).await {
@@ -584,6 +760,32 @@ async fn client_reader_task(
         if is_shutdown {
             tracing::info!("agent relay: client slot={slot} sent core.shutdown, notifying drain");
             let _ = drain_tx.try_send(());
+        }
+
+        // Register each ExecRequest in the session registry: assign a
+        // relay-monotonic session id and record the pty flag. The
+        // monotonic id is what users see in `exec.log` entries — it's
+        // unique per session within the relay's lifetime, unlike the
+        // protocol correlation id which can be reused after slot
+        // recycling.
+        //
+        // FLAG_SESSION_START is set on both ExecRequest and FsRequest,
+        // so we decode the type to disambiguate.
+        if is_session_start
+            && let Ok(msg) = decode_frame(frame.data.to_vec())
+            && msg.t == MessageType::ExecRequest
+        {
+            let pty = msg.payload::<ExecRequest>().map(|r| r.tty).unwrap_or(false);
+            let session_id = next_session_id.fetch_add(1, Ordering::SeqCst);
+            if let Ok(mut registry) = session_registry.lock() {
+                registry.insert(
+                    frame.id,
+                    SessionInfo {
+                        session_id,
+                        is_pty: pty,
+                    },
+                );
+            }
         }
 
         // Only acquire the lock when session bookkeeping is needed.

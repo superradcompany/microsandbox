@@ -264,6 +264,58 @@ Stream resource metrics at a regular interval. The returned stream supports both
 
 ---
 
+#### logs()
+
+```typescript
+logs(opts?: LogReadOptions): Promise<LogEntry[]>
+```
+
+Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike — there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
+
+The default sources are `"stdout"`, `"stderr"`, and `"output"` (PTY-merged). Pass `"system"` to also include synthetic lifecycle markers and runtime/kernel diagnostic lines.
+
+```typescript
+import { Sandbox } from "microsandbox";
+
+const handle = await Sandbox.get("web");
+
+// Default — all user-program output, regardless of pipe/pty mode
+const entries = await handle.logs();
+
+for (const e of entries) {
+  const source =
+    e.source === "stdout" ? "OUT" :
+    e.source === "stderr" ? "ERR" :
+    e.source === "output" ? "PTY" :
+    "SYS";
+
+  console.log(
+    `[${e.timestamp.toISOString()}] ${source} ${e.sessionId}: ${e.text().trimEnd()}`
+  );
+}
+
+// Filtered: last 50 entries from the past hour, including system lines
+const recent = await handle.logs({
+  tail: 50,
+  since: new Date(Date.now() - 60 * 60 * 1000),
+  sources: ["stdout", "stderr", "output", "system"],
+});
+```
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| opts | [`LogReadOptions`](#logreadoptions) `?` | Filters: `tail`, `since`, `until`, `sources`. Omit for the default user-program sources. |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Promise<`[`LogEntry`](#logentry)`[]>` | Matching entries in chronological order |
+
+---
+
 #### removePersisted()
 
 ```typescript
@@ -342,6 +394,8 @@ Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter r
 | `workdir(path)` | Default working directory for commands |
 | `shell(shell)` | Shell binary used by `sandbox.shell(...)` |
 | `entrypoint(iter)` | Override the image entrypoint |
+| `init(cmd, args?)` | Hand off PID 1 to `cmd` (absolute path or `"auto"`) after agentd setup. See [Init handoff](/sandboxes/customization#init-handoff) |
+| `initWith(cmd, i => ...)` | Like `init` but with a closure-builder for argv and env (`.arg`, `.args`, `.env`, `.envs`) |
 | `hostname(name)` | Guest hostname |
 | `user(user)` | Default guest user |
 | `pullPolicy(policy)` | Image pull behavior |
@@ -378,6 +432,44 @@ Sandbox process log verbosity.
 | `'info'` | Info and higher |
 | `'trace'` | Most verbose - all diagnostic output |
 | `'warn'` | Warnings and errors only |
+
+### LogEntry
+
+A class wrapping one captured log entry. Returned by [`logs()`](#logs).
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| timestamp | `Date` | Wall-clock capture time on the host |
+| source | [`LogSource`](#logsource) | Where the chunk came from |
+| sessionId | `number \| null` | Relay-monotonic session id; `null` for `"system"` entries |
+| data | `Uint8Array` | The chunk's bytes (UTF-8 lossy decoded by default) |
+| `text()` | `string` | Convenience: UTF-8 decode of `data` (lossy — invalid bytes are replaced) |
+
+### LogReadOptions
+
+Filters passed to [`logs()`](#logs). All fields optional. Omit the argument entirely for the default sources (`stdout` + `stderr` + `output`).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| tail | `number?` | Show only the last N entries after other filters apply |
+| since | `Date?` | Inclusive lower bound on entry timestamp |
+| until | `Date?` | Exclusive upper bound on entry timestamp |
+| sources | [`LogSource`](#logsource)`[]?` | Sources to include. Omit = `["stdout", "stderr", "output"]`. Add `"system"` to merge runtime/kernel diagnostics. |
+
+### LogSource
+
+Tag indicating where a captured log entry came from. String literal type:
+
+```typescript
+type LogSource = "stdout" | "stderr" | "output" | "system";
+```
+
+| Value | Description |
+|-------|-------------|
+| `"stdout"` | Captured from a session's stdout (pipe mode — streams stayed separated) |
+| `"stderr"` | Captured from a session's stderr (pipe mode) |
+| `"output"` | Captured from a session running in PTY mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `"output"` rather than mislabelled as `"stdout"`. |
+| `"system"` | Synthetic entry: lifecycle markers in `exec.log` plus runtime/kernel diagnostic lines merged in at read time when `"system"` is requested. |
 
 ### MetricsStream
 
@@ -447,6 +539,7 @@ Handles from `Sandbox.get(name)` are **live** — they expose lifecycle methods 
 | createdAt | `Date \| null` | Creation timestamp |
 | updatedAt | `Date \| null` | Last update timestamp |
 | metrics() | `Promise<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
+| logs() | `Promise<`[`LogEntry`](#logentry)`[]>` | Read captured `exec.log` (works without starting) |
 | start() | `Promise<`[`Sandbox`](#instance-methods)`>` | Start in attached mode |
 | startDetached() | `Promise<`[`Sandbox`](#instance-methods)`>` | Start in detached mode |
 | connect() | `Promise<`[`Sandbox`](#instance-methods)`>` | Connect to a running sandbox without taking ownership |

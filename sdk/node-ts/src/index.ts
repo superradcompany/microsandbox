@@ -43,6 +43,23 @@ export {
   VolumeFsWriteSink,
 } from "./volume-fs.js";
 
+// Snapshots
+export { Snapshot } from "./snapshot.js";
+import { Snapshot as _Snapshot, type SnapshotBuilder as _SnapBT } from "./snapshot.js";
+/**
+ * Native fluent builder for a snapshot. `new SnapshotBuilder(sourceSandbox)`
+ * is equivalent to `Snapshot.builder(sourceSandbox)`.
+ */
+export const SnapshotBuilder = function SnapshotBuilder(
+  this: unknown,
+  sourceSandbox: string,
+) {
+  return _Snapshot.builder(sourceSandbox);
+} as unknown as new (sourceSandbox: string) => _SnapBT;
+export type SnapshotBuilder = _SnapBT;
+export { SnapshotHandle } from "./snapshot-handle.js";
+export type { ExportOpts, SnapshotVerifyReport } from "./snapshot.js";
+
 // Image management
 export { Image, ImageHandle } from "./image.js";
 export type {
@@ -50,6 +67,10 @@ export type {
   ImageDetail,
   ImageLayerDetail,
 } from "./image.js";
+
+// Logs
+export { LogEntry } from "./logs.js";
+export type { LogReadOptions, LogReadSource, LogSource } from "./logs.js";
 
 // Metrics streaming
 export { MetricsStream } from "./metrics-stream.js";
@@ -266,6 +287,7 @@ export const PatchBuilder = napi.PatchBuilder;
 export const RegistryConfigBuilder = napi.RegistryConfigBuilder;
 export const ImageBuilder = napi.ImageBuilder;
 export const ExecOptionsBuilder = napi.ExecOptionsBuilder;
+export const InitOptionsBuilder = napi.InitOptionsBuilder;
 export const AttachOptionsBuilder = napi.AttachOptionsBuilder;
 import type {
   NapiNetworkPolicyBuilder,

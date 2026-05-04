@@ -1,14 +1,9 @@
-//! Network policy — three modes built with the fluent `NetworkPolicy::builder()`.
-//!
-//! Demonstrates the default policy (public internet only), an
-//! allow-all override, and a custom policy that allows public egress
-//! plus a specific private host on tcp/443.
+//! Network policies: default, allow-all, and a custom mix.
 
 use microsandbox::{NetworkPolicy, Sandbox};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Default policy — public internet works, private/loopback denied.
     let sandbox = Sandbox::builder("net-policy-public")
         .image("alpine")
         .cpus(1)
@@ -24,7 +19,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     sandbox.stop_and_wait().await?;
 
-    // 2. Allow-all — everything reachable, including private networks.
     let allow_all = NetworkPolicy::builder().default_allow().build()?;
     let sandbox = Sandbox::builder("net-policy-all")
         .image("alpine")
@@ -42,7 +36,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     sandbox.stop_and_wait().await?;
 
-    // 3. Custom policy — public egress plus a specific private host on tcp/443.
     let custom = NetworkPolicy::builder()
         .default_deny()
         .egress(|e| e.allow_public())
@@ -64,7 +57,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     sandbox.stop_and_wait().await?;
 
-    // Cleanup.
     Sandbox::remove("net-policy-public").await?;
     Sandbox::remove("net-policy-all").await?;
     Sandbox::remove("net-policy-custom").await?;

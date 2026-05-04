@@ -42,6 +42,18 @@ pub enum MicrosandboxError {
     #[error("runtime error: {0}")]
     Runtime(String),
 
+    /// The sandbox process exited before the agent relay became
+    /// available. Carries the sandbox name and the structured
+    /// `boot-error.json` record so the CLI can render a useful inline
+    /// error with hints.
+    #[error("failed to start {name:?}: {}", .err.message)]
+    BootStart {
+        /// The name of the sandbox that failed to start.
+        name: String,
+        /// Structured failure record loaded from `boot-error.json`.
+        err: microsandbox_runtime::boot_error::BootError,
+    },
+
     /// A JSON serialization/deserialization error occurred.
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
@@ -57,6 +69,14 @@ pub enum MicrosandboxError {
     /// Command execution timed out.
     #[error("exec timed out after {0:?}")]
     ExecTimeout(std::time::Duration),
+
+    /// A command failed to spawn (binary not found, permission
+    /// denied, etc.). Distinct from a non-zero exit status: the
+    /// user code never ran. The CLI renders this as a styled
+    /// error block with hints; SDK consumers can branch on
+    /// [`microsandbox_protocol::exec::ExecFailureKind`].
+    #[error("exec failed: {}", .0.message)]
+    ExecFailed(microsandbox_protocol::exec::ExecFailed),
 
     /// A terminal operation failed.
     #[error("terminal error: {0}")]
@@ -97,6 +117,26 @@ pub enum MicrosandboxError {
     /// A rootfs patch operation failed.
     #[error("patch failed: {0}")]
     PatchFailed(String),
+
+    /// A snapshot artifact was not found.
+    #[error("snapshot not found: {0}")]
+    SnapshotNotFound(String),
+
+    /// A snapshot artifact already exists at the given path.
+    #[error("snapshot already exists: {0}")]
+    SnapshotAlreadyExists(String),
+
+    /// Snapshotting requires the source sandbox to be stopped.
+    #[error("snapshot source sandbox '{0}' is not stopped")]
+    SnapshotSandboxRunning(String),
+
+    /// The image referenced by a snapshot is not in the local cache.
+    #[error("snapshot image missing from cache: {0}")]
+    SnapshotImageMissing(String),
+
+    /// The snapshot artifact failed integrity verification.
+    #[error("snapshot integrity check failed: {0}")]
+    SnapshotIntegrity(String),
 
     /// A custom error message.
     #[error("{0}")]

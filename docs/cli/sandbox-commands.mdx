@@ -46,6 +46,9 @@ msb run -d --name worker python -- python worker.py
 | `--replace` | Replace an existing sandbox with the same name |
 | `-q`, `--quiet` | Suppress progress output |
 | `--entrypoint` | Override the image's default entrypoint command |
+| `--init` | Hand off PID 1 to this init binary (absolute path) inside the guest after agentd's setup. See [Init handoff](/sandboxes/customization#init-handoff) |
+| `--init-arg` | Argv entry appended to the handoff init. Repeatable. Defaults to `[<--init>]` when empty |
+| `--init-env` | Env var passed to the handoff init only (`KEY=VALUE`). Repeatable; merged on top of the inherited env |
 | `-H`, `--hostname` | Set the guest hostname (defaults to sandbox name) |
 | `-u`, `--user` | Run commands as the specified user (e.g. `nobody`, `1000`, `1000:1000`) |
 | `--pull` | When to pull the image: `always`, `if-missing` (default), `never` |
@@ -132,6 +135,62 @@ msb exec devbox -- ls -la /app
 
 <Tip>
   The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it captures output. No `-i` flag is needed.
+</Tip>
+
+## msb logs
+
+Read captured output from a sandbox. Each sandbox stores its captured stdio under `<sandbox-dir>/logs/exec.log` as JSON Lines, plus runtime/kernel diagnostics in `runtime.log`/`kernel.log`. The command works on running and stopped sandboxes alike — there is no protocol traffic, just a file read.
+
+```bash
+# Captured user-program output (default sources: stdout + stderr + output)
+msb logs devbox
+
+# Tail and follow
+msb logs devbox --tail 100
+msb logs devbox -f --grep ERROR
+
+# Time-bounded
+msb logs devbox --since 5m
+msb logs devbox --since 2026-04-30T20:00:00Z --until 5m
+
+# JSON Lines passthrough — feed to jq, vector, etc.
+msb logs devbox --json | jq 'select(.s == "stderr")'
+
+# Multi-session view: prefix each line with [id:N] so you can tell sessions apart
+msb logs devbox --show-id
+
+# Color each session's output a distinct color (implies --show-id)
+msb logs devbox --color-sessions
+
+# Include runtime/kernel diagnostics
+msb logs devbox --source system
+msb logs devbox --source all                # everything, chronologically merged
+```
+
+| Flag | Description |
+|------|-------------|
+| `--tail` | Show only the last N entries |
+| `--since` | Show entries at or after this time (RFC 3339 or relative `5m`/`2h`/`1d`) |
+| `--until` | Show entries strictly before this time (same formats) |
+| `-f`, `--follow` | Follow in real time (200 ms polling, rotation-aware) |
+| `--timestamps` | Prefix each line with the entry timestamp |
+| `--source` | Sources to include: `stdout`, `stderr`, `output`, `system`, `all`. Repeat or comma-separate. Default: `stdout,stderr,output` |
+| `--grep` | Client-side regex filter on the entry body |
+| `--json` | Emit raw JSON Lines without decoding (one entry per line) |
+| `--raw` | Opt into base64 encoding for non-UTF-8 bytes |
+| `--show-id` | Prefix each line with `[id:N]` (the session correlation id) |
+| `--color-sessions` | Color each session's lines a distinct color (implies `--show-id`) |
+| `--color` | ANSI handling: `auto` (default), `always`, `never` |
+| `--no-color` | Alias for `--color=never` |
+
+**Source tags** (the `s` field in `--json` output):
+
+- `stdout` / `stderr` — captured from the session's pipes when running in **pipe mode** (streams stay separated end to end).
+- `output` — captured from the session in **pty mode**. pty allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `output` rather than mislabelled as `stdout`.
+- `system` — synthetic lifecycle markers (`--- sandbox started ---` / `--- sandbox stopped ---`) plus diagnostic lines from `runtime.log`/`kernel.log` when `--source system` is requested.
+
+<Tip>
+  If a sandbox failed to start, `msb logs` prepends a styled error block reconstructed from `boot-error.json`. The block tells you the failure stage, errno, and a hint — even though no user-program output was ever captured.
 </Tip>
 
 ## msb ls

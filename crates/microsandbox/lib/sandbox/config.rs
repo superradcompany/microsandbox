@@ -10,6 +10,7 @@ use microsandbox_image::{ImageConfig, PullPolicy, RegistryAuth};
 
 use super::{
     exec::Rlimit,
+    init::HandoffInit,
     types::{Patch, RootfsSource, SecretsConfig, SshConfig, VolumeMount},
 };
 
@@ -136,6 +137,19 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub stop_signal: Option<String>,
 
+    /// Hand off PID 1 to a guest init binary after agentd's setup.
+    ///
+    /// When set, agentd performs initial setup (mounts, runtime
+    /// directories), then forks. The parent execs the configured init
+    /// (typically `systemd`, but any init works) and becomes PID 1.
+    /// The child stays alive as a normal grandchild, serving host
+    /// requests over virtio-serial.
+    ///
+    /// `None` (the default) means agentd remains PID 1 — the existing
+    /// minimal-init behaviour.
+    #[serde(default)]
+    pub init: Option<HandoffInit>,
+
     /// Pull policy for OCI images. Default: `IfMissing`.
     #[serde(default)]
     pub pull_policy: PullPolicy,
@@ -183,6 +197,15 @@ pub struct SandboxConfig {
     /// from the global cache. `None` for non-OCI rootfs sources.
     #[serde(default)]
     pub(crate) manifest_digest: Option<String>,
+
+    /// Path to a snapshot's `upper.ext4` file to copy into the new
+    /// sandbox's upper layer at create time, replacing the fresh-format
+    /// step.
+    ///
+    /// Transient: set by `SandboxBuilder::from_snapshot` and consumed
+    /// during `create_with_mode`. Never persisted.
+    #[serde(skip)]
+    pub(crate) snapshot_upper_source: Option<PathBuf>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -341,6 +364,7 @@ impl Default for SandboxConfig {
             user: None,
             labels: HashMap::new(),
             stop_signal: None,
+            init: None,
             pull_policy: PullPolicy::default(),
             policy: SandboxPolicy::default(),
             registry_auth: None,
@@ -349,6 +373,7 @@ impl Default for SandboxConfig {
             ca_certs: Vec::new(),
             replace_existing: false,
             manifest_digest: None,
+            snapshot_upper_source: None,
         }
     }
 }

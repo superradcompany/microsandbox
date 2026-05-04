@@ -4,9 +4,16 @@ import type {
   NapiSandboxHandle,
   NapiSandboxInfo,
 } from "./internal/napi.js";
+import {
+  LogEntry,
+  type LogReadOptions,
+  logEntryFromNapi,
+  logReadOptionsToNapi,
+} from "./logs.js";
 import { Sandbox } from "./sandbox.js";
 import type { SandboxStatus } from "./sandbox-status.js";
 import type { SandboxMetrics } from "./metrics.js";
+import { Snapshot } from "./snapshot.js";
 
 const READ_ONLY_MSG =
   "SandboxHandle is read-only — fetch a live handle via Sandbox.get(name) for lifecycle methods.";
@@ -77,6 +84,42 @@ export class SandboxHandle {
   async remove(): Promise<void> {
     const live = this.requireLive();
     await withMappedErrors(() => live.remove());
+  }
+
+  /**
+   * Read captured output from `exec.log` for this sandbox.
+   *
+   * Works without starting the sandbox. Defaults to user output:
+   * `stdout`, `stderr`, and pty-merged `output`. Pass
+   * `{ sources: ["system"] }` for runtime/kernel diagnostics or
+   * `{ sources: ["all"] }` for everything.
+   */
+  async logs(opts?: LogReadOptions): Promise<LogEntry[]> {
+    const live = this.requireLive();
+    const napiOpts = logReadOptionsToNapi(opts);
+    const raw = await withMappedErrors(() => live.logs(napiOpts));
+    return raw.map(logEntryFromNapi);
+  }
+
+  /**
+   * Snapshot this (stopped) sandbox under a bare name. Resolves under
+   * `~/.microsandbox/snapshots/<name>/`. For an explicit filesystem
+   * destination, see `snapshotTo`.
+   *
+   * The sandbox must be stopped (or crashed); running sandboxes are
+   * rejected with a `SnapshotSandboxRunning` error.
+   */
+  async snapshot(name: string): Promise<Snapshot> {
+    const live = this.requireLive();
+    const raw = await withMappedErrors(() => live.snapshot(name));
+    return new Snapshot(raw);
+  }
+
+  /** Snapshot this (stopped) sandbox to an explicit filesystem path. */
+  async snapshotTo(path: string): Promise<Snapshot> {
+    const live = this.requireLive();
+    const raw = await withMappedErrors(() => live.snapshotTo(path));
+    return new Snapshot(raw);
   }
 }
 

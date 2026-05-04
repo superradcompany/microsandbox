@@ -149,6 +149,7 @@ pub fn run(args: SandboxArgs, log_level: Option<LogLevel>) -> ! {
             None
         },
         rootfs_upper: args.rootfs_upper,
+        rootfs_upper_spec: None,
         rootfs_disk: if is_vmdk { None } else { args.rootfs_disk },
         rootfs_disk_format: if is_vmdk {
             None

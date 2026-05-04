@@ -13,7 +13,8 @@ use tokio::time::{self, Duration};
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::Ready;
 use microsandbox_protocol::exec::{
-    ExecExited, ExecRequest, ExecResize, ExecSignal, ExecStarted, ExecStderr, ExecStdin, ExecStdout,
+    ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
+    ExecStderr, ExecStdin, ExecStdout,
 };
 use microsandbox_protocol::fs::{FsData, FsRequest};
 use microsandbox_protocol::message::{Message, MessageType};
@@ -40,6 +41,10 @@ const SERIAL_READ_BUF_SIZE: usize = 64 * 1024;
 
 /// Maximum allowed input buffer size (frame size limit + 4 bytes for length prefix).
 const MAX_INPUT_BUF_SIZE: usize = MAX_FRAME_SIZE as usize + 4;
+
+/// Grace period between the SIGRTMIN+4 shutdown request and the
+/// SIGTERM fallback in the post-handoff shutdown path.
+const HANDOFF_SHUTDOWN_GRACE_SECS: u64 = 5;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -234,15 +239,25 @@ async fn handle_message(
                     sessions.insert(msg.id, session);
                 }
                 Err(e) => {
-                    // Send an immediate exit with code -1 on spawn failure.
-                    let reply = Message::with_payload(
-                        MessageType::ExecExited,
-                        msg.id,
-                        &ExecExited { code: -1 },
-                    )
-                    .map_err(|e| AgentdError::ExecSession(format!("encode exited: {e}")))?;
+                    // Send a typed `ExecFailed` so the host can render a
+                    // useful message + hint. `ExecSpawnFailed` already
+                    // carries the structured payload; other error
+                    // variants (free-form `ExecSession(_)` etc.) get
+                    // wrapped as `Other` with the message preserved.
+                    let payload = match &e {
+                        AgentdError::ExecSpawnFailed(p) => p.clone(),
+                        other => ExecFailed {
+                            kind: ExecFailureKind::Other,
+                            errno: None,
+                            errno_name: None,
+                            message: other.to_string(),
+                            stage: None,
+                        },
+                    };
+                    let reply = Message::with_payload(MessageType::ExecFailed, msg.id, &payload)
+                        .map_err(|e| AgentdError::ExecSession(format!("encode failed: {e}")))?;
                     codec::encode_to_buf(&reply, out_buf).map_err(|e| {
-                        AgentdError::ExecSession(format!("encode exited frame: {e}"))
+                        AgentdError::ExecSession(format!("encode failed frame: {e}"))
                     })?;
                     eprintln!("failed to spawn exec session {}: {e}", msg.id);
                 }
@@ -423,17 +438,33 @@ fn request_guest_poweroff() -> AgentdResult<()> {
         libc::sync();
     }
 
-    let _ = remount_root_readonly();
-
-    unsafe {
-        libc::sync();
+    if crate::handoff::is_pid_1() {
+        // PID 1 mode (no handoff): remount root RO and reboot.
+        let _ = remount_root_readonly();
+        unsafe {
+            libc::sync();
+        }
+        let ret = unsafe { libc::reboot(libc::RB_POWER_OFF) };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        return Ok(());
     }
 
-    let ret = unsafe { libc::reboot(libc::RB_POWER_OFF) };
-    if ret != 0 {
-        return Err(std::io::Error::last_os_error().into());
+    // Handoff mode: ask the new init (PID 1) to shut down.
+    // SIGRTMIN+4 is systemd's poweroff signal; sysvinit-derived inits
+    // typically default-handle it as a clean exit. Either way, PID 1
+    // exiting causes the kernel to panic the guest, which the VMM
+    // observes as a clean shutdown.
+    if crate::handoff::signal_init_shutdown().is_ok() {
+        std::thread::sleep(std::time::Duration::from_secs(HANDOFF_SHUTDOWN_GRACE_SECS));
     }
 
+    // SIGTERM fallback for inits that didn't act on SIGRTMIN+4. If
+    // both are ignored, we return Ok and let the host's outer
+    // VMM-process kill be the backstop — the VM still dies, just
+    // less gracefully.
+    let _ = crate::handoff::signal_init_term();
     Ok(())
 }
 

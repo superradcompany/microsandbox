@@ -17,9 +17,22 @@ use crate::ui;
 #[derive(Debug, Args)]
 pub struct RunArgs {
     /// Image to use (e.g. alpine, python, ./rootfs, ./disk.qcow2).
-    pub image: String,
+    ///
+    /// Mutually exclusive with `--snapshot`; one of the two is required.
+    #[arg(required_unless_present = "snapshot", conflicts_with = "snapshot")]
+    pub image: Option<String>,
+
+    /// Boot a fresh sandbox from a snapshot artifact (path or name).
+    ///
+    /// The snapshot pins the image; passing `--snapshot` is equivalent
+    /// to specifying the snapshot's image plus pre-populating the
+    /// upper layer from the artifact.
+    #[arg(long, value_name = "PATH_OR_NAME")]
+    pub snapshot: Option<String>,
 
     /// Start the sandbox in the background and print its name.
+    ///
+    /// Use `msb exec` to run commands in a detached sandbox.
     #[arg(short, long)]
     pub detach: bool,
 
@@ -39,7 +52,7 @@ pub struct RunArgs {
     #[arg(long)]
     pub detach_keys: Option<String>,
 
-    /// Command to run inside the sandbox (after --).
+    /// Command to run inside the sandbox in attached mode (after --).
     #[arg(last = true)]
     pub command: Vec<String>,
 
@@ -97,9 +110,9 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
 
 /// Run in an existing named sandbox — start if stopped, connect if running.
 async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
-    if args.sandbox.has_creation_flags() {
+    if let Some(ignored) = ignored_existing_inputs(&args) {
         ui::warn(&format!(
-            "sandbox '{name}' already exists; image and resource flags ignored (use --replace to recreate)"
+            "sandbox '{name}' already exists; {ignored} ignored (use --replace to recreate)"
         ));
     }
 
@@ -107,7 +120,9 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
 
     // Detach mode: ensure running and exit.
     if args.detach {
+        warn_detached_command_ignored(&name, &args);
         sandbox.detach().await;
+        println!("{name}");
         return Ok(());
     }
 
@@ -133,7 +148,14 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
 
 /// Create a new sandbox and run in it.
 async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<()> {
-    let builder = Sandbox::builder(&name).image(args.image.as_str());
+    let mut builder = Sandbox::builder(&name);
+    if let Some(ref snap) = args.snapshot {
+        builder = builder.from_snapshot(snap.clone());
+    } else if let Some(ref image) = args.image {
+        builder = builder.image(image.as_str());
+    } else {
+        anyhow::bail!("either an image or --snapshot is required");
+    }
     let builder = apply_sandbox_opts(builder, &args.sandbox)?;
 
     // Create sandbox with pull progress — select attached vs detached mode.
@@ -143,10 +165,15 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
         builder.create_with_pull_progress()?
     };
 
+    let display_label = args
+        .snapshot
+        .clone()
+        .or_else(|| args.image.clone())
+        .unwrap_or_else(|| name.clone());
     let mut display = if args.sandbox.quiet {
-        ui::PullProgressDisplay::quiet(&args.image)
+        ui::PullProgressDisplay::quiet(&display_label)
     } else {
-        ui::PullProgressDisplay::new(&args.image)
+        ui::PullProgressDisplay::new(&display_label)
     };
 
     while let Some(event) = progress.recv().await {
@@ -160,10 +187,9 @@ async fn run_new(name: String, is_named: bool, args: RunArgs) -> anyhow::Result<
 
     // Detach mode: just print the name and exit.
     if args.detach {
+        warn_detached_command_ignored(&name, &args);
         sandbox.detach().await;
-        if !is_named {
-            println!("{name}");
-        }
+        println!("{name}");
         return Ok(());
     }
 
@@ -282,4 +308,71 @@ fn handle_exit(exit_code: i32) -> anyhow::Result<()> {
         std::process::exit(exit_code);
     }
     Ok(())
+}
+
+/// Describe creation-only inputs that are ignored when reusing an
+/// existing named sandbox.
+fn ignored_existing_inputs(args: &RunArgs) -> Option<&'static str> {
+    match (args.snapshot.is_some(), args.sandbox.has_creation_flags()) {
+        (true, true) => Some("--snapshot and creation flags"),
+        (true, false) => Some("--snapshot"),
+        (false, true) => Some("creation flags"),
+        (false, false) => None,
+    }
+}
+
+/// Warn when a detached run includes an explicit command.
+fn warn_detached_command_ignored(name: &str, args: &RunArgs) {
+    if args.command.is_empty() {
+        return;
+    }
+
+    ui::warn(&format!(
+        "command after -- is not run in --detach mode; sandbox '{name}' is running in the background (use `msb exec {name} -- ...`)"
+    ));
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: RunArgs,
+    }
+
+    fn parse_run_args(args: &[&str]) -> RunArgs {
+        TestCli::parse_from(std::iter::once("msb").chain(args.iter().copied())).args
+    }
+
+    #[test]
+    fn existing_reuse_does_not_warn_for_required_image() {
+        let args = parse_run_args(&["--name", "box", "alpine", "--", "echo", "hello"]);
+
+        assert_eq!(ignored_existing_inputs(&args), None);
+    }
+
+    #[test]
+    fn existing_reuse_warns_for_snapshot() {
+        let args = parse_run_args(&["--name", "box", "--detach", "--snapshot", "clean"]);
+
+        assert_eq!(ignored_existing_inputs(&args), Some("--snapshot"));
+    }
+
+    #[test]
+    fn existing_reuse_warns_for_snapshot_and_creation_flags() {
+        let args = parse_run_args(&["--name", "box", "--memory", "1G", "--snapshot", "clean"]);
+
+        assert_eq!(
+            ignored_existing_inputs(&args),
+            Some("--snapshot and creation flags")
+        );
+    }
 }

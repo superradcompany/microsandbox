@@ -4,39 +4,63 @@ description: TypeScript SDK - Snapshot API reference
 icon: "camera"
 ---
 
+Disk-only snapshots of a stopped sandbox. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs; this page is the TypeScript SDK reference.
+
+```ts
+import { Sandbox, Snapshot, SnapshotHandle } from "microsandbox";
+import type { ExportOpts, SnapshotVerifyReport } from "microsandbox";
+```
+
 <Note>
-  Snapshots are coming soon and not yet available in the current SDK.
+  Snapshots are **disk-only and stopped-only**. Live snapshots and qcow2 backing chains are tracked as future work.
 </Note>
 
-See [Snapshots](/sandboxes/snapshots) for usage examples and patterns.
-
-## Sandbox methods
+## SandboxBuilder
 
 ---
 
-#### resume()
+#### fromSnapshot()
 
-```typescript
-resume(): Promise<void>
+```ts
+fromSnapshot(pathOrName: string): SandboxBuilder
 ```
 
-Resume the sandbox after a snapshot. The VM continues from exactly where it was paused.
+Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`image()`](/sdk/typescript/sandbox#image) — the snapshot already pins the image.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| pathOrName | `string` | Bare name (resolved under `~/.microsandbox/snapshots/`) or filesystem path to an artifact directory |
+
+---
+
+## SandboxHandle methods
 
 ---
 
 #### snapshot()
 
-```typescript
-snapshot(): Promise<Snapshot>
+```ts
+snapshot(name: string): Promise<Snapshot>
 ```
 
-Capture the full VM state: memory, CPU registers, filesystem, everything. The sandbox is paused during capture. Call [`resume()`](#resume) to continue running, or use the snapshot to fork new sandboxes.
+Snapshot this (stopped) sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). For an explicit filesystem destination, see [`snapshotTo()`](#snapshotto).
 
-**Returns**
+**Errors**
 
-| Type | Description |
-|------|-------------|
-| `Snapshot` | Handle to the captured state |
+- `SnapshotSandboxRunning` — the sandbox is not stopped
+- `SnapshotAlreadyExists` — destination exists (use the builder with `.force()` to overwrite)
+
+---
+
+#### snapshotTo()
+
+```ts
+snapshotTo(path: string): Promise<Snapshot>
+```
+
+Snapshot this (stopped) sandbox to an explicit filesystem path.
 
 ---
 
@@ -44,42 +68,153 @@ Capture the full VM state: memory, CPU registers, filesystem, everything. The sa
 
 ---
 
-#### restore()
+#### path
 
-```typescript
-restore(sandboxName: string, opts?: RestoreOptions): Promise<Sandbox>
+```ts
+readonly path: string
 ```
 
-Fork a new sandbox from this snapshot. The new sandbox starts exactly where the original was - no boot, no setup. Each fork gets its own copy-on-write filesystem.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| sandboxName | `string` | Name for the new sandbox |
-| opts? | `{ memoryMib?: number, cpus?: number }` | Optional config overrides |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| [`Sandbox`](/sdk/typescript/sandbox#instance-methods) | The forked sandbox, ready to accept commands |
+Path to the artifact directory.
 
 ---
 
-#### saveNamed()
+#### digest
 
-```typescript
-saveNamed(name: string): Promise<void>
+```ts
+readonly digest: string
 ```
 
-Persist this snapshot under a name so it survives beyond the lifetime of the original sandbox. Named snapshots can be loaded later with [`Snapshot.get()`](#snapshotget) to fork workers.
+Canonical content digest (`sha256:hex`) over the manifest bytes. The snapshot's identity.
 
-**Parameters**
+---
 
-| Name | Type | Description |
-|------|------|-------------|
-| name | `string` | Snapshot name (e.g. `"after-pip-install"`) |
+#### sizeBytes
+
+```ts
+readonly sizeBytes: bigint
+```
+
+Apparent size of the captured upper layer in bytes (the ext4 virtual size, sparse on disk).
+
+---
+
+#### imageRef
+
+```ts
+readonly imageRef: string
+```
+
+Image reference the snapshot was taken from.
+
+---
+
+#### imageManifestDigest
+
+```ts
+readonly imageManifestDigest: string
+```
+
+OCI manifest digest of the pinned image.
+
+---
+
+#### format
+
+```ts
+readonly format: "raw" | "qcow2"
+```
+
+On-disk format of the upper layer. Always `"raw"` today.
+
+---
+
+#### fstype
+
+```ts
+readonly fstype: string
+```
+
+Filesystem type inside the upper (e.g. `"ext4"`).
+
+---
+
+#### parent
+
+```ts
+readonly parent: string | null
+```
+
+Manifest digest of the parent snapshot, or `null` for a root.
+
+---
+
+#### createdAt
+
+```ts
+readonly createdAt: string
+```
+
+RFC 3339 timestamp when the snapshot was created.
+
+---
+
+#### labels
+
+```ts
+readonly labels: ReadonlyArray<readonly [string, string]>
+```
+
+User-supplied labels (sorted by key in canonical form).
+
+---
+
+#### verify()
+
+```ts
+verify(): Promise<SnapshotVerifyReport>
+```
+
+Recompute the upper layer's content hash and compare against the manifest. Walks data extents only, so a 4 GiB sparse file with a few MB of data verifies in milliseconds.
+
+```ts
+const report = await snap.verify();
+if (report.upper.kind === "verified") {
+  console.log(`hash matches: ${report.upper.digest}`);
+} else {
+  console.log("no integrity hash recorded");
+}
+```
+
+---
+
+## Snapshot.builder()
+
+```ts
+static builder(sourceSandbox: string): SnapshotBuilder
+```
+
+Start configuring a new snapshot. The fluent builder is what powers the CLI internally.
+
+```ts
+const snap = await Snapshot.builder("baseline")
+  .name("after-pip-install")        // bare name in default dir
+  .label("stage", "post-deps")
+  .force()                           // overwrite if it exists
+  .recordIntegrity()                 // hash the upper layer
+  .create();
+```
+
+**Builder methods**
+
+| Method | Description |
+|--------|-------------|
+| `.name(string)` | Bare name under the default snapshots directory |
+| `.path(string)` | Explicit filesystem path |
+| `.label(key, value)` | Add a `key=value` label (may be repeated) |
+| `.force()` | Overwrite an existing artifact at the destination |
+| `.recordIntegrity()` | Compute and record a content-integrity hash at creation |
+| `.build()` | Snapshot the accumulated configuration |
+| `.create()` | Build and execute |
 
 ---
 
@@ -87,54 +222,127 @@ Persist this snapshot under a name so it survives beyond the lifetime of the ori
 
 ---
 
-#### Snapshot.delete()
+#### Snapshot.open()
 
-```typescript
-static delete(name: string): Promise<void>
+```ts
+static open(pathOrName: string): Promise<Snapshot>
 ```
 
-Delete a named snapshot from disk.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| name | `string` | Snapshot name |
+Open an existing artifact by bare name (resolved under the default snapshots directory) or path. Cheap metadata validation only; does **not** read the upper file. Use [`verify()`](#verify) for content checks.
 
 ---
 
 #### Snapshot.get()
 
-```typescript
-static get(name: string): Promise<Snapshot>
+```ts
+static get(nameOrDigest: string): Promise<SnapshotHandle>
 ```
 
-Load a previously saved named snapshot.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| name | `string` | Snapshot name |
-
-**Returns**
-
-| Type | Description |
-|------|-------------|
-| `Snapshot` | The loaded snapshot |
+Look up a handle in the local index by name, digest, or path.
 
 ---
 
 #### Snapshot.list()
 
-```typescript
-static list(): Promise<Array<SnapshotInfo>>
+```ts
+static list(): Promise<SnapshotHandle[]>
 ```
 
-List all saved named snapshots.
+List indexed snapshots from the local DB cache.
 
-**Returns**
+---
 
-| Type | Description |
-|------|-------------|
-| `Array<SnapshotInfo>` | All named snapshots |
+#### Snapshot.listDir()
+
+```ts
+static listDir(dir: string): Promise<Snapshot[]>
+```
+
+Walk a directory and parse each subdirectory's manifest. Does not touch the index — useful for inspecting external snapshot collections (e.g. a mounted volume of artifacts that were never imported). Skips entries that don't look like snapshot artifacts.
+
+---
+
+#### Snapshot.remove()
+
+```ts
+static remove(pathOrName: string, opts?: { force?: boolean }): Promise<void>
+```
+
+Remove a snapshot artifact and its index row. Refuses if the snapshot has indexed children unless `force: true`.
+
+---
+
+#### Snapshot.reindex()
+
+```ts
+static reindex(dir?: string): Promise<number>
+```
+
+Walk `dir` (default: configured snapshots dir) and rebuild the local index. Returns the number of artifacts indexed.
+
+---
+
+#### Snapshot.export()
+
+```ts
+static export(nameOrPath: string, out: string, opts?: ExportOpts): Promise<void>
+```
+
+Bundle a snapshot into a `.tar.zst` archive. Computes and embeds the integrity hash in the bundled manifest if not already present.
+
+**ExportOpts**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `withParents` | `boolean` | Walk the parent chain (no-op today) |
+| `withImage` | `boolean` | Bundle the OCI image cache for offline transport |
+| `plainTar` | `boolean` | Skip zstd compression and write a plain `.tar` |
+
+---
+
+#### Snapshot.import()
+
+```ts
+static import(archive: string, dest?: string): Promise<SnapshotHandle>
+```
+
+Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity on the way in. Compression is detected from magic bytes.
+
+---
+
+## SnapshotHandle
+
+Lightweight handle backed by an index row. Returned by [`Snapshot.list()`](#snapshotlist) and [`Snapshot.get()`](#snapshotget).
+
+```ts
+const h = await Snapshot.get("after-pip-install");
+
+h.digest;          // string ("sha256:...")
+h.name;            // string | null
+h.parentDigest;    // string | null — null today
+h.imageRef;        // string
+h.format;          // "raw" | "qcow2"
+h.sizeBytes;       // bigint | null
+h.createdAt;       // Date
+h.path;            // string
+
+const snap = await h.open();              // metadata-validated
+await h.remove({ force: false });          // refuse if has children
+```
+
+---
+
+## Types
+
+```ts
+export interface ExportOpts {
+  withParents?: boolean;
+  withImage?: boolean;
+  plainTar?: boolean;
+}
+
+export type SnapshotVerifyReport =
+  | { digest: string; path: string; upper: { kind: "notRecorded" } }
+  | { digest: string; path: string;
+      upper: { kind: "verified"; algorithm: string; digest: string } };
+```

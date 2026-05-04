@@ -3,10 +3,12 @@ mod error;
 mod exec;
 mod fs;
 mod helpers;
+mod logs;
 mod metrics;
 mod sandbox;
 mod sandbox_handle;
 mod setup;
+mod snapshot;
 mod volume;
 
 use pyo3::prelude::*;
@@ -33,8 +35,11 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<volume::PyVolume>()?;
     m.add_class::<volume::PyVolumeHandle>()?;
     m.add_class::<volume::PyVolumeFs>()?;
+    m.add_class::<snapshot::PySnapshot>()?;
+    m.add_class::<snapshot::PySnapshotHandle>()?;
     m.add_class::<metrics::PyMetricsStream>()?;
     m.add_class::<metrics::PySandboxMetrics>()?;
+    m.add_class::<logs::PyLogEntry>()?;
     m.add_class::<sandbox::PyPullSession>()?;
     m.add_class::<exec::PyExecEvent>()?;
     m.add_class::<fs::PyFsEntry>()?;

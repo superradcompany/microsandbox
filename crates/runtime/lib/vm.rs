@@ -82,6 +82,26 @@ pub struct Config {
     pub vm: VmConfig,
 }
 
+/// Specification for the writable upper layer attached as virtio-blk.
+///
+/// Today the upper is always a flat raw ext4 file, so `format = Raw`
+/// and `backing` is empty. The shape is forward-compatible with
+/// qcow2 backing chains: when chains land, `format = Qcow2` and
+/// `backing` lists ancestor files that the VMM must also map. The
+/// runtime walks `backing` and attaches each as a read-only disk.
+#[derive(Debug, Clone)]
+pub struct UpperSpec {
+    /// Path to the head upper file. Mounted writable.
+    pub primary: PathBuf,
+    /// On-disk format. `Raw` today; `Qcow2` once chains land.
+    pub format: msb_krun::DiskImageFormat,
+    /// Ancestor files in the backing chain, oldest-first. Empty today.
+    pub backing: Vec<PathBuf>,
+    /// Whether the head file is read-only. Should be `false` for the
+    /// running sandbox's upper.
+    pub read_only: bool,
+}
+
 /// Specification for a disk-image volume mount attached to the guest.
 ///
 /// Each entry becomes one extra virtio-blk device. Agentd consumes the
@@ -136,7 +156,20 @@ pub struct VmConfig {
     pub rootfs_vmdk: Option<PathBuf>,
 
     /// Upper ext4 disk path for writable overlay (paired with rootfs_vmdk).
+    ///
+    /// Convenience field equivalent to `rootfs_upper_spec` with format
+    /// `Raw` and no backing chain. When `rootfs_upper_spec` is set, it
+    /// takes precedence; this field is the fast path for the common case.
     pub rootfs_upper: Option<PathBuf>,
+
+    /// Full spec for the writable upper layer.
+    ///
+    /// Forward-compat seam for qcow2 backing chains. Today this always
+    /// produces `Raw` with an empty backing chain — equivalent to
+    /// `rootfs_upper`. The qcow2 future populates `format = Qcow2`
+    /// and a non-empty `backing` chain without touching every call
+    /// site.
+    pub rootfs_upper_spec: Option<UpperSpec>,
 
     /// Additional mounts as `tag:host_path[:ro]` strings.
     pub mounts: Vec<String>,
@@ -202,6 +235,7 @@ impl std::fmt::Debug for VmConfig {
             .field("rootfs_path", &self.rootfs_path)
             .field("rootfs_vmdk", &self.rootfs_vmdk)
             .field("rootfs_upper", &self.rootfs_upper)
+            .field("rootfs_upper_spec", &self.rootfs_upper_spec)
             .field("rootfs_disk", &self.rootfs_disk)
             .field("rootfs_disk_format", &self.rootfs_disk_format)
             .field("rootfs_disk_readonly", &self.rootfs_disk_readonly)
@@ -227,10 +261,21 @@ impl std::fmt::Debug for VmConfig {
 /// relay, heartbeat, idle timeout), configures the VMM, writes a startup
 /// JSON to stdout, and calls `Vm::enter()` which takes over the process.
 pub fn enter(config: Config) -> ! {
+    // Capture log_dir before moving config into run() — we need it after
+    // a failure to write boot-error.json, regardless of how far run() got.
+    let log_dir = config.log_dir.clone();
     let result = run(config);
     match result {
         Ok(infallible) => match infallible {},
         Err(e) => {
+            // Write the structured boot-error record so the parent CLI
+            // can surface a real cause inline. Best-effort: any failure
+            // to write falls back to the existing eprintln path, which
+            // is already captured into runtime.log via setup_log_capture.
+            let boot_err = crate::boot_error::BootError::from_runtime_error(&e);
+            if let Err(write_err) = boot_err.write_atomic(&log_dir) {
+                eprintln!("failed to write boot-error.json: {write_err}");
+            }
             eprintln!("sandbox error: {e}");
             std::process::exit(1);
         }
@@ -277,6 +322,22 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         Ok::<_, RuntimeError>((relay, db, run_db_id))
     })?;
 
+    // Attach the exec.log writer so the ring reader can capture the
+    // primary session's stdout/stderr. Failure to open the file is
+    // non-fatal — log capture is best-effort and must not block boot.
+    let exec_log_writer: Option<Arc<crate::exec_log::LogWriter>> =
+        match crate::exec_log::LogWriter::open(&config.log_dir) {
+            Ok(writer) => {
+                let arc = Arc::new(writer);
+                relay = relay.with_log_writer(Arc::clone(&arc));
+                Some(arc)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "exec_log: open failed, capture disabled");
+                None
+            }
+        };
+
     // Shared termination reason — background tasks store the reason before
     // triggering exit; the exit observer reads it for the DB update.
     let exit_reason: Arc<std::sync::atomic::AtomicU8> =
@@ -290,6 +351,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_run_id = run_db_id;
     let exit_reason_for_observer = Arc::clone(&exit_reason);
     let exit_sock_path = config.agent_sock_path.clone();
+    let exit_log_writer = exec_log_writer.clone();
     let (vm, _network_termination_handle, network_metrics_handle) = match build_vm(
         &config,
         console_backend,
@@ -335,6 +397,13 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                     .exec(&exit_db)
                     .await;
             });
+
+            // Inject the exec.log lifecycle-stop marker before _exit().
+            // The relay's async run() loop won't get a chance to write
+            // it because _exit() bypasses task cleanup.
+            if let Some(ref writer) = exit_log_writer {
+                writer.write_system("--- sandbox stopped ---");
+            }
 
             // Clean up agent.sock — the relay's async cleanup won't run because
             // _exit() is called immediately after this observer returns.
@@ -506,8 +575,23 @@ fn build_vm(
                 .read_only(true)
         });
 
-        // Attach upper.ext4 as writable raw block device.
-        if let Some(ref upper) = vm.rootfs_upper {
+        // Attach the writable upper. Prefer the typed `UpperSpec` if
+        // provided; otherwise fall back to the legacy raw-only field.
+        // When chains are populated (qcow2 future), each ancestor is
+        // attached read-only ahead of the head file.
+        if let Some(ref spec) = vm.rootfs_upper_spec {
+            for backing in spec.backing.clone() {
+                builder = builder.disk(move |d| {
+                    d.path(&backing)
+                        .format(msb_krun::DiskImageFormat::Qcow2)
+                        .read_only(true)
+                });
+            }
+            let primary = spec.primary.clone();
+            let format = spec.format;
+            let read_only = spec.read_only;
+            builder = builder.disk(move |d| d.path(&primary).format(format).read_only(read_only));
+        } else if let Some(ref upper) = vm.rootfs_upper {
             let upper = upper.clone();
             builder = builder.disk(move |d| {
                 d.path(&upper)
@@ -664,12 +748,12 @@ fn build_vm(
     });
 
     // Console — ring-buffer-based custom backend for agent protocol, plus
-    // implicit console output routed to guest.log for kernel/init logs.
+    // implicit console output routed to kernel.log for kernel/init logs.
     // NOTE: The implicit console must remain enabled (do not call
     // `disable_implicit()`) because disk image rootfs boots depend on it.
-    let guest_log_path = config.log_dir.join("guest.log");
+    let kernel_log_path = config.log_dir.join("kernel.log");
     builder = builder.console(|c| {
-        c.output(&guest_log_path).custom(
+        c.output(&kernel_log_path).custom(
             microsandbox_protocol::AGENT_PORT_NAME,
             Box::new(console_backend),
         )
@@ -692,13 +776,13 @@ fn build_vm(
 /// Set up host log capture.
 ///
 /// Redirects stderr through a pipe so a background thread can write to a
-/// rotating log file (`host.log`). Stdout is redirected to `/dev/null`
-/// because kernel console output is routed to `guest.log` directly via
+/// rotating log file (`runtime.log`). Stdout is redirected to `/dev/null`
+/// because kernel console output is routed to `kernel.log` directly via
 /// `console_output` in the VM builder.
 ///
 /// If `forward` is true, stderr is also tee'd to the original fd.
 fn setup_log_capture(log_dir: &std::path::Path, forward: bool) -> RuntimeResult<()> {
-    // Redirect stdout to /dev/null — kernel console goes to guest.log
+    // Redirect stdout to /dev/null — kernel console goes to kernel.log
     // via console_output, so nothing useful writes to stdout after the
     // startup JSON. This prevents SIGPIPE when the parent drops the pipe.
     let devnull = std::fs::OpenOptions::new().write(true).open("/dev/null")?;
@@ -707,7 +791,7 @@ fn setup_log_capture(log_dir: &std::path::Path, forward: bool) -> RuntimeResult<
     }
     drop(devnull);
 
-    // Capture stderr → host.log (rotating).
+    // Capture stderr → runtime.log (rotating).
     let (stderr_read, stderr_write) = create_pipe()?;
 
     let orig_stderr: Option<std::fs::File> = if forward {
@@ -721,7 +805,7 @@ fn setup_log_capture(log_dir: &std::path::Path, forward: bool) -> RuntimeResult<
     }
     drop(stderr_write);
 
-    spawn_log_thread("log-host", stderr_read, log_dir, "host", orig_stderr)?;
+    spawn_log_thread("log-runtime", stderr_read, log_dir, "runtime", orig_stderr)?;
 
     Ok(())
 }

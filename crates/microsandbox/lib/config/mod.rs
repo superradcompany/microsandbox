@@ -110,6 +110,9 @@ pub struct PathsConfig {
     /// Named volumes directory.
     pub volumes: Option<PathBuf>,
 
+    /// Snapshot artifacts directory.
+    pub snapshots: Option<PathBuf>,
+
     /// Logs directory.
     pub logs: Option<PathBuf>,
 
@@ -232,6 +235,18 @@ impl GlobalConfig {
             .volumes
             .clone()
             .unwrap_or_else(|| self.home().join(microsandbox_utils::VOLUMES_SUBDIR))
+    }
+
+    /// Resolve the `snapshots` directory.
+    ///
+    /// Snapshot artifacts are stored under this directory by name. The
+    /// directory is the source of truth; the local DB index is just a
+    /// cache rebuildable from a directory walk.
+    pub fn snapshots_dir(&self) -> PathBuf {
+        self.paths
+            .snapshots
+            .clone()
+            .unwrap_or_else(|| self.home().join(microsandbox_utils::SNAPSHOTS_SUBDIR))
     }
 
     /// Resolve the `logs` directory.

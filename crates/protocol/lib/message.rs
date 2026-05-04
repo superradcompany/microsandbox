@@ -96,6 +96,11 @@ pub enum MessageType {
     /// Guest reports command exit.
     ExecExited,
 
+    /// Guest reports command failed to spawn (binary not found,
+    /// permission denied, etc.). Distinct from `ExecExited` —
+    /// `ExecFailed` means the user code never ran. Terminal.
+    ExecFailed,
+
     /// Host requests PTY resize.
     ExecResize,
 
@@ -157,7 +162,7 @@ impl MessageType {
     /// Computes the frame flags byte for this message type.
     pub fn flags(&self) -> u8 {
         match self {
-            Self::ExecExited | Self::FsResponse => FLAG_TERMINAL,
+            Self::ExecExited | Self::ExecFailed | Self::FsResponse => FLAG_TERMINAL,
             Self::ExecRequest | Self::FsRequest => FLAG_SESSION_START,
             Self::Shutdown => FLAG_SHUTDOWN,
             _ => 0,
@@ -175,6 +180,7 @@ impl MessageType {
             Self::ExecStdout => "core.exec.stdout",
             Self::ExecStderr => "core.exec.stderr",
             Self::ExecExited => "core.exec.exited",
+            Self::ExecFailed => "core.exec.failed",
             Self::ExecResize => "core.exec.resize",
             Self::ExecSignal => "core.exec.signal",
             Self::FsRequest => "core.fs.request",
@@ -194,6 +200,7 @@ impl MessageType {
             "core.exec.stdout" => Some(Self::ExecStdout),
             "core.exec.stderr" => Some(Self::ExecStderr),
             "core.exec.exited" => Some(Self::ExecExited),
+            "core.exec.failed" => Some(Self::ExecFailed),
             "core.exec.resize" => Some(Self::ExecResize),
             "core.exec.signal" => Some(Self::ExecSignal),
             "core.fs.request" => Some(Self::FsRequest),
@@ -247,6 +254,7 @@ mod tests {
             (MessageType::ExecStdout, "core.exec.stdout"),
             (MessageType::ExecStderr, "core.exec.stderr"),
             (MessageType::ExecExited, "core.exec.exited"),
+            (MessageType::ExecFailed, "core.exec.failed"),
             (MessageType::ExecResize, "core.exec.resize"),
             (MessageType::ExecSignal, "core.exec.signal"),
             (MessageType::FsRequest, "core.fs.request"),
@@ -271,6 +279,7 @@ mod tests {
             MessageType::ExecStdout,
             MessageType::ExecStderr,
             MessageType::ExecExited,
+            MessageType::ExecFailed,
             MessageType::ExecResize,
             MessageType::ExecSignal,
             MessageType::FsRequest,
@@ -309,6 +318,7 @@ mod tests {
     #[test]
     fn test_message_type_flags() {
         assert_eq!(MessageType::ExecExited.flags(), FLAG_TERMINAL);
+        assert_eq!(MessageType::ExecFailed.flags(), FLAG_TERMINAL);
         assert_eq!(MessageType::FsResponse.flags(), FLAG_TERMINAL);
         assert_eq!(MessageType::ExecRequest.flags(), FLAG_SESSION_START);
         assert_eq!(MessageType::FsRequest.flags(), FLAG_SESSION_START);

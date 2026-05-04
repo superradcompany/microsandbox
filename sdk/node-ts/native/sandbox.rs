@@ -377,6 +377,22 @@ impl Sandbox {
         let sb = guard.take().ok_or_else(consumed_error)?;
         sb.remove_persisted().await.map_err(to_napi_error)
     }
+
+    /// Read captured output from `exec.log` for this sandbox.
+    ///
+    /// Reads the on-disk JSON Lines file the runtime writes via the
+    /// relay tap. Works on running and stopped sandboxes alike — no
+    /// protocol traffic.
+    #[napi]
+    pub async fn logs(&self, opts: Option<LogOptions>) -> Result<Vec<LogEntry>> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let name = sb.name().to_string();
+        let rust_opts = log_options_from_js(opts).map_err(napi::Error::from_reason)?;
+        let entries =
+            microsandbox::sandbox::logs::read_logs(&name, &rust_opts).map_err(to_napi_error)?;
+        Ok(entries.into_iter().map(log_entry_to_js).collect())
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -415,6 +431,61 @@ impl AsyncGenerator for JsMetricsStream {
             }
         }
     }
+}
+
+pub fn log_entry_to_js(entry: microsandbox::sandbox::LogEntry) -> LogEntry {
+    let source = match entry.source {
+        microsandbox::sandbox::LogSource::Stdout => "stdout",
+        microsandbox::sandbox::LogSource::Stderr => "stderr",
+        microsandbox::sandbox::LogSource::Output => "output",
+        microsandbox::sandbox::LogSource::System => "system",
+    };
+    LogEntry {
+        timestamp_ms: entry.timestamp.timestamp_millis() as f64,
+        source: source.to_string(),
+        session_id: entry.session_id.map(|id| id as f64),
+        data: entry.data.to_vec().into(),
+    }
+}
+
+pub fn log_options_from_js(
+    opts: Option<LogOptions>,
+) -> std::result::Result<microsandbox::sandbox::LogOptions, String> {
+    let Some(o) = opts else {
+        return Ok(microsandbox::sandbox::LogOptions::default());
+    };
+    let mut out = microsandbox::sandbox::LogOptions {
+        tail: o.tail.map(|n| n as usize),
+        since: o.since_ms.and_then(ms_to_datetime),
+        until: o.until_ms.and_then(ms_to_datetime),
+        sources: Vec::new(),
+    };
+    if let Some(srcs) = o.sources {
+        for s in srcs {
+            match s.as_str() {
+                "stdout" => out.sources.push(microsandbox::sandbox::LogSource::Stdout),
+                "stderr" => out.sources.push(microsandbox::sandbox::LogSource::Stderr),
+                "output" => out.sources.push(microsandbox::sandbox::LogSource::Output),
+                "system" => out.sources.push(microsandbox::sandbox::LogSource::System),
+                "all" => {
+                    out.sources = vec![
+                        microsandbox::sandbox::LogSource::Stdout,
+                        microsandbox::sandbox::LogSource::Stderr,
+                        microsandbox::sandbox::LogSource::Output,
+                        microsandbox::sandbox::LogSource::System,
+                    ];
+                }
+                other => return Err(format!("unknown log source {other:?}")),
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn ms_to_datetime(ms: f64) -> Option<chrono::DateTime<chrono::Utc>> {
+    let secs = (ms / 1000.0).trunc() as i64;
+    let nsecs = ((ms - secs as f64 * 1000.0) * 1_000_000.0).round() as u32;
+    chrono::DateTime::from_timestamp(secs, nsecs)
 }
 
 pub fn metrics_to_js(m: &microsandbox::sandbox::SandboxMetrics) -> SandboxMetrics {

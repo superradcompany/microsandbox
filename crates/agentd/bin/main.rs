@@ -6,7 +6,7 @@
 use std::process;
 
 #[cfg(target_os = "linux")]
-use microsandbox_agentd::{AgentdConfig, AgentdError, BootParams, agent, clock, init};
+use microsandbox_agentd::{AgentdConfig, AgentdError, BootParams, agent, clock, handoff, init};
 
 //--------------------------------------------------------------------------------------------------
 // Functions: main
@@ -26,7 +26,7 @@ fn main() {
     // Read all MSB_* environment variables once at startup. `BootParams`
     // carries the one-shot init data; `AgentdConfig` carries the runtime
     // config that outlives init.
-    let boot = match BootParams::from_env() {
+    let mut boot = match BootParams::from_env() {
         Ok(b) => b,
         Err(e) => {
             eprintln!("agentd: config parse failed: {e}");
@@ -41,6 +41,11 @@ fn main() {
         }
     };
 
+    // Extract handoff spec (if any) before `init::init` consumes
+    // `BootParams` by value. The handoff itself fires after init so
+    // the new init inherits a fully-prepared filesystem.
+    let handoff_spec = boot.take_handoff_init();
+
     // Phase 1: Synchronous init (mount filesystems, prepare runtime directories).
     let init_start = clock::boottime_ns();
     if let Err(e) = init::init(boot) {
@@ -48,6 +53,15 @@ fn main() {
         process::exit(1);
     }
     let init_time_ns = clock::boottime_ns() - init_start;
+
+    // Phase 1.5: Optional PID 1 handoff. Returns only in the child;
+    // the parent execve's into the new init and never returns here.
+    if let Some(spec) = handoff_spec
+        && let Err(e) = handoff::do_handoff(spec)
+    {
+        eprintln!("agentd: handoff failed: {e}");
+        process::exit(1);
+    }
 
     // Phase 2: Build a single-threaded tokio runtime and run the agent loop.
     let rt = tokio::runtime::Builder::new_current_thread()

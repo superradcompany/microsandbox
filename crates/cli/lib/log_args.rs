@@ -39,8 +39,13 @@ pub struct LogArgs {
 
 /// Install a tracing subscriber for the selected level.
 ///
+/// `ansi` controls whether the formatter emits color escape sequences.
+/// Pass `true` for the user-facing CLI (colored output on a TTY) and
+/// `false` for the sandbox subprocess (whose stderr is captured into
+/// `runtime.log`, where escape codes would be junk).
+///
 /// If no level is selected, logging stays disabled.
-pub fn init_tracing(log_level: Option<LogLevel>) {
+pub fn init_tracing(log_level: Option<LogLevel>, ansi: bool) {
     if let Some(level) = log_level {
         // Silence oci_client logs — the crate logs the auth token in debug mode
         // See: https://github.com/oras-project/rust-oci-client/issues/254
@@ -50,6 +55,7 @@ pub fn init_tracing(log_level: Option<LogLevel>) {
         tracing_subscriber::fmt()
             .with_writer(std::io::stderr)
             .with_env_filter(filter)
+            .with_ansi(ansi)
             .init();
     }
 }

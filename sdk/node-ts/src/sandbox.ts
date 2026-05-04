@@ -12,6 +12,12 @@ import {
 import { ExecHandle, ExecOutput } from "./exec.js";
 import { SandboxFs } from "./fs.js";
 import type { ExitStatus } from "./exit-status.js";
+import {
+  LogEntry,
+  type LogReadOptions,
+  logEntryFromNapi,
+  logReadOptionsToNapi,
+} from "./logs.js";
 import { SandboxHandle, sandboxInfoToHandle } from "./sandbox-handle.js";
 import type { SandboxMetrics } from "./metrics.js";
 import { metricsFromNapi } from "./internal/metrics.js";
@@ -253,6 +259,22 @@ export class Sandbox implements AsyncDisposable {
   async config(): Promise<unknown> {
     const json = await withMappedErrors(() => this.inner.configJson());
     return remapKeysToCamel(JSON.parse(json));
+  }
+
+  // -- logs ---------------------------------------------------------------
+
+  /**
+   * Read captured output from this sandbox's `exec.log`.
+   *
+   * Backed by an on-disk JSON Lines file the runtime writes via the
+   * relay tap. Works on running and stopped sandboxes alike — no
+   * protocol traffic. Default sources are user output: `stdout`,
+   * `stderr`, and pty-merged `output`.
+   */
+  async logs(opts?: LogReadOptions): Promise<LogEntry[]> {
+    const napiOpts = logReadOptionsToNapi(opts);
+    const raw = await withMappedErrors(() => this.inner.logs(napiOpts));
+    return raw.map(logEntryFromNapi);
   }
 
   // -- metrics ------------------------------------------------------------

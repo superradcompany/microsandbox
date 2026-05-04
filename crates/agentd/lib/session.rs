@@ -13,10 +13,88 @@ use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
-use microsandbox_protocol::exec::ExecRequest;
+use microsandbox_protocol::exec::{ExecFailed, ExecFailureKind, ExecRequest};
 
 use crate::error::{AgentdError, AgentdResult};
 use crate::rlimit;
+
+//--------------------------------------------------------------------------------------------------
+// Functions: classify
+//--------------------------------------------------------------------------------------------------
+
+/// Map an `errno` integer to its standard symbolic name. Returns
+/// `None` for unrecognized values; we only enumerate the ones that
+/// can plausibly come out of fork/exec/setrlimit/setuid paths.
+fn errno_name(e: i32) -> Option<&'static str> {
+    match e {
+        libc::E2BIG => Some("E2BIG"),
+        libc::EACCES => Some("EACCES"),
+        libc::EAGAIN => Some("EAGAIN"),
+        libc::EBUSY => Some("EBUSY"),
+        libc::EFAULT => Some("EFAULT"),
+        libc::EINVAL => Some("EINVAL"),
+        libc::EIO => Some("EIO"),
+        libc::EISDIR => Some("EISDIR"),
+        libc::ELOOP => Some("ELOOP"),
+        libc::EMFILE => Some("EMFILE"),
+        libc::ENAMETOOLONG => Some("ENAMETOOLONG"),
+        libc::ENFILE => Some("ENFILE"),
+        libc::ENOENT => Some("ENOENT"),
+        libc::ENOEXEC => Some("ENOEXEC"),
+        libc::ENOMEM => Some("ENOMEM"),
+        libc::ENOSYS => Some("ENOSYS"),
+        libc::ENOTDIR => Some("ENOTDIR"),
+        libc::ENXIO => Some("ENXIO"),
+        libc::EPERM => Some("EPERM"),
+        libc::ETXTBSY => Some("ETXTBSY"),
+        _ => None,
+    }
+}
+
+/// Classify a fork/exec-time `errno` into one of the
+/// `ExecFailureKind` buckets.
+///
+/// ENOENT is ambiguous in principle (missing binary vs. missing
+/// cwd), but in practice it's overwhelmingly the binary — the cwd
+/// is set in `pre_exec` *before* execvp, and a bad cwd would more
+/// commonly produce ENOTDIR (path component isn't a directory) or
+/// EACCES (no permission to chdir). We classify ENOENT as
+/// `NotFound` and ENOTDIR as `BadCwd`. Edge cases of "bad cwd that
+/// happens to ENOENT" fall through with the message "spawn 'cmd':
+/// No such file or directory" which is still understandable.
+fn classify_spawn_errno(errno: i32) -> ExecFailureKind {
+    match errno {
+        libc::ENOENT => ExecFailureKind::NotFound,
+        libc::ENOTDIR => ExecFailureKind::BadCwd,
+        libc::EACCES | libc::EPERM => ExecFailureKind::PermissionDenied,
+        libc::ENOEXEC => ExecFailureKind::NotExecutable,
+        libc::EISDIR => ExecFailureKind::NotExecutable,
+        libc::ETXTBSY => ExecFailureKind::NotExecutable,
+        libc::E2BIG | libc::ELOOP | libc::ENAMETOOLONG | libc::EFAULT => ExecFailureKind::BadArgs,
+        libc::EMFILE | libc::ENFILE => ExecFailureKind::ResourceLimit,
+        libc::EAGAIN => ExecFailureKind::ResourceLimit,
+        libc::ENOMEM => ExecFailureKind::OutOfMemory,
+        libc::EINVAL => ExecFailureKind::Other,
+        _ => ExecFailureKind::Other,
+    }
+}
+
+/// Build a `ExecFailed` payload from a spawn-time `io::Error`.
+fn exec_failed_from_io_error(err: &std::io::Error, cmd: &str, stage: &str) -> ExecFailed {
+    let errno = err.raw_os_error();
+    let kind = errno
+        .map(classify_spawn_errno)
+        .unwrap_or(ExecFailureKind::Other);
+    let errno_name = errno.and_then(errno_name).map(str::to_string);
+    let message = format!("spawn {cmd:?}: {err}");
+    ExecFailed {
+        kind,
+        errno,
+        errno_name,
+        message,
+        stage: Some(stage.to_string()),
+    }
+}
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -230,7 +308,10 @@ impl ExecSession {
         // Fork.
         let pid = unsafe { libc::fork() };
         if pid < 0 {
-            return Err(std::io::Error::last_os_error().into());
+            let io_err = std::io::Error::last_os_error();
+            return Err(AgentdError::ExecSpawnFailed(exec_failed_from_io_error(
+                &io_err, &req.cmd, "fork",
+            )));
         }
 
         #[allow(unreachable_code)]
@@ -313,12 +394,9 @@ impl ExecSession {
 
         if let Some(exec_errno) = read_exec_error(err_pipe.read_end.as_raw_fd())? {
             let _ = wait_for_exec_failure_child(pid);
-            return Err(AgentdError::ExecSession(format!(
-                "spawn pty cmd={} args={:?} cwd={:?}: {}",
-                req.cmd,
-                req.args,
-                req.cwd,
-                std::io::Error::from_raw_os_error(exec_errno)
+            let io_err = std::io::Error::from_raw_os_error(exec_errno);
+            return Err(AgentdError::ExecSpawnFailed(exec_failed_from_io_error(
+                &io_err, &req.cmd, "execvp",
             )));
         }
 
@@ -385,10 +463,12 @@ impl ExecSession {
             }
         }
 
+        let cmd_label = req.cmd.clone();
         let mut child = cmd.spawn().map_err(|err| {
-            AgentdError::ExecSession(format!(
-                "spawn pipe cmd={} args={:?} cwd={:?}: {}",
-                req.cmd, req.args, req.cwd, err
+            AgentdError::ExecSpawnFailed(exec_failed_from_io_error(
+                &err,
+                &cmd_label,
+                "Command::spawn",
             ))
         })?;
         let pid = child.id().unwrap_or(0) as i32;
@@ -1039,9 +1119,25 @@ mod tests {
         };
 
         let err = ExecSession::spawn(9, &req, tx, None).expect_err("spawn should fail");
-        let message = err.to_string();
 
-        assert!(message.contains("spawn pipe"));
+        // Spawn failures now produce the typed `ExecSpawnFailed` so
+        // the host can render a useful message + hint. The classifier
+        // maps ENOENT on the binary path to `NotFound`.
+        let payload = match &err {
+            AgentdError::ExecSpawnFailed(p) => p,
+            other => panic!("expected ExecSpawnFailed, got: {other:?}"),
+        };
+        assert_eq!(payload.kind, ExecFailureKind::NotFound);
+        assert_eq!(payload.errno, Some(libc::ENOENT));
+        assert_eq!(payload.errno_name.as_deref(), Some("ENOENT"));
+
+        // The original intent of the test: probe internals leak into
+        // the error message. The format is now
+        // `spawn "<cmd>": <io::Error>` from
+        // `exec_failed_from_io_error`. Verify that none of the old
+        // probe-detail keys snuck back into the message.
+        let message = &payload.message;
+        assert!(message.contains("spawn"));
         assert!(!message.contains("symlink_metadata="));
         assert!(!message.contains("metadata="));
         assert!(!message.contains("magic="));

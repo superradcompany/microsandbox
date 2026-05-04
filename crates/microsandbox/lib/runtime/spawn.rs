@@ -22,8 +22,9 @@ use tokio::{io::AsyncBufReadExt, process::Command};
 
 use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_protocol::{
-    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HOSTNAME, ENV_TMPFS,
-    ENV_USER,
+    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
+    ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOSTNAME, ENV_TMPFS, ENV_USER,
+    HANDOFF_INIT_SEP_STR,
 };
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
@@ -723,6 +724,38 @@ fn sandbox_cli_args(
         args.push(OsString::from(format!("{}={hostname}", ENV_HOSTNAME)));
     }
 
+    // Handoff-init: PID 1 hand-off to a user-supplied init binary.
+    // The builder's `validate()` rejects non-UTF-8 cmd paths, args/env
+    // containing the separator byte (\x1f) or NUL, and env keys containing
+    // `=`, so the joins below can't produce a corrupted wire format.
+    if let Some(ref init) = config.init {
+        let cmd = init
+            .cmd
+            .to_str()
+            .expect("validate() rejects non-UTF-8 cmd paths");
+        args.push(OsString::from("--env"));
+        args.push(OsString::from(format!("{ENV_HANDOFF_INIT}={cmd}")));
+
+        if !init.args.is_empty() {
+            let argv_val = init.args.join(HANDOFF_INIT_SEP_STR);
+            args.push(OsString::from("--env"));
+            args.push(OsString::from(format!(
+                "{ENV_HANDOFF_INIT_ARGS}={argv_val}"
+            )));
+        }
+
+        if !init.env.is_empty() {
+            let env_val = init
+                .env
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(HANDOFF_INIT_SEP_STR);
+            args.push(OsString::from("--env"));
+            args.push(OsString::from(format!("{ENV_HANDOFF_INIT_ENV}={env_val}")));
+        }
+    }
+
     if let Some(ref workdir) = config.workdir {
         args.push(OsString::from("--workdir"));
         args.push(OsString::from(workdir));
@@ -1203,5 +1236,105 @@ mod tests {
     fn test_guest_mount_tag_slug_prefix_is_readable() {
         assert!(super::guest_mount_tag("/data").starts_with("data_"));
         assert!(super::guest_mount_tag("/var/log").starts_with("var_log_"));
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Tests: Handoff init env-var construction
+    //----------------------------------------------------------------------------------------------
+
+    /// Helper to grep the rendered args for an `--env KEY=...` entry.
+    fn find_env(args: &[String], key: &str) -> Option<String> {
+        let prefix = format!("{key}=");
+        args.windows(2).find_map(|pair| {
+            if pair[0] == "--env" && pair[1].starts_with(&prefix) {
+                Some(pair[1][prefix.len()..].to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    #[test]
+    fn test_handoff_init_emits_only_cmd_when_args_and_env_empty() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .init("/lib/systemd/systemd")
+            .build()
+            .unwrap();
+
+        let args = render_args(&config);
+
+        assert_eq!(
+            find_env(&args, "MSB_HANDOFF_INIT").as_deref(),
+            Some("/lib/systemd/systemd")
+        );
+        assert!(find_env(&args, "MSB_HANDOFF_INIT_ARGS").is_none());
+        assert!(find_env(&args, "MSB_HANDOFF_INIT_ENV").is_none());
+    }
+
+    #[test]
+    fn test_handoff_init_joins_argv_with_unit_separator() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .init_with("/lib/systemd/systemd", |i| {
+                i.args(["--unit=multi-user.target", "--log-level=warning"])
+            })
+            .build()
+            .unwrap();
+
+        let args = render_args(&config);
+        let argv = find_env(&args, "MSB_HANDOFF_INIT_ARGS").expect("argv env present");
+
+        assert_eq!(argv, "--unit=multi-user.target\x1f--log-level=warning");
+    }
+
+    #[test]
+    fn test_handoff_init_emits_env_pairs_separated_by_unit_separator() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .init_with("/sbin/init", |i| {
+                i.env("container", "microsandbox").env("LANG", "C.UTF-8")
+            })
+            .build()
+            .unwrap();
+
+        let args = render_args(&config);
+        let env_val = find_env(&args, "MSB_HANDOFF_INIT_ENV").expect("env present");
+
+        assert_eq!(env_val, "container=microsandbox\x1fLANG=C.UTF-8");
+    }
+
+    #[test]
+    fn test_handoff_init_omitted_when_unset() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .unwrap();
+
+        let args = render_args(&config);
+
+        assert!(find_env(&args, "MSB_HANDOFF_INIT").is_none());
+        assert!(find_env(&args, "MSB_HANDOFF_INIT_ARGS").is_none());
+        assert!(find_env(&args, "MSB_HANDOFF_INIT_ENV").is_none());
+    }
+
+    #[test]
+    fn test_handoff_init_separator_in_arg_rejected_at_build_time() {
+        let err = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .init_with("/sbin/init", |i| i.args(["foo\x1fbar"]))
+            .build()
+            .unwrap_err();
+        assert!(format!("{err}").contains("0x1F"));
+    }
+
+    #[test]
+    fn test_handoff_init_equals_in_env_key_rejected_at_build_time() {
+        let err = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .init_with("/sbin/init", |i| i.env("BAD=KEY", "v"))
+            .build()
+            .unwrap_err();
+        assert!(format!("{err}").contains("must not contain '='"));
     }
 }

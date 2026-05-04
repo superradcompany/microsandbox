@@ -1,14 +1,9 @@
-//! Rootfs patch example demonstrating pre-boot filesystem modifications.
-//!
-//! See [examples/README.md](../../../README.md) for prerequisites and usage.
+//! Rootfs patches: pre-boot filesystem modifications.
 
 use microsandbox::Sandbox;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Creating sandbox with rootfs patches (image=alpine)");
-
-    // Create a sandbox with patches applied before the VM boots.
     let sandbox = Sandbox::builder("rootfs-patch")
         .image("alpine")
         .cpus(1)
@@ -21,11 +16,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None,
                 false,
             )
+            // /etc/motd exists in alpine, so set replace=true
             .text(
                 "/etc/motd",
                 "Welcome to a patched microsandbox.\n",
                 None,
-                true, // replace — /etc/motd exists in alpine
+                true,
             )
             .mkdir("/app", Some(0o755))
             .text(
@@ -39,7 +35,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create()
         .await?;
 
-    // Verify the patches were applied.
     let output = sandbox.shell("cat /etc/greeting.txt").await?;
     println!("greeting: {}", output.stdout()?.trim_end());
 
@@ -55,9 +50,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = sandbox.shell("stat -c '%a' /app").await?;
     println!("/app permissions: {}", output.stdout()?.trim_end());
 
-    // Stop the sandbox gracefully.
     sandbox.stop_and_wait().await?;
-
-    println!("Sandbox stopped.");
     Ok(())
 }

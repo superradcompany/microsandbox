@@ -32,6 +32,7 @@ Create and boot a sandbox. The first argument is either a name (`str`) or a full
 | hostname | `str` | Guest hostname |
 | user | `str` | Default guest user |
 | entrypoint | `list[str]` | Override image entrypoint |
+| init | `str \| dict \|` [`InitConfig`](#initconfig) | Hand off PID 1 to a guest init binary. See [Init handoff](/sandboxes/customization#init-handoff) and [`InitConfig`](#initconfig) for accepted shapes |
 | replace | `bool` | Replace existing sandbox with same name |
 | max_duration | `float` | Maximum sandbox lifetime in seconds |
 | idle_timeout | `float` | Idle timeout in seconds |
@@ -357,6 +358,78 @@ Stream resource metrics at a regular interval. The returned stream supports both
 
 ---
 
+#### logs()
+
+```python
+async def logs(
+    tail: int | None = None,
+    since_ms: float | None = None,
+    until_ms: float | None = None,
+    sources: list[str] | None = None,
+) -> list[LogEntry]
+```
+
+Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike — there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
+
+The default sources are `"stdout"`, `"stderr"`, and `"output"` (PTY-merged). Pass `"system"` to also include synthetic lifecycle markers and runtime/kernel diagnostic lines.
+
+```python
+import asyncio
+import microsandbox
+
+async def main():
+    handle = await microsandbox.Sandbox.get("web")
+
+    # Default — all user-program output, regardless of pipe/pty mode
+    entries = await handle.logs()
+
+    for e in entries:
+        source = {
+            "stdout": "OUT",
+            "stderr": "ERR",
+            "output": "PTY",
+            "system": "SYS",
+        }[e.source]
+        print(
+            f"[{e.timestamp_ms / 1000:.3f}] "
+            f"{source} {e.session_id}: {e.text().rstrip()}"
+        )
+
+    # Filtered: last 50 entries from the past hour, including system lines
+    import time
+    recent = await handle.logs(
+        tail=50,
+        since_ms=(time.time() - 3600) * 1000,
+        sources=["stdout", "stderr", "output", "system"],
+    )
+
+asyncio.run(main())
+```
+
+Timestamps are exposed as `float` ms since the Unix epoch (UTC) for parity with `SandboxMetrics.timestamp_ms`. Convert to `datetime` if needed:
+
+```python
+from datetime import datetime, timezone
+dt = datetime.fromtimestamp(e.timestamp_ms / 1000, timezone.utc)
+```
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| tail | `int \| None` | Show only the last N entries after other filters apply |
+| since_ms | `float \| None` | Inclusive lower bound on entry timestamp (ms since epoch) |
+| until_ms | `float \| None` | Exclusive upper bound on entry timestamp (ms since epoch) |
+| sources | `list[str] \| None` | Sources to include. `None` = `["stdout", "stderr", "output"]`. Add `"system"` to merge runtime/kernel diagnostics. Use `"all"` as shorthand for all four. |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `list[`[`LogEntry`](#logentry)`]` | Matching entries in chronological order |
+
+---
+
 #### remove_persisted()
 
 ```python
@@ -480,6 +553,31 @@ Sandbox process log verbosity.
 | `"trace"` | Most verbose -- all diagnostic output |
 | `"warn"` | Warnings and errors only |
 
+### LogEntry
+
+A single captured log entry returned by [`logs()`](#logs).
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| timestamp_ms | `float` | Wall-clock capture time (ms since Unix epoch, UTC) |
+| source | `str` | Where the chunk came from. See [LogSource](#logsource). |
+| session_id | `int \| None` | Relay-monotonic session id; `None` for `"system"` entries |
+| data | `bytes` | The chunk's bytes (UTF-8 lossy decoded by default) |
+| `text()` | `str` | Convenience: UTF-8 decode of `data` (lossy — invalid bytes are replaced) |
+
+### LogSource
+
+The string values that the `source` field on a [`LogEntry`](#logentry) can take, also accepted by `logs(sources=[...])`.
+
+| Value | Description |
+|-------|-------------|
+| `"stdout"` | Captured from a session's stdout (pipe mode — streams stayed separated) |
+| `"stderr"` | Captured from a session's stderr (pipe mode) |
+| `"output"` | Captured from a session running in PTY mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `"output"` rather than mislabelled as `"stdout"`. |
+| `"system"` | Synthetic entry: lifecycle markers in `exec.log` plus runtime/kernel diagnostic lines merged in at read time when `"system"` is requested. |
+
+In addition, `logs(sources=["all"])` is a shorthand for all four.
+
 ### MetricsStream
 
 Async stream for receiving periodic metrics snapshots.
@@ -539,6 +637,7 @@ The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`San
 | hostname | `str` | - | Guest hostname |
 | user | `str` | - | Default guest user |
 | entrypoint | `list[str]` | - | Override image entrypoint |
+| init | `str \| dict \|` [`InitConfig`](#initconfig) | - | Hand off PID 1 to a guest init binary. See [Init handoff](/sandboxes/customization#init-handoff) |
 | replace | `bool` | `False` | Replace existing sandbox with same name |
 | max_duration | `float` | - | Maximum sandbox lifetime in seconds |
 | idle_timeout | `float` | - | Idle timeout in seconds |
@@ -553,6 +652,52 @@ The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`San
 | network | [`Network`](/sdk/python/networking#network) | `public_only` | Network policy and configuration |
 | secrets | `list[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
 | detached | `bool` | `False` | If `True`, sandbox survives after your process exits |
+
+### InitConfig
+
+Guest init-handoff specification. Pass it (or one of the equivalent shorthand shapes) as the `init=` kwarg to [`Sandbox.create()`](#sandboxcreate) to hand PID 1 inside the guest off to your own init binary after agentd's setup. See [Init handoff](/sandboxes/customization#init-handoff) for image picks, shutdown semantics, and tradeoffs.
+
+```python
+from dataclasses import dataclass
+
+@dataclass(frozen=True, slots=True)
+class InitConfig:
+    cmd: str
+    args: tuple[str, ...] = ()
+    env: Mapping[str, str] = {}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| cmd | `str` | Absolute path or `"auto"` to the init binary inside the guest rootfs |
+| args | `tuple[str, ...]` | Supplemental argv (`argv[0]` is implicitly `cmd`) |
+| env | `dict[str, str]` | Extra env vars merged on top of the inherited env |
+
+The `init=` kwarg follows the same shape as other `Sandbox.create` kwargs that carry structured values (`image=`, `network=`, etc.): a bare scalar for the simple case, or a dataclass / dict for the rich case.
+
+| Form | Equivalent to |
+|------|---------------|
+| `init="auto"` or `init="/sbin/init"` | `InitConfig(cmd=...)` |
+| `init={"cmd": ..., "args": [...], "env": {...}}` | dict equivalent of `InitConfig` |
+| `init=InitConfig(cmd="/sbin/init", args=("--foo",))` | itself |
+
+```python
+from microsandbox import InitConfig, Sandbox
+
+# Common case: bare string.
+sb = await Sandbox.create("worker", image="jrei/systemd-debian:12", init="auto")
+
+# Argv / env: dataclass.
+sb = await Sandbox.create(
+    "worker",
+    image="jrei/systemd-debian:12",
+    init=InitConfig(
+        cmd="/lib/systemd/systemd",
+        args=("--unit=multi-user.target",),
+        env={"container": "microsandbox"},
+    ),
+)
+```
 
 ### SandboxHandle
 
@@ -571,6 +716,7 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 | kill() | `Awaitable[None]` | Force terminate |
 | remove() | `Awaitable[None]` | Delete sandbox and state |
 | metrics() | `Awaitable[`[`SandboxMetrics`](#sandboxmetrics)`]` | Point-in-time resource metrics |
+| logs() | `Awaitable[list[`[`LogEntry`](#logentry)`]]` | Read captured `exec.log` (works without starting) |
 
 ### SandboxMetrics
 

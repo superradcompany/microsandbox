@@ -26,6 +26,8 @@ from microsandbox._microsandbox import (
     SandboxFs,
     SandboxHandle,
     SandboxMetrics,
+    Snapshot,
+    SnapshotHandle,
     Volume,
     VolumeHandle,
     all_sandbox_metrics,
@@ -82,7 +84,10 @@ from microsandbox.types import (
     GiB,
     Image,
     ImageSource,
+    InitConfig,
     LogLevel,
+    LogReadSource,
+    LogSource,
     MiB,
     MountConfig,
     MountKind,
@@ -153,6 +158,9 @@ __all__ = [
     "VolumeHandle",
     "MountConfig",
     "MountKind",
+    # Snapshots
+    "Snapshot",
+    "SnapshotHandle",
     # Network
     "Network",
     "NetworkPolicy",
@@ -174,10 +182,14 @@ __all__ = [
     "PullPolicy",
     "RegistryAuth",
     "LogLevel",
+    "LogSource",
+    "LogReadSource",
     # Patches
     "Patch",
     "PatchConfig",
     "AttachOptions",
+    # Init handoff
+    "InitConfig",
     # Metrics
     "SandboxMetrics",
     "all_sandbox_metrics",

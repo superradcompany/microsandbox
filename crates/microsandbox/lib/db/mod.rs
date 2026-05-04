@@ -128,7 +128,7 @@ mod tests {
             "sandbox",
             "sandbox_metric",
             "sandbox_rootfs",
-            "snapshot",
+            "snapshot_index",
             "volume",
         ];
 
@@ -235,7 +235,7 @@ mod tests {
             .unwrap();
         assert_eq!(migration_row_count, 1);
 
-        let index_count = recovered
+        let legacy_index_count = recovered
             .read()
             .query_one(Statement::from_string(
                 DatabaseBackend::Sqlite,
@@ -251,6 +251,25 @@ mod tests {
             .unwrap()
             .try_get_by_index::<i64>(0)
             .unwrap();
-        assert_eq!(index_count, 2);
+        assert_eq!(legacy_index_count, 0);
+
+        let new_index_count = recovered
+            .read()
+            .query_one(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index'
+                   AND name IN (
+                       'idx_snapshot_index_name',
+                       'idx_snapshot_index_parent',
+                       'idx_snapshot_index_image'
+                   )",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by_index::<i64>(0)
+            .unwrap();
+        assert_eq!(new_index_count, 3);
     }
 }

@@ -39,7 +39,7 @@ pub async fn run(args: StartArgs) -> anyhow::Result<()> {
             // Sandbox stays running — the sandbox process continues in the background.
         }
         Err(e) => {
-            spinner.finish_error();
+            spinner.finish_clear();
             return Err(e.into());
         }
     }

@@ -10,10 +10,13 @@ members = [
     "crates/migration",
     "crates/protocol",
     "crates/runtime",
+    "crates/test-init",
     "crates/test-macros",
     "crates/test-utils",
     "crates/utils",
     "examples/rust/fs-read-stream",
+    "examples/rust/init-handoff",
+    "examples/rust/logs-read",
     "examples/rust/metrics-stream",
     "examples/rust/net-basic",
     "examples/rust/net-dns",
@@ -27,6 +30,7 @@ members = [
     "examples/rust/root-oci",
     "examples/rust/rootfs-patch",
     "examples/rust/shell-attach",
+    "examples/rust/snapshot-fork",
     "examples/rust/volume-disk",
     "examples/rust/volume-named",
     "sdk/node-ts",
@@ -36,7 +40,7 @@ members = [
 [workspace.package]
 authors = ["Super Rad Company <development@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.4.3"
+version = "0.4.4"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -72,6 +76,7 @@ nix = "0.30"
 oci-client = "0.16"
 oci-spec = "0.9.0"
 rand = "0.10.1"
+reflink-copy = "0.1"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 resolv-conf = "0.7"
 scopeguard = "1.2"

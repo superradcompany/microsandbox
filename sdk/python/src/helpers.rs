@@ -16,39 +16,99 @@ pub fn build_config_from_kwargs(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<SandboxConfig> {
     let Some(kwargs) = kwargs else {
-        return Err(pyo3::exceptions::PyValueError::new_err("image is required"));
-    };
-
-    let image_obj = kwargs
-        .get_item("image")?
-        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("image is required"))?;
-
-    // Accept str, PathLike, or ImageSource (with _to_image_str method).
-    let image_str: String = if let Ok(s) = image_obj.extract::<String>() {
-        s
-    } else if let Ok(method) = image_obj.getattr("_to_image_str") {
-        method.call0()?.extract()?
-    } else if let Ok(fspath) = image_obj.call_method0("__fspath__") {
-        fspath.extract()?
-    } else {
-        return Err(pyo3::exceptions::PyTypeError::new_err(
-            "image must be str, os.PathLike, or ImageSource",
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "image= or snapshot= is required",
         ));
     };
 
+    let image_present = kwargs.get_item("image")?.is_some();
+    let snapshot_present = kwargs.get_item("snapshot")?.is_some();
+    if image_present && snapshot_present {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "pass either image= or snapshot=, not both",
+        ));
+    }
+    if !image_present && !snapshot_present {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "image= or snapshot= is required",
+        ));
+    }
+
     let mut builder = microsandbox::Sandbox::builder(name);
 
-    // Handle disk image with fstype if ImageSource has those attributes.
-    if let Ok(fstype_attr) = image_obj.getattr("_fstype") {
-        if !fstype_attr.is_none() {
-            let fstype: String = fstype_attr.extract()?;
-            builder = builder.image_with(|i| i.disk(&image_str).fstype(&fstype));
+    if snapshot_present {
+        // Boot from a snapshot. Accept str or PathLike.
+        let snap_obj = kwargs.get_item("snapshot")?.unwrap();
+        let snap_str: String = if let Ok(s) = snap_obj.extract::<String>() {
+            s
+        } else if let Ok(fspath) = snap_obj.call_method0("__fspath__") {
+            fspath.extract()?
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "snapshot must be str or os.PathLike",
+            ));
+        };
+        // Resolve the snapshot synchronously: read the manifest and
+        // pin the image. We can't use the async `from_snapshot` here
+        // because `build_config_from_kwargs` runs in sync context;
+        // instead we replicate the resolution against the on-disk
+        // artifact directly via `snapshot_resolved`.
+        let snap_dir = resolve_snapshot_dir(&snap_str);
+        if !snap_dir.exists() {
+            return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+                "snapshot artifact not found: {}",
+                snap_dir.display()
+            )));
+        }
+        let manifest_bytes = std::fs::read(
+            snap_dir.join(microsandbox::snapshot::MANIFEST_FILENAME),
+        )
+        .map_err(|e| {
+            pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+                "snapshot manifest not readable at {}: {e}",
+                snap_dir.display(),
+            ))
+        })?;
+        let manifest =
+            microsandbox::snapshot::Manifest::from_bytes(&manifest_bytes).map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("snapshot manifest invalid: {e}"))
+            })?;
+        let upper_path = snap_dir.join(&manifest.upper.file);
+        if !upper_path.exists() {
+            return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+                "snapshot upper file missing: {}",
+                upper_path.display(),
+            )));
+        }
+        builder = builder.image(manifest.image.reference.as_str());
+        builder = builder.snapshot_resolved(manifest.image.manifest_digest.clone(), upper_path);
+    } else {
+        let image_obj = kwargs.get_item("image")?.unwrap();
+        // Accept str, PathLike, or ImageSource (with _to_image_str method).
+        let image_str: String = if let Ok(s) = image_obj.extract::<String>() {
+            s
+        } else if let Ok(method) = image_obj.getattr("_to_image_str") {
+            method.call0()?.extract()?
+        } else if let Ok(fspath) = image_obj.call_method0("__fspath__") {
+            fspath.extract()?
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "image must be str, os.PathLike, or ImageSource",
+            ));
+        };
+
+        // Handle disk image with fstype if ImageSource has those attributes.
+        if let Ok(fstype_attr) = image_obj.getattr("_fstype") {
+            if !fstype_attr.is_none() {
+                let fstype: String = fstype_attr.extract()?;
+                builder = builder.image_with(|i| i.disk(&image_str).fstype(&fstype));
+            } else {
+                builder = builder.image(image_str.as_str());
+            }
         } else {
             builder = builder.image(image_str.as_str());
-        }
-    } else {
-        builder = builder.image(image_str.as_str());
-    };
+        };
+    }
 
     if let Some(memory) = extract_opt::<u32>(kwargs, "memory")? {
         builder = builder.memory(memory);
@@ -73,6 +133,12 @@ pub fn build_config_from_kwargs(
     }
     if let Some(entrypoint) = extract_opt::<Vec<String>>(kwargs, "entrypoint")? {
         builder = builder.entrypoint(entrypoint);
+    }
+    if let Some(init_obj) = kwargs.get_item("init")?
+        && !init_obj.is_none()
+    {
+        let (cmd, args, env) = parse_init_kwarg(&init_obj)?;
+        builder = builder.init_with(cmd, |i| i.args(args).envs(env));
     }
     if let Some(replace) = extract_opt::<bool>(kwargs, "replace")?
         && replace
@@ -223,6 +289,83 @@ pub fn build_config_from_kwargs(
         config.stop_signal = Some(sig);
     }
     Ok(config)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Init
+//--------------------------------------------------------------------------------------------------
+
+/// Tuple returned by [`parse_init_kwarg`]: `(cmd, args, env)`.
+type ParsedInit = (String, Vec<String>, Vec<(String, String)>);
+
+/// Parse the `init=` kwarg into `(cmd, args, env)`.
+///
+/// Accepted forms (consistent with how other `Sandbox.create` kwargs
+/// take a single value: bare scalar for the simple case, dataclass or
+/// dict for the rich case — never a tuple-as-pair):
+///
+/// - `"/sbin/init"` or `"auto"` — bare string, no args/env
+/// - `InitConfig(cmd=..., args=[...], env={...})` — dataclass
+/// - `{"cmd": ..., "args": [...], "env": {...}}` — equivalent dict
+fn parse_init_kwarg(obj: &Bound<'_, PyAny>) -> PyResult<ParsedInit> {
+    // Bare string.
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok((s, Vec::new(), Vec::new()));
+    }
+
+    // Dict form, or any object exposing `_to_dict()` (e.g. InitConfig).
+    let dict_owned = if let Ok(d) = obj.downcast::<PyDict>() {
+        Some(d.clone())
+    } else if let Ok(method) = obj.getattr("_to_dict") {
+        let returned = method.call0()?;
+        Some(
+            returned
+                .downcast::<PyDict>()
+                .map_err(|_| {
+                    pyo3::exceptions::PyTypeError::new_err("init._to_dict() must return a dict")
+                })?
+                .clone(),
+        )
+    } else {
+        None
+    };
+    if let Some(dict) = dict_owned {
+        let cmd: String = dict
+            .get_item("cmd")?
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("init dict requires 'cmd'"))?
+            .extract()?;
+        let (args, env) = parse_args_env(&dict)?;
+        return Ok((cmd, args, env));
+    }
+
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "init must be str, dict with 'cmd', or InitConfig",
+    ))
+}
+
+/// `(args, env)` pair extracted from a Python init-options dict.
+type ArgsEnv = (Vec<String>, Vec<(String, String)>);
+
+/// Pull `args: list[str]` and `env: dict[str, str]` from an init dict.
+/// Both keys are optional.
+fn parse_args_env(dict: &Bound<'_, PyDict>) -> PyResult<ArgsEnv> {
+    let args = dict
+        .get_item("args")?
+        .filter(|v| !v.is_none())
+        .map(|v| v.extract::<Vec<String>>())
+        .transpose()?
+        .unwrap_or_default();
+    let env = match dict.get_item("env")? {
+        Some(env_obj) if !env_obj.is_none() => {
+            let env_dict: &Bound<'_, PyDict> = env_obj.downcast()?;
+            env_dict
+                .iter()
+                .map(|(k, v)| Ok::<_, PyErr>((k.extract::<String>()?, v.extract::<String>()?)))
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        _ => Vec::new(),
+    };
+    Ok((args, env))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -772,4 +915,14 @@ fn extract_required<'py, T: FromPyObject<'py>>(
     dict.get_item(key)?
         .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("{key} is required")))?
         .extract()
+}
+
+/// Resolve a snapshot reference (bare name or path) to its on-disk
+/// directory. Mirrors the convention used by `Snapshot::open`.
+fn resolve_snapshot_dir(s: &str) -> std::path::PathBuf {
+    if s.contains('/') || s.starts_with('.') || s.starts_with('~') {
+        std::path::PathBuf::from(s)
+    } else {
+        microsandbox::config::config().snapshots_dir().join(s)
+    }
 }

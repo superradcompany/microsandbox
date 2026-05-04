@@ -107,4 +107,40 @@ impl JsSandboxHandle {
     pub async fn remove(&self) -> Result<()> {
         self.inner.remove().await.map_err(to_napi_error)
     }
+
+    /// Read captured output from `exec.log` for this sandbox.
+    ///
+    /// Works without starting the sandbox.
+    #[napi]
+    pub async fn logs(&self, opts: Option<LogOptions>) -> Result<Vec<LogEntry>> {
+        let rust_opts =
+            crate::sandbox::log_options_from_js(opts).map_err(napi::Error::from_reason)?;
+        let entries = self.inner.logs(&rust_opts).map_err(to_napi_error)?;
+        Ok(entries
+            .into_iter()
+            .map(crate::sandbox::log_entry_to_js)
+            .collect())
+    }
+
+    /// Snapshot this (stopped) sandbox under a bare name.
+    ///
+    /// Resolves under `~/.microsandbox/snapshots/<name>/`. Use
+    /// [`snapshotTo`](Self::snapshot_to) for an explicit filesystem
+    /// destination.
+    #[napi]
+    pub async fn snapshot(&self, name: String) -> Result<crate::snapshot::JsSnapshot> {
+        let snap = self.inner.snapshot(&name).await.map_err(to_napi_error)?;
+        Ok(crate::snapshot::JsSnapshot::from_rust(snap))
+    }
+
+    /// Snapshot this (stopped) sandbox to an explicit filesystem path.
+    #[napi(js_name = "snapshotTo")]
+    pub async fn snapshot_to(&self, path: String) -> Result<crate::snapshot::JsSnapshot> {
+        let snap = self
+            .inner
+            .snapshot_to(std::path::PathBuf::from(path))
+            .await
+            .map_err(to_napi_error)?;
+        Ok(crate::snapshot::JsSnapshot::from_rust(snap))
+    }
 }
