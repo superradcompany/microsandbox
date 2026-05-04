@@ -89,7 +89,7 @@ export interface NapiSandboxBuilderSetters {
   memory(mib: number): this;
   logLevel(level: string): this;
   quietLogs(): this;
-  metricsSampleIntervalMs(ms: number): this;
+  metricsSampleIntervalMs(ms: number | null): this;
   workdir(path: string): this;
   shell(shell: string): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

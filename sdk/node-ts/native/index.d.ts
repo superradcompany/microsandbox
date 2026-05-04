@@ -746,8 +746,8 @@ export declare class SandboxBuilder {
   logLevel(level: string): this
   /** Suppress sandbox logs. */
   quietLogs(): this
-  /** Override the metrics sampling interval in milliseconds. Pass 0 to disable metrics sampling entirely. */
-  metricsSampleIntervalMs(ms: number): this
+  /** Override the metrics sampling interval in milliseconds; pass `null` to disable. */
+  metricsSampleIntervalMs(ms?: number | undefined | null): this
   /** Default working directory for commands. */
   workdir(path: string): this
   /** Shell binary used by `Sandbox.shell(...)`. */
@@ -1227,7 +1227,7 @@ export interface ExitStatus {
 
 /** Options for `Snapshot.export()`. */
 export interface ExportOpts {
-  /** Walk the parent chain and include each ancestor (no-op in v1). */
+  /** Walk the parent chain and include each ancestor (no-op today). */
   withParents?: boolean
   /** Bundle the OCI image cache for offline transport. */
   withImage?: boolean

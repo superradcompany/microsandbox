@@ -977,7 +977,7 @@ mod tests {
     fn test_sandbox_cli_args_disabled_metrics_emit_null() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
-            .metrics_sample_interval(std::time::Duration::ZERO)
+            .metrics_sample_interval(None)
             .build()
             .unwrap();
 

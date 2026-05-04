@@ -156,8 +156,12 @@ impl SandboxBuilder {
         self
     }
 
-    /// Override the metrics sampling interval for this sandbox.
-    pub fn metrics_sample_interval(mut self, interval: Duration) -> Self {
+    /// Override the metrics sampling interval; pass `None` to disable.
+    pub fn metrics_sample_interval(mut self, interval: impl Into<Option<Duration>>) -> Self {
+        let Some(interval) = interval.into() else {
+            self.config.metrics_sample_interval_ms = None;
+            return self;
+        };
         let ms = interval.as_millis();
         if ms > u128::from(u64::MAX) {
             if self.build_error.is_none() {
@@ -876,10 +880,10 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_metrics_sample_interval_zero_is_disabled() {
+    fn test_builder_metrics_sample_interval_none_is_disabled() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
-            .metrics_sample_interval(std::time::Duration::ZERO)
+            .metrics_sample_interval(None)
             .build()
             .unwrap();
 

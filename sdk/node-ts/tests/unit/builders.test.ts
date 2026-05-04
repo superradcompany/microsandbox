@@ -192,12 +192,12 @@ describe("SandboxBuilder.build", () => {
     expect(cfg.metricsSampleIntervalMs).toBe(5000);
   });
 
-  it("metricsSampleIntervalMs(0) disables sampling", () => {
+  it("metricsSampleIntervalMs(null) disables sampling", () => {
     const cfg = Sandbox.builder("x")
       .image("alpine")
-      .metricsSampleIntervalMs(0)
+      .metricsSampleIntervalMs(null)
       .build();
-    expect(cfg.metricsSampleIntervalMs).toBe(0);
+    expect(cfg.metricsSampleIntervalMs).toBeNull();
   });
 });
 
