@@ -152,13 +152,6 @@ By default the microsandbox agent runs as PID 1 inside the guest — small, fast
 The simplest entry point is `auto`, which asks the agent to probe a small list of well-known paths inside the guest rootfs (`/sbin/init`, `/lib/systemd/systemd`, `/usr/lib/systemd/systemd`) and pick the first one that exists. If you need an exact path (e.g. for reproducible CI), pass an absolute path instead.
 
 <CodeGroup>
-```bash CLI
-msb run jrei/systemd-debian:12 \
-  -m 1G -c 2 \
-  --init auto \
-  -- bash
-```
-
 ```rust Rust
 use microsandbox::Sandbox;
 
@@ -192,6 +185,13 @@ sb = await Sandbox.create(
     cpus=2,
     init="auto",
 )
+```
+
+```bash CLI
+msb run jrei/systemd-debian:12 \
+  -m 1G -c 2 \
+  --init auto \
+  -- bash
 ```
 </CodeGroup>
 
