@@ -727,14 +727,16 @@ async fn upsert_layer_record<C: ConnectionTrait>(
         })
 }
 
-/// Attempt to satisfy `Image::persist` with a single bulk UPDATE.
+/// Attempt to satisfy `Image::persist` with a couple of bulk UPDATEs.
 ///
 /// Returns `Some(image_ref_id)` when the database is already consistent with
-/// `metadata` (i.e. the `image_ref` row exists and points to a manifest whose
-/// digest matches `metadata.manifest_digest`). In that case the only write
-/// performed is a bulk `UPDATE layer SET last_used_at` for LRU bookkeeping —
-/// the manifest, config, layer, and junction rows are content-addressed and
-/// guaranteed to be unchanged for a given manifest digest.
+/// `metadata` (i.e. the `image_ref` row exists, points to a manifest whose
+/// digest matches `metadata.manifest_digest`, and every expected `layer` row
+/// is present). In that case the only writes performed are a bulk
+/// `UPDATE layer SET last_used_at` and an `UPDATE image_ref SET updated_at`
+/// for LRU bookkeeping — the manifest, config, layer, and junction rows are
+/// content-addressed and guaranteed to be unchanged for a given manifest
+/// digest.
 ///
 /// Returns `None` when the caller must fall through to the full transactional
 /// upsert (fresh DB, manifest digest changed, partially persisted state).
@@ -756,22 +758,38 @@ async fn try_persist_fast_path(
         return Ok(None);
     }
 
-    // Refresh layer.last_used_at in a single statement so the layer GC
-    // policy still treats this image as recently used.
+    let now = chrono::Utc::now().naive_utc();
+
     if !metadata.layers.is_empty() {
-        let now = chrono::Utc::now().naive_utc();
         let diff_ids: Vec<String> = metadata
             .layers
             .iter()
             .map(|layer| layer.diff_id.clone())
             .collect();
 
+        // Sanity count check to verify all layers exist in the database.
+        let existing_layer_count = layer_entity::Entity::find()
+            .filter(layer_entity::Column::DiffId.is_in(diff_ids.clone()))
+            .count(db)
+            .await?;
+        if existing_layer_count != metadata.layers.len() as u64 {
+            return Ok(None);
+        }
+
+        // Refresh layer.last_used_at
         layer_entity::Entity::update_many()
             .col_expr(layer_entity::Column::LastUsedAt, Expr::value(now))
             .filter(layer_entity::Column::DiffId.is_in(diff_ids))
             .exec(db)
             .await?;
     }
+
+    // Refresh image_ref.updated_at
+    image_ref_entity::Entity::update_many()
+        .col_expr(image_ref_entity::Column::UpdatedAt, Expr::value(now))
+        .filter(image_ref_entity::Column::Id.eq(image_ref_model.id))
+        .exec(db)
+        .await?;
 
     Ok(Some(image_ref_model.id))
 }
