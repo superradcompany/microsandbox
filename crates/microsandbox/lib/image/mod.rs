@@ -5,8 +5,9 @@
 //! by [`microsandbox_image::GlobalCache`]; this module owns the DB lifecycle.
 
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, JoinType, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, RelationTrait, Set, TransactionTrait, sea_query::OnConflict,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, JoinType, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set, TransactionTrait,
+    sea_query::{Expr, OnConflict},
 };
 
 use microsandbox_image::{
@@ -151,6 +152,12 @@ impl Image {
     ///
     /// Upserts the manifest, config, layers, junction records, and image_ref
     /// inside a single transaction.
+    ///
+    /// Fast path: when the `image_ref` already points to a manifest whose
+    /// digest matches `metadata.manifest_digest`, skip the transactional
+    /// upsert entirely and only refresh `layer.last_used_at` for LRU GC.
+    /// This avoids ~25–30 redundant write statements per cached create
+    /// and keeps SQLite's single-writer lock free for other work.
     pub async fn persist(
         reference: &str,
         metadata: CachedImageMetadata,
@@ -159,6 +166,10 @@ impl Image {
             crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
 
         let reference = reference.to_string();
+
+        if let Some(image_ref_id) = try_persist_fast_path(db, &reference, &metadata).await? {
+            return Ok(image_ref_id);
+        }
 
         db.transaction::<_, i32, MicrosandboxError>(|txn| {
             Box::pin(async move {
@@ -714,4 +725,53 @@ async fn upsert_layer_record<C: ConnectionTrait>(
                 layer_meta.diff_id
             ))
         })
+}
+
+/// Attempt to satisfy `Image::persist` with a single bulk UPDATE.
+///
+/// Returns `Some(image_ref_id)` when the database is already consistent with
+/// `metadata` (i.e. the `image_ref` row exists and points to a manifest whose
+/// digest matches `metadata.manifest_digest`). In that case the only write
+/// performed is a bulk `UPDATE layer SET last_used_at` for LRU bookkeeping —
+/// the manifest, config, layer, and junction rows are content-addressed and
+/// guaranteed to be unchanged for a given manifest digest.
+///
+/// Returns `None` when the caller must fall through to the full transactional
+/// upsert (fresh DB, manifest digest changed, partially persisted state).
+async fn try_persist_fast_path(
+    db: &DatabaseConnection,
+    reference: &str,
+    metadata: &CachedImageMetadata,
+) -> MicrosandboxResult<Option<i32>> {
+    let Some((image_ref_model, Some(manifest))) = image_ref_entity::Entity::find()
+        .filter(image_ref_entity::Column::Reference.eq(reference))
+        .find_also_related(manifest_entity::Entity)
+        .one(db)
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    if manifest.digest != metadata.manifest_digest {
+        return Ok(None);
+    }
+
+    // Refresh layer.last_used_at in a single statement so the layer GC
+    // policy still treats this image as recently used.
+    if !metadata.layers.is_empty() {
+        let now = chrono::Utc::now().naive_utc();
+        let diff_ids: Vec<String> = metadata
+            .layers
+            .iter()
+            .map(|layer| layer.diff_id.clone())
+            .collect();
+
+        layer_entity::Entity::update_many()
+            .col_expr(layer_entity::Column::LastUsedAt, Expr::value(now))
+            .filter(layer_entity::Column::DiffId.is_in(diff_ids))
+            .exec(db)
+            .await?;
+    }
+
+    Ok(Some(image_ref_model.id))
 }
