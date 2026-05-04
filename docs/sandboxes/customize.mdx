@@ -151,13 +151,6 @@ The handoff sequence:
 
 Common reasons to opt in: long-lived daemons, system service tests, anything that talks to dbus or expects `systemctl` to work.
 
-The simplest entry point is `auto`, which probes a small list of well-known paths inside the guest rootfs and picks the first one that exists:
-
-- `/sbin/init`
-- `/lib/systemd/systemd`
-- `/usr/lib/systemd/systemd`
-
-Pass an absolute path instead when you need pinning (e.g. for reproducible CI).
 
 <CodeGroup>
 ```rust Rust
