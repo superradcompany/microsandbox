@@ -7,9 +7,9 @@
 //! cache of "snapshots I happen to know about on this machine."
 //!
 //! See `planning/microsandbox/implementation/snapshots.md` for the
-//! full design. v1 is stopped-sandbox / raw-format only; the manifest
-//! schema and DB columns are forward-compatible with qcow2 backing
-//! chains landing later.
+//! full design. Today snapshots are stopped-sandbox / raw-format only;
+//! the manifest schema and DB columns are forward-compatible with
+//! qcow2 backing chains landing later.
 
 mod archive;
 mod create;

@@ -11,7 +11,7 @@ from microsandbox import Sandbox, Snapshot, SnapshotHandle
 ```
 
 <Note>
-  v1 is **disk-only and stopped-only**. Live snapshots and qcow2 backing chains are tracked as future work.
+  Snapshots are **disk-only and stopped-only**. Live snapshots and qcow2 backing chains are tracked as future work.
 </Note>
 
 ## Sandbox.create() — `snapshot=` kwarg
@@ -77,7 +77,7 @@ Properties are read-only attributes (not async).
 | `size_bytes` | `int` | Apparent size of the captured upper layer in bytes (sparse on disk) |
 | `image_ref` | `str` | Image reference the snapshot was taken from |
 | `image_manifest_digest` | `str` | OCI manifest digest of the pinned image |
-| `format` | `str` | `"raw"` or `"qcow2"` (always `"raw"` in v1) |
+| `format` | `str` | `"raw"` or `"qcow2"` (always `"raw"` today) |
 | `fstype` | `str` | Filesystem type inside the upper (e.g. `"ext4"`) |
 | `parent` | `str \| None` | Parent snapshot's digest, or `None` for a root |
 | `created_at` | `str` | RFC 3339 timestamp |
@@ -256,7 +256,7 @@ Lightweight handle backed by an index row. Returned by [`Snapshot.list()`](#snap
 |----------|------|-------------|
 | `digest` | `str` | Manifest digest — canonical identity |
 | `name` | `str \| None` | Convenience alias |
-| `parent_digest` | `str \| None` | Parent snapshot digest (None in v1) |
+| `parent_digest` | `str \| None` | Parent snapshot digest (`None` today; populated when chains land) |
 | `image_ref` | `str` | Image the snapshot was taken from |
 | `format` | `str` | `"raw"` or `"qcow2"` |
 | `size_bytes` | `int \| None` | Apparent upper size at index time |

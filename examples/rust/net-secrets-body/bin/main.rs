@@ -1,8 +1,4 @@
 //! Body secret injection — placeholder substituted in HTTP body by the TLS proxy.
-//!
-//! Spins up a self-signed HTTPS server in the same process, creates a sandbox
-//! with a body-injected secret, and has the guest POST the placeholder.
-//! The server logs the real secret it receives; the guest only ever sees the placeholder.
 
 mod sandbox;
 mod server;
@@ -23,17 +19,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let sb = sandbox::create(SECRET, HOSTNAME, PORT, &handle.ca_cert_path).await?;
 
-    // Guest sees only the placeholder.
     let out = sb.shell("echo $API_KEY").await?;
     println!("[guest]  API_KEY = {}", out.stdout()?.trim());
 
-    // Guest POSTs the placeholder in a JSON body — the TLS proxy substitutes the real secret.
     let response = sandbox::post_secret(&sb, HOSTNAME, &host_ip, PORT).await?;
     println!("[guest]  Server responded: {response}");
 
     sb.stop_and_wait().await?;
     Sandbox::remove("net-secrets-body").await?;
-    println!("[host]   Done.");
 
     Ok(())
 }

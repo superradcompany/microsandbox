@@ -50,8 +50,8 @@ pub(super) async fn create_snapshot(config: SnapshotConfig) -> MicrosandboxResul
 
     let sandbox_config: SandboxConfig = serde_json::from_str(&model.config)?;
 
-    // v1 only supports OCI-rooted sandboxes. Non-OCI rootfs (passthrough,
-    // disk-image-rootfs) are out of scope.
+    // Only OCI-rooted sandboxes can be snapshotted today; non-OCI
+    // rootfs (passthrough, disk-image-rootfs) are out of scope.
     let manifest_digest_str = sandbox_config.manifest_digest.clone().ok_or_else(|| {
         MicrosandboxError::InvalidConfig(format!(
             "sandbox '{source_sandbox}' has no OCI image pinned; only OCI-rooted sandboxes can be snapshotted"

@@ -134,6 +134,12 @@ pub fn build_config_from_kwargs(
     if let Some(entrypoint) = extract_opt::<Vec<String>>(kwargs, "entrypoint")? {
         builder = builder.entrypoint(entrypoint);
     }
+    if let Some(init_obj) = kwargs.get_item("init")?
+        && !init_obj.is_none()
+    {
+        let (cmd, args, env) = parse_init_kwarg(&init_obj)?;
+        builder = builder.init_with(cmd, |i| i.args(args).envs(env));
+    }
     if let Some(replace) = extract_opt::<bool>(kwargs, "replace")?
         && replace
     {
@@ -283,6 +289,83 @@ pub fn build_config_from_kwargs(
         config.stop_signal = Some(sig);
     }
     Ok(config)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Init
+//--------------------------------------------------------------------------------------------------
+
+/// Tuple returned by [`parse_init_kwarg`]: `(cmd, args, env)`.
+type ParsedInit = (String, Vec<String>, Vec<(String, String)>);
+
+/// Parse the `init=` kwarg into `(cmd, args, env)`.
+///
+/// Accepted forms (consistent with how other `Sandbox.create` kwargs
+/// take a single value: bare scalar for the simple case, dataclass or
+/// dict for the rich case — never a tuple-as-pair):
+///
+/// - `"/sbin/init"` or `"auto"` — bare string, no args/env
+/// - `InitConfig(cmd=..., args=[...], env={...})` — dataclass
+/// - `{"cmd": ..., "args": [...], "env": {...}}` — equivalent dict
+fn parse_init_kwarg(obj: &Bound<'_, PyAny>) -> PyResult<ParsedInit> {
+    // Bare string.
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok((s, Vec::new(), Vec::new()));
+    }
+
+    // Dict form, or any object exposing `_to_dict()` (e.g. InitConfig).
+    let dict_owned = if let Ok(d) = obj.downcast::<PyDict>() {
+        Some(d.clone())
+    } else if let Ok(method) = obj.getattr("_to_dict") {
+        let returned = method.call0()?;
+        Some(
+            returned
+                .downcast::<PyDict>()
+                .map_err(|_| {
+                    pyo3::exceptions::PyTypeError::new_err("init._to_dict() must return a dict")
+                })?
+                .clone(),
+        )
+    } else {
+        None
+    };
+    if let Some(dict) = dict_owned {
+        let cmd: String = dict
+            .get_item("cmd")?
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("init dict requires 'cmd'"))?
+            .extract()?;
+        let (args, env) = parse_args_env(&dict)?;
+        return Ok((cmd, args, env));
+    }
+
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "init must be str, dict with 'cmd', or InitConfig",
+    ))
+}
+
+/// `(args, env)` pair extracted from a Python init-options dict.
+type ArgsEnv = (Vec<String>, Vec<(String, String)>);
+
+/// Pull `args: list[str]` and `env: dict[str, str]` from an init dict.
+/// Both keys are optional.
+fn parse_args_env(dict: &Bound<'_, PyDict>) -> PyResult<ArgsEnv> {
+    let args = dict
+        .get_item("args")?
+        .filter(|v| !v.is_none())
+        .map(|v| v.extract::<Vec<String>>())
+        .transpose()?
+        .unwrap_or_default();
+    let env = match dict.get_item("env")? {
+        Some(env_obj) if !env_obj.is_none() => {
+            let env_dict: &Bound<'_, PyDict> = env_obj.downcast()?;
+            env_dict
+                .iter()
+                .map(|(k, v)| Ok::<_, PyErr>((k.extract::<String>()?, v.extract::<String>()?)))
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        _ => Vec::new(),
+    };
+    Ok((args, env))
 }
 
 //--------------------------------------------------------------------------------------------------

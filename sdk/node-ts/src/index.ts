@@ -287,6 +287,7 @@ export const PatchBuilder = napi.PatchBuilder;
 export const RegistryConfigBuilder = napi.RegistryConfigBuilder;
 export const ImageBuilder = napi.ImageBuilder;
 export const ExecOptionsBuilder = napi.ExecOptionsBuilder;
+export const InitOptionsBuilder = napi.InitOptionsBuilder;
 export const AttachOptionsBuilder = napi.AttachOptionsBuilder;
 import type {
   NapiNetworkPolicyBuilder,

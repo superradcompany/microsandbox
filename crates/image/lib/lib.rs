@@ -8,6 +8,14 @@
 //! - ext4 upper disk formatting for writable overlay upper layer
 //! - Minimal EROFS reader for Append patches
 
+// New lints introduced in rustc 1.95 fire on existing code; cleanup
+// tracked separately.
+#![allow(
+    clippy::identity_op,
+    clippy::useless_conversion,
+    clippy::needless_update
+)]
+
 mod auth;
 mod config;
 pub(crate) mod crc32c;

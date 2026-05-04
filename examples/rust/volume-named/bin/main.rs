@@ -1,15 +1,11 @@
-//! Named volume example — persistent storage across sandboxes.
-//!
-//! See [examples/README.md](../../../README.md) for prerequisites and usage.
+//! Named volume — persistent storage shared across sandboxes.
 
 use microsandbox::{Sandbox, Volume, size::SizeExt};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a named volume.
     let data = Volume::builder("my-data").quota(100.mib()).create().await?;
 
-    // Sandbox A writes to the volume.
     let writer = Sandbox::builder("writer")
         .image("alpine")
         .volume("/data", |v| v.named(data.name()))
@@ -23,7 +19,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     writer.stop_and_wait().await?;
 
-    // Sandbox B reads from the same volume.
     let reader = Sandbox::builder("reader")
         .image("alpine")
         .volume("/data", |v| v.named(data.name()).readonly())
@@ -36,7 +31,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     reader.stop_and_wait().await?;
 
-    // Clean up.
     Sandbox::remove("writer").await?;
     Sandbox::remove("reader").await?;
     Volume::remove("my-data").await?;

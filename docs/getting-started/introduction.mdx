@@ -216,7 +216,7 @@ sb = await Sandbox.create(
 
 ### Snapshot and reuse setup state
 
-Capture a stopped sandbox's writable upper layer as a portable artifact, then boot fresh sandboxes from it. Install dependencies once, snapshot, and `msb run --snapshot ...` workers that skip the setup phase. The artifact is a directory you can `scp` between machines or bundle into a `.tar.zst`. v1 is disk-only and stopped-only; live VM-state snapshots are tracked as future work.
+Capture a stopped sandbox's writable upper layer as a portable artifact, then boot fresh sandboxes from it. Install dependencies once, snapshot, and `msb run --snapshot ...` workers that skip the setup phase. The artifact is a directory you can `scp` between machines or bundle into a `.tar.zst`. Snapshots today are disk-only and stopped-only; live VM-state snapshots are tracked as future work.
 
 <CodeGroup>
 

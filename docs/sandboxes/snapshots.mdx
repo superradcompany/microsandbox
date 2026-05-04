@@ -9,12 +9,12 @@ A snapshot captures a stopped sandbox's writable upper layer as a self-describin
 The artifact is a directory containing `manifest.json` (canonical JSON, identity is the SHA-256 of these bytes) plus the captured `upper.ext4`. The directory **is** the snapshot — there is no hidden daemon state. A local DB indexes known snapshots for fast queries, but it's a rebuildable cache; deleting it loses nothing.
 
 <Note>
-  v1 snapshots are **disk-only and stopped-only**. They capture the writable filesystem layer of a sandbox that's not currently running. Live snapshots (memory + CPU state) and qcow2-backed checkpoint chains are future work.
+  Snapshots are **disk-only and stopped-only**: they capture the writable filesystem layer of a sandbox that's not currently running. Live snapshots (memory + CPU state) and qcow2-backed checkpoint chains are future work.
 </Note>
 
 ## What gets captured
 
-| Captured | Not captured (v1) |
+| Captured | Not captured |
 |---|---|
 | `upper.ext4` — the sandbox's writable overlay | Memory contents |
 | Pinned image reference + manifest digest | CPU registers / running processes |
@@ -214,9 +214,9 @@ msb snapshot inspect after-pip-install --verify
 - **Local fork-by-copy.** Multiple sandboxes from one snapshot are independent; each copy of the upper layer diverges on its own.
 - **Disaster recovery.** Snapshot a sandbox before a risky migration; if it goes wrong, `msb rm` the broken one and `msb run --snapshot` from the pre-migration artifact.
 
-## What's not in v1
+## What's not yet supported
 
 - **Live (running) snapshots.** The sandbox must be stopped first. Live capture requires an in-guest filesystem freeze and memory checkpointing that's tracked as future work.
-- **qcow2 backing chains.** v1 always copies the upper layer. The manifest's `format` and `parent` fields are reserved so qcow2 chains can land additively without a schema break.
+- **qcow2 backing chains.** Snapshots always copy the upper layer today. The manifest's `format` and `parent` fields are reserved so qcow2 chains can land additively without a schema break.
 - **Push/pull from a registry.** The artifact format is registry-shaped on purpose, but transport tooling beyond `scp` and `tar.zst` is a separate piece of work.
-- **Snapshotting `DiskImage` volumes.** Same mechanism would apply (reflink the disk file), but is out of scope for v1.
+- **Snapshotting `DiskImage` volumes.** The same mechanism would apply (reflink the disk file), but is currently out of scope.

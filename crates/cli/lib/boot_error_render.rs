@@ -90,7 +90,7 @@ fn stage_hint(err: &BootError) -> Option<String> {
 /// we cannot recover one.
 fn extract_mount_hint(_message: &str) -> String {
     // Future: parse the host path from the volume spec at higher levels
-    // and pass it through. For v1, a clear generic message is enough.
+    // and pass it through. For now, a clear generic message is enough.
     "the host path for one of the mounts does not exist".into()
 }
 

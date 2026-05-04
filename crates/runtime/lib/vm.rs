@@ -87,7 +87,7 @@ pub struct Config {
 
 /// Specification for the writable upper layer attached as virtio-blk.
 ///
-/// In v1 the upper is always a flat raw ext4 file, so `format = Raw`
+/// Today the upper is always a flat raw ext4 file, so `format = Raw`
 /// and `backing` is empty. The shape is forward-compatible with
 /// qcow2 backing chains: when chains land, `format = Qcow2` and
 /// `backing` lists ancestor files that the VMM must also map. The
@@ -96,9 +96,9 @@ pub struct Config {
 pub struct UpperSpec {
     /// Path to the head upper file. Mounted writable.
     pub primary: PathBuf,
-    /// On-disk format. `Raw` in v1; `Qcow2` once chains land.
+    /// On-disk format. `Raw` today; `Qcow2` once chains land.
     pub format: msb_krun::DiskImageFormat,
-    /// Ancestor files in the backing chain, oldest-first. Empty in v1.
+    /// Ancestor files in the backing chain, oldest-first. Empty today.
     pub backing: Vec<PathBuf>,
     /// Whether the head file is read-only. Should be `false` for the
     /// running sandbox's upper.
@@ -162,12 +162,12 @@ pub struct VmConfig {
     ///
     /// Convenience field equivalent to `rootfs_upper_spec` with format
     /// `Raw` and no backing chain. When `rootfs_upper_spec` is set, it
-    /// takes precedence; this field is the v1 fast-path.
+    /// takes precedence; this field is the fast path for the common case.
     pub rootfs_upper: Option<PathBuf>,
 
     /// Full spec for the writable upper layer.
     ///
-    /// Forward-compat seam for qcow2 backing chains. v1 always
+    /// Forward-compat seam for qcow2 backing chains. Today this always
     /// produces `Raw` with an empty backing chain — equivalent to
     /// `rootfs_upper`. The qcow2 future populates `format = Qcow2`
     /// and a non-empty `backing` chain without touching every call

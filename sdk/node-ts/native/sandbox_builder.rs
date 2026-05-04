@@ -14,6 +14,7 @@ use crate::dns_builder::JsDnsBuilder;
 use crate::error::to_napi_error;
 use crate::exec_options_builder::parse_rlimit_resource;
 use crate::image_builder::JsImageBuilder;
+use crate::init_options_builder::JsInitOptionsBuilder;
 use crate::mount_builder::JsMountBuilder;
 use crate::network_builder::JsNetworkBuilder;
 use crate::patch_builder::JsPatchBuilder;
@@ -198,6 +199,43 @@ impl JsSandboxBuilder {
         let prev = self.take_inner();
         self.inner = Some(prev.entrypoint(cmd));
         self
+    }
+
+    /// Hand off PID 1 to a guest init binary after agentd's setup.
+    ///
+    /// `cmd` is either an absolute path inside the guest rootfs or
+    /// the literal `"auto"`. `args` is the supplemental argv;
+    /// `argv[0]` is implicitly `cmd`. For env vars, use `initWith`.
+    #[napi]
+    pub fn init(&mut self, cmd: String, args: Option<Vec<String>>) -> &Self {
+        let prev = self.take_inner();
+        let cmd_path = PathBuf::from(cmd);
+        self.inner = Some(match args {
+            Some(args) if !args.is_empty() => prev.init_with(cmd_path, |i| i.args(args)),
+            _ => prev.init(cmd_path),
+        });
+        self
+    }
+
+    /// Hand off PID 1 with a closure-builder for argv and env. Mirrors
+    /// `imageWith` — the closure is invoked synchronously and returns
+    /// the populated `InitOptionsBuilder`.
+    #[napi(js_name = "initWith")]
+    pub fn init_with(
+        &mut self,
+        env: &Env,
+        cmd: String,
+        configure: Function<
+            ClassInstance<JsInitOptionsBuilder>,
+            ClassInstance<JsInitOptionsBuilder>,
+        >,
+    ) -> Result<&Self> {
+        let initial = JsInitOptionsBuilder::new().into_instance(env)?;
+        let mut returned = configure.call(initial)?;
+        let init_builder = returned.take_inner_builder()?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.init_with(PathBuf::from(cmd), |_default| init_builder));
+        Ok(self)
     }
 
     /// Override the guest hostname.
