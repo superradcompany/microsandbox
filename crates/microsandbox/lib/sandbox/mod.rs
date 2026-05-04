@@ -18,14 +18,15 @@ mod types;
 use std::{collections::HashMap, path::Path, process::ExitStatus, sync::Arc};
 
 use bytes::Bytes;
+use microsandbox_db::pool::DbPools;
+use microsandbox_db::{DbReadConnection, DbWriteConnection};
 use microsandbox_image::Registry;
 use microsandbox_protocol::{
     exec::{ExecExited, ExecRequest, ExecRlimit, ExecStarted, ExecStderr, ExecStdin, ExecStdout},
     message::{Message, MessageType},
 };
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
-    sea_query::Expr,
+    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set, sea_query::Expr,
 };
 use tokio::sync::{Mutex, mpsc};
 
@@ -199,7 +200,7 @@ impl Sandbox {
 
         // Initialize the database before any expensive image pull so we can
         // fail fast on conflicting persisted sandbox state.
-        let db = db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = db::init_global().await?;
         let sandbox_dir = crate::config::config().sandboxes_dir().join(&config.name);
         prepare_create_target(db, &config, &sandbox_dir).await?;
 
@@ -280,7 +281,8 @@ impl Sandbox {
         }
 
         // Insert the sandbox record and keep its stable database ID.
-        let sandbox_id = insert_sandbox_record(db, &config).await?;
+        let write_db = db.write();
+        let sandbox_id = insert_sandbox_record(write_db, &config).await?;
         tracing::debug!(sandbox_id, sandbox = %config.name, "create_with_mode: db record inserted");
 
         // Spawn the sandbox process and create the bridge. On failure, mark the sandbox
@@ -288,7 +290,7 @@ impl Sandbox {
         let sandbox = match Self::create_inner(config, sandbox_id, mode).await {
             Ok(sandbox) => sandbox,
             Err(e) => {
-                let _ = update_sandbox_status(db, sandbox_id, SandboxStatus::Stopped).await;
+                let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
                 return Err(e);
             }
         };
@@ -296,10 +298,10 @@ impl Sandbox {
         if let (Some(_reference), Some(manifest_digest)) = (
             pinned_reference.as_deref(),
             pinned_manifest_digest.as_deref(),
-        ) && let Err(err) = persist_oci_manifest_pin(db, sandbox_id, manifest_digest).await
+        ) && let Err(err) = persist_oci_manifest_pin(write_db, sandbox_id, manifest_digest).await
         {
             let _ = sandbox.stop().await;
-            let _ = update_sandbox_status(db, sandbox_id, SandboxStatus::Stopped).await;
+            let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
             return Err(err);
         }
 
@@ -308,7 +310,7 @@ impl Sandbox {
             && !sandbox.fs().exists(workdir).await.unwrap_or(false)
         {
             let _ = sandbox.stop().await;
-            let _ = update_sandbox_status(db, sandbox_id, SandboxStatus::Stopped).await;
+            let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
             return Err(crate::MicrosandboxError::InvalidConfig(format!(
                 "workdir does not exist in guest: {workdir}"
             )));
@@ -319,8 +321,9 @@ impl Sandbox {
 
     pub(super) async fn start_with_mode(name: &str, mode: SpawnMode) -> MicrosandboxResult<Self> {
         tracing::debug!(sandbox = name, ?mode, "start_with_mode: loading record");
-        let db = db::init_global(Some(crate::config::config().database.max_connections)).await?;
-        let model = load_sandbox_record_reconciled(db, name).await?;
+        let pools = db::init_global().await?;
+        let write_db = pools.write();
+        let model = load_sandbox_record_reconciled(pools, name).await?;
         tracing::debug!(sandbox = name, status = ?model.status, "start_with_mode: current status");
 
         if model.status == SandboxStatus::Running || model.status == SandboxStatus::Draining {
@@ -340,12 +343,12 @@ impl Sandbox {
         config.apply_runtime_defaults();
         validate_rootfs_source(&config.image)?;
         validate_start_state(&config, &crate::config::config().sandboxes_dir().join(name))?;
-        update_sandbox_status(db, model.id, SandboxStatus::Running).await?;
+        update_sandbox_status(write_db, model.id, SandboxStatus::Running).await?;
 
         match Self::create_inner(config, model.id, mode).await {
             Ok(sandbox) => Ok(sandbox),
             Err(err) => {
-                let _ = update_sandbox_status(db, model.id, SandboxStatus::Stopped).await;
+                let _ = update_sandbox_status(write_db, model.id, SandboxStatus::Stopped).await;
                 Err(err)
             }
         }
@@ -379,35 +382,35 @@ impl Sandbox {
 
     /// Get a sandbox handle by name from the database.
     pub async fn get(name: &str) -> MicrosandboxResult<SandboxHandle> {
-        let db = db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let pools = db::init_global().await?;
 
         let model = sandbox_entity::Entity::find()
             .filter(sandbox_entity::Column::Name.eq(name))
-            .one(db)
+            .one(pools.read())
             .await?
             .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(name.into()))?;
 
-        let model = reconcile_sandbox_runtime_state(db, model).await?;
-        build_handle(db, model).await
+        let model = reconcile_sandbox_runtime_state(pools, model).await?;
+        build_handle(pools.read(), model).await
     }
 
     /// List all sandboxes from the database.
     pub async fn list() -> MicrosandboxResult<Vec<SandboxHandle>> {
-        let db = db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let pools = db::init_global().await?;
 
         let sandboxes = sandbox_entity::Entity::find()
             .order_by_desc(sandbox_entity::Column::CreatedAt)
-            .all(db)
+            .all(pools.read())
             .await?;
 
         let mut reconciled = Vec::with_capacity(sandboxes.len());
         for sandbox in sandboxes {
-            let model = reconcile_sandbox_runtime_state(db, sandbox).await?;
+            let model = reconcile_sandbox_runtime_state(pools, sandbox).await?;
             reconciled.push(model);
         }
 
         let sandbox_ids: Vec<i32> = reconciled.iter().map(|sandbox| sandbox.id).collect();
-        let active_pids = load_active_pids(db, &sandbox_ids).await?;
+        let active_pids = load_active_pids(pools.read(), &sandbox_ids).await?;
         let mut handles = Vec::with_capacity(reconciled.len());
         for sandbox in reconciled {
             handles.push(build_handle_with_pid(
@@ -434,7 +437,7 @@ impl Sandbox {
 impl Sandbox {
     /// Remove this sandbox's persisted state after it has fully stopped.
     pub async fn remove_persisted(self) -> MicrosandboxResult<()> {
-        let db = db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let pools = db::init_global().await?;
 
         remove_dir_if_exists(
             &crate::config::config()
@@ -442,7 +445,7 @@ impl Sandbox {
                 .join(&self.config.name),
         )?;
         sandbox_entity::Entity::delete_by_id(self.db_id)
-            .exec(db)
+            .exec(pools.write())
             .await?;
 
         Ok(())
@@ -1054,7 +1057,7 @@ async fn wait_for_relay(
 
 /// Build a [`SandboxHandle`] by eagerly loading the microVM PID.
 async fn build_handle(
-    db: &sea_orm::DatabaseConnection,
+    db: &DbReadConnection,
     model: sandbox_entity::Model,
 ) -> MicrosandboxResult<SandboxHandle> {
     let run = load_active_run(db, model.id).await?;
@@ -1208,11 +1211,11 @@ async fn event_mapper_task(
 
 /// Update the sandbox status in the database.
 pub(super) async fn update_sandbox_status(
-    db: &sea_orm::DatabaseConnection,
+    db: &DbWriteConnection,
     sandbox_id: i32,
     status: SandboxStatus,
 ) -> MicrosandboxResult<()> {
-    db::with_retry_transaction(db, "update_sandbox_status", |txn| async move {
+    db.transaction("update_sandbox_status", |txn| async move {
         sandbox_entity::Entity::update_many()
             .col_expr(sandbox_entity::Column::Status, Expr::value(status))
             .col_expr(
@@ -1242,19 +1245,19 @@ pub(super) async fn update_sandbox_status(
 /// from updating the database on exit are cleaned up without blocking the
 /// main path.
 pub async fn reap_stale_sandboxes() -> MicrosandboxResult<()> {
-    let db = db::init_global(Some(crate::config::config().database.max_connections)).await?;
+    let pools = db::init_global().await?;
 
     let stale = sandbox_entity::Entity::find()
         .filter(
             sandbox_entity::Column::Status.is_in([SandboxStatus::Running, SandboxStatus::Draining]),
         )
-        .all(db)
+        .all(pools.read())
         .await?;
 
     for sandbox in stale {
         // Best-effort: ignore per-sandbox errors so one bad record does not
         // prevent the rest from being reaped.
-        let _ = reconcile_sandbox_runtime_state(db, sandbox).await;
+        let _ = reconcile_sandbox_runtime_state(pools, sandbox).await;
     }
 
     Ok(())
@@ -1289,15 +1292,15 @@ pub fn spawn_reaper() {
 //--------------------------------------------------------------------------------------------------
 
 pub(super) async fn load_sandbox_record_reconciled(
-    db: &sea_orm::DatabaseConnection,
+    pools: &DbPools,
     name: &str,
 ) -> MicrosandboxResult<sandbox_entity::Model> {
-    let sandbox = load_sandbox_record(db, name).await?;
-    reconcile_sandbox_runtime_state(db, sandbox).await
+    let sandbox = load_sandbox_record(pools.read(), name).await?;
+    reconcile_sandbox_runtime_state(pools, sandbox).await
 }
 
 pub(super) async fn reconcile_sandbox_runtime_state(
-    db: &sea_orm::DatabaseConnection,
+    pools: &DbPools,
     sandbox: sandbox_entity::Model,
 ) -> MicrosandboxResult<sandbox_entity::Model> {
     if !matches!(
@@ -1307,7 +1310,7 @@ pub(super) async fn reconcile_sandbox_runtime_state(
         return Ok(sandbox);
     }
 
-    let run = load_active_run(db, sandbox.id).await?;
+    let run = load_active_run(pools.read(), sandbox.id).await?;
 
     // No run record yet — the sandbox is still starting up (the child
     // process has not inserted its PID). Skip reconciliation to avoid
@@ -1320,16 +1323,16 @@ pub(super) async fn reconcile_sandbox_runtime_state(
         return Ok(sandbox);
     }
 
-    mark_sandbox_runtime_stale(db, sandbox.id, Some(run.id)).await?;
+    mark_sandbox_runtime_stale(pools.write(), sandbox.id, Some(run.id)).await?;
 
     sandbox_entity::Entity::find_by_id(sandbox.id)
-        .one(db)
+        .one(pools.read())
         .await?
         .ok_or_else(|| crate::MicrosandboxError::SandboxNotFound(sandbox.name))
 }
 
 pub(super) async fn load_active_run(
-    db: &sea_orm::DatabaseConnection,
+    db: &DbReadConnection,
     sandbox_id: i32,
 ) -> MicrosandboxResult<Option<run_entity::Model>> {
     run_entity::Entity::find()
@@ -1342,7 +1345,7 @@ pub(super) async fn load_active_run(
 }
 
 async fn load_active_pids(
-    db: &sea_orm::DatabaseConnection,
+    db: &DbReadConnection,
     sandbox_ids: &[i32],
 ) -> MicrosandboxResult<HashMap<i32, i32>> {
     if sandbox_ids.is_empty() {
@@ -1379,46 +1382,48 @@ fn pid_from_run(run: Option<&run_entity::Model>) -> Option<i32> {
 }
 
 async fn mark_sandbox_runtime_stale(
-    db: &sea_orm::DatabaseConnection,
+    db: &DbWriteConnection,
     sandbox_id: i32,
     run_id: Option<i32>,
 ) -> MicrosandboxResult<()> {
-    let txn = db.begin().await?;
-    let now = chrono::Utc::now().naive_utc();
+    db.transaction("mark_sandbox_runtime_stale", |txn| async move {
+        let now = chrono::Utc::now().naive_utc();
 
-    if let Some(run_id) = run_id {
-        run_entity::Entity::update_many()
+        if let Some(run_id) = run_id {
+            run_entity::Entity::update_many()
+                .col_expr(
+                    run_entity::Column::Status,
+                    Expr::value(run_entity::RunStatus::Terminated),
+                )
+                .col_expr(
+                    run_entity::Column::TerminationReason,
+                    Expr::value(run_entity::TerminationReason::InternalError),
+                )
+                .col_expr(run_entity::Column::TerminatedAt, Expr::value(now))
+                .filter(run_entity::Column::Id.eq(run_id))
+                .exec(&txn)
+                .await?;
+        }
+
+        // Only mark Crashed if the sandbox is still Running or Draining. This
+        // prevents a concurrent start() from having its Running status overwritten.
+        sandbox_entity::Entity::update_many()
             .col_expr(
-                run_entity::Column::Status,
-                Expr::value(run_entity::RunStatus::Terminated),
+                sandbox_entity::Column::Status,
+                Expr::value(SandboxStatus::Crashed),
             )
-            .col_expr(
-                run_entity::Column::TerminationReason,
-                Expr::value(run_entity::TerminationReason::InternalError),
+            .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
+            .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+            .filter(
+                sandbox_entity::Column::Status
+                    .is_in([SandboxStatus::Running, SandboxStatus::Draining]),
             )
-            .col_expr(run_entity::Column::TerminatedAt, Expr::value(now))
-            .filter(run_entity::Column::Id.eq(run_id))
             .exec(&txn)
             .await?;
-    }
 
-    // Only mark Crashed if the sandbox is still Running or Draining. This
-    // prevents a concurrent start() from having its Running status overwritten.
-    sandbox_entity::Entity::update_many()
-        .col_expr(
-            sandbox_entity::Column::Status,
-            Expr::value(SandboxStatus::Crashed),
-        )
-        .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
-        .filter(sandbox_entity::Column::Id.eq(sandbox_id))
-        .filter(
-            sandbox_entity::Column::Status.is_in([SandboxStatus::Running, SandboxStatus::Draining]),
-        )
-        .exec(&txn)
-        .await?;
-
-    txn.commit().await?;
-    Ok(())
+        Ok((txn, ()))
+    })
+    .await
 }
 
 pub(super) fn pid_is_alive(pid: i32) -> bool {
@@ -1570,7 +1575,7 @@ pub(super) fn remove_dir_if_exists(path: &Path) -> MicrosandboxResult<()> {
 
 /// Load a sandbox row by name.
 pub(super) async fn load_sandbox_record(
-    db: &sea_orm::DatabaseConnection,
+    db: &DbReadConnection,
     name: &str,
 ) -> MicrosandboxResult<sandbox_entity::Model> {
     sandbox_entity::Entity::find()
@@ -1581,13 +1586,13 @@ pub(super) async fn load_sandbox_record(
 }
 
 async fn prepare_create_target(
-    db: &sea_orm::DatabaseConnection,
+    pools: &DbPools,
     config: &SandboxConfig,
     sandbox_dir: &Path,
 ) -> MicrosandboxResult<()> {
     let existing = sandbox_entity::Entity::find()
         .filter(sandbox_entity::Column::Name.eq(&config.name))
-        .one(db)
+        .one(pools.read())
         .await?;
 
     let dir_exists = sandbox_dir.exists();
@@ -1604,16 +1609,16 @@ async fn prepare_create_target(
     }
 
     if let Some(model) = existing {
-        let model = reconcile_sandbox_runtime_state(db, model).await?;
+        let model = reconcile_sandbox_runtime_state(pools, model).await?;
         if matches!(
             model.status,
             SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
         ) {
-            stop_sandbox_for_replacement(db, &model).await?;
+            stop_sandbox_for_replacement(pools, &model).await?;
         }
 
         sandbox_entity::Entity::delete_by_id(model.id)
-            .exec(db)
+            .exec(pools.write())
             .await?;
     }
 
@@ -1622,10 +1627,10 @@ async fn prepare_create_target(
 }
 
 async fn stop_sandbox_for_replacement(
-    db: &sea_orm::DatabaseConnection,
+    pools: &DbPools,
     sandbox: &sandbox_entity::Model,
 ) -> MicrosandboxResult<()> {
-    let run = load_active_run(db, sandbox.id).await?;
+    let run = load_active_run(pools.read(), sandbox.id).await?;
     let pids: Vec<i32> = run
         .as_ref()
         .and_then(|model| model.pid)
@@ -1649,45 +1654,51 @@ async fn stop_sandbox_for_replacement(
         )));
     }
 
-    mark_sandbox_stopped_for_replacement(db, sandbox.id, run.as_ref().map(|model| model.id)).await
+    mark_sandbox_stopped_for_replacement(
+        pools.write(),
+        sandbox.id,
+        run.as_ref().map(|model| model.id),
+    )
+    .await
 }
 
 async fn mark_sandbox_stopped_for_replacement(
-    db: &sea_orm::DatabaseConnection,
+    db: &DbWriteConnection,
     sandbox_id: i32,
     run_id: Option<i32>,
 ) -> MicrosandboxResult<()> {
-    let txn = db.begin().await?;
-    let now = chrono::Utc::now().naive_utc();
+    db.transaction("mark_sandbox_stopped_for_replacement", |txn| async move {
+        let now = chrono::Utc::now().naive_utc();
 
-    if let Some(run_id) = run_id {
-        run_entity::Entity::update_many()
+        if let Some(run_id) = run_id {
+            run_entity::Entity::update_many()
+                .col_expr(
+                    run_entity::Column::Status,
+                    Expr::value(run_entity::RunStatus::Terminated),
+                )
+                .col_expr(
+                    run_entity::Column::TerminationReason,
+                    Expr::value(run_entity::TerminationReason::Signal),
+                )
+                .col_expr(run_entity::Column::TerminatedAt, Expr::value(now))
+                .filter(run_entity::Column::Id.eq(run_id))
+                .exec(&txn)
+                .await?;
+        }
+
+        sandbox_entity::Entity::update_many()
             .col_expr(
-                run_entity::Column::Status,
-                Expr::value(run_entity::RunStatus::Terminated),
+                sandbox_entity::Column::Status,
+                Expr::value(SandboxStatus::Stopped),
             )
-            .col_expr(
-                run_entity::Column::TerminationReason,
-                Expr::value(run_entity::TerminationReason::Signal),
-            )
-            .col_expr(run_entity::Column::TerminatedAt, Expr::value(now))
-            .filter(run_entity::Column::Id.eq(run_id))
+            .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
+            .filter(sandbox_entity::Column::Id.eq(sandbox_id))
             .exec(&txn)
             .await?;
-    }
 
-    sandbox_entity::Entity::update_many()
-        .col_expr(
-            sandbox_entity::Column::Status,
-            Expr::value(SandboxStatus::Stopped),
-        )
-        .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
-        .filter(sandbox_entity::Column::Id.eq(sandbox_id))
-        .exec(&txn)
-        .await?;
-
-    txn.commit().await?;
-    Ok(())
+        Ok((txn, ()))
+    })
+    .await
 }
 
 async fn wait_for_pids_to_exit(pids: &[i32], timeout: std::time::Duration) {
@@ -1739,12 +1750,12 @@ fn validate_start_state(config: &SandboxConfig, sandbox_dir: &Path) -> Microsand
 
 /// Insert the sandbox record in the database and return its ID.
 async fn insert_sandbox_record(
-    db: &sea_orm::DatabaseConnection,
+    db: &DbWriteConnection,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<i32> {
     let config_json = serde_json::to_string(config)?;
 
-    db::with_retry_transaction(db, "insert_sandbox_record", |txn| {
+    db.transaction("insert_sandbox_record", |txn| {
         let config_json = config_json.clone();
         async move {
             let now = chrono::Utc::now().naive_utc();
@@ -1764,11 +1775,11 @@ async fn insert_sandbox_record(
 }
 
 async fn persist_oci_manifest_pin(
-    db: &sea_orm::DatabaseConnection,
+    db: &DbWriteConnection,
     sandbox_id: i32,
     manifest_digest: &str,
 ) -> MicrosandboxResult<()> {
-    db::with_retry_transaction(db, "persist_oci_manifest_pin", |txn| async move {
+    db.transaction("persist_oci_manifest_pin", |txn| async move {
         replace_oci_manifest_pin(&txn, sandbox_id, manifest_digest).await?;
         Ok((txn, ()))
     })
@@ -1870,8 +1881,9 @@ mod tests {
     };
 
     use microsandbox_db::entity::{run as run_entity, sandbox_rootfs as sandbox_rootfs_entity};
+    use microsandbox_db::pool::DbPools;
     use microsandbox_migration::{Migrator, MigratorTrait};
-    use sea_orm::{ColumnTrait, ConnectOptions, Database, EntityTrait, QueryFilter, Set};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
     use super::{
@@ -1879,6 +1891,20 @@ mod tests {
         persist_oci_manifest_pin, prepare_create_target, reconcile_sandbox_runtime_state,
         remove_dir_if_exists, validate_rootfs_source,
     };
+
+    /// Open both pools at `db_path` for tests, with migrations applied.
+    async fn open_test_pools(db_path: &std::path::Path) -> DbPools {
+        let pools = DbPools::open(
+            db_path,
+            1,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        Migrator::up(pools.write().inner(), None).await.unwrap();
+        pools
+    }
 
     fn unique_temp_path(suffix: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -2032,11 +2058,7 @@ mod tests {
     async fn test_persist_oci_manifest_pin_upserts_rootfs_record() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
-        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-        let conn = Database::connect(ConnectOptions::new(&db_url))
-            .await
-            .unwrap();
-        Migrator::up(&conn, None).await.unwrap();
+        let pools = open_test_pools(&db_path).await;
 
         let mut config = SandboxConfig {
             name: "pinned".into(),
@@ -2044,11 +2066,11 @@ mod tests {
             ..Default::default()
         };
         config.manifest_digest = Some("sha256:aaaa".into());
-        let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
 
         // First pin (no matching manifest in DB, so manifest_id will be None).
         persist_oci_manifest_pin(
-            &conn,
+            pools.write(),
             sandbox_id,
             "sha256:1111111111111111111111111111111111111111111111111111111111111111",
         )
@@ -2057,7 +2079,7 @@ mod tests {
 
         // Second pin replaces the first.
         persist_oci_manifest_pin(
-            &conn,
+            pools.write(),
             sandbox_id,
             "sha256:2222222222222222222222222222222222222222222222222222222222222222",
         )
@@ -2065,7 +2087,7 @@ mod tests {
         .unwrap();
 
         let pins = sandbox_rootfs_entity::Entity::find()
-            .all(&conn)
+            .all(pools.write())
             .await
             .unwrap();
         assert_eq!(pins.len(), 1);
@@ -2078,11 +2100,7 @@ mod tests {
     async fn test_persist_oci_manifest_pin_replaces_stale_pin_for_different_digest() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
-        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-        let conn = Database::connect(ConnectOptions::new(&db_url))
-            .await
-            .unwrap();
-        Migrator::up(&conn, None).await.unwrap();
+        let pools = open_test_pools(&db_path).await;
 
         let mut config = SandboxConfig {
             name: "recreated".into(),
@@ -2090,10 +2108,10 @@ mod tests {
             ..Default::default()
         };
         config.manifest_digest = Some("sha256:aaaa".into());
-        let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
 
         persist_oci_manifest_pin(
-            &conn,
+            pools.write(),
             sandbox_id,
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
@@ -2102,7 +2120,7 @@ mod tests {
 
         // Replacing with a different digest should delete the old pin.
         persist_oci_manifest_pin(
-            &conn,
+            pools.write(),
             sandbox_id,
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         )
@@ -2110,7 +2128,7 @@ mod tests {
         .unwrap();
 
         let pins = sandbox_rootfs_entity::Entity::find()
-            .all(&conn)
+            .all(pools.write())
             .await
             .unwrap();
         assert_eq!(pins.len(), 1);
@@ -2123,11 +2141,7 @@ mod tests {
     async fn test_insert_sandbox_record_persists_manifest_digest_in_config_json() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
-        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-        let conn = Database::connect(ConnectOptions::new(&db_url))
-            .await
-            .unwrap();
-        Migrator::up(&conn, None).await.unwrap();
+        let pools = open_test_pools(&db_path).await;
 
         let mut config = SandboxConfig {
             name: "persisted-digest".into(),
@@ -2136,9 +2150,9 @@ mod tests {
         };
         config.manifest_digest = Some("sha256:abc123".into());
 
-        let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
         let row = super::sandbox_entity::Entity::find_by_id(sandbox_id)
-            .one(&conn)
+            .one(pools.write())
             .await
             .unwrap()
             .unwrap();
@@ -2151,11 +2165,7 @@ mod tests {
     async fn test_prepare_create_target_rejects_existing_state_without_force() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
-        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-        let conn = Database::connect(ConnectOptions::new(&db_url))
-            .await
-            .unwrap();
-        Migrator::up(&conn, None).await.unwrap();
+        let pools = open_test_pools(&db_path).await;
 
         let sandbox_dir = temp.path().join("sandboxes").join("existing");
         fs::create_dir_all(&sandbox_dir).unwrap();
@@ -2165,7 +2175,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = prepare_create_target(&conn, &config, &sandbox_dir)
+        let err = prepare_create_target(&pools, &config, &sandbox_dir)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("already exists"));
@@ -2175,11 +2185,7 @@ mod tests {
     async fn test_prepare_create_target_force_replaces_stopped_sandbox_state() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
-        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-        let conn = Database::connect(ConnectOptions::new(&db_url))
-            .await
-            .unwrap();
-        Migrator::up(&conn, None).await.unwrap();
+        let pools = open_test_pools(&db_path).await;
 
         let sandbox_dir = temp.path().join("sandboxes").join("replaceable");
         fs::create_dir_all(sandbox_dir.join("rw")).unwrap();
@@ -2187,8 +2193,8 @@ mod tests {
             name: "replaceable".into(),
             ..Default::default()
         };
-        let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
-        super::update_sandbox_status(&conn, sandbox_id, super::SandboxStatus::Stopped)
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
+        super::update_sandbox_status(pools.write(), sandbox_id, super::SandboxStatus::Stopped)
             .await
             .unwrap();
 
@@ -2198,14 +2204,14 @@ mod tests {
         };
         forced.replace_existing = true;
 
-        prepare_create_target(&conn, &forced, &sandbox_dir)
+        prepare_create_target(&pools, &forced, &sandbox_dir)
             .await
             .unwrap();
 
         assert!(!sandbox_dir.exists());
         assert!(
             super::sandbox_entity::Entity::find_by_id(sandbox_id)
-                .one(&conn)
+                .one(pools.write())
                 .await
                 .unwrap()
                 .is_none()
@@ -2216,17 +2222,13 @@ mod tests {
     async fn test_reconcile_sandbox_runtime_state_marks_dead_processes_crashed() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
-        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-        let conn = Database::connect(ConnectOptions::new(&db_url))
-            .await
-            .unwrap();
-        Migrator::up(&conn, None).await.unwrap();
+        let pools = open_test_pools(&db_path).await;
 
         let config = SandboxConfig {
             name: "stale".into(),
             ..Default::default()
         };
-        let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
         let dead_run_pid = dead_pid();
 
         let run = run_entity::ActiveModel {
@@ -2236,23 +2238,23 @@ mod tests {
             ..Default::default()
         };
         let run_id = run_entity::Entity::insert(run)
-            .exec(&conn)
+            .exec(pools.write())
             .await
             .unwrap()
             .last_insert_id;
 
         let sandbox = super::sandbox_entity::Entity::find_by_id(sandbox_id)
-            .one(&conn)
+            .one(pools.write())
             .await
             .unwrap()
             .unwrap();
-        let reconciled = reconcile_sandbox_runtime_state(&conn, sandbox)
+        let reconciled = reconcile_sandbox_runtime_state(&pools, sandbox)
             .await
             .unwrap();
         assert_eq!(reconciled.status, SandboxStatus::Crashed);
 
         let run = run_entity::Entity::find_by_id(run_id)
-            .one(&conn)
+            .one(pools.write())
             .await
             .unwrap()
             .unwrap();
@@ -2268,11 +2270,7 @@ mod tests {
     async fn test_prepare_create_target_force_replaces_stale_running_sandbox_state() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
-        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-        let conn = Database::connect(ConnectOptions::new(&db_url))
-            .await
-            .unwrap();
-        Migrator::up(&conn, None).await.unwrap();
+        let pools = open_test_pools(&db_path).await;
 
         let sandbox_dir = temp.path().join("sandboxes").join("stale-running");
         fs::create_dir_all(sandbox_dir.join("rw")).unwrap();
@@ -2280,7 +2278,7 @@ mod tests {
             name: "stale-running".into(),
             ..Default::default()
         };
-        let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
 
         let run = run_entity::ActiveModel {
             sandbox_id: Set(sandbox_id),
@@ -2288,7 +2286,10 @@ mod tests {
             status: Set(run_entity::RunStatus::Running),
             ..Default::default()
         };
-        run_entity::Entity::insert(run).exec(&conn).await.unwrap();
+        run_entity::Entity::insert(run)
+            .exec(pools.write())
+            .await
+            .unwrap();
 
         let mut forced = SandboxConfig {
             name: "stale-running".into(),
@@ -2296,14 +2297,14 @@ mod tests {
         };
         forced.replace_existing = true;
 
-        prepare_create_target(&conn, &forced, &sandbox_dir)
+        prepare_create_target(&pools, &forced, &sandbox_dir)
             .await
             .unwrap();
 
         assert!(!sandbox_dir.exists());
         assert!(
             super::sandbox_entity::Entity::find_by_id(sandbox_id)
-                .one(&conn)
+                .one(pools.write())
                 .await
                 .unwrap()
                 .is_none()
@@ -2314,11 +2315,7 @@ mod tests {
     async fn test_prepare_create_target_force_replaces_running_sandbox() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
-        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-        let conn = Database::connect(ConnectOptions::new(&db_url))
-            .await
-            .unwrap();
-        Migrator::up(&conn, None).await.unwrap();
+        let pools = open_test_pools(&db_path).await;
 
         let sandbox_dir = temp.path().join("sandboxes").join("running");
         fs::create_dir_all(&sandbox_dir).unwrap();
@@ -2326,7 +2323,7 @@ mod tests {
             name: "running".into(),
             ..Default::default()
         };
-        let sandbox_id = insert_sandbox_record(&conn, &config).await.unwrap();
+        let sandbox_id = insert_sandbox_record(pools.write(), &config).await.unwrap();
 
         let child = Command::new("sleep").arg("30").spawn().unwrap();
         let live_pid = child.id() as i32;
@@ -2340,7 +2337,10 @@ mod tests {
             status: Set(run_entity::RunStatus::Running),
             ..Default::default()
         };
-        run_entity::Entity::insert(run).exec(&conn).await.unwrap();
+        run_entity::Entity::insert(run)
+            .exec(pools.write())
+            .await
+            .unwrap();
 
         let mut forced = SandboxConfig {
             name: "running".into(),
@@ -2348,7 +2348,7 @@ mod tests {
         };
         forced.replace_existing = true;
 
-        prepare_create_target(&conn, &forced, &sandbox_dir)
+        prepare_create_target(&pools, &forced, &sandbox_dir)
             .await
             .unwrap();
 
@@ -2358,7 +2358,7 @@ mod tests {
         assert!(!sandbox_dir.exists());
         assert!(
             super::sandbox_entity::Entity::find_by_id(sandbox_id)
-                .one(&conn)
+                .one(pools.write())
                 .await
                 .unwrap()
                 .is_none()
@@ -2406,11 +2406,7 @@ mod tests {
     async fn test_reap_marks_only_dead_running_and_draining_sandboxes() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
-        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-        let conn = Database::connect(ConnectOptions::new(&db_url))
-            .await
-            .unwrap();
-        Migrator::up(&conn, None).await.unwrap();
+        let pools = open_test_pools(&db_path).await;
 
         let dead = dead_pid();
 
@@ -2419,14 +2415,14 @@ mod tests {
             name: "running-dead".into(),
             ..Default::default()
         };
-        let id_a = insert_sandbox_record(&conn, &cfg_a).await.unwrap();
+        let id_a = insert_sandbox_record(pools.write(), &cfg_a).await.unwrap();
         run_entity::Entity::insert(run_entity::ActiveModel {
             sandbox_id: Set(id_a),
             pid: Set(Some(dead)),
             status: Set(run_entity::RunStatus::Running),
             ..Default::default()
         })
-        .exec(&conn)
+        .exec(pools.write())
         .await
         .unwrap();
 
@@ -2442,14 +2438,14 @@ mod tests {
             name: "running-alive".into(),
             ..Default::default()
         };
-        let id_b = insert_sandbox_record(&conn, &cfg_b).await.unwrap();
+        let id_b = insert_sandbox_record(pools.write(), &cfg_b).await.unwrap();
         run_entity::Entity::insert(run_entity::ActiveModel {
             sandbox_id: Set(id_b),
             pid: Set(Some(live_pid)),
             status: Set(run_entity::RunStatus::Running),
             ..Default::default()
         })
-        .exec(&conn)
+        .exec(pools.write())
         .await
         .unwrap();
 
@@ -2458,8 +2454,8 @@ mod tests {
             name: "draining-dead".into(),
             ..Default::default()
         };
-        let id_c = insert_sandbox_record(&conn, &cfg_c).await.unwrap();
-        super::update_sandbox_status(&conn, id_c, SandboxStatus::Draining)
+        let id_c = insert_sandbox_record(pools.write(), &cfg_c).await.unwrap();
+        super::update_sandbox_status(pools.write(), id_c, SandboxStatus::Draining)
             .await
             .unwrap();
         run_entity::Entity::insert(run_entity::ActiveModel {
@@ -2468,7 +2464,7 @@ mod tests {
             status: Set(run_entity::RunStatus::Running),
             ..Default::default()
         })
-        .exec(&conn)
+        .exec(pools.write())
         .await
         .unwrap();
 
@@ -2477,8 +2473,8 @@ mod tests {
             name: "stopped".into(),
             ..Default::default()
         };
-        let id_d = insert_sandbox_record(&conn, &cfg_d).await.unwrap();
-        super::update_sandbox_status(&conn, id_d, SandboxStatus::Stopped)
+        let id_d = insert_sandbox_record(pools.write(), &cfg_d).await.unwrap();
+        super::update_sandbox_status(pools.write(), id_d, SandboxStatus::Stopped)
             .await
             .unwrap();
 
@@ -2487,7 +2483,7 @@ mod tests {
             name: "starting".into(),
             ..Default::default()
         };
-        let id_e = insert_sandbox_record(&conn, &cfg_e).await.unwrap();
+        let id_e = insert_sandbox_record(pools.write(), &cfg_e).await.unwrap();
 
         // --- Reap: query all Running/Draining, reconcile each ---
         let stale = super::sandbox_entity::Entity::find()
@@ -2495,20 +2491,20 @@ mod tests {
                 super::sandbox_entity::Column::Status
                     .is_in([SandboxStatus::Running, SandboxStatus::Draining]),
             )
-            .all(&conn)
+            .all(pools.write())
             .await
             .unwrap();
 
         for sandbox in stale {
-            let _ = reconcile_sandbox_runtime_state(&conn, sandbox).await;
+            let _ = reconcile_sandbox_runtime_state(&pools, sandbox).await;
         }
 
         // --- Assertions ---
         let load = |id| {
-            let conn = &conn;
+            let read_db = pools.read();
             async move {
                 super::sandbox_entity::Entity::find_by_id(id)
-                    .one(conn)
+                    .one(read_db)
                     .await
                     .unwrap()
                     .unwrap()

@@ -123,12 +123,11 @@ impl VolumeHandle {
     /// Deletes the DB record first, then the directory. An orphaned directory
     /// is easier to detect and clean up than an orphaned DB record.
     pub async fn remove(&self) -> MicrosandboxResult<()> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let pools = crate::db::init_global().await?;
 
         // Delete the DB record first.
         volume_entity::Entity::delete_by_id(self.db_id)
-            .exec(db)
+            .exec(pools.write())
             .await?;
 
         // Then delete the directory.
@@ -159,13 +158,12 @@ impl Volume {
         tracing::debug!(name = %config.name, quota_mib = ?config.quota_mib, "Volume::create");
         validate_volume_name(&config.name)?;
 
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let pools = crate::db::init_global().await?;
 
         // Check for existing volume.
         let existing = volume_entity::Entity::find()
             .filter(volume_entity::Column::Name.eq(&config.name))
-            .one(db)
+            .one(pools.read())
             .await?;
         if existing.is_some() {
             return Err(MicrosandboxError::VolumeAlreadyExists(config.name));
@@ -191,7 +189,9 @@ impl Volume {
             ..Default::default()
         };
 
-        volume_entity::Entity::insert(model).exec(db).await?;
+        volume_entity::Entity::insert(model)
+            .exec(pools.write())
+            .await?;
 
         // Create the volume directory. If this fails, clean up the DB record.
         let volumes_dir = crate::config::config().volumes_dir();
@@ -200,7 +200,7 @@ impl Volume {
         if let Err(e) = tokio::fs::create_dir_all(&path).await {
             let _ = volume_entity::Entity::delete_many()
                 .filter(volume_entity::Column::Name.eq(&config.name))
-                .exec(db)
+                .exec(pools.write())
                 .await;
             return Err(e.into());
         }
@@ -215,8 +215,7 @@ impl Volume {
     ///
     /// Returns a lightweight handle for metadata and management operations.
     pub async fn get(name: &str) -> MicrosandboxResult<VolumeHandle> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = crate::db::init_global().await?.read();
 
         let model = volume_entity::Entity::find()
             .filter(volume_entity::Column::Name.eq(name))
@@ -229,8 +228,7 @@ impl Volume {
 
     /// List all volumes, ordered by creation time (newest first).
     pub async fn list() -> MicrosandboxResult<Vec<VolumeHandle>> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = crate::db::init_global().await?.read();
 
         let models = volume_entity::Entity::find()
             .order_by_desc(volume_entity::Column::CreatedAt)

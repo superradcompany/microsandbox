@@ -71,7 +71,7 @@ impl DbPools {
 /// lock before returning `SQLITE_BUSY`. It interacts with the
 /// application-level retry policy: a longer busy timeout reduces retry
 /// volume at the cost of higher tail latency on contention.
-pub async fn build_pool(
+pub(crate) async fn build_pool(
     db_path: &Path,
     max_connections: u32,
     connect_timeout: Duration,
