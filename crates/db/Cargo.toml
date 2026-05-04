@@ -12,5 +12,8 @@ name = "microsandbox_db"
 path = "lib/lib.rs"
 
 [dependencies]
+async-trait = "0.1"
 sea-orm.workspace = true
 sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true

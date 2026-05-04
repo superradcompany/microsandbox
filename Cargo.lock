@@ -2617,8 +2617,11 @@ dependencies = [
 name = "microsandbox-db"
 version = "0.4.3"
 dependencies = [
+ "async-trait",
  "sea-orm",
  "sqlx",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -102,3 +102,9 @@ pub enum MicrosandboxError {
     #[error("{0}")]
     Custom(String),
 }
+
+impl microsandbox_db::retry::IsSqliteBusy for MicrosandboxError {
+    fn is_sqlite_busy(&self) -> bool {
+        matches!(self, MicrosandboxError::Database(db_err) if microsandbox_db::retry::is_sqlite_busy(db_err))
+    }
+}
