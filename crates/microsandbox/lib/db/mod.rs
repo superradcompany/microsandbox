@@ -1,23 +1,17 @@
-//! Database connection pool init and accessors.
+//! Global database connection pool init and accessor.
 //!
-//! Provides dual-pool access for global (`~/.microsandbox/db/msb.db`) and
-//! project-local (`.microsandbox/db/msb.db`) databases. Migrations are
-//! automatically applied on first connection.
-//!
-//! Init functions return [`DbPools`] from `microsandbox-db`; callers pick
-//! `pools.read()` (a [`DbReadConnection`]) or `pools.write()` (a
-//! [`DbWriteConnection`]) based on the operation. The type system blocks
-//! accidental writes against the read pool.
+//! Opens both pools (read + write) for `~/.microsandbox/db/msb.db` and
+//! runs migrations on the writer. Returns [`DbPools`] from
+//! `microsandbox-db`; callers pick `pools.read()` (a [`DbReadConnection`])
+//! or `pools.write()` (a [`DbWriteConnection`]) based on the operation.
+//! The type system blocks accidental writes against the read pool.
 //!
 //! [`DbReadConnection`]: microsandbox_db::DbReadConnection
 //! [`DbWriteConnection`]: microsandbox_db::DbWriteConnection
 
 pub use microsandbox_db::entity;
 
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{path::Path, time::Duration};
 
 use microsandbox_db::pool::DbPools;
 use microsandbox_migration::{Migrator, MigratorTrait};
@@ -30,7 +24,6 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 //--------------------------------------------------------------------------------------------------
 
 static GLOBAL_POOL: OnceCell<DbPools> = OnceCell::const_new();
-static PROJECT_POOL: OnceCell<(PathBuf, DbPools)> = OnceCell::const_new();
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -57,45 +50,9 @@ pub async fn init_global() -> MicrosandboxResult<&'static DbPools> {
         .await
 }
 
-/// Initialize the project-local database pools at `<project>/.microsandbox/db/msb.db`.
-///
-/// Migrations are applied automatically. Idempotent — repeat calls
-/// return the existing pools. Errors if called with a different
-/// project directory than the first call. Tuning is read from the
-/// global config.
-pub async fn init_project(project_dir: impl AsRef<Path>) -> MicrosandboxResult<&'static DbPools> {
-    let requested = project_dir.as_ref().to_path_buf();
-
-    let pair = PROJECT_POOL
-        .get_or_try_init(|| async {
-            let db_dir = requested
-                .join(microsandbox_utils::BASE_DIR_NAME)
-                .join(microsandbox_utils::DB_SUBDIR);
-
-            let pools = connect_and_migrate(&db_dir).await?;
-            Ok::<_, MicrosandboxError>((requested.clone(), pools))
-        })
-        .await?;
-
-    if pair.0 != requested {
-        return Err(MicrosandboxError::Custom(format!(
-            "project pool already initialized for '{}', cannot reinitialize for '{}'",
-            pair.0.display(),
-            requested.display(),
-        )));
-    }
-
-    Ok(&pair.1)
-}
-
 /// Get the global pools, or `None` if [`init_global`] has not run.
 pub fn global() -> Option<&'static DbPools> {
     GLOBAL_POOL.get()
-}
-
-/// Get the project-local pools, or `None` if [`init_project`] has not run.
-pub fn project() -> Option<&'static DbPools> {
-    PROJECT_POOL.get().map(|(_, p)| p)
 }
 
 //--------------------------------------------------------------------------------------------------
