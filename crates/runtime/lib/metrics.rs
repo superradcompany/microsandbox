@@ -1,5 +1,6 @@
 //! Sandbox process metrics sampling and persistence.
 
+use std::num::NonZero;
 use std::time::{Duration, Instant};
 
 use microsandbox_db::DbWriteConnection;
@@ -12,8 +13,8 @@ use crate::{RuntimeError, RuntimeResult};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Fixed sampling interval for persisted sandbox metrics.
-pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+/// Default sampling interval used when the caller does not configure one.
+pub const DEFAULT_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -67,8 +68,10 @@ pub async fn run_metrics_sampler(
     db: DbWriteConnection,
     sandbox_id: i32,
     pid: u32,
+    interval_ms: NonZero<u64>,
     network_metrics: Option<Box<dyn NetworkMetrics>>,
 ) {
+    let interval = Duration::from_millis(interval_ms.get());
     let pid = pid as i32;
 
     let mut previous = match sample_process(pid) {
@@ -87,7 +90,7 @@ pub async fn run_metrics_sampler(
     }
 
     loop {
-        tokio::time::sleep(SAMPLE_INTERVAL).await;
+        tokio::time::sleep(interval).await;
 
         let current = match sample_process(pid) {
             Ok(sample) => sample,

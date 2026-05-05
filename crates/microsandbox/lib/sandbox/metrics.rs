@@ -47,7 +47,14 @@ pub struct SandboxMetrics {
 
 impl Sandbox {
     /// Get the latest metrics snapshot for this running sandbox.
+    ///
+    /// Returns [`MicrosandboxError::MetricsDisabled`] when the sandbox
+    /// was created with metrics sampling disabled
+    /// (`metrics_sample_interval_ms == None`).
     pub async fn metrics(&self) -> MicrosandboxResult<SandboxMetrics> {
+        if self.config.effective_metrics_interval().is_none() {
+            return Err(MicrosandboxError::MetricsDisabled(self.config.name.clone()));
+        }
         let db = crate::db::init_global().await?.read();
         metrics_for_sandbox(db, self.db_id, memory_limit_bytes(&self.config)).await
     }
@@ -57,6 +64,14 @@ impl Sandbox {
         &self,
         interval: Duration,
     ) -> impl futures::Stream<Item = MicrosandboxResult<SandboxMetrics>> + Send + 'static {
+        use futures::StreamExt;
+
+        if self.config.effective_metrics_interval().is_none() {
+            let name = self.config.name.clone();
+            return stream::once(async move { Err(MicrosandboxError::MetricsDisabled(name)) })
+                .left_stream();
+        }
+
         let db_id = self.db_id;
         let memory_limit_bytes = memory_limit_bytes(&self.config);
         let interval = if interval.is_zero() {
@@ -77,6 +92,7 @@ impl Sandbox {
                 Some((item, ticker))
             },
         )
+        .right_stream()
     }
 }
 
@@ -107,6 +123,9 @@ pub async fn all_sandbox_metrics() -> MicrosandboxResult<HashMap<String, Sandbox
         }
 
         let config: SandboxConfig = serde_json::from_str(&sandbox.config)?;
+        if config.effective_metrics_interval().is_none() {
+            continue;
+        }
         let snapshot = metrics_for_sandbox(db, sandbox.id, memory_limit_bytes(&config)).await?;
         metrics.insert(sandbox.name, snapshot);
     }

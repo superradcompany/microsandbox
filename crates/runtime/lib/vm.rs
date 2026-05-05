@@ -6,6 +6,7 @@
 //! `_exit()` on guest shutdown after running exit observers.
 
 use std::io::Write;
+use std::num::NonZero;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -77,6 +78,9 @@ pub struct Config {
 
     /// Maximum sandbox lifetime in seconds (None = no limit).
     pub max_duration_secs: Option<u64>,
+
+    /// Metrics sampling interval in milliseconds; `None` disables sampling.
+    pub metrics_sample_interval_ms: Option<NonZero<u64>>,
 
     /// VM hardware and rootfs configuration.
     pub vm: VmConfig,
@@ -430,13 +434,27 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         }));
     }
 
-    tokio_rt.spawn(run_metrics_sampler(
-        db.clone(),
-        config.sandbox_id,
-        pid,
-        network_metrics_handle
-            .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
-    ));
+    match config.metrics_sample_interval_ms {
+        None => tracing::debug!(
+            sandbox = %config.sandbox_name,
+            "metrics sampling disabled; not spawning sampler"
+        ),
+        Some(interval_ms) => {
+            tracing::debug!(
+                sandbox = %config.sandbox_name,
+                interval_ms = interval_ms.get(),
+                "starting metrics sampler"
+            );
+            tokio_rt.spawn(run_metrics_sampler(
+                db.clone(),
+                config.sandbox_id,
+                pid,
+                interval_ms,
+                network_metrics_handle
+                    .map(|handle| Box::new(handle) as Box<dyn crate::metrics::NetworkMetrics>),
+            ));
+        }
+    }
 
     // Spawn background tasks.
     let (_relay_shutdown_tx, relay_shutdown_rx) = tokio::sync::watch::channel(false);

@@ -327,6 +327,7 @@ export {
   IoError,
   JsonError,
   LibkrunfwNotFoundError,
+  MetricsDisabledError,
   MicrosandboxError,
   NixError,
   PatchFailedError,
