@@ -116,6 +116,25 @@ pub const MICROSANDBOX_REPO: &str = "microsandbox";
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Resolve the microsandbox home directory.
+///
+/// Order of resolution:
+/// 1. `MSB_HOME` env var (used as-is, no `.microsandbox` suffix appended)
+/// 2. `~/.microsandbox/` (i.e. `dirs::home_dir().join(BASE_DIR_NAME)`)
+/// 3. `./.microsandbox/` if no home is available
+///
+/// `MSB_HOME` lets CI and integration tests isolate microsandbox state
+/// (db, sandboxes, cache, logs) per process without disturbing other
+/// `$HOME`-rooted tooling.
+pub fn resolve_home() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("MSB_HOME") {
+        return std::path::PathBuf::from(path);
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(BASE_DIR_NAME)
+}
+
 /// Returns the platform-specific libkrunfw filename.
 pub fn libkrunfw_filename(os: &str) -> String {
     if os == "macos" {
@@ -151,4 +170,31 @@ pub fn bundle_download_url(version: &str, arch: &str, os: &str) -> String {
     format!(
         "https://github.com/{GITHUB_ORG}/{MICROSANDBOX_REPO}/releases/download/v{version}/{MICROSANDBOX_REPO}-{target_os}-{arch}.tar.gz"
     )
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `MSB_HOME` is honoured verbatim (no `.microsandbox` suffix appended)
+    /// so callers can isolate state per process without disturbing tooling
+    /// that reads `$HOME` (npm cache, ssh keys, etc.).
+    ///
+    /// Uses a unique env var per test process to avoid clashing with other
+    /// parallel tests that read `MSB_HOME`.
+    #[test]
+    fn test_resolve_home_respects_env_override() {
+        // SAFETY: This test sets a process-global env var. Vitest-style
+        // single-test isolation isn't available; rely on the test being
+        // the sole reader of `MSB_HOME` in this binary.
+        let custom = std::path::PathBuf::from("/tmp/msb-home-resolve-test-12345");
+        unsafe { std::env::set_var("MSB_HOME", &custom) };
+        let resolved = resolve_home();
+        unsafe { std::env::remove_var("MSB_HOME") };
+        assert_eq!(resolved, custom);
+    }
 }

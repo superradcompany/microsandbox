@@ -11,6 +11,7 @@ edition.workspace = true
 path = "lib/lib.rs"
 
 [dependencies]
+dirs.workspace = true
 libc.workspace = true
 reflink-copy.workspace = true
 scopeguard.workspace = true
