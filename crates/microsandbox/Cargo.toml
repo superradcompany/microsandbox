@@ -33,14 +33,14 @@ flate2.workspace = true
 futures.workspace = true
 hex.workspace = true
 libc.workspace = true
-microsandbox-db = { version = "0.4.4", path = "../db" }
-microsandbox-filesystem = { version = "0.4.4", path = "../filesystem", default-features = false }
-microsandbox-image = { version = "0.4.4", path = "../image" }
-microsandbox-migration = { version = "0.4.4", path = "../migration" }
-microsandbox-network = { version = "0.4.4", path = "../network", optional = true }
-microsandbox-protocol = { version = "0.4.4", path = "../protocol" }
-microsandbox-runtime = { version = "0.4.4", path = "../runtime", default-features = false }
-microsandbox-utils = { version = "0.4.4", path = "../utils" }
+microsandbox-db = { version = "0.4.5", path = "../db" }
+microsandbox-filesystem = { version = "0.4.5", path = "../filesystem", default-features = false }
+microsandbox-image = { version = "0.4.5", path = "../image" }
+microsandbox-migration = { version = "0.4.5", path = "../migration" }
+microsandbox-network = { version = "0.4.5", path = "../network", optional = true }
+microsandbox-protocol = { version = "0.4.5", path = "../protocol" }
+microsandbox-runtime = { version = "0.4.5", path = "../runtime", default-features = false }
+microsandbox-utils = { version = "0.4.5", path = "../utils" }
 nix = { workspace = true, features = ["process", "signal"] }
 rand.workspace = true
 reqwest.workspace = true
@@ -59,7 +59,7 @@ which.workspace = true
 
 [build-dependencies]
 flate2.workspace = true
-microsandbox-utils = { version = "0.4.4", path = "../utils" }
+microsandbox-utils = { version = "0.4.5", path = "../utils" }
 tar.workspace = true
 ureq.workspace = true
 
