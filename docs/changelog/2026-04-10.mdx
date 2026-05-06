@@ -1,0 +1,22 @@
+---
+title: "Week of April 10, 2026"
+description: "File-level volume mounts, TypeScript SDK streams, and `msb shell` removal."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.3.11](https://github.com/superradcompany/microsandbox/releases/tag/v0.3.11) · [v0.3.12](https://github.com/superradcompany/microsandbox/releases/tag/v0.3.12)
+</Tip>
+
+## New features
+
+- **File-level volume mounts.** Mounts now target individual files, not just directories. See [Sandbox volumes](/sandboxes/volumes).
+- **`fs.readStream` in the TypeScript SDK.** Async-iterable file reads instead of buffering whole files in memory.
+- **`sandbox.metricsStream()` in the TypeScript SDK.** Async iterable of CPU, memory, and I/O samples, mirroring the Rust SDK.
+- **`msb shell` removed.** Use `msb exec --tty <sandbox> -- bash` instead.
+
+## Bug fixes
+
+- The network proxy now recomputes `Content-Length` after substituting secrets into request bodies.
+- `msb run` execution options (env, cwd, signal handling) only apply when `--tty` is set.
+- Extended attributes on symlinks and `listxattr` initialization now match the underlying VFS.
