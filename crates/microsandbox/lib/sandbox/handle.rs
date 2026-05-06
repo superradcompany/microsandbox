@@ -151,7 +151,12 @@ impl SandboxHandle {
             .join("runtime")
             .join("agent.sock");
 
-        let client = AgentClient::connect(&sock_path).await?;
+        // Bound the handshake reads. The relay is supposed to be running
+        // already for a sandbox in Running/Draining state; if it doesn't
+        // respond within 10s, something is wedged and the caller should
+        // see a timeout instead of hanging forever.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let client = AgentClient::connect(&sock_path, deadline).await?;
         let config: SandboxConfig = serde_json::from_str(&self.config_json)?;
 
         Ok(Sandbox {

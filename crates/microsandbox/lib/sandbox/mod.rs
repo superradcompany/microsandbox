@@ -1077,7 +1077,7 @@ async fn wait_for_relay(
 
     loop {
         attempts += 1;
-        match AgentClient::connect(sock_path).await {
+        match AgentClient::connect(sock_path, deadline).await {
             Ok(client) => {
                 tracing::debug!(attempts, "wait_for_relay: connected");
                 // The relay is up — clear any stale boot-error.json from
@@ -1096,10 +1096,7 @@ async fn wait_for_relay(
 
                     // Prefer the structured boot-error record if the
                     // sandbox got far enough to write one.
-                    if let Some(ref dir) = log_dir
-                        && let Ok(Some(boot_err)) =
-                            microsandbox_runtime::boot_error::BootError::read(dir)
-                    {
+                    if let Some(boot_err) = read_boot_error(log_dir.as_deref()) {
                         return Err(crate::MicrosandboxError::BootStart {
                             name: sandbox_name.to_string(),
                             err: boot_err,
@@ -1137,10 +1134,36 @@ async fn wait_for_relay(
                     error = %e,
                     "wait_for_relay: timed out"
                 );
+                // Even when the process is still running, the sandbox
+                // may have written a structured boot-error before
+                // stalling (e.g. agentd reported a recoverable failure
+                // and never produced the handshake bytes). Prefer that
+                // typed record over the raw IO/timeout error so the CLI
+                // can render the styled boot-error block.
+                if let Some(boot_err) = read_boot_error(log_dir.as_deref()) {
+                    return Err(crate::MicrosandboxError::BootStart {
+                        name: sandbox_name.to_string(),
+                        err: boot_err,
+                    });
+                }
                 return Err(e);
             }
         }
     }
+}
+
+/// Read `boot-error.json` from `log_dir` if present and parseable.
+///
+/// Returns `None` when the directory is unknown, the file is missing, or
+/// the contents cannot be deserialized — callers fall back to a raw
+/// error in those cases.
+fn read_boot_error(
+    log_dir: Option<&std::path::Path>,
+) -> Option<microsandbox_runtime::boot_error::BootError> {
+    let dir = log_dir?;
+    microsandbox_runtime::boot_error::BootError::read(dir)
+        .ok()
+        .flatten()
 }
 
 /// Build a [`SandboxHandle`] by eagerly loading the microVM PID.
