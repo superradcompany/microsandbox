@@ -30,6 +30,8 @@ jobs:
           filters: |
             code:
               - '!docs/**'
+              - '!packaging/guest-images/**'
+              - '!.github/workflows/guest-images.yml'
 
   # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
