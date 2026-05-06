@@ -1,6 +1,6 @@
 {
   "name": "@superradcompany/microsandbox-linux-arm64-gnu",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "Bundled msb + libkrunfw + napi binding for microsandbox on Linux arm64 (glibc).",
   "os": ["linux"],
   "cpu": ["arm64"],
