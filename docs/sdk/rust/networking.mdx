@@ -8,30 +8,7 @@ See [Networking](/networking/overview) for conceptual overview and [TLS Intercep
 
 ## NetworkPolicy
 
-A network access policy consisting of two per-direction defaults and an ordered list of rules evaluated first-match-wins per direction.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| default_egress | [`Action`](#action) | Action when no egress-applicable rule matches |
-| default_ingress | [`Action`](#action) | Action when no ingress-applicable rule matches |
-| rules | `Vec<`[`Rule`](#rule)`>` | Ordered list of rules; first match wins |
-
-The default `NetworkPolicy::default()` is `default_egress = Deny + implicit allow@public`, `default_ingress = Allow + no rules`. This preserves today's `public_only` egress behavior plus today's unfiltered published-port behavior. See the [defaults rationale](/networking/overview#defaults) for why the defaults are asymmetric.
-
-### Presets
-
-Static methods that return pre-configured policies. Most callers should use the builder; presets exist as compat shims for the legacy API.
-
-```rust
-NetworkPolicy::allow_all()    // unrestricted
-NetworkPolicy::none()         // deny both directions
-NetworkPolicy::public_only()  // egress=Deny + allow Public; ingress=Allow (today's default)
-NetworkPolicy::non_local()    // egress=Deny + allow Public+Private; ingress=Allow
-```
-
-### NetworkPolicy::builder()
-
-The fluent builder is the primary construction path. String inputs (`.ip(&str)`, `.cidr(&str)`, `.domain(&str)`, `.domain_suffix(&str)`) are stored raw and parsed at `.build()` time; the chain stays clean. The first parse / validation failure surfaces as [`BuildError`](#builderror).
+A list of rules plus two per-direction defaults, evaluated first-match-wins. Build one with [`NetworkPolicy::builder()`](#networkpolicybuilder):
 
 ```rust
 use microsandbox::NetworkPolicy;
@@ -43,53 +20,453 @@ let policy = NetworkPolicy::builder()
     .build()?;
 ```
 
-#### Top-level methods
+The default policy denies egress except for an implicit `allow public`, and allows ingress with no rules. See the [defaults rationale](/networking/overview#defaults) for the asymmetry.
 
-| Method | Effect |
-|--------|--------|
-| `.default_allow()` | Set both `default_egress` and `default_ingress` to `Allow` |
-| `.default_deny()` | Set both to `Deny` |
-| `.default_egress(Action)` | Per-direction override |
-| `.default_ingress(Action)` | Per-direction override |
-| `.rule(\|r\| ...)` | Multi-rule batch; direction set inside via `.egress() / .ingress() / .any()` |
-| `.egress(\|e\| ...)` | Sugar for `.rule(\|r\| { r.egress(); ... })` |
-| `.ingress(\|i\| ...)` | Sugar with direction pre-set to `Ingress` |
-| `.any(\|a\| ...)` | Sugar with direction pre-set to `Any` (rule applies in either direction) |
-| `.build()` | `Result<NetworkPolicy, BuildError>` |
+| Field | Type | Description |
+|-------|------|-------------|
+| default_egress | [`Action`](#action) | Action when no egress-applicable rule matches |
+| default_ingress | [`Action`](#action) | Action when no ingress-applicable rule matches |
+| rules | `Vec<`[`Rule`](#rule)`>` | Ordered list of rules; first match wins |
 
-The closure signature is `FnOnce(&mut RuleBuilder) -> &mut RuleBuilder`. A chain ending in any rule-adder (`.allow_public()`, `.deny().ip(...)`, etc.) returns the builder reference and satisfies the bound. Multi-statement bodies end with an explicit `r` return.
+### Rule order matters
 
-#### Inside the closure: `RuleBuilder`
+The first matching rule wins, so a broad rule placed before a narrow one swallows it:
 
-Inside `.rule(|r| ...)` (or any of the direction sub-builders), state setters and rule-adders interleave freely. State accumulates eagerly across the closure; each rule-adder commits a rule using the state at that point.
+```rust
+NetworkPolicy::builder()
+    .default_deny()
+    .egress(|e| e
+        .allow().cidr("10.0.0.0/8")     // matches everything in 10.x
+        .deny().ip("10.0.0.5"))          // never reached
+    .build()?;
+```
 
-**State setters:**
+Put specific rules before general ones.
 
-| Method | Effect |
-|--------|--------|
-| `.egress() / .ingress() / .any()` | Set direction. Last-write-wins. `.any()` makes rules apply in both directions |
-| `.tcp() / .udp() / .icmpv4() / .icmpv6()` | Add to the protocols set (set semantics; duplicates dedupe). ICMP is egress-only |
-| `.port(u16)` | Add a single port to the ports set |
-| `.port_range(u16, u16)` | Add an inclusive range. `lo > hi` records `BuildError::InvalidPortRange` |
+### Shadow detection
 
-**Per-category rule-adders** (each commits one rule using the current state):
+`.build()` walks the rules and warns (via `tracing::warn!`) when a rule is fully covered by an earlier one in the same direction. Only `Ip`, `Cidr`, and `Group` destinations are checked; domain coverage depends on runtime DNS and is skipped. Builds still succeed:
 
-| Method | Group |
-|--------|-------|
-| `.allow_public() / .deny_public()` | `Group::Public` (complement of named categories) |
-| `.allow_private() / .deny_private()` | `Group::Private` (RFC1918 + ULA + CGN) |
-| `.allow_loopback() / .deny_loopback()` | `Group::Loopback` (`127.0.0.0/8`, `::1`) — see the [loopback-vs-host watch-out](/networking/overview#loopback-vs-host-a-common-trap) |
-| `.allow_link_local() / .deny_link_local()` | `Group::LinkLocal` (`169.254.0.0/16`, `fe80::/10`, excluding metadata) |
-| `.allow_meta() / .deny_meta()` | `Group::Metadata` (`169.254.169.254`). Dangerous on cloud hosts |
-| `.allow_multicast() / .deny_multicast()` | `Group::Multicast` |
-| `.allow_host() / .deny_host()` | `Group::Host` (per-sandbox gateway IPs that back `host.microsandbox.internal`) |
+```text
+WARN rule #1 (Egress Cidr(10.0.0.5/32) Deny) is shadowed by rule #0 (Egress Cidr(10.0.0.0/8) Allow); to narrow, place the more specific rule first
+```
 
-**Bulk-domain shortcuts** (one rule per name, inheriting current direction/protocol/port state):
+### State accumulation
 
-| Method | Effect |
-|--------|--------|
-| <a id="deny_domains"></a>`.allow_domains([..]) / .deny_domains([..])` | One `Destination::Domain` rule per name. Lazy-parse: invalid names surface as `BuildError::InvalidDomain` from `.build()` |
-| <a id="deny_domain_suffixes"></a>`.allow_domain_suffixes([..]) / .deny_domain_suffixes([..])` | One `Destination::DomainSuffix` rule per suffix. Same lazy-parse contract |
+State setters (`.tcp()`, `.port()`, etc.) inside a closure carry into every rule-adder that follows. State is **not reset** between adders:
+
+```rust
+.rule(|r| r.egress()
+    .tcp().port(443).allow_public()    // rule 1: egress, TCP, 443, allow Public
+    .udp().allow_private())            // rule 2: egress, [TCP, UDP], 443, allow Private
+```
+
+Use separate closures for rules that need different state.
+
+---
+
+## NetworkPolicy::builder()
+
+The fluent builder is the primary construction path. String inputs (`.ip(&str)`, `.cidr(&str)`, `.domain(&str)`, `.domain_suffix(&str)`) are stored raw and parsed at `.build()` time, so the chain stays clean. The first parse / validation failure surfaces as [`BuildError`](#builderror).
+
+The closure signature for `.rule()` / `.egress()` / `.ingress()` / `.any()` is `FnOnce(&mut RuleBuilder) -> &mut RuleBuilder`. A chain ending in any rule-adder (`.allow_public()`, `.deny().ip(...)`, etc.) returns the builder reference and satisfies the bound. Multi-statement bodies end with an explicit `r` return.
+
+---
+
+#### any()
+
+```rust
+fn any<F>(self, f: F) -> Self
+where
+    F: for<'a> FnOnce(&'a mut RuleBuilder) -> &'a mut RuleBuilder
+```
+
+Sugar for [`rule()`](#rule-1) with direction pre-set to `Any`. Rules committed inside apply in both directions.
+
+---
+
+#### build()
+
+```rust
+fn build(self) -> Result<NetworkPolicy, BuildError>
+```
+
+Consume the builder and produce a [`NetworkPolicy`](#networkpolicy). Lazy-parses every `.ip()` / `.cidr()` / `.domain()` / `.domain_suffix()` input, validates direction-set and ICMP-egress-only invariants, and emits a `tracing::warn!` for each shadowed rule pair detected.
+
+---
+
+#### default_allow()
+
+```rust
+fn default_allow(self) -> Self
+```
+
+Set both `default_egress` and `default_ingress` to `Allow`.
+
+---
+
+#### default_deny()
+
+```rust
+fn default_deny(self) -> Self
+```
+
+Set both `default_egress` and `default_ingress` to `Deny`.
+
+---
+
+#### default_egress()
+
+```rust
+fn default_egress(self, action: Action) -> Self
+```
+
+Per-direction override for the egress default action.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| action | [`Action`](#action) | Default action for egress |
+
+---
+
+#### default_ingress()
+
+```rust
+fn default_ingress(self, action: Action) -> Self
+```
+
+Per-direction override for the ingress default action.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| action | [`Action`](#action) | Default action for ingress |
+
+---
+
+#### egress()
+
+```rust
+fn egress<F>(self, f: F) -> Self
+where
+    F: for<'a> FnOnce(&'a mut RuleBuilder) -> &'a mut RuleBuilder
+```
+
+Sugar for [`rule()`](#rule-1) with direction pre-set to `Egress`.
+
+---
+
+#### ingress()
+
+```rust
+fn ingress<F>(self, f: F) -> Self
+where
+    F: for<'a> FnOnce(&'a mut RuleBuilder) -> &'a mut RuleBuilder
+```
+
+Sugar for [`rule()`](#rule-1) with direction pre-set to `Ingress`.
+
+---
+
+#### rule()
+
+```rust
+fn rule<F>(self, f: F) -> Self
+where
+    F: for<'a> FnOnce(&'a mut RuleBuilder) -> &'a mut RuleBuilder
+```
+
+Open a multi-rule batch closure. Direction must be set inside via `.egress()`, `.ingress()`, or `.any()` before any rule-adder.
+
+---
+
+## RuleBuilder
+
+The closure passed to `.rule(...)` (or any of the direction sugar methods) gives you a `RuleBuilder`. State setters and rule-adders interleave freely. State accumulates eagerly across the closure (see [State accumulation](#state-accumulation)).
+
+### Direction setters
+
+Last-write-wins. ICMP rule-adders are egress-only at build time.
+
+---
+
+#### any()
+
+```rust
+fn any(&mut self) -> &mut Self
+```
+
+Set direction to `Any` for subsequent rule-adders. Rules committed after this apply in both directions.
+
+---
+
+#### egress()
+
+```rust
+fn egress(&mut self) -> &mut Self
+```
+
+Set direction to `Egress` for subsequent rule-adders.
+
+---
+
+#### ingress()
+
+```rust
+fn ingress(&mut self) -> &mut Self
+```
+
+Set direction to `Ingress` for subsequent rule-adders.
+
+---
+
+### Protocol setters
+
+Protocols accumulate as a set; duplicates dedupe.
+
+---
+
+#### icmpv4()
+
+```rust
+fn icmpv4(&mut self) -> &mut Self
+```
+
+Add `Icmpv4` to the protocols set. Egress-only; an ICMP rule on an `Ingress` or `Any` direction fails build with [`BuildError::IngressDoesNotSupportIcmp`](#builderror).
+
+---
+
+#### icmpv6()
+
+```rust
+fn icmpv6(&mut self) -> &mut Self
+```
+
+Add `Icmpv6` to the protocols set. Egress-only; same rules as [`icmpv4()`](#icmpv4).
+
+---
+
+#### tcp()
+
+```rust
+fn tcp(&mut self) -> &mut Self
+```
+
+Add `Tcp` to the protocols set.
+
+---
+
+#### udp()
+
+```rust
+fn udp(&mut self) -> &mut Self
+```
+
+Add `Udp` to the protocols set.
+
+---
+
+### Port setters
+
+Ports accumulate as a set; duplicates dedupe. Always guest-side (egress destination port / ingress listening port).
+
+---
+
+#### port()
+
+```rust
+fn port(&mut self, port: u16) -> &mut Self
+```
+
+Add a single port to the ports set.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| port | `u16` | Port number |
+
+---
+
+#### port_range()
+
+```rust
+fn port_range(&mut self, lo: u16, hi: u16) -> &mut Self
+```
+
+Add an inclusive port range.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| lo | `u16` | Lower bound (inclusive) |
+| hi | `u16` | Upper bound (inclusive). `lo > hi` records [`BuildError::InvalidPortRange`](#builderror) |
+
+---
+
+#### ports()
+
+```rust
+fn ports<I: IntoIterator<Item = u16>>(&mut self, ports: I) -> &mut Self
+```
+
+Add multiple single ports. Equivalent to calling [`port()`](#port-1) once per element.
+
+---
+
+### Group rule-adders
+
+Each adder commits one rule using the current state and the named destination group.
+
+---
+
+#### allow_host()
+
+```rust
+fn allow_host(&mut self) -> &mut Self
+```
+
+Allow the `Host` group: per-sandbox gateway IPs that back `host.microsandbox.internal`. This is the right shortcut for "let the sandbox reach my host's localhost", not [`allow_loopback()`](#allow_loopback).
+
+---
+
+#### allow_link_local()
+
+```rust
+fn allow_link_local(&mut self) -> &mut Self
+```
+
+Allow the `LinkLocal` group (`169.254.0.0/16`, `fe80::/10`). Excludes the metadata IP `169.254.169.254`.
+
+---
+
+#### allow_loopback()
+
+```rust
+fn allow_loopback(&mut self) -> &mut Self
+```
+
+Allow the `Loopback` group (`127.0.0.0/8`, `::1`). The **guest's own** loopback, not the host. To reach a service on the host's localhost, use [`allow_host()`](#allow_host) instead. See the [loopback-vs-host watch-out](/networking/overview#loopback-vs-host-a-common-trap).
+
+---
+
+#### allow_meta()
+
+```rust
+fn allow_meta(&mut self) -> &mut Self
+```
+
+Allow the `Metadata` group (`169.254.169.254`). **Dangerous on cloud hosts** (exposes IAM credentials).
+
+---
+
+#### allow_multicast()
+
+```rust
+fn allow_multicast(&mut self) -> &mut Self
+```
+
+Allow the `Multicast` group (`224.0.0.0/4`, `ff00::/8`).
+
+---
+
+#### allow_private()
+
+```rust
+fn allow_private(&mut self) -> &mut Self
+```
+
+Allow the `Private` group (RFC1918 + ULA + CGN).
+
+---
+
+#### allow_public()
+
+```rust
+fn allow_public(&mut self) -> &mut Self
+```
+
+Allow the `Public` group (complement of named categories: every IP not in any other group).
+
+---
+
+#### deny_host()
+
+```rust
+fn deny_host(&mut self) -> &mut Self
+```
+
+Deny the `Host` group.
+
+---
+
+#### deny_link_local()
+
+```rust
+fn deny_link_local(&mut self) -> &mut Self
+```
+
+Deny the `LinkLocal` group.
+
+---
+
+#### deny_loopback()
+
+```rust
+fn deny_loopback(&mut self) -> &mut Self
+```
+
+Deny the `Loopback` group.
+
+---
+
+#### deny_meta()
+
+```rust
+fn deny_meta(&mut self) -> &mut Self
+```
+
+Deny the `Metadata` group.
+
+---
+
+#### deny_multicast()
+
+```rust
+fn deny_multicast(&mut self) -> &mut Self
+```
+
+Deny the `Multicast` group.
+
+---
+
+#### deny_private()
+
+```rust
+fn deny_private(&mut self) -> &mut Self
+```
+
+Deny the `Private` group.
+
+---
+
+#### deny_public()
+
+```rust
+fn deny_public(&mut self) -> &mut Self
+```
+
+Deny the `Public` group.
+
+---
+
+### Bulk-domain rule-adders
+
+Each call adds one rule per name, inheriting the current direction / protocol / port state. Lazy-parse: invalid names surface as [`BuildError::InvalidDomain`](#builderror) from `.build()`.
 
 ```rust
 NetworkPolicy::builder()
@@ -100,53 +477,114 @@ NetworkPolicy::builder()
     .build()?
 ```
 
-**Composite sugar:**
+---
 
-| Method | Effect |
-|--------|--------|
-| `.allow_local() / .deny_local()` | Adds **three** rules atomically: `Loopback + LinkLocal + Host`. `Metadata` is explicitly **not** included (cloud-IMDS opt-in only via `.allow_meta()`) |
+#### allow_domain_suffixes()
 
-**Explicit-rule sub-builder** (`.allow()` / `.deny()` open it):
+```rust
+fn allow_domain_suffixes<I, S>(&mut self, suffixes: I) -> &mut Self
+where I: IntoIterator<Item = S>, S: Into<String>
+```
+
+Add one `Destination::DomainSuffix` allow rule per suffix.
+
+---
+
+#### allow_domains()
+
+```rust
+fn allow_domains<I, S>(&mut self, names: I) -> &mut Self
+where I: IntoIterator<Item = S>, S: Into<String>
+```
+
+Add one `Destination::Domain` allow rule per name.
+
+---
+
+#### deny_domain_suffixes()
+
+```rust
+fn deny_domain_suffixes<I, S>(&mut self, suffixes: I) -> &mut Self
+where I: IntoIterator<Item = S>, S: Into<String>
+```
+
+Add one `Destination::DomainSuffix` deny rule per suffix.
+
+---
+
+#### deny_domains()
+
+```rust
+fn deny_domains<I, S>(&mut self, names: I) -> &mut Self
+where I: IntoIterator<Item = S>, S: Into<String>
+```
+
+Add one `Destination::Domain` deny rule per name.
+
+---
+
+### Composite rule-adders
+
+---
+
+#### allow_local()
+
+```rust
+fn allow_local(&mut self) -> &mut Self
+```
+
+Add three allow rules atomically: `Loopback + LinkLocal + Host`. Each uses the closure's current state. `Metadata` is intentionally not included; opt in via [`allow_meta()`](#allow_meta) separately.
+
+---
+
+#### deny_local()
+
+```rust
+fn deny_local(&mut self) -> &mut Self
+```
+
+Add three deny rules atomically: `Loopback + LinkLocal + Host`. `Metadata` is intentionally not included.
+
+---
+
+### Explicit-destination rule-adders
+
+`.allow()` / `.deny()` open an [`ExplicitRuleBuilder`](#explicitrulebuilder) that requires a destination call to commit.
 
 ```rust
 .rule(|r| r.egress().tcp().port(443).allow().domain("api.example.com"))
 .rule(|r| r.any().deny().cidr("198.51.100.0/24"))
 ```
 
-Returns an [`ExplicitRuleBuilder`](#explicitrulebuilder) requiring a destination call (`.ip / .cidr / .domain / .domain_suffix / .group / .any`) to commit. Dropping without a destination call adds no rule (the type is `#[must_use]`).
+Dropping without a destination call adds no rule (the type is `#[must_use]`).
 
-#### State accumulation
+---
 
-State is **not reset** between rule-adders within a closure. Callers wanting different state per rule use separate `.rule()` calls or interleave state setters between adders:
+#### allow()
 
 ```rust
-.rule(|r| r.egress()
-    .tcp().port(443).allow_public()    // rule 1: egress, TCP, 443, allow Public
-    .udp().allow_private())            // rule 2: egress, [TCP, UDP], 443, allow Private
-                                       //   (UDP added; TCP and 443 still in state)
+fn allow(&mut self) -> ExplicitRuleBuilder<'_>
 ```
 
-#### Shadow detection
+Begin an explicit-destination rule with action `Allow`.
 
-At `.build()` time, the builder walks the rules list and emits a `tracing::warn!` for any rule whose match set is fully contained in an earlier rule's match set in a compatible direction. Coverage is `Ip` / `Cidr` / `Group` destinations; domain shadowing is intentionally out of scope (depends on runtime DNS state).
+---
+
+#### deny()
+
+```rust
+fn deny(&mut self) -> ExplicitRuleBuilder<'_>
+```
+
+Begin an explicit-destination rule with action `Deny`.
 
 ---
 
 ## NetworkBuilder
 
-Builder for configuring the sandbox's network stack. Used in `SandboxBuilder::network(|n| n...)`.
+Builder for configuring the sandbox's network stack. Used in `SandboxBuilder::network(|n| n...)`. Errors accumulated by nested builders cascade up; the outermost `SandboxBuilder::build()` surfaces them as `MicrosandboxError::NetworkBuilder(BuildError)`.
 
-#### policy()
-
-```rust
-fn policy(self, policy: NetworkPolicy) -> Self
-```
-
-Set the network access policy. Override the default with a builder-constructed value:
-
-```rust
-.network(|n| n.policy(NetworkPolicy::builder().default_deny().build()?))
-```
+---
 
 #### dns()
 
@@ -154,7 +592,7 @@ Set the network access policy. Override the default with a builder-constructed v
 fn dns(self, f: impl FnOnce(DnsBuilder) -> DnsBuilder) -> Self
 ```
 
-Configure DNS interception. Errors accumulated by [`DnsBuilder`](#dnsbuilder) cascade up; the outermost `SandboxBuilder::build()` surfaces them as `MicrosandboxError::NetworkBuilder(BuildError)`.
+Configure DNS interception. See [`DnsBuilder`](#dnsbuilder).
 
 ```rust
 .network(|n| n
@@ -165,6 +603,8 @@ Configure DNS interception. Errors accumulated by [`DnsBuilder`](#dnsbuilder) ca
 )
 ```
 
+---
+
 #### max_connections()
 
 ```rust
@@ -173,13 +613,31 @@ fn max_connections(self, max: usize) -> Self
 
 Limit the maximum number of concurrent network connections from the sandbox.
 
-#### trust_host_cas()
+---
+
+#### on_secret_violation()
 
 ```rust
-fn trust_host_cas(self, enabled: bool) -> Self
+fn on_secret_violation(self, action: ViolationAction) -> Self
 ```
 
-Whether to ship the host's trusted root CAs into the guest at boot. Default: `false`. Opt in when egress HTTPS inside the sandbox needs to work behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.). These proxies install a gateway CA on the host that's unknown to the guest's stock Mozilla bundle.
+Set the action taken when a secret placeholder is detected in traffic destined for a host not in the secret's allow list. See [`ViolationAction`](#violationaction).
+
+---
+
+#### policy()
+
+```rust
+fn policy(self, policy: NetworkPolicy) -> Self
+```
+
+Set the network access policy. Pass a builder-constructed [`NetworkPolicy`](#networkpolicy):
+
+```rust
+.network(|n| n.policy(NetworkPolicy::builder().default_deny().build()?))
+```
+
+---
 
 #### tls()
 
@@ -189,13 +647,15 @@ fn tls(self, f: impl FnOnce(TlsBuilder) -> TlsBuilder) -> Self
 
 Configure TLS interception. See [`TlsBuilder`](#tlsbuilder).
 
-#### on_secret_violation()
+---
+
+#### trust_host_cas()
 
 ```rust
-fn on_secret_violation(self, action: ViolationAction) -> Self
+fn trust_host_cas(self, enabled: bool) -> Self
 ```
 
-Set the action taken when a secret placeholder is detected in traffic destined for a host not in the secret's allow list.
+Whether to ship the host's trusted root CAs into the guest at boot. Default: `false`. Opt in when egress HTTPS inside the sandbox needs to work behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.). These proxies install a gateway CA on the host that's unknown to the guest's stock Mozilla bundle.
 
 ---
 
@@ -203,13 +663,7 @@ Set the action taken when a secret placeholder is detected in traffic destined f
 
 Builder for DNS interception settings. Used in `NetworkBuilder::dns(|d| d...)`. Owns rebind protection, nameserver pinning, and the per-query timeout.
 
-#### rebind_protection()
-
-```rust
-fn rebind_protection(self, enabled: bool) -> Self
-```
-
-When enabled, DNS responses that resolve to private IP addresses are blocked. This prevents DNS rebinding attacks. Default: `true`.
+---
 
 #### nameservers()
 
@@ -217,10 +671,12 @@ When enabled, DNS responses that resolve to private IP addresses are blocked. Th
 fn nameservers<I>(self, nameservers: I) -> Self
 where
     I: IntoIterator,
-    I::Item: Into<Nameserver>,
+    I::Item: Into<Nameserver>
 ```
 
 Set the upstream nameservers to forward DNS queries to. Replaces any previously-set nameservers. Each element is convertible into `Nameserver` (`SocketAddr`, `IpAddr`, or a parsed string via `"dns.google:53".parse::<Nameserver>()?`).
+
+---
 
 #### query_timeout_ms()
 
@@ -232,18 +688,89 @@ Set the per-DNS-query timeout in milliseconds. Default: `5000`.
 
 ---
 
+#### rebind_protection()
+
+```rust
+fn rebind_protection(self, enabled: bool) -> Self
+```
+
+When enabled, DNS responses that resolve to private IP addresses are blocked. Prevents DNS rebinding attacks. Default: `true`.
+
+---
+
 ## TlsBuilder
 
 Builder for TLS interception settings. Used in `NetworkBuilder::tls(|t| t...)`.
 
-| Method | Effect |
-|--------|--------|
-| `.bypass(pattern)` | Skip TLS interception for this domain. Supports `*.suffix` wildcards |
-| `.intercepted_ports(ports)` | TCP ports where interception is active. Default: `[443]` |
-| `.intercept_ca_cert(path)` / `.intercept_ca_key(path)` | Provide a stable CA across sandbox restarts |
-| `.upstream_ca_cert(path)` | Trust an additional CA when verifying upstream servers |
-| `.verify_upstream(bool)` | Whether the proxy verifies upstream server certs. Default: `true` |
-| `.block_quic(bool)` | Block QUIC/HTTP3 on intercepted ports. Default: `true` |
+---
+
+#### block_quic()
+
+```rust
+fn block_quic(self, block: bool) -> Self
+```
+
+Block QUIC/HTTP3 on intercepted ports, forcing TCP/TLS fallback. Default: `true`.
+
+---
+
+#### bypass()
+
+```rust
+fn bypass(self, pattern: impl Into<String>) -> Self
+```
+
+Skip TLS interception for hosts matching this glob (e.g. `"*.internal.corp"`). Use for domains with certificate pinning.
+
+---
+
+#### intercept_ca_cert()
+
+```rust
+fn intercept_ca_cert(self, path: impl Into<PathBuf>) -> Self
+```
+
+PEM file used as the intercepting CA's certificate. Pair with [`intercept_ca_key()`](#intercept_ca_key) to provide a stable CA across sandbox restarts.
+
+---
+
+#### intercept_ca_key()
+
+```rust
+fn intercept_ca_key(self, path: impl Into<PathBuf>) -> Self
+```
+
+PEM file used as the intercepting CA's private key.
+
+---
+
+#### intercepted_ports()
+
+```rust
+fn intercepted_ports(self, ports: Vec<u16>) -> Self
+```
+
+TCP ports where TLS interception is active. Default: `[443]`.
+
+---
+
+#### upstream_ca_cert()
+
+```rust
+fn upstream_ca_cert(self, path: impl Into<PathBuf>) -> Self
+```
+
+PEM file with extra root CAs the proxy should trust when verifying upstream servers.
+
+---
+
+#### verify_upstream()
+
+```rust
+fn verify_upstream(self, verify: bool) -> Self
+```
+
+Whether the proxy verifies upstream server certificates. Default: `true`. Set to `false` only for self-signed servers.
 
 ---
 
@@ -251,22 +778,18 @@ Builder for TLS interception settings. Used in `NetworkBuilder::tls(|t| t...)`.
 
 ### Action
 
-| Value | Description |
-|-------|-------------|
-| `Allow` | Permit the traffic |
-| `Deny` | Drop the traffic silently |
-
-Wire format: `"allow"` / `"deny"`.
+| Value | Wire format | Description |
+|-------|-------------|-------------|
+| `Allow` | `"allow"` | Permit the traffic |
+| `Deny` | `"deny"` | Drop the traffic silently |
 
 ### Direction
 
-| Value | Description |
-|-------|-------------|
-| `Egress` | Traffic leaving the sandbox |
-| `Ingress` | Traffic entering the sandbox (via published ports) |
-| `Any` | Rule applies in either direction |
-
-Wire format: `"egress"` / `"ingress"` / `"any"`.
+| Value | Wire format | Description |
+|-------|-------------|-------------|
+| `Egress` | `"egress"` | Traffic leaving the sandbox |
+| `Ingress` | `"ingress"` | Traffic entering the sandbox (via published ports) |
+| `Any` | `"any"` | Rule applies in either direction |
 
 ### Destination
 
@@ -282,7 +805,7 @@ Wire format: `"egress"` / `"ingress"` / `"any"`.
 
 | Value | Wire format | Matches |
 |-------|-------------|---------|
-| `Public` | `"public"` | Complement of the other categories — every address not in any other group |
+| `Public` | `"public"` | Complement of the other categories: every address not in any other group |
 | `Private` | `"private"` | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7` |
 | `Loopback` | `"loopback"` | `127.0.0.0/8`, `::1` (the **guest's own** loopback, not the host) |
 | `LinkLocal` | `"link_local"` | `169.254.0.0/16`, `fe80::/10` (excludes metadata) |
@@ -303,7 +826,7 @@ let suffix: DomainName = ".example.com".parse()?;  // -> "example.com"
 
 Labels follow the permissive DNS grammar (RFC 2181 §11), so underscore-prefixed names like `_service._tcp.example.com` are accepted.
 
-The builder methods (`.domain(&str)`, `.domain_suffix(&str)`) take strings and parse them lazily at `.build()` — callers don't need to construct `DomainName` directly.
+The builder methods (`.domain(&str)`, `.domain_suffix(&str)`) take strings and parse them lazily at `.build()`; callers don't need to construct `DomainName` directly.
 
 ### Protocol
 
@@ -314,9 +837,16 @@ The builder methods (`.domain(&str)`, `.domain_suffix(&str)`) take strings and p
 | `Icmpv4` | `"icmpv4"` |
 | `Icmpv6` | `"icmpv6"` |
 
-ICMP protocols are egress-only. A rule with direction `Ingress` or `Any` carrying an ICMP protocol fails build with `BuildError::IngressDoesNotSupportIcmp`.
+ICMP protocols are egress-only. A rule with direction `Ingress` or `Any` carrying an ICMP protocol fails build with [`BuildError::IngressDoesNotSupportIcmp`](#builderror).
 
 ### PortRange
+
+```rust
+struct PortRange {
+    start: u16,  // inclusive
+    end: u16,    // inclusive
+}
+```
 
 | Method | Description |
 |--------|-------------|
@@ -335,7 +865,7 @@ A single network policy rule.
 | ports | `Vec<`[`PortRange`](#portrange)`>` | Set semantics; empty = any port. Always guest-side (egress destination port / ingress listening port) |
 | action | [`Action`](#action) | What to do on match |
 
-**Convenience constructors:**
+Convenience constructors:
 
 | Method | Description |
 |--------|-------------|
@@ -348,10 +878,10 @@ A single network policy rule.
 
 ### ExplicitRuleBuilder
 
-Returned by [`RuleBuilder`](#networkpolicybuilder)`::allow()` / `::deny()`. Requires exactly one destination method call to commit the rule. The type is `#[must_use]` — dropping without a call adds no rule.
+Returned by [`RuleBuilder`](#rulebuilder)`::allow()` / `::deny()`. Requires exactly one destination method call to commit the rule. The type is `#[must_use]`; dropping without a call adds no rule.
 
-| Method | Effect |
-|--------|--------|
+| Method | Description |
+|--------|-------------|
 | `.ip(impl Into<String>)` | Commit with `Destination::Cidr` of the IP as `/32` or `/128` |
 | `.cidr(impl Into<String>)` | Commit with `Destination::Cidr` |
 | `.domain(impl Into<String>)` | Commit with `Destination::Domain` |
