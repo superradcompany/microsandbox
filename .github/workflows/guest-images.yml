@@ -151,6 +151,8 @@ jobs:
             aliases: [latest]
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Compute date stamp
         id: date
         run: echo "stamp=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
@@ -162,29 +164,42 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build multi-arch manifest (primary tag)
+      - name: Build multi-arch manifest (primary + dated tags)
         run: |
+          set -euo pipefail
           IMG="${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.image.name }}"
           PRIMARY="${{ matrix.image.primary_tag }}"
           DATE="${{ steps.date.outputs.stamp }}"
+          README="packaging/guest-images/${{ matrix.image.name }}/README.md"
+
+          # Pull the per-image README into a shell var so we can pass it as a
+          # multi-line annotation. ghcr renders this as the package's
+          # "About this package" markdown block.
+          DESC="$(cat "$README")"
 
           docker buildx imagetools create \
+            --annotation "index,manifest,manifest-descriptor:org.opencontainers.image.description=$DESC" \
             -t "$IMG:$PRIMARY" \
             "$IMG:$PRIMARY-amd64" \
             "$IMG:$PRIMARY-arm64"
 
           docker buildx imagetools create \
+            --annotation "index,manifest,manifest-descriptor:org.opencontainers.image.description=$DESC" \
             -t "$IMG:$PRIMARY-$DATE" \
             "$IMG:$PRIMARY-$DATE-amd64" \
             "$IMG:$PRIMARY-$DATE-arm64"
 
       - name: Build multi-arch manifest (aliases)
         run: |
+          set -euo pipefail
           IMG="${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.image.name }}"
           PRIMARY="${{ matrix.image.primary_tag }}"
+          README="packaging/guest-images/${{ matrix.image.name }}/README.md"
+          DESC="$(cat "$README")"
 
           for alias in ${{ join(matrix.image.aliases, ' ') }}; do
             docker buildx imagetools create \
+              --annotation "index,manifest,manifest-descriptor:org.opencontainers.image.description=$DESC" \
               -t "$IMG:$alias" \
               "$IMG:$PRIMARY-amd64" \
               "$IMG:$PRIMARY-arm64"
