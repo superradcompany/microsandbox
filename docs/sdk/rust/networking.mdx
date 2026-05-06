@@ -6,26 +6,6 @@ icon: "network-wired"
 
 See [Networking](/networking/overview) for conceptual overview and [TLS Interception](/networking/tls) for TLS proxy details.
 
-Network configuration is attached to a sandbox via `SandboxBuilder::network(|n| n...)`. Inside the closure you get a [`NetworkBuilder`](#networkbuilder) which exposes DNS, TLS, secret, and policy configuration.
-
-```rust
-use microsandbox::{NetworkPolicy, Sandbox};
-
-let sb = Sandbox::builder("filtered")
-    .image("alpine")
-    .network(|n| n
-        .policy(NetworkPolicy::builder()
-            .default_deny()
-            .egress(|e| e.tcp().port(443).allow_public())
-            .build()?)
-        .tls(|t| t.bypass("*.googleapis.com")),
-    )
-    .create()
-    .await?;
-```
-
-For port publishing, use `SandboxBuilder::port(host, guest)` / `port_udp(host, guest)` (or the equivalent methods on `NetworkBuilder`).
-
 ## NetworkPolicy
 
 A list of rules plus two per-direction defaults, evaluated first-match-wins. Build one with [`NetworkPolicy::builder()`](#networkpolicybuilder):

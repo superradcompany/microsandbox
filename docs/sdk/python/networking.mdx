@@ -6,24 +6,6 @@ icon: "network-wired"
 
 See [Networking](/networking/overview) for conceptual overview and [TLS Interception](/networking/tls) for TLS proxy details.
 
-Network configuration is attached to a sandbox via the `network=` argument on `Sandbox.create(...)`. Pass a [`Network`](#network) instance, optionally carrying a custom [`NetworkPolicy`](#networkpolicy), [`DnsConfig`](#dnsconfig), and [`TlsConfig`](#tlsconfig).
-
-```python
-from microsandbox import Sandbox, Network, TlsConfig
-
-sb = await Sandbox.create(
-    "filtered",
-    image="alpine",
-    network=Network(
-        policy="public_only",
-        deny_domain_suffixes=(".evil.com",),
-        tls=TlsConfig(bypass=("*.googleapis.com",)),
-    ),
-)
-```
-
-For port publishing, set `ports=` on `Sandbox.create(...)` or pass `ports={host: guest, ...}` on the `Network` itself.
-
 ## Network
 
 Frozen dataclass for sandbox network configuration. Use a class-method preset for the common cases, or construct directly with custom options.

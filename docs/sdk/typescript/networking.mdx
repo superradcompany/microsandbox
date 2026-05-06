@@ -6,23 +6,6 @@ icon: "network-wired"
 
 See [Networking](/networking/overview) for conceptual overview and [TLS Interception](/networking/tls) for TLS proxy details.
 
-Network configuration is attached to a sandbox via `SandboxBuilder.network(n => ...)`. Inside the callback you get a [`NetworkBuilder`](#networkbuilder) which exposes DNS, TLS, secret, and policy configuration.
-
-```typescript
-import { Sandbox, NetworkPolicy } from "microsandbox";
-
-await using sb = await Sandbox.builder("filtered")
-  .image("alpine")
-  .network((n) => n
-    .policy(NetworkPolicy.publicOnly())
-    .denyDomainSuffixes(".evil.com")
-    .tls((t) => t.bypass("*.googleapis.com")),
-  )
-  .create();
-```
-
-For port publishing, use `SandboxBuilder.port(host, guest)` / `portUdp(host, guest)` (or the equivalent methods on `NetworkBuilder`).
-
 ## NetworkPolicy
 
 A list of rules plus two per-direction defaults, evaluated first-match-wins. Use a static factory for a preset, or build a literal:
