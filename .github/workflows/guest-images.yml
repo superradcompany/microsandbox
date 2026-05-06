@@ -16,6 +16,9 @@ on:
   # microsandbox releases.
   push:
     tags: ['v*']
+    # TEMP: push trigger on the PR branch so we can validate the publish path
+    # end-to-end before merge. Remove this `branches:` entry before merging.
+    branches: [feat/guest-images]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
