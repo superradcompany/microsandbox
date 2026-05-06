@@ -25,7 +25,7 @@ Network(
 
 | Field | Type | Description |
 |-------|------|-------------|
-| policy | `str \| NetworkPolicy \| None` | Preset name (`"none"`, `"public_only"`, `"allow_all"`) or custom [`NetworkPolicy`](#networkpolicy) |
+| policy | `str \| NetworkPolicy \| None` | Preset name (`"none"`, `"public_only"`, `"allow_all"`) or custom [`NetworkPolicy`](#networkpolicy-1) |
 | ports | `Mapping[int, int]` | Port mappings from host to guest |
 | deny_domains | `tuple[str, ...]` | Deny egress to these exact domains. Each entry adds a `deny Domain("...")` policy rule that fires at DNS resolution (REFUSED), TLS first-flight (SNI), and TCP egress (cache fallback). Prepended onto the policy so it takes precedence over later allow rules |
 | deny_domain_suffixes | `tuple[str, ...]` | Deny egress to all subdomains of these suffixes. Adds `deny DomainSuffix("...")` rules; same enforcement layers as `deny_domains` |
