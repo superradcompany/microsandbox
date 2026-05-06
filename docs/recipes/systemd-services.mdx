@@ -1,0 +1,92 @@
+---
+title: Running systemd services
+description: Boot a sandbox under systemd so services like Cloudflare WARP can run as regular units
+icon: "gear"
+---
+
+By default the microsandbox agent is PID 1 in the guest. That's enough for one-shot processes, but it doesn't replace a real init: anything that calls into `systemctl`, `loginctl`, or expects a session bus will fail.
+
+Hand PID 1 over to systemd with `--init` and the rest of the guest behaves like a normal Linux box. This recipe walks through booting under systemd and installing Cloudflare WARP as a worked example, but the same shape works for any service that ships a `.service` unit.
+
+## Prerequisites
+
+- An image that ships a systemd init binary at one of `/sbin/init`, `/lib/systemd/systemd`, or `/usr/lib/systemd/systemd`. `oowy/systemd:debian-bookworm` and `jrei/systemd-debian:12` both work.
+- 1 GiB of memory or so. systemd plus the WARP daemon is heavier than the agent-only default.
+
+## Step 1: Boot under systemd
+
+```bash
+msb run oowy/systemd:debian-bookworm \
+  --memory 1G --cpus 2 \
+  --init auto \
+  -- bash
+```
+
+`--init auto` probes the well-known paths and picks the first that exists. Pass an absolute path (`--init /lib/systemd/systemd`) instead if you need pinning.
+
+Confirm systemd is actually PID 1:
+
+```bash
+root@msb-19bc4106:/# systemctl status
+● msb-19bc4106
+    State: running
+    Units: 113 loaded (incl. loaded aliases)
+  systemd: 252.39-1~deb12u1
+```
+
+## Step 2: Install the service
+
+WARP isn't in the Debian repos, so add Cloudflare's:
+
+```bash
+apt update && apt install -y curl gnupg lsb-release
+
+curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
+  | gpg --yes --dearmor \
+        --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] \
+https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" \
+  > /etc/apt/sources.list.d/cloudflare-client.list
+
+apt update && apt install -y cloudflare-warp
+```
+
+`lsb_release` has to be installed *before* the `echo` because the codename expansion (`bookworm`) comes from it. Skipping it produces a malformed source line and a follow-up `apt update` fails.
+
+## Step 3: Start the unit
+
+The package install enables the unit but doesn't start it (microsandbox is detected as a container, so policy-rc.d defers it):
+
+```bash
+systemctl enable --now warp-svc
+systemctl status warp-svc
+```
+
+You should see `Active: active (running)` and a real PID under `Main PID:`.
+
+## Step 4: Use the service
+
+Register the device, accept the EULA on first run, and connect:
+
+```bash
+warp-cli registration new
+warp-cli connect
+warp-cli status
+# Status update: Connected
+# Network: healthy
+```
+
+Verify egress is actually going through WARP:
+
+```bash
+curl https://1.1.1.1/cdn-cgi/trace
+```
+
+Look for `warp=on` in the response. That's the sandbox routing through Cloudflare's network instead of your host's NAT.
+
+## Notes
+
+- **Image choice matters.** Distroless / minimal images like `python:3.13-slim` don't ship an init binary; `--init auto` will fail and `kernel.log` will list every path it tried. Use a systemd-equipped base or layer one in.
+- **Memory budget.** systemd's idle footprint is ~50 MiB; daemons add more. Bump `--memory` if your service is hungry.
+- **Other inits work too.** `--init` accepts any absolute path. s6, OpenRC, runit, or a hand-rolled `/sbin/init` shell script are all fine — `auto` just covers the systemd-on-Debian/Ubuntu case.

@@ -157,6 +157,13 @@
               "recipes/docker",
               "recipes/local-images"
             ]
+          },
+          {
+            "group": "Guest Setup",
+            "icon": "gear",
+            "pages": [
+              "recipes/systemd-services"
+            ]
           }
         ]
       }
