@@ -25,14 +25,14 @@ Network(
 
 | Field | Type | Description |
 |-------|------|-------------|
-| policy | `str \| NetworkPolicy \| None` | **Default:** `None`<br/><br/>Preset name (`"none"`, `"public_only"`, `"allow_all"`) or custom [`NetworkPolicy`](#networkpolicy) |
-| ports | `Mapping[int, int]` | **Default:** `{}`<br/><br/>Port mappings from host to guest |
-| deny_domains | `tuple[str, ...]` | **Default:** `()`<br/><br/>Deny egress to these exact domains. Each entry adds a `deny Domain("...")` policy rule that fires at DNS resolution (REFUSED), TLS first-flight (SNI), and TCP egress (cache fallback). Prepended onto the policy so it takes precedence over later allow rules |
-| deny_domain_suffixes | `tuple[str, ...]` | **Default:** `()`<br/><br/>Deny egress to all subdomains of these suffixes. Adds `deny DomainSuffix("...")` rules; same enforcement layers as `deny_domains` |
-| dns | [`DnsConfig`](#dnsconfig) ` \| None` | **Default:** `None`<br/><br/>DNS interception configuration |
-| tls | [`TlsConfig`](#tlsconfig) ` \| None` | **Default:** `None`<br/><br/>TLS interception configuration |
-| max_connections | `int \| None` | **Default:** `None`<br/><br/>Maximum concurrent connections |
-| trust_host_cas | `bool \| None` | **Default:** `False`<br/><br/>Ship the host's trusted root CAs into the guest at boot so outbound TLS works behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.). These proxies install a gateway CA on the host that's unknown to the guest's stock Mozilla bundle. Opt-in |
+| policy | `str \| NetworkPolicy \| None` | Preset name (`"none"`, `"public_only"`, `"allow_all"`) or custom [`NetworkPolicy`](#networkpolicy) |
+| ports | `Mapping[int, int]` | Port mappings from host to guest |
+| deny_domains | `tuple[str, ...]` | Deny egress to these exact domains. Each entry adds a `deny Domain("...")` policy rule that fires at DNS resolution (REFUSED), TLS first-flight (SNI), and TCP egress (cache fallback). Prepended onto the policy so it takes precedence over later allow rules |
+| deny_domain_suffixes | `tuple[str, ...]` | Deny egress to all subdomains of these suffixes. Adds `deny DomainSuffix("...")` rules; same enforcement layers as `deny_domains` |
+| dns | [`DnsConfig`](#dnsconfig) ` \| None` | DNS interception configuration |
+| tls | [`TlsConfig`](#tlsconfig) ` \| None` | TLS interception configuration |
+| max_connections | `int \| None` | Maximum concurrent connections |
+| trust_host_cas | `bool \| None` | Ship the host's trusted root CAs into the guest at boot so outbound TLS works behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.). These proxies install a gateway CA on the host that's unknown to the guest's stock Mozilla bundle. Opt-in |
 
 ---
 
@@ -116,9 +116,9 @@ NetworkPolicy(
 
 | Field | Type | Description |
 |-------|------|-------------|
-| default_egress | [`Action`](#action) | **Default:** `Action.DENY`<br/><br/>Action when no egress-applicable rule matches |
-| default_ingress | [`Action`](#action) | **Default:** `Action.ALLOW`<br/><br/>Action when no ingress-applicable rule matches |
-| rules | `tuple[`[`Rule`](#rule)`, ...]` | **Default:** `()`<br/><br/>Rules evaluated first-match-wins per direction |
+| default_egress | [`Action`](#action) | Action when no egress-applicable rule matches |
+| default_ingress | [`Action`](#action) | Action when no ingress-applicable rule matches |
+| rules | `tuple[`[`Rule`](#rule)`, ...]` | Rules evaluated first-match-wins per direction |
 
 ### Rule order matters
 
@@ -156,10 +156,10 @@ Rule(
 | Field | Type | Description |
 |-------|------|-------------|
 | action | [`Action`](#action) | What to do when this rule matches |
-| direction | [`Direction`](#direction) | **Default:** `Direction.EGRESS`<br/><br/>Which evaluator considers this rule. `Direction.ANY` matches in either direction |
-| destination | `str \| None` | **Default:** `None`<br/><br/>Target filter: a [`DestGroup`](#destgroup) value, domain, CIDR range, domain suffix (prefixed with `"."`), or `"*"` for any. Domain and suffix strings are validated at sandbox creation; invalid names raise `ValueError` |
-| protocol | [`Protocol`](#protocol) ` \| None` | **Default:** `None`<br/><br/>Protocol filter |
-| port | `int \| str \| None` | **Default:** `None`<br/><br/>Single port (`443`) or range (`"8000-9000"`) |
+| direction | [`Direction`](#direction) | Which evaluator considers this rule. `Direction.ANY` matches in either direction |
+| destination | `str \| None` | Target filter: a [`DestGroup`](#destgroup) value, domain, CIDR range, domain suffix (prefixed with `"."`), or `"*"` for any. Domain and suffix strings are validated at sandbox creation; invalid names raise `ValueError` |
+| protocol | [`Protocol`](#protocol) ` \| None` | Protocol filter |
+| port | `int \| str \| None` | Single port (`443`) or range (`"8000-9000"`) |
 
 Ingress rules carrying ICMP protocols are rejected at sandbox creation; the host has no inbound ICMP path. Use `Direction.EGRESS` for ICMP allow/deny.
 
@@ -184,10 +184,10 @@ Create a rule that permits matching traffic.
 
 | Name | Type | Description |
 |------|------|-------------|
-| direction | [`Direction`](#direction) | **Default:** `Direction.EGRESS`<br/><br/>Traffic direction |
-| protocol | [`Protocol`](#protocol) ` \| None` | **Default:** `None`<br/><br/>Protocol filter |
-| port | `int \| str \| None` | **Default:** `None`<br/><br/>Port or port range |
-| destination | `str \| None` | **Default:** `None`<br/><br/>Destination filter |
+| direction | [`Direction`](#direction) | Traffic direction |
+| protocol | [`Protocol`](#protocol) ` \| None` | Protocol filter |
+| port | `int \| str \| None` | Port or port range |
+| destination | `str \| None` | Destination filter |
 
 **Returns**
 
@@ -216,10 +216,10 @@ Create a rule that blocks matching traffic.
 
 | Name | Type | Description |
 |------|------|-------------|
-| direction | [`Direction`](#direction) | **Default:** `Direction.EGRESS`<br/><br/>Traffic direction |
-| protocol | [`Protocol`](#protocol) ` \| None` | **Default:** `None`<br/><br/>Protocol filter |
-| port | `int \| str \| None` | **Default:** `None`<br/><br/>Port or port range |
-| destination | `str \| None` | **Default:** `None`<br/><br/>Destination filter |
+| direction | [`Direction`](#direction) | Traffic direction |
+| protocol | [`Protocol`](#protocol) ` \| None` | Protocol filter |
+| port | `int \| str \| None` | Port or port range |
+| destination | `str \| None` | Destination filter |
 
 **Returns**
 
@@ -243,9 +243,9 @@ DnsConfig(
 
 | Field | Type | Description |
 |-------|------|-------------|
-| nameservers | `tuple[str, ...]` | **Default:** `()`<br/><br/>Nameservers (`IP`, `IP:PORT`, `HOST`, or `HOST:PORT`). Overrides the host's `/etc/resolv.conf` when set. Hostnames are resolved once at startup via the host's OS resolver |
-| query_timeout_ms | `int \| None` | **Default:** `None` (5000 ms server-side)<br/><br/>Per-DNS-query timeout in milliseconds |
-| rebind_protection | `bool` | **Default:** `True`<br/><br/>Block DNS responses resolving to private IPs |
+| nameservers | `tuple[str, ...]` | Nameservers (`IP`, `IP:PORT`, `HOST`, or `HOST:PORT`). Overrides the host's `/etc/resolv.conf` when set. Hostnames are resolved once at startup via the host's OS resolver |
+| query_timeout_ms | `int \| None` | Per-DNS-query timeout in milliseconds |
+| rebind_protection | `bool` | Block DNS responses resolving to private IPs |
 
 ---
 
@@ -267,13 +267,13 @@ TlsConfig(
 
 | Field | Type | Description |
 |-------|------|-------------|
-| block_quic | `bool` | **Default:** `False`<br/><br/>Block QUIC/HTTP3 (UDP) on intercepted ports, forcing TCP/TLS fallback |
-| bypass | `tuple[str, ...]` | **Default:** `()`<br/><br/>Domains to skip interception. Use for domains with certificate pinning |
-| ca_cert | `str \| None` | **Default:** `None`<br/><br/>Path to a custom interception CA certificate PEM file |
-| ca_cn | `str \| None` | **Default:** `None`<br/><br/>Common name for the generated interception CA |
-| ca_key | `str \| None` | **Default:** `None`<br/><br/>Path to a custom interception CA private key PEM file |
-| intercepted_ports | `tuple[int, ...]` | **Default:** `(443,)`<br/><br/>TCP ports where TLS interception is active |
-| verify_upstream | `bool` | **Default:** `True`<br/><br/>Verify upstream server certificates. Set to `False` only for self-signed servers |
+| block_quic | `bool` | Block QUIC/HTTP3 (UDP) on intercepted ports, forcing TCP/TLS fallback |
+| bypass | `tuple[str, ...]` | Domains to skip interception. Use for domains with certificate pinning |
+| ca_cert | `str \| None` | Path to a custom interception CA certificate PEM file |
+| ca_cn | `str \| None` | Common name for the generated interception CA |
+| ca_key | `str \| None` | Path to a custom interception CA private key PEM file |
+| intercepted_ports | `tuple[int, ...]` | TCP ports where TLS interception is active |
+| verify_upstream | `bool` | Verify upstream server certificates. Set to `False` only for self-signed servers |
 
 ---
 
