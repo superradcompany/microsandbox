@@ -347,80 +347,143 @@ Each adder commits one rule using the current state and the named destination gr
 
 ---
 
-#### allow_public() / deny_public()
+#### allow_public()
 
 ```rust
 fn allow_public(&mut self) -> &mut Self
+```
+
+Allow the `Public` group (complement of named categories: every IP not in any other group).
+
+---
+
+#### deny_public()
+
+```rust
 fn deny_public(&mut self) -> &mut Self
 ```
 
-Match the `Public` group (complement of named categories: every IP not in any other group).
+Deny the `Public` group.
 
 ---
 
-#### allow_private() / deny_private()
+#### allow_private()
 
 ```rust
 fn allow_private(&mut self) -> &mut Self
+```
+
+Allow the `Private` group (RFC1918 + ULA + CGN).
+
+---
+
+#### deny_private()
+
+```rust
 fn deny_private(&mut self) -> &mut Self
 ```
 
-Match the `Private` group (RFC1918 + ULA + CGN).
+Deny the `Private` group.
 
 ---
 
-#### allow_loopback() / deny_loopback()
+#### allow_loopback()
 
 ```rust
 fn allow_loopback(&mut self) -> &mut Self
+```
+
+Allow the `Loopback` group (`127.0.0.0/8`, `::1`). The **guest's own** loopback, not the host. To reach a service on the host's localhost, use [`allow_host()`](#allow_host) instead. See the [loopback-vs-host watch-out](/networking/overview#loopback-vs-host-a-common-trap).
+
+---
+
+#### deny_loopback()
+
+```rust
 fn deny_loopback(&mut self) -> &mut Self
 ```
 
-Match the `Loopback` group (`127.0.0.0/8`, `::1`). The **guest's own** loopback, not the host. To reach a service on the host's localhost, use [`allow_host()`](#allow_host--deny_host) instead. See the [loopback-vs-host watch-out](/networking/overview#loopback-vs-host-a-common-trap).
+Deny the `Loopback` group.
 
 ---
 
-#### allow_link_local() / deny_link_local()
+#### allow_link_local()
 
 ```rust
 fn allow_link_local(&mut self) -> &mut Self
+```
+
+Allow the `LinkLocal` group (`169.254.0.0/16`, `fe80::/10`). Excludes the metadata IP `169.254.169.254`.
+
+---
+
+#### deny_link_local()
+
+```rust
 fn deny_link_local(&mut self) -> &mut Self
 ```
 
-Match the `LinkLocal` group (`169.254.0.0/16`, `fe80::/10`). Excludes the metadata IP `169.254.169.254`.
+Deny the `LinkLocal` group.
 
 ---
 
-#### allow_meta() / deny_meta()
+#### allow_meta()
 
 ```rust
 fn allow_meta(&mut self) -> &mut Self
+```
+
+Allow the `Metadata` group (`169.254.169.254`). **Dangerous on cloud hosts** (exposes IAM credentials).
+
+---
+
+#### deny_meta()
+
+```rust
 fn deny_meta(&mut self) -> &mut Self
 ```
 
-Match the `Metadata` group (`169.254.169.254`). **Dangerous on cloud hosts** (exposes IAM credentials).
+Deny the `Metadata` group.
 
 ---
 
-#### allow_multicast() / deny_multicast()
+#### allow_multicast()
 
 ```rust
 fn allow_multicast(&mut self) -> &mut Self
-fn deny_multicast(&mut self) -> &mut Self
 ```
 
-Match the `Multicast` group (`224.0.0.0/4`, `ff00::/8`).
+Allow the `Multicast` group (`224.0.0.0/4`, `ff00::/8`).
 
 ---
 
-#### allow_host() / deny_host()
+#### deny_multicast()
+
+```rust
+fn deny_multicast(&mut self) -> &mut Self
+```
+
+Deny the `Multicast` group.
+
+---
+
+#### allow_host()
 
 ```rust
 fn allow_host(&mut self) -> &mut Self
+```
+
+Allow the `Host` group: per-sandbox gateway IPs that back `host.microsandbox.internal`. This is the right shortcut for "let the sandbox reach my host's localhost", not [`allow_loopback()`](#allow_loopback).
+
+---
+
+#### deny_host()
+
+```rust
 fn deny_host(&mut self) -> &mut Self
 ```
 
-Match the `Host` group: per-sandbox gateway IPs that back `host.microsandbox.internal`. This is the right shortcut for "let the sandbox reach my host's localhost", not [`allow_loopback()`](#allow_loopback--deny_loopback).
+Deny the `Host` group.
 
 ---
 
@@ -439,29 +502,47 @@ NetworkPolicy::builder()
 
 ---
 
-#### allow_domains() / deny_domains()
+#### allow_domains()
 
 ```rust
 fn allow_domains<I, S>(&mut self, names: I) -> &mut Self
 where I: IntoIterator<Item = S>, S: Into<String>
+```
+
+Add one `Destination::Domain` allow rule per name.
+
+---
+
+#### deny_domains()
+
+```rust
 fn deny_domains<I, S>(&mut self, names: I) -> &mut Self
 where I: IntoIterator<Item = S>, S: Into<String>
 ```
 
-Add one `Destination::Domain` rule per name.
+Add one `Destination::Domain` deny rule per name.
 
 ---
 
-#### allow_domain_suffixes() / deny_domain_suffixes()
+#### allow_domain_suffixes()
 
 ```rust
 fn allow_domain_suffixes<I, S>(&mut self, suffixes: I) -> &mut Self
 where I: IntoIterator<Item = S>, S: Into<String>
+```
+
+Add one `Destination::DomainSuffix` allow rule per suffix.
+
+---
+
+#### deny_domain_suffixes()
+
+```rust
 fn deny_domain_suffixes<I, S>(&mut self, suffixes: I) -> &mut Self
 where I: IntoIterator<Item = S>, S: Into<String>
 ```
 
-Add one `Destination::DomainSuffix` rule per suffix.
+Add one `Destination::DomainSuffix` deny rule per suffix.
 
 ---
 
@@ -469,14 +550,23 @@ Add one `Destination::DomainSuffix` rule per suffix.
 
 ---
 
-#### allow_local() / deny_local()
+#### allow_local()
 
 ```rust
 fn allow_local(&mut self) -> &mut Self
+```
+
+Add three allow rules atomically: `Loopback + LinkLocal + Host`. Each uses the closure's current state. `Metadata` is intentionally not included; opt in via [`allow_meta()`](#allow_meta) separately.
+
+---
+
+#### deny_local()
+
+```rust
 fn deny_local(&mut self) -> &mut Self
 ```
 
-Add three rules atomically: `Loopback + LinkLocal + Host`. Each uses the closure's current state. `Metadata` is intentionally not included; opt in via [`allow_meta()`](#allow_meta--deny_meta) separately.
+Add three deny rules atomically: `Loopback + LinkLocal + Host`. `Metadata` is intentionally not included.
 
 ---
 
