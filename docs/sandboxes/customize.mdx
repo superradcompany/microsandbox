@@ -311,7 +311,7 @@ msb run alpine:3.20 --init /sbin/init -- sh -c "cat /proc/1/comm"
 
 ### Shutdown semantics
 
-Without `--init`, microsandbox shuts the guest down by remounting root read-only and calling `reboot(RB_POWER_OFF)`. Typically <100 ms.
+Without `--init`, microsandbox shuts the guest down by remounting root read-only and calling `reboot(RB_POWER_OFF)`. Typically &lt;100 ms.
 
 With `--init`, the agent isn't PID 1 anymore, so it asks your init to shut down:
 
@@ -322,7 +322,7 @@ Your init then runs its own teardown (stop services, unmount, halt), which is sl
 
 | Init | Typical shutdown |
 |------|------------------|
-| BusyBox / s6 / runit | <100 ms |
+| BusyBox / s6 / runit | &lt;100 ms |
 | OpenRC | 50-500 ms |
 | systemd | 1-5 s |
 
