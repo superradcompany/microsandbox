@@ -132,18 +132,21 @@ sb = await Sandbox.create(
 
 The patch builder is invoked through `SandboxBuilder.patch(p => ...)`. Each method appends an operation; calls are chainable.
 
-| Method | Description |
-|--------|-------------|
-| `text(path, content, opts?)` | Write text content to a file |
-| `file(path, bytes, opts?)` | Write raw bytes to a file |
-| `mkdir(path, opts?)` | Create a directory (idempotent) |
-| `append(path, content)` | Append content to an existing file |
-| `copyFile(src, dst, opts?)` | Copy a file from the host into the rootfs |
-| `copyDir(src, dst, opts?)` | Recursively copy a directory from the host |
-| `symlink(target, link, opts?)` | Create a symlink |
-| `remove(path)` | Delete a file or directory (idempotent) |
+| Method | Description | `opts` |
+|--------|-------------|--------|
+| `text(path, content, opts?)` | Write text content to a file | `mode`, `replace` |
+| `file(path, bytes, opts?)` | Write raw bytes to a file | `mode`, `replace` |
+| `mkdir(path, opts?)` | Create a directory (idempotent) | `mode` |
+| `append(path, content)` | Append content to an existing file | |
+| `copyFile(src, dst, opts?)` | Copy a file from the host into the rootfs | `mode`, `replace` |
+| `copyDir(src, dst, opts?)` | Recursively copy a directory from the host | `replace` |
+| `symlink(target, link, opts?)` | Create a symlink | `replace` |
+| `remove(path)` | Delete a file or directory (idempotent) | |
 
-`opts` accepts `{ mode?: number; replace?: boolean }` for `text` / `file` / `copyFile`, `{ replace?: boolean }` for `copyDir` / `symlink`, and `{ mode?: number }` for `mkdir`.
+Both `opts` keys are optional:
+
+- `mode`: numeric file mode, e.g. `0o644`.
+- `replace`: when `true`, overwrite a path that already exists in the image. Defaults to `false`, which errors on collision.
 
 ## Custom init system
 
@@ -278,22 +281,25 @@ Most slim Docker base images (`debian:bookworm-slim`, `ubuntu:24.04`, `python:3.
 
 Two ways to get an image with an init:
 
-**Build a small custom image:**
+<AccordionGroup>
+  <Accordion title="Build a small custom image">
+    ```dockerfile
+    # Dockerfile.systemd
+    FROM debian:bookworm
+    RUN apt-get update \
+        && apt-get install -y --no-install-recommends systemd \
+        && rm -rf /var/lib/apt/lists/*
+    ```
 
-```dockerfile
-# Dockerfile.systemd
-FROM debian:bookworm
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends systemd \
-    && rm -rf /var/lib/apt/lists/*
-```
-
-```bash
-docker buildx build -t local-systemd:debian -f Dockerfile.systemd .
-msb run local-systemd:debian --init /lib/systemd/systemd -- bash
-```
-
-**Use a community-built systemd image** (e.g. `jrei/systemd-debian:12`, `jrei/systemd-ubuntu:22.04`). These work out of the box but are published by community maintainers, not the distros themselves. Vet them like any other third-party image before running real workloads.
+    ```bash
+    docker buildx build -t local-systemd:debian -f Dockerfile.systemd .
+    msb run local-systemd:debian --init /lib/systemd/systemd -- bash
+    ```
+  </Accordion>
+  <Accordion title="Use a community-built systemd image">
+    Examples: `jrei/systemd-debian:12`, `jrei/systemd-ubuntu:22.04`. These work out of the box but are published by community maintainers, not the distros themselves. Vet them like any other third-party image before running real workloads.
+  </Accordion>
+</AccordionGroup>
 
 For a sanity check that doesn't need systemd, `alpine:3.20` ships BusyBox at `/sbin/init`, which is enough to exercise the handoff mechanics:
 
