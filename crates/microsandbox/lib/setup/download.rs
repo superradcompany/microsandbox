@@ -8,9 +8,7 @@ use futures::StreamExt;
 use tar::Archive;
 
 use crate::{MicrosandboxError, MicrosandboxResult};
-use microsandbox_utils::{
-    BASE_DIR_NAME, BIN_SUBDIR, LIB_SUBDIR, LIBKRUNFW_ABI, MSB_BINARY, PREBUILT_VERSION,
-};
+use microsandbox_utils::{BIN_SUBDIR, LIB_SUBDIR, LIBKRUNFW_ABI, MSB_BINARY, PREBUILT_VERSION};
 
 use super::verify::verify_installation;
 
@@ -151,7 +149,7 @@ pub fn is_installed() -> bool {
 //--------------------------------------------------------------------------------------------------
 
 fn default_base_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(BASE_DIR_NAME))
+    Some(microsandbox_utils::resolve_home())
 }
 
 fn libkrunfw_symlinks(filename: &str) -> Vec<(String, String)> {

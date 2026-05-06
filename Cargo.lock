@@ -2800,6 +2800,7 @@ dependencies = [
 name = "microsandbox-utils"
 version = "0.4.4"
 dependencies = [
+ "dirs",
  "libc",
  "reflink-copy",
  "scopeguard",
