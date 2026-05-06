@@ -25,7 +25,7 @@ For port publishing, use `SandboxBuilder.port(host, guest)` / `portUdp(host, gue
 
 ## NetworkPolicy
 
-Static factory for creating preset policies. Each helper returns a plain `NetworkPolicy` value that can be passed to `NetworkBuilder.policy(...)`.
+A list of rules plus two per-direction defaults, evaluated first-match-wins. Use a static factory for a preset, or build a literal:
 
 ```typescript
 import { NetworkPolicy, Rule, Destination } from "microsandbox";
@@ -41,9 +41,11 @@ const custom = {
 };
 ```
 
+Pass either form to `NetworkBuilder.policy(...)`.
+
 ### Rule order matters
 
-Rules are scanned top to bottom and the first match wins, so a broad rule placed before a narrow rule swallows it. The narrow rule is dead code:
+The first matching rule wins, so a broad rule placed before a narrow one swallows it:
 
 ```typescript
 const policy = {
@@ -51,12 +53,12 @@ const policy = {
   defaultIngress: "allow",
   rules: [
     Rule.allowEgress(Destination.cidr("10.0.0.0/8")),  // matches everything in 10.x
-    Rule.denyEgress(Destination.cidr("10.0.0.5/32")),  // never reached: shadowed by the line above
+    Rule.denyEgress(Destination.cidr("10.0.0.5/32")),  // never reached
   ],
 };
 ```
 
-To make the deny effective, place it before the broader allow.
+Put specific rules before general ones.
 
 ---
 

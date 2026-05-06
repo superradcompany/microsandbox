@@ -28,7 +28,7 @@ For port publishing, use `SandboxBuilder::port(host, guest)` / `port_udp(host, g
 
 ## NetworkPolicy
 
-A network access policy: two per-direction defaults plus an ordered list of rules evaluated first-match-wins per direction. Construct with [`NetworkPolicy::builder()`](#networkpolicybuilder).
+A list of rules plus two per-direction defaults, evaluated first-match-wins. Build one with [`NetworkPolicy::builder()`](#networkpolicybuilder):
 
 ```rust
 use microsandbox::NetworkPolicy;
@@ -40,7 +40,7 @@ let policy = NetworkPolicy::builder()
     .build()?;
 ```
 
-`NetworkPolicy::default()` is `default_egress = Deny + implicit allow @ public`, `default_ingress = Allow + no rules`. This preserves the historical `public_only` egress behavior plus today's unfiltered published-port behavior. See the [defaults rationale](/networking/overview#defaults) for why the defaults are asymmetric.
+The default policy denies egress except for an implicit `allow public`, and allows ingress with no rules. See the [defaults rationale](/networking/overview#defaults) for the asymmetry.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -50,24 +50,22 @@ let policy = NetworkPolicy::builder()
 
 ### Rule order matters
 
-Rules are scanned top to bottom and the first match wins, so a broad rule placed before a narrow rule swallows it. The narrow rule is dead code:
+The first matching rule wins, so a broad rule placed before a narrow one swallows it:
 
 ```rust
 NetworkPolicy::builder()
     .default_deny()
     .egress(|e| e
         .allow().cidr("10.0.0.0/8")     // matches everything in 10.x
-        .deny().ip("10.0.0.5"))          // never reached: shadowed by the line above
+        .deny().ip("10.0.0.5"))          // never reached
     .build()?;
 ```
 
-To make the deny effective, place it before the broader allow.
+Put specific rules before general ones.
 
 ### Shadow detection
 
-At `.build()` time the builder walks the rule list and emits a `tracing::warn!` for any rule whose match set is fully covered by an earlier rule in a compatible direction. Coverage is checked for `Ip`, `Cidr`, and `Group` destinations. Domain shadowing depends on runtime DNS state and is intentionally out of scope.
-
-The build still succeeds: a shadowed rule is a hint, not a hard error. Enable `tracing` to see the warnings:
+`.build()` walks the rules and warns (via `tracing::warn!`) when a rule is fully covered by an earlier one in the same direction. Only `Ip`, `Cidr`, and `Group` destinations are checked; domain coverage depends on runtime DNS and is skipped. Builds still succeed:
 
 ```text
 WARN rule #1 (Egress Cidr(10.0.0.5/32) Deny) is shadowed by rule #0 (Egress Cidr(10.0.0.0/8) Allow); to narrow, place the more specific rule first
@@ -75,16 +73,15 @@ WARN rule #1 (Egress Cidr(10.0.0.5/32) Deny) is shadowed by rule #0 (Egress Cidr
 
 ### State accumulation
 
-Inside a `.rule()` / `.egress()` / `.ingress()` / `.any()` closure, state setters (`.tcp()`, `.port(N)`, etc.) accumulate eagerly. Each rule-adder commits a rule using the state at that point. State is **not reset** between rule-adders.
+State setters (`.tcp()`, `.port()`, etc.) inside a closure carry into every rule-adder that follows. State is **not reset** between adders:
 
 ```rust
 .rule(|r| r.egress()
     .tcp().port(443).allow_public()    // rule 1: egress, TCP, 443, allow Public
     .udp().allow_private())            // rule 2: egress, [TCP, UDP], 443, allow Private
-                                       //   UDP added; TCP and 443 still in state
 ```
 
-To reset state between rules, use separate `.rule()` / `.egress()` / `.ingress()` closures, or interleave fresh state setters between adders.
+Use separate closures for rules that need different state.
 
 ---
 
