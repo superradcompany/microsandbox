@@ -1,0 +1,188 @@
+name: Guest Images
+
+on:
+  # Weekly rebuild to pick up upstream base-image security patches.
+  schedule:
+    - cron: '0 6 * * MON'
+  # Manual trigger for re-publishing on demand.
+  workflow_dispatch:
+  # Build (no push) on PRs that touch the image definitions or this workflow,
+  # so contributors get the smoke-test verdict before merge.
+  pull_request:
+    paths:
+      - 'packaging/guest-images/**'
+      - '.github/workflows/guest-images.yml'
+  # Build + push on tag releases too, so versioned image rebuilds align with
+  # microsandbox releases.
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: superradcompany
+
+jobs:
+  build:
+    name: Build ${{ matrix.image.name }}:${{ matrix.image.primary_tag }} (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+        image:
+          - name: debian-systemd
+            context: packaging/guest-images/debian-systemd
+            build_arg_name: DEBIAN_VERSION
+            build_arg_value: bookworm
+            primary_tag: '12'
+            aliases: [bookworm, latest]
+          - name: ubuntu-systemd
+            context: packaging/guest-images/ubuntu-systemd
+            build_arg_name: UBUNTU_VERSION
+            build_arg_value: '24.04'
+            primary_tag: '24.04'
+            aliases: [noble, latest]
+          - name: fedora-systemd
+            context: packaging/guest-images/fedora-systemd
+            build_arg_name: FEDORA_VERSION
+            build_arg_value: '40'
+            primary_tag: '40'
+            aliases: [latest]
+          - name: alpine-openrc
+            context: packaging/guest-images/alpine-openrc
+            build_arg_name: ALPINE_VERSION
+            build_arg_value: '3.20'
+            primary_tag: '3.20'
+            aliases: [latest]
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Compute date stamp
+        id: date
+        run: echo "stamp=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Compute platform suffix
+        id: platform
+        run: |
+          # linux/amd64 -> amd64, linux/arm64 -> arm64
+          suffix="${{ matrix.platform }}"
+          suffix="${suffix#linux/}"
+          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
+
+      - name: Build (load locally for smoke test)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.image.context }}
+          platforms: ${{ matrix.platform }}
+          load: true
+          push: false
+          build-args: |
+            ${{ matrix.image.build_arg_name }}=${{ matrix.image.build_arg_value }}
+          tags: |
+            ${{ matrix.image.name }}:smoke-${{ steps.platform.outputs.suffix }}
+
+      - name: Smoke test (init binary present)
+        run: |
+          docker run --rm --platform ${{ matrix.platform }} \
+            ${{ matrix.image.name }}:smoke-${{ steps.platform.outputs.suffix }} \
+            sh -c 'for p in /sbin/init /lib/systemd/systemd /usr/lib/systemd/systemd; do [ -x "$p" ] && echo "found init at $p" && exit 0; done; echo "no init binary found"; exit 1'
+
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (per-platform)
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.image.context }}
+          platforms: ${{ matrix.platform }}
+          push: true
+          provenance: false
+          build-args: |
+            ${{ matrix.image.build_arg_name }}=${{ matrix.image.build_arg_value }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.image.name }}:${{ matrix.image.primary_tag }}-${{ steps.platform.outputs.suffix }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.image.name }}:${{ matrix.image.primary_tag }}-${{ steps.date.outputs.stamp }}-${{ steps.platform.outputs.suffix }}
+
+  manifest:
+    name: Publish multi-arch manifest for ${{ matrix.image.name }}
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: debian-systemd
+            primary_tag: '12'
+            aliases: [bookworm, latest]
+          - name: ubuntu-systemd
+            primary_tag: '24.04'
+            aliases: [noble, latest]
+          - name: fedora-systemd
+            primary_tag: '40'
+            aliases: [latest]
+          - name: alpine-openrc
+            primary_tag: '3.20'
+            aliases: [latest]
+
+    steps:
+      - name: Compute date stamp
+        id: date
+        run: echo "stamp=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build multi-arch manifest (primary tag)
+        run: |
+          IMG="${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.image.name }}"
+          PRIMARY="${{ matrix.image.primary_tag }}"
+          DATE="${{ steps.date.outputs.stamp }}"
+
+          docker buildx imagetools create \
+            -t "$IMG:$PRIMARY" \
+            "$IMG:$PRIMARY-amd64" \
+            "$IMG:$PRIMARY-arm64"
+
+          docker buildx imagetools create \
+            -t "$IMG:$PRIMARY-$DATE" \
+            "$IMG:$PRIMARY-$DATE-amd64" \
+            "$IMG:$PRIMARY-$DATE-arm64"
+
+      - name: Build multi-arch manifest (aliases)
+        run: |
+          IMG="${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.image.name }}"
+          PRIMARY="${{ matrix.image.primary_tag }}"
+
+          for alias in ${{ join(matrix.image.aliases, ' ') }}; do
+            docker buildx imagetools create \
+              -t "$IMG:$alias" \
+              "$IMG:$PRIMARY-amd64" \
+              "$IMG:$PRIMARY-arm64"
+          done
