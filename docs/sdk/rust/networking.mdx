@@ -96,6 +96,28 @@ The closure signature for `.rule()` / `.egress()` / `.ingress()` / `.any()` is `
 
 ---
 
+#### any()
+
+```rust
+fn any<F>(self, f: F) -> Self
+where
+    F: for<'a> FnOnce(&'a mut RuleBuilder) -> &'a mut RuleBuilder
+```
+
+Sugar for [`rule()`](#rule-1) with direction pre-set to `Any`. Rules committed inside apply in both directions.
+
+---
+
+#### build()
+
+```rust
+fn build(self) -> Result<NetworkPolicy, BuildError>
+```
+
+Consume the builder and produce a [`NetworkPolicy`](#networkpolicy). Lazy-parses every `.ip()` / `.cidr()` / `.domain()` / `.domain_suffix()` input, validates direction-set and ICMP-egress-only invariants, and emits a `tracing::warn!` for each shadowed rule pair detected.
+
+---
+
 #### default_allow()
 
 ```rust
@@ -148,18 +170,6 @@ Per-direction override for the ingress default action.
 
 ---
 
-#### rule()
-
-```rust
-fn rule<F>(self, f: F) -> Self
-where
-    F: for<'a> FnOnce(&'a mut RuleBuilder) -> &'a mut RuleBuilder
-```
-
-Open a multi-rule batch closure. Direction must be set inside via `.egress()`, `.ingress()`, or `.any()` before any rule-adder.
-
----
-
 #### egress()
 
 ```rust
@@ -184,25 +194,15 @@ Sugar for [`rule()`](#rule-1) with direction pre-set to `Ingress`.
 
 ---
 
-#### any()
+#### rule()
 
 ```rust
-fn any<F>(self, f: F) -> Self
+fn rule<F>(self, f: F) -> Self
 where
     F: for<'a> FnOnce(&'a mut RuleBuilder) -> &'a mut RuleBuilder
 ```
 
-Sugar for [`rule()`](#rule-1) with direction pre-set to `Any`. Rules committed inside apply in both directions.
-
----
-
-#### build()
-
-```rust
-fn build(self) -> Result<NetworkPolicy, BuildError>
-```
-
-Consume the builder and produce a [`NetworkPolicy`](#networkpolicy). Lazy-parses every `.ip()` / `.cidr()` / `.domain()` / `.domain_suffix()` input, validates direction-set and ICMP-egress-only invariants, and emits a `tracing::warn!` for each shadowed rule pair detected.
+Open a multi-rule batch closure. Direction must be set inside via `.egress()`, `.ingress()`, or `.any()` before any rule-adder.
 
 ---
 
@@ -213,6 +213,16 @@ The closure passed to `.rule(...)` (or any of the direction sugar methods) gives
 ### Direction setters
 
 Last-write-wins. ICMP rule-adders are egress-only at build time.
+
+---
+
+#### any()
+
+```rust
+fn any(&mut self) -> &mut Self
+```
+
+Set direction to `Any` for subsequent rule-adders. Rules committed after this apply in both directions.
 
 ---
 
@@ -236,39 +246,9 @@ Set direction to `Ingress` for subsequent rule-adders.
 
 ---
 
-#### any()
-
-```rust
-fn any(&mut self) -> &mut Self
-```
-
-Set direction to `Any` for subsequent rule-adders. Rules committed after this apply in both directions.
-
----
-
 ### Protocol setters
 
 Protocols accumulate as a set; duplicates dedupe.
-
----
-
-#### tcp()
-
-```rust
-fn tcp(&mut self) -> &mut Self
-```
-
-Add `Tcp` to the protocols set.
-
----
-
-#### udp()
-
-```rust
-fn udp(&mut self) -> &mut Self
-```
-
-Add `Udp` to the protocols set.
 
 ---
 
@@ -289,6 +269,26 @@ fn icmpv6(&mut self) -> &mut Self
 ```
 
 Add `Icmpv6` to the protocols set. Egress-only; same rules as [`icmpv4()`](#icmpv4).
+
+---
+
+#### tcp()
+
+```rust
+fn tcp(&mut self) -> &mut Self
+```
+
+Add `Tcp` to the protocols set.
+
+---
+
+#### udp()
+
+```rust
+fn udp(&mut self) -> &mut Self
+```
+
+Add `Udp` to the protocols set.
 
 ---
 
@@ -347,63 +347,13 @@ Each adder commits one rule using the current state and the named destination gr
 
 ---
 
-#### allow_public()
+#### allow_host()
 
 ```rust
-fn allow_public(&mut self) -> &mut Self
+fn allow_host(&mut self) -> &mut Self
 ```
 
-Allow the `Public` group (complement of named categories: every IP not in any other group).
-
----
-
-#### deny_public()
-
-```rust
-fn deny_public(&mut self) -> &mut Self
-```
-
-Deny the `Public` group.
-
----
-
-#### allow_private()
-
-```rust
-fn allow_private(&mut self) -> &mut Self
-```
-
-Allow the `Private` group (RFC1918 + ULA + CGN).
-
----
-
-#### deny_private()
-
-```rust
-fn deny_private(&mut self) -> &mut Self
-```
-
-Deny the `Private` group.
-
----
-
-#### allow_loopback()
-
-```rust
-fn allow_loopback(&mut self) -> &mut Self
-```
-
-Allow the `Loopback` group (`127.0.0.0/8`, `::1`). The **guest's own** loopback, not the host. To reach a service on the host's localhost, use [`allow_host()`](#allow_host) instead. See the [loopback-vs-host watch-out](/networking/overview#loopback-vs-host-a-common-trap).
-
----
-
-#### deny_loopback()
-
-```rust
-fn deny_loopback(&mut self) -> &mut Self
-```
-
-Deny the `Loopback` group.
+Allow the `Host` group: per-sandbox gateway IPs that back `host.microsandbox.internal`. This is the right shortcut for "let the sandbox reach my host's localhost", not [`allow_loopback()`](#allow_loopback).
 
 ---
 
@@ -417,13 +367,13 @@ Allow the `LinkLocal` group (`169.254.0.0/16`, `fe80::/10`). Excludes the metada
 
 ---
 
-#### deny_link_local()
+#### allow_loopback()
 
 ```rust
-fn deny_link_local(&mut self) -> &mut Self
+fn allow_loopback(&mut self) -> &mut Self
 ```
 
-Deny the `LinkLocal` group.
+Allow the `Loopback` group (`127.0.0.0/8`, `::1`). The **guest's own** loopback, not the host. To reach a service on the host's localhost, use [`allow_host()`](#allow_host) instead. See the [loopback-vs-host watch-out](/networking/overview#loopback-vs-host-a-common-trap).
 
 ---
 
@@ -437,16 +387,6 @@ Allow the `Metadata` group (`169.254.169.254`). **Dangerous on cloud hosts** (ex
 
 ---
 
-#### deny_meta()
-
-```rust
-fn deny_meta(&mut self) -> &mut Self
-```
-
-Deny the `Metadata` group.
-
----
-
 #### allow_multicast()
 
 ```rust
@@ -454,6 +394,66 @@ fn allow_multicast(&mut self) -> &mut Self
 ```
 
 Allow the `Multicast` group (`224.0.0.0/4`, `ff00::/8`).
+
+---
+
+#### allow_private()
+
+```rust
+fn allow_private(&mut self) -> &mut Self
+```
+
+Allow the `Private` group (RFC1918 + ULA + CGN).
+
+---
+
+#### allow_public()
+
+```rust
+fn allow_public(&mut self) -> &mut Self
+```
+
+Allow the `Public` group (complement of named categories: every IP not in any other group).
+
+---
+
+#### deny_host()
+
+```rust
+fn deny_host(&mut self) -> &mut Self
+```
+
+Deny the `Host` group.
+
+---
+
+#### deny_link_local()
+
+```rust
+fn deny_link_local(&mut self) -> &mut Self
+```
+
+Deny the `LinkLocal` group.
+
+---
+
+#### deny_loopback()
+
+```rust
+fn deny_loopback(&mut self) -> &mut Self
+```
+
+Deny the `Loopback` group.
+
+---
+
+#### deny_meta()
+
+```rust
+fn deny_meta(&mut self) -> &mut Self
+```
+
+Deny the `Metadata` group.
 
 ---
 
@@ -467,23 +467,23 @@ Deny the `Multicast` group.
 
 ---
 
-#### allow_host()
+#### deny_private()
 
 ```rust
-fn allow_host(&mut self) -> &mut Self
+fn deny_private(&mut self) -> &mut Self
 ```
 
-Allow the `Host` group: per-sandbox gateway IPs that back `host.microsandbox.internal`. This is the right shortcut for "let the sandbox reach my host's localhost", not [`allow_loopback()`](#allow_loopback).
+Deny the `Private` group.
 
 ---
 
-#### deny_host()
+#### deny_public()
 
 ```rust
-fn deny_host(&mut self) -> &mut Self
+fn deny_public(&mut self) -> &mut Self
 ```
 
-Deny the `Host` group.
+Deny the `Public` group.
 
 ---
 
@@ -502,28 +502,6 @@ NetworkPolicy::builder()
 
 ---
 
-#### allow_domains()
-
-```rust
-fn allow_domains<I, S>(&mut self, names: I) -> &mut Self
-where I: IntoIterator<Item = S>, S: Into<String>
-```
-
-Add one `Destination::Domain` allow rule per name.
-
----
-
-#### deny_domains()
-
-```rust
-fn deny_domains<I, S>(&mut self, names: I) -> &mut Self
-where I: IntoIterator<Item = S>, S: Into<String>
-```
-
-Add one `Destination::Domain` deny rule per name.
-
----
-
 #### allow_domain_suffixes()
 
 ```rust
@@ -535,6 +513,17 @@ Add one `Destination::DomainSuffix` allow rule per suffix.
 
 ---
 
+#### allow_domains()
+
+```rust
+fn allow_domains<I, S>(&mut self, names: I) -> &mut Self
+where I: IntoIterator<Item = S>, S: Into<String>
+```
+
+Add one `Destination::Domain` allow rule per name.
+
+---
+
 #### deny_domain_suffixes()
 
 ```rust
@@ -543,6 +532,17 @@ where I: IntoIterator<Item = S>, S: Into<String>
 ```
 
 Add one `Destination::DomainSuffix` deny rule per suffix.
+
+---
+
+#### deny_domains()
+
+```rust
+fn deny_domains<I, S>(&mut self, names: I) -> &mut Self
+where I: IntoIterator<Item = S>, S: Into<String>
+```
+
+Add one `Destination::Domain` deny rule per name.
 
 ---
 
@@ -609,20 +609,6 @@ Builder for configuring the sandbox's network stack. Used in `SandboxBuilder::ne
 
 ---
 
-#### policy()
-
-```rust
-fn policy(self, policy: NetworkPolicy) -> Self
-```
-
-Set the network access policy. Pass a builder-constructed [`NetworkPolicy`](#networkpolicy):
-
-```rust
-.network(|n| n.policy(NetworkPolicy::builder().default_deny().build()?))
-```
-
----
-
 #### dns()
 
 ```rust
@@ -642,16 +628,6 @@ Configure DNS interception. See [`DnsBuilder`](#dnsbuilder).
 
 ---
 
-#### tls()
-
-```rust
-fn tls(self, f: impl FnOnce(TlsBuilder) -> TlsBuilder) -> Self
-```
-
-Configure TLS interception. See [`TlsBuilder`](#tlsbuilder).
-
----
-
 #### max_connections()
 
 ```rust
@@ -659,16 +635,6 @@ fn max_connections(self, max: usize) -> Self
 ```
 
 Limit the maximum number of concurrent network connections from the sandbox.
-
----
-
-#### trust_host_cas()
-
-```rust
-fn trust_host_cas(self, enabled: bool) -> Self
-```
-
-Whether to ship the host's trusted root CAs into the guest at boot. Default: `false`. Opt in when egress HTTPS inside the sandbox needs to work behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.) whose gateway CA is installed on the host but unknown to the guest's stock Mozilla bundle.
 
 ---
 
@@ -682,19 +648,43 @@ Set the action taken when a secret placeholder is detected in traffic destined f
 
 ---
 
-## DnsBuilder
+#### policy()
 
-Builder for DNS interception settings. Used in `NetworkBuilder::dns(|d| d...)`. Owns rebind protection, nameserver pinning, and the per-query timeout.
+```rust
+fn policy(self, policy: NetworkPolicy) -> Self
+```
+
+Set the network access policy. Pass a builder-constructed [`NetworkPolicy`](#networkpolicy):
+
+```rust
+.network(|n| n.policy(NetworkPolicy::builder().default_deny().build()?))
+```
 
 ---
 
-#### rebind_protection()
+#### tls()
 
 ```rust
-fn rebind_protection(self, enabled: bool) -> Self
+fn tls(self, f: impl FnOnce(TlsBuilder) -> TlsBuilder) -> Self
 ```
 
-When enabled, DNS responses that resolve to private IP addresses are blocked. Prevents DNS rebinding attacks. Default: `true`.
+Configure TLS interception. See [`TlsBuilder`](#tlsbuilder).
+
+---
+
+#### trust_host_cas()
+
+```rust
+fn trust_host_cas(self, enabled: bool) -> Self
+```
+
+Whether to ship the host's trusted root CAs into the guest at boot. Default: `false`. Opt in when egress HTTPS inside the sandbox needs to work behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.) whose gateway CA is installed on the host but unknown to the guest's stock Mozilla bundle.
+
+---
+
+## DnsBuilder
+
+Builder for DNS interception settings. Used in `NetworkBuilder::dns(|d| d...)`. Owns rebind protection, nameserver pinning, and the per-query timeout.
 
 ---
 
@@ -721,9 +711,29 @@ Set the per-DNS-query timeout in milliseconds. Default: `5000`.
 
 ---
 
+#### rebind_protection()
+
+```rust
+fn rebind_protection(self, enabled: bool) -> Self
+```
+
+When enabled, DNS responses that resolve to private IP addresses are blocked. Prevents DNS rebinding attacks. Default: `true`.
+
+---
+
 ## TlsBuilder
 
 Builder for TLS interception settings. Used in `NetworkBuilder::tls(|t| t...)`.
+
+---
+
+#### block_quic()
+
+```rust
+fn block_quic(self, block: bool) -> Self
+```
+
+Block QUIC/HTTP3 on intercepted ports, forcing TCP/TLS fallback. Default: `true`.
 
 ---
 
@@ -734,16 +744,6 @@ fn bypass(self, pattern: impl Into<String>) -> Self
 ```
 
 Skip TLS interception for hosts matching this glob (e.g. `"*.internal.corp"`). Use for domains with certificate pinning.
-
----
-
-#### intercepted_ports()
-
-```rust
-fn intercepted_ports(self, ports: Vec<u16>) -> Self
-```
-
-TCP ports where TLS interception is active. Default: `[443]`.
 
 ---
 
@@ -767,6 +767,16 @@ PEM file used as the intercepting CA's private key.
 
 ---
 
+#### intercepted_ports()
+
+```rust
+fn intercepted_ports(self, ports: Vec<u16>) -> Self
+```
+
+TCP ports where TLS interception is active. Default: `[443]`.
+
+---
+
 #### upstream_ca_cert()
 
 ```rust
@@ -784,16 +794,6 @@ fn verify_upstream(self, verify: bool) -> Self
 ```
 
 Whether the proxy verifies upstream server certificates. Default: `true`. Set to `false` only for self-signed servers.
-
----
-
-#### block_quic()
-
-```rust
-fn block_quic(self, block: bool) -> Self
-```
-
-Block QUIC/HTTP3 on intercepted ports, forcing TCP/TLS fallback. Default: `true`.
 
 ---
 
