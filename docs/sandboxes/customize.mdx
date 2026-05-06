@@ -1,10 +1,10 @@
 ---
-title: Customization
+title: Customize
 description: Inject scripts, modify the rootfs, and choose your own init
-icon: "scroll"
+icon: "wand-magic-sparkles"
 ---
 
-Before a sandbox starts doing real work, you can prepare it three ways: **scripts** that bundle reusable commands, **patches** that modify the rootfs before the VM boots, and **init handoff** that lets you run a real init system (systemd, OpenRC, s6) as PID 1 instead of microsandbox's minimal agent. All three are defined at creation time and keep the base image untouched.
+Before a sandbox starts doing real work, you can prepare it three ways. **Scripts** bundle reusable commands. **Patches** modify the rootfs before the VM boots. A **custom init system** (systemd, OpenRC, s6) can run as PID 1 instead of microsandbox's minimal agent. All three are defined at creation time and keep the base image untouched.
 
 ## Scripts
 
@@ -145,20 +145,19 @@ The patch builder is invoked through `SandboxBuilder.patch(p => ...)`. Each meth
 
 `opts` accepts `{ mode?: number; replace?: boolean }` for `text` / `file` / `copyFile`, `{ replace?: boolean }` for `copyDir` / `symlink`, and `{ mode?: number }` for `mkdir`.
 
-## Init handoff
+## Custom init system
 
 By default the microsandbox agent runs as PID 1 inside the guest — small, fast, and minimal. For workloads that expect a real init (systemd, OpenRC, s6, runit) — long-lived daemons, system service tests, dbus-using tools — you can hand PID 1 over to the init binary of your choice. The agent does the boot-time setup (mount filesystems, configure network, prepare runtime dirs), then forks. The parent execs your init and becomes PID 1; the agent continues as a normal child process serving host requests over the same channel.
 
-The simplest entry point is `auto`, which asks the agent to probe a small list of well-known paths inside the guest rootfs (`/sbin/init`, `/lib/systemd/systemd`, `/usr/lib/systemd/systemd`) and pick the first one that exists. If you need an exact path (e.g. for reproducible CI), pass an absolute path instead.
+The simplest entry point is `auto`, which probes a small list of well-known paths inside the guest rootfs and picks the first one that exists:
+
+- `/sbin/init`
+- `/lib/systemd/systemd`
+- `/usr/lib/systemd/systemd`
+
+If you need an exact path (e.g. for reproducible CI), pass an absolute path instead.
 
 <CodeGroup>
-```bash CLI
-msb run jrei/systemd-debian:12 \
-  -m 1G -c 2 \
-  --init auto \
-  -- bash
-```
-
 ```rust Rust
 use microsandbox::Sandbox;
 
@@ -192,6 +191,13 @@ sb = await Sandbox.create(
     cpus=2,
     init="auto",
 )
+```
+
+```bash CLI
+msb run jrei/systemd-debian:12 \
+  -m 1G -c 2 \
+  --init auto \
+  -- bash
 ```
 </CodeGroup>
 
@@ -283,11 +289,11 @@ msb run alpine:3.20 --init /sbin/init -- sh -c "cat /proc/1/comm"
 
 ### Shutdown semantics
 
-In default (no-handoff) mode, microsandbox shuts the guest down by remounting root read-only and calling `reboot(RB_POWER_OFF)` — typically <100 ms. With handoff, the agent isn't PID 1 anymore, so it asks your init to shut down via `SIGRTMIN+4` (systemd's poweroff signal) with a `SIGTERM` fallback. Your init then runs its own teardown — stop services, unmount, halt — which is **slower**:
+In default (no-handoff) mode, microsandbox shuts the guest down by remounting root read-only and calling `reboot(RB_POWER_OFF)` — typically &lt;100 ms. With handoff, the agent isn't PID 1 anymore, so it asks your init to shut down via `SIGRTMIN+4` (systemd's poweroff signal) with a `SIGTERM` fallback. Your init then runs its own teardown — stop services, unmount, halt — which is **slower**:
 
 | Init | Typical shutdown |
 |------|------------------|
-| BusyBox / s6 / runit | <100 ms |
+| BusyBox / s6 / runit | &lt;100 ms |
 | OpenRC | 50–500 ms |
 | systemd | 1–5 s |
 

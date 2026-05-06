@@ -32,7 +32,7 @@ Create and boot a sandbox. The first argument is either a name (`str`) or a full
 | hostname | `str` | Guest hostname |
 | user | `str` | Default guest user |
 | entrypoint | `list[str]` | Override image entrypoint |
-| init | `str \| dict \|` [`InitConfig`](#initconfig) | Hand off PID 1 to a guest init binary. See [Init handoff](/sandboxes/customization#init-handoff) and [`InitConfig`](#initconfig) for accepted shapes |
+| init | `str \| dict \|` [`InitConfig`](#initconfig) | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/customize#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
 | replace | `bool` | Replace existing sandbox with same name |
 | max_duration | `float` | Maximum sandbox lifetime in seconds |
 | idle_timeout | `float` | Idle timeout in seconds |
@@ -637,7 +637,7 @@ The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`San
 | hostname | `str` | - | Guest hostname |
 | user | `str` | - | Default guest user |
 | entrypoint | `list[str]` | - | Override image entrypoint |
-| init | `str \| dict \|` [`InitConfig`](#initconfig) | - | Hand off PID 1 to a guest init binary. See [Init handoff](/sandboxes/customization#init-handoff) |
+| init | `str \| dict \|` [`InitConfig`](#initconfig) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/customize#custom-init-system) |
 | replace | `bool` | `False` | Replace existing sandbox with same name |
 | max_duration | `float` | - | Maximum sandbox lifetime in seconds |
 | idle_timeout | `float` | - | Idle timeout in seconds |
@@ -655,7 +655,7 @@ The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`San
 
 ### InitConfig
 
-Guest init-handoff specification. Pass it (or one of the equivalent shorthand shapes) as the `init=` kwarg to [`Sandbox.create()`](#sandboxcreate) to hand PID 1 inside the guest off to your own init binary after agentd's setup. See [Init handoff](/sandboxes/customization#init-handoff) for image picks, shutdown semantics, and tradeoffs.
+Custom init specification. Pass it (or one of the equivalent shorthand shapes) as the `init=` kwarg to [`Sandbox.create()`](#sandboxcreate) to hand PID 1 inside the guest off to your own init binary after agentd's setup. See [Custom init system](/sandboxes/customize#custom-init-system) for image picks, shutdown semantics, and tradeoffs.
 
 ```python
 from dataclasses import dataclass

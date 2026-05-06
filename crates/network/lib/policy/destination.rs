@@ -147,8 +147,8 @@ mod tests {
     fn with_gateway() -> SharedState {
         let s = SharedState::new(4);
         s.set_gateway_ips(
-            Ipv4Addr::new(100, 96, 0, 1),
-            "fd42:6d73:62::1".parse().unwrap(),
+            Some(Ipv4Addr::new(100, 96, 0, 1)),
+            Some("fd42:6d73:62::1".parse().unwrap()),
         );
         s
     }

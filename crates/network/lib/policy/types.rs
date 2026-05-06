@@ -796,7 +796,7 @@ mod tests {
         let shared = SharedState::new(4);
         let v4 = Ipv4Addr::new(100, 96, 0, 1);
         let v6 = Ipv6Addr::new(0xfd42, 0x6d73, 0x62, 0, 0, 0, 0, 1);
-        shared.set_gateway_ips(v4, v6);
+        shared.set_gateway_ips(Some(v4), Some(v6));
         (shared, v4, v6)
     }
 

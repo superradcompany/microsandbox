@@ -7,7 +7,7 @@
     "dark": "/images/microsandbox-banner-dark.svg",
     "href": "https://microsandbox.dev"
   },
-  "favicon": "/logo/light.svg",
+  "favicon": "/logo/favicon.png",
   "colors": {
     "primary": "#BF84FE",
     "light": "#BF84FE",
@@ -43,10 +43,10 @@
               "sandboxes/filesystem",
               "sandboxes/volumes",
               "sandboxes/secrets",
-              "sandboxes/customization",
-              "sandboxes/metrics",
-              "sandboxes/logs",
+              "sandboxes/customize",
               "sandboxes/snapshots",
+              "sandboxes/logs",
+              "sandboxes/metrics",
               "sandboxes/events"
             ]
           },

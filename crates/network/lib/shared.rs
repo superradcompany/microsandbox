@@ -123,10 +123,15 @@ impl SharedState {
         }
     }
 
-    /// Set the per-sandbox gateway IPs. Called once at boot.
-    pub fn set_gateway_ips(&self, ipv4: Ipv4Addr, ipv6: Ipv6Addr) {
-        let _ = self.gateway_ipv4.set(ipv4);
-        let _ = self.gateway_ipv6.set(ipv6);
+    /// Set the per-sandbox gateway IPs. Called once at boot. Each family is
+    /// only published when active for this sandbox.
+    pub fn set_gateway_ips(&self, ipv4: Option<Ipv4Addr>, ipv6: Option<Ipv6Addr>) {
+        if let Some(ipv4) = ipv4 {
+            let _ = self.gateway_ipv4.set(ipv4);
+        }
+        if let Some(ipv6) = ipv6 {
+            let _ = self.gateway_ipv6.set(ipv6);
+        }
     }
 
     /// Gateway IPv4 address, if set.

@@ -529,8 +529,8 @@ fn synthesize_host_alias_response(
     let name = question.name().clone();
 
     let rdata = match qtype {
-        RecordType::A => RData::A(A::from(gateway.ipv4)),
-        RecordType::AAAA => RData::AAAA(AAAA::from(gateway.ipv6)),
+        RecordType::A => RData::A(A::from(gateway.ipv4?)),
+        RecordType::AAAA => RData::AAAA(AAAA::from(gateway.ipv6?)),
         _ => return None,
     };
 

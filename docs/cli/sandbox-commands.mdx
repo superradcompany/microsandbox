@@ -46,7 +46,7 @@ msb run -d --name worker python -- python worker.py
 | `--replace` | Replace an existing sandbox with the same name |
 | `-q`, `--quiet` | Suppress progress output |
 | `--entrypoint` | Override the image's default entrypoint command |
-| `--init` | Hand off PID 1 to this init binary (absolute path) inside the guest after agentd's setup. See [Init handoff](/sandboxes/customization#init-handoff) |
+| `--init` | Hand off PID 1 to this init binary (absolute path) inside the guest after agentd's setup. See [Custom init system](/sandboxes/customize#custom-init-system) |
 | `--init-arg` | Argv entry appended to the handoff init. Repeatable. Defaults to `[<--init>]` when empty |
 | `--init-env` | Env var passed to the handoff init only (`KEY=VALUE`). Repeatable; merged on top of the inherited env |
 | `-H`, `--hostname` | Set the guest hostname (defaults to sandbox name) |
