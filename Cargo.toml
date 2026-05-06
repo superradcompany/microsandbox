@@ -106,6 +106,10 @@ sea-orm-migration = { version = "1.1", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlx-sqlite",
 ] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+] }
 ureq = "3"
 rustls = { version = "0.23", default-features = false, features = [
     "logging",

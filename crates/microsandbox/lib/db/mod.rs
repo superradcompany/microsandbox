@@ -1,153 +1,80 @@
-//! Database connection pool and entity definitions.
+//! Global database connection pool init and accessor.
 //!
-//! Provides dual-pool access for global (`~/.microsandbox/db/msb.db`) and
-//! project-local (`.microsandbox/db/msb.db`) databases. Migrations are
-//! automatically applied on first connection.
+//! Opens both pools (read + write) for `~/.microsandbox/db/msb.db` and
+//! runs migrations on the writer. Returns [`DbPools`] from
+//! `microsandbox-db`; callers pick `pools.read()` (a [`DbReadConnection`])
+//! or `pools.write()` (a [`DbWriteConnection`]) based on the operation.
+//! The type system blocks accidental writes against the read pool.
+//!
+//! [`DbReadConnection`]: microsandbox_db::DbReadConnection
+//! [`DbWriteConnection`]: microsandbox_db::DbWriteConnection
 
 pub use microsandbox_db::entity;
 
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{path::Path, time::Duration};
 
+use microsandbox_db::pool::DbPools;
 use microsandbox_migration::{Migrator, MigratorTrait};
-use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use tokio::sync::OnceCell;
 
-use crate::MicrosandboxResult;
+use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
-// Types
+// Statics
 //--------------------------------------------------------------------------------------------------
 
-static GLOBAL_POOL: OnceCell<DatabaseConnection> = OnceCell::const_new();
-static PROJECT_POOL: OnceCell<(PathBuf, DatabaseConnection)> = OnceCell::const_new();
+static GLOBAL_POOL: OnceCell<DbPools> = OnceCell::const_new();
 
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Initialize the global database connection pool at `~/.microsandbox/db/msb.db`.
+/// Initialize the global database pools at `~/.microsandbox/db/msb.db`.
 ///
-/// Migrations are applied automatically. This is idempotent — calling it
-/// multiple times returns the existing pool.
-pub async fn init_global(
-    max_connections: Option<u32>,
-) -> MicrosandboxResult<&'static DatabaseConnection> {
+/// Migrations are applied automatically. Idempotent — repeat calls
+/// return the existing pools. All tuning (max_connections,
+/// connect_timeout, busy_timeout) is read from `~/.microsandbox/config.json`.
+pub async fn init_global() -> MicrosandboxResult<&'static DbPools> {
     GLOBAL_POOL
         .get_or_try_init(|| async {
-            let base = dirs::home_dir().ok_or_else(|| {
-                crate::MicrosandboxError::Custom("cannot determine home directory".into())
-            })?;
+            let db_dir = microsandbox_utils::resolve_home().join(microsandbox_utils::DB_SUBDIR);
 
-            let db_dir = base
-                .join(microsandbox_utils::BASE_DIR_NAME)
-                .join(microsandbox_utils::DB_SUBDIR);
-
-            connect_and_migrate(
-                &db_dir,
-                max_connections.unwrap_or(crate::config::DEFAULT_MAX_CONNECTIONS),
-                crate::config::config().database.connect_timeout_secs,
-            )
-            .await
+            connect_and_migrate(&db_dir).await
         })
         .await
 }
 
-/// Initialize a project-local database connection pool at `<project>/.microsandbox/db/msb.db`.
-///
-/// Migrations are applied automatically. This is idempotent — calling it
-/// multiple times returns the existing pool. Returns an error if called
-/// with a different project directory than the first call.
-pub async fn init_project(
-    project_dir: impl AsRef<Path>,
-    max_connections: Option<u32>,
-) -> MicrosandboxResult<&'static DatabaseConnection> {
-    let requested = project_dir.as_ref().to_path_buf();
-
-    let pair = PROJECT_POOL
-        .get_or_try_init(|| async {
-            let db_dir = requested
-                .join(microsandbox_utils::BASE_DIR_NAME)
-                .join(microsandbox_utils::DB_SUBDIR);
-
-            let conn = connect_and_migrate(
-                &db_dir,
-                max_connections.unwrap_or(crate::config::DEFAULT_MAX_CONNECTIONS),
-                crate::config::config().database.connect_timeout_secs,
-            )
-            .await?;
-            Ok::<_, crate::MicrosandboxError>((requested.clone(), conn))
-        })
-        .await?;
-
-    // Verify the requested project matches the initialized one.
-    if pair.0 != requested {
-        return Err(crate::MicrosandboxError::Custom(format!(
-            "project pool already initialized for '{}', cannot reinitialize for '{}'",
-            pair.0.display(),
-            requested.display(),
-        )));
-    }
-
-    Ok(&pair.1)
-}
-
-/// Get the global database connection pool.
-///
-/// Returns `None` if [`init_global`] has not been called yet.
-pub fn global() -> Option<&'static DatabaseConnection> {
+/// Get the global pools, or `None` if [`init_global`] has not run.
+pub fn global() -> Option<&'static DbPools> {
     GLOBAL_POOL.get()
-}
-
-/// Get the project-local database connection pool.
-///
-/// Returns `None` if [`init_project`] has not been called yet.
-pub fn project() -> Option<&'static DatabaseConnection> {
-    PROJECT_POOL.get().map(|(_, conn)| conn)
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-async fn connect_and_migrate(
-    db_dir: &Path,
-    max_connections: u32,
-    connect_timeout_secs: u64,
-) -> MicrosandboxResult<DatabaseConnection> {
+/// Open both pools for `db_dir/msb.db` and run migrations on the writer.
+///
+/// The write pool connects first so WAL mode (persisted in the database
+/// header) is set before the read pool opens. Tuning is read from the
+/// global config.
+async fn connect_and_migrate(db_dir: &Path) -> MicrosandboxResult<DbPools> {
     tokio::fs::create_dir_all(db_dir).await?;
 
+    let database = &crate::config::config().database;
     let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
-    let db_path_str = db_path.to_str().ok_or_else(|| {
-        crate::MicrosandboxError::Custom(format!(
-            "database path is not valid UTF-8: {}",
-            db_path.display()
-        ))
-    })?;
-    let db_url = format!("sqlite://{db_path_str}?mode=rwc");
+    let pools = DbPools::open(
+        &db_path,
+        database.max_connections,
+        Duration::from_secs(database.connect_timeout_secs),
+        Duration::from_secs(database.busy_timeout_secs),
+    )
+    .await
+    .map_err(|e| MicrosandboxError::Custom(format!("connect to {}: {e}", db_path.display())))?;
 
-    let mut opts = ConnectOptions::new(&db_url);
-    opts.max_connections(max_connections)
-        .connect_timeout(Duration::from_secs(connect_timeout_secs))
-        .sqlx_logging(false);
+    Migrator::up(pools.write().inner(), None).await?;
 
-    let conn = Database::connect(opts).await?;
-
-    // Enable WAL journal mode, busy timeout, and foreign key enforcement.
-    // WAL prevents SQLITE_BUSY when multiple processes (CLI + sandbox runtimes)
-    // access the same database concurrently.
-    use sea_orm::ConnectionTrait;
-    conn.execute(sea_orm::Statement::from_string(
-        sea_orm::DatabaseBackend::Sqlite,
-        microsandbox_utils::SQLITE_PRAGMAS,
-    ))
-    .await?;
-
-    Migrator::up(&conn, None).await?;
-
-    Ok(conn)
+    Ok(pools)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -165,7 +92,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_dir = tmp.path().join("db");
 
-        let conn = connect_and_migrate(&db_dir, 1, 1).await.unwrap();
+        let pools = connect_and_migrate(&db_dir).await.unwrap();
+        let conn = pools.read();
 
         // DB file should exist on disk.
         assert!(db_dir.join(microsandbox_utils::DB_FILENAME).exists());
@@ -206,10 +134,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_dir = tmp.path().join("db");
 
-        let conn1 = connect_and_migrate(&db_dir, 1, 1).await.unwrap();
+        let pools = connect_and_migrate(&db_dir).await.unwrap();
 
         // Running migrations again on the same DB should succeed.
-        Migrator::up(&conn1, None).await.unwrap();
+        Migrator::up(pools.write().inner(), None).await.unwrap();
     }
 
     #[tokio::test]
@@ -286,9 +214,10 @@ mod tests {
 
         drop(conn);
 
-        let recovered = connect_and_migrate(&db_dir, 1, 1).await.unwrap();
+        let recovered = connect_and_migrate(&db_dir).await.unwrap();
 
         let migration_row_count = recovered
+            .read()
             .query_one(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) FROM seaql_migrations WHERE version = 'm20260305_000003_create_storage_tables'",
@@ -300,12 +229,8 @@ mod tests {
             .unwrap();
         assert_eq!(migration_row_count, 1);
 
-        // The legacy snapshot indexes are dropped by the
-        // `m20260501_000001_create_snapshot_index` migration, which
-        // also drops the legacy `snapshot` table. After full recovery
-        // they should be gone, replaced by the new `snapshot_index`
-        // table and its own indexes.
         let legacy_index_count = recovered
+            .read()
             .query_one(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) FROM sqlite_master
@@ -323,6 +248,7 @@ mod tests {
         assert_eq!(legacy_index_count, 0);
 
         let new_index_count = recovered
+            .read()
             .query_one(Statement::from_string(
                 DatabaseBackend::Sqlite,
                 "SELECT COUNT(*) FROM sqlite_master

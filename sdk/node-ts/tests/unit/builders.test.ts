@@ -178,6 +178,37 @@ describe("SandboxBuilder.build", () => {
       .volume("/bad", (m) => m.bind("/host").size(MiB(1)));
     expect(() => builder.build()).toThrow(InvalidConfigError);
   });
+
+  it("defaults metricsSampleIntervalMs to 1000", () => {
+    const cfg = Sandbox.builder("x").image("alpine").build();
+    expect(cfg.metricsSampleIntervalMs).toBe(1000);
+  });
+
+  it("metricsSampleIntervalMs sets the persisted value", () => {
+    const cfg = Sandbox.builder("x")
+      .image("alpine")
+      .metricsSampleIntervalMs(5000)
+      .build();
+    expect(cfg.metricsSampleIntervalMs).toBe(5000);
+  });
+
+  it("metricsSampleIntervalMs(0) disables sampling", () => {
+    const cfg = Sandbox.builder("x")
+      .image("alpine")
+      .metricsSampleIntervalMs(0)
+      .build();
+    expect(cfg.metricsSampleIntervalMs).toBe(0);
+  });
+
+  it("disableMetricsSample overrides metricsSampleIntervalMs", () => {
+    const cfg = Sandbox.builder("x")
+      .image("alpine")
+      .metricsSampleIntervalMs(5000)
+      .disableMetricsSample()
+      .build();
+    expect(cfg.metricsSampleIntervalMs).toBe(5000);
+    expect(cfg.disableMetricsSample).toBe(true);
+  });
 });
 
 describe("InterfaceOverridesBuilder", () => {

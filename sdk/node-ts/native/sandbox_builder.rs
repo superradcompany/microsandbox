@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -139,6 +140,22 @@ impl JsSandboxBuilder {
     pub fn quiet_logs(&mut self) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.quiet_logs());
+        self
+    }
+
+    /// Override the metrics sampling interval in milliseconds; pass `0` to disable.
+    #[napi(js_name = "metricsSampleIntervalMs")]
+    pub fn metrics_sample_interval_ms(&mut self, ms: u32) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.metrics_sample_interval(Duration::from_millis(u64::from(ms))));
+        self
+    }
+
+    /// Force-disable metrics sampling regardless of `metricsSampleIntervalMs`.
+    #[napi(js_name = "disableMetricsSample")]
+    pub fn disable_metrics_sample(&mut self) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.disable_metrics_sample());
         self
     }
 

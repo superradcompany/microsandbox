@@ -101,7 +101,7 @@ pub(super) async fn index_upsert(
     digest: &str,
     manifest: &Manifest,
 ) -> MicrosandboxResult<()> {
-    let db = crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+    let db = crate::db::init_global().await?.write();
 
     let created_at = chrono::DateTime::parse_from_rfc3339(&manifest.created_at)
         .map(|d| d.naive_utc())
@@ -174,7 +174,7 @@ fn looks_like_path(s: &str) -> bool {
 }
 
 pub(super) async fn list_indexed() -> MicrosandboxResult<Vec<SnapshotHandle>> {
-    let db = crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+    let db = crate::db::init_global().await?.read();
     let rows = snapshot_entity::Entity::find()
         .order_by_desc(snapshot_entity::Column::CreatedAt)
         .all(db)
@@ -207,13 +207,15 @@ pub(super) async fn list_dir(dir: &Path) -> MicrosandboxResult<Vec<Snapshot>> {
 }
 
 pub(super) async fn remove_snapshot(path_or_name: &str, force: bool) -> MicrosandboxResult<()> {
-    let db = crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+    let pools = crate::db::init_global().await?;
+    let read_db = pools.read();
+    let write_db = pools.write();
 
     // Resolve the target row. Accept digest, name, or path.
     let (digest, artifact_path) =
         if path_or_name.starts_with("sha256:") || path_or_name.starts_with("sha512:") {
             let row = snapshot_entity::Entity::find_by_id(path_or_name.to_string())
-                .one(db)
+                .one(read_db)
                 .await?
                 .ok_or_else(|| MicrosandboxError::SnapshotNotFound(path_or_name.into()))?;
             (row.digest.clone(), PathBuf::from(row.artifact_path))
@@ -225,7 +227,7 @@ pub(super) async fn remove_snapshot(path_or_name: &str, force: bool) -> Microsan
             // Bare name: prefer the index lookup; fall back to default-dir resolution.
             let row = snapshot_entity::Entity::find()
                 .filter(snapshot_entity::Column::Name.eq(path_or_name.to_string()))
-                .one(db)
+                .one(read_db)
                 .await?;
             if let Some(row) = row {
                 (row.digest.clone(), PathBuf::from(row.artifact_path))
@@ -238,7 +240,7 @@ pub(super) async fn remove_snapshot(path_or_name: &str, force: bool) -> Microsan
 
     // Check children unless --force.
     let row = snapshot_entity::Entity::find_by_id(digest.clone())
-        .one(db)
+        .one(read_db)
         .await?;
     if let Some(ref row) = row
         && row.child_count > 0
@@ -253,14 +255,15 @@ pub(super) async fn remove_snapshot(path_or_name: &str, force: bool) -> Microsan
     // Drop the index row and decrement parent's child_count if any.
     let parent = row.as_ref().and_then(|r| r.parent_digest.clone());
     snapshot_entity::Entity::delete_by_id(digest.clone())
-        .exec(db)
+        .exec(write_db)
         .await?;
     if let Some(p) = parent {
-        db.execute_unprepared(&format!(
-            "UPDATE snapshot_index SET child_count = MAX(0, child_count - 1) WHERE digest = '{}'",
-            p.replace('\'', "''")
-        ))
-        .await?;
+        write_db
+            .execute_unprepared(&format!(
+                "UPDATE snapshot_index SET child_count = MAX(0, child_count - 1) WHERE digest = '{}'",
+                p.replace('\'', "''")
+            ))
+            .await?;
     }
 
     // Delete the artifact directory.
@@ -282,7 +285,7 @@ pub(super) async fn reindex_dir(dir: &Path) -> MicrosandboxResult<usize> {
     }
     // After upserts, recompute child_count from parent edges in one pass
     // to keep the cache honest about the current set of artifacts.
-    let db = crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+    let db = crate::db::init_global().await?.write();
     db.execute_unprepared(
         "UPDATE snapshot_index SET child_count = (\
             SELECT COUNT(*) FROM snapshot_index AS c \
@@ -294,7 +297,7 @@ pub(super) async fn reindex_dir(dir: &Path) -> MicrosandboxResult<usize> {
 
 /// Look up a snapshot by digest, name, or path in the local index.
 pub(super) async fn get_handle(needle: &str) -> MicrosandboxResult<SnapshotHandle> {
-    let db = crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+    let db = crate::db::init_global().await?.read();
 
     let row = if needle.starts_with("sha256:") || needle.starts_with("sha512:") {
         snapshot_entity::Entity::find_by_id(needle.to_string())
@@ -322,7 +325,7 @@ pub(super) async fn get_handle(needle: &str) -> MicrosandboxResult<SnapshotHandl
 
 /// Look up a snapshot by digest in the local index.
 pub(super) async fn lookup_by_digest(digest: &str) -> MicrosandboxResult<Option<SnapshotHandle>> {
-    let db = crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+    let db = crate::db::init_global().await?.read();
     let row = snapshot_entity::Entity::find_by_id(digest.to_string())
         .one(db)
         .await?;

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ExecTimeoutError,
   ImageNotFoundError,
+  MetricsDisabledError,
   MicrosandboxError,
   SandboxNotFoundError,
 } from "../../dist/index.js";
@@ -46,5 +47,16 @@ describe("mapNapiError", () => {
     expect(mapNapiError(new Error("[ImageNotFound] python:3.12"))).toBeInstanceOf(
       ImageNotFoundError,
     );
+  });
+
+  it("maps MetricsDisabled to MetricsDisabledError", () => {
+    const raw = new Error("[MetricsDisabled] metrics disabled for sandbox: foo");
+    const mapped = mapNapiError(raw);
+    expect(mapped).toBeInstanceOf(MetricsDisabledError);
+    expect((mapped as MetricsDisabledError).message).toBe(
+      "metrics disabled for sandbox: foo",
+    );
+    expect((mapped as MetricsDisabledError).code).toBe("metricsDisabled");
+    expect((mapped as MicrosandboxError).cause).toBe(raw);
   });
 });

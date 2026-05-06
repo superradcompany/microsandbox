@@ -403,9 +403,7 @@ async fn fetch_latest_version() -> anyhow::Result<String> {
 }
 
 fn resolve_base_dir() -> anyhow::Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(microsandbox_utils::BASE_DIR_NAME))
-        .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))
+    Ok(microsandbox_utils::resolve_home())
 }
 
 fn info(msg: &str) {

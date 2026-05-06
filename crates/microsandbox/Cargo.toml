@@ -59,7 +59,7 @@ which.workspace = true
 
 [build-dependencies]
 flate2.workspace = true
-microsandbox-utils = { path = "../utils" }
+microsandbox-utils = { version = "0.4.4", path = "../utils" }
 tar.workspace = true
 ureq.workspace = true
 

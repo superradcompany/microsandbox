@@ -138,7 +138,17 @@ pub enum MicrosandboxError {
     #[error("snapshot integrity check failed: {0}")]
     SnapshotIntegrity(String),
 
+    /// Metrics sampling is disabled for this sandbox.
+    #[error("metrics disabled for sandbox: {0}")]
+    MetricsDisabled(String),
+
     /// A custom error message.
     #[error("{0}")]
     Custom(String),
+}
+
+impl microsandbox_db::retry::IsSqliteBusy for MicrosandboxError {
+    fn is_sqlite_busy(&self) -> bool {
+        matches!(self, MicrosandboxError::Database(db_err) if microsandbox_db::retry::is_sqlite_busy(db_err))
+    }
 }

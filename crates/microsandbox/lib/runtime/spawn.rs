@@ -535,6 +535,13 @@ fn sandbox_cli_args(
     args.push(OsString::from(config.cpus.to_string()));
     args.push(OsString::from("--memory-mib"));
     args.push(OsString::from(config.memory_mib.to_string()));
+    match config.effective_metrics_interval() {
+        Some(ms) => {
+            args.push(OsString::from("--metrics-sample-interval-ms"));
+            args.push(OsString::from(ms.get().to_string()));
+        }
+        None => args.push(OsString::from("--disable-metrics-sample")),
+    }
 
     match &config.image {
         RootfsSource::Bind(path) => {
@@ -929,6 +936,87 @@ mod tests {
         assert_eq!(parsed[1].resource, "nproc");
         assert_eq!(parsed[1].soft, 1024);
         assert_eq!(parsed[1].hard, 1024);
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_emit_metrics_interval_flag() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .metrics_sample_interval(std::time::Duration::from_millis(1000))
+            .build()
+            .unwrap();
+
+        let rendered = render_args(&config);
+
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair == ["--metrics-sample-interval-ms", "1000"]),
+            "expected metrics interval flag in {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_include_custom_metrics_sample_interval() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .metrics_sample_interval(std::time::Duration::from_millis(2500))
+            .build()
+            .unwrap();
+
+        let rendered = render_args(&config);
+
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair == ["--metrics-sample-interval-ms", "2500"]),
+            "expected custom metrics interval flag in {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_disabled_metrics_emit_disable_flag() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .metrics_sample_interval(std::time::Duration::ZERO)
+            .build()
+            .unwrap();
+
+        let rendered = render_args(&config);
+
+        assert!(
+            rendered.iter().any(|arg| arg == "--disable-metrics-sample"),
+            "expected `--disable-metrics-sample` flag; got {rendered:?}"
+        );
+        assert!(
+            !rendered
+                .iter()
+                .any(|arg| arg == "--metrics-sample-interval-ms"),
+            "should not also emit interval flag; got {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_cli_args_disable_overrides_positive_interval() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .metrics_sample_interval(std::time::Duration::from_millis(2500))
+            .disable_metrics_sample()
+            .build()
+            .unwrap();
+
+        let rendered = render_args(&config);
+
+        assert!(
+            rendered.iter().any(|arg| arg == "--disable-metrics-sample"),
+            "expected disable flag to win over positive interval; got {rendered:?}"
+        );
+        assert!(
+            !rendered
+                .iter()
+                .any(|arg| arg == "--metrics-sample-interval-ms"),
+            "should not emit interval flag when disable is set; got {rendered:?}"
+        );
     }
 
     #[test]

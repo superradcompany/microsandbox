@@ -19,6 +19,7 @@ export type MicrosandboxErrorCode =
   | "volumeAlreadyExists"
   | "image"
   | "patchFailed"
+  | "metricsDisabled"
   | "custom";
 
 export class MicrosandboxError extends Error {
@@ -151,6 +152,12 @@ export class ImageError extends MicrosandboxError {
 export class PatchFailedError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("patchFailed", message, options);
+  }
+}
+
+export class MetricsDisabledError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("metricsDisabled", message, options);
   }
 }
 

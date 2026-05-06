@@ -6,7 +6,8 @@
 
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, JoinType, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, RelationTrait, Set, TransactionTrait, sea_query::OnConflict,
+    QuerySelect, RelationTrait, Set,
+    sea_query::{Expr, OnConflict},
 };
 
 use microsandbox_image::{
@@ -15,10 +16,13 @@ use microsandbox_image::{
 
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    db::entity::{
-        config as config_entity, image_ref as image_ref_entity, layer as layer_entity,
-        manifest as manifest_entity, manifest_layer as manifest_layer_entity,
-        sandbox_rootfs as sandbox_rootfs_entity,
+    db::{
+        self,
+        entity::{
+            config as config_entity, image_ref as image_ref_entity, layer as layer_entity,
+            manifest as manifest_entity, manifest_layer as manifest_layer_entity,
+            sandbox_rootfs as sandbox_rootfs_entity,
+        },
     },
 };
 
@@ -151,17 +155,28 @@ impl Image {
     ///
     /// Upserts the manifest, config, layers, junction records, and image_ref
     /// inside a single transaction.
+    ///
+    /// Fast path: when the `image_ref` already points to a manifest whose
+    /// digest matches `metadata.manifest_digest`, skip the transactional
+    /// upsert entirely and only refresh `layer.last_used_at` for LRU GC.
+    /// This avoids ~25–30 redundant write statements per cached create
+    /// and keeps SQLite's single-writer lock free for other work.
     pub async fn persist(
         reference: &str,
         metadata: CachedImageMetadata,
     ) -> MicrosandboxResult<i32> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
-
+        let pools = db::init_global().await?;
+        let db = pools.write();
         let reference = reference.to_string();
 
-        db.transaction::<_, i32, MicrosandboxError>(|txn| {
-            Box::pin(async move {
+        if let Some(image_ref_id) = try_persist_fast_path(db, &reference, &metadata).await? {
+            return Ok(image_ref_id);
+        }
+
+        db.transaction(|txn| {
+            let reference = reference.clone();
+            let metadata = metadata.clone();
+            async move {
                 let total_size: i64 = metadata
                     .layers
                     .iter()
@@ -173,7 +188,7 @@ impl Image {
 
                 // 1. Upsert manifest record.
                 let manifest_id = upsert_manifest_record(
-                    txn,
+                    &txn,
                     &metadata.manifest_digest,
                     &metadata.config_digest,
                     &platform,
@@ -183,19 +198,19 @@ impl Image {
                 .await?;
 
                 // 2. Upsert config record.
-                upsert_config_record(txn, manifest_id, &metadata.config_digest, &metadata.config)
+                upsert_config_record(&txn, manifest_id, &metadata.config_digest, &metadata.config)
                     .await?;
 
                 // 3. Clear old manifest_layer entries.
                 manifest_layer_entity::Entity::delete_many()
                     .filter(manifest_layer_entity::Column::ManifestId.eq(manifest_id))
-                    .exec(txn)
+                    .exec(&txn)
                     .await?;
 
                 // 4. Upsert layers and insert junction records.
                 let mut manifest_layers = Vec::with_capacity(metadata.layers.len());
                 for (position, layer_meta) in metadata.layers.iter().enumerate() {
-                    let layer_id = upsert_layer_record(txn, layer_meta).await?;
+                    let layer_id = upsert_layer_record(&txn, layer_meta).await?;
                     manifest_layers.push(manifest_layer_entity::ActiveModel {
                         manifest_id: Set(manifest_id),
                         layer_id: Set(layer_id),
@@ -205,27 +220,22 @@ impl Image {
                 }
                 if !manifest_layers.is_empty() {
                     manifest_layer_entity::Entity::insert_many(manifest_layers)
-                        .exec(txn)
+                        .exec(&txn)
                         .await?;
                 }
 
                 // 5. Upsert image_ref record.
-                let image_ref_id = upsert_image_ref_record(txn, &reference, manifest_id).await?;
+                let image_ref_id = upsert_image_ref_record(&txn, &reference, manifest_id).await?;
 
-                Ok(image_ref_id)
-            })
+                Ok((txn, image_ref_id))
+            }
         })
         .await
-        .map_err(|err| match err {
-            sea_orm::TransactionError::Connection(db_err) => db_err.into(),
-            sea_orm::TransactionError::Transaction(err) => err,
-        })
     }
 
     /// Get an image handle by reference.
     pub async fn get(reference: &str) -> MicrosandboxResult<ImageHandle> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = db::init_global().await?.read();
 
         let (image_ref_model, manifest) = image_ref_entity::Entity::find()
             .filter(image_ref_entity::Column::Reference.eq(reference))
@@ -243,8 +253,7 @@ impl Image {
 
     /// List all cached images, ordered by creation time (newest first).
     pub async fn list() -> MicrosandboxResult<Vec<ImageHandle>> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = db::init_global().await?.read();
 
         let models = image_ref_entity::Entity::find()
             .order_by_desc(image_ref_entity::Column::CreatedAt)
@@ -261,8 +270,7 @@ impl Image {
 
     /// Get full detail for an image (config + layers).
     pub async fn inspect(reference: &str) -> MicrosandboxResult<ImageDetail> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let db = db::init_global().await?.read();
 
         let image_ref_model = image_ref_entity::Entity::find()
             .filter(image_ref_entity::Column::Reference.eq(reference))
@@ -356,12 +364,12 @@ impl Image {
     /// If `force` is false and the image is referenced by any sandbox, returns
     /// [`MicrosandboxError::ImageInUse`].
     pub async fn remove(reference: &str, force: bool) -> MicrosandboxResult<()> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let pools = db::init_global().await?;
+        let db = pools.write();
 
         let image_ref_model = image_ref_entity::Entity::find()
             .filter(image_ref_entity::Column::Reference.eq(reference))
-            .one(db)
+            .one(pools.read())
             .await?
             .ok_or_else(|| MicrosandboxError::ImageNotFound(reference.into()))?;
 
@@ -369,88 +377,82 @@ impl Image {
         let image_ref_id = image_ref_model.id;
 
         let (layer_diff_ids, flat_manifest_digest) = db
-            .transaction::<_, (Vec<String>, Option<String>), MicrosandboxError>(|txn| {
-                Box::pin(async move {
-                    // Check sandbox references inside transaction to avoid TOCTOU.
-                    if !force {
-                        let refs = sandbox_rootfs_entity::Entity::find()
-                            .filter(sandbox_rootfs_entity::Column::ManifestId.eq(manifest_id))
-                            .all(txn)
-                            .await?;
-                        if !refs.is_empty() {
-                            let sandbox_ids: Vec<String> =
-                                refs.iter().map(|r| r.sandbox_id.to_string()).collect();
-                            return Err(MicrosandboxError::ImageInUse(sandbox_ids.join(", ")));
-                        }
+            .transaction(|txn| async move {
+                // Check sandbox references inside transaction to avoid TOCTOU.
+                if !force {
+                    let refs = sandbox_rootfs_entity::Entity::find()
+                        .filter(sandbox_rootfs_entity::Column::ManifestId.eq(manifest_id))
+                        .all(&txn)
+                        .await?;
+                    if !refs.is_empty() {
+                        let sandbox_ids: Vec<String> =
+                            refs.iter().map(|r| r.sandbox_id.to_string()).collect();
+                        return Err(MicrosandboxError::ImageInUse(sandbox_ids.join(", ")));
                     }
+                }
 
-                    let manifest_digest = manifest_entity::Entity::find_by_id(manifest_id)
-                        .one(txn)
-                        .await?
-                        .map(|manifest| manifest.digest);
+                let manifest_digest = manifest_entity::Entity::find_by_id(manifest_id)
+                    .one(&txn)
+                    .await?
+                    .map(|manifest| manifest.digest);
 
-                    // Collect layer diff_ids before cascade delete removes junction rows.
-                    let layer_diff_ids: Vec<String> = layer_entity::Entity::find()
-                        .join(
-                            JoinType::InnerJoin,
-                            layer_entity::Relation::ManifestLayer.def(),
-                        )
-                        .filter(manifest_layer_entity::Column::ManifestId.eq(manifest_id))
-                        .all(txn)
-                        .await?
-                        .into_iter()
-                        .map(|l| l.diff_id)
-                        .collect();
+                // Collect layer diff_ids before cascade delete removes junction rows.
+                let layer_diff_ids: Vec<String> = layer_entity::Entity::find()
+                    .join(
+                        JoinType::InnerJoin,
+                        layer_entity::Relation::ManifestLayer.def(),
+                    )
+                    .filter(manifest_layer_entity::Column::ManifestId.eq(manifest_id))
+                    .all(&txn)
+                    .await?
+                    .into_iter()
+                    .map(|l| l.diff_id)
+                    .collect();
 
-                    // Delete the image_ref.
-                    image_ref_entity::Entity::delete_by_id(image_ref_id)
-                        .exec(txn)
+                // Delete the image_ref.
+                image_ref_entity::Entity::delete_by_id(image_ref_id)
+                    .exec(&txn)
+                    .await?;
+
+                // Check if any other image_refs still point to this manifest.
+                let remaining_refs = image_ref_entity::Entity::find()
+                    .filter(image_ref_entity::Column::ManifestId.eq(manifest_id))
+                    .count(&txn)
+                    .await?;
+
+                if remaining_refs == 0 {
+                    // No more references — delete manifest (cascades to config, manifest_layers).
+                    manifest_entity::Entity::delete_by_id(manifest_id)
+                        .exec(&txn)
                         .await?;
 
-                    // Check if any other image_refs still point to this manifest.
-                    let remaining_refs = image_ref_entity::Entity::find()
-                        .filter(image_ref_entity::Column::ManifestId.eq(manifest_id))
-                        .count(txn)
-                        .await?;
-
-                    if remaining_refs == 0 {
-                        // No more references — delete manifest (cascades to config, manifest_layers).
-                        manifest_entity::Entity::delete_by_id(manifest_id)
-                            .exec(txn)
+                    // Clean up orphaned layers with zero remaining manifest refs.
+                    let mut orphaned = Vec::new();
+                    for diff_id in &layer_diff_ids {
+                        let refs = manifest_layer_entity::Entity::find()
+                            .join(
+                                JoinType::InnerJoin,
+                                manifest_layer_entity::Relation::Layer.def(),
+                            )
+                            .filter(layer_entity::Column::DiffId.eq(diff_id.as_str()))
+                            .count(&txn)
                             .await?;
 
-                        // Clean up orphaned layers with zero remaining manifest refs.
-                        let mut orphaned = Vec::new();
-                        for diff_id in &layer_diff_ids {
-                            let refs = manifest_layer_entity::Entity::find()
-                                .join(
-                                    JoinType::InnerJoin,
-                                    manifest_layer_entity::Relation::Layer.def(),
-                                )
+                        if refs == 0 {
+                            layer_entity::Entity::delete_many()
                                 .filter(layer_entity::Column::DiffId.eq(diff_id.as_str()))
-                                .count(txn)
+                                .exec(&txn)
                                 .await?;
-
-                            if refs == 0 {
-                                layer_entity::Entity::delete_many()
-                                    .filter(layer_entity::Column::DiffId.eq(diff_id.as_str()))
-                                    .exec(txn)
-                                    .await?;
-                                orphaned.push(diff_id.clone());
-                            }
+                            orphaned.push(diff_id.clone());
                         }
-
-                        return Ok((orphaned, manifest_digest));
                     }
 
-                    Ok((Vec::new(), None))
-                })
+                    return Ok((txn, (orphaned, manifest_digest)));
+                }
+
+                Ok((txn, (Vec::new(), None)))
             })
-            .await
-            .map_err(|err| match err {
-                sea_orm::TransactionError::Connection(db_err) => db_err.into(),
-                sea_orm::TransactionError::Transaction(err) => err,
-            })?;
+            .await?;
 
         // Best-effort on-disk cleanup (outside transaction).
         let cache_dir = crate::config::config().cache_dir();
@@ -484,14 +486,13 @@ impl Image {
     ///
     /// Returns the number of layers removed.
     pub async fn gc_layers() -> MicrosandboxResult<u32> {
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let pools = db::init_global().await?;
 
         // Find layers with zero manifest_layer references.
         let orphans: Vec<layer_entity::Model> = layer_entity::Entity::find()
             .left_join(manifest_layer_entity::Entity)
             .filter(manifest_layer_entity::Column::Id.is_null())
-            .all(db)
+            .all(pools.read())
             .await?;
 
         let cache_dir = crate::config::config().cache_dir();
@@ -500,7 +501,7 @@ impl Image {
 
         for orphan in &orphans {
             layer_entity::Entity::delete_by_id(orphan.id)
-                .exec(db)
+                .exec(pools.write())
                 .await?;
 
             // Best-effort on-disk cleanup.
@@ -714,4 +715,71 @@ async fn upsert_layer_record<C: ConnectionTrait>(
                 layer_meta.diff_id
             ))
         })
+}
+
+/// Attempt to satisfy `Image::persist` with a couple of bulk UPDATEs.
+///
+/// Returns `Some(image_ref_id)` when the database is already consistent with
+/// `metadata` (i.e. the `image_ref` row exists, points to a manifest whose
+/// digest matches `metadata.manifest_digest`, and every expected `layer` row
+/// is present). In that case the only writes performed are a bulk
+/// `UPDATE layer SET last_used_at` and an `UPDATE image_ref SET updated_at`
+/// for LRU bookkeeping — the manifest, config, layer, and junction rows are
+/// content-addressed and guaranteed to be unchanged for a given manifest
+/// digest.
+///
+/// Returns `None` when the caller must fall through to the full transactional
+/// upsert (fresh DB, manifest digest changed, partially persisted state).
+async fn try_persist_fast_path(
+    db: &microsandbox_db::DbWriteConnection,
+    reference: &str,
+    metadata: &CachedImageMetadata,
+) -> MicrosandboxResult<Option<i32>> {
+    let Some((image_ref_model, Some(manifest))) = image_ref_entity::Entity::find()
+        .filter(image_ref_entity::Column::Reference.eq(reference))
+        .find_also_related(manifest_entity::Entity)
+        .one(db)
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    if manifest.digest != metadata.manifest_digest {
+        return Ok(None);
+    }
+
+    let now = chrono::Utc::now().naive_utc();
+
+    if !metadata.layers.is_empty() {
+        let diff_ids: Vec<String> = metadata
+            .layers
+            .iter()
+            .map(|layer| layer.diff_id.clone())
+            .collect();
+
+        // Sanity count check to verify all layers exist in the database.
+        let existing_layer_count = layer_entity::Entity::find()
+            .filter(layer_entity::Column::DiffId.is_in(diff_ids.clone()))
+            .count(db)
+            .await?;
+        if existing_layer_count != metadata.layers.len() as u64 {
+            return Ok(None);
+        }
+
+        // Refresh layer.last_used_at
+        layer_entity::Entity::update_many()
+            .col_expr(layer_entity::Column::LastUsedAt, Expr::value(now))
+            .filter(layer_entity::Column::DiffId.is_in(diff_ids))
+            .exec(db)
+            .await?;
+    }
+
+    // Refresh image_ref.updated_at
+    image_ref_entity::Entity::update_many()
+        .col_expr(image_ref_entity::Column::UpdatedAt, Expr::value(now))
+        .filter(image_ref_entity::Column::Id.eq(image_ref_model.id))
+        .exec(db)
+        .await?;
+
+    Ok(Some(image_ref_model.id))
 }

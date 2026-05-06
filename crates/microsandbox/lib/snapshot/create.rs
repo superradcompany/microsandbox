@@ -30,7 +30,7 @@ pub(super) async fn create_snapshot(config: SnapshotConfig) -> MicrosandboxResul
         record_integrity,
     } = config;
 
-    let db = crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+    let db = crate::db::init_global().await?.read();
 
     // Look up the sandbox row + parse its persisted config.
     let model = sandbox_entity::Entity::find()

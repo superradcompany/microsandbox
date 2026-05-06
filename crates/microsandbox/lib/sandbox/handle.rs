@@ -102,12 +102,16 @@ impl SandboxHandle {
             )));
         }
 
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let config = self.config()?;
+        if config.effective_metrics_interval().is_none() {
+            return Err(crate::MicrosandboxError::MetricsDisabled(self.name.clone()));
+        }
+
+        let db = crate::db::init_global().await?.read();
         super::metrics::metrics_for_sandbox(
             db,
             self.db_id,
-            u64::from(self.config()?.memory_mib) * 1024 * 1024,
+            u64::from(config.memory_mib) * 1024 * 1024,
         )
         .await
     }
@@ -222,8 +226,7 @@ impl SandboxHandle {
         let all_dead = pids.is_empty() || pids.iter().all(|pid| !super::pid_is_alive(*pid));
 
         if all_dead {
-            let db = crate::db::init_global(Some(crate::config::config().database.max_connections))
-                .await?;
+            let db = crate::db::init_global().await?.write();
             if let Err(e) =
                 super::update_sandbox_status(db, self.db_id, SandboxStatus::Stopped).await
             {
@@ -247,12 +250,11 @@ impl SandboxHandle {
             )));
         }
 
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let pools = crate::db::init_global().await?;
 
         super::remove_dir_if_exists(&crate::config::config().sandboxes_dir().join(&self.name))?;
         sandbox_entity::Entity::delete_by_id(self.db_id)
-            .exec(db)
+            .exec(pools.write())
             .await?;
 
         Ok(())

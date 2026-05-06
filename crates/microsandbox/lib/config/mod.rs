@@ -5,6 +5,7 @@
 
 use std::{
     collections::HashMap,
+    num::NonZero,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -31,6 +32,28 @@ pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 5;
 
 /// Default database connection acquisition timeout in seconds.
 pub(crate) const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
+
+/// Default sandbox metrics sampling interval in milliseconds.
+pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
+
+/// Default value for `metrics_sample_interval_ms` fields.
+pub fn default_metrics_sample_interval() -> Option<NonZero<u64>> {
+    NonZero::new(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
+}
+
+/// Serde adapter mapping the `metrics_sample_interval_ms` wire format `u64` to `Option<NonZero<u64>>` (`0` ↔ `None`).
+pub(crate) mod metrics_interval_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::num::NonZero;
+
+    pub fn serialize<S: Serializer>(v: &Option<NonZero<u64>>, s: S) -> Result<S::Ok, S::Error> {
+        v.map(|n| n.get()).unwrap_or(0).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<NonZero<u64>>, D::Error> {
+        Ok(NonZero::new(u64::deserialize(d)?))
+    }
+}
 
 /// Service name for microsandbox-managed registry credentials in the OS keyring.
 #[cfg(all(
@@ -82,6 +105,10 @@ pub struct DatabaseConfig {
 
     /// Timeout when acquiring a database connection from the pool.
     pub connect_timeout_secs: u64,
+
+    /// SQLite `busy_timeout` PRAGMA: seconds SQLite waits on a contended
+    /// lock before surfacing `SQLITE_BUSY` to the retry layer.
+    pub busy_timeout_secs: u64,
 }
 
 /// Path overrides for runtime binaries and data directories.
@@ -131,6 +158,17 @@ pub struct SandboxDefaults {
 
     /// Default working directory inside the sandbox.
     pub workdir: Option<String>,
+
+    /// Default metrics sampling interval in milliseconds; `0` disables sampling globally.
+    #[serde(
+        default = "default_metrics_sample_interval",
+        with = "metrics_interval_serde"
+    )]
+    pub metrics_sample_interval_ms: Option<NonZero<u64>>,
+
+    /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
+    #[serde(default)]
+    pub disable_metrics_sample: bool,
 }
 
 /// Registry configuration.
@@ -412,6 +450,7 @@ impl Default for DatabaseConfig {
             url: None,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             connect_timeout_secs: DEFAULT_CONNECT_TIMEOUT_SECS,
+            busy_timeout_secs: microsandbox_db::pool::DEFAULT_BUSY_TIMEOUT_SECS,
         }
     }
 }
@@ -423,6 +462,8 @@ impl Default for SandboxDefaults {
             memory_mib: DEFAULT_MEMORY_MIB,
             shell: "/bin/sh".into(),
             workdir: None,
+            metrics_sample_interval_ms: default_metrics_sample_interval(),
+            disable_metrics_sample: false,
         }
     }
 }
@@ -747,11 +788,9 @@ fn read_config_from(path: &Path) -> MicrosandboxResult<GlobalConfig> {
     })
 }
 
-/// Resolve the default home directory (`~/.microsandbox`).
+/// Resolve the default home directory (`~/.microsandbox`, or `$MSB_HOME` if set).
 fn resolve_default_home() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(microsandbox_utils::BASE_DIR_NAME)
+    microsandbox_utils::resolve_home()
 }
 
 /// Load config from the default config file path.
@@ -895,9 +934,14 @@ mod tests {
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
         assert_eq!(cfg.sandbox_defaults.shell, "/bin/sh");
+        assert_eq!(
+            cfg.sandbox_defaults.metrics_sample_interval_ms,
+            NonZero::new(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
+        );
         assert_eq!(cfg.log_level, None);
         assert_eq!(cfg.database.max_connections, 5);
         assert_eq!(cfg.database.connect_timeout_secs, 30);
+        assert_eq!(cfg.database.busy_timeout_secs, 5);
     }
 
     #[test]
@@ -916,6 +960,59 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_metrics_interval_missing_uses_default() {
+        let json = r#"{"sandbox_defaults": {}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.sandbox_defaults.metrics_sample_interval_ms,
+            NonZero::new(DEFAULT_METRICS_SAMPLE_INTERVAL_MS)
+        );
+    }
+
+    #[test]
+    fn test_deserialize_metrics_interval_zero_disables() {
+        let json = r#"{"sandbox_defaults": {"metrics_sample_interval_ms": 0}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.sandbox_defaults.metrics_sample_interval_ms.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_metrics_interval_positive() {
+        let json = r#"{"sandbox_defaults": {"metrics_sample_interval_ms": 2500}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.sandbox_defaults.metrics_sample_interval_ms,
+            NonZero::new(2500)
+        );
+    }
+
+    #[test]
+    fn test_serialize_metrics_interval_disabled_round_trips() {
+        let mut cfg = GlobalConfig::default();
+        cfg.sandbox_defaults.metrics_sample_interval_ms = None;
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(
+            json.contains("\"metrics_sample_interval_ms\":0"),
+            "expected `0` serialization, got: {json}"
+        );
+        let round: GlobalConfig = serde_json::from_str(&json).unwrap();
+        assert!(round.sandbox_defaults.metrics_sample_interval_ms.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_disable_metrics_sample_default_false() {
+        let cfg: GlobalConfig = serde_json::from_str("{}").unwrap();
+        assert!(!cfg.sandbox_defaults.disable_metrics_sample);
+    }
+
+    #[test]
+    fn test_deserialize_disable_metrics_sample_true() {
+        let json = r#"{"sandbox_defaults": {"disable_metrics_sample": true}}"#;
+        let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.sandbox_defaults.disable_metrics_sample);
+    }
+
+    #[test]
     fn test_deserialize_log_level() {
         let json = r#"{"log_level":"debug"}"#;
         let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
@@ -927,12 +1024,14 @@ mod tests {
         let json = r#"{
             "database": {
                 "max_connections": 9,
-                "connect_timeout_secs": 7
+                "connect_timeout_secs": 7,
+                "busy_timeout_secs": 12
             }
         }"#;
         let cfg: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.database.max_connections, 9);
         assert_eq!(cfg.database.connect_timeout_secs, 7);
+        assert_eq!(cfg.database.busy_timeout_secs, 12);
     }
 
     #[test]
