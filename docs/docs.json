@@ -22,12 +22,6 @@
   "navigation": {
     "tabs": [
       {
-        "tab": "Changelog",
-        "pages": [
-          "changelog/overview"
-        ]
-      },
-      {
         "tab": "Documentation",
         "groups": [
           {
@@ -163,6 +157,12 @@
               "recipes/local-images"
             ]
           }
+        ]
+      },
+      {
+        "tab": "Changelog",
+        "pages": [
+          "changelog/overview"
         ]
       }
     ]

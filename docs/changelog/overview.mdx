@@ -10,72 +10,37 @@ mode: center
 
 **Redesigned TypeScript SDK with builder API**
 
-The TypeScript SDK has been rewritten to match the ergonomics of the Rust SDK. Configure sandboxes with fluent builders like `Sandbox.builder(name).image(...).cpus(...).create()`, use `await using` for automatic cleanup, and benefit from typed errors and async iterables. Native binaries are now bundled per-platform, so installs no longer need a postinstall download step. See the [TypeScript SDK reference](/sdk/typescript/sandbox).
+The TypeScript SDK has been rewritten to match the Rust SDK. Configure sandboxes with fluent builders (`Sandbox.builder(name).image(...).cpus(...).create()`), use `await using` for automatic cleanup, and rely on typed errors and async iterables. Native binaries now ship per-platform, removing the postinstall download. See the [TypeScript SDK reference](/sdk/typescript/sandbox).
 
 **Redesigned network policy with per-rule direction**
 
-The network policy schema has been overhauled. Each rule now carries its own direction (egress or ingress), action, target, protocol, and ports through a unified grammar. The CLI replaces `--network-policy` with four new flags:
+Each rule now carries its own direction, action, target, protocol, and ports through a unified grammar. The CLI replaces `--network-policy` with:
 
 - `--net-rule <TOKEN>[,<TOKEN>...]` (repeatable)
 - `--net-default-egress allow|deny`
 - `--net-default-ingress allow|deny`
 - `--no-net` (sugar for deny-all)
 
-Targets support `any`, group keywords (`public`, `private`, `loopback`, `link-local`, `meta`, `multicast`, `host`), bare IPs, CIDRs, domains, plus `domain=` and `suffix=` escape hatches. Domain rules are now enforced consistently across DNS, SNI, and policy layers. See the [networking overview](/networking/overview).
+Targets accept `any`, group keywords (`public`, `private`, `loopback`, `link-local`, `meta`, `multicast`, `host`), bare IPs, CIDRs, domains, and `domain=` / `suffix=` escape hatches. See the [networking overview](/networking/overview).
 
-**Disk-image volume mounts**
+**Other features**
 
-Attach host disk images (qcow2, raw, or vmdk) directly to sandboxes as virtio-blk devices at any guest path. Format auto-detects from the file extension and `readonly` is now a consistent property across every volume type. See [Sandbox volumes](/sandboxes/volumes).
-
-**Inline `--script` flag**
-
-Register sandbox scripts directly on the command line with `--script NAME=BODY`, no host file required. The previous file-based form is now `--script-path NAME:PATH`. See the [CLI reference](/cli/sandbox-commands).
-
-**`msb` alias for the CLI**
-
-Installing microsandbox via npm, pip, or cargo now puts both `microsandbox` and `msb` on your PATH, so you can use the shorter alias interchangeably.
-
-**`host.microsandbox.internal` alias**
-
-Sandboxes can now reach the host machine through the well-known DNS name `host.microsandbox.internal`, mirroring the Docker convention.
-
-**Trust host CAs inside sandboxes (opt-in)**
-
-Sandboxes can now opt in to trusting the host's CA bundle, making it easier to talk to internal TLS endpoints from inside a sandbox. See [Networking TLS](/networking/tls).
-
-**DNS interception over TCP and DoT**
-
-The in-sandbox DNS resolver now intercepts queries over TCP/53 and DNS-over-TLS on 853, in addition to UDP/53. This closes gaps where applications would bypass policy by switching transports. See [Networking DNS](/networking/dns).
-
-**Custom TLS certs and insecure registries for images**
-
-`msb` can now pull images from registries that use custom CAs or that you want to mark as insecure. Useful for self-hosted registries. See the [images overview](/images/overview).
-
-**Per-sandbox `libkrunfw` override**
-
-SDK callers can now point an individual sandbox at a specific `libkrunfw` shared library instead of relying on the global resolver, useful when developing against unreleased firmware builds.
-
-**Installer rejects unsupported glibc**
-
-The installer now detects unsupported glibc versions up-front and fails with a clear message, instead of producing confusing runtime errors later.
+- **Disk-image volume mounts.** Attach qcow2, raw, or vmdk images as virtio-blk devices at any guest path; `readonly` is now consistent across volume types. See [Sandbox volumes](/sandboxes/volumes).
+- **Inline `--script` flag.** Register scripts on the command line with `--script NAME=BODY`; the file form is now `--script-path NAME:PATH`. See the [CLI reference](/cli/sandbox-commands).
+- **`msb` alias.** Installs from npm, pip, and cargo now put both `microsandbox` and `msb` on PATH.
+- **`host.microsandbox.internal`.** Sandboxes can reach the host through this well-known DNS name.
+- **Trust host CAs (opt-in).** Sandboxes can trust the host's CA bundle for internal TLS endpoints. See [Networking TLS](/networking/tls).
+- **DNS interception over TCP/53 and DoT/853.** Closes gaps where apps bypassed policy by switching transports. See [Networking DNS](/networking/dns).
+- **Custom TLS certs and insecure registries** for self-hosted image registries. See the [images overview](/images/overview).
+- **Per-sandbox `libkrunfw` override** for SDK callers developing against unreleased firmware.
+- **Installer rejects unsupported glibc** up front, instead of producing confusing runtime errors.
 
 ## Bug fixes
 
-**Domain and domain-suffix rule enforcement**
-
-Domain and `suffix=` rules now match consistently at the DNS, SNI, and policy layers, fixing edge cases where some traffic could slip through.
-
-**TypeScript SDK secret injection**
-
-The Node/TypeScript SDK now supports the same secret injection options as the Rust SDK.
-
-**DNS nameserver discovery on macOS**
-
-On macOS, microsandbox now reads the system nameservers via `SCDynamicStore`, matching what the OS actually uses and avoiding stale configurations.
-
-**`libkrunfw` packaging in npm**
-
-The npm platform package now ships `libkrunfw` under its canonical name, fixing load failures on some Linux distributions.
+- Domain and `suffix=` rules now enforce consistently across DNS, SNI, and policy layers.
+- The Node/TypeScript SDK supports the same secret injection options as the Rust SDK.
+- macOS reads system nameservers via `SCDynamicStore`, matching what the OS actually uses.
+- The npm platform package ships `libkrunfw` under its canonical name, fixing load failures on some Linux distros.
 
 </Update>
 
@@ -85,25 +50,17 @@ The npm platform package now ships `libkrunfw` under its canonical name, fixing 
 
 **Block-backed OCI rootfs**
 
-Image rootfs is now served from a packed VMDK with EROFS metadata and copy-on-write overlays, instead of a per-sandbox extracted directory. Boots are faster, host disk usage drops, and large images stop ballooning the working tree on disk. See the [images overview](/images/overview).
+Image rootfs is now served from a packed VMDK with EROFS metadata and copy-on-write overlays, replacing the per-sandbox extracted directory. Boots are faster and host disk usage drops, especially for large images. See the [images overview](/images/overview).
 
-**Sandbox-wide guest rlimits**
+**Other features**
 
-Sandboxes can now apply default `RLIMIT_*` values to every process inside the guest, so things like file descriptor and process counts are bounded without per-exec configuration.
-
-**`execStreamWithConfig` in the TypeScript SDK**
-
-The TypeScript SDK gained `execStreamWithConfig`, mirroring the Rust API. Callers can stream stdout/stderr while passing the same per-exec options (env, cwd, tty, timeouts) that the synchronous `execWithConfig` accepts.
-
-**Run microsandbox via cargo, npx, and pipx**
-
-Installing the microsandbox SDK from crates.io, npm, or PyPI now installs a working `microsandbox` CLI on PATH alongside the library, so `cargo install microsandbox`, `npx microsandbox`, and `pipx run microsandbox` all bring up a usable CLI without a separate install step.
+- **Sandbox-wide guest rlimits.** Apply default `RLIMIT_*` values to every process inside the guest.
+- **`execStreamWithConfig` in the TypeScript SDK.** Stream stdout/stderr while passing the same per-exec options as `execWithConfig`.
+- **Run microsandbox via cargo, npx, and pipx.** `cargo install microsandbox`, `npx microsandbox`, and `pipx run microsandbox` all bring up a working CLI.
 
 ## Bug fixes
 
-**SDK self-heals when the `msb` binary is missing**
-
-If the bundled `msb` binary has been deleted or moved out from under an SDK install, the SDK now detects the broken shim and re-downloads the binary on demand instead of failing with a confusing error.
+- The SDK now self-heals when the bundled `msb` binary is missing, re-downloading it on demand.
 
 </Update>
 
@@ -113,41 +70,21 @@ If the bundled `msb` binary has been deleted or moved out from under an SDK inst
 
 **Python SDK**
 
-A new Python SDK ships with PyO3 bindings, exposing the same sandbox, exec, networking, and filesystem APIs as the Rust and TypeScript SDKs. Install with `pip install microsandbox` and import `microsandbox` to drive sandboxes from Python. See the [Python SDK reference](/sdk/python/sandbox).
+A new Python SDK ships with PyO3 bindings, exposing the same sandbox, exec, networking, and filesystem APIs as the Rust and TypeScript SDKs. Install with `pip install microsandbox`. See the [Python SDK reference](/sdk/python/sandbox).
 
-**Docker image publishing in the release pipeline**
+**Other features**
 
-Releases now publish a `microsandbox` Docker image alongside the existing binary artifacts, so CI environments and one-off runs can pull a ready-to-use container instead of installing the CLI.
-
-**Interactive `msb self uninstall`**
-
-`msb self uninstall` now opens a multi-select prompt over the components it can remove (CLI, SDK shims, cached images, state directory), so partial cleanups no longer require remembering exact flags.
-
-**Interactive `msb exec`**
-
-Running `msb exec` without a command now opens an interactive picker over the sandbox's registered scripts and recent exec history, instead of erroring out.
-
-**Upstream CA trust configuration**
-
-The TLS proxy can now be pointed at a custom upstream CA bundle for outbound connections from the sandbox. The previous `--tls-ca` family of flags has been renamed for consistency with the new networking grammar; old names continue to resolve with a deprecation warning.
-
-**`--allow-private-ips` for permissive policies**
-
-`NetworkPolicy::allow_all` and the matching CLI flag now accept `--allow-private-ips`, opting permissive policies into reaching RFC1918 ranges without falling all the way back to no policy at all.
+- **Docker image publishing.** Releases now publish a `microsandbox` Docker image alongside the binary artifacts.
+- **Interactive `msb self uninstall`** with a multi-select prompt over CLI, SDK shims, cached images, and state directory.
+- **Interactive `msb exec`.** Running without a command opens a picker over registered scripts and recent exec history.
+- **Upstream CA trust config.** Point the TLS proxy at a custom upstream CA bundle; the old `--tls-ca` flag names are deprecated but still resolve.
+- **`--allow-private-ips`** opts permissive policies into RFC1918 ranges without disabling policy entirely.
 
 ## Bug fixes
 
-**TLS MITM proxy data loss under parallel connections**
-
-Concurrent TLS connections through the in-sandbox MITM proxy could interleave plaintext between sessions under load. Per-connection buffer ownership has been corrected and traffic stays on its own session.
-
-**TLS 1.3 plaintext drain after handshake**
-
-Bytes that arrived in the same TCP segment as the final handshake message were occasionally dropped on TLS 1.3 connections. The proxy now drains buffered plaintext before handing the socket to the application.
-
-**`CERT_NOT_YET_VALID` on fast-booting sandboxes**
-
-Sandboxes that booted faster than the host clock could converge on certificate validity windows would intermittently reject internal TLS traffic with `CERT_NOT_YET_VALID`. The proxy now backdates `notBefore` enough to absorb the skew.
+- Concurrent TLS connections through the in-sandbox MITM proxy no longer interleave plaintext between sessions.
+- TLS 1.3 connections no longer drop bytes that arrived in the same TCP segment as the final handshake message.
+- Sandboxes that boot faster than host clock convergence no longer reject internal TLS traffic with `CERT_NOT_YET_VALID`.
 
 </Update>
 
@@ -155,35 +92,16 @@ Sandboxes that booted faster than the host clock could converge on certificate v
 
 ## New features
 
-**File-level volume mounts**
-
-Volume mounts can now target individual files in addition to directories. Mounting a single config file or socket no longer requires staging it inside a host directory first. See [Sandbox volumes](/sandboxes/volumes).
-
-**Filesystem `readStream` in the TypeScript SDK**
-
-The TypeScript SDK gained `fs.readStream`, returning an async iterable of chunks instead of buffering whole files in memory. Useful for streaming logs and large artifacts out of a sandbox.
-
-**Metrics stream in the TypeScript SDK**
-
-`sandbox.metricsStream()` exposes CPU, memory, and I/O samples as an async iterable, mirroring the metrics API already available in the Rust SDK.
-
-**`msb shell` removed**
-
-The standalone `msb shell` command has been removed in favor of `msb exec` with `--tty`, which covers the same interactive workflow without a second code path. Existing scripts that called `msb shell` should switch to `msb exec --tty <sandbox> -- bash`.
+- **File-level volume mounts.** Mounts now target individual files, not just directories. See [Sandbox volumes](/sandboxes/volumes).
+- **`fs.readStream` in the TypeScript SDK.** Async-iterable file reads instead of buffering whole files in memory.
+- **`sandbox.metricsStream()` in the TypeScript SDK.** Async iterable of CPU, memory, and I/O samples, mirroring the Rust SDK.
+- **`msb shell` removed.** Use `msb exec --tty <sandbox> -- bash` instead.
 
 ## Bug fixes
 
-**Content-Length after body secret substitution**
-
-When the network proxy substituted secrets into request bodies, the resulting `Content-Length` header was not updated, causing some upstreams to hang or reject the request. The header is now recomputed after substitution.
-
-**Run options only applied with `--tty`**
-
-Some `msb run` execution options (env, cwd, signal handling) were being applied even in non-TTY attach modes, where they were silently ignored or produced unexpected behavior. They now apply only when `--tty` is set.
-
-**Symlink xattr operations and `listxattr` init**
-
-The composable filesystem mishandled extended attributes on symlinks and returned an uninitialized buffer from `listxattr` in some paths. Both now match the underlying VFS behavior.
+- The network proxy now recomputes `Content-Length` after substituting secrets into request bodies.
+- `msb run` execution options (env, cwd, signal handling) only apply when `--tty` is set.
+- Extended attributes on symlinks and `listxattr` initialization now match the underlying VFS.
 
 </Update>
 
@@ -193,43 +111,26 @@ The composable filesystem mishandled extended attributes on symlinks and returne
 
 **Microsandbox rewrite**
 
-Microsandbox has been rewritten around an embeddable SDK, smoltcp-based networking, and a composable filesystem layer. Highlights:
+Microsandbox has been rewritten around an embeddable SDK, smoltcp-based networking, and a composable filesystem layer:
 
-- A first-class Rust SDK that the CLI is built on top of, so anything the CLI can do is reachable from code.
-- A user-space network stack (smoltcp) with an in-sandbox DNS resolver and TLS proxy, replacing the previous host-side rules.
-- A composable filesystem that layers OCI image content, host volumes, and per-sandbox writable overlays through a single VFS.
-- A redesigned policy and config model that is shared across CLI, SDK, and `Sandboxfile` definitions.
+- A first-class Rust SDK that the CLI is built on, so anything the CLI can do is reachable from code.
+- A user-space network stack (smoltcp) with an in-sandbox DNS resolver and TLS proxy, replacing host-side rules.
+- A composable filesystem that layers OCI image content, host volumes, and per-sandbox writable overlays through one VFS.
+- A redesigned policy and config model shared across CLI, SDK, and `Sandboxfile`.
 
-This is a breaking change. Configurations from prior versions need to be migrated; see the [migration notes](/getting-started/installation).
+This is a breaking change. See the [migration notes](/getting-started/installation).
 
-**Per-command exec flags for `msb run`**
+**Other features**
 
-`msb run` now accepts the full set of per-exec flags (`--env`, `--workdir`, `--tty`, `--timeout`, etc.) directly on the command line, so one-shot runs no longer need a `Sandboxfile` to set common options.
+- **Per-command exec flags for `msb run`.** Pass `--env`, `--workdir`, `--tty`, `--timeout`, etc. directly without a `Sandboxfile`.
 
 ## Bug fixes
 
-**VM logs split into `guest.log` and `host.log`**
-
-Log output from the guest kernel/init and from the host-side runtime were being interleaved into a single file, making boot issues hard to diagnose. They now land in `guest.log` and `host.log` respectively.
-
-**macOS `/.vol` inode reopen**
-
-Reopening inodes via `/.vol` on macOS was failing under `O_RESOLVE_BENEATH`, which the kernel does not honor for that path. The flag is now omitted on macOS so reopen-on-demand works as designed.
-
-**Zero inode numbers in overlay `readdir`**
-
-Some overlay entries were surfacing inode number `0` in `readdir`, tripping up tools that treated `0` as a sentinel. The overlay now resolves real inode numbers for every entry.
-
-**`ExecTimeout` propagation**
-
-Exec calls that hit their timeout could return a generic error instead of the typed `ExecTimeout`, breaking callers that branched on the timeout case. Timeouts now produce `ExecTimeout` consistently.
-
-**Workdir validation at sandbox creation**
-
-Sandboxes were accepting non-existent `workdir` values and only failing at exec time. The workdir is now validated at creation, and `cwd` defaults to `/` when unset.
-
-**Self-update bundle download**
-
-`msb self update` was occasionally pulling a stale bundle from the previous release channel. It now resolves the latest version before downloading.
+- VM logs split into `guest.log` and `host.log` instead of interleaving.
+- Reopening inodes via `/.vol` on macOS no longer fails under `O_RESOLVE_BENEATH`.
+- Overlay `readdir` resolves real inode numbers instead of surfacing `0`.
+- `ExecTimeout` is returned consistently when an exec call hits its timeout.
+- Sandbox creation validates `workdir` up front and defaults `cwd` to `/` when unset.
+- `msb self update` resolves the latest version before downloading the bundle.
 
 </Update>
