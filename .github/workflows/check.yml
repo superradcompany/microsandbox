@@ -429,7 +429,13 @@ jobs:
 
       - name: Run SDK smoke tests
         working-directory: sdk/node-ts
+        # MSB_PATH forces the SDK to use the freshly-built msb installed at
+        # ~/.microsandbox/bin/msb. Without it, the SDK's resolve-binary.js
+        # prefers the platform-pkg-bundled msb (older published version)
+        # under node_modules/@superradcompany/microsandbox-linux-x64-gnu/bin/msb,
+        # which can lag the SDK's CLI args and cause clap parse failures.
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
+          export MSB_PATH="$HOME/.microsandbox/bin/msb"
           npm test
