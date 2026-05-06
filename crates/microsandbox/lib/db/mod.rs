@@ -37,13 +37,7 @@ pub async fn init_global(
 ) -> MicrosandboxResult<&'static DatabaseConnection> {
     GLOBAL_POOL
         .get_or_try_init(|| async {
-            let base = dirs::home_dir().ok_or_else(|| {
-                crate::MicrosandboxError::Custom("cannot determine home directory".into())
-            })?;
-
-            let db_dir = base
-                .join(microsandbox_utils::BASE_DIR_NAME)
-                .join(microsandbox_utils::DB_SUBDIR);
+            let db_dir = microsandbox_utils::resolve_home().join(microsandbox_utils::DB_SUBDIR);
 
             connect_and_migrate(
                 &db_dir,

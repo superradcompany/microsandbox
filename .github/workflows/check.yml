@@ -429,6 +429,11 @@ jobs:
 
       - name: Run SDK smoke tests
         working-directory: sdk/node-ts
+        env:
+          # Per-job isolated state directory so concurrent / sequential
+          # runs of this job don't share `~/.microsandbox/{db,sandboxes}`.
+          # `$RUNNER_TEMP` is wiped between jobs, so cleanup is automatic.
+          MSB_HOME: ${{ runner.temp }}/msb-home-${{ github.run_id }}
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
