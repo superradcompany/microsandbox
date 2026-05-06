@@ -147,7 +147,16 @@ The patch builder is invoked through `SandboxBuilder.patch(p => ...)`. Each meth
 
 ## Custom init system
 
-By default the microsandbox agent runs as PID 1 inside the guest — small, fast, and minimal. For workloads that expect a real init (systemd, OpenRC, s6, runit) — long-lived daemons, system service tests, dbus-using tools — you can hand PID 1 over to the init binary of your choice. The agent does the boot-time setup (mount filesystems, configure network, prepare runtime dirs), then forks. The parent execs your init and becomes PID 1; the agent continues as a normal child process serving host requests over the same channel.
+By default the microsandbox agent runs as PID 1 inside the guest: small, fast, minimal. For workloads that expect a real init (systemd, OpenRC, s6, runit, etc.), `--init` hands PID 1 over to the init binary of your choice.
+
+The handoff sequence:
+
+- Agent does the boot-time setup: mount filesystems, configure network, prepare runtime dirs.
+- Agent forks.
+- Parent execs your init and becomes PID 1.
+- Child agent continues serving host requests over the same channel.
+
+Common reasons to opt in: long-lived daemons, system service tests, anything that talks to dbus or expects `systemctl` to work.
 
 The simplest entry point is `auto`, which probes a small list of well-known paths inside the guest rootfs and picks the first one that exists:
 
@@ -155,7 +164,7 @@ The simplest entry point is `auto`, which probes a small list of well-known path
 - `/lib/systemd/systemd`
 - `/usr/lib/systemd/systemd`
 
-If you need an exact path (e.g. for reproducible CI), pass an absolute path instead.
+Pass an absolute path instead when you need pinning (e.g. for reproducible CI).
 
 <CodeGroup>
 ```rust Rust
@@ -201,7 +210,7 @@ msb run jrei/systemd-debian:12 \
 ```
 </CodeGroup>
 
-To verify the handoff worked, check `/proc/1/comm` inside the sandbox — it should print the init's name (`systemd`, `init`, etc.):
+To verify the handoff worked, check `/proc/1/comm` inside the sandbox. It should print the init's name (`systemd`, `init`, etc.):
 
 ```bash
 $ msb run jrei/systemd-debian:12 --init auto -- cat /proc/1/comm
@@ -212,7 +221,13 @@ If `--init=auto` can't find anything in its candidate list, agentd fails boot wi
 
 ### Argv and env
 
-Pass extra argv to the init via `init_with` (Rust/TypeScript) or by giving `init=` an `InitConfig` (Python). On the CLI, repeat `--init-arg` once per entry and `--init-env KEY=VAL` for env vars. Argv defaults to `[<cmd>]` when no `--init-arg` is given; env is merged on top of the inherited environment.
+Pass extra argv and env to the init:
+
+- **Rust / TypeScript**: `init_with(...)` / `initWith(...)`.
+- **Python**: pass an `InitConfig` to `init=`.
+- **CLI**: repeat `--init-arg` once per entry, and `--init-env KEY=VAL` once per env var.
+
+Argv defaults to `[<cmd>]` when none is given; env is merged on top of the inherited environment.
 
 <CodeGroup>
 ```bash CLI
@@ -259,7 +274,7 @@ sb = await Sandbox.create(
 
 ### Picking an image
 
-Most slim Docker base images (`debian:bookworm-slim`, `ubuntu:24.04`, `python:3.12-slim`) are stripped of init binaries — they're built for "one process per container" and don't ship systemd at all. If you point `--init` at a path the image doesn't contain, the agent's pre-flight check fails boot with a clear error in the kernel log, no kernel panic.
+Most slim Docker base images (`debian:bookworm-slim`, `ubuntu:24.04`, `python:3.12-slim`) are stripped of init binaries; they're built for "one process per container" and don't ship systemd at all. If you point `--init` at a path the image doesn't contain, the agent's pre-flight check fails boot with a clear error in the kernel log (no kernel panic).
 
 Two ways to get an image with an init:
 
@@ -278,7 +293,7 @@ docker buildx build -t local-systemd:debian -f Dockerfile.systemd .
 msb run local-systemd:debian --init /lib/systemd/systemd -- bash
 ```
 
-**Use a community-built systemd image** (e.g. `jrei/systemd-debian:12`, `jrei/systemd-ubuntu:22.04`). These work out of the box but are published by community maintainers, not the distros themselves — vet them like any other third-party image before running real workloads.
+**Use a community-built systemd image** (e.g. `jrei/systemd-debian:12`, `jrei/systemd-ubuntu:22.04`). These work out of the box but are published by community maintainers, not the distros themselves. Vet them like any other third-party image before running real workloads.
 
 For a sanity check that doesn't need systemd, `alpine:3.20` ships BusyBox at `/sbin/init`, which is enough to exercise the handoff mechanics:
 
@@ -289,16 +304,28 @@ msb run alpine:3.20 --init /sbin/init -- sh -c "cat /proc/1/comm"
 
 ### Shutdown semantics
 
-In default (no-handoff) mode, microsandbox shuts the guest down by remounting root read-only and calling `reboot(RB_POWER_OFF)` — typically &lt;100 ms. With handoff, the agent isn't PID 1 anymore, so it asks your init to shut down via `SIGRTMIN+4` (systemd's poweroff signal) with a `SIGTERM` fallback. Your init then runs its own teardown — stop services, unmount, halt — which is **slower**:
+Without `--init`, microsandbox shuts the guest down by remounting root read-only and calling `reboot(RB_POWER_OFF)`. Typically <100 ms.
+
+With `--init`, the agent isn't PID 1 anymore, so it asks your init to shut down:
+
+- `SIGRTMIN+4` first (systemd's poweroff signal).
+- `SIGTERM` fallback for inits that don't speak it.
+
+Your init then runs its own teardown (stop services, unmount, halt), which is slower:
 
 | Init | Typical shutdown |
 |------|------------------|
-| BusyBox / s6 / runit | &lt;100 ms |
-| OpenRC | 50–500 ms |
-| systemd | 1–5 s |
+| BusyBox / s6 / runit | <100 ms |
+| OpenRC | 50-500 ms |
+| systemd | 1-5 s |
 
 This is the price of a real init. If your test harness measures end-to-end sandbox lifecycle and you're comparing to a no-handoff baseline, account for this.
 
 ### Init and entrypoint
 
-`--init` and `--entrypoint` are orthogonal. `--init` controls **PID 1** — what runs the system. `--entrypoint` (and the trailing `-- cmd`) controls **what your workload runs**. They can be combined: boot systemd as PID 1 and have microsandbox `exec` calls land your shell, scripts, or app inside the systemd-managed environment.
+`--init` and `--entrypoint` are orthogonal:
+
+- `--init` controls **PID 1**: what runs the system.
+- `--entrypoint` (and the trailing `-- cmd`) controls **what your workload runs**.
+
+They can be combined. Boot systemd as PID 1 and have microsandbox `exec` calls land your shell, scripts, or app inside the systemd-managed environment.

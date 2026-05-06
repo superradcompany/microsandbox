@@ -17,7 +17,7 @@ msb run oowy/systemd:debian-bookworm \
   -- bash
 ```
 
-`--init auto` probes a few well-known paths (`/sbin/init`, `/lib/systemd/systemd`, `/usr/lib/systemd/systemd`) and picks the first that exists. Pass an absolute path instead if you want pinning.
+`--init auto` probes a small set of well-known paths and picks the first that exists. See [Custom init system](/sandboxes/customize#custom-init-system) for the full list and for pinning to an exact path.
 
 ## Step 2: Confirm systemd is PID 1
 
