@@ -132,21 +132,22 @@ sb = await Sandbox.create(
 
 The patch builder is invoked through `SandboxBuilder.patch(p => ...)`. Each method appends an operation; calls are chainable.
 
-| Method | Description | `opts` |
-|--------|-------------|--------|
-| `text(path, content, opts?)` | Write text content to a file | `mode`, `replace` |
-| `file(path, bytes, opts?)` | Write raw bytes to a file | `mode`, `replace` |
-| `mkdir(path, opts?)` | Create a directory (idempotent) | `mode` |
-| `append(path, content)` | Append content to an existing file | |
-| `copyFile(src, dst, opts?)` | Copy a file from the host into the rootfs | `mode`, `replace` |
-| `copyDir(src, dst, opts?)` | Recursively copy a directory from the host | `replace` |
-| `symlink(target, link, opts?)` | Create a symlink | `replace` |
-| `remove(path)` | Delete a file or directory (idempotent) | |
+| Method | Description |
+|--------|-------------|
+| `text(path, content, opts?)` | Write text content to a file |
+| `file(path, bytes, opts?)` | Write raw bytes to a file |
+| `mkdir(path, opts?)` | Create a directory (idempotent) |
+| `append(path, content)` | Append content to an existing file |
+| `copyFile(src, dst, opts?)` | Copy a file from the host into the rootfs |
+| `copyDir(src, dst, opts?)` | Recursively copy a directory from the host |
+| `symlink(target, link, opts?)` | Create a symlink |
+| `remove(path)` | Delete a file or directory (idempotent) |
 
-Both `opts` keys are optional:
+`opts` is per-method and always optional:
 
-- `mode`: numeric file mode, e.g. `0o644`.
-- `replace`: when `true`, overwrite a path that already exists in the image. Defaults to `false`, which errors on collision.
+- `mode` (numeric file mode, e.g. `0o644`) and `replace` (overwrite if the path already exists): `text`, `file`, `copyFile`.
+- `replace` only: `copyDir`, `symlink`.
+- `mode` only: `mkdir`.
 
 ## Custom init system
 
