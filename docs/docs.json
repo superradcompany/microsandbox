@@ -151,7 +151,7 @@
         "tab": "Recipes",
         "groups": [
           {
-            "group": "Container Integration",
+            "group": "Docker",
             "icon": "docker",
             "pages": [
               "recipes/docker",
@@ -159,8 +159,8 @@
             ]
           },
           {
-            "group": "Guest Setup",
-            "icon": "gear",
+            "group": "Guest",
+            "icon": "server",
             "pages": [
               "recipes/systemd-services"
             ]
