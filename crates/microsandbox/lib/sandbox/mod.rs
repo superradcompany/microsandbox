@@ -1309,7 +1309,7 @@ pub(super) async fn update_sandbox_status(
     sandbox_id: i32,
     status: SandboxStatus,
 ) -> MicrosandboxResult<()> {
-    db.transaction("update_sandbox_status", |txn| async move {
+    db.transaction(|txn| async move {
         sandbox_entity::Entity::update_many()
             .col_expr(sandbox_entity::Column::Status, Expr::value(status))
             .col_expr(
@@ -1480,7 +1480,7 @@ async fn mark_sandbox_runtime_stale(
     sandbox_id: i32,
     run_id: Option<i32>,
 ) -> MicrosandboxResult<()> {
-    db.transaction("mark_sandbox_runtime_stale", |txn| async move {
+    db.transaction(|txn| async move {
         let now = chrono::Utc::now().naive_utc();
 
         if let Some(run_id) = run_id {
@@ -1761,7 +1761,7 @@ async fn mark_sandbox_stopped_for_replacement(
     sandbox_id: i32,
     run_id: Option<i32>,
 ) -> MicrosandboxResult<()> {
-    db.transaction("mark_sandbox_stopped_for_replacement", |txn| async move {
+    db.transaction(|txn| async move {
         let now = chrono::Utc::now().naive_utc();
 
         if let Some(run_id) = run_id {
@@ -1849,7 +1849,7 @@ async fn insert_sandbox_record(
 ) -> MicrosandboxResult<i32> {
     let config_json = serde_json::to_string(config)?;
 
-    db.transaction("insert_sandbox_record", |txn| {
+    db.transaction(|txn| {
         let config_json = config_json.clone();
         async move {
             let now = chrono::Utc::now().naive_utc();
@@ -1873,7 +1873,7 @@ async fn persist_oci_manifest_pin(
     sandbox_id: i32,
     manifest_digest: &str,
 ) -> MicrosandboxResult<()> {
-    db.transaction("persist_oci_manifest_pin", |txn| async move {
+    db.transaction(|txn| async move {
         replace_oci_manifest_pin(&txn, sandbox_id, manifest_digest).await?;
         Ok((txn, ()))
     })

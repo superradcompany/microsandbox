@@ -173,7 +173,7 @@ impl Image {
             return Ok(image_ref_id);
         }
 
-        db.transaction("cache_image", |txn| {
+        db.transaction(|txn| {
             let reference = reference.clone();
             let metadata = metadata.clone();
             async move {
@@ -377,7 +377,7 @@ impl Image {
         let image_ref_id = image_ref_model.id;
 
         let (layer_diff_ids, flat_manifest_digest) = db
-            .transaction("remove_image", |txn| async move {
+            .transaction(|txn| async move {
                 // Check sandbox references inside transaction to avoid TOCTOU.
                 if !force {
                     let refs = sandbox_rootfs_entity::Entity::find()

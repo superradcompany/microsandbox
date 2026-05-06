@@ -92,9 +92,11 @@ impl DbWriteConnection {
         &self.0
     }
 
-    /// Run a write transaction with automatic retry on `SQLITE_BUSY` and
-    /// `SQLITE_BUSY_SNAPSHOT`. Prefer this over bare `Entity::insert(...)
-    /// .exec(self)` for any DB write so retry policy stays centralised.
+    /// Run a multi-statement atomic write inside a transaction with
+    /// automatic retry on `SQLITE_BUSY` / `SQLITE_BUSY_SNAPSHOT`. Use this
+    /// when you need several writes to commit (or roll back) as a unit.
+    /// Single-statement writes don't need this — auto-commit `.exec(db)`
+    /// already retries via the `ConnectionTrait` impl below.
     ///
     /// `f` is invoked once per attempt with a freshly opened transaction.
     /// Return `Ok((txn, value))` to commit, or any `Err` to roll back (the
@@ -105,14 +107,14 @@ impl DbWriteConnection {
     /// Generic over the closure's error type `E` so callers can return
     /// app-level errors directly (e.g. `MicrosandboxError`) provided
     /// `E: From<DbErr> + IsSqliteBusy`.
-    pub async fn transaction<F, Fut, T, E>(&self, name: &'static str, f: F) -> Result<T, E>
+    pub async fn transaction<F, Fut, T, E>(&self, f: F) -> Result<T, E>
     where
         F: Fn(DatabaseTransaction) -> Fut,
         Fut: Future<Output = Result<(DatabaseTransaction, T), E>> + Send,
         T: Send,
         E: From<DbErr> + IsSqliteBusy,
     {
-        retry::retry_on_busy(name, || async {
+        retry::retry_on_busy(|| async {
             let txn = self.0.begin().await?;
             let (txn, value) = f(txn).await?;
             txn.commit().await?;
@@ -153,6 +155,17 @@ impl ConnectionTrait for DbReadConnection {
     }
 }
 
+// Auto-retry every auto-commit operation on the writer pool. Sea-orm
+// callers (`Entity::insert(...).exec(db)` etc.) ultimately funnel through
+// these `ConnectionTrait` methods, so wrapping them in `retry_on_busy`
+// gives every single-statement write inter-process retry semantics
+// without per-call-site code.
+//
+// `Statement` is `Clone`, so the closure can produce a fresh future on
+// each retry. Multi-statement atomic work still uses `transaction()`
+// above (which retries the whole closure body); statements *inside* a
+// transaction call `ConnectionTrait` methods on `DatabaseTransaction`,
+// not on this type, so no double-retry occurs.
 #[async_trait::async_trait]
 impl ConnectionTrait for DbWriteConnection {
     fn get_database_backend(&self) -> DbBackend {
@@ -160,19 +173,19 @@ impl ConnectionTrait for DbWriteConnection {
     }
 
     async fn execute(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
-        self.0.execute(stmt).await
+        retry::retry_on_busy(|| async { self.0.execute(stmt.clone()).await }).await
     }
 
     async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
-        self.0.execute_unprepared(sql).await
+        retry::retry_on_busy(|| async { self.0.execute_unprepared(sql).await }).await
     }
 
     async fn query_one(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
-        self.0.query_one(stmt).await
+        retry::retry_on_busy(|| async { self.0.query_one(stmt.clone()).await }).await
     }
 
     async fn query_all(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
-        self.0.query_all(stmt).await
+        retry::retry_on_busy(|| async { self.0.query_all(stmt.clone()).await }).await
     }
 
     fn support_returning(&self) -> bool {

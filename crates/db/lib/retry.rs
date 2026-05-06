@@ -58,11 +58,16 @@ impl IsSqliteBusy for DbErr {
 /// Retry a database operation on SQLite `BUSY` / `BUSY_SNAPSHOT` with
 /// exponential backoff, capped at a small fixed number of attempts.
 ///
-/// `name` is used purely for tracing. `f` is invoked once per attempt and
-/// must produce a fresh future each call (so it can be retried with a
-/// clean transaction or query). `E` must implement [`IsSqliteBusy`] so the
-/// loop can distinguish transient busy errors from permanent failures.
-pub async fn retry_on_busy<F, Fut, T, E>(name: &'static str, mut f: F) -> Result<T, E>
+/// `f` is invoked once per attempt and must produce a fresh future each
+/// call (so it can be retried with a clean transaction or query). `E` must
+/// implement [`IsSqliteBusy`] so the loop can distinguish transient busy
+/// errors from permanent failures.
+///
+/// Tracing context: callers that want operation context in retry warnings
+/// should wrap the call in a `tracing::info_span!` or apply `#[instrument]`
+/// to the calling function — the warnings emitted here pick up the current
+/// span automatically.
+pub async fn retry_on_busy<F, Fut, T, E>(mut f: F) -> Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
@@ -73,19 +78,25 @@ where
         match f().await {
             Ok(value) => {
                 if attempt > 1 {
-                    tracing::debug!(operation = name, attempt, "db busy retry succeeded");
+                    tracing::warn!(attempts = attempt, "db busy resolved after retries");
                 }
                 return Ok(value);
             }
             Err(err) if err.is_sqlite_busy() && attempt < MAX_BUSY_RETRY_ATTEMPTS => {
-                tracing::debug!(
-                    operation = name,
+                tracing::warn!(
                     attempt,
                     delay_ms = delay.as_millis() as u64,
-                    "db busy, retrying"
+                    "SQLITE_BUSY, retrying"
                 );
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(MAX_DELAY);
+            }
+            Err(err) if err.is_sqlite_busy() => {
+                tracing::error!(
+                    attempts = attempt,
+                    "SQLITE_BUSY exhausted retries, giving up"
+                );
+                return Err(err);
             }
             Err(err) => return Err(err),
         }
