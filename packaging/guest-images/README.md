@@ -9,7 +9,7 @@ Base images we publish for use as the *guest* rootfs inside microsandbox VMs. Ea
 | `fedora-systemd` | `fedora:40` | systemd | `:40` |
 | `alpine-openrc` | `alpine:3.20` | OpenRC + BusyBox init | `:3.20` |
 
-All images are published to `ghcr.io/superradcompany/<name>:<tag>` for both `linux/amd64` and `linux/arm64`.
+All images are published to `ghcr.io/superradcompany/<name>:<tag>` for both `linux/amd64` and `linux/arm64` by the `Guest Images` workflow.
 
 ## Tags
 
