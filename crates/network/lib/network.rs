@@ -5,7 +5,7 @@
 //! type the runtime creates from config, wires into the VM builder, and starts
 //! the networking stack.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -48,10 +48,12 @@ pub struct SmoltcpNetwork {
     guest_mac: [u8; 6],
     gateway_mac: [u8; 6],
     mtu: u16,
-    guest_ipv4: Ipv4Addr,
-    gateway_ipv4: Ipv4Addr,
-    guest_ipv6: Ipv6Addr,
-    gateway_ipv6: Ipv6Addr,
+    // IPv4 / IPv6 are `Some` when active for this sandbox: the user supplied
+    // an explicit address, or the host has a route for that family.
+    guest_ipv4: Option<Ipv4Addr>,
+    gateway_ipv4: Option<Ipv4Addr>,
+    guest_ipv6: Option<Ipv6Addr>,
+    gateway_ipv6: Option<Ipv6Addr>,
 
     // TLS state (if enabled). Created in new(), used for ca_cert_pem().
     tls_state: Option<Arc<TlsState>>,
@@ -76,11 +78,26 @@ pub struct MetricsHandle {
 impl SmoltcpNetwork {
     /// Create from user config + sandbox slot (for IP/MAC derivation).
     ///
+    /// Each address family is enabled when either the user supplied an
+    /// explicit address or the host kernel has a route for that family;
+    /// otherwise the corresponding `guest_*`/`gateway_*` fields stay `None`
+    /// and the family is omitted from the smoltcp interface, env vars, and
+    /// downstream consumers.
+    ///
     /// # Panics
     ///
     /// Panics if `slot` exceeds the address pool capacity (65535 for MAC/IPv6,
     /// 524287 for IPv4).
     pub fn new(config: NetworkConfig, slot: u64) -> Self {
+        Self::new_with_routes(config, slot, host_has_ipv4_route(), host_has_ipv6_route())
+    }
+
+    fn new_with_routes(
+        config: NetworkConfig,
+        slot: u64,
+        host_has_ipv4: bool,
+        host_has_ipv6: bool,
+    ) -> Self {
         assert!(
             slot <= MAX_SLOT,
             "sandbox slot {slot} exceeds address pool capacity (max {MAX_SLOT})"
@@ -92,16 +109,17 @@ impl SmoltcpNetwork {
             .unwrap_or_else(|| derive_guest_mac(slot));
         let gateway_mac = derive_gateway_mac(slot);
         let mtu = config.interface.mtu.unwrap_or(1500);
+
         let guest_ipv4 = config
             .interface
             .ipv4_address
-            .unwrap_or_else(|| derive_guest_ipv4(slot));
-        let gateway_ipv4 = gateway_from_guest_ipv4(guest_ipv4);
+            .or_else(|| host_has_ipv4.then(|| derive_guest_ipv4(slot)));
+        let gateway_ipv4 = guest_ipv4.map(gateway_from_guest_ipv4);
         let guest_ipv6 = config
             .interface
             .ipv6_address
-            .unwrap_or_else(|| derive_guest_ipv6(slot));
-        let gateway_ipv6 = gateway_from_guest_ipv6(guest_ipv6);
+            .or_else(|| host_has_ipv6.then(|| derive_guest_ipv6(slot)));
+        let gateway_ipv6 = guest_ipv6.map(gateway_from_guest_ipv6);
 
         let queue_capacity = config
             .max_connections
@@ -154,6 +172,7 @@ impl SmoltcpNetwork {
             guest_mac: self.guest_mac,
             gateway: self.gateway_ips(),
             guest_ipv4: self.guest_ipv4,
+            guest_ipv6: self.guest_ipv6,
             mtu: self.mtu as usize,
         };
         let network_policy = self.config.policy.clone();
@@ -205,22 +224,22 @@ impl SmoltcpNetwork {
                     self.mtu,
                 ),
             ),
-            (
-                ENV_NET_IPV4.into(),
-                format!(
-                    "addr={}/30,gw={},dns={}",
-                    self.guest_ipv4, self.gateway_ipv4, self.gateway_ipv4,
-                ),
-            ),
-            (
-                ENV_NET_IPV6.into(),
-                format!(
-                    "addr={}/64,gw={},dns={}",
-                    self.guest_ipv6, self.gateway_ipv6, self.gateway_ipv6,
-                ),
-            ),
             (ENV_HOST_ALIAS.into(), crate::HOST_ALIAS.into()),
         ];
+
+        if let (Some(guest), Some(gateway)) = (self.guest_ipv4, self.gateway_ipv4) {
+            vars.push((
+                ENV_NET_IPV4.into(),
+                format!("addr={guest}/30,gw={gateway},dns={gateway}"),
+            ));
+        }
+
+        if let (Some(guest), Some(gateway)) = (self.guest_ipv6, self.gateway_ipv6) {
+            vars.push((
+                ENV_NET_IPV6.into(),
+                format!("addr={guest}/64,gw={gateway},dns={gateway}"),
+            ));
+        }
 
         // Auto-expose secret placeholders as environment variables.
         for secret in &self.config.secrets.secrets {
@@ -342,6 +361,26 @@ fn format_mac(mac: [u8; 6]) -> String {
     )
 }
 
+/// Returns true if the host kernel can select an IPv4 route.
+///
+/// `UdpSocket::connect` performs a local routing-table lookup against the
+/// TEST-NET-1 (`192.0.2.1`) address; it does not send packets or wait on
+/// the network.
+fn host_has_ipv4_route() -> bool {
+    UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .and_then(|socket| socket.connect((Ipv4Addr::new(192, 0, 2, 1), 443)))
+        .is_ok()
+}
+
+/// Returns true if the host kernel can select an IPv6 route. Probes a
+/// `2001:db8::/32` documentation address via `UdpSocket::connect` (no packet
+/// is sent).
+fn host_has_ipv6_route() -> bool {
+    UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0))
+        .and_then(|socket| socket.connect((Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1), 443)))
+        .is_ok()
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -391,19 +430,72 @@ mod tests {
     }
 
     #[test]
-    fn guest_env_vars_format() {
-        let config = NetworkConfig::default();
-        let net = SmoltcpNetwork::new(config, 0);
+    fn guest_env_vars_includes_ipv4_when_host_has_v4_route() {
+        let net = SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, true, false);
+        let vars = net.guest_env_vars();
+
+        assert_eq!(vars.len(), 3);
+        assert_eq!(vars[0].0, ENV_NET);
+        assert!(vars[0].1.contains("iface=eth0"));
+        assert_eq!(vars[1].0, ENV_HOST_ALIAS);
+        assert_eq!(vars[1].1, crate::HOST_ALIAS);
+        assert_eq!(vars[2].0, ENV_NET_IPV4);
+        assert!(vars[2].1.contains("/30"));
+    }
+
+    #[test]
+    fn guest_env_vars_includes_ipv6_when_host_has_v6_route() {
+        let net = SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, true, true);
         let vars = net.guest_env_vars();
 
         assert_eq!(vars.len(), 4);
         assert_eq!(vars[0].0, ENV_NET);
-        assert!(vars[0].1.contains("iface=eth0"));
-        assert_eq!(vars[1].0, ENV_NET_IPV4);
-        assert!(vars[1].1.contains("/30"));
+        assert_eq!(vars[1].0, ENV_HOST_ALIAS);
+        assert_eq!(vars[2].0, ENV_NET_IPV4);
+        assert_eq!(vars[3].0, ENV_NET_IPV6);
+        assert!(vars[3].1.contains("/64"));
+    }
+
+    #[test]
+    fn guest_env_vars_omit_ipv6_without_host_route() {
+        let net = SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, true, false);
+        let vars = net.guest_env_vars();
+
+        assert!(!vars.iter().any(|(k, _)| k == ENV_NET_IPV6));
+    }
+
+    #[test]
+    fn guest_env_vars_omit_ipv4_without_host_route() {
+        let net = SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, false, true);
+        let vars = net.guest_env_vars();
+
+        assert_eq!(vars.len(), 3);
+        assert_eq!(vars[0].0, ENV_NET);
+        assert_eq!(vars[1].0, ENV_HOST_ALIAS);
         assert_eq!(vars[2].0, ENV_NET_IPV6);
-        assert!(vars[2].1.contains("/64"));
-        assert_eq!(vars[3].0, ENV_HOST_ALIAS);
-        assert_eq!(vars[3].1, crate::HOST_ALIAS);
+    }
+
+    #[test]
+    fn explicit_ipv6_address_overrides_missing_host_v6_route() {
+        let mut config = NetworkConfig::default();
+        config.interface.ipv6_address = Some("fd42:6d73:62:99::2".parse().unwrap());
+        let net = SmoltcpNetwork::new_with_routes(config, 0, true, false);
+        let vars = net.guest_env_vars();
+
+        let v6 = vars
+            .iter()
+            .find(|(k, _)| k == ENV_NET_IPV6)
+            .expect("explicit ipv6 should publish env var even without host route");
+        assert!(v6.1.contains("fd42:6d73:62:99::2/64"));
+    }
+
+    #[test]
+    fn neither_family_active_emits_only_base_env_vars() {
+        let net = SmoltcpNetwork::new_with_routes(NetworkConfig::default(), 0, false, false);
+        let vars = net.guest_env_vars();
+
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].0, ENV_NET);
+        assert_eq!(vars[1].0, ENV_HOST_ALIAS);
     }
 }

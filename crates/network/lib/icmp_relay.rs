@@ -151,7 +151,7 @@ impl IcmpRelay {
 
         // Gateway echo is already handled upstream — skip.
         let dst_ip: Ipv4Addr = ipv4.dst_addr();
-        if dst_ip == config.gateway.ipv4 {
+        if config.gateway.ipv4 == Some(dst_ip) {
             return false;
         }
 
@@ -222,7 +222,7 @@ impl IcmpRelay {
 
         // Gateway echo is already handled upstream — skip.
         let dst_ip: Ipv6Addr = ipv6.dst_addr();
-        if dst_ip == config.gateway.ipv6 {
+        if config.gateway.ipv6 == Some(dst_ip) {
             return false;
         }
 
