@@ -5,20 +5,31 @@ description: "TypeScript SDK redesign, network policy redesign, disk-image volum
 
 ## New features
 
-**Redesigned TypeScript SDK with builder API**
+**Redesigned TypeScript SDK**
 
-The TypeScript SDK has been rewritten to match the Rust SDK. Configure sandboxes with fluent builders (`Sandbox.builder(name).image(...).cpus(...).create()`), use `await using` for automatic cleanup, and rely on typed errors and async iterables. Native binaries now ship per-platform, removing the postinstall download. See the [TypeScript SDK reference](/sdk/typescript/sandbox).
+Builder API matching the Rust SDK, with `await using`, typed errors, async iterables, and bundled native binaries (no postinstall download).
 
-**Redesigned network policy with per-rule direction**
+```ts
+await using sandbox = await Sandbox.builder("my-sandbox")
+  .image("alpine:latest")
+  .cpus(2)
+  .create();
+```
 
-Each rule now carries its own direction, action, target, protocol, and ports through a unified grammar. The CLI replaces `--network-policy` with:
+See the [TypeScript SDK reference](/sdk/typescript/sandbox).
 
-- `--net-rule <TOKEN>[,<TOKEN>...]` (repeatable)
-- `--net-default-egress allow|deny`
-- `--net-default-ingress allow|deny`
-- `--no-net` (sugar for deny-all)
+**Redesigned network policy**
 
-Targets accept `any`, group keywords (`public`, `private`, `loopback`, `link-local`, `meta`, `multicast`, `host`), bare IPs, CIDRs, domains, and `domain=` / `suffix=` escape hatches. See the [networking overview](/networking/overview).
+`--network-policy` is gone. Rules now carry their own direction, action, target, protocol, and ports through a single grammar: `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`.
+
+```bash
+msb run alpine --name agent \
+  --net-default-egress deny \
+  --net-rule "allow@public,allow@host" \
+  --net-rule "deny@private:tcp:445"
+```
+
+See the [networking overview](/networking/overview).
 
 **Other features**
 

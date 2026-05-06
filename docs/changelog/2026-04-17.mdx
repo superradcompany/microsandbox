@@ -7,7 +7,15 @@ description: "New Python SDK, Docker image publishing, and TLS proxy fixes."
 
 **Python SDK**
 
-A new Python SDK ships with PyO3 bindings, exposing the same sandbox, exec, networking, and filesystem APIs as the Rust and TypeScript SDKs. Install with `pip install microsandbox`. See the [Python SDK reference](/sdk/python/sandbox).
+PyO3 bindings exposing the same sandbox, exec, networking, and filesystem APIs as the Rust and TypeScript SDKs.
+
+```python
+async with await Sandbox.create("my-sandbox", image="alpine") as sb:
+    out = await sb.shell("echo hello")
+    print(out.stdout_text)
+```
+
+Install with `pip install microsandbox`. See the [Python SDK reference](/sdk/python/sandbox).
 
 **Other features**
 

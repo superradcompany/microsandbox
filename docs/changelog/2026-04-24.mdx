@@ -7,7 +7,7 @@ description: "Block-backed OCI rootfs, guest rlimits, and TypeScript SDK improve
 
 **Block-backed OCI rootfs**
 
-Image rootfs is now served from a packed VMDK with EROFS metadata and copy-on-write overlays, replacing the per-sandbox extracted directory. Boots are faster and host disk usage drops, especially for large images. See the [images overview](/images/overview).
+Image rootfs now ships as a packed VMDK with EROFS metadata and copy-on-write overlays instead of an extracted directory, cutting boot time and host disk usage. See the [images overview](/images/overview).
 
 **Other features**
 
