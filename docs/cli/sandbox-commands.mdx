@@ -317,6 +317,11 @@ msb self uninstall            # Remove msb (with confirmation prompt)
 msb self uninstall --yes      # Skip confirmation
 ```
 
+> If `msb` was installed from the official APT repository, these commands do
+> not modify the system package directly. They print the equivalent `apt`
+> command instead: `apt upgrade microsandbox`, `apt remove microsandbox`, or
+> `apt purge microsandbox`.
+
 | Subcommand | Description |
 |------------|-------------|
 | `update` (alias: `upgrade`) | Update msb and libkrunfw to the latest release |

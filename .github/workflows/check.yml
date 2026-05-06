@@ -35,6 +35,41 @@ jobs:
               - '!docs/**'
 
   # ---------------------------------------------------------------------------
+  # Lint workflow and packaging tooling
+  # ---------------------------------------------------------------------------
+  tooling-lint:
+    name: Tooling Lint
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Install workflow and shell lint dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml shellcheck
+
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      - name: Run shared packaging helper regression test
+        run: bash scripts/tests/test-apt-common.sh
+
+      - name: Run workflow structure regression test
+        run: python3 scripts/tests/test-workflows.py
+
+      - name: Lint shell scripts
+        run: PATH="$HOME/go/bin:$PATH" shellcheck -x scripts/*.sh scripts/lib/*.sh scripts/tests/*.sh
+
+      - name: Lint GitHub Actions workflows
+        run: PATH="$HOME/go/bin:$PATH" actionlint
+
+  # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
   # ---------------------------------------------------------------------------
   build-kernel:
@@ -108,7 +143,7 @@ jobs:
   # ---------------------------------------------------------------------------
   check:
     name: Check (${{ matrix.target }})
-    needs: [build-kernel, build-agentd-aarch64, changes]
+    needs: [tooling-lint, build-kernel, build-agentd-aarch64, changes]
     if: always() && needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -318,6 +353,114 @@ jobs:
           npm run build
 
   # ---------------------------------------------------------------------------
+  # Validate APT packages and repository
+  # ---------------------------------------------------------------------------
+  apt-package-test:
+    name: APT Package Validation (${{ matrix.target }})
+    needs: check
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-latest
+            arch: x86_64
+            deb_arch: amd64
+            upload_kvm_repo: true
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+            deb_arch: arm64
+            upload_kvm_repo: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install APT packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils lintian gnupg
+
+      - name: Build baseline APT artifacts
+        run: |
+          bash scripts/build-apt-baseline-artifacts.sh \
+            --output-dir build/apt/${{ matrix.arch }}
+
+      - name: Build and validate .deb packages
+        run: |
+          VERSION="$(sed -n 's/^version = \"\\(.*\\)\"$/\\1/p' Cargo.toml | head -n1)"
+
+          bash scripts/package-deb.sh \
+            --arch "${{ matrix.arch }}" \
+            --version "$VERSION" \
+            --revision 1 \
+            --msb build/apt/${{ matrix.arch }}/msb \
+            --libkrunfw build/apt/${{ matrix.arch }}/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} \
+            --output-dir dist/v1
+
+          bash scripts/package-deb.sh \
+            --arch "${{ matrix.arch }}" \
+            --version "$VERSION" \
+            --revision 2 \
+            --msb build/apt/${{ matrix.arch }}/msb \
+            --libkrunfw build/apt/${{ matrix.arch }}/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} \
+            --output-dir dist/v2
+
+          bash scripts/validate-deb.sh \
+            --deb dist/v1/microsandbox_*_${{ matrix.deb_arch }}.deb \
+            --arch "${{ matrix.deb_arch }}" \
+            --version "$VERSION" \
+            --revision 1
+
+          bash scripts/validate-deb.sh \
+            --deb dist/v2/microsandbox_*_${{ matrix.deb_arch }}.deb \
+            --arch "${{ matrix.deb_arch }}" \
+            --version "$VERSION" \
+            --revision 2
+
+      - name: Build signed test repositories
+        env:
+          GNUPGHOME: ${{ runner.temp }}/apt-gnupg
+        run: |
+          mkdir -p "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
+
+          GOOD_KEY_ID="$(bash scripts/generate-apt-test-key.sh --gnupg-home "$GNUPGHOME")"
+          BAD_KEY_ID="$(bash scripts/generate-apt-test-key.sh \
+            --gnupg-home "$GNUPGHOME" \
+            --name-real "Microsandbox Wrong Repository" \
+            --name-email "wrong@microsandbox.dev")"
+
+          bash scripts/build-apt-repo.sh \
+            --input-dir dist/v1 \
+            --output-dir apt-repo-v1 \
+            --gpg-key-id "$GOOD_KEY_ID"
+
+          bash scripts/build-apt-repo.sh \
+            --input-dir dist/v2 \
+            --output-dir apt-repo-v2 \
+            --gpg-key-id "$GOOD_KEY_ID"
+
+          gpg --batch --yes --output wrong-repo-keyring.gpg --export "$BAD_KEY_ID"
+
+      - name: Test APT install and upgrade in containers
+        run: |
+          bash scripts/test-apt-repo.sh \
+            --repo-v1 apt-repo-v1 \
+            --repo-v2 apt-repo-v2 \
+            --keyring apt-repo-v1/microsandbox-archive-keyring.gpg \
+            --bad-keyring wrong-repo-keyring.gpg
+
+      - name: Upload signed APT repository artifact
+        if: matrix.upload_kvm_repo
+        uses: actions/upload-artifact@v4
+        with:
+          name: apt-repo-v1-${{ matrix.target }}
+          path: apt-repo-v1/
+
+  # ---------------------------------------------------------------------------
   # Integration tests (requires KVM)
   # ---------------------------------------------------------------------------
   integration-test:
@@ -444,3 +587,33 @@ jobs:
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
           export MSB_PATH="$HOME/.microsandbox/bin/msb"
           npm test
+
+  # ---------------------------------------------------------------------------
+  # APT smoke tests (requires KVM)
+  # ---------------------------------------------------------------------------
+  apt-kvm-smoke:
+    name: APT KVM Smoke Test
+    needs: apt-package-test
+    runs-on: self-hosted-ubuntu-2404-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clean workspace
+        run: |
+          rm -rf "${{ github.workspace }}"/apt-repo
+          rm -rf ~/.microsandbox
+          sudo apt-get remove -y microsandbox || true
+          sudo rm -f /etc/apt/sources.list.d/microsandbox.list
+          sudo rm -f /usr/share/keyrings/microsandbox-archive-keyring.gpg
+
+      - name: Download signed APT repository
+        uses: actions/download-artifact@v4
+        with:
+          name: apt-repo-v1-linux-x86_64
+          path: apt-repo/
+
+      - name: Install and smoke test microsandbox from APT
+        run: |
+          bash scripts/apt-smoke-test.sh \
+            --repo-url "file://${{ github.workspace }}/apt-repo" \
+            --keyring-path "${{ github.workspace }}/apt-repo/microsandbox-archive-keyring.gpg"

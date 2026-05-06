@@ -3,6 +3,11 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "linux")]
+use std::io::ErrorKind;
+#[cfg(target_os = "linux")]
+use std::process::Command;
+
 use clap::{Args, Subcommand};
 use console::{Key, Term, style};
 
@@ -14,6 +19,7 @@ use crate::ui;
 //--------------------------------------------------------------------------------------------------
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const APT_PACKAGE_NAME: &str = "microsandbox";
 
 const MARKER_START: &str = "# >>> microsandbox >>>";
 const MARKER_END: &str = "# <<< microsandbox <<<";
@@ -70,6 +76,18 @@ enum UninstallCategory {
     Secrets,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AptManagedInstallation {
+    package: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DpkgQueryError {
+    CommandUnavailable,
+    CommandFailed,
+}
+
 impl UninstallCategory {
     const ITEMS: &[Self] = &[
         Self::All,
@@ -124,6 +142,11 @@ pub async fn run(args: SelfArgs) -> anyhow::Result<()> {
 async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
     info(&format!("Current version: v{CURRENT_VERSION}"));
 
+    if let Some(installation) = detect_apt_managed_installation() {
+        print_apt_managed_update_notice(&installation);
+        return Ok(());
+    }
+
     let spinner = ui::Spinner::start("Checking", "latest release");
     let latest = fetch_latest_version().await?;
     spinner.finish_clear();
@@ -165,6 +188,11 @@ async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
 }
 
 async fn run_uninstall(args: SelfUninstallArgs) -> anyhow::Result<()> {
+    if let Some(installation) = detect_apt_managed_installation() {
+        print_apt_managed_uninstall_notice(&installation);
+        return Ok(());
+    }
+
     let base_dir = resolve_base_dir()?;
 
     if !base_dir.exists() {
@@ -414,6 +442,105 @@ fn done(msg: &str) {
     eprintln!("{} {msg}", style("done").green().bold());
 }
 
+#[cfg(target_os = "linux")]
+fn detect_apt_managed_installation() -> Option<AptManagedInstallation> {
+    let current_exe = std::env::current_exe().ok()?;
+
+    detect_apt_managed_installation_with(&current_exe, |executable_path| {
+        let output = Command::new("dpkg-query")
+            .args(["-S", &executable_path.display().to_string()])
+            .output();
+
+        match output {
+            Ok(output) if output.status.success() => {
+                Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+            }
+            Ok(_) => Err(DpkgQueryError::CommandFailed),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                Err(DpkgQueryError::CommandUnavailable)
+            }
+            Err(_) => Err(DpkgQueryError::CommandFailed),
+        }
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detect_apt_managed_installation() -> Option<AptManagedInstallation> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn detect_apt_managed_installation_with<F>(
+    executable_path: &Path,
+    query: F,
+) -> Option<AptManagedInstallation>
+where
+    F: FnOnce(&Path) -> Result<String, DpkgQueryError>,
+{
+    match query(executable_path) {
+        Ok(stdout) => parse_apt_managed_installation(APT_PACKAGE_NAME, executable_path, &stdout),
+        Err(DpkgQueryError::CommandUnavailable | DpkgQueryError::CommandFailed) => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_apt_managed_installation(
+    package: &str,
+    executable_path: &Path,
+    stdout: &str,
+) -> Option<AptManagedInstallation> {
+    let expected_path = executable_path.display().to_string();
+
+    stdout.lines().find_map(|line| {
+        let (package_field, owned_path) = line.rsplit_once(": ")?;
+        if owned_path.trim() != expected_path {
+            return None;
+        }
+
+        package_field.split(',').find_map(|entry| {
+            let package_name = entry.trim().split(':').next()?;
+            (package_name == package).then(|| AptManagedInstallation {
+                package: package.to_string(),
+            })
+        })
+    })
+}
+
+fn apt_upgrade_hint(installation: &AptManagedInstallation) -> String {
+    format!(
+        "sudo apt update && sudo apt upgrade {}",
+        installation.package
+    )
+}
+
+fn apt_remove_hint(installation: &AptManagedInstallation) -> String {
+    format!("sudo apt remove {}", installation.package)
+}
+
+fn apt_purge_hint(installation: &AptManagedInstallation) -> String {
+    format!("sudo apt purge {}", installation.package)
+}
+
+fn print_apt_managed_update_notice(installation: &AptManagedInstallation) {
+    info("This microsandbox installation is managed by APT.");
+    info(&format!(
+        "Run `{}` to upgrade the system package.",
+        apt_upgrade_hint(installation)
+    ));
+}
+
+fn print_apt_managed_uninstall_notice(installation: &AptManagedInstallation) {
+    info("This microsandbox installation is managed by APT.");
+    info(&format!(
+        "Run `{}` to uninstall the system package.",
+        apt_remove_hint(installation)
+    ));
+    info(&format!(
+        "Use `{}` if you also want to remove package metadata.",
+        apt_purge_hint(installation)
+    ));
+}
+
 /// Remove a single uninstall category from the base directory.
 fn remove_category(base_dir: &Path, category: UninstallCategory) -> anyhow::Result<()> {
     match category {
@@ -522,4 +649,126 @@ fn remove_marker_block(path: &Path) -> anyhow::Result<bool> {
 
     std::fs::write(path, result)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_apt_managed_installation_accepts_package_owner_for_current_executable() {
+        let executable = PathBuf::from("/usr/bin/msb");
+        let installation = parse_apt_managed_installation(
+            APT_PACKAGE_NAME,
+            &executable,
+            "microsandbox: /usr/bin/msb\n",
+        );
+        assert_eq!(
+            installation,
+            Some(AptManagedInstallation {
+                package: "microsandbox".to_string(),
+            })
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_apt_managed_installation_accepts_arch_qualified_package_owner() {
+        let executable = PathBuf::from("/usr/bin/msb");
+        let installation = parse_apt_managed_installation(
+            APT_PACKAGE_NAME,
+            &executable,
+            "microsandbox:amd64: /usr/bin/msb\n",
+        );
+        assert_eq!(
+            installation,
+            Some(AptManagedInstallation {
+                package: "microsandbox".to_string(),
+            })
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_apt_managed_installation_rejects_different_package_owner() {
+        let executable = PathBuf::from("/usr/bin/msb");
+        let installation = parse_apt_managed_installation(
+            APT_PACKAGE_NAME,
+            &executable,
+            "other-package: /usr/bin/msb\n",
+        );
+        assert_eq!(installation, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_apt_managed_installation_rejects_different_owned_path() {
+        let executable = PathBuf::from("/home/user/.microsandbox/bin/msb");
+        let installation = parse_apt_managed_installation(
+            APT_PACKAGE_NAME,
+            &executable,
+            "microsandbox: /usr/bin/msb\n",
+        );
+        assert_eq!(installation, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_detect_apt_managed_installation_ignores_missing_dpkg_query() {
+        let executable = PathBuf::from("/usr/bin/msb");
+        let installation = detect_apt_managed_installation_with(&executable, |_| {
+            Err(DpkgQueryError::CommandUnavailable)
+        });
+        assert_eq!(installation, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_detect_apt_managed_installation_ignores_failed_query() {
+        let executable = PathBuf::from("/usr/bin/msb");
+        let installation = detect_apt_managed_installation_with(&executable, |_| {
+            Err(DpkgQueryError::CommandFailed)
+        });
+        assert_eq!(installation, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_detect_apt_managed_installation_with_successful_owner_query() {
+        let executable = PathBuf::from("/usr/bin/msb");
+        let installation = detect_apt_managed_installation_with(&executable, |path| {
+            Ok(format!("microsandbox: {}\n", path.display()))
+        });
+        assert_eq!(
+            installation,
+            Some(AptManagedInstallation {
+                package: "microsandbox".to_string(),
+            })
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn test_detect_apt_managed_installation_returns_none_off_linux() {
+        assert_eq!(detect_apt_managed_installation(), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_apt_hints_use_expected_package_name() {
+        let installation = AptManagedInstallation {
+            package: "microsandbox".to_string(),
+        };
+
+        assert_eq!(
+            apt_upgrade_hint(&installation),
+            "sudo apt update && sudo apt upgrade microsandbox"
+        );
+        assert_eq!(
+            apt_remove_hint(&installation),
+            "sudo apt remove microsandbox"
+        );
+        assert_eq!(apt_purge_hint(&installation), "sudo apt purge microsandbox");
+    }
 }

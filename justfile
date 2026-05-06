@@ -1,6 +1,9 @@
 # Version constants for libkrunfw. Keep in sync with microsandbox-utils/lib/lib.rs.
 LIBKRUNFW_ABI := "5"
 LIBKRUNFW_VERSION := "5.2.1"
+DEFAULT_PACKAGE_FORMAT := "deb"
+LOCAL_PACKAGE_DIST_DIR := "dist/packages"
+LINUX_PACKAGE_NAME := "microsandbox"
 
 # Set up the development environment, build, and install. Prerequisites: just, git (+ Docker on macOS).
 setup: _install-dev-deps
@@ -127,9 +130,35 @@ _ensure-libkrunfw:
 
 # Build libkrunfw on Linux. Requires: kernel build dependencies (gcc, make, flex, bison, etc.).
 [linux]
-build-libkrunfw:
+_require-libkrunfw-build-tools:
     #!/usr/bin/env bash
     set -euo pipefail
+    missing=()
+
+    for cmd in bc bison flex gcc make python3; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing+=("$cmd")
+        fi
+    done
+
+    if [ "${#missing[@]}" -gt 0 ]; then
+        echo "error: missing build tools for libkrunfw: ${missing[*]}" >&2
+        echo "hint: install them with: sudo apt-get install -y bc bison flex gcc make libelf-dev python3-pyelftools libcap-ng-dev" >&2
+        exit 1
+    fi
+
+[linux]
+build-libkrunfw: _require-libkrunfw-build-tools
+    #!/usr/bin/env bash
+    set -euo pipefail
+    kernel_version="$(sed -n 's/^KERNEL_VERSION = //p' vendor/libkrunfw/Makefile | head -n1)"
+    kernel_tarball="vendor/libkrunfw/tarballs/${kernel_version}.tar.xz"
+
+    if [ -f "$kernel_tarball" ] && ! tar -tf "$kernel_tarball" >/dev/null 2>&1; then
+        echo "Removing corrupt kernel tarball: $kernel_tarball"
+        rm -f "$kernel_tarball"
+    fi
+
     cd vendor/libkrunfw
     make -j$(nproc)
     cd ../..
@@ -231,6 +260,141 @@ uninstall:
     rm -f ~/.microsandbox/bin/msb
     rm -f ~/.microsandbox/lib/libkrunfw*
     echo "Removed msb and libkrunfw from ~/.microsandbox/"
+
+# Lint shell tooling and run the shared APT helper regression check.
+lint-shell:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v pre-commit >/dev/null || { echo "error: pre-commit not found. Run 'just setup' first."; exit 1; }
+    pre-commit run shellcheck --all-files
+    pre-commit run apt-common-regression --all-files
+
+# Lint GitHub Actions workflows and run workflow regression checks.
+lint-workflows:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v pre-commit >/dev/null || { echo "error: pre-commit not found. Run 'just setup' first."; exit 1; }
+    pre-commit run actionlint --all-files
+    pre-commit run workflow-regressions --all-files
+
+# Run the repository's shell and workflow lint suite.
+lint-tooling: lint-shell lint-workflows
+
+# Build a local Linux package from baseline-compatible APT artifacts.
+[linux]
+package-local format=DEFAULT_PACKAGE_FORMAT revision="1" image="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    arch="$(uname -m)"
+    package_format="{{ format }}"
+    revision="{{ revision }}"
+    baseline_image="{{ image }}"
+    version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+    output_dir="{{ LOCAL_PACKAGE_DIST_DIR }}/$package_format"
+    artifacts_dir="build/apt/$arch"
+
+    test -n "$version" || { echo "error: could not determine workspace version from Cargo.toml"; exit 1; }
+
+    baseline_cmd=(bash scripts/build-apt-baseline-artifacts.sh --output-dir "$artifacts_dir")
+    if [ -n "$baseline_image" ]; then
+        baseline_cmd+=(--image "$baseline_image")
+    fi
+
+    echo "==> Building baseline-compatible APT artifacts for $arch..."
+    "${baseline_cmd[@]}"
+
+    case "$package_format" in
+        deb)
+            echo "==> Packaging {{ LINUX_PACKAGE_NAME }} $version-$revision as $package_format..."
+            bash scripts/package-deb.sh \
+                --arch "$arch" \
+                --version "$version" \
+                --revision "$revision" \
+                --msb "$artifacts_dir/msb" \
+                --libkrunfw "$artifacts_dir/libkrunfw.so.{{ LIBKRUNFW_VERSION }}" \
+                --output-dir "$output_dir"
+            ;;
+        *)
+            echo "error: unsupported local package format: $package_format" >&2
+            echo "supported formats: deb" >&2
+            exit 1
+            ;;
+    esac
+
+# Build the local Linux package and install it with the matching system tool.
+[linux]
+install-package-local format=DEFAULT_PACKAGE_FORMAT revision="1": (package-local format revision)
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    package_format="{{ format }}"
+    revision="{{ revision }}"
+    version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+    test -n "$version" || { echo "error: could not determine workspace version from Cargo.toml"; exit 1; }
+
+    case "$package_format" in
+        deb)
+            case "$(uname -m)" in
+                x86_64)
+                    package_arch="amd64"
+                    ;;
+                aarch64)
+                    package_arch="arm64"
+                    ;;
+                *)
+                    echo "error: unsupported Debian architecture: $(uname -m)" >&2
+                    exit 1
+                    ;;
+            esac
+            package_path="$PWD/{{ LOCAL_PACKAGE_DIST_DIR }}/$package_format/{{ LINUX_PACKAGE_NAME }}_${version}-${revision}_${package_arch}.deb"
+            ;;
+        *)
+            echo "error: unsupported local package format: $package_format" >&2
+            echo "supported formats: deb" >&2
+            exit 1
+            ;;
+    esac
+
+    test -f "$package_path" || { echo "error: package not found: $package_path"; exit 1; }
+    stage_dir="$(mktemp -d /tmp/microsandbox-package.XXXXXX)"
+    stage_package="$stage_dir/$(basename "$package_path")"
+    trap 'rm -rf "$stage_dir"' EXIT
+
+    chmod 755 "$stage_dir"
+    install -m644 "$package_path" "$stage_package"
+
+    case "$package_format" in
+        deb)
+            echo "==> Installing $stage_package..."
+            sudo apt-get update
+            sudo apt install --reinstall -y "$stage_package"
+            ;;
+    esac
+
+# Remove the locally installed Linux package with the matching system tool.
+[linux]
+uninstall-package-local format=DEFAULT_PACKAGE_FORMAT:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    package_format="{{ format }}"
+
+    case "$package_format" in
+        deb)
+            if dpkg-query -W -f='${Status}' "{{ LINUX_PACKAGE_NAME }}" 2>/dev/null | grep -q "install ok installed"; then
+                echo "==> Removing {{ LINUX_PACKAGE_NAME }}..."
+                sudo apt remove -y "{{ LINUX_PACKAGE_NAME }}"
+            else
+                echo "{{ LINUX_PACKAGE_NAME }} is not installed."
+            fi
+            ;;
+        *)
+            echo "error: unsupported local package format: $package_format" >&2
+            echo "supported formats: deb" >&2
+            exit 1
+            ;;
+    esac
 
 # Clean build artifacts.
 clean:

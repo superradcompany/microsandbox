@@ -1,0 +1,35 @@
+name: APT Canary
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+jobs:
+  canary:
+    name: APT Canary Smoke Test
+    if: vars.APT_CANARY_ENABLED == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: self-hosted-ubuntu-2404-x64
+    env:
+      APT_REPO_URL: ${{ vars.APT_REPO_URL }}
+      APT_REPO_KEY_URL: ${{ vars.APT_REPO_KEY_URL }}
+      DEFAULT_APT_REPO_URL: https://apt.microsandbox.dev
+      DEFAULT_APT_REPO_KEY_URL: https://apt.microsandbox.dev/microsandbox-archive-keyring.gpg
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clean previous apt state
+        run: |
+          sudo apt-get remove -y microsandbox || true
+          sudo rm -f /etc/apt/sources.list.d/microsandbox.list
+          sudo rm -f /usr/share/keyrings/microsandbox-archive-keyring.gpg
+          rm -rf ~/.microsandbox
+
+      - name: Install and smoke test from published APT repository
+        run: |
+          REPO_URL="${APT_REPO_URL:-$DEFAULT_APT_REPO_URL}"
+          KEY_URL="${APT_REPO_KEY_URL:-$DEFAULT_APT_REPO_KEY_URL}"
+
+          bash scripts/apt-smoke-test.sh \
+            --repo-url "$REPO_URL" \
+            --key-url "$KEY_URL"
