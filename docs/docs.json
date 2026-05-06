@@ -162,7 +162,11 @@
       {
         "tab": "Changelog",
         "pages": [
-          "changelog/overview"
+          "changelog/2026-05-01",
+          "changelog/2026-04-24",
+          "changelog/2026-04-17",
+          "changelog/2026-04-10",
+          "changelog/2026-04-03"
         ]
       }
     ]

@@ -1,0 +1,40 @@
+---
+title: "May 1, 2026"
+description: "TypeScript SDK redesign, network policy redesign, disk-image volumes, and more."
+---
+
+## New features
+
+**Redesigned TypeScript SDK with builder API**
+
+The TypeScript SDK has been rewritten to match the Rust SDK. Configure sandboxes with fluent builders (`Sandbox.builder(name).image(...).cpus(...).create()`), use `await using` for automatic cleanup, and rely on typed errors and async iterables. Native binaries now ship per-platform, removing the postinstall download. See the [TypeScript SDK reference](/sdk/typescript/sandbox).
+
+**Redesigned network policy with per-rule direction**
+
+Each rule now carries its own direction, action, target, protocol, and ports through a unified grammar. The CLI replaces `--network-policy` with:
+
+- `--net-rule <TOKEN>[,<TOKEN>...]` (repeatable)
+- `--net-default-egress allow|deny`
+- `--net-default-ingress allow|deny`
+- `--no-net` (sugar for deny-all)
+
+Targets accept `any`, group keywords (`public`, `private`, `loopback`, `link-local`, `meta`, `multicast`, `host`), bare IPs, CIDRs, domains, and `domain=` / `suffix=` escape hatches. See the [networking overview](/networking/overview).
+
+**Other features**
+
+- **Disk-image volume mounts.** Attach qcow2, raw, or vmdk images as virtio-blk devices at any guest path; `readonly` is now consistent across volume types. See [Sandbox volumes](/sandboxes/volumes).
+- **Inline `--script` flag.** Register scripts on the command line with `--script NAME=BODY`; the file form is now `--script-path NAME:PATH`. See the [CLI reference](/cli/sandbox-commands).
+- **`msb` alias.** Installs from npm, pip, and cargo now put both `microsandbox` and `msb` on PATH.
+- **`host.microsandbox.internal`.** Sandboxes can reach the host through this well-known DNS name.
+- **Trust host CAs (opt-in).** Sandboxes can trust the host's CA bundle for internal TLS endpoints. See [Networking TLS](/networking/tls).
+- **DNS interception over TCP/53 and DoT/853.** Closes gaps where apps bypassed policy by switching transports. See [Networking DNS](/networking/dns).
+- **Custom TLS certs and insecure registries** for self-hosted image registries. See the [images overview](/images/overview).
+- **Per-sandbox `libkrunfw` override** for SDK callers developing against unreleased firmware.
+- **Installer rejects unsupported glibc** up front, instead of producing confusing runtime errors.
+
+## Bug fixes
+
+- Domain and `suffix=` rules now enforce consistently across DNS, SNI, and policy layers.
+- The Node/TypeScript SDK supports the same secret injection options as the Rust SDK.
+- macOS reads system nameservers via `SCDynamicStore`, matching what the OS actually uses.
+- The npm platform package ships `libkrunfw` under its canonical name, fixing load failures on some Linux distros.
