@@ -166,6 +166,18 @@
             ]
           }
         ]
+      },
+      {
+        "tab": "Changelog",
+        "groups": [
+          {
+            "group": "Changelog",
+            "icon": "bolt",
+            "pages": [
+              "changelog/2026-05-08"
+            ]
+          }
+        ]
       }
     ]
   },

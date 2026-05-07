@@ -1,0 +1,59 @@
+---
+title: "Week of May 8, 2026"
+description: "File-first disk snapshots, custom guest init, per-sandbox exec logs, configurable metrics sampling, and an air-gap fix for `--no-net`."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.4.4](https://github.com/superradcompany/microsandbox/releases/tag/v0.4.4) · [v0.4.5](https://github.com/superradcompany/microsandbox/releases/tag/v0.4.5)
+</Tip>
+
+## New features
+
+**File-first disk snapshots**
+
+You can now snapshot a stopped sandbox's writable filesystem to disk and boot fresh sandboxes from that artifact, with full parity across the CLI and the Rust, TypeScript, and Python SDKs. Snapshots are content-addressed directories, stay sparse on macOS and Linux via reflink-aware copies, and can be exported as `.tar.zst` to move between machines.
+
+```bash
+# Capture a stopped sandbox's filesystem
+msb snapshot create after-pip-install --from baseline
+
+# Boot a fresh sandbox from that snapshot
+msb run --name worker --snapshot after-pip-install -- python -V
+```
+
+See the [snapshots guide](/sandboxes/snapshots).
+
+**Custom init system inside the guest**
+
+A new `--init` flag (and matching `init` / `initWith` / `init=` surfaces on every SDK) hands PID 1 inside the guest off to systemd, OpenRC, s6, or any other init binary. The agent does its boot-time setup, forks, then execs your init while the host channel keeps serving in the child. Use `--init auto` to probe a list of well-known paths, or pass an explicit absolute path.
+
+```bash
+msb run ghcr.io/superradcompany/debian-systemd:12 \
+  --init auto \
+  -- systemctl status
+```
+
+See the [custom init system docs](/sandboxes/customize#custom-init-system) and the [systemd services recipe](/recipes/systemd-services).
+
+**Per-sandbox exec logs and structured boot errors**
+
+Every exec session's stdout, stderr, and pty output is now captured to a per-sandbox `exec.log` (JSON Lines, rotated at 10 MiB), and sandboxes that fail before the agent is ready write a structured `boot-error.json` with stage, errno, and message. The CLI renders boot errors inline instead of "process exited (status: 1)", and a new typed `ExecFailed` protocol message surfaces spawn-time failures (not found, permission denied, not executable, bad cwd) directly to the SDK.
+
+```bash
+msb logs my-sandbox
+cat ~/.microsandbox/sandboxes/nope/logs/boot-error.json
+```
+
+See the [logs guide](/sandboxes/logs).
+
+### Other features
+
+- **Configurable metrics sampling interval.** The metrics sampler now accepts a custom interval (in milliseconds) from sandbox config or the SDK `create` call. The default is still 1000 ms; setting it to `0` skips the sampling task entirely, in which case reads return a clear "metrics are disabled" error. See the [metrics guide](/sandboxes/metrics).
+- **`MSB_HOME` env override.** Set `MSB_HOME` to point microsandbox at an isolated state directory instead of `~/.microsandbox/`. Useful for CI runners that share a host between jobs and need each job's sandboxes, SQLite state, and snapshots fully isolated.
+
+## Bug fixes
+
+- `--no-net` now actually air-gaps the guest. Previously, with no virtio-net attached, the underlying VMM silently bridged the guest's TCP/UDP sockets to the host, so traffic still reached the network even though `ip a` only showed `lo`. The bundled VMM was bumped to a build that flips this default; the host bridge is now opt-in.
+- Address families are gated on host route availability. Sandboxes no longer advertise `MSB_NET_IPV6` to the guest on IPv4-only hosts (and vice versa), which was causing intermittent DNS upstream failures. Each family is now active only when the user supplies an explicit address or the host kernel has a route for it.
+- The 30-second relay handshake deadline is now enforced as wall-clock time. If a sandbox accepted the unix socket but stalled before writing the handshake bytes, the in-flight read could block indefinitely. On a deadline-exceeded timeout the CLI now also surfaces the contents of `boot-error.json` instead of a generic timeout message.
