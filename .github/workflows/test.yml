@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -218,3 +221,28 @@ jobs:
       - name: Test agentd
         if: matrix.os == 'linux'
         run: cargo test --manifest-path crates/agentd/Cargo.toml --target ${{ matrix.agentd_target }}
+
+  # ---------------------------------------------------------------------------
+  # Aggregator: a single status check that always reports, regardless of
+  # whether the matrix jobs ran. Branch protection requires only this job,
+  # so docs-only PRs (where the matrix is skipped) still satisfy the gate.
+  # ---------------------------------------------------------------------------
+  summary:
+    name: Test Summary
+    if: always()
+    needs:
+      - changes
+      - build-kernel
+      - build-agentd-aarch64
+      - test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate results
+        run: |
+          results='${{ toJson(needs.*.result) }}'
+          echo "needs results: $results"
+          if echo "$results" | grep -qE '"failure"|"cancelled"'; then
+            echo "::error::A required job failed or was cancelled"
+            exit 1
+          fi
+          echo "All required jobs passed or were skipped"
