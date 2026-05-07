@@ -2011,10 +2011,13 @@ mod tests {
 
     /// Open both pools at `db_path` for tests, with migrations applied.
     async fn open_test_pools(db_path: &std::path::Path) -> DbPools {
+        // Connect timeout matches the production default (30s). 1s was too
+        // tight on cold ci runners and surfaced as `PoolTimedOut` flakes
+        // before the test body had a chance to run.
         let pools = DbPools::open(
             db_path,
             1,
-            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(30),
             std::time::Duration::from_secs(5),
         )
         .await

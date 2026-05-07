@@ -469,7 +469,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: mcp
         run: |
-          rm package-lock.json
+          rm -f package-lock.json
           npm install
           npm run build
           npm publish --access public

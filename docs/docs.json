@@ -155,6 +155,7 @@
             "icon": "docker",
             "pages": [
               "recipes/docker",
+              "recipes/docker-in-sandbox",
               "recipes/local-images"
             ]
           },
