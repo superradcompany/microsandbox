@@ -17,7 +17,7 @@ msb run ghcr.io/superradcompany/debian-systemd:12 \
   -- bash
 ```
 
-`debian-systemd` is one of the [official guest images](https://github.com/superradcompany/guest-images) we publish. `--init auto` probes a small set of well-known paths and picks the first that exists. See [Custom init system](/sandboxes/customize#custom-init-system) for the full list and for pinning to an exact path.
+`debian-systemd` is one of the optional bases we maintain in [guest-images](https://github.com/superradcompany/guest-images) for cases like this. `--init auto` probes a small set of well-known paths and picks the first that exists. See [Custom init system](/sandboxes/customize#custom-init-system) for the full list and for pinning to an exact path.
 
 ## Step 2: Confirm systemd is PID 1
 

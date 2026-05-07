@@ -280,11 +280,11 @@ sb = await Sandbox.create(
 
 Most slim Docker base images (`debian:bookworm-slim`, `ubuntu:24.04`, `python:3.12-slim`) are stripped of init binaries; they're built for "one process per container" and don't ship systemd at all. If you point `--init` at a path the image doesn't contain, the agent's pre-flight check fails boot with a clear error in the kernel log (no kernel panic).
 
-Three ways to get an image with an init, in order of how often you'd reach for them:
+Three ways to get an image with an init:
 
 <AccordionGroup>
-  <Accordion title="Use an official microsandbox image (recommended)">
-    We publish [`guest-images`](https://github.com/superradcompany/guest-images) on GHCR. The current set:
+  <Accordion title="Use an image from `guest-images`">
+    We maintain a small collection at [`superradcompany/guest-images`](https://github.com/superradcompany/guest-images) for the cases where you specifically need a real init. Current set:
 
     | Image | Pull |
     |-------|------|
@@ -293,7 +293,7 @@ Three ways to get an image with an init, in order of how often you'd reach for t
     | Fedora + systemd | `ghcr.io/superradcompany/fedora-systemd:40` |
     | Alpine + OpenRC | `ghcr.io/superradcompany/alpine-openrc:3.20` |
 
-    Multi-arch (`linux/amd64` + `linux/arm64`), rebuilt weekly to pick up upstream security patches, smoke-tested on every rebuild. Each image's GHCR page documents its specific tag aliases and contents.
+    Multi-arch (`linux/amd64` + `linux/arm64`), rebuilt weekly so they pick up upstream security patches, smoke-tested on every rebuild. Each image's GHCR page documents its specific tag aliases and contents.
   </Accordion>
   <Accordion title="Build a small custom image">
     ```dockerfile
