@@ -11,13 +11,13 @@ By default the microsandbox agent is PID 1. That's enough for one-shot processes
 ## Step 1: Boot
 
 ```bash
-msb run oowy/systemd:debian-bookworm \
+msb run ghcr.io/superradcompany/debian-systemd:12 \
   --memory 1G --cpus 2 \
   --init auto \
   -- bash
 ```
 
-`--init auto` probes a small set of well-known paths and picks the first that exists. See [Custom init system](/sandboxes/customize#custom-init-system) for the full list and for pinning to an exact path.
+`debian-systemd` is one of the [official guest images](https://github.com/superradcompany/guest-images) we publish. `--init auto` probes a small set of well-known paths and picks the first that exists. See [Custom init system](/sandboxes/customize#custom-init-system) for the full list and for pinning to an exact path.
 
 ## Step 2: Confirm systemd is PID 1
 

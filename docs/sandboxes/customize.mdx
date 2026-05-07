@@ -175,7 +175,7 @@ Pass an absolute path instead when you need pinning (e.g. for reproducible CI).
 use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("worker")
-    .image("jrei/systemd-debian:12")
+    .image("ghcr.io/superradcompany/debian-systemd:12")
     .memory(1024)
     .cpus(2)
     .init("auto")
@@ -187,7 +187,7 @@ let sb = Sandbox::builder("worker")
 import { MiB, Sandbox } from "microsandbox";
 
 await using sb = await Sandbox.builder("worker")
-    .image("jrei/systemd-debian:12")
+    .image("ghcr.io/superradcompany/debian-systemd:12")
     .memory(MiB(1024))
     .cpus(2)
     .init("auto")
@@ -199,7 +199,7 @@ from microsandbox import Sandbox
 
 sb = await Sandbox.create(
     "worker",
-    image="jrei/systemd-debian:12",
+    image="ghcr.io/superradcompany/debian-systemd:12",
     memory=1024,
     cpus=2,
     init="auto",
@@ -207,7 +207,7 @@ sb = await Sandbox.create(
 ```
 
 ```bash CLI
-msb run jrei/systemd-debian:12 \
+msb run ghcr.io/superradcompany/debian-systemd:12 \
   -m 1G -c 2 \
   --init auto \
   -- bash
@@ -217,7 +217,7 @@ msb run jrei/systemd-debian:12 \
 To verify the handoff worked, check `/proc/1/comm` inside the sandbox. It should print the init's name (`systemd`, `init`, etc.):
 
 ```bash
-$ msb run jrei/systemd-debian:12 --init auto -- cat /proc/1/comm
+$ msb run ghcr.io/superradcompany/debian-systemd:12 --init auto -- cat /proc/1/comm
 systemd
 ```
 
@@ -235,7 +235,7 @@ Argv defaults to `[<cmd>]` when none is given; env is merged on top of the inher
 
 <CodeGroup>
 ```bash CLI
-msb run jrei/systemd-debian:12 \
+msb run ghcr.io/superradcompany/debian-systemd:12 \
   --init /lib/systemd/systemd \
   --init-arg --unit=multi-user.target \
   --init-env container=microsandbox \
@@ -244,7 +244,7 @@ msb run jrei/systemd-debian:12 \
 
 ```rust Rust
 let sb = Sandbox::builder("worker")
-    .image("jrei/systemd-debian:12")
+    .image("ghcr.io/superradcompany/debian-systemd:12")
     .init_with("/lib/systemd/systemd", |i| i
         .args(["--unit=multi-user.target"])
         .env("container", "microsandbox"))
@@ -254,7 +254,7 @@ let sb = Sandbox::builder("worker")
 
 ```typescript TypeScript
 await using sb = await Sandbox.builder("worker")
-    .image("jrei/systemd-debian:12")
+    .image("ghcr.io/superradcompany/debian-systemd:12")
     .initWith("/lib/systemd/systemd", (i) => i
         .args(["--unit=multi-user.target"])
         .env("container", "microsandbox"))
@@ -266,7 +266,7 @@ from microsandbox import InitConfig, Sandbox
 
 sb = await Sandbox.create(
     "worker",
-    image="jrei/systemd-debian:12",
+    image="ghcr.io/superradcompany/debian-systemd:12",
     init=InitConfig(
         cmd="/lib/systemd/systemd",
         args=("--unit=multi-user.target",),
@@ -280,9 +280,21 @@ sb = await Sandbox.create(
 
 Most slim Docker base images (`debian:bookworm-slim`, `ubuntu:24.04`, `python:3.12-slim`) are stripped of init binaries; they're built for "one process per container" and don't ship systemd at all. If you point `--init` at a path the image doesn't contain, the agent's pre-flight check fails boot with a clear error in the kernel log (no kernel panic).
 
-Two ways to get an image with an init:
+Three ways to get an image with an init, in order of how often you'd reach for them:
 
 <AccordionGroup>
+  <Accordion title="Use an official microsandbox image (recommended)">
+    We publish [`guest-images`](https://github.com/superradcompany/guest-images) on GHCR. The current set:
+
+    | Image | Pull |
+    |-------|------|
+    | Debian + systemd | `ghcr.io/superradcompany/debian-systemd:12` |
+    | Ubuntu + systemd | `ghcr.io/superradcompany/ubuntu-systemd:24.04` |
+    | Fedora + systemd | `ghcr.io/superradcompany/fedora-systemd:40` |
+    | Alpine + OpenRC | `ghcr.io/superradcompany/alpine-openrc:3.20` |
+
+    Multi-arch (`linux/amd64` + `linux/arm64`), rebuilt weekly to pick up upstream security patches, smoke-tested on every rebuild. Each image's GHCR page documents its specific tag aliases and contents.
+  </Accordion>
   <Accordion title="Build a small custom image">
     ```dockerfile
     # Dockerfile.systemd
