@@ -151,11 +151,18 @@
         "tab": "Recipes",
         "groups": [
           {
-            "group": "Container Integration",
+            "group": "Docker",
             "icon": "docker",
             "pages": [
               "recipes/docker",
               "recipes/local-images"
+            ]
+          },
+          {
+            "group": "Guest",
+            "icon": "server",
+            "pages": [
+              "recipes/systemd-services"
             ]
           }
         ]
