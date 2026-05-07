@@ -876,6 +876,175 @@ Set the default working directory for all commands.
 
 ---
 
+## PatchBuilder
+
+Fluent builder for the ordered list of pre-boot rootfs patches. Used in `SandboxBuilder::patch(|p| p...)`. Each method appends one operation; calls are chainable. By default a method that targets a path already present in the image errors at boot; pass `replace = true` on the operation to allow overwriting. `mkdir` and `remove` are idempotent.
+
+See [Patches](/sandboxes/customize#patches) for conceptual context.
+
+---
+
+#### append()
+
+```rust
+fn append(self, path: impl Into<String>, content: impl Into<String>) -> Self
+```
+
+Append `content` to an existing file at `path`. If the file lives in a lower image layer, it's copied up first.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl Into<String>` | Absolute path inside the guest |
+| content | `impl Into<String>` | Text to append |
+
+---
+
+#### copy_dir()
+
+```rust
+fn copy_dir(self, src: impl Into<PathBuf>, dst: impl Into<String>, replace: bool) -> Self
+```
+
+Recursively copy a host directory at `src` into the guest rootfs at `dst`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `impl Into<PathBuf>` | Host source directory |
+| dst | `impl Into<String>` | Absolute destination path inside the guest |
+| replace | `bool` | When `true`, overwrite an existing path at `dst` |
+
+---
+
+#### copy_file()
+
+```rust
+fn copy_file(
+    self,
+    src: impl Into<PathBuf>,
+    dst: impl Into<String>,
+    mode: Option<u32>,
+    replace: bool,
+) -> Self
+```
+
+Copy a single host file at `src` into the guest rootfs at `dst`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `impl Into<PathBuf>` | Host source file |
+| dst | `impl Into<String>` | Absolute destination path inside the guest |
+| mode | `Option<u32>` | File mode, e.g. `Some(0o644)`. `None` keeps the source mode |
+| replace | `bool` | When `true`, overwrite an existing path at `dst` |
+
+---
+
+#### file()
+
+```rust
+fn file(
+    self,
+    path: impl Into<String>,
+    content: impl Into<Vec<u8>>,
+    mode: Option<u32>,
+    replace: bool,
+) -> Self
+```
+
+Write raw bytes at `path`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl Into<String>` | Absolute path inside the guest |
+| content | `impl Into<Vec<u8>>` | Raw byte content |
+| mode | `Option<u32>` | File mode, e.g. `Some(0o644)` |
+| replace | `bool` | When `true`, overwrite an existing path |
+
+---
+
+#### mkdir()
+
+```rust
+fn mkdir(self, path: impl Into<String>, mode: Option<u32>) -> Self
+```
+
+Create a directory at `path`. Idempotent: a no-op if the directory already exists.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl Into<String>` | Absolute path inside the guest |
+| mode | `Option<u32>` | Directory mode, e.g. `Some(0o755)` |
+
+---
+
+#### remove()
+
+```rust
+fn remove(self, path: impl Into<String>) -> Self
+```
+
+Delete a file or directory at `path`. Idempotent: a no-op if the path doesn't exist.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl Into<String>` | Absolute path inside the guest |
+
+---
+
+#### symlink()
+
+```rust
+fn symlink(self, target: impl Into<String>, link: impl Into<String>, replace: bool) -> Self
+```
+
+Create a symlink at `link` pointing to `target`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| target | `impl Into<String>` | What the symlink points to (literal symlink target text) |
+| link | `impl Into<String>` | Absolute path of the symlink itself |
+| replace | `bool` | When `true`, overwrite an existing path at `link` |
+
+---
+
+#### text()
+
+```rust
+fn text(
+    self,
+    path: impl Into<String>,
+    content: impl Into<String>,
+    mode: Option<u32>,
+    replace: bool,
+) -> Self
+```
+
+Write UTF-8 text content at `path`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl Into<String>` | Absolute path inside the guest |
+| content | `impl Into<String>` | Text content |
+| mode | `Option<u32>` | File mode, e.g. `Some(0o644)` |
+| replace | `bool` | When `true`, overwrite an existing path |
+
+---
+
 ## Types
 
 ### LogEntry
