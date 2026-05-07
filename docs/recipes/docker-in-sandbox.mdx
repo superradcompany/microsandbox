@@ -4,6 +4,14 @@ description: Start dockerd inside a microsandbox VM and run containers from an i
 icon: "docker"
 ---
 
+<iframe
+  className="w-full aspect-video rounded-xl"
+  src="https://www.youtube.com/embed/scFFZWsbrbo"
+  title="Docker in a Sandbox demo"
+  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+  allowFullScreen
+></iframe>
+
 This recipe gives you a complete, throwaway Docker environment inside a microsandbox VM. It is useful for sandboxed builds, isolating agent workflows that need their own Docker, or any experiment you don't want leaking onto the dev machine. The host's Docker setup (if any) is left untouched.
 
 `docker:dind` is a regular OCI image, so microsandbox can boot one inside a microVM. You boot the image into a shell, start `dockerd`, and from there every Docker command in that shell talks to the nested daemon rather than the host's.
