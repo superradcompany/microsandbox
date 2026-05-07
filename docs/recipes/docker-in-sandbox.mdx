@@ -1,0 +1,114 @@
+---
+title: Running Docker Inside a Sandbox
+description: Start dockerd inside a microsandbox VM and run containers from an interactive shell
+icon: "docker"
+---
+
+This recipe gives you a complete, throwaway Docker environment inside a microsandbox VM. It is useful for sandboxed builds, isolating agent workflows that need their own Docker, or any experiment you don't want leaking onto the dev machine. The host's Docker setup (if any) is left untouched.
+
+`docker:dind` is a regular OCI image, so microsandbox can boot one inside a microVM. You boot the image into a shell, start `dockerd`, and from there every Docker command in that shell talks to the nested daemon rather than the host's.
+
+Storage needs one small workaround. The sandbox root is already an overlayfs mount, and Docker's default storage driver also wants overlayfs for container layers. Stacking the two produces overlay-on-overlay mount errors. The fix is to point Docker's data root at `/tmp`, which microsandbox already mounts as tmpfs.
+
+<Warning>
+  Docker's data lives on tmpfs in this recipe. Pulled images and created containers do not survive sandbox removal.
+</Warning>
+
+## Step 1: Create the helper script
+
+Save this as `start-docker` in the directory you'll run `msb` from:
+
+```bash start-docker
+#!/bin/sh
+set -eu
+
+if docker info >/dev/null 2>&1; then
+  echo "Docker is already running."
+  exit 0
+fi
+
+dockerd --data-root=/tmp/docker >/tmp/dockerd.log 2>&1 &
+
+printf "Starting Docker"
+i=0
+while ! docker info >/dev/null 2>&1; do
+  i=$((i + 1))
+  if [ "$i" -ge 60 ]; then
+    echo
+    cat /tmp/dockerd.log
+    exit 1
+  fi
+  printf "."
+  sleep 1
+done
+echo " ready"
+```
+
+Make it executable:
+
+```bash
+chmod +x start-docker
+```
+
+## Step 2: Boot the sandbox
+
+```bash
+msb run --name docker-demo --replace \
+  --memory 2G \
+  --tmpfs /tmp:1G \
+  --entrypoint sh \
+  --script-path start-docker:./start-docker \
+  docker:dind
+```
+
+`--entrypoint sh` replaces the image's default DinD entrypoint with an interactive shell. `--script-path` makes `start-docker` available inside the sandbox at `/.msb/scripts/start-docker`, which is already on `PATH`.
+
+## Step 3: Start the daemon
+
+From the sandbox shell, run the helper:
+
+```bash
+start-docker
+```
+
+Once it prints `ready`, the daemon is running and the Docker client in the same shell is connected to it.
+
+## Step 4: Run something
+
+Verify the daemon with hello-world:
+
+```bash
+docker run --rm hello-world
+```
+
+For something closer to a real workload, start a long-running container and tail its logs:
+
+```bash
+docker run -d --name heartbeat alpine sh -c 'while true; do date; sleep 1; done'
+docker ps
+docker logs -f heartbeat
+```
+
+`Ctrl-C` stops the tail; `heartbeat` continues running in the background.
+
+For a visual demo, run cmatrix in a nested Alpine container:
+
+```bash
+docker run --rm -it alpine sh -lc 'apk add --no-cache cmatrix >/dev/null && cmatrix -ab'
+```
+
+`q` exits.
+
+## Cleanup
+
+```bash
+exit
+msb rm -f docker-demo
+```
+
+## Notes
+
+- **Tmpfs sizing.** `/tmp` is 1 GiB here. Increase `--tmpfs /tmp:N` if you plan to pull larger images.
+- **Named volumes don't fix this.** They are virtiofs-backed host directories, and Docker's overlay snapshotter can't use those for `upperdir` / `workdir`.
+- **Future work: disk-image-backed volumes.** microsandbox already supports virtio-blk-mounted disk images at the runtime layer. Once that is exposed through `msb volume`, Docker's data root can sit on a real block device and survive sandbox removal.
+- **Not the same as [running microsandbox in Docker](/recipes/docker).** That recipe covers the opposite direction.
