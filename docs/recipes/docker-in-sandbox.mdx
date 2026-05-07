@@ -119,4 +119,4 @@ msb rm -f docker-demo
 - **Tmpfs sizing.** `/tmp` is 1 GiB here. Increase `--tmpfs /tmp:N` if you plan to pull larger images.
 - **Named volumes don't fix this.** They are virtiofs-backed host directories, and Docker's overlay snapshotter can't use those for `upperdir` / `workdir`.
 - **Future work: disk-image-backed volumes.** microsandbox already supports virtio-blk-mounted disk images at the runtime layer. Once that is exposed through `msb volume`, Docker's data root can sit on a real block device and survive sandbox removal.
-- **Not the same as [running microsandbox in Docker](/recipes/docker).** That recipe covers the opposite direction.
+- **Not the same as [Sandbox in Docker](/recipes/docker).** That recipe covers the opposite direction.
