@@ -1,0 +1,344 @@
+---
+title: "Снимки"
+description: "Справочник API снимков"
+icon: "camera"
+---
+
+
+Disk-only snapshots of a stopped sandbox. See [Snapshots](/ru/sandboxes/snapshots) for concepts and walkthroughs; this page is the Rust SDK reference.
+
+```rust
+use microsandbox::{Sandbox, Snapshot, SnapshotHandle, SnapshotFormat};
+use microsandbox::snapshot::ExportOpts;
+```
+
+<Note>
+  Snapshots are **disk-only and stopped-only**. Live snapshots and qcow2 backing chains are tracked as future work.
+</Note>
+
+## SandboxBuilder
+
+---
+
+#### from_snapshot()
+
+```rust
+fn from_snapshot(self, src: impl Into<String>) -> Self
+```
+
+Boot a fresh sandbox from a snapshot artifact. Mutually exclusive with [`image()`](/ru/sdk/rust/sandbox#image) and [`image_with()`](/ru/sdk/rust/sandbox#image-with) — the snapshot already pins the image.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `impl Into<String>` | Bare name (resolved under `~/.microsandbox/snapshots/`) or filesystem path to an artifact directory |
+
+---
+
+## SandboxHandle methods
+
+---
+
+#### snapshot()
+
+```rust
+async fn snapshot(&self, name: &str) -> MicrosandboxResult<Snapshot>
+```
+
+Snapshot this (stopped) sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). For an explicit filesystem destination see [`snapshot_to()`](#snapshot-to).
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `&str` | Bare snapshot name |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Snapshot` | The created artifact handle |
+
+**Errors**
+
+- `MicrosandboxError::SnapshotSandboxRunning` — the sandbox is not stopped
+- `MicrosandboxError::SnapshotAlreadyExists` — destination already exists (use the builder with `.force()` to overwrite)
+
+---
+
+#### snapshot_to()
+
+```rust
+async fn snapshot_to(&self, path: impl AsRef<Path>) -> MicrosandboxResult<Snapshot>
+```
+
+Snapshot this (stopped) sandbox to an explicit filesystem path. For the common case of writing under the default snapshots directory see [`snapshot()`](#snapshot).
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl AsRef<Path>` | Destination directory |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Snapshot` | The created artifact handle |
+
+---
+
+## Snapshot (instance)
+
+---
+
+#### path()
+
+```rust
+fn path(&self) -> &Path
+```
+
+Path to the artifact directory.
+
+---
+
+#### digest()
+
+```rust
+fn digest(&self) -> &str
+```
+
+Canonical content digest (`sha256:hex`) over the manifest bytes. The snapshot's identity.
+
+---
+
+#### manifest()
+
+```rust
+fn manifest(&self) -> &Manifest
+```
+
+Parsed manifest — image reference, image manifest digest, fstype, format, labels, upper-layer metadata, and optional integrity hash.
+
+---
+
+#### size_bytes()
+
+```rust
+fn size_bytes(&self) -> u64
+```
+
+Apparent size of the captured upper layer in bytes (the ext4 virtual size, sparse on disk).
+
+---
+
+#### verify()
+
+```rust
+async fn verify(&self) -> MicrosandboxResult<SnapshotVerifyReport>
+```
+
+Recompute the upper layer's content hash and compare against the manifest. Walks data extents only, so a 4 GiB sparse file with a few MB of data verifies in milliseconds. Returns `NotRecorded` when the manifest has no integrity hash.
+
+---
+
+## Snapshot::builder
+
+---
+
+#### Snapshot::builder()
+
+```rust
+fn builder(source_sandbox: impl Into<String>) -> SnapshotBuilder
+```
+
+Start configuring a new snapshot. The fluent builder is the API the CLI uses internally.
+
+```rust
+let snap = Snapshot::builder("baseline")
+    .name("after-pip-install")        // bare name in default dir
+    .label("stage", "post-deps")
+    .force()                           // overwrite if it exists
+    .record_integrity()                // hash the upper layer
+    .create()
+    .await?;
+```
+
+**Builder methods**
+
+| Method | Description |
+|--------|-------------|
+| `.destination(SnapshotDestination)` | Explicit destination variant |
+| `.name(&str)` | Convenience: bare name under the default snapshots directory |
+| `.path(PathBuf)` | Convenience: explicit filesystem path |
+| `.label(k, v)` | Add a `key=value` label (sorted in canonical form) |
+| `.force()` | Overwrite an existing artifact at the destination |
+| `.record_integrity()` | Compute and record a content-integrity hash at creation |
+
+---
+
+## Snapshot (static)
+
+---
+
+#### Snapshot::create()
+
+```rust
+async fn create(config: SnapshotConfig) -> MicrosandboxResult<Snapshot>
+```
+
+Create a snapshot from a [`SnapshotConfig`](#snapshotconfig). Equivalent to using the builder.
+
+---
+
+#### Snapshot::open()
+
+```rust
+async fn open(path_or_name: impl AsRef<str>) -> MicrosandboxResult<Snapshot>
+```
+
+Open an existing artifact by bare name (resolved under the default snapshots directory) or path. Cheap metadata validation only; does **not** read the upper file. Use [`verify()`](#verify) for content checks.
+
+---
+
+#### Snapshot::get()
+
+```rust
+async fn get(name_or_digest: &str) -> MicrosandboxResult<SnapshotHandle>
+```
+
+Look up a handle in the local index by name, digest, or path.
+
+---
+
+#### Snapshot::list()
+
+```rust
+async fn list() -> MicrosandboxResult<Vec<SnapshotHandle>>
+```
+
+List indexed snapshots from the local DB cache. External-path artifacts opened via `Snapshot::open(/some/path)` may not appear here unless they live under the configured snapshots directory.
+
+---
+
+#### Snapshot::list_dir()
+
+```rust
+async fn list_dir(dir: impl AsRef<Path>) -> MicrosandboxResult<Vec<Snapshot>>
+```
+
+Walk a directory and parse each subdirectory's manifest. Does not touch the index. Skips entries that don't look like snapshot artifacts.
+
+---
+
+#### Snapshot::remove()
+
+```rust
+async fn remove(path_or_name: &str, force: bool) -> MicrosandboxResult<()>
+```
+
+Remove a snapshot artifact and its index row. Refuses if the snapshot has indexed children unless `force` is `true`.
+
+---
+
+#### Snapshot::reindex()
+
+```rust
+async fn reindex(dir: impl AsRef<Path>) -> MicrosandboxResult<usize>
+```
+
+Walk `dir`, upsert index rows for every artifact found, recompute parent-edge child counts. Returns the number of artifacts indexed.
+
+---
+
+#### Snapshot::export()
+
+```rust
+async fn export(name_or_path: &str, out: &Path, opts: ExportOpts) -> MicrosandboxResult<()>
+```
+
+Bundle a snapshot into a `.tar.zst` archive. Computes and embeds the integrity hash in the bundled manifest if not already present.
+
+**ExportOpts**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `with_parents` | `bool` | Walk the parent chain and include each ancestor (no-op today) |
+| `with_image` | `bool` | Bundle the OCI image cache (`cache/{layers,fsmeta,vmdk}`) for offline transport |
+| `plain_tar` | `bool` | Skip zstd compression and write a plain `.tar` |
+
+---
+
+#### Snapshot::import()
+
+```rust
+async fn import(archive: &Path, dest: Option<&Path>) -> MicrosandboxResult<SnapshotHandle>
+```
+
+Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity on the way in. Compression is detected from magic bytes.
+
+---
+
+## SnapshotHandle
+
+Lightweight handle backed by an index row. Returned by [`Snapshot::list()`](#snapshotlist) and [`Snapshot::get()`](#snapshotget).
+
+```rust
+let h = Snapshot::get("after-pip-install").await?;
+
+h.digest();           // &str — sha256:...
+h.name();             // Option<&str>
+h.parent_digest();    // Option<&str> — None today; populated when chains land
+h.image_ref();        // &str
+h.format();           // SnapshotFormat::Raw | Qcow2
+h.size_bytes();       // Option<u64>
+h.created_at();       // chrono::NaiveDateTime
+h.path();             // &Path
+
+let snap = h.open().await?;       // verify metadata, return Snapshot
+h.remove(false).await?;            // false = refuse if has children
+```
+
+---
+
+## Types
+
+#### SnapshotDestination
+
+```rust
+pub enum SnapshotDestination {
+    Name(String),
+    Path(PathBuf),
+}
+```
+
+Used by [`SnapshotBuilder::destination()`](#snapshotbuilder). The handle methods [`snapshot()`](#snapshot) and [`snapshot_to()`](#snapshot-to) construct this enum internally so callers don't need to import it.
+
+#### SnapshotFormat
+
+```rust
+pub enum SnapshotFormat {
+    Raw,
+    Qcow2,    // future
+}
+```
+
+Always emits `Raw` today. The `Qcow2` variant is reserved for backing-chain checkpoints.
+
+#### SnapshotVerifyReport
+
+```rust
+pub struct SnapshotVerifyReport {
+    pub digest: String,
+    pub path: PathBuf,
+    pub upper: UpperVerifyStatus,
+}
+
+pub enum UpperVerifyStatus {
+    NotRecorded,
+    Verified { algorithm: String, digest: String },
+}
+```
+
+Returned by [`Snapshot::verify()`](#verify).

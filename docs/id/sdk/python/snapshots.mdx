@@ -1,0 +1,271 @@
+---
+title: "Snapshot"
+description: "Referensi API snapshot"
+icon: "code-branch"
+---
+
+
+Disk-only snapshots of a stopped sandbox. See [Snapshots](/id/sandboxes/snapshots) for concepts and walkthroughs; this page is the Python SDK reference.
+
+```python
+from microsandbox import Sandbox, Snapshot, SnapshotHandle
+```
+
+<Note>
+  Snapshots are **disk-only and stopped-only**. Live snapshots and qcow2 backing chains are tracked as future work.
+</Note>
+
+## Sandbox.create() — `snapshot=` kwarg
+
+```python
+@staticmethod
+async def create(name_or_config, *, snapshot: str | os.PathLike | None = None, **kwargs) -> Sandbox
+```
+
+Boot a fresh sandbox from a snapshot artifact by passing `snapshot=` as a peer of `image=`. The two are mutually exclusive — pass exactly one.
+
+```python
+# Boot from a snapshot
+sb = await Sandbox.create("worker", snapshot="after-pip-install")
+
+# Or from an image (existing flow, unchanged)
+sb = await Sandbox.create("worker", image="python:3.12")
+```
+
+**Errors**
+
+- `ValueError` — both `image=` and `snapshot=` were passed or neither, the snapshot artifact doesn't exist, or the artifact's manifest failed validation
+
+---
+
+## SandboxHandle methods
+
+---
+
+#### snapshot()
+
+```python
+async def snapshot(self, name: str) -> Snapshot
+```
+
+Snapshot this (stopped) sandbox under a bare name in the default snapshots directory (`~/.microsandbox/snapshots/<name>/`). For an explicit filesystem destination, see [`snapshot_to()`](#snapshot-to).
+
+**Errors**
+
+- `SnapshotSandboxRunning` — the sandbox is not stopped
+- `SnapshotAlreadyExists` — destination exists (use `Snapshot.create(..., force=True)` to overwrite)
+
+---
+
+#### snapshot_to()
+
+```python
+async def snapshot_to(self, path: str | os.PathLike) -> Snapshot
+```
+
+Snapshot this (stopped) sandbox to an explicit filesystem path.
+
+---
+
+## Snapshot (instance)
+
+Properties are read-only attributes (not async).
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `path` | `str` | Path to the artifact directory |
+| `digest` | `str` | Canonical content digest (`sha256:hex`). The snapshot's identity. |
+| `size_bytes` | `int` | Apparent size of the captured upper layer in bytes (sparse on disk) |
+| `image_ref` | `str` | Image reference the snapshot was taken from |
+| `image_manifest_digest` | `str` | OCI manifest digest of the pinned image |
+| `format` | `str` | `"raw"` or `"qcow2"` (always `"raw"` today) |
+| `fstype` | `str` | Filesystem type inside the upper (e.g. `"ext4"`) |
+| `parent` | `str \| None` | Parent snapshot's digest, or `None` for a root |
+| `created_at` | `str` | RFC 3339 timestamp |
+| `labels` | `dict[str, str]` | User-supplied labels |
+| `source_sandbox` | `str \| None` | Best-effort source-sandbox name |
+
+---
+
+#### verify()
+
+```python
+async def verify(self) -> dict[str, Any]
+```
+
+Recompute the upper layer's content hash and compare against the manifest. Walks data extents only, so a 4 GiB sparse file with a few MB of data verifies in milliseconds.
+
+```python
+report = await snap.verify()
+if report["upper"]["kind"] == "verified":
+    print(f"hash matches: {report['upper']['digest']}")
+else:
+    print("no integrity hash recorded")
+```
+
+The report shape:
+
+```python
+{
+    "digest": "sha256:...",
+    "path": "/path/to/artifact",
+    "upper": {"kind": "not_recorded"}                            # no integrity recorded
+        | {"kind": "verified", "algorithm": "...", "digest": "sha256:..."},
+}
+```
+
+---
+
+## Snapshot (static)
+
+---
+
+#### Snapshot.create()
+
+```python
+@staticmethod
+async def create(
+    source_sandbox: str,
+    *,
+    name: str | None = None,
+    path: str | os.PathLike | None = None,
+    labels: dict[str, str] | None = None,
+    force: bool = False,
+    record_integrity: bool = False,
+) -> Snapshot
+```
+
+Create a snapshot from a stopped sandbox. Exactly one of `name=` (resolved under the default snapshots directory) or `path=` (explicit filesystem destination) is required.
+
+```python
+snap = await Snapshot.create(
+    "baseline",
+    name="after-pip-install",
+    labels={"stage": "post-deps"},
+    record_integrity=True,
+)
+```
+
+---
+
+#### Snapshot.open()
+
+```python
+@staticmethod
+async def open(path_or_name: str) -> Snapshot
+```
+
+Open an existing artifact by bare name (resolved under the default snapshots directory) or path. Cheap metadata validation only; does **not** read the upper file. Use [`verify()`](#verify) for content checks.
+
+---
+
+#### Snapshot.get()
+
+```python
+@staticmethod
+async def get(name_or_digest: str) -> SnapshotHandle
+```
+
+Look up a handle in the local index by name, digest, or path.
+
+---
+
+#### Snapshot.list()
+
+```python
+@staticmethod
+async def list() -> list[SnapshotHandle]
+```
+
+List indexed snapshots from the local DB cache.
+
+---
+
+#### Snapshot.list_dir()
+
+```python
+@staticmethod
+async def list_dir(dir: str | os.PathLike) -> list[Snapshot]
+```
+
+Walk a directory and parse each subdirectory's manifest. Does not touch the index — useful for inspecting external snapshot collections (e.g. a mounted volume of artifacts that were never imported). Skips entries that don't look like snapshot artifacts.
+
+---
+
+#### Snapshot.remove()
+
+```python
+@staticmethod
+async def remove(path_or_name: str, *, force: bool = False) -> None
+```
+
+Remove a snapshot artifact and its index row. Refuses if the snapshot has indexed children unless `force=True`.
+
+---
+
+#### Snapshot.reindex()
+
+```python
+@staticmethod
+async def reindex(dir: str | os.PathLike | None = None) -> int
+```
+
+Walk `dir` (default: configured snapshots dir) and rebuild the local index. Returns the number of artifacts indexed.
+
+---
+
+#### Snapshot.export()
+
+```python
+@staticmethod
+async def export(
+    name_or_path: str,
+    out: str | os.PathLike,
+    *,
+    with_parents: bool = False,
+    with_image: bool = False,
+    plain_tar: bool = False,
+) -> None
+```
+
+Bundle a snapshot into a `.tar.zst` archive. Computes and embeds the integrity hash in the bundled manifest if not already present.
+
+---
+
+#### Snapshot.import_()
+
+```python
+@staticmethod
+async def import_(
+    archive: str | os.PathLike,
+    *,
+    dest: str | os.PathLike | None = None,
+) -> SnapshotHandle
+```
+
+Unpack a snapshot archive (`.tar.zst` or `.tar`) into the snapshots directory, verifying recorded integrity on the way in. Compression is detected from magic bytes.
+
+The trailing underscore is intentional — `import` is a reserved Python keyword.
+
+---
+
+## SnapshotHandle
+
+Lightweight handle backed by an index row. Returned by [`Snapshot.list()`](#snapshot-list) and [`Snapshot.get()`](#snapshot-get).
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `digest` | `str` | Manifest digest — canonical identity |
+| `name` | `str \| None` | Convenience alias |
+| `parent_digest` | `str \| None` | Parent snapshot digest (`None` today; populated when chains land) |
+| `image_ref` | `str` | Image the snapshot was taken from |
+| `format` | `str` | `"raw"` or `"qcow2"` |
+| `size_bytes` | `int \| None` | Apparent upper size at index time |
+| `created_at` | `float` | ms since Unix epoch |
+| `path` | `str` | Local artifact directory path |
+
+```python
+h = await Snapshot.get("after-pip-install")
+snap = await h.open()                # metadata-validated
+await h.remove(force=False)          # refuse if has children
+```

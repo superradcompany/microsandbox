@@ -1,0 +1,213 @@
+---
+title: "Spouštění"
+description: "Reference API pro spouštění příkazů"
+icon: "terminal"
+---
+
+
+See [Commands](/cs/sandboxes/commands) for usage examples.
+
+## Types
+
+### ExecOutput
+
+The result of a completed command execution.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| exit_code | `int` | Exit code |
+| success | `bool` | `True` if exit_code is `0` |
+| stdout_text | `str` | Collected stdout decoded as UTF-8. Raises on invalid encoding. |
+| stderr_text | `str` | Collected stderr decoded as UTF-8 |
+| stdout_bytes | `bytes` | Raw stdout bytes |
+| stderr_bytes | `bytes` | Raw stderr bytes |
+
+---
+
+### ExecHandle
+
+A handle to a running streaming execution. Supports `async for event in handle:` to iterate over events until the stream ends.
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| id | `str` | Correlation ID for this execution |
+| take_stdin() | [`ExecSink`](#execsink) ` \| None` | Take the stdin writer. Returns `None` after first call. |
+| recv() | `ExecEvent \| None` | *(async)* Receive the next event. Returns `None` when done. |
+| wait() | `tuple[int, bool]` | *(async)* Wait for the process to exit. Returns `(code, success)`. |
+| collect() | [`ExecOutput`](#execoutput) | *(async)* Wait and collect all remaining output |
+| signal(sig) | `None` | *(async)* Send a POSIX signal to the process |
+| kill() | `None` | *(async)* Send SIGKILL |
+
+---
+
+### ExecSink
+
+Writer for sending data to a running process's stdin.
+
+| Method | Parameters | Description |
+|--------|-----------|-------------|
+| write() | `data: bytes` | *(async)* Write bytes to the process's stdin |
+| close() | - | *(async)* Close stdin. The process sees EOF. |
+
+---
+
+### ExecEvent
+
+Low-level event from PyO3 bindings.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| event_type | `str` | `"started"`, `"stdout"`, `"stderr"`, or `"exited"` |
+| pid | `int \| None` | Guest PID (on `"started"`) |
+| data | `bytes \| None` | Output data (on `"stdout"` / `"stderr"`) |
+| code | `int \| None` | Exit code (on `"exited"`) |
+
+Python dataclass variants are also available for pattern matching:
+
+| Class | Fields | Description |
+|-------|--------|-------------|
+| `StartedEvent` | `pid: int` | The process has started |
+| `StdoutEvent` | `data: bytes` | A chunk of stdout data |
+| `StderrEvent` | `data: bytes` | A chunk of stderr data |
+| `ExitedEvent` | `code: int` | The process has exited |
+
+The union type `ExecEvent = StartedEvent | StdoutEvent | StderrEvent | ExitedEvent` is available from `events.py`.
+
+---
+
+### ExecOptions
+
+```python
+ExecOptions(
+    args: tuple[str, ...] = (),
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] = {},
+    timeout: float | None = None,  # seconds
+    stdin: Stdin = Stdin.null(),
+    tty: bool = False,
+    rlimits: tuple[Rlimit, ...] = (),
+)
+```
+
+Frozen dataclass for per-execution overrides.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| args | `tuple[str, ...]` | `()` | Command arguments |
+| cwd | `str \| None` | `None` | Working directory |
+| user | `str \| None` | `None` | Guest user |
+| env | `Mapping[str, str]` | `{}` | Environment variables |
+| timeout | `float \| None` | `None` | Kill the process after this many seconds |
+| stdin | [`Stdin`](#stdin) | `Stdin.null()` | Stdin source |
+| tty | `bool` | `False` | Allocate a pseudo-terminal |
+| rlimits | `tuple[`[`Rlimit`](#rlimit)`, ...]` | `()` | Resource limits |
+
+---
+
+### AttachOptions
+
+```python
+AttachOptions(
+    args: tuple[str, ...] = (),
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] = {},
+    detach_keys: str | None = None,
+)
+```
+
+Frozen dataclass for interactive PTY attach configuration.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| args | `tuple[str, ...]` | `()` | Command arguments |
+| cwd | `str \| None` | `None` | Working directory |
+| user | `str \| None` | `None` | Guest user |
+| env | `Mapping[str, str]` | `{}` | Environment variables |
+| detach_keys | `str \| None` | `None` | Key sequence to detach without stopping |
+
+---
+
+### Stdin
+
+Frozen dataclass with factory methods for configuring process stdin.
+
+| Factory | Parameters | Description |
+|---------|-----------|-------------|
+| Stdin.null() | - | `/dev/null` (default) |
+| Stdin.pipe() | - | Piped stdin. Use [`take_stdin()`](#exechandle) on the handle to write. |
+| Stdin.bytes() | `data: bytes` | Inline data sent before the process starts |
+
+---
+
+### Rlimit
+
+Frozen dataclass with factory methods for POSIX resource limits.
+
+| Factory | Parameters | Description |
+|---------|-----------|-------------|
+| Rlimit.nofile(limit) | `limit: int` | Max open file descriptors |
+| Rlimit.cpu(secs) | `secs: int` | CPU time limit in seconds |
+| Rlimit.as_(*, soft, hard) | `soft: int, hard: int` | Virtual memory size |
+| Rlimit.nproc(limit) | `limit: int` | Max number of processes |
+| Rlimit.fsize(limit) | `limit: int` | Max file size |
+| Rlimit.memlock(limit) | `limit: int` | Max locked memory |
+| Rlimit.stack(limit) | `limit: int` | Max stack size |
+
+**Properties**
+
+| Property | Type | Description |
+|----------|------|-------------|
+| resource | [`RlimitResource`](#rlimitresource) | Resource type |
+| soft | `int` | Soft limit |
+| hard | `int` | Hard limit |
+
+---
+
+### RlimitResource
+
+Enum of POSIX resource types.
+
+| Value | Description |
+|-------|-------------|
+| `cpu` | CPU time |
+| `fsize` | File size |
+| `data` | Data segment size |
+| `stack` | Stack size |
+| `core` | Core file size |
+| `rss` | Resident set size |
+| `nproc` | Number of processes |
+| `nofile` | Open file descriptors |
+| `memlock` | Locked memory |
+| `as` | Virtual memory |
+| `locks` | File locks |
+| `sigpending` | Pending signals |
+| `msgqueue` | Message queue size |
+| `nice` | Nice priority ceiling |
+| `rtprio` | Real-time priority ceiling |
+| `rttime` | Real-time CPU time |
+
+---
+
+### SandboxMetrics
+
+Metrics snapshot for a running sandbox.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| cpu_percent | `float` | CPU utilization percentage |
+| memory_bytes | `int` | Current memory usage in bytes |
+| memory_limit_bytes | `int` | Memory limit in bytes |
+| disk_read_bytes | `int` | Total bytes read from disk |
+| disk_write_bytes | `int` | Total bytes written to disk |
+| net_rx_bytes | `int` | Total bytes received over the network |
+| net_tx_bytes | `int` | Total bytes sent over the network |
+| uptime_ms | `int` | Sandbox uptime in milliseconds |
+| timestamp_ms | `float` | Timestamp of the snapshot in milliseconds |
+
+---
+
+### MetricsStream
+
+Async iterator yielding [`SandboxMetrics`](#sandboxmetrics). Use `async for metrics in stream:` to consume.

@@ -1,0 +1,267 @@
+---
+title: "Errores"
+description: "Errores comunes del SDK y cómo manejarlos"
+icon: "triangle-exclamation"
+---
+
+
+All SDKs surface typed errors so you can match on specific failure modes instead of parsing strings. Rust has an `Error` enum, TypeScript exposes a dedicated subclass per variant (use `instanceof`), and Python provides dedicated exception classes.
+
+## Matching errors
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, Error};
+
+async fn get_or_create(name: &str) -> Result<Sandbox, Error> {
+    match Sandbox::get(name).await {
+        Ok(handle) => handle.start().await,
+        Err(Error::SandboxNotFound(_)) => {
+            Sandbox::builder(name).image("python").create().await
+        }
+        Err(e) => Err(e),
+    }
+}
+
+match sb.exec("python", ["script.py"]).await {
+    Ok(output) if output.status().success => {
+        println!("{}", output.stdout()?);
+    }
+    Ok(output) => {
+        eprintln!("Exit {}: {}", output.status().code, output.stderr()?);
+    }
+    Err(Error::ExecTimeout) => eprintln!("Timed out"),
+    Err(Error::Runtime(msg)) => eprintln!("Runtime: {msg}"),
+    Err(e) => return Err(e),
+}
+```
+
+```typescript TypeScript
+import {
+    ExecTimeoutError,
+    RuntimeError,
+    Sandbox,
+    SandboxNotFoundError,
+} from "microsandbox";
+
+async function getOrCreate(name: string): Promise<Sandbox> {
+    try {
+        const handle = await Sandbox.get(name);
+        return await handle.start();
+    } catch (e) {
+        if (e instanceof SandboxNotFoundError) {
+            return Sandbox.builder(name).image("python").create();
+        }
+        throw e;
+    }
+}
+
+try {
+    const output = await sb.exec("python", ["script.py"]);
+    if (!output.success) {
+        console.error(`Failed (exit ${output.code}):`, output.stderr());
+    }
+} catch (e) {
+    if (e instanceof ExecTimeoutError) {
+        console.error(`Timed out after ${e.timeoutMs}ms`);
+    } else if (e instanceof RuntimeError) {
+        console.error("Runtime:", e.message);
+    } else {
+        throw e;
+    }
+}
+```
+
+```python Python
+from microsandbox import (
+    ExecTimeoutError, Sandbox, SandboxNotFoundError
+)
+
+async def get_or_create(name: str):
+    try:
+        handle = await Sandbox.get(name)
+        return await handle.start()
+    except SandboxNotFoundError:
+        return await Sandbox.create(name, image="python")
+
+try:
+    output = await sb.exec("python", ["script.py"])
+    if not output.success:
+        print(f"Exit {output.exit_code}: {output.stderr_text}")
+except ExecTimeoutError:
+    print("Timed out")
+```
+
+</CodeGroup>
+
+## Spawn-time exec failures
+
+`exec()` distinguishes between:
+
+- **A program that ran and exited non-zero** — the call returns an `ExecOutput` with a non-zero `code`. This is *not* an error in the SDK sense; it's a normal result.
+- **A program that never started** — the binary doesn't exist, isn't executable, the working directory is unreachable, etc. This surfaces as a typed error variant: `ExecFailed` (Rust), `ExecFailedError` (TypeScript), `ExecFailedError` (Python).
+
+The typed error carries a classified `kind` plus the underlying `errno`, so callers can branch on the cause and react. Common kinds: `NotFound` (binary missing on PATH), `PermissionDenied`, `NotExecutable`, `BadCwd`, `BadArgs`, `ResourceLimit`, `UserSetupFailed`, `OutOfMemory`, `PtySetupFailed`, `Other`.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Error;
+use microsandbox_protocol::exec::ExecFailureKind;
+
+match sb.exec("nonexistent", []).await {
+    Ok(output) => { /* program ran, check output.status() */ }
+    Err(Error::ExecFailed(payload)) => {
+        match payload.kind {
+            ExecFailureKind::NotFound => {
+                eprintln!("Binary not found on PATH: {}", payload.message);
+            }
+            ExecFailureKind::PermissionDenied => {
+                eprintln!("Not executable (chmod +x?): {}", payload.message);
+            }
+            kind => {
+                eprintln!("Spawn failed ({:?}): {}", kind, payload.message);
+            }
+        }
+        // payload.errno, payload.errno_name, payload.stage are also available
+    }
+    Err(e) => return Err(e),
+}
+```
+
+```typescript TypeScript
+import { ExecFailedError, Sandbox } from "microsandbox";
+
+try {
+    const output = await sb.exec("nonexistent");
+    // program ran, check output.success / output.code
+} catch (e) {
+    if (e instanceof ExecFailedError) {
+        switch (e.kind) {
+            case "not_found":
+                console.error("Binary not on PATH:", e.message);
+                break;
+            case "permission_denied":
+                console.error("Not executable (chmod +x?):", e.message);
+                break;
+            default:
+                console.error(`Spawn failed (${e.kind}):`, e.message);
+        }
+        // e.errno, e.errnoName, e.stage are also available
+    } else {
+        throw e;
+    }
+}
+```
+
+```python Python
+from microsandbox import ExecFailedError
+
+try:
+    output = await sb.exec("nonexistent")
+    # program ran, check output.success / output.exit_code
+except ExecFailedError as e:
+    if e.kind == "not_found":
+        print(f"Binary not on PATH: {e.message}")
+    elif e.kind == "permission_denied":
+        print(f"Not executable (chmod +x?): {e.message}")
+    else:
+        print(f"Spawn failed ({e.kind}): {e.message}")
+    # e.errno, e.errno_name, e.stage are also available
+```
+</CodeGroup>
+
+The CLI maps these kinds to POSIX-style exit codes: `127` for `NotFound`, `126` for `PermissionDenied` and `NotExecutable`, `1` otherwise. SDK callers reading the error directly don't need to think about exit codes — branch on `kind` instead.
+
+## Sandbox start failures
+
+When a sandbox process exits before the agent relay is ready (mount errors, missing rootfs, network setup failures), the SDK surfaces a typed `BootStart` / `BootStartError`. The payload carries the failure stage and errno so callers can recover or report cleanly.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Error;
+use microsandbox_runtime::boot_error::BootErrorStage;
+
+match Sandbox::builder("svc").image("alpine").create().await {
+    Ok(sb) => { /* ... */ }
+    Err(Error::BootStart { name, err }) => {
+        eprintln!("Sandbox {name:?} failed at stage {:?}: {}", err.stage, err.message);
+        if matches!(err.stage, BootErrorStage::Mount) {
+            eprintln!("Hint: a host volume path may not exist.");
+        }
+    }
+    Err(e) => return Err(e),
+}
+```
+
+```typescript TypeScript
+import { BootStartError } from "microsandbox";
+
+try {
+    const sb = await Sandbox.builder("svc").image("alpine").create();
+} catch (e) {
+    if (e instanceof BootStartError) {
+        console.error(`Sandbox "${e.name}" failed at stage ${e.stage}: ${e.message}`);
+        if (e.stage === "mount") {
+            console.error("Hint: a host volume path may not exist.");
+        }
+    } else {
+        throw e;
+    }
+}
+```
+
+```python Python
+from microsandbox import BootStartError
+
+try:
+    sb = await Sandbox.create("svc", image="alpine")
+except BootStartError as e:
+    print(f"Sandbox {e.name!r} failed at stage {e.stage}: {e.message}")
+    if e.stage == "mount":
+        print("Hint: a host volume path may not exist.")
+```
+</CodeGroup>
+
+The CLI prepends the same payload as a styled `error:` block before any captured log output, so you see "what went wrong + a hint" inline. SDK callers get the structured payload to make their own decisions.
+
+## Resource cleanup
+
+Sandboxes hold compute resources, so release them when done. In Rust, `Drop` handles cleanup when the sandbox goes out of scope. In TypeScript, prefer `await using` (Node 22+) which calls `Sandbox.stop()` automatically when the binding leaves scope.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+
+// Sandbox implements Drop, so resources are released when `sb` goes out of scope.
+// For explicit control, call stop() or kill().
+{
+    let sb = Sandbox::builder("temp")
+        .image("python")
+        .create()
+        .await?;
+
+    let output = sb.exec("python", ["-c", "print('hello')"]).await?;
+} // sb is dropped here, resources are cleaned up
+```
+
+```typescript TypeScript
+async function runTemporary(): Promise<string> {
+    // `await using` calls Sandbox.stop() when the binding leaves scope.
+    await using sb = await Sandbox.builder("temp")
+        .image("python")
+        .replace()
+        .create();
+
+    const out = await sb.exec("python", ["-c", "print('hello')"]);
+    return out.stdout();
+}
+```
+
+```python Python
+# Use async context manager — auto-kills and removes on exit.
+async with await Sandbox.create("temp", image="python") as sb:
+    output = await sb.exec("python", ["-c", "print('hello')"])
+    print(output.stdout_text)
+```
+
+</CodeGroup>

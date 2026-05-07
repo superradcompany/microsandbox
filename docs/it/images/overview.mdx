@@ -1,0 +1,178 @@
+---
+title: "Panoramica"
+description: "Immagini container e immagini disco"
+icon: "layer-group"
+---
+
+
+microsandbox uses standard OCI container images as root filesystems. Docker Hub, GHCR, ECR, GCR, any OCI-compatible registry works. Existing images run as-is.
+
+When you specify an image like `python`, microsandbox pulls the manifest, downloads the layers in parallel, and stacks them as a copy-on-write filesystem. Changes inside the sandbox don't modify the base image. Two sandboxes using the same image share the same cached layers on disk.
+
+## Pull policies
+
+By default, microsandbox pulls an image only if it isn't already cached. You can change this behavior.
+
+| Policy | Behavior |
+|--------|----------|
+| `"if-missing"` | Pull only if not cached (default) |
+| `"always"` | Always check the registry for updates |
+| `"never"` | Use local cache only, fail if missing |
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .pull_policy(PullPolicy::Always)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .pullPolicy("always")
+    .create();
+```
+
+```python Python
+from microsandbox import PullPolicy, Sandbox
+
+sb = await Sandbox.create("worker", image="python", pull_policy=PullPolicy.ALWAYS)
+```
+</CodeGroup>
+
+<Tip>
+  Once an image reference is resolved, microsandbox pins the exact layers. `python` is resolved to a specific set of immutable layers at first pull. Subsequent `start()` calls use the pinned layers without re-resolving the mutable tag, so your sandbox is reproducible even if the upstream tag moves.
+</Tip>
+
+## Private registries
+
+Authenticate to private registries by passing credentials.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("registry.corp.io/team/app:latest")
+    .registry(|r| r.auth(RegistryAuth::Basic {
+        username: "deploy".into(),
+        password: std::env::var("REGISTRY_PASSWORD")?,
+    }))
+    .pull_policy(PullPolicy::Always)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("registry.corp.io/team/app:latest")
+    .registry((r) => r.auth({
+        kind: "basic",
+        username: "deploy",
+        password: process.env.REGISTRY_TOKEN!,
+    }))
+    .pullPolicy("always")
+    .create();
+```
+
+```python Python
+import os
+from microsandbox import PullPolicy, RegistryAuth, Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="registry.corp.io/team/app:latest",
+    registry_auth=RegistryAuth.basic("deploy", os.environ["REGISTRY_PASSWORD"]),
+    pull_policy=PullPolicy.ALWAYS,
+)
+```
+</CodeGroup>
+
+## Registry TLS
+
+By default, microsandbox connects to registries over HTTPS using system CA roots. You can customize this per-registry in `~/.microsandbox/config.json`.
+
+### Plain HTTP registries
+
+Local registries often run without TLS. Mark them as insecure to connect over plain HTTP:
+
+```json
+{
+  "registries": {
+    "hosts": {
+      "localhost:5050": {
+        "insecure": true
+      }
+    }
+  }
+}
+```
+
+### Custom CA certificates
+
+For registries using self-signed or internal CA certificates, point `ca_certs` to a PEM file. This applies globally to all registry connections:
+
+```json
+{
+  "registries": {
+    "ca_certs": "/path/to/ca-bundle.pem"
+  }
+}
+```
+
+The certificates are added to the default system roots — public registries continue to work normally.
+
+### Combined configuration
+
+```json
+{
+  "registries": {
+    "ca_certs": "/path/to/corporate-ca.pem",
+    "hosts": {
+      "localhost:5050": {
+        "insecure": true,
+        "auth": { "username": "deploy", "password_env": "REGISTRY_TOKEN" }
+      },
+      "ghcr.io": {
+        "auth": { "username": "user", "store": "keyring" }
+      }
+    }
+  }
+}
+```
+
+These settings can also be set per-sandbox via the SDK, overriding global config:
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("localhost:5050/my-app:latest")
+    .registry(|r| r.insecure())
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("localhost:5050/my-app:latest")
+    .registry((r) => r.insecure())
+    .create();
+```
+</CodeGroup>
+
+## Image storage
+
+Images are cached in the global microsandbox home directory:
+
+| Path | Description |
+|------|-------------|
+| `~/.microsandbox/cache/layers/` | Downloaded and extracted image layers |
+| `~/.microsandbox/db/` | Database tracking image metadata and digests |
+
+Layers are content-addressable and deduplicated. If `python` and `python` share a base layer, it's stored once.
+
+<Tip>
+  Use `msb pull` from the CLI to pre-pull images before creating sandboxes. This avoids blocking on a download during `Sandbox.create`.
+</Tip>

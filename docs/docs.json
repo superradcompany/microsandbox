@@ -20,149 +20,1966 @@
     }
   },
   "navigation": {
-    "tabs": [
+    "languages": [
       {
-        "tab": "Documentation",
-        "groups": [
+        "language": "en",
+        "tabs": [
           {
-            "group": "Getting Started",
-            "icon": "rocket",
-            "pages": [
-              "getting-started/introduction",
-              "getting-started/quickstart",
-              "getting-started/agents"
+            "tab": "Documentation",
+            "groups": [
+              {
+                "group": "Getting Started",
+                "icon": "rocket",
+                "pages": [
+                  "getting-started/introduction",
+                  "getting-started/quickstart",
+                  "getting-started/agents"
+                ]
+              },
+              {
+                "group": "Sandboxes",
+                "icon": "box",
+                "pages": [
+                  "sandboxes/overview",
+                  "sandboxes/lifecycle",
+                  "sandboxes/commands",
+                  "sandboxes/filesystem",
+                  "sandboxes/volumes",
+                  "sandboxes/secrets",
+                  "sandboxes/customize",
+                  "sandboxes/snapshots",
+                  "sandboxes/logs",
+                  "sandboxes/metrics",
+                  "sandboxes/events"
+                ]
+              },
+              {
+                "group": "Networking",
+                "icon": "network-wired",
+                "pages": [
+                  "networking/overview",
+                  "networking/dns",
+                  "networking/tls",
+                  "networking/security-model"
+                ]
+              },
+              {
+                "group": "Images",
+                "icon": "layer-group",
+                "pages": [
+                  "images/overview",
+                  "images/disk-images"
+                ]
+              },
+              {
+                "group": "Configuration",
+                "icon": "gear",
+                "pages": [
+                  "configuration"
+                ]
+              }
             ]
           },
           {
-            "group": "Sandboxes",
-            "icon": "box",
-            "pages": [
-              "sandboxes/overview",
-              "sandboxes/lifecycle",
-              "sandboxes/commands",
-              "sandboxes/filesystem",
-              "sandboxes/volumes",
-              "sandboxes/secrets",
-              "sandboxes/customize",
-              "sandboxes/snapshots",
-              "sandboxes/logs",
-              "sandboxes/metrics",
-              "sandboxes/events"
+            "tab": "SDK Reference",
+            "groups": [
+              {
+                "group": "Getting Started",
+                "icon": "flag",
+                "pages": [
+                  "sdk/overview",
+                  "sdk/errors"
+                ]
+              },
+              {
+                "group": "Rust SDK",
+                "icon": "rust",
+                "pages": [
+                  "sdk/rust/sandbox",
+                  "sdk/rust/execution",
+                  "sdk/rust/filesystem",
+                  "sdk/rust/volumes",
+                  "sdk/rust/networking",
+                  "sdk/rust/secrets",
+                  "sdk/rust/snapshots",
+                  "sdk/rust/events"
+                ]
+              },
+              {
+                "group": "TypeScript SDK",
+                "icon": "js",
+                "pages": [
+                  "sdk/typescript/sandbox",
+                  "sdk/typescript/execution",
+                  "sdk/typescript/filesystem",
+                  "sdk/typescript/volumes",
+                  "sdk/typescript/networking",
+                  "sdk/typescript/secrets",
+                  "sdk/typescript/snapshots",
+                  "sdk/typescript/events"
+                ]
+              },
+              {
+                "group": "Python SDK",
+                "icon": "python",
+                "pages": [
+                  "sdk/python/sandbox",
+                  "sdk/python/execution",
+                  "sdk/python/filesystem",
+                  "sdk/python/volumes",
+                  "sdk/python/networking",
+                  "sdk/python/secrets",
+                  "sdk/python/snapshots",
+                  "sdk/python/events"
+                ]
+              }
             ]
           },
           {
-            "group": "Networking",
-            "icon": "network-wired",
-            "pages": [
-              "networking/overview",
-              "networking/dns",
-              "networking/tls",
-              "networking/security-model"
+            "tab": "CLI Reference",
+            "groups": [
+              {
+                "group": "CLI",
+                "icon": "terminal",
+                "pages": [
+                  "cli/overview",
+                  "cli/sandbox-commands",
+                  "cli/volume-commands",
+                  "cli/image-commands"
+                ]
+              }
             ]
           },
           {
-            "group": "Images",
-            "icon": "layer-group",
-            "pages": [
-              "images/overview",
-              "images/disk-images"
-            ]
-          },
-          {
-            "group": "Configuration",
-            "icon": "gear",
-            "pages": [
-              "configuration"
+            "tab": "Recipes",
+            "groups": [
+              {
+                "group": "Docker",
+                "icon": "docker",
+                "pages": [
+                  "recipes/docker",
+                  "recipes/local-images"
+                ]
+              },
+              {
+                "group": "Guest",
+                "icon": "server",
+                "pages": [
+                  "recipes/systemd-services"
+                ]
+              }
             ]
           }
         ]
       },
       {
-        "tab": "SDK Reference",
-        "groups": [
+        "language": "es",
+        "tabs": [
           {
-            "group": "Getting Started",
-            "icon": "flag",
-            "pages": [
-              "sdk/overview",
-              "sdk/errors"
+            "tab": "Documentación",
+            "groups": [
+              {
+                "group": "Primeros pasos",
+                "icon": "rocket",
+                "pages": [
+                  "es/getting-started/introduction",
+                  "es/getting-started/quickstart",
+                  "es/getting-started/agents"
+                ]
+              },
+              {
+                "group": "Sandboxes",
+                "icon": "box",
+                "pages": [
+                  "es/sandboxes/overview",
+                  "es/sandboxes/lifecycle",
+                  "es/sandboxes/commands",
+                  "es/sandboxes/filesystem",
+                  "es/sandboxes/volumes",
+                  "es/sandboxes/secrets",
+                  "es/sandboxes/customize",
+                  "es/sandboxes/snapshots",
+                  "es/sandboxes/logs",
+                  "es/sandboxes/metrics",
+                  "es/sandboxes/events"
+                ]
+              },
+              {
+                "group": "Redes",
+                "icon": "network-wired",
+                "pages": [
+                  "es/networking/overview",
+                  "es/networking/dns",
+                  "es/networking/tls",
+                  "es/networking/security-model"
+                ]
+              },
+              {
+                "group": "Imágenes",
+                "icon": "layer-group",
+                "pages": [
+                  "es/images/overview",
+                  "es/images/disk-images"
+                ]
+              },
+              {
+                "group": "Configuración",
+                "icon": "gear",
+                "pages": [
+                  "es/configuration"
+                ]
+              }
             ]
           },
           {
-            "group": "Rust SDK",
-            "icon": "rust",
-            "pages": [
-              "sdk/rust/sandbox",
-              "sdk/rust/execution",
-              "sdk/rust/filesystem",
-              "sdk/rust/volumes",
-              "sdk/rust/networking",
-              "sdk/rust/secrets",
-              "sdk/rust/snapshots",
-              "sdk/rust/events"
+            "tab": "Referencia de SDK",
+            "groups": [
+              {
+                "group": "Primeros pasos",
+                "icon": "flag",
+                "pages": [
+                  "es/sdk/overview",
+                  "es/sdk/errors"
+                ]
+              },
+              {
+                "group": "SDK de Rust",
+                "icon": "rust",
+                "pages": [
+                  "es/sdk/rust/sandbox",
+                  "es/sdk/rust/execution",
+                  "es/sdk/rust/filesystem",
+                  "es/sdk/rust/volumes",
+                  "es/sdk/rust/networking",
+                  "es/sdk/rust/secrets",
+                  "es/sdk/rust/snapshots",
+                  "es/sdk/rust/events"
+                ]
+              },
+              {
+                "group": "SDK de TypeScript",
+                "icon": "js",
+                "pages": [
+                  "es/sdk/typescript/sandbox",
+                  "es/sdk/typescript/execution",
+                  "es/sdk/typescript/filesystem",
+                  "es/sdk/typescript/volumes",
+                  "es/sdk/typescript/networking",
+                  "es/sdk/typescript/secrets",
+                  "es/sdk/typescript/snapshots",
+                  "es/sdk/typescript/events"
+                ]
+              },
+              {
+                "group": "SDK de Python",
+                "icon": "python",
+                "pages": [
+                  "es/sdk/python/sandbox",
+                  "es/sdk/python/execution",
+                  "es/sdk/python/filesystem",
+                  "es/sdk/python/volumes",
+                  "es/sdk/python/networking",
+                  "es/sdk/python/secrets",
+                  "es/sdk/python/snapshots",
+                  "es/sdk/python/events"
+                ]
+              }
             ]
           },
           {
-            "group": "TypeScript SDK",
-            "icon": "js",
-            "pages": [
-              "sdk/typescript/sandbox",
-              "sdk/typescript/execution",
-              "sdk/typescript/filesystem",
-              "sdk/typescript/volumes",
-              "sdk/typescript/networking",
-              "sdk/typescript/secrets",
-              "sdk/typescript/snapshots",
-              "sdk/typescript/events"
+            "tab": "Referencia de CLI",
+            "groups": [
+              {
+                "group": "CLI",
+                "icon": "terminal",
+                "pages": [
+                  "es/cli/overview",
+                  "es/cli/sandbox-commands",
+                  "es/cli/volume-commands",
+                  "es/cli/image-commands"
+                ]
+              }
             ]
           },
           {
-            "group": "Python SDK",
-            "icon": "python",
-            "pages": [
-              "sdk/python/sandbox",
-              "sdk/python/execution",
-              "sdk/python/filesystem",
-              "sdk/python/volumes",
-              "sdk/python/networking",
-              "sdk/python/secrets",
-              "sdk/python/snapshots",
-              "sdk/python/events"
+            "tab": "Recetas",
+            "groups": [
+              {
+                "group": "Docker",
+                "icon": "docker",
+                "pages": [
+                  "es/recipes/docker",
+                  "es/recipes/local-images"
+                ]
+              },
+              {
+                "group": "Invitado",
+                "icon": "server",
+                "pages": [
+                  "es/recipes/systemd-services"
+                ]
+              }
             ]
           }
         ]
       },
       {
-        "tab": "CLI Reference",
-        "groups": [
+        "language": "fr",
+        "tabs": [
           {
-            "group": "CLI",
-            "icon": "terminal",
-            "pages": [
-              "cli/overview",
-              "cli/sandbox-commands",
-              "cli/volume-commands",
-              "cli/image-commands"
+            "tab": "Documentation",
+            "groups": [
+              {
+                "group": "Premiers pas",
+                "icon": "rocket",
+                "pages": [
+                  "fr/getting-started/introduction",
+                  "fr/getting-started/quickstart",
+                  "fr/getting-started/agents"
+                ]
+              },
+              {
+                "group": "Sandboxes",
+                "icon": "box",
+                "pages": [
+                  "fr/sandboxes/overview",
+                  "fr/sandboxes/lifecycle",
+                  "fr/sandboxes/commands",
+                  "fr/sandboxes/filesystem",
+                  "fr/sandboxes/volumes",
+                  "fr/sandboxes/secrets",
+                  "fr/sandboxes/customize",
+                  "fr/sandboxes/snapshots",
+                  "fr/sandboxes/logs",
+                  "fr/sandboxes/metrics",
+                  "fr/sandboxes/events"
+                ]
+              },
+              {
+                "group": "Réseau",
+                "icon": "network-wired",
+                "pages": [
+                  "fr/networking/overview",
+                  "fr/networking/dns",
+                  "fr/networking/tls",
+                  "fr/networking/security-model"
+                ]
+              },
+              {
+                "group": "Images",
+                "icon": "layer-group",
+                "pages": [
+                  "fr/images/overview",
+                  "fr/images/disk-images"
+                ]
+              },
+              {
+                "group": "Configuration",
+                "icon": "gear",
+                "pages": [
+                  "fr/configuration"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Référence SDK",
+            "groups": [
+              {
+                "group": "Premiers pas",
+                "icon": "flag",
+                "pages": [
+                  "fr/sdk/overview",
+                  "fr/sdk/errors"
+                ]
+              },
+              {
+                "group": "SDK Rust",
+                "icon": "rust",
+                "pages": [
+                  "fr/sdk/rust/sandbox",
+                  "fr/sdk/rust/execution",
+                  "fr/sdk/rust/filesystem",
+                  "fr/sdk/rust/volumes",
+                  "fr/sdk/rust/networking",
+                  "fr/sdk/rust/secrets",
+                  "fr/sdk/rust/snapshots",
+                  "fr/sdk/rust/events"
+                ]
+              },
+              {
+                "group": "SDK TypeScript",
+                "icon": "js",
+                "pages": [
+                  "fr/sdk/typescript/sandbox",
+                  "fr/sdk/typescript/execution",
+                  "fr/sdk/typescript/filesystem",
+                  "fr/sdk/typescript/volumes",
+                  "fr/sdk/typescript/networking",
+                  "fr/sdk/typescript/secrets",
+                  "fr/sdk/typescript/snapshots",
+                  "fr/sdk/typescript/events"
+                ]
+              },
+              {
+                "group": "SDK Python",
+                "icon": "python",
+                "pages": [
+                  "fr/sdk/python/sandbox",
+                  "fr/sdk/python/execution",
+                  "fr/sdk/python/filesystem",
+                  "fr/sdk/python/volumes",
+                  "fr/sdk/python/networking",
+                  "fr/sdk/python/secrets",
+                  "fr/sdk/python/snapshots",
+                  "fr/sdk/python/events"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Référence CLI",
+            "groups": [
+              {
+                "group": "CLI",
+                "icon": "terminal",
+                "pages": [
+                  "fr/cli/overview",
+                  "fr/cli/sandbox-commands",
+                  "fr/cli/volume-commands",
+                  "fr/cli/image-commands"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Recettes",
+            "groups": [
+              {
+                "group": "Docker",
+                "icon": "docker",
+                "pages": [
+                  "fr/recipes/docker",
+                  "fr/recipes/local-images"
+                ]
+              },
+              {
+                "group": "Invité",
+                "icon": "server",
+                "pages": [
+                  "fr/recipes/systemd-services"
+                ]
+              }
             ]
           }
         ]
       },
       {
-        "tab": "Recipes",
-        "groups": [
+        "language": "ja",
+        "tabs": [
           {
-            "group": "Docker",
-            "icon": "docker",
-            "pages": [
-              "recipes/docker",
-              "recipes/local-images"
+            "tab": "ドキュメント",
+            "groups": [
+              {
+                "group": "はじめに",
+                "icon": "rocket",
+                "pages": [
+                  "ja/getting-started/introduction",
+                  "ja/getting-started/quickstart",
+                  "ja/getting-started/agents"
+                ]
+              },
+              {
+                "group": "サンドボックス",
+                "icon": "box",
+                "pages": [
+                  "ja/sandboxes/overview",
+                  "ja/sandboxes/lifecycle",
+                  "ja/sandboxes/commands",
+                  "ja/sandboxes/filesystem",
+                  "ja/sandboxes/volumes",
+                  "ja/sandboxes/secrets",
+                  "ja/sandboxes/customize",
+                  "ja/sandboxes/snapshots",
+                  "ja/sandboxes/logs",
+                  "ja/sandboxes/metrics",
+                  "ja/sandboxes/events"
+                ]
+              },
+              {
+                "group": "ネットワーキング",
+                "icon": "network-wired",
+                "pages": [
+                  "ja/networking/overview",
+                  "ja/networking/dns",
+                  "ja/networking/tls",
+                  "ja/networking/security-model"
+                ]
+              },
+              {
+                "group": "イメージ",
+                "icon": "layer-group",
+                "pages": [
+                  "ja/images/overview",
+                  "ja/images/disk-images"
+                ]
+              },
+              {
+                "group": "設定",
+                "icon": "gear",
+                "pages": [
+                  "ja/configuration"
+                ]
+              }
             ]
           },
           {
-            "group": "Guest",
-            "icon": "server",
-            "pages": [
-              "recipes/systemd-services"
+            "tab": "SDK リファレンス",
+            "groups": [
+              {
+                "group": "はじめに",
+                "icon": "flag",
+                "pages": [
+                  "ja/sdk/overview",
+                  "ja/sdk/errors"
+                ]
+              },
+              {
+                "group": "Rust SDK",
+                "icon": "rust",
+                "pages": [
+                  "ja/sdk/rust/sandbox",
+                  "ja/sdk/rust/execution",
+                  "ja/sdk/rust/filesystem",
+                  "ja/sdk/rust/volumes",
+                  "ja/sdk/rust/networking",
+                  "ja/sdk/rust/secrets",
+                  "ja/sdk/rust/snapshots",
+                  "ja/sdk/rust/events"
+                ]
+              },
+              {
+                "group": "TypeScript SDK",
+                "icon": "js",
+                "pages": [
+                  "ja/sdk/typescript/sandbox",
+                  "ja/sdk/typescript/execution",
+                  "ja/sdk/typescript/filesystem",
+                  "ja/sdk/typescript/volumes",
+                  "ja/sdk/typescript/networking",
+                  "ja/sdk/typescript/secrets",
+                  "ja/sdk/typescript/snapshots",
+                  "ja/sdk/typescript/events"
+                ]
+              },
+              {
+                "group": "Python SDK",
+                "icon": "python",
+                "pages": [
+                  "ja/sdk/python/sandbox",
+                  "ja/sdk/python/execution",
+                  "ja/sdk/python/filesystem",
+                  "ja/sdk/python/volumes",
+                  "ja/sdk/python/networking",
+                  "ja/sdk/python/secrets",
+                  "ja/sdk/python/snapshots",
+                  "ja/sdk/python/events"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "CLI リファレンス",
+            "groups": [
+              {
+                "group": "CLI",
+                "icon": "terminal",
+                "pages": [
+                  "ja/cli/overview",
+                  "ja/cli/sandbox-commands",
+                  "ja/cli/volume-commands",
+                  "ja/cli/image-commands"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "レシピ",
+            "groups": [
+              {
+                "group": "Docker",
+                "icon": "docker",
+                "pages": [
+                  "ja/recipes/docker",
+                  "ja/recipes/local-images"
+                ]
+              },
+              {
+                "group": "ゲスト",
+                "icon": "server",
+                "pages": [
+                  "ja/recipes/systemd-services"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "language": "pt",
+        "tabs": [
+          {
+            "tab": "Documentação",
+            "groups": [
+              {
+                "group": "Primeiros passos",
+                "icon": "rocket",
+                "pages": [
+                  "pt/getting-started/introduction",
+                  "pt/getting-started/quickstart",
+                  "pt/getting-started/agents"
+                ]
+              },
+              {
+                "group": "Sandboxes",
+                "icon": "box",
+                "pages": [
+                  "pt/sandboxes/overview",
+                  "pt/sandboxes/lifecycle",
+                  "pt/sandboxes/commands",
+                  "pt/sandboxes/filesystem",
+                  "pt/sandboxes/volumes",
+                  "pt/sandboxes/secrets",
+                  "pt/sandboxes/customize",
+                  "pt/sandboxes/snapshots",
+                  "pt/sandboxes/logs",
+                  "pt/sandboxes/metrics",
+                  "pt/sandboxes/events"
+                ]
+              },
+              {
+                "group": "Rede",
+                "icon": "network-wired",
+                "pages": [
+                  "pt/networking/overview",
+                  "pt/networking/dns",
+                  "pt/networking/tls",
+                  "pt/networking/security-model"
+                ]
+              },
+              {
+                "group": "Imagens",
+                "icon": "layer-group",
+                "pages": [
+                  "pt/images/overview",
+                  "pt/images/disk-images"
+                ]
+              },
+              {
+                "group": "Configuração",
+                "icon": "gear",
+                "pages": [
+                  "pt/configuration"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Referência SDK",
+            "groups": [
+              {
+                "group": "Primeiros passos",
+                "icon": "flag",
+                "pages": [
+                  "pt/sdk/overview",
+                  "pt/sdk/errors"
+                ]
+              },
+              {
+                "group": "SDK Rust",
+                "icon": "rust",
+                "pages": [
+                  "pt/sdk/rust/sandbox",
+                  "pt/sdk/rust/execution",
+                  "pt/sdk/rust/filesystem",
+                  "pt/sdk/rust/volumes",
+                  "pt/sdk/rust/networking",
+                  "pt/sdk/rust/secrets",
+                  "pt/sdk/rust/snapshots",
+                  "pt/sdk/rust/events"
+                ]
+              },
+              {
+                "group": "SDK TypeScript",
+                "icon": "js",
+                "pages": [
+                  "pt/sdk/typescript/sandbox",
+                  "pt/sdk/typescript/execution",
+                  "pt/sdk/typescript/filesystem",
+                  "pt/sdk/typescript/volumes",
+                  "pt/sdk/typescript/networking",
+                  "pt/sdk/typescript/secrets",
+                  "pt/sdk/typescript/snapshots",
+                  "pt/sdk/typescript/events"
+                ]
+              },
+              {
+                "group": "SDK Python",
+                "icon": "python",
+                "pages": [
+                  "pt/sdk/python/sandbox",
+                  "pt/sdk/python/execution",
+                  "pt/sdk/python/filesystem",
+                  "pt/sdk/python/volumes",
+                  "pt/sdk/python/networking",
+                  "pt/sdk/python/secrets",
+                  "pt/sdk/python/snapshots",
+                  "pt/sdk/python/events"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Referência CLI",
+            "groups": [
+              {
+                "group": "CLI",
+                "icon": "terminal",
+                "pages": [
+                  "pt/cli/overview",
+                  "pt/cli/sandbox-commands",
+                  "pt/cli/volume-commands",
+                  "pt/cli/image-commands"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Receitas",
+            "groups": [
+              {
+                "group": "Docker",
+                "icon": "docker",
+                "pages": [
+                  "pt/recipes/docker",
+                  "pt/recipes/local-images"
+                ]
+              },
+              {
+                "group": "Convidado",
+                "icon": "server",
+                "pages": [
+                  "pt/recipes/systemd-services"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "language": "nl",
+        "tabs": [
+          {
+            "tab": "Documentatie",
+            "groups": [
+              {
+                "group": "Aan de slag",
+                "icon": "rocket",
+                "pages": [
+                  "nl/getting-started/introduction",
+                  "nl/getting-started/quickstart",
+                  "nl/getting-started/agents"
+                ]
+              },
+              {
+                "group": "Sandboxes",
+                "icon": "box",
+                "pages": [
+                  "nl/sandboxes/overview",
+                  "nl/sandboxes/lifecycle",
+                  "nl/sandboxes/commands",
+                  "nl/sandboxes/filesystem",
+                  "nl/sandboxes/volumes",
+                  "nl/sandboxes/secrets",
+                  "nl/sandboxes/customize",
+                  "nl/sandboxes/snapshots",
+                  "nl/sandboxes/logs",
+                  "nl/sandboxes/metrics",
+                  "nl/sandboxes/events"
+                ]
+              },
+              {
+                "group": "Netwerken",
+                "icon": "network-wired",
+                "pages": [
+                  "nl/networking/overview",
+                  "nl/networking/dns",
+                  "nl/networking/tls",
+                  "nl/networking/security-model"
+                ]
+              },
+              {
+                "group": "Images",
+                "icon": "layer-group",
+                "pages": [
+                  "nl/images/overview",
+                  "nl/images/disk-images"
+                ]
+              },
+              {
+                "group": "Configuratie",
+                "icon": "gear",
+                "pages": [
+                  "nl/configuration"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "SDK-referentie",
+            "groups": [
+              {
+                "group": "Aan de slag",
+                "icon": "flag",
+                "pages": [
+                  "nl/sdk/overview",
+                  "nl/sdk/errors"
+                ]
+              },
+              {
+                "group": "Rust SDK",
+                "icon": "rust",
+                "pages": [
+                  "nl/sdk/rust/sandbox",
+                  "nl/sdk/rust/execution",
+                  "nl/sdk/rust/filesystem",
+                  "nl/sdk/rust/volumes",
+                  "nl/sdk/rust/networking",
+                  "nl/sdk/rust/secrets",
+                  "nl/sdk/rust/snapshots",
+                  "nl/sdk/rust/events"
+                ]
+              },
+              {
+                "group": "TypeScript SDK",
+                "icon": "js",
+                "pages": [
+                  "nl/sdk/typescript/sandbox",
+                  "nl/sdk/typescript/execution",
+                  "nl/sdk/typescript/filesystem",
+                  "nl/sdk/typescript/volumes",
+                  "nl/sdk/typescript/networking",
+                  "nl/sdk/typescript/secrets",
+                  "nl/sdk/typescript/snapshots",
+                  "nl/sdk/typescript/events"
+                ]
+              },
+              {
+                "group": "Python SDK",
+                "icon": "python",
+                "pages": [
+                  "nl/sdk/python/sandbox",
+                  "nl/sdk/python/execution",
+                  "nl/sdk/python/filesystem",
+                  "nl/sdk/python/volumes",
+                  "nl/sdk/python/networking",
+                  "nl/sdk/python/secrets",
+                  "nl/sdk/python/snapshots",
+                  "nl/sdk/python/events"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "CLI-referentie",
+            "groups": [
+              {
+                "group": "CLI",
+                "icon": "terminal",
+                "pages": [
+                  "nl/cli/overview",
+                  "nl/cli/sandbox-commands",
+                  "nl/cli/volume-commands",
+                  "nl/cli/image-commands"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Recepten",
+            "groups": [
+              {
+                "group": "Docker",
+                "icon": "docker",
+                "pages": [
+                  "nl/recipes/docker",
+                  "nl/recipes/local-images"
+                ]
+              },
+              {
+                "group": "Gast",
+                "icon": "server",
+                "pages": [
+                  "nl/recipes/systemd-services"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "language": "cs",
+        "tabs": [
+          {
+            "tab": "Dokumentace",
+            "groups": [
+              {
+                "group": "Začínáme",
+                "icon": "rocket",
+                "pages": [
+                  "cs/getting-started/introduction",
+                  "cs/getting-started/quickstart",
+                  "cs/getting-started/agents"
+                ]
+              },
+              {
+                "group": "Sandboxy",
+                "icon": "box",
+                "pages": [
+                  "cs/sandboxes/overview",
+                  "cs/sandboxes/lifecycle",
+                  "cs/sandboxes/commands",
+                  "cs/sandboxes/filesystem",
+                  "cs/sandboxes/volumes",
+                  "cs/sandboxes/secrets",
+                  "cs/sandboxes/customize",
+                  "cs/sandboxes/snapshots",
+                  "cs/sandboxes/logs",
+                  "cs/sandboxes/metrics",
+                  "cs/sandboxes/events"
+                ]
+              },
+              {
+                "group": "Sítě",
+                "icon": "network-wired",
+                "pages": [
+                  "cs/networking/overview",
+                  "cs/networking/dns",
+                  "cs/networking/tls",
+                  "cs/networking/security-model"
+                ]
+              },
+              {
+                "group": "Obrazy",
+                "icon": "layer-group",
+                "pages": [
+                  "cs/images/overview",
+                  "cs/images/disk-images"
+                ]
+              },
+              {
+                "group": "Konfigurace",
+                "icon": "gear",
+                "pages": [
+                  "cs/configuration"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Reference SDK",
+            "groups": [
+              {
+                "group": "Začínáme",
+                "icon": "flag",
+                "pages": [
+                  "cs/sdk/overview",
+                  "cs/sdk/errors"
+                ]
+              },
+              {
+                "group": "Rust SDK",
+                "icon": "rust",
+                "pages": [
+                  "cs/sdk/rust/sandbox",
+                  "cs/sdk/rust/execution",
+                  "cs/sdk/rust/filesystem",
+                  "cs/sdk/rust/volumes",
+                  "cs/sdk/rust/networking",
+                  "cs/sdk/rust/secrets",
+                  "cs/sdk/rust/snapshots",
+                  "cs/sdk/rust/events"
+                ]
+              },
+              {
+                "group": "TypeScript SDK",
+                "icon": "js",
+                "pages": [
+                  "cs/sdk/typescript/sandbox",
+                  "cs/sdk/typescript/execution",
+                  "cs/sdk/typescript/filesystem",
+                  "cs/sdk/typescript/volumes",
+                  "cs/sdk/typescript/networking",
+                  "cs/sdk/typescript/secrets",
+                  "cs/sdk/typescript/snapshots",
+                  "cs/sdk/typescript/events"
+                ]
+              },
+              {
+                "group": "Python SDK",
+                "icon": "python",
+                "pages": [
+                  "cs/sdk/python/sandbox",
+                  "cs/sdk/python/execution",
+                  "cs/sdk/python/filesystem",
+                  "cs/sdk/python/volumes",
+                  "cs/sdk/python/networking",
+                  "cs/sdk/python/secrets",
+                  "cs/sdk/python/snapshots",
+                  "cs/sdk/python/events"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Reference CLI",
+            "groups": [
+              {
+                "group": "CLI",
+                "icon": "terminal",
+                "pages": [
+                  "cs/cli/overview",
+                  "cs/cli/sandbox-commands",
+                  "cs/cli/volume-commands",
+                  "cs/cli/image-commands"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Recepty",
+            "groups": [
+              {
+                "group": "Docker",
+                "icon": "docker",
+                "pages": [
+                  "cs/recipes/docker",
+                  "cs/recipes/local-images"
+                ]
+              },
+              {
+                "group": "Host",
+                "icon": "server",
+                "pages": [
+                  "cs/recipes/systemd-services"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "language": "de",
+        "tabs": [
+          {
+            "tab": "Dokumentation",
+            "groups": [
+              {
+                "group": "Erste Schritte",
+                "icon": "rocket",
+                "pages": [
+                  "de/getting-started/introduction",
+                  "de/getting-started/quickstart",
+                  "de/getting-started/agents"
+                ]
+              },
+              {
+                "group": "Sandboxes",
+                "icon": "box",
+                "pages": [
+                  "de/sandboxes/overview",
+                  "de/sandboxes/lifecycle",
+                  "de/sandboxes/commands",
+                  "de/sandboxes/filesystem",
+                  "de/sandboxes/volumes",
+                  "de/sandboxes/secrets",
+                  "de/sandboxes/customize",
+                  "de/sandboxes/snapshots",
+                  "de/sandboxes/logs",
+                  "de/sandboxes/metrics",
+                  "de/sandboxes/events"
+                ]
+              },
+              {
+                "group": "Netzwerk",
+                "icon": "network-wired",
+                "pages": [
+                  "de/networking/overview",
+                  "de/networking/dns",
+                  "de/networking/tls",
+                  "de/networking/security-model"
+                ]
+              },
+              {
+                "group": "Images",
+                "icon": "layer-group",
+                "pages": [
+                  "de/images/overview",
+                  "de/images/disk-images"
+                ]
+              },
+              {
+                "group": "Konfiguration",
+                "icon": "gear",
+                "pages": [
+                  "de/configuration"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "SDK-Referenz",
+            "groups": [
+              {
+                "group": "Erste Schritte",
+                "icon": "flag",
+                "pages": [
+                  "de/sdk/overview",
+                  "de/sdk/errors"
+                ]
+              },
+              {
+                "group": "Rust SDK",
+                "icon": "rust",
+                "pages": [
+                  "de/sdk/rust/sandbox",
+                  "de/sdk/rust/execution",
+                  "de/sdk/rust/filesystem",
+                  "de/sdk/rust/volumes",
+                  "de/sdk/rust/networking",
+                  "de/sdk/rust/secrets",
+                  "de/sdk/rust/snapshots",
+                  "de/sdk/rust/events"
+                ]
+              },
+              {
+                "group": "TypeScript SDK",
+                "icon": "js",
+                "pages": [
+                  "de/sdk/typescript/sandbox",
+                  "de/sdk/typescript/execution",
+                  "de/sdk/typescript/filesystem",
+                  "de/sdk/typescript/volumes",
+                  "de/sdk/typescript/networking",
+                  "de/sdk/typescript/secrets",
+                  "de/sdk/typescript/snapshots",
+                  "de/sdk/typescript/events"
+                ]
+              },
+              {
+                "group": "Python SDK",
+                "icon": "python",
+                "pages": [
+                  "de/sdk/python/sandbox",
+                  "de/sdk/python/execution",
+                  "de/sdk/python/filesystem",
+                  "de/sdk/python/volumes",
+                  "de/sdk/python/networking",
+                  "de/sdk/python/secrets",
+                  "de/sdk/python/snapshots",
+                  "de/sdk/python/events"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "CLI-Referenz",
+            "groups": [
+              {
+                "group": "CLI",
+                "icon": "terminal",
+                "pages": [
+                  "de/cli/overview",
+                  "de/cli/sandbox-commands",
+                  "de/cli/volume-commands",
+                  "de/cli/image-commands"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Rezepte",
+            "groups": [
+              {
+                "group": "Docker",
+                "icon": "docker",
+                "pages": [
+                  "de/recipes/docker",
+                  "de/recipes/local-images"
+                ]
+              },
+              {
+                "group": "Gast",
+                "icon": "server",
+                "pages": [
+                  "de/recipes/systemd-services"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "language": "it",
+        "tabs": [
+          {
+            "tab": "Documentazione",
+            "groups": [
+              {
+                "group": "Per iniziare",
+                "icon": "rocket",
+                "pages": [
+                  "it/getting-started/introduction",
+                  "it/getting-started/quickstart",
+                  "it/getting-started/agents"
+                ]
+              },
+              {
+                "group": "Sandbox",
+                "icon": "box",
+                "pages": [
+                  "it/sandboxes/overview",
+                  "it/sandboxes/lifecycle",
+                  "it/sandboxes/commands",
+                  "it/sandboxes/filesystem",
+                  "it/sandboxes/volumes",
+                  "it/sandboxes/secrets",
+                  "it/sandboxes/customize",
+                  "it/sandboxes/snapshots",
+                  "it/sandboxes/logs",
+                  "it/sandboxes/metrics",
+                  "it/sandboxes/events"
+                ]
+              },
+              {
+                "group": "Rete",
+                "icon": "network-wired",
+                "pages": [
+                  "it/networking/overview",
+                  "it/networking/dns",
+                  "it/networking/tls",
+                  "it/networking/security-model"
+                ]
+              },
+              {
+                "group": "Immagini",
+                "icon": "layer-group",
+                "pages": [
+                  "it/images/overview",
+                  "it/images/disk-images"
+                ]
+              },
+              {
+                "group": "Configurazione",
+                "icon": "gear",
+                "pages": [
+                  "it/configuration"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Riferimento SDK",
+            "groups": [
+              {
+                "group": "Per iniziare",
+                "icon": "flag",
+                "pages": [
+                  "it/sdk/overview",
+                  "it/sdk/errors"
+                ]
+              },
+              {
+                "group": "SDK Rust",
+                "icon": "rust",
+                "pages": [
+                  "it/sdk/rust/sandbox",
+                  "it/sdk/rust/execution",
+                  "it/sdk/rust/filesystem",
+                  "it/sdk/rust/volumes",
+                  "it/sdk/rust/networking",
+                  "it/sdk/rust/secrets",
+                  "it/sdk/rust/snapshots",
+                  "it/sdk/rust/events"
+                ]
+              },
+              {
+                "group": "SDK TypeScript",
+                "icon": "js",
+                "pages": [
+                  "it/sdk/typescript/sandbox",
+                  "it/sdk/typescript/execution",
+                  "it/sdk/typescript/filesystem",
+                  "it/sdk/typescript/volumes",
+                  "it/sdk/typescript/networking",
+                  "it/sdk/typescript/secrets",
+                  "it/sdk/typescript/snapshots",
+                  "it/sdk/typescript/events"
+                ]
+              },
+              {
+                "group": "SDK Python",
+                "icon": "python",
+                "pages": [
+                  "it/sdk/python/sandbox",
+                  "it/sdk/python/execution",
+                  "it/sdk/python/filesystem",
+                  "it/sdk/python/volumes",
+                  "it/sdk/python/networking",
+                  "it/sdk/python/secrets",
+                  "it/sdk/python/snapshots",
+                  "it/sdk/python/events"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Riferimento CLI",
+            "groups": [
+              {
+                "group": "CLI",
+                "icon": "terminal",
+                "pages": [
+                  "it/cli/overview",
+                  "it/cli/sandbox-commands",
+                  "it/cli/volume-commands",
+                  "it/cli/image-commands"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Ricette",
+            "groups": [
+              {
+                "group": "Docker",
+                "icon": "docker",
+                "pages": [
+                  "it/recipes/docker",
+                  "it/recipes/local-images"
+                ]
+              },
+              {
+                "group": "Guest",
+                "icon": "server",
+                "pages": [
+                  "it/recipes/systemd-services"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "language": "ru",
+        "tabs": [
+          {
+            "tab": "Документация",
+            "groups": [
+              {
+                "group": "Начало работы",
+                "icon": "rocket",
+                "pages": [
+                  "ru/getting-started/introduction",
+                  "ru/getting-started/quickstart",
+                  "ru/getting-started/agents"
+                ]
+              },
+              {
+                "group": "Песочницы",
+                "icon": "box",
+                "pages": [
+                  "ru/sandboxes/overview",
+                  "ru/sandboxes/lifecycle",
+                  "ru/sandboxes/commands",
+                  "ru/sandboxes/filesystem",
+                  "ru/sandboxes/volumes",
+                  "ru/sandboxes/secrets",
+                  "ru/sandboxes/customize",
+                  "ru/sandboxes/snapshots",
+                  "ru/sandboxes/logs",
+                  "ru/sandboxes/metrics",
+                  "ru/sandboxes/events"
+                ]
+              },
+              {
+                "group": "Сеть",
+                "icon": "network-wired",
+                "pages": [
+                  "ru/networking/overview",
+                  "ru/networking/dns",
+                  "ru/networking/tls",
+                  "ru/networking/security-model"
+                ]
+              },
+              {
+                "group": "Образы",
+                "icon": "layer-group",
+                "pages": [
+                  "ru/images/overview",
+                  "ru/images/disk-images"
+                ]
+              },
+              {
+                "group": "Конфигурация",
+                "icon": "gear",
+                "pages": [
+                  "ru/configuration"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Справочник SDK",
+            "groups": [
+              {
+                "group": "Начало работы",
+                "icon": "flag",
+                "pages": [
+                  "ru/sdk/overview",
+                  "ru/sdk/errors"
+                ]
+              },
+              {
+                "group": "Rust SDK",
+                "icon": "rust",
+                "pages": [
+                  "ru/sdk/rust/sandbox",
+                  "ru/sdk/rust/execution",
+                  "ru/sdk/rust/filesystem",
+                  "ru/sdk/rust/volumes",
+                  "ru/sdk/rust/networking",
+                  "ru/sdk/rust/secrets",
+                  "ru/sdk/rust/snapshots",
+                  "ru/sdk/rust/events"
+                ]
+              },
+              {
+                "group": "TypeScript SDK",
+                "icon": "js",
+                "pages": [
+                  "ru/sdk/typescript/sandbox",
+                  "ru/sdk/typescript/execution",
+                  "ru/sdk/typescript/filesystem",
+                  "ru/sdk/typescript/volumes",
+                  "ru/sdk/typescript/networking",
+                  "ru/sdk/typescript/secrets",
+                  "ru/sdk/typescript/snapshots",
+                  "ru/sdk/typescript/events"
+                ]
+              },
+              {
+                "group": "Python SDK",
+                "icon": "python",
+                "pages": [
+                  "ru/sdk/python/sandbox",
+                  "ru/sdk/python/execution",
+                  "ru/sdk/python/filesystem",
+                  "ru/sdk/python/volumes",
+                  "ru/sdk/python/networking",
+                  "ru/sdk/python/secrets",
+                  "ru/sdk/python/snapshots",
+                  "ru/sdk/python/events"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Справочник CLI",
+            "groups": [
+              {
+                "group": "CLI",
+                "icon": "terminal",
+                "pages": [
+                  "ru/cli/overview",
+                  "ru/cli/sandbox-commands",
+                  "ru/cli/volume-commands",
+                  "ru/cli/image-commands"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Рецепты",
+            "groups": [
+              {
+                "group": "Docker",
+                "icon": "docker",
+                "pages": [
+                  "ru/recipes/docker",
+                  "ru/recipes/local-images"
+                ]
+              },
+              {
+                "group": "Гость",
+                "icon": "server",
+                "pages": [
+                  "ru/recipes/systemd-services"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "language": "ko",
+        "tabs": [
+          {
+            "tab": "문서",
+            "groups": [
+              {
+                "group": "시작하기",
+                "icon": "rocket",
+                "pages": [
+                  "ko/getting-started/introduction",
+                  "ko/getting-started/quickstart",
+                  "ko/getting-started/agents"
+                ]
+              },
+              {
+                "group": "샌드박스",
+                "icon": "box",
+                "pages": [
+                  "ko/sandboxes/overview",
+                  "ko/sandboxes/lifecycle",
+                  "ko/sandboxes/commands",
+                  "ko/sandboxes/filesystem",
+                  "ko/sandboxes/volumes",
+                  "ko/sandboxes/secrets",
+                  "ko/sandboxes/customize",
+                  "ko/sandboxes/snapshots",
+                  "ko/sandboxes/logs",
+                  "ko/sandboxes/metrics",
+                  "ko/sandboxes/events"
+                ]
+              },
+              {
+                "group": "네트워킹",
+                "icon": "network-wired",
+                "pages": [
+                  "ko/networking/overview",
+                  "ko/networking/dns",
+                  "ko/networking/tls",
+                  "ko/networking/security-model"
+                ]
+              },
+              {
+                "group": "이미지",
+                "icon": "layer-group",
+                "pages": [
+                  "ko/images/overview",
+                  "ko/images/disk-images"
+                ]
+              },
+              {
+                "group": "구성",
+                "icon": "gear",
+                "pages": [
+                  "ko/configuration"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "SDK 레퍼런스",
+            "groups": [
+              {
+                "group": "시작하기",
+                "icon": "flag",
+                "pages": [
+                  "ko/sdk/overview",
+                  "ko/sdk/errors"
+                ]
+              },
+              {
+                "group": "Rust SDK",
+                "icon": "rust",
+                "pages": [
+                  "ko/sdk/rust/sandbox",
+                  "ko/sdk/rust/execution",
+                  "ko/sdk/rust/filesystem",
+                  "ko/sdk/rust/volumes",
+                  "ko/sdk/rust/networking",
+                  "ko/sdk/rust/secrets",
+                  "ko/sdk/rust/snapshots",
+                  "ko/sdk/rust/events"
+                ]
+              },
+              {
+                "group": "TypeScript SDK",
+                "icon": "js",
+                "pages": [
+                  "ko/sdk/typescript/sandbox",
+                  "ko/sdk/typescript/execution",
+                  "ko/sdk/typescript/filesystem",
+                  "ko/sdk/typescript/volumes",
+                  "ko/sdk/typescript/networking",
+                  "ko/sdk/typescript/secrets",
+                  "ko/sdk/typescript/snapshots",
+                  "ko/sdk/typescript/events"
+                ]
+              },
+              {
+                "group": "Python SDK",
+                "icon": "python",
+                "pages": [
+                  "ko/sdk/python/sandbox",
+                  "ko/sdk/python/execution",
+                  "ko/sdk/python/filesystem",
+                  "ko/sdk/python/volumes",
+                  "ko/sdk/python/networking",
+                  "ko/sdk/python/secrets",
+                  "ko/sdk/python/snapshots",
+                  "ko/sdk/python/events"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "CLI 레퍼런스",
+            "groups": [
+              {
+                "group": "CLI",
+                "icon": "terminal",
+                "pages": [
+                  "ko/cli/overview",
+                  "ko/cli/sandbox-commands",
+                  "ko/cli/volume-commands",
+                  "ko/cli/image-commands"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "레시피",
+            "groups": [
+              {
+                "group": "Docker",
+                "icon": "docker",
+                "pages": [
+                  "ko/recipes/docker",
+                  "ko/recipes/local-images"
+                ]
+              },
+              {
+                "group": "게스트",
+                "icon": "server",
+                "pages": [
+                  "ko/recipes/systemd-services"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "language": "id",
+        "tabs": [
+          {
+            "tab": "Dokumentasi",
+            "groups": [
+              {
+                "group": "Memulai",
+                "icon": "rocket",
+                "pages": [
+                  "id/getting-started/introduction",
+                  "id/getting-started/quickstart",
+                  "id/getting-started/agents"
+                ]
+              },
+              {
+                "group": "Sandbox",
+                "icon": "box",
+                "pages": [
+                  "id/sandboxes/overview",
+                  "id/sandboxes/lifecycle",
+                  "id/sandboxes/commands",
+                  "id/sandboxes/filesystem",
+                  "id/sandboxes/volumes",
+                  "id/sandboxes/secrets",
+                  "id/sandboxes/customize",
+                  "id/sandboxes/snapshots",
+                  "id/sandboxes/logs",
+                  "id/sandboxes/metrics",
+                  "id/sandboxes/events"
+                ]
+              },
+              {
+                "group": "Jaringan",
+                "icon": "network-wired",
+                "pages": [
+                  "id/networking/overview",
+                  "id/networking/dns",
+                  "id/networking/tls",
+                  "id/networking/security-model"
+                ]
+              },
+              {
+                "group": "Image",
+                "icon": "layer-group",
+                "pages": [
+                  "id/images/overview",
+                  "id/images/disk-images"
+                ]
+              },
+              {
+                "group": "Konfigurasi",
+                "icon": "gear",
+                "pages": [
+                  "id/configuration"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Referensi SDK",
+            "groups": [
+              {
+                "group": "Memulai",
+                "icon": "flag",
+                "pages": [
+                  "id/sdk/overview",
+                  "id/sdk/errors"
+                ]
+              },
+              {
+                "group": "SDK Rust",
+                "icon": "rust",
+                "pages": [
+                  "id/sdk/rust/sandbox",
+                  "id/sdk/rust/execution",
+                  "id/sdk/rust/filesystem",
+                  "id/sdk/rust/volumes",
+                  "id/sdk/rust/networking",
+                  "id/sdk/rust/secrets",
+                  "id/sdk/rust/snapshots",
+                  "id/sdk/rust/events"
+                ]
+              },
+              {
+                "group": "SDK TypeScript",
+                "icon": "js",
+                "pages": [
+                  "id/sdk/typescript/sandbox",
+                  "id/sdk/typescript/execution",
+                  "id/sdk/typescript/filesystem",
+                  "id/sdk/typescript/volumes",
+                  "id/sdk/typescript/networking",
+                  "id/sdk/typescript/secrets",
+                  "id/sdk/typescript/snapshots",
+                  "id/sdk/typescript/events"
+                ]
+              },
+              {
+                "group": "SDK Python",
+                "icon": "python",
+                "pages": [
+                  "id/sdk/python/sandbox",
+                  "id/sdk/python/execution",
+                  "id/sdk/python/filesystem",
+                  "id/sdk/python/volumes",
+                  "id/sdk/python/networking",
+                  "id/sdk/python/secrets",
+                  "id/sdk/python/snapshots",
+                  "id/sdk/python/events"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Referensi CLI",
+            "groups": [
+              {
+                "group": "CLI",
+                "icon": "terminal",
+                "pages": [
+                  "id/cli/overview",
+                  "id/cli/sandbox-commands",
+                  "id/cli/volume-commands",
+                  "id/cli/image-commands"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Resep",
+            "groups": [
+              {
+                "group": "Docker",
+                "icon": "docker",
+                "pages": [
+                  "id/recipes/docker",
+                  "id/recipes/local-images"
+                ]
+              },
+              {
+                "group": "Guest",
+                "icon": "server",
+                "pages": [
+                  "id/recipes/systemd-services"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "language": "tr",
+        "tabs": [
+          {
+            "tab": "Dokümantasyon",
+            "groups": [
+              {
+                "group": "Başlarken",
+                "icon": "rocket",
+                "pages": [
+                  "tr/getting-started/introduction",
+                  "tr/getting-started/quickstart",
+                  "tr/getting-started/agents"
+                ]
+              },
+              {
+                "group": "Sandbox'lar",
+                "icon": "box",
+                "pages": [
+                  "tr/sandboxes/overview",
+                  "tr/sandboxes/lifecycle",
+                  "tr/sandboxes/commands",
+                  "tr/sandboxes/filesystem",
+                  "tr/sandboxes/volumes",
+                  "tr/sandboxes/secrets",
+                  "tr/sandboxes/customize",
+                  "tr/sandboxes/snapshots",
+                  "tr/sandboxes/logs",
+                  "tr/sandboxes/metrics",
+                  "tr/sandboxes/events"
+                ]
+              },
+              {
+                "group": "Ağ",
+                "icon": "network-wired",
+                "pages": [
+                  "tr/networking/overview",
+                  "tr/networking/dns",
+                  "tr/networking/tls",
+                  "tr/networking/security-model"
+                ]
+              },
+              {
+                "group": "İmajlar",
+                "icon": "layer-group",
+                "pages": [
+                  "tr/images/overview",
+                  "tr/images/disk-images"
+                ]
+              },
+              {
+                "group": "Yapılandırma",
+                "icon": "gear",
+                "pages": [
+                  "tr/configuration"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "SDK Referansı",
+            "groups": [
+              {
+                "group": "Başlarken",
+                "icon": "flag",
+                "pages": [
+                  "tr/sdk/overview",
+                  "tr/sdk/errors"
+                ]
+              },
+              {
+                "group": "Rust SDK",
+                "icon": "rust",
+                "pages": [
+                  "tr/sdk/rust/sandbox",
+                  "tr/sdk/rust/execution",
+                  "tr/sdk/rust/filesystem",
+                  "tr/sdk/rust/volumes",
+                  "tr/sdk/rust/networking",
+                  "tr/sdk/rust/secrets",
+                  "tr/sdk/rust/snapshots",
+                  "tr/sdk/rust/events"
+                ]
+              },
+              {
+                "group": "TypeScript SDK",
+                "icon": "js",
+                "pages": [
+                  "tr/sdk/typescript/sandbox",
+                  "tr/sdk/typescript/execution",
+                  "tr/sdk/typescript/filesystem",
+                  "tr/sdk/typescript/volumes",
+                  "tr/sdk/typescript/networking",
+                  "tr/sdk/typescript/secrets",
+                  "tr/sdk/typescript/snapshots",
+                  "tr/sdk/typescript/events"
+                ]
+              },
+              {
+                "group": "Python SDK",
+                "icon": "python",
+                "pages": [
+                  "tr/sdk/python/sandbox",
+                  "tr/sdk/python/execution",
+                  "tr/sdk/python/filesystem",
+                  "tr/sdk/python/volumes",
+                  "tr/sdk/python/networking",
+                  "tr/sdk/python/secrets",
+                  "tr/sdk/python/snapshots",
+                  "tr/sdk/python/events"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "CLI Referansı",
+            "groups": [
+              {
+                "group": "CLI",
+                "icon": "terminal",
+                "pages": [
+                  "tr/cli/overview",
+                  "tr/cli/sandbox-commands",
+                  "tr/cli/volume-commands",
+                  "tr/cli/image-commands"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "Tarifler",
+            "groups": [
+              {
+                "group": "Docker",
+                "icon": "docker",
+                "pages": [
+                  "tr/recipes/docker",
+                  "tr/recipes/local-images"
+                ]
+              },
+              {
+                "group": "Guest",
+                "icon": "server",
+                "pages": [
+                  "tr/recipes/systemd-services"
+                ]
+              }
             ]
           }
         ]

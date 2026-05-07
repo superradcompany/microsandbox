@@ -1,0 +1,73 @@
+---
+title: "ローカルイメージ"
+description: "ローカルコンテナイメージを構築して使用する"
+icon: "boxes-stacked"
+---
+
+
+microsandbox pulls images from OCI-compatible registries. If you build an image locally with `docker build`, microsandbox can't access it directly from Docker's local store. The workaround is to run a local registry and push your image there.
+
+## Step 1: Start a local registry
+
+Run a local OCI registry on port 5050:
+
+```bash
+docker run -d -p 5050:5000 --name registry registry:2
+```
+
+<Tip>
+  Port 5000 is used by AirPlay on macOS. This guide uses port 5050 to avoid conflicts.
+</Tip>
+
+## Step 2: Build, tag, and push your image
+
+Build your Docker image and tag it for the local registry:
+
+```bash
+docker build -t localhost:5050/my-image:latest .
+```
+
+If you already have an existing image, re-tag it:
+
+```bash
+docker tag my-image:latest localhost:5050/my-image:latest
+```
+
+Push to the local registry:
+
+```bash
+docker push localhost:5050/my-image:latest
+```
+
+## Step 3: Pull with microsandbox
+
+Since the local registry runs over plain HTTP, use the `--insecure` flag:
+
+```bash
+msb pull localhost:5050/my-image:latest --insecure
+```
+
+## Step 4: Use it in microsandbox
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("localhost:5050/my-image:latest")
+    .registry(|r| r.insecure())
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+    .image("localhost:5050/my-image:latest")
+    .registry((r) => r.insecure())
+    .create();
+```
+</CodeGroup>
+
+<Tip>
+  For persistent configuration that applies to all CLI and SDK operations, add the registry to `~/.microsandbox/config.json` instead. See [Registry TLS](/ja/images/overview#registry-tls).
+</Tip>

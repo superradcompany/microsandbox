@@ -1,0 +1,289 @@
+---
+title: "Logs"
+description: "Captura e inspecciona los logs del sandbox"
+icon: "scroll"
+---
+
+
+Every sandbox records its captured output to disk so you can read it later — even after the sandbox stops or crashes. The CLI surface is `msb logs <name>`; the SDK surface is `logs()` on `Sandbox` and `SandboxHandle`. Both work on running and stopped sandboxes alike, with no protocol traffic — just a file read.
+
+## What's captured
+
+When a sandbox is running, the host-side **relay tap** intercepts the protocol frames flowing from the guest agent (`agentd`) and writes a copy of every exec session's stdout/stderr to `exec.log` as JSON Lines. Every session is captured, tagged with its own monotonic id so readers can group or filter by session.
+
+```jsonl
+{"t":"2026-04-30T20:32:59.688Z","s":"system","d":"--- sandbox started ---\n"}
+{"t":"2026-04-30T20:32:59.689Z","s":"stdout","d":"Listening on :8080\n","id":1}
+{"t":"2026-04-30T20:32:59.690Z","s":"stderr","d":"warn: no TLS\n","id":1}
+{"t":"2026-04-30T20:33:01.112Z","s":"stdout","d":"got request\n","id":2}
+{"t":"2026-04-30T20:33:05.220Z","s":"system","d":"--- sandbox stopped ---\n"}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `t` | RFC 3339 timestamp at the moment the chunk was captured |
+| `s` | Source tag — see [Sources](#sources) |
+| `d` | The chunk's bytes, UTF-8 lossy decoded by default |
+| `id` | Relay-monotonic session id (starts at 1, +1 per `exec`); absent on `system` entries |
+
+## Sources
+
+The `s` field tells you where each chunk came from. Four values:
+
+| Source | When emitted |
+|--------|--------------|
+| `stdout` | Captured from a session's stdout, **pipe mode** — streams stayed separated end to end. |
+| `stderr` | Captured from a session's stderr, **pipe mode**. |
+| `output` | Captured from a session running in **PTY mode**. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream. We tag them `output` rather than mislabel as `stdout` so a reader doing `jq 'select(.s == "stderr")'` doesn't accidentally pick up merged PTY bytes. |
+| `system` | Synthetic entries: lifecycle markers (`--- sandbox started ---` / `--- sandbox stopped ---`) plus runtime/kernel diagnostic lines from `runtime.log` / `kernel.log` merged in at read time when `--source system` is requested. |
+
+The default `msb logs <name>` and SDK `logs()` show `stdout` + `stderr` + `output` — all user-program output, regardless of pipe vs PTY. Add `system` explicitly when you want the diagnostics merge.
+
+<Tip>
+  **Pipe vs PTY modes.** Non-interactive `msb run` (with stdin piped or redirected) and `Sandbox.exec()` use pipe mode — streams stay separate. Interactive `msb run` from a real terminal, `msb attach`, and explicit `--tty` use PTY mode — streams are merged in the kernel. Choose pipe mode when you want clean per-stream filtering in your logs.
+</Tip>
+
+## Reading logs
+
+### From the CLI
+
+```bash
+# Default — user-program output (stdout + stderr + output)
+msb logs devbox
+
+# Tail the most recent entries
+msb logs devbox --tail 100
+
+# Follow live
+msb logs devbox -f
+
+# Filter by source
+msb logs devbox --source stderr           # just stderr (pipe-mode only)
+msb logs devbox --source output           # just PTY-merged
+msb logs devbox --source system           # runtime + kernel diagnostics
+msb logs devbox --source all              # everything, chronologically merged
+
+# Time-bounded
+msb logs devbox --since 5m                # last 5 minutes
+msb logs devbox --since 2026-04-30T20:00:00Z
+
+# Grep
+msb logs devbox --grep ERROR
+
+# Multi-session view: prefix each line with [id:N]
+msb logs devbox --show-id
+
+# Color each session distinctly (implies --show-id)
+msb logs devbox --color-sessions
+
+# Programmatic: raw JSON Lines
+msb logs devbox --json | jq 'select(.s == "stderr")'
+```
+
+See [`msb logs` reference](/es/cli/sandbox-commands#msb-logs) for the full flag list.
+
+### From the SDK
+
+<CodeGroup>
+```rust Rust
+use microsandbox::sandbox::{LogOptions, LogSource, Sandbox};
+
+let handle = Sandbox::get("web").await?;
+
+let entries = handle.logs(&LogOptions::default())?;
+
+for e in entries {
+    let source = match e.source {
+        LogSource::Stdout => "OUT",
+        LogSource::Stderr => "ERR",
+        LogSource::Output => "PTY",
+        LogSource::System => "SYS",
+    };
+    println!(
+        "[{}] {} {:?}: {}",
+        e.timestamp.to_rfc3339(),
+        source,
+        e.session_id,
+        String::from_utf8_lossy(&e.data).trim_end()
+    );
+}
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+const handle = await Sandbox.get("web");
+
+const entries = await handle.logs();
+
+for (const e of entries) {
+    const source =
+        e.source === "stdout" ? "OUT" :
+        e.source === "stderr" ? "ERR" :
+        e.source === "output" ? "PTY" :
+        "SYS";
+
+    console.log(
+        `[${e.timestamp.toISOString()}] ${source} ${e.sessionId}: ${e.text().trimEnd()}`
+    );
+}
+```
+
+```python Python
+import asyncio
+import microsandbox
+
+async def main():
+    handle = await microsandbox.Sandbox.get("web")
+
+    entries = await handle.logs()
+
+    for e in entries:
+        source = {
+            "stdout": "OUT",
+            "stderr": "ERR",
+            "output": "PTY",
+            "system": "SYS",
+        }[e.source]
+
+        print(
+            f"[{e.timestamp_ms / 1000:.3f}] "
+            f"{source} {e.session_id}: {e.text().rstrip()}"
+        )
+
+asyncio.run(main())
+```
+</CodeGroup>
+
+### Filtering at read time
+
+All filters are client-side. The on-disk file is bounded (10 MiB rotated × 3 = 30 MiB ceiling per sandbox), so a linear scan is always cheap.
+
+<CodeGroup>
+```rust Rust
+use chrono::{Duration, Utc};
+use microsandbox::sandbox::{LogOptions, LogSource};
+
+let recent = handle.logs(&LogOptions {
+    tail: Some(50),
+    since: Some(Utc::now() - Duration::hours(1)),
+    sources: vec![
+        LogSource::Stdout,
+        LogSource::Stderr,
+        LogSource::Output,
+        LogSource::System,
+    ],
+    ..Default::default()
+})?;
+```
+
+```typescript TypeScript
+const recent = await handle.logs({
+    tail: 50,
+    since: new Date(Date.now() - 60 * 60 * 1000),
+    sources: ["stdout", "stderr", "output", "system"],
+});
+```
+
+```python Python
+import time
+
+recent = await handle.logs(
+    tail=50,
+    since_ms=(time.time() - 3600) * 1000,
+    sources=["stdout", "stderr", "output", "system"],
+)
+```
+</CodeGroup>
+
+## On-disk layout
+
+Each sandbox has its own log directory under `<sandbox-dir>/logs/`:
+
+| File | Producer | Format | Bounded? |
+|------|----------|--------|----------|
+| `exec.log` | Host relay tap | JSON Lines (one entry per chunk) | Yes — `RotatingLog`, 10 MiB × 3 |
+| `runtime.log` | Sandbox process tracing | Plain text (RFC 3339 prefix) | Yes — `RotatingLog`, 10 MiB × 3 |
+| `kernel.log` | Guest VM virtio-console | Plain text (kernel + `agentd`) | Append-only |
+| `boot-error.json` | Sandbox process (failed start only) | JSON object | Single file, atomically replaced |
+
+Lifecycle: the directory is created on `msb create`. `exec.log` gets `--- sandbox started ---` injected when the agent reports `core.ready`, and `--- sandbox stopped ---` when the sandbox process exits (the latter from the VMM's `on_exit` observer, so it fires reliably even on crashes). On `msb remove`, the entire directory is deleted.
+
+## Boot errors
+
+When a sandbox process exits before the agent relay is ready — typically a mount error, missing rootfs, or network setup failure — there's no `exec.log` content yet. The runtime writes a small structured `boot-error.json` instead:
+
+```json
+{
+  "t": "2026-04-30T20:32:59.690Z",
+  "stage": "mount",
+  "errno": 2,
+  "message": "mount tmp_x_…: No such file or directory (os error 2)"
+}
+```
+
+The CLI prepends a styled error block reconstructed from this file before any captured log content:
+
+```
+error: failed to start "dind"
+  → mount: mount tmp_x_…: No such file or directory (os error 2)
+  → the host path for one of the mounts does not exist
+  → run `msb logs --source system dind` for full diagnostics
+```
+
+`stage` values: `mount`, `build_vm`, `config`, `network`, `image`, `other`. The CLI's stage-to-hint mapper turns `(stage, errno)` into the actionable hint line.
+
+SDK callers see this as a typed [`BootStart` error](/es/sdk/errors#sandbox-start-failures) — match on it to recover or report cleanly.
+
+## Common diagnostic flows
+
+**"My sandbox crashed — what happened?"**
+
+```bash
+msb ls                              # confirm Crashed state
+msb logs <name>                     # what was the program doing right before?
+msb logs <name> --source system     # runtime + kernel diagnostics
+```
+
+**"My sandbox won't start."**
+
+```bash
+msb create --name nope ...          # observe the styled error block
+cat ~/.microsandbox/sandboxes/nope/logs/boot-error.json
+msb logs nope --source system       # full diagnostics from runtime.log/kernel.log
+```
+
+**"My program isn't logging."**
+
+If `exec.log` only has `--- sandbox started ---` and nothing else, no exec session ever opened. Check that you actually ran something — `msb create` alone doesn't run any user program.
+
+**"My program is logging but I can't tell which session."**
+
+```bash
+msb logs <name> --show-id           # prefix every line with the session id
+msb logs <name> --color-sessions    # one color per session
+```
+
+**"I want to feed logs to my own pipeline."**
+
+```bash
+# JSON Lines — schema in this page's "What's captured" section
+msb logs <name> --json | jq -c 'select(.s == "stderr")'
+
+# Or programmatic via the SDK — same data, typed.
+```
+
+## Capture model in detail
+
+A sandbox can host many concurrent exec sessions: an `msb run` at creation, plus arbitrary `msb exec` calls, plus SDK-driven sessions. **Every session is captured** to `exec.log`, tagged with its own monotonic `id` field so readers can group or filter without losing data.
+
+The id is minted by the relay (`next_session_id: AtomicU64`, starts at 1, +1 per observed `ExecRequest`). It's distinct from the protocol correlation id — the latter is per-client and gets reused across slot recycling, which would make sequential `msb exec` calls indistinguishable. The relay-minted id never repeats within a sandbox lifetime.
+
+System entries (`--- sandbox started ---`, `--- sandbox stopped ---`) have no `id` field — they aren't tied to a specific session.
+
+## Troubleshooting log capture
+
+- **`exec.log` is empty.** No exec session ever opened. `msb create` alone doesn't run anything; you need `msb run` or `msb exec` to produce output.
+- **Stderr appears as `stdout`.** The session is in PTY mode (interactive). PTY merges streams in the kernel — by the time bytes leave the guest, they're indistinguishable. Use `< /dev/null` or non-interactive invocation to take the pipe path. PTY-mode bytes are tagged `output`, not `stdout` — make sure your filters cover both.
+- **`runtime.log` has weird `[2m...` characters.** Older sandboxes may still have ANSI color codes from `tracing`. Newly-created sandboxes don't (we disable ANSI at the source for the sandbox subprocess).
+- **`msb logs -f` exits immediately.** The sandbox is stopped. Follow mode against a stopped sandbox dumps the existing contents and exits — it doesn't block waiting for it to start.

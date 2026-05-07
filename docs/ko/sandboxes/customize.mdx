@@ -1,0 +1,340 @@
+---
+title: "사용자 지정"
+description: "스크립트 및 패치로 게스트 환경을 사용자 지정합니다"
+icon: "wand-magic-sparkles"
+---
+
+
+Before a sandbox starts doing real work, you can prepare it three ways. **Scripts** bundle reusable commands. **Patches** modify the rootfs before the VM boots. A **custom init system** (systemd, OpenRC, s6) can run as PID 1 instead of microsandbox's minimal agent. All three are defined at creation time and keep the base image untouched.
+
+## Scripts
+
+Scripts are files mounted at `/.msb/scripts/` inside the sandbox. The directory is on `PATH`, so each script is callable by name through `exec()` or `shell()`.
+
+It provides a clean way to bundle setup procedures or entry points with a sandbox without baking them into the image.
+
+<CodeGroup>
+```rust Rust
+use indoc::indoc;
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("worker")
+    .image("ubuntu")
+    .script("setup", indoc! {"
+        #!/bin/bash
+        apt-get update && apt-get install -y python3 curl
+    "})
+    .script("start", indoc! {"
+        #!/bin/bash
+        exec python3 /app/main.py
+    "})
+    .create()
+    .await?;
+
+sb.shell("setup").await?;
+let output = sb.shell("start").await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+    .image("ubuntu")
+    .script("setup", "#!/bin/bash\napt-get update && apt-get install -y python3 curl")
+    .script("run",   "#!/bin/bash\nexec python3 /app/main.py")
+    .create();
+
+await sb.shell("setup");
+const output = await sb.shell("run");
+```
+
+```python Python
+from microsandbox import Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="ubuntu",
+    scripts={
+        "setup": "#!/bin/bash\napt-get update && apt-get install -y python3 curl",
+        "start": "#!/bin/bash\nexec python3 /app/main.py",
+    },
+)
+
+await sb.shell("setup")
+output = await sb.shell("start")
+```
+
+</CodeGroup>
+
+## Patches
+
+Patches modify the rootfs **before the VM boots**. Write config files, copy directories from the host, create symlinks, append to existing files, remove things you don't need. The base image stays untouched since patches are written to the writable layer on top.
+
+Patches are applied in order and work with OCI images and bind-mounted rootfs. They're not supported with disk image roots (QCOW2, Raw).
+
+<Tip>
+  By default, patching a path that already exists in the image will error. Pass `replace: true` on the operation to allow it. `Mkdir` and `Remove` are idempotent and won't error either way.
+</Tip>
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("worker")
+    .image("alpine")
+    .patch(|p| p
+        .text("/etc/greeting.txt", "Hello from a patched rootfs!\n", None, false)
+        .text("/etc/motd", "Custom message of the day.\n", None, true) // replace existing
+        .mkdir("/app", Some(0o755))
+        .text("/app/config.json", r#"{"debug": true}"#, Some(0o644), false)
+        .copy_file("./cert.pem", "/etc/ssl/cert.pem", None, false)
+        .append("/etc/hosts", "127.0.0.1 myapp.local\n")
+    )
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+    .image("alpine")
+    .patch((p) => p
+        .text("/etc/greeting.txt", "Hello from a patched rootfs!\n")
+        .text("/etc/motd", "Custom message of the day.\n", { replace: true })
+        .mkdir("/app", { mode: 0o755 })
+        .text("/app/config.json", '{"debug": true}', { mode: 0o644 })
+        .copyFile("./cert.pem", "/etc/ssl/cert.pem")
+        .append("/etc/hosts", "127.0.0.1 myapp.local\n"),
+    )
+    .create();
+```
+
+```python Python
+from microsandbox import Patch, Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="alpine",
+    patches=[
+        Patch.text("/etc/greeting.txt", "Hello from a patched rootfs!\n"),
+        Patch.text("/etc/motd", "Custom message of the day.\n", replace=True),
+        Patch.mkdir("/app", mode=0o755),
+        Patch.text("/app/config.json", '{"debug": true}', mode=0o644),
+        Patch.copy_file("./cert.pem", "/etc/ssl/cert.pem"),
+        Patch.append("/etc/hosts", "127.0.0.1 myapp.local\n"),
+    ],
+)
+```
+
+</CodeGroup>
+
+### Available operations
+
+The patch builder appends operations in the order you call them; calls are chainable. Available operations across SDKs: `text`, `file`, `mkdir`, `append`, `copyFile` / `copy_file`, `copyDir` / `copy_dir`, `symlink`, `remove`.
+
+Full per-language signatures, parameters, and option shapes are documented in the SDK references:
+
+- Rust: [`PatchBuilder`](/ko/sdk/rust/sandbox#patchbuilder)
+- TypeScript: [`PatchBuilder`](/ko/sdk/typescript/sandbox#patchbuilder)
+- Python: [`Patch`](/ko/sdk/python/sandbox#patch) (factory) and [`PatchConfig`](/ko/sdk/python/sandbox#patchconfig) (the value type)
+
+## Custom init system
+
+By default the microsandbox agent runs as PID 1 inside the guest: small, fast, minimal. For workloads that expect a real init (systemd, OpenRC, s6, runit, etc.), `--init` hands PID 1 over to the init binary of your choice.
+
+The handoff sequence:
+
+- Agent does the boot-time setup: mount filesystems, configure network, prepare runtime dirs.
+- Agent forks.
+- Parent execs your init and becomes PID 1.
+- Child agent continues serving host requests over the same channel.
+
+Common reasons to opt in: long-lived daemons, system service tests, anything that talks to dbus or expects `systemctl` to work.
+
+The simplest entry point is `auto`, which probes a small list of well-known paths inside the guest rootfs and picks the first one that exists:
+
+- `/sbin/init`
+- `/lib/systemd/systemd`
+- `/usr/lib/systemd/systemd`
+
+Pass an absolute path instead when you need pinning (e.g. for reproducible CI).
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("worker")
+    .image("ghcr.io/superradcompany/debian-systemd:12")
+    .memory(1024)
+    .cpus(2)
+    .init("auto")
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { MiB, Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+    .image("ghcr.io/superradcompany/debian-systemd:12")
+    .memory(MiB(1024))
+    .cpus(2)
+    .init("auto")
+    .create();
+```
+
+```python Python
+from microsandbox import Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="ghcr.io/superradcompany/debian-systemd:12",
+    memory=1024,
+    cpus=2,
+    init="auto",
+)
+```
+
+```bash CLI
+msb run ghcr.io/superradcompany/debian-systemd:12 \
+  -m 1G -c 2 \
+  --init auto \
+  -- bash
+```
+</CodeGroup>
+
+To verify the handoff worked, check `/proc/1/comm` inside the sandbox. It should print the init's name (`systemd`, `init`, etc.):
+
+```bash
+$ msb run ghcr.io/superradcompany/debian-systemd:12 --init auto -- cat /proc/1/comm
+systemd
+```
+
+If `--init=auto` can't find anything in its candidate list, agentd fails boot with a clear error in `kernel.log` listing every path it checked. Switch to an explicit path (`--init=/lib/systemd/systemd`) when you know exactly where the init lives, or follow the image-picking guidance below to choose an image that actually ships one.
+
+### Argv and env
+
+Pass extra argv and env to the init:
+
+- **Rust / TypeScript**: `init_with(...)` / `initWith(...)`.
+- **Python**: pass an `InitConfig` to `init=`.
+- **CLI**: repeat `--init-arg` once per entry, and `--init-env KEY=VAL` once per env var.
+
+Argv defaults to `[<cmd>]` when none is given; env is merged on top of the inherited environment.
+
+<CodeGroup>
+```bash CLI
+msb run ghcr.io/superradcompany/debian-systemd:12 \
+  --init /lib/systemd/systemd \
+  --init-arg --unit=multi-user.target \
+  --init-env container=microsandbox \
+  -- bash
+```
+
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("ghcr.io/superradcompany/debian-systemd:12")
+    .init_with("/lib/systemd/systemd", |i| i
+        .args(["--unit=multi-user.target"])
+        .env("container", "microsandbox"))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("ghcr.io/superradcompany/debian-systemd:12")
+    .initWith("/lib/systemd/systemd", (i) => i
+        .args(["--unit=multi-user.target"])
+        .env("container", "microsandbox"))
+    .create();
+```
+
+```python Python
+from microsandbox import InitConfig, Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="ghcr.io/superradcompany/debian-systemd:12",
+    init=InitConfig(
+        cmd="/lib/systemd/systemd",
+        args=("--unit=multi-user.target",),
+        env={"container": "microsandbox"},
+    ),
+)
+```
+</CodeGroup>
+
+### Picking an image
+
+Most slim Docker base images (`debian:bookworm-slim`, `ubuntu:24.04`, `python:3.12-slim`) are stripped of init binaries; they're built for "one process per container" and don't ship systemd at all. If you point `--init` at a path the image doesn't contain, the agent's pre-flight check fails boot with a clear error in the kernel log (no kernel panic).
+
+Three ways to get an image with an init:
+
+<AccordionGroup>
+  <Accordion title="Use one of our published guest images">
+    We maintain a small collection at [`superradcompany/guest-images`](https://github.com/superradcompany/guest-images) for the cases where you specifically need a real init. Current set:
+
+    | Image | Pull |
+    |-------|------|
+    | Debian + systemd | `ghcr.io/superradcompany/debian-systemd:12` |
+    | Ubuntu + systemd | `ghcr.io/superradcompany/ubuntu-systemd:24.04` |
+    | Fedora + systemd | `ghcr.io/superradcompany/fedora-systemd:40` |
+    | Alpine + OpenRC | `ghcr.io/superradcompany/alpine-openrc:3.20` |
+
+    Multi-arch (`linux/amd64` + `linux/arm64`), rebuilt weekly so they pick up upstream security patches, smoke-tested on every rebuild. Each image's GHCR page documents its specific tag aliases and contents.
+  </Accordion>
+  <Accordion title="Build a small custom image">
+    ```dockerfile
+    # Dockerfile.systemd
+    FROM debian:bookworm
+    RUN apt-get update \
+        && apt-get install -y --no-install-recommends systemd \
+        && rm -rf /var/lib/apt/lists/*
+    ```
+
+    ```bash
+    docker buildx build -t local-systemd:debian -f Dockerfile.systemd .
+    msb run local-systemd:debian --init /lib/systemd/systemd -- bash
+    ```
+  </Accordion>
+  <Accordion title="Use a community-built systemd image">
+    Examples: `jrei/systemd-debian:12`, `jrei/systemd-ubuntu:22.04`. These work out of the box but are published by community maintainers, not the distros themselves. Vet them like any other third-party image before running real workloads.
+  </Accordion>
+</AccordionGroup>
+
+For a sanity check that doesn't need systemd, `alpine:3.20` ships BusyBox at `/sbin/init`, which is enough to exercise the handoff mechanics:
+
+```bash
+msb run alpine:3.20 --init /sbin/init -- sh -c "cat /proc/1/comm"
+# busybox
+```
+
+### Shutdown semantics
+
+Without `--init`, microsandbox shuts the guest down by remounting root read-only and calling `reboot(RB_POWER_OFF)`. Typically &lt;100 ms.
+
+With `--init`, the agent isn't PID 1 anymore, so it asks your init to shut down:
+
+- `SIGRTMIN+4` first (systemd's poweroff signal).
+- `SIGTERM` fallback for inits that don't speak it.
+
+Your init then runs its own teardown (stop services, unmount, halt), which is slower:
+
+| Init | Typical shutdown |
+|------|------------------|
+| BusyBox / s6 / runit | &lt;100 ms |
+| OpenRC | 50-500 ms |
+| systemd | 1-5 s |
+
+This is the price of a real init. If your test harness measures end-to-end sandbox lifecycle and you're comparing to a no-handoff baseline, account for this.
+
+### Init and entrypoint
+
+`--init` and `--entrypoint` are orthogonal:
+
+- `--init` controls **PID 1**: what runs the system.
+- `--entrypoint` (and the trailing `-- cmd`) controls **what your workload runs**.
+
+They can be combined. Boot systemd as PID 1 and have microsandbox `exec` calls land your shell, scripts, or app inside the systemd-managed environment.

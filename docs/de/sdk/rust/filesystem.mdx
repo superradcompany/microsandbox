@@ -1,0 +1,357 @@
+---
+title: "Dateisystem"
+description: "Dateisystem-API-Referenz"
+icon: "folder-open"
+---
+
+
+See [Filesystem](/de/sandboxes/filesystem) for usage examples and extensible backends.
+
+## SandboxFs
+
+Filesystem handle for a running sandbox. Obtained via `sb.fs()`. All operations go through the same host-guest channel as command execution - no SSH, no network involved. For bulk file operations, consider using [volumes](/de/sandboxes/volumes) instead, which give the guest direct filesystem access.
+
+---
+
+#### copy()
+
+```rust
+async fn copy(&self, from: &str, to: &str) -> MicrosandboxResult<()>
+```
+
+Copy a file within the sandbox.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| from | `&str` | Source path |
+| to | `&str` | Destination path |
+
+---
+
+#### copy_from_host()
+
+```rust
+async fn copy_from_host(&self, host_path: impl AsRef<Path>, guest_path: &str) -> MicrosandboxResult<()>
+```
+
+Copy a file from the host machine into the sandbox. For transferring many files, consider a [bind-mounted volume](/de/sandboxes/volumes) instead.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| host_path | `impl AsRef<Path>` | Path on the host filesystem |
+| guest_path | `&str` | Destination path inside the sandbox |
+
+---
+
+#### copy_to_host()
+
+```rust
+async fn copy_to_host(&self, guest_path: &str, host_path: impl AsRef<Path>) -> MicrosandboxResult<()>
+```
+
+Copy a file from the sandbox to the host machine.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| guest_path | `&str` | Path inside the sandbox |
+| host_path | `impl AsRef<Path>` | Destination path on the host |
+
+---
+
+#### exists()
+
+```rust
+async fn exists(&self, path: &str) -> MicrosandboxResult<bool>
+```
+
+Check whether a path exists inside the sandbox.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `&str` | Absolute path inside the guest |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `bool` | `true` if the path exists |
+
+---
+
+#### list()
+
+```rust
+async fn list(&self, path: &str) -> MicrosandboxResult<Vec<FsEntry>>
+```
+
+List the entries in a directory. Returns metadata for each entry including name, type, size, and permissions.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `&str` | Absolute directory path inside the guest |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Vec<`[`FsEntry`](#fsentry)`>` | Directory entries |
+
+---
+
+#### mkdir()
+
+```rust
+async fn mkdir(&self, path: &str) -> MicrosandboxResult<()>
+```
+
+Create a directory. Parent directories must already exist.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `&str` | Absolute directory path |
+
+---
+
+#### read()
+
+```rust
+async fn read(&self, path: &str) -> MicrosandboxResult<Bytes>
+```
+
+Read the entire contents of a file as raw bytes.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `&str` | Absolute path inside the guest (e.g. `"/app/config.json"`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Bytes` | File contents as raw bytes |
+
+---
+
+#### read_stream()
+
+```rust
+async fn read_stream(&self, path: &str) -> MicrosandboxResult<FsReadStream>
+```
+
+Open a streaming reader for a file. Data is transferred in chunks of approximately 3 MiB each. Use this for files too large to fit in memory, or when you want to process data incrementally.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `&str` | Absolute path inside the guest |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`FsReadStream`](#fsreadstream) | Async stream that yields chunks of file data |
+
+---
+
+#### read_to_string()
+
+```rust
+async fn read_to_string(&self, path: &str) -> MicrosandboxResult<String>
+```
+
+Read the entire contents of a file and decode as UTF-8. Returns an error if the file contains invalid UTF-8.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `&str` | Absolute path inside the guest |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `String` | File contents as a UTF-8 string |
+
+---
+
+#### remove()
+
+```rust
+async fn remove(&self, path: &str) -> MicrosandboxResult<()>
+```
+
+Remove a file.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `&str` | Absolute file path |
+
+---
+
+#### remove_dir()
+
+```rust
+async fn remove_dir(&self, path: &str) -> MicrosandboxResult<()>
+```
+
+Remove a directory.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `&str` | Absolute directory path |
+
+---
+
+#### rename()
+
+```rust
+async fn rename(&self, from: &str, to: &str) -> MicrosandboxResult<()>
+```
+
+Rename or move a file or directory within the sandbox.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| from | `&str` | Current path |
+| to | `&str` | New path |
+
+---
+
+#### stat()
+
+```rust
+async fn stat(&self, path: &str) -> MicrosandboxResult<FsMetadata>
+```
+
+Get detailed metadata for a file or directory, including type, size, permissions, and timestamps.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `&str` | Absolute path inside the guest |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`FsMetadata`](#fsmetadata) | File metadata |
+
+---
+
+#### write()
+
+```rust
+async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()>
+```
+
+Write content to a file, creating it if it doesn't exist and overwriting if it does. Parent directories must already exist.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `&str` | Absolute path inside the guest |
+| data | `impl AsRef<[u8]>` | File content |
+
+---
+
+#### write_stream()
+
+```rust
+async fn write_stream(&self, path: &str) -> MicrosandboxResult<FsWriteSink>
+```
+
+Open a streaming writer for large files. Write chunks incrementally and close when done.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `&str` | Absolute path inside the guest |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`FsWriteSink`](#fswritesink) | Async writer for sending chunks |
+
+---
+
+## Types
+
+### FsEntry
+
+Metadata for a single directory entry, returned by [`list()`](#list).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| kind | [`FsEntryKind`](#fsentrykind) | Type of entry |
+| mode | `u32` | Unix permission bits (e.g. `0o644`) |
+| modified | `Option<DateTime<Utc>>` | Last modified timestamp |
+| path | `String` | File path |
+| size | `u64` | File size in bytes |
+
+### FsEntryKind
+
+The type of a filesystem entry.
+
+| Value | Description |
+|-------|-------------|
+| `Directory` | Directory |
+| `File` | Regular file |
+| `Other` | Other entry type (device, socket, etc.) |
+| `Symlink` | Symbolic link |
+
+### FsMetadata
+
+Detailed file metadata, returned by [`stat()`](#stat).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| created | `Option<DateTime<Utc>>` | Creation timestamp (not available on all filesystems) |
+| kind | [`FsEntryKind`](#fsentrykind) | Type of entry |
+| mode | `u32` | Unix permission bits |
+| modified | `Option<DateTime<Utc>>` | Last modified timestamp |
+| readonly | `bool` | Whether the file is read-only |
+| size | `u64` | File size in bytes |
+
+### FsReadStream
+
+Async stream for reading a file in chunks. Obtained via [`read_stream()`](#read_stream).
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| collect() | `Bytes` | Collect all remaining chunks into a single `Bytes` buffer. |
+| recv() | `Option<Bytes>` | Receive the next chunk. Returns `None` when the file has been fully read. |
+
+### FsWriteSink
+
+Async writer for streaming data into a file. Obtained via [`write_stream()`](#write_stream).
+
+| Method | Parameters | Description |
+|--------|-----------|-------------|
+| close() | - | Finalize the write and close the stream. Must be called to ensure all data is flushed. |
+| write() | `data: impl AsRef<[u8]>` | Write a chunk of data to the file. |

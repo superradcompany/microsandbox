@@ -1,0 +1,214 @@
+---
+title: "Volumes"
+description: "Volumes-API-referentie"
+icon: "hard-drive"
+---
+
+
+See [Volumes](/nl/sandboxes/volumes) for usage examples and patterns.
+
+## Volume
+
+Named volumes are managed by microsandbox and stored at `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox.
+
+---
+
+#### Volume::builder()
+
+```rust
+fn builder(name: impl Into<String>) -> VolumeBuilder
+```
+
+Create a builder for a new named volume. Call `.quota()` to set a storage limit, then `.create()` to finalize.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `impl Into<String>` | Volume name (e.g. `"pip-cache"`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`VolumeBuilder`](#volumebuilder) | Builder with `.quota()` and `.create()` |
+
+---
+
+#### Volume::get()
+
+```rust
+async fn get(name: &str) -> MicrosandboxResult<VolumeHandle>
+```
+
+Get a handle to an existing named volume. Use the handle to access the volume's filesystem from the host or to delete it.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `&str` | Volume name |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`VolumeHandle`](#volumehandle) | Handle for host-side operations |
+
+---
+
+#### Volume::list()
+
+```rust
+async fn list() -> MicrosandboxResult<Vec<VolumeHandle>>
+```
+
+List all named volumes.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Vec<`[`VolumeHandle`](#volumehandle)`>` | All volume handles |
+
+---
+
+#### Volume::remove()
+
+```rust
+async fn remove(name: &str) -> MicrosandboxResult<()>
+```
+
+Delete a named volume and its contents from disk. Fails if the volume is currently mounted by a running sandbox.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `&str` | Volume name |
+
+---
+
+## VolumeBuilder
+
+Builder for creating a named volume.
+
+---
+
+#### create()
+
+```rust
+async fn create(self) -> MicrosandboxResult<Volume>
+```
+
+Create the volume on disk.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Volume` | The created volume |
+
+---
+
+#### quota()
+
+```rust
+fn quota(self, mib: u64) -> Self
+```
+
+Set the maximum storage size for this volume. The guest cannot write beyond this limit.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| mib | `u64` | Quota in MiB |
+
+---
+
+## MountBuilder
+
+Builder for configuring a volume mount. Used in `SandboxBuilder::volume(path, |v| v...)`.
+
+---
+
+#### bind()
+
+```rust
+fn bind(self, host_path: impl Into<PathBuf>) -> Self
+```
+
+Mount a host directory into the sandbox. Changes in the guest are reflected on the host and vice versa.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| host_path | `impl Into<PathBuf>` | Directory path on the host |
+
+---
+
+#### named()
+
+```rust
+fn named(self, name: impl Into<String>) -> Self
+```
+
+Mount a named volume. The volume must already exist (create it with [`Volume::builder()`](#volumebuilder)).
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `impl Into<String>` | Volume name |
+
+---
+
+#### readonly()
+
+```rust
+fn readonly(self) -> Self
+```
+
+Mount as read-only. The guest can read but not write.
+
+---
+
+#### size()
+
+```rust
+fn size(self, mib: impl Into<Mebibytes>) -> Self
+```
+
+Set the size limit for a tmpfs mount. Has no effect on bind or named mounts.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| mib | `impl Into<Mebibytes>` | Size limit in MiB |
+
+---
+
+#### tmpfs()
+
+```rust
+fn tmpfs(self) -> Self
+```
+
+Use an in-memory filesystem. Contents are discarded when the sandbox stops. Good for scratch space, temp files, and build artifacts.
+
+---
+
+## Types
+
+### VolumeHandle
+
+Handle for interacting with a named volume from the host side.
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| fs() | `VolumeFsHandle` | Host-side filesystem access - read and write files without a running sandbox |
+| name() | `&str` | Volume name |
+| remove() | `()` | Delete this volume from disk |

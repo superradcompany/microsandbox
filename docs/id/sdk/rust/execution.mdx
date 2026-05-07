@@ -1,0 +1,307 @@
+---
+title: "Eksekusi"
+description: "Referensi API eksekusi perintah"
+icon: "terminal"
+---
+
+
+See [Commands](/id/sandboxes/commands) for usage examples.
+
+---
+
+#### attach()
+
+```rust
+async fn attach(&self, cmd: impl Into<String>, args: impl IntoIterator<Item = impl Into<String>>) -> MicrosandboxResult<i32>
+```
+
+Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session. Your terminal's stdin, stdout, and stderr are connected to the guest process. Press `Ctrl+]` (or configured detach keys) to disconnect without stopping the process - it keeps running and can be reattached via its session ID.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `impl Into<String>` | Command to run |
+| args | `impl IntoIterator<Item = impl Into<String>>` | Command arguments |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `i32` | Exit code of the process |
+
+---
+
+#### attach_shell()
+
+```rust
+async fn attach_shell(&self) -> MicrosandboxResult<i32>
+```
+
+Attach to the sandbox's default shell (configured via `SandboxBuilder::shell()`, defaults to `/bin/sh`).
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `i32` | Exit code |
+
+---
+
+#### attach_with()
+
+```rust
+async fn attach_with(&self, cmd: impl Into<String>, f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder) -> MicrosandboxResult<i32>
+```
+
+Interactive PTY attach with options for environment variables, working directory, user, and custom detach keys.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `impl Into<String>` | Command to run |
+| f | `AttachOptionsBuilder` | Configure attach options (env, cwd, user, detach keys). |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `i32` | Exit code of the process |
+
+---
+
+#### exec()
+
+```rust
+async fn exec(&self, cmd: impl Into<String>, args: impl IntoIterator<Item = impl Into<String>>) -> MicrosandboxResult<ExecOutput>
+```
+
+Run a command inside the sandbox and wait for it to complete. Collects all stdout and stderr into memory and returns them along with the exit code. For long-running processes or large output, use [`exec_stream()`](#exec_stream) instead.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `impl Into<String>` | Command to execute (e.g. `"python"`, `"/usr/bin/node"`) |
+| args | `impl IntoIterator<Item = impl Into<String>>` | Command arguments (e.g. `["-c", "print('hello')"]`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecOutput`](#execoutput) | Collected stdout, stderr, and exit status |
+
+---
+
+#### exec_stream()
+
+```rust
+async fn exec_stream(&self, cmd: impl Into<String>, args: impl IntoIterator<Item = impl Into<String>>) -> MicrosandboxResult<ExecHandle>
+```
+
+Run a command with streaming output. Returns a handle that emits stdout, stderr, and exit events as they happen, rather than buffering everything until the command finishes. Use this for long-running processes, large output, or when you need to process output incrementally.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `impl Into<String>` | Command to execute |
+| args | `impl IntoIterator<Item = impl Into<String>>` | Command arguments |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecHandle`](#exechandle) | Streaming handle for receiving events and controlling the process |
+
+---
+
+#### exec_stream_with()
+
+```rust
+async fn exec_stream_with(&self, cmd: impl Into<String>, f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder) -> MicrosandboxResult<ExecHandle>
+```
+
+Streaming execution with per-execution overrides. Enable `stdin_pipe()` to write to the process's stdin, and `tty(true)` to allocate a pseudo-terminal for interactive programs like shells, REPLs, or editors.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `impl Into<String>` | Command to execute |
+| f | [`ExecOptionsBuilder`](#execoptionsbuilder) | Configure execution options. |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecHandle`](#exechandle) | Streaming handle |
+
+---
+
+#### exec_with()
+
+```rust
+async fn exec_with(&self, cmd: impl Into<String>, f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder) -> MicrosandboxResult<ExecOutput>
+```
+
+Run a command with per-execution overrides. The closure receives an [`ExecOptionsBuilder`](#execoptionsbuilder) to configure working directory, environment variables, timeout, resource limits, stdin mode, and TTY allocation. These overrides apply only to this execution and don't change the sandbox's defaults.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `impl Into<String>` | Command to execute |
+| f | [`ExecOptionsBuilder`](#execoptionsbuilder) | Configure execution options. |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecOutput`](#execoutput) | Collected stdout, stderr, and exit status |
+
+---
+
+#### shell()
+
+```rust
+async fn shell(&self, script: impl Into<String>) -> MicrosandboxResult<ExecOutput>
+```
+
+Run a command through the sandbox's configured shell (defaults to `/bin/sh`). The script is passed as `sh -c "<script>"`, so shell syntax like pipes, redirects, and `&&` chains works.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| script | `impl Into<String>` | Shell command string (e.g. `"ls -la /app && echo done"`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecOutput`](#execoutput) | Collected stdout, stderr, and exit status |
+
+---
+
+#### shell_stream()
+
+```rust
+async fn shell_stream(&self, script: impl Into<String>) -> MicrosandboxResult<ExecHandle>
+```
+
+Shell command with streaming output.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| script | `impl Into<String>` | Shell command string |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecHandle`](#exechandle) | Streaming handle |
+
+---
+
+## Types
+
+### ExecEvent
+
+Events emitted by a streaming execution.
+
+| Variant | Fields | Description |
+|---------|--------|-------------|
+| `Exited` | `code: i32` | The process has exited. `code` is the exit code. |
+| `Started` | `pid: u32` | The process has started. `pid` is the guest-side PID. |
+| `Stderr` | `Bytes` | A chunk of stderr data. |
+| `Stdout` | `Bytes` | A chunk of stdout data. May arrive in arbitrary sizes. |
+
+### ExecHandle
+
+A handle to a running streaming execution. Receives events as the process produces output, and provides control over stdin and signals.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| collect() | [`ExecOutput`](#execoutput) | Wait for exit and collect all remaining stdout/stderr. |
+| id() | `String` | Session ID for this execution. Can be used to reattach later. |
+| kill() | `()` | Send SIGKILL to the process. |
+| recv() | `Option<`[`ExecEvent`](#execevent)`>` | Receive the next event. Returns `None` when the process has exited and all output has been delivered. |
+| signal(signal) | `()` | Send a POSIX signal to the process (e.g. `libc::SIGTERM`). |
+| take_stdin() | `Option<`[`ExecSink`](#execsink)`>` | Take the stdin writer. Only available if `stdin_pipe()` was enabled. Returns `None` after the first call. |
+| wait() | [`ExitStatus`](#exitstatus) | Wait for the process to exit, discarding any remaining output. |
+
+### ExecOptionsBuilder
+
+Builder for per-execution overrides. Does not change the sandbox's defaults.
+
+| Method | Parameters | Description |
+|--------|-----------|-------------|
+| args() | `impl IntoIterator<Item = impl Into<String>>` | Append command-line arguments. |
+| cwd() | `impl Into<String>` | Override the working directory for this command. |
+| env() | - `key: impl Into<String>` <br/> - `value: impl Into<String>` | Set an environment variable. Merged on top of sandbox-level env vars. |
+| envs() | `impl IntoIterator<Item = (String, String)>` | Set multiple environment variables at once. |
+| rlimit() | - `resource:` [`RlimitResource`](#rlimitresource) <br/> - `limit: u64` | Set a POSIX resource limit (soft = hard). Applied via `setrlimit()` before exec. |
+| rlimit_range() | - `resource:` [`RlimitResource`](#rlimitresource) <br/> - `soft: u64` <br/> - `hard: u64` | Set a resource limit with different soft and hard values. |
+| stdin_bytes() | `impl Into<Vec<u8>>` | Provide fixed bytes as stdin. The process reads them and then sees EOF. |
+| stdin_null() | - | Stdin reads from `/dev/null`. This is the default. |
+| stdin_pipe() | - | Enable a stdin writer via [`ExecSink`](#execsink). Use with [`ExecHandle::take_stdin()`](#exechandle). |
+| timeout() | `Duration` | Kill the process with SIGKILL if it hasn't exited within this duration. |
+| tty() | `bool` | Allocate a pseudo-terminal. Enable for interactive programs (shells, editors, `top`); disable for scripts and batch jobs. Default: `false`. |
+| user() | `impl Into<String>` | Override the guest user for this command. |
+
+### ExecOutput
+
+The result of a completed command execution. Holds the exit status and all captured output.
+
+| Field / Method | Type | Description |
+|----------------|------|-------------|
+| status() | [`ExitStatus`](#exitstatus) | Exit code and success flag |
+| stderr() | `Result<String>` | Collected stderr decoded as UTF-8 |
+| stderr_bytes() | `&Bytes` | Raw stderr bytes without decoding |
+| stdout() | `Result<String>` | Collected stdout decoded as UTF-8. Returns `Err` if the output is not valid UTF-8. |
+| stdout_bytes() | `&Bytes` | Raw stdout bytes without decoding |
+
+### ExecSink
+
+A writer for sending data to a running process's stdin. Obtained via [`ExecHandle::take_stdin()`](#exechandle).
+
+| Method | Parameters | Description |
+|--------|-----------|-------------|
+| close() | - | Close stdin. The process sees EOF on its stdin. |
+| write() | `data: impl AsRef<[u8]>` | Write bytes to the process's stdin. |
+
+### ExitStatus
+
+The exit status of a completed process.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| code | `i32` | Exit code. `0` typically means success. |
+| success | `bool` | `true` if code is `0` |
+
+### RlimitResource
+
+POSIX resource limit identifiers. Maps to `RLIMIT_*` constants.
+
+| Value | Description |
+|-------|-------------|
+| `As` | Max address space size |
+| `Core` | Max core file size |
+| `Cpu` | Max CPU time in seconds |
+| `Data` | Max data segment size |
+| `Fsize` | Max file size in bytes |
+| `Locks` | Max file locks |
+| `Memlock` | Max locked memory |
+| `Msgqueue` | Max bytes in POSIX message queues |
+| `Nice` | Max nice priority |
+| `Nofile` | Max open file descriptors |
+| `Nproc` | Max number of processes |
+| `Rss` | Max resident set size |
+| `Rtprio` | Max real-time priority |
+| `Rttime` | Max real-time timeout |
+| `Sigpending` | Max pending signals |
+| `Stack` | Max stack size |

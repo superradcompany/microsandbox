@@ -1,0 +1,98 @@
+---
+title: "Visão geral"
+description: "A interface de linha de comando msb"
+icon: "book"
+---
+
+
+The `msb` CLI lets you create, manage, and interact with sandboxes from the terminal. It auto-detects TTY and interactivity, so no `-it` flags are needed. If your terminal is interactive, `msb` acts accordingly.
+
+## Install
+
+```bash
+curl -fsSL https://install.microsandbox.dev | sh
+```
+
+<Note>
+  microsandbox requires Linux with KVM enabled, or macOS with Apple Silicon (M-series chip). Both use hardware virtualization.
+</Note>
+
+## Quick reference
+
+```bash
+# Run a one-off command (ephemeral, auto-removed)
+msb run python -- python -c "print('Hello!')"
+
+# Interactive shell (auto-detects TTY)
+msb run alpine -- sh
+
+# Create a persistent sandbox
+msb run --name devbox ubuntu -- bash
+
+# Resume later
+msb start devbox
+
+# Execute in a running sandbox
+msb exec devbox -- sh -c "apt update && apt install -y cowsay && /usr/games/cowsay \"Hello from devbox\""
+
+# Manage
+msb ls                   # List all sandboxes
+msb ps                   # Running sandboxes only
+msb metrics              # Live CPU/memory/network stats
+msb inspect devbox       # Detailed info
+msb logs devbox          # Captured stdout/stderr (works on stopped sandboxes too)
+msb logs devbox -f       # Follow live
+msb stop devbox          # Graceful shutdown
+msb rm devbox            # Remove stopped sandbox
+
+# Images
+msb pull python     # Pre-pull to cache
+msb image ls             # List cached images
+msb image rm python # Remove a cached image
+
+# Volumes
+msb volume create data --size 10G
+msb volume ls
+msb volume rm data
+
+# Install as a system command
+msb install ubuntu       # Install as 'ubuntu' command
+msb uninstall ubuntu     # Remove installed command
+
+# Self-management
+msb self update          # Update msb to latest
+msb self uninstall       # Remove msb
+```
+
+<Tip>
+  Unnamed sandboxes (no `--name` flag) are ephemeral. They're automatically removed when the command finishes. Named sandboxes persist and can be stopped, restarted, and inspected later.
+</Tip>
+
+## Global options
+
+| Flag | Description |
+|------|-------------|
+| `--tree` | Display the complete command tree with descriptions |
+| `--error` | Show only errors |
+| `--warn` | Show warnings and errors |
+| `--info` | Show info, warnings, and errors |
+| `--debug` | Show debug output |
+| `--trace` | Show all output including trace |
+
+## Command tree
+
+Use `--tree` as an alternative to `--help` to see every command, subcommand, and flag at once:
+
+```bash
+msb --tree
+```
+
+You can scope it to a specific subcommand:
+
+```bash
+msb image --tree    # Show only image commands
+msb volume --tree   # Show only volume commands
+msb run --tree      # Show all flags for run
+```
+
+For detailed command reference, see [Sandbox Commands](/pt/cli/sandbox-commands), [Volume Commands](/pt/cli/volume-commands), and [Image Commands](/pt/cli/image-commands).

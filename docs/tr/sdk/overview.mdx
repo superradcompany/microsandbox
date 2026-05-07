@@ -1,0 +1,97 @@
+---
+title: "Genel bakış"
+description: "microsandbox SDK'ları ile başlayın"
+icon: "play"
+---
+
+
+The SDK embeds the microsandbox runtime directly into whatever application uses it. `Sandbox.builder(name).create()` spawns the VM as a child process. No daemon to install, no server to connect to.
+
+## Installation
+
+<CodeGroup>
+```bash Rust
+cargo add microsandbox
+```
+
+```bash TypeScript
+npm install microsandbox
+```
+
+```bash Python
+pip install microsandbox
+```
+</CodeGroup>
+
+## Quick start
+
+Create a sandbox from a container image, run a command, print the output, and stop it.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::{Sandbox, NetworkPolicy};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let sb = Sandbox::builder("my-sandbox")
+        .image("python")
+        .memory(512)
+        .cpus(2)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .volume("/app/src", |v| v.bind("./src").readonly())
+        .network(|n| n.policy(NetworkPolicy::public_only()))
+        .create()
+        .await?;
+
+    let output = sb.exec("python", ["-c", "print('Hello, World!')"]).await?;
+    println!("{}", output.stdout()?);
+
+    sb.stop().await?;
+    Ok(())
+}
+```
+
+```typescript TypeScript
+import { NetworkPolicy, Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("my-sandbox")
+    .image("python")
+    .memory(512)
+    .cpus(2)
+    .env("PYTHONDONTWRITEBYTECODE", "1")
+    .volume("/app/src", (m) => m.bind("./src").readonly())
+    .network((n) => n.policy(NetworkPolicy.publicOnly()))
+    .create();
+
+const output = await sb.exec("python", ["-c", "print('Hello, World!')"]);
+console.log("Output:", output.stdout());
+```
+
+```python Python
+import asyncio
+from microsandbox import Network, Sandbox, Volume
+
+async def main():
+    sb = await Sandbox.create(
+        "my-sandbox",
+        image="python",
+        memory=512,
+        cpus=2,
+        env={"PYTHONDONTWRITEBYTECODE": "1"},
+        volumes={
+            "/app/src": Volume.bind("./src", readonly=True),
+        },
+        network=Network.public_only(),
+    )
+
+    output = await sb.exec("python", ["-c", "print('Hello, World!')"])
+    print("Output:", output.stdout_text)
+
+    await sb.stop()
+
+asyncio.run(main())
+```
+
+</CodeGroup>
+
+The SDK reference is split by language - choose [Rust SDK](/tr/sdk/rust/sandbox), [TypeScript SDK](/tr/sdk/typescript/sandbox), or [Python SDK](/tr/sdk/python/sandbox) for the full API. See also [error handling](/tr/sdk/errors).

@@ -1,0 +1,170 @@
+---
+title: "DNS"
+description: "Risoluzione DNS e applicazione dei criteri"
+icon: "magnifying-glass"
+---
+
+
+DNS queries from the sandbox are intercepted on the host. Rather than letting the guest talk to a resolver directly, microsandbox proxies each query, which lets you:
+
+- block lookups by domain or suffix,
+- pin which upstream resolvers get used,
+- tune the query timeout,
+- power domain-based policy rules (by mapping responses back to IPs).
+
+The knobs below cover the day-to-day controls. For the rebinding and TOCTOU protections that also ride on the interceptor, see the [security model](/it/networking/security-model).
+
+## Blocking domains
+
+Domain blocking lives in the network policy as `deny Domain(...)` / `deny DomainSuffix(...)` rules. The interceptor enforces them at three layers:
+
+1. **DNS resolution** — denied names get a local `REFUSED` response; the upstream resolver never sees them.
+2. **TLS first-flight** — when a guest hardcodes an IP and opens a TLS connection, the SNI is checked against the same rules.
+3. **TCP egress (cache fallback)** — for non-TLS traffic, the resolved-hostname cache disambiguates by IP.
+
+The bulk-deny shortcuts in each SDK are convenience for `deny Domain` / `deny DomainSuffix` rules; they prepend onto whatever policy is set so the deny takes precedence over later allow rules.
+
+<CodeGroup>
+```rust Rust
+let policy = NetworkPolicy::builder()
+    .default_allow()
+    .egress(|e| e
+        .deny_domains(["malware.example.com"])
+        .deny_domain_suffixes([".tracking.com"]))
+    .build()?;
+
+let sb = Sandbox::builder("safe-agent")
+    .image("python")
+    .network(|n| n.policy(policy))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("safe-agent")
+    .image("python")
+    .network({
+        denyDomains: ["malware.example.com"],
+        denyDomainSuffixes: [".tracking.com"],
+    })
+    .create();
+```
+
+```python Python
+from microsandbox import Network, Sandbox
+
+sb = await Sandbox.create(
+    "safe-agent",
+    image="python",
+    network=Network(
+        deny_domains=("malware.example.com",),
+        deny_domain_suffixes=(".tracking.com",),
+    ),
+)
+```
+
+```bash CLI
+msb create python --name safe-agent \
+  --deny-domain malware.example.com \
+  --deny-domain-suffix .tracking.com
+```
+
+</CodeGroup>
+
+
+## Pinning nameservers
+
+By default the sandbox picks up the host's resolver list automatically:
+
+- **macOS**: reads `State:/Network/Global/DNS` from the system configuration store, with `/etc/resolv.conf` as a fallback when the store isn't available.
+- **Linux**: reads `/etc/resolv.conf` directly.
+
+You can override this by setting `nameservers` to pin the exact resolvers you want (e.g. `1.1.1.1`, `dns.google`), which is useful when auto-discovery picks the wrong ones.
+
+Values can be plain IPs, `IP:PORT`, hostnames, or `HOST:PORT`. Hostnames are resolved once at sandbox startup using the host's OS resolver.
+
+<CodeGroup>
+```rust Rust
+use microsandbox_network::dns::Nameserver;
+
+let sb = Sandbox::builder("safe-agent")
+    .image("python")
+    .network(|n| n
+        .dns(|d| d
+            .nameservers([
+                "1.1.1.1".parse::<Nameserver>()?,
+                "1.0.0.1".parse::<Nameserver>()?,
+            ])
+            .query_timeout_ms(3000)
+        )
+    )
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("safe-agent")
+    .image("python")
+    .network((n) => n.dns((d) =>
+        d.nameservers(["1.1.1.1", "1.0.0.1"])
+            .queryTimeoutMs(3000),
+    ))
+    .create();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "safe-agent",
+    image="python",
+    network=Network(
+        dns=DnsConfig(
+            nameservers=("1.1.1.1", "1.0.0.1"),
+            query_timeout_ms=3000,
+        ),
+    ),
+)
+```
+
+```bash CLI
+msb create python --name safe-agent \
+  --dns-nameserver 1.1.1.1 \
+  --dns-nameserver 1.0.0.1 \
+  --dns-query-timeout-ms 3000
+```
+
+</CodeGroup>
+
+If the guest aims a query at a specific resolver (`dig @1.1.1.1`, an `/etc/resolv.conf` entry inside the guest, or a library call that takes a resolver IP), the interceptor forwards it to that resolver directly. The pinned defaults aren't used in this case. The network policy still applies: the query only goes through if the destination IP is allowed.
+
+## DNS over alternative transports
+
+The block list and rebind protection only apply to queries the gateway can see. A guest that routes DNS through an encrypted or non-DNS protocol bypasses both unless the gateway intercepts or refuses it.
+
+**Intercepted** (block list and rebind protection apply):
+- DNS over UDP (UDP/53)
+- DNS over TCP (TCP/53)
+- DNS over TLS (DoT, TCP/853): requires [TLS interception](/it/networking/tls)
+
+**Refused** (guest's stub falls back to plain DNS):
+- DNS over QUIC (DoQ, UDP/853)
+- mDNS (UDP/5353), LLMNR (UDP/5355), NetBIOS-NS (UDP/137)
+
+**Not distinguishable from regular traffic** (you must filter via network policy):
+- DNS over HTTPS (DoH, TCP/443)
+
+For strict DNS integrity, combine DoT interception with a network policy denying egress `UDP/53`, `TCP/53`, and `TCP/853` to anything except the gateway.
+
+## Domain-based policy rules
+
+Network policy rules can match a destination by exact domain or by suffix. The interceptor watches DNS responses as they flow back to the guest and keeps track of which IP addresses belong to which domain.
+
+A connection to `93.184.216.34` is only allowed by a rule targeting `example.com` if that IP actually came back as an answer to a lookup for `example.com` from this sandbox.
+
+Because of that, domain rules only take effect on connections that are preceded by a DNS lookup from inside the sandbox. An application that connects to a hard-coded IP it didn't resolve through the interceptor won't match any domain rule.
+
+## See also
+
+- [Security model](/it/networking/security-model): rebinding protection and DNS-to-IP binding (TOCTOU defense)
+- [TLS interception](/it/networking/tls): domains that get intercepted also go through TLS inspection

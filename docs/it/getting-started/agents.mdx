@@ -1,0 +1,109 @@
+---
+title: "Agenti IA"
+description: "Consenti agli agenti IA di creare e gestire le proprie sandbox"
+icon: "robot"
+---
+
+
+microsandbox is built for AI agents. The SDK and CLI give you full programmatic control, but there are two additional ways to connect agents directly: **Agent Skills** for coding assistants and an **MCP server** for any MCP-compatible client.
+
+## Agent Skills
+
+[Agent Skills](https://github.com/superradcompany/skills) teach AI coding agents how to use microsandbox without any custom integration code. Once installed, the agent can create sandboxes, run commands, manage files, and control the full sandbox lifecycle through natural language.
+
+Works with Claude Code, Cursor, Codex, Gemini CLI, GitHub Copilot, and other agents that support the skills format.
+
+```bash
+npx skills add superradcompany/skills
+```
+
+This installs a set of skill files into your project that the agent reads as context. No server process, no configuration, just files that describe how to use microsandbox.
+
+## MCP Server
+
+The [microsandbox MCP server](https://github.com/superradcompany/microsandbox-mcp) exposes microsandbox as a set of structured tool calls over the [Model Context Protocol](https://modelcontextprotocol.io). Any MCP-compatible client can use it to manage sandbox lifecycle, execute commands, access the filesystem, work with volumes, and monitor sandbox state.
+
+<CodeGroup>
+
+```bash Claude Code
+claude mcp add --transport stdio microsandbox -- npx -y microsandbox-mcp
+```
+
+```json Cursor
+// ~/.cursor/mcp.json
+{
+  "mcpServers": {
+    "microsandbox": {
+      "command": "npx",
+      "args": ["-y", "microsandbox-mcp"]
+    }
+  }
+}
+```
+
+```json VS Code
+// .vscode/mcp.json
+{
+  "servers": {
+    "microsandbox": {
+      "command": "npx",
+      "args": ["-y", "microsandbox-mcp"]
+    }
+  }
+}
+```
+
+```json Claude Desktop
+// ~/Library/Application Support/Claude/claude_desktop_config.json
+{
+  "mcpServers": {
+    "microsandbox": {
+      "command": "npx",
+      "args": ["-y", "microsandbox-mcp"]
+    }
+  }
+}
+```
+
+```json Windsurf
+// ~/.codeium/windsurf/mcp_config.json
+{
+  "mcpServers": {
+    "microsandbox": {
+      "command": "npx",
+      "args": ["-y", "microsandbox-mcp"]
+    }
+  }
+}
+```
+
+```json Open Code
+// .opencode.json
+{
+  "mcpServers": {
+    "microsandbox": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "microsandbox-mcp"]
+    }
+  }
+}
+```
+
+```json Zed
+// Zed settings
+{
+  "context_servers": {
+    "microsandbox": {
+      "command": {
+        "path": "npx",
+        "args": ["-y", "microsandbox-mcp"]
+      }
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+Once connected, the agent gets access to tools for creating sandboxes, running commands inside them, reading and writing files, and managing the sandbox lifecycle, all through the MCP protocol.

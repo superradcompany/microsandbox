@@ -1,0 +1,84 @@
+---
+title: "Метрики"
+description: "Мониторинг использования CPU, памяти и диска песочницы"
+icon: "chart-line"
+---
+
+
+Query resource usage for a running sandbox: CPU, memory, and more. Get a single point-in-time snapshot, or open a streaming subscription that delivers updates at a fixed interval.
+
+## Point-in-time
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+
+let metrics = sb.metrics().await?;
+println!("CPU: {:.1}%, Mem: {} MB", metrics.cpu_percent, metrics.memory_bytes / 1024 / 1024);
+```
+
+```typescript TypeScript
+const metrics = await sb.metrics();
+console.log(`CPU: ${metrics.cpuPercent.toFixed(1)}%, Mem: ${Math.floor(metrics.memoryBytes / 1024 / 1024)} MB`);
+```
+
+```python Python
+m = await sb.metrics()
+print(f"CPU: {m.cpu_percent:.1f}%, Mem: {m.memory_bytes // 1024 // 1024} MB")
+```
+
+</CodeGroup>
+
+## Streaming
+
+Subscribe to metric updates at a regular interval. Each update arrives as a separate event.
+
+<CodeGroup>
+```rust Rust
+use std::time::Duration;
+use futures::StreamExt;
+
+let mut stream = sb.metrics_stream(Duration::from_secs(1));
+while let Some(m) = stream.next().await {
+    let m = m?;
+    println!("CPU: {:.1}%, Mem: {} MB", m.cpu_percent, m.memory_bytes / 1024 / 1024);
+}
+```
+
+```typescript TypeScript
+for await (const m of await sb.metricsStream(1000)) {
+    console.log(`[${m.timestamp.toISOString()}] CPU: ${m.cpuPercent.toFixed(1)}%`);
+}
+```
+
+```python Python
+async for m in await sb.metrics_stream(interval=1.0):
+    print(f"[{m.timestamp_ms}] CPU: {m.cpu_percent:.1f}%")
+```
+
+</CodeGroup>
+
+## Fleet-wide metrics
+
+Get metrics for all running sandboxes at once. Useful for dashboards or capacity planning.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::all_sandbox_metrics;
+
+let all = all_sandbox_metrics().await?;
+```
+
+```typescript TypeScript
+import { allSandboxMetrics } from "microsandbox";
+
+const all = await allSandboxMetrics();
+```
+
+```python Python
+from microsandbox import all_sandbox_metrics
+
+all_metrics = await all_sandbox_metrics()
+```
+
+</CodeGroup>

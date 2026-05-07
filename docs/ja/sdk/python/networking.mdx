@@ -1,0 +1,334 @@
+---
+title: "ネットワーキング"
+description: "ネットワーキング API リファレンス"
+icon: "network-wired"
+---
+
+
+See [Networking](/ja/networking/overview) for conceptual overview and [TLS Interception](/ja/networking/tls) for TLS proxy details.
+
+## Network
+
+Frozen dataclass for sandbox network configuration. Use a class-method preset for the common cases, or construct directly with custom options.
+
+```python
+Network(
+    policy: str | NetworkPolicy | None = None,
+    ports: Mapping[int, int] = {},
+    deny_domains: tuple[str, ...] = (),
+    deny_domain_suffixes: tuple[str, ...] = (),
+    dns: DnsConfig | None = None,
+    tls: TlsConfig | None = None,
+    max_connections: int | None = None,
+    trust_host_cas: bool | None = None,
+)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| policy | `str \| NetworkPolicy \| None` | Preset name (`"none"`, `"public_only"`, `"allow_all"`) or custom [`NetworkPolicy`](#networkpolicy-1) |
+| ports | `Mapping[int, int]` | Port mappings from host to guest |
+| deny_domains | `tuple[str, ...]` | Deny egress to these exact domains. Each entry adds a `deny Domain("...")` policy rule that fires at DNS resolution (REFUSED), TLS first-flight (SNI), and TCP egress (cache fallback). Prepended onto the policy so it takes precedence over later allow rules |
+| deny_domain_suffixes | `tuple[str, ...]` | Deny egress to all subdomains of these suffixes. Adds `deny DomainSuffix("...")` rules; same enforcement layers as `deny_domains` |
+| dns | [`DnsConfig`](#dnsconfig) ` \| None` | DNS interception configuration |
+| tls | [`TlsConfig`](#tlsconfig) ` \| None` | TLS interception configuration |
+| max_connections | `int \| None` | Maximum concurrent connections |
+| trust_host_cas | `bool \| None` | Ship the host's trusted root CAs into the guest at boot so outbound TLS works behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.). These proxies install a gateway CA on the host that's unknown to the guest's stock Mozilla bundle. Opt-in |
+
+---
+
+#### Network.allow_all()
+
+```python
+@classmethod
+def allow_all() -> Network
+```
+
+Unrestricted network access, including to private addresses and the host machine.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Network`](#network) | Unrestricted network configuration |
+
+---
+
+#### Network.none()
+
+```python
+@classmethod
+def none() -> Network
+```
+
+Deny all traffic. No network interface is created; the guest is fully offline. `exec` and `fs` still work since they use the host-guest channel, not the network.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Network`](#network) | Fully airgapped network configuration |
+
+---
+
+#### Network.public_only()
+
+```python
+@classmethod
+def public_only() -> Network
+```
+
+Block private address ranges and cloud metadata endpoints. Allow everything else. This is the **default** policy.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Network`](#network) | Public-only network configuration |
+
+---
+
+## NetworkPolicy
+
+A list of rules plus two per-direction defaults, evaluated first-match-wins. Pass to `Network(policy=...)` for custom policies:
+
+```python
+from microsandbox import NetworkPolicy, Rule, Action, Direction, Protocol
+
+policy = NetworkPolicy(
+    default_egress=Action.DENY,
+    default_ingress=Action.ALLOW,
+    rules=(
+        Rule.allow(protocol=Protocol.TCP, port=443, destination="public"),
+        Rule.deny(destination="198.51.100.5"),
+    ),
+)
+```
+
+The default policy denies egress except for an implicit `allow public`, and allows ingress with no rules. See the [defaults rationale](/ja/networking/overview#defaults) for the asymmetry.
+
+```python
+NetworkPolicy(
+    default_egress: Action = Action.DENY,
+    default_ingress: Action = Action.ALLOW,
+    rules: tuple[Rule, ...] = (),
+)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| default_egress | [`Action`](#action) | Action when no egress-applicable rule matches |
+| default_ingress | [`Action`](#action) | Action when no ingress-applicable rule matches |
+| rules | `tuple[`[`Rule`](#rule)`, ...]` | Rules evaluated first-match-wins per direction |
+
+### Rule order matters
+
+The first matching rule wins, so a broad rule placed before a narrow one swallows it:
+
+```python
+policy = NetworkPolicy(
+    default_egress=Action.DENY,
+    default_ingress=Action.ALLOW,
+    rules=(
+        Rule.allow(destination="10.0.0.0/8"),     # matches everything in 10.x
+        Rule.deny(destination="10.0.0.5"),        # never reached
+    ),
+)
+```
+
+Put specific rules before general ones.
+
+---
+
+## Rule
+
+Frozen dataclass for a single network policy rule.
+
+```python
+Rule(
+    action: Action,
+    direction: Direction = Direction.EGRESS,
+    destination: str | None = None,
+    protocol: Protocol | None = None,
+    port: int | str | None = None,
+)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| action | [`Action`](#action) | What to do when this rule matches |
+| direction | [`Direction`](#direction) | Which evaluator considers this rule. `Direction.ANY` matches in either direction |
+| destination | `str \| None` | Target filter: a [`DestGroup`](#destgroup) value, domain, CIDR range, domain suffix (prefixed with `"."`), or `"*"` for any. Domain and suffix strings are validated at sandbox creation; invalid names raise `ValueError` |
+| protocol | [`Protocol`](#protocol) ` \| None` | Protocol filter |
+| port | `int \| str \| None` | Single port (`443`) or range (`"8000-9000"`) |
+
+Ingress rules carrying ICMP protocols are rejected at sandbox creation; the host has no inbound ICMP path. Use `Direction.EGRESS` for ICMP allow/deny.
+
+---
+
+#### Rule.allow()
+
+```python
+@classmethod
+def allow(
+    *,
+    direction: Direction = Direction.EGRESS,
+    protocol: Protocol | None = None,
+    port: int | str | None = None,
+    destination: str | None = None,
+) -> Rule
+```
+
+Create a rule that permits matching traffic.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| direction | [`Direction`](#direction) | Traffic direction |
+| protocol | [`Protocol`](#protocol) ` \| None` | Protocol filter |
+| port | `int \| str \| None` | Port or port range |
+| destination | `str \| None` | Destination filter |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Rule`](#rule) | An allow rule |
+
+---
+
+#### Rule.deny()
+
+```python
+@classmethod
+def deny(
+    *,
+    direction: Direction = Direction.EGRESS,
+    protocol: Protocol | None = None,
+    port: int | str | None = None,
+    destination: str | None = None,
+) -> Rule
+```
+
+Create a rule that blocks matching traffic.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| direction | [`Direction`](#direction) | Traffic direction |
+| protocol | [`Protocol`](#protocol) ` \| None` | Protocol filter |
+| port | `int \| str \| None` | Port or port range |
+| destination | `str \| None` | Destination filter |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Rule`](#rule) | A deny rule |
+
+---
+
+## DnsConfig
+
+Frozen dataclass for DNS interception settings.
+
+```python
+DnsConfig(
+    rebind_protection: bool = True,
+    nameservers: tuple[str, ...] = (),
+    query_timeout_ms: int | None = None,
+)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| nameservers | `tuple[str, ...]` | Nameservers (`IP`, `IP:PORT`, `HOST`, or `HOST:PORT`). Overrides the host's `/etc/resolv.conf` when set. Hostnames are resolved once at startup via the host's OS resolver |
+| query_timeout_ms | `int \| None` | Per-DNS-query timeout in milliseconds |
+| rebind_protection | `bool` | Block DNS responses resolving to private IPs |
+
+---
+
+## TlsConfig
+
+Frozen dataclass for TLS interception settings within [`Network`](#network).
+
+```python
+TlsConfig(
+    bypass: tuple[str, ...] = (),
+    verify_upstream: bool = True,
+    intercepted_ports: tuple[int, ...] = (443,),
+    block_quic: bool = False,
+    ca_cert: str | None = None,
+    ca_key: str | None = None,
+    ca_cn: str | None = None,
+)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| block_quic | `bool` | Block QUIC/HTTP3 (UDP) on intercepted ports, forcing TCP/TLS fallback |
+| bypass | `tuple[str, ...]` | Domains to skip interception. Use for domains with certificate pinning |
+| ca_cert | `str \| None` | Path to a custom interception CA certificate PEM file |
+| ca_cn | `str \| None` | Common name for the generated interception CA |
+| ca_key | `str \| None` | Path to a custom interception CA private key PEM file |
+| intercepted_ports | `tuple[int, ...]` | TCP ports where TLS interception is active |
+| verify_upstream | `bool` | Verify upstream server certificates. Set to `False` only for self-signed servers |
+
+---
+
+## Types
+
+### Action
+
+String enum ([`StrEnum`](https://docs.python.org/3/library/enum.html#enum.StrEnum)) for policy actions.
+
+| Value | Description |
+|-------|-------------|
+| `"allow"` | Permit the traffic |
+| `"deny"` | Drop the traffic silently |
+
+### Direction
+
+String enum for traffic direction.
+
+| Value | Description |
+|-------|-------------|
+| `"egress"` | Traffic leaving the sandbox |
+| `"ingress"` | Traffic entering the sandbox (via published ports) |
+| `"any"` | Rule applies in either direction |
+
+### Protocol
+
+String enum for network protocols in policy rules.
+
+| Value | Description |
+|-------|-------------|
+| `"tcp"` | TCP traffic |
+| `"udp"` | UDP traffic |
+| `"icmpv4"` | ICMPv4 traffic |
+| `"icmpv6"` | ICMPv6 traffic |
+
+### PortProtocol
+
+String enum for port-level protocol selection.
+
+| Value | Description |
+|-------|-------------|
+| `"tcp"` | TCP port |
+| `"udp"` | UDP port |
+
+### DestGroup
+
+String enum for well-known destination groups used in [`Rule.destination`](#rule).
+
+| Value | Description |
+|-------|-------------|
+| `"public"` | Complement of the named categories: every address not in any other group |
+| `"private"` | Private/RFC 1918 addresses + ULA + CGN (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7`) |
+| `"loopback"` | Loopback addresses (`127.0.0.0/8`, `::1`); the **guest's own** loopback, not the host. See the [loopback-vs-host watch-out](/ja/networking/overview#loopback-vs-host-a-common-trap) |
+| `"link-local"` | Link-local addresses (`169.254.0.0/16`, `fe80::/10`) excluding metadata |
+| `"metadata"` | Cloud metadata endpoints (`169.254.169.254`) |
+| `"multicast"` | Multicast addresses (`224.0.0.0/4`, `ff00::/8`) |
+| `"host"` | The host machine, reached via `host.microsandbox.internal`. This is the right group for "let the sandbox reach my host's localhost", not `"loopback"` |

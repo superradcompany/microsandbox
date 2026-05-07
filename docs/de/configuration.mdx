@@ -1,0 +1,141 @@
+---
+title: "config.json"
+description: "Globale config.json-Referenz"
+icon: "gear"
+---
+
+
+microsandbox reads its global configuration from `~/.microsandbox/config.json`. All fields are optional. A missing file or empty JSON object is equivalent to using the defaults.
+
+<Accordion title="Full example">
+```json
+{
+  "home": "/custom/path/.microsandbox",
+  "log_level": "info",
+  "database": {
+    "url": "sqlite:///tmp/msb.db",
+    "max_connections": 10,
+    "connect_timeout_secs": 30
+  },
+  "paths": {
+    "msb": "/usr/local/bin/msb",
+    "libkrunfw": "/usr/local/lib/libkrunfw.so",
+    "cache": "/mnt/fast/msb-cache",
+    "sandboxes": null,
+    "volumes": null,
+    "logs": null,
+    "secrets": null
+  },
+  "sandbox_defaults": {
+    "cpus": 2,
+    "memory_mib": 1024,
+    "shell": "/bin/bash",
+    "workdir": "/app"
+  },
+  "registries": {
+    "auth": {
+      "ghcr.io": {
+        "username": "octocat",
+        "store": "keyring"
+      },
+      "registry.example.com": {
+        "username": "deploy",
+        "password_env": "REGISTRY_TOKEN"
+      },
+      "docker.io": {
+        "username": "user",
+        "secret_name": "dockerhub-token"
+      }
+    }
+  }
+}
+```
+</Accordion>
+
+## Top-level fields
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `home` | `~/.microsandbox` | Root directory for all microsandbox data |
+| `log_level` | `null` (silent) | Log level for sandbox processes: `error`, `warn`, `info`, `debug`, `trace` |
+| `database` | [reference](#database) | Database connection settings |
+| `paths` | [reference](#paths) | Path overrides for binaries and directories |
+| `sandbox_defaults` | [reference](#sandbox_defaults) | Defaults applied to every sandbox |
+| `registries` | [reference](#registries) | Container registry authentication |
+
+## `database`
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `url` | `null` | Database URL. Uses SQLite under `home` when null |
+| `max_connections` | `5` | Maximum connection pool size |
+| `connect_timeout_secs` | `30` | Timeout when acquiring a database connection from the pool |
+
+## `paths`
+
+All path fields are optional. When `null`, they resolve relative to `home`.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `msb` | `{home}/bin/msb` | `msb` binary. Resolved via: `MSB_PATH` env, this field, default path, `PATH` |
+| `libkrunfw` | `{home}/lib/libkrunfw` | Path to a custom VM kernel (`.so` on Linux, `.dylib` on macOS) |
+| `cache` | `{home}/cache` | Image layer cache |
+| `sandboxes` | `{home}/sandboxes` | Per-sandbox state |
+| `volumes` | `{home}/volumes` | Named volumes |
+| `logs` | `{home}/logs` | Sandbox logs |
+| `secrets` | `{home}/secrets` | Secrets. Registry secrets live under `secrets/registries/` |
+
+## `sandbox_defaults`
+
+Defaults applied to every sandbox unless overridden per-sandbox.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `cpus` | `1` | Number of vCPUs |
+| `memory_mib` | `512` | Guest memory in MiB |
+| `shell` | `"/bin/sh"` | Shell for interactive sessions and scripts |
+| `workdir` | `null` | Working directory inside the sandbox |
+| `metrics_sample_interval_ms` | `1000` | Runtime metrics sampling interval in milliseconds. Set to `0` to disable sampling. |
+| `disable_metrics_sample` | `false` | Force-disable metrics sampling regardless of `metrics_sample_interval_ms`. |
+
+## `registries`
+
+### `registries.auth`
+
+A map of registry hostnames to authentication entries. Each entry specifies a username and exactly **one** credential source.
+
+```json
+{
+  "registries": {
+    "auth": {
+      "ghcr.io": {
+        "username": "octocat",
+        "store": "keyring"
+      }
+    }
+  }
+}
+```
+
+#### Auth entry fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `username` | Yes | Registry username |
+| `store` | No | Credential store. Only `"keyring"` is supported (macOS Keychain, Windows Credential Manager, Linux Secret Service) |
+| `password_env` | No | Environment variable containing the password or token |
+| `secret_name` | No | Filename under `{home}/secrets/registries/` containing the password or token |
+
+<Note>
+  Exactly one of `store`, `password_env`, or `secret_name` must be set per entry. Setting none or more than one is an error.
+</Note>
+
+### Auth resolution order
+
+When pulling from a registry, credentials are resolved in this order:
+
+1. **Explicit SDK auth** via `.registry_auth()` on the sandbox builder
+2. **OS keyring** entries created by `msb registry login`
+3. **Config file** `registries.auth` entries in `config.json`
+4. **Docker config** `~/.docker/config.json` credential helpers
+5. **Anonymous** (no authentication)

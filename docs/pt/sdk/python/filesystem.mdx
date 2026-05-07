@@ -1,0 +1,358 @@
+---
+title: "Sistema de arquivos"
+description: "Referência da API do sistema de arquivos"
+icon: "folder-open"
+---
+
+
+See [Filesystem](/pt/sandboxes/filesystem) for usage examples and extensible backends.
+
+## SandboxFs
+
+Filesystem handle for a running sandbox. Obtained via the `sandbox.fs` property. All operations go through the same host-guest channel as command execution - no SSH, no network involved. For bulk file operations, consider using [volumes](/pt/sandboxes/volumes) instead.
+
+---
+
+#### copy()
+
+```python
+async def copy(src: str, dst: str) -> None
+```
+
+Copy a file within the sandbox.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `str` | Source path |
+| dst | `str` | Destination path |
+
+---
+
+#### copy_from_host()
+
+```python
+async def copy_from_host(host_path: str, guest_path: str) -> None
+```
+
+Copy a file from the host machine into the sandbox. For transferring many files, consider a [bind-mounted volume](/pt/sandboxes/volumes) instead.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| host_path | `str` | Path on the host filesystem |
+| guest_path | `str` | Destination path inside the sandbox |
+
+---
+
+#### copy_to_host()
+
+```python
+async def copy_to_host(guest_path: str, host_path: str) -> None
+```
+
+Copy a file from the sandbox to the host machine.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| guest_path | `str` | Path inside the sandbox |
+| host_path | `str` | Destination path on the host |
+
+---
+
+#### exists()
+
+```python
+async def exists(path: str) -> bool
+```
+
+Check whether a path exists inside the sandbox.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute path inside the guest |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `bool` | `True` if the path exists |
+
+---
+
+#### list()
+
+```python
+async def list(path: str) -> list[FsEntry]
+```
+
+List the entries in a directory.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute directory path inside the guest |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `list[`[`FsEntry`](#fsentry)`]` | Directory entries |
+
+---
+
+#### mkdir()
+
+```python
+async def mkdir(path: str) -> None
+```
+
+Create a directory and all parent directories.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute directory path |
+
+---
+
+#### read()
+
+```python
+async def read(path: str) -> bytes
+```
+
+Read the entire contents of a file as raw bytes.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute path inside the guest (e.g. `"/app/config.json"`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `bytes` | File contents as raw bytes |
+
+---
+
+#### read_stream()
+
+```python
+async def read_stream(path: str) -> FsReadStream
+```
+
+Open a streaming reader for a file. Data is transferred in chunks of approximately 3 MiB each. Use this for files too large to fit in memory.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute path inside the guest |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`FsReadStream`](#fsreadstream) | Async iterator that yields chunks of file data |
+
+---
+
+#### read_text()
+
+```python
+async def read_text(path: str) -> str
+```
+
+Read the entire contents of a file and decode as UTF-8.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute path inside the guest |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `str` | File contents as a string |
+
+---
+
+#### remove()
+
+```python
+async def remove(path: str) -> None
+```
+
+Remove a file.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute file path |
+
+---
+
+#### remove_dir()
+
+```python
+async def remove_dir(path: str) -> None
+```
+
+Remove a directory recursively.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute directory path |
+
+---
+
+#### rename()
+
+```python
+async def rename(src: str, dst: str) -> None
+```
+
+Rename or move a file or directory within the sandbox.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `str` | Current path |
+| dst | `str` | New path |
+
+---
+
+#### stat()
+
+```python
+async def stat(path: str) -> FsMetadata
+```
+
+Get detailed metadata for a file or directory.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute path inside the guest |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`FsMetadata`](#fsmetadata) | File metadata |
+
+---
+
+#### write()
+
+```python
+async def write(path: str, data: bytes) -> None
+```
+
+Write content to a file, creating it if it doesn't exist and overwriting if it does.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute path inside the guest |
+| data | `bytes` | File content |
+
+---
+
+#### write_stream()
+
+```python
+async def write_stream(path: str) -> FsWriteSink
+```
+
+Open a streaming writer for a file. Use this for files too large to fit in memory.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute path inside the guest |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`FsWriteSink`](#fswritesink) | Async writer that accepts chunks of data |
+
+---
+
+## Types
+
+### FsEntry
+
+Metadata for a single directory entry, returned by [`list()`](#list).
+
+| Property | Type | Description |
+|----------|------|-------------|
+| kind | `str` | Type of entry (`"file"`, `"directory"`, `"symlink"`, `"other"`) |
+| mode | `int` | Unix permission bits |
+| modified | `float \| None` | Last modified timestamp (ms since epoch) |
+| path | `str` | File path |
+| size | `int` | File size in bytes |
+
+### FsEntryKind
+
+String enum ([`StrEnum`](https://docs.python.org/3/library/enum.html#enum.StrEnum)) representing the type of a filesystem entry.
+
+| Value | Description |
+|-------|-------------|
+| `"directory"` | Directory |
+| `"file"` | Regular file |
+| `"other"` | Other entry type |
+| `"symlink"` | Symbolic link |
+
+### FsMetadata
+
+Detailed file metadata, returned by [`stat()`](#stat).
+
+| Property | Type | Description |
+|----------|------|-------------|
+| created | `float \| None` | Creation timestamp (ms since epoch) |
+| kind | `str` | Type of entry (`"file"`, `"directory"`, `"symlink"`, `"other"`) |
+| mode | `int` | Unix permission bits |
+| modified | `float \| None` | Last modified timestamp (ms since epoch) |
+| readonly | `bool` | Whether the file is read-only |
+| size | `int` | File size in bytes |
+
+### FsReadStream
+
+Async stream for reading a file in chunks. Obtained via [`read_stream()`](#read_stream).
+
+| Method / Protocol | Returns | Description |
+|-------------------|---------|-------------|
+| `__aiter__` / `__anext__` | `bytes` | Async iterator - use with `async for chunk in stream:` |
+| `collect()` | `bytes` | Collect all remaining data into a single `bytes` object |
+
+### FsWriteSink
+
+Async writer for streaming data into a file. Obtained via [`write_stream()`](#write_stream). Supports the async context manager protocol (`async with`).
+
+| Method / Protocol | Returns | Description |
+|-------------------|---------|-------------|
+| `write(data)` | `None` | Write a chunk of `bytes` to the file |
+| `close()` | `None` | Send EOF and finalize the file |
+| `__aenter__` / `__aexit__` | `FsWriteSink` | Use with `async with` for automatic close on exit |

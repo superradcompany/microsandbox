@@ -1,0 +1,135 @@
+---
+title: "TLS"
+description: "Interception TLS et gestion des certificats"
+icon: "lock"
+---
+
+
+Enable HTTPS traffic inspection so policy rules, logging, and other controls can see plaintext request data. microsandbox terminates TLS on the host side and re-encrypts to the upstream server, which is how features like per-host secret injection and URL-level policy checks are able to see inside what would otherwise be an opaque stream.
+
+## How it works
+
+When you enable TLS interception:
+
+1. A CA key and certificate are generated for the sandbox at creation time. The CA is scoped to that sandbox: it's not shared across sandboxes or with the host.
+2. The guest's trust store is updated to trust this CA.
+3. When the guest opens an HTTPS connection, the host-side proxy intercepts the handshake, generates a leaf certificate for the target domain on the fly, and signs it with the per-sandbox CA.
+4. The proxy opens its own TLS connection to the upstream server and bridges the two.
+
+Because the CA lives only for the sandbox's lifetime, nothing signed by it is trusted anywhere else.
+
+## Enabling interception
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("agent")
+    .image("python")
+    .network(|n| n
+        .tls(|t| t
+            .bypass("pinned-api.example.com")
+            .bypass("*.gov")
+        )
+    )
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("agent")
+    .image("python")
+    .network((n) => n.tls((t) =>
+        t.bypass("pinned-api.example.com").bypass("*.gov"),
+    ))
+    .create();
+```
+
+```python Python
+from microsandbox import Network, Sandbox, TlsConfig
+
+sb = await Sandbox.create(
+    "agent",
+    image="python",
+    network=Network(
+        tls=TlsConfig(bypass=("pinned-api.example.com", "*.gov")),
+    ),
+)
+```
+
+```bash CLI
+msb create python --name agent \
+  --tls-intercept \
+  --tls-bypass "pinned-api.example.com" \
+  --tls-bypass "*.gov"
+```
+
+</CodeGroup>
+
+## Bypass patterns
+
+Some domains don't play well with interception, typically ones whose clients pin a specific certificate or public key instead of trusting the system CA store. Software update channels (browser autoupdate, macOS `softwareupdate`, package-manager mirrors that ship a pinned signing CA) and vendor SDKs that bundle their own pinned CA are the usual suspects. Add them to the bypass list and their traffic flows through as-is, encrypted end-to-end between the guest and the upstream server.
+
+Bypass patterns accept exact matches (`api.example.com`) and wildcards (`*.gov`, `*.apple.com`).
+
+## Limits
+
+- **Pinned clients bypass the trust store.** Any client that pins the server's certificate or public key (rather than trusting the system CA) will fail TLS interception and needs to be bypassed explicitly.
+- **Bypassed traffic is opaque.** Policy checks that depend on inspecting request content (URL-based rules, secret injection with `require_tls_identity`) don't apply on bypassed domains.
+- **Client certificates are not proxied.** mTLS flows where the guest is the one presenting a client certificate aren't supported through interception; add those hosts to the bypass list.
+
+## Trusting host CAs
+
+Corporate TLS-inspecting proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, Palo Alto, ...) terminate outbound HTTPS at the host and re-sign it with a gateway CA. That CA is installed in your macOS Keychain or Linux trust store as part of the corporate rollout, so HTTPS works silently on the host. Inside a sandbox it doesn't: the guest's stock Mozilla bundle has never seen the gateway CA, so `apk update`, `pip install`, `curl`, and any SDK fetch fail with `server certificate not trusted`.
+
+By default the sandbox does not extend host trust into the guest, so the guest validates TLS strictly against its stock Mozilla bundle. Opt in when you need the guest to trust whatever the host trusts: at sandbox boot the host's trusted root CAs are copied into the guest and appended to the system CA bundle.
+
+<Note>
+**Security:** this extends the guest's trust to whatever the host trusts. That's the point for MITM-proxy environments, but it also means an attacker who can plant a CA on the host now has that trust inside every sandbox.
+
+It matches the existing threat model (a host-access attacker already owns the sandbox), but worth knowing before enabling on a host with an unfamiliar trust store.
+</Note>
+
+<CodeGroup>
+
+```rust Rust
+let sb = Sandbox::builder("agent")
+    .image("alpine")
+    .network(|n| n.trust_host_cas(true))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("agent")
+    .image("alpine")
+    .network((n) => n.trustHostCAs(true))
+    .create();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "agent",
+    image="alpine",
+    network=Network(trust_host_cas=True),
+)
+```
+
+```bash CLI
+msb run alpine --trust-host-cas -- apk update
+```
+
+</CodeGroup>
+
+### Interaction with TLS interception
+
+TLS interception also covers the corporate-proxy case, but only on the ports it's configured for (default `[443]`), and only for non-bypassed domains. It doesn't touch QUIC / HTTP/3 flows. Everything outside that scope (gRPC, Postgres / Redis / Mongo TLS, custom 8443, non-intercepted ports, bypassed domains) goes over raw TLS from the guest, where host-CA trust is what makes certificate validation succeed.
+
+The two features compose. Turn on [`trust_host_cas`](/fr/sdk/rust/networking#trust_host_cas) alongside TLS interception when you need both: interception provides richer inspection on the ports it covers, host-CA trust covers everything else. Leave it off to keep the guest's TLS stack validating strictly against its stock Mozilla bundle.
+
+## See also
+
+- [DNS](/fr/networking/dns): the DNS interceptor is what makes per-host rules possible, and DoT interception reuses this TLS path
+- [Security model](/fr/networking/security-model): how TLS interception interacts with secret injection and SSRF defenses

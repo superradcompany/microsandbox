@@ -1,0 +1,737 @@
+---
+title: "Sandbox"
+description: "Справочник API песочницы"
+icon: "cube"
+---
+
+
+See [Overview](/ru/sandboxes/overview) for configuration examples and [Lifecycle](/ru/sandboxes/lifecycle) for state management.
+
+The TypeScript SDK uses a **builder-only** entry point. Start every new sandbox from `Sandbox.builder(name)` and chain configuration calls before terminating with `.create()` or `.createDetached()`.
+
+```typescript
+import { Sandbox } from "microsandbox";
+
+await using sandbox = await Sandbox.builder("demo")
+  .image("alpine")
+  .cpus(1)
+  .memory(512)
+  .create();
+```
+
+## Static methods
+
+---
+
+#### Sandbox.builder()
+
+```typescript
+static builder(name: string): SandboxBuilder
+```
+
+Begin building a new sandbox. Configure it with chainable setters, then call `.create()` or `.createDetached()` to boot it.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Sandbox name |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxBuilder`](#sandboxbuilder) | Fluent builder |
+
+---
+
+#### Sandbox.get()
+
+```typescript
+static get(name: string): Promise<SandboxHandle>
+```
+
+Get a handle to an existing sandbox (running or stopped). The handle provides status, configuration, and lifecycle control.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Sandbox name |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxHandle`](#sandboxhandle) | Handle with status and lifecycle control |
+
+---
+
+#### Sandbox.list()
+
+```typescript
+static list(): Promise<SandboxHandle[]>
+```
+
+List all sandboxes (running, stopped, and crashed). Handles returned from `list()` are read-only — call `Sandbox.get(name)` to get a live handle for lifecycle calls.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxHandle[]`](#sandboxhandle) | All sandboxes (read-only handles) |
+
+---
+
+#### Sandbox.remove()
+
+```typescript
+static remove(name: string): Promise<void>
+```
+
+Delete a stopped sandbox and all its state from disk. Fails if the sandbox is still running.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Sandbox name |
+
+---
+
+#### Sandbox.start()
+
+```typescript
+static start(name: string): Promise<Sandbox>
+```
+
+Restart a previously stopped sandbox. The VM reboots using the persisted configuration.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Name of a stopped sandbox |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Sandbox`](#instance-methods) | Running sandbox |
+
+---
+
+#### Sandbox.startDetached()
+
+```typescript
+static startDetached(name: string): Promise<Sandbox>
+```
+
+Restart a stopped sandbox in detached mode.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `string` | Name of a stopped sandbox |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Sandbox`](#instance-methods) | Running sandbox |
+
+---
+
+## Instance properties
+
+---
+
+#### name
+
+```typescript
+readonly name: string
+```
+
+Sandbox name.
+
+---
+
+#### config
+
+```typescript
+readonly config: Readonly<SandboxConfig>
+```
+
+The frozen configuration the sandbox was built with.
+
+---
+
+#### ownsLifecycle
+
+```typescript
+readonly ownsLifecycle: boolean
+```
+
+Whether this handle owns the sandbox lifecycle. `true` in attached mode (the auto-disposer will stop the sandbox), `false` in detached mode.
+
+---
+
+## Instance methods
+
+---
+
+#### detach()
+
+```typescript
+detach(): Promise<void>
+```
+
+Release the handle without stopping the sandbox. Reconnect later with [`Sandbox.get()`](#sandboxget).
+
+---
+
+#### drain()
+
+```typescript
+drain(): Promise<void>
+```
+
+Start a graceful drain. Existing commands run to completion, new `exec` calls are rejected.
+
+---
+
+#### fs()
+
+```typescript
+fs(): SandboxFs
+```
+
+Get a filesystem handle for reading and writing files inside the running sandbox. See [Filesystem](/ru/sdk/typescript/filesystem) for the full API.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxFs`](/ru/sdk/typescript/filesystem) | Filesystem handle |
+
+---
+
+#### kill()
+
+```typescript
+kill(): Promise<void>
+```
+
+Force-terminate the sandbox immediately. No graceful shutdown.
+
+---
+
+#### metrics()
+
+```typescript
+metrics(): Promise<SandboxMetrics>
+```
+
+Get a point-in-time snapshot of the sandbox's resource usage.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxMetrics`](#sandboxmetrics) | CPU, memory, disk, network metrics |
+
+---
+
+#### metricsStream()
+
+```typescript
+metricsStream(intervalMs: number): Promise<MetricsStream>
+```
+
+Stream resource metrics at a regular interval. The returned stream supports both `recv()` and `for await...of`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| intervalMs | `number` | Milliseconds between metric snapshots |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`MetricsStream`](#metricsstream) | Async stream of metrics |
+
+---
+
+#### logs()
+
+```typescript
+logs(opts?: LogReadOptions): Promise<LogEntry[]>
+```
+
+Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike — there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
+
+The default sources are `"stdout"`, `"stderr"`, and `"output"` (PTY-merged). Pass `"system"` to also include synthetic lifecycle markers and runtime/kernel diagnostic lines.
+
+```typescript
+import { Sandbox } from "microsandbox";
+
+const handle = await Sandbox.get("web");
+
+// Default — all user-program output, regardless of pipe/pty mode
+const entries = await handle.logs();
+
+for (const e of entries) {
+  const source =
+    e.source === "stdout" ? "OUT" :
+    e.source === "stderr" ? "ERR" :
+    e.source === "output" ? "PTY" :
+    "SYS";
+
+  console.log(
+    `[${e.timestamp.toISOString()}] ${source} ${e.sessionId}: ${e.text().trimEnd()}`
+  );
+}
+
+// Filtered: last 50 entries from the past hour, including system lines
+const recent = await handle.logs({
+  tail: 50,
+  since: new Date(Date.now() - 60 * 60 * 1000),
+  sources: ["stdout", "stderr", "output", "system"],
+});
+```
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| opts | [`LogReadOptions`](#logreadoptions) `?` | Filters: `tail`, `since`, `until`, `sources`. Omit for the default user-program sources. |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Promise<`[`LogEntry`](#logentry)`[]>` | Matching entries in chronological order |
+
+---
+
+#### removePersisted()
+
+```typescript
+removePersisted(): Promise<void>
+```
+
+Remove the sandbox and all its persisted state from disk.
+
+---
+
+#### stop()
+
+```typescript
+stop(): Promise<void>
+```
+
+Gracefully shut down the sandbox.
+
+---
+
+#### stopAndWait()
+
+```typescript
+stopAndWait(): Promise<ExitStatus>
+```
+
+Stop the sandbox and wait for the exit status.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExitStatus`](/ru/sdk/typescript/execution#exitstatus) | Exit code and success flag |
+
+---
+
+#### wait()
+
+```typescript
+wait(): Promise<ExitStatus>
+```
+
+Block until the sandbox exits on its own.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExitStatus`](/ru/sdk/typescript/execution#exitstatus) | Exit code and success flag |
+
+---
+
+#### \[Symbol.asyncDispose\]()
+
+```typescript
+[Symbol.asyncDispose](): Promise<void>
+```
+
+Implements `AsyncDisposable` so the sandbox can be used with `await using`. When the binding goes out of scope, the sandbox is stopped (best-effort) — but only if `ownsLifecycle` is `true`.
+
+---
+
+## PatchBuilder
+
+Fluent builder for the ordered list of pre-boot rootfs patches. Used in `SandboxBuilder.patch(p => p...)`. Each method appends one operation; calls are chainable. By default a method that targets a path already present in the image errors at boot; pass `{ replace: true }` on the operation to allow overwriting. `mkdir` and `remove` are idempotent.
+
+See [Patches](/ru/sandboxes/customize#patches) for conceptual context.
+
+---
+
+#### append()
+
+```typescript
+append(path: string, content: string): this
+```
+
+Append `content` to an existing file at `path`. If the file lives in a lower image layer, it's copied up first.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Absolute path inside the guest |
+| content | `string` | Text to append |
+
+---
+
+#### copyDir()
+
+```typescript
+copyDir(src: string, dst: string, opts?: { replace?: boolean }): this
+```
+
+Recursively copy a host directory at `src` into the guest rootfs at `dst`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `string` | Host source directory |
+| dst | `string` | Absolute destination path inside the guest |
+| opts.replace | `boolean` | When `true`, overwrite an existing path at `dst` |
+
+---
+
+#### copyFile()
+
+```typescript
+copyFile(
+  src: string,
+  dst: string,
+  opts?: { mode?: number; replace?: boolean },
+): this
+```
+
+Copy a single host file at `src` into the guest rootfs at `dst`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `string` | Host source file |
+| dst | `string` | Absolute destination path inside the guest |
+| opts.mode | `number` | File mode, e.g. `0o644`. Omit to keep the source mode |
+| opts.replace | `boolean` | When `true`, overwrite an existing path at `dst` |
+
+---
+
+#### file()
+
+```typescript
+file(
+  path: string,
+  content: Buffer,
+  opts?: { mode?: number; replace?: boolean },
+): this
+```
+
+Write raw bytes at `path`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Absolute path inside the guest |
+| content | `Buffer` | Raw byte content |
+| opts.mode | `number` | File mode, e.g. `0o644` |
+| opts.replace | `boolean` | When `true`, overwrite an existing path |
+
+---
+
+#### mkdir()
+
+```typescript
+mkdir(path: string, opts?: { mode?: number }): this
+```
+
+Create a directory at `path`. Idempotent: a no-op if the directory already exists.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Absolute path inside the guest |
+| opts.mode | `number` | Directory mode, e.g. `0o755` |
+
+---
+
+#### remove()
+
+```typescript
+remove(path: string): this
+```
+
+Delete a file or directory at `path`. Idempotent: a no-op if the path doesn't exist.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Absolute path inside the guest |
+
+---
+
+#### symlink()
+
+```typescript
+symlink(target: string, link: string, opts?: { replace?: boolean }): this
+```
+
+Create a symlink at `link` pointing to `target`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| target | `string` | What the symlink points to (literal symlink target text) |
+| link | `string` | Absolute path of the symlink itself |
+| opts.replace | `boolean` | When `true`, overwrite an existing path at `link` |
+
+---
+
+#### text()
+
+```typescript
+text(
+  path: string,
+  content: string,
+  opts?: { mode?: number; replace?: boolean },
+): this
+```
+
+Write UTF-8 text content at `path`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Absolute path inside the guest |
+| content | `string` | Text content |
+| opts.mode | `number` | File mode, e.g. `0o644` |
+| opts.replace | `boolean` | When `true`, overwrite an existing path |
+
+---
+
+## Types
+
+### SandboxBuilder
+
+Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter returns the same builder so calls can be chained.
+
+| Method | Description |
+|--------|-------------|
+| `image(src)` | OCI image (`"alpine"`), local rootfs path, or a `RootfsSource`. **Required.** |
+| `cpus(n)` | Virtual CPUs |
+| `memory(mib)` | Guest memory in MiB |
+| `logLevel(level)` | Override log verbosity |
+| `quietLogs()` | Suppress log output |
+| `workdir(path)` | Default working directory for commands |
+| `shell(shell)` | Shell binary used by `sandbox.shell(...)` |
+| `entrypoint(iter)` | Override the image entrypoint |
+| `init(cmd, args?)` | Hand off PID 1 to `cmd` (absolute path or `"auto"`) after agentd setup. See [Custom init system](/ru/sandboxes/customize#custom-init-system) |
+| `initWith(cmd, i => ...)` | Like `init` but with a closure-builder for argv and env (`.arg`, `.args`, `.env`, `.envs`) |
+| `hostname(name)` | Guest hostname |
+| `user(user)` | Default guest user |
+| `pullPolicy(policy)` | Image pull behavior |
+| `libkrunfwPath(path)` | Override the bundled libkrunfw shared library |
+| `env(key, value)` | Add a single env var |
+| `envs(record \| iter)` | Add many env vars |
+| `script(name, content)` | Mount a script at `/.msb/scripts/<name>` |
+| `scripts(record \| iter)` | Mount many scripts |
+| `replace()` | Replace any existing sandbox with the same name |
+| `maxDuration(secs)` | Maximum sandbox lifetime |
+| `idleTimeout(secs)` | Stop the sandbox after this many idle seconds |
+| `volume(guestPath, m => ...)` | Mount a volume — see [Volumes](/ru/sdk/typescript/volumes) |
+| `patch(p => ...)` | Modify the rootfs before boot — see [Snapshots](/ru/sdk/typescript/snapshots) |
+| `addPatch(patch)` | Append a pre-built `Patch` |
+| `registry(r => r.auth(...).insecure().caCertsPath(...))` | Configure the OCI registry |
+| `port(host, guest)` | Publish a TCP port |
+| `portUdp(host, guest)` | Publish a UDP port |
+| `disableNetwork()` | Disable networking entirely |
+| `network(n => ...)` | Configure DNS / TLS / policy / secrets — see [Networking](/ru/sdk/typescript/networking) |
+| `secret(s => ...)` | Add a secret via [`SecretBuilder`](/ru/sdk/typescript/secrets#secretbuilder) |
+| `secretEnv(envVar, value, allowedHost)` | Auto-placeholder shorthand. Generates `$MSB_<ENV_VAR>`. |
+| `build(): SandboxConfig` | Materialize without booting |
+| `create(): Promise<Sandbox>` | Build and boot in attached mode |
+| `createDetached(): Promise<Sandbox>` | Build and boot in detached mode |
+
+### LogLevel
+
+Sandbox process log verbosity.
+
+| Value | Description |
+|-------|-------------|
+| `'debug'` | Debug and higher |
+| `'error'` | Errors only |
+| `'info'` | Info and higher |
+| `'trace'` | Most verbose - all diagnostic output |
+| `'warn'` | Warnings and errors only |
+
+### LogEntry
+
+A class wrapping one captured log entry. Returned by [`logs()`](#logs).
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| timestamp | `Date` | Wall-clock capture time on the host |
+| source | [`LogSource`](#logsource) | Where the chunk came from |
+| sessionId | `number \| null` | Relay-monotonic session id; `null` for `"system"` entries |
+| data | `Uint8Array` | The chunk's bytes (UTF-8 lossy decoded by default) |
+| `text()` | `string` | Convenience: UTF-8 decode of `data` (lossy — invalid bytes are replaced) |
+
+### LogReadOptions
+
+Filters passed to [`logs()`](#logs). All fields optional. Omit the argument entirely for the default sources (`stdout` + `stderr` + `output`).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| tail | `number?` | Show only the last N entries after other filters apply |
+| since | `Date?` | Inclusive lower bound on entry timestamp |
+| until | `Date?` | Exclusive upper bound on entry timestamp |
+| sources | [`LogSource`](#logsource)`[]?` | Sources to include. Omit = `["stdout", "stderr", "output"]`. Add `"system"` to merge runtime/kernel diagnostics. |
+
+### LogSource
+
+Tag indicating where a captured log entry came from. String literal type:
+
+```typescript
+type LogSource = "stdout" | "stderr" | "output" | "system";
+```
+
+| Value | Description |
+|-------|-------------|
+| `"stdout"` | Captured from a session's stdout (pipe mode — streams stayed separated) |
+| `"stderr"` | Captured from a session's stderr (pipe mode) |
+| `"output"` | Captured from a session running in PTY mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `"output"` rather than mislabelled as `"stdout"`. |
+| `"system"` | Synthetic entry: lifecycle markers in `exec.log` plus runtime/kernel diagnostic lines merged in at read time when `"system"` is requested. |
+
+### MetricsStream
+
+Async stream for receiving periodic metrics snapshots.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `[Symbol.asyncIterator]` | `AsyncIterator<`[`SandboxMetrics`](#sandboxmetrics)`>` | Use with `for await...of` |
+| `recv()` | `Promise<`[`SandboxMetrics`](#sandboxmetrics)` \| null>` | Receive next snapshot. Returns `null` when the stream ends. |
+| `[Symbol.asyncDispose]()` | `Promise<void>` | Stop iterating; safe to use with `await using`. |
+
+### PullPolicy
+
+Controls when the SDK fetches an OCI image from the registry.
+
+| Value | Description |
+|-------|-------------|
+| `'always'` | Pull the image every time, even if cached locally |
+| `'if-missing'` | Pull only if the image is not already cached. This is the default. |
+| `'never'` | Never pull; fail if the image is not cached locally |
+
+### SandboxConfig
+
+Frozen configuration object — produced by `SandboxBuilder.build()` and exposed as the `config` property on a `Sandbox`. You generally should not construct this by hand; use the builder.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| name | `string` | Sandbox name |
+| image | `RootfsSource` | OCI / bind / disk discriminated union |
+| cpus | `number \| null` | Virtual CPUs |
+| memoryMib | `number \| null` | Guest memory in MiB |
+| logLevel | `LogLevel \| null` | Log verbosity |
+| quietLogs | `boolean` | Suppress log output |
+| workdir | `string \| null` | Default working directory |
+| shell | `string \| null` | Shell binary |
+| entrypoint | `string[] \| null` | Override image entrypoint |
+| cmd | `string[] \| null` | Override image cmd |
+| hostname | `string \| null` | Guest hostname |
+| user | `string \| null` | Default guest user |
+| libkrunfwPath | `string \| null` | Custom libkrunfw path |
+| env | `Array<readonly [string, string]>` | Environment variables |
+| scripts | `Array<readonly [string, string]>` | Named scripts |
+| mounts | `VolumeMount[]` | Volume mounts |
+| patches | `Patch[]` | Rootfs modifications applied before boot |
+| pullPolicy | `PullPolicy \| null` | Image pull behavior |
+| replace | `boolean` | Replace existing sandbox with same name |
+| maxDurationSecs | `number \| null` | Maximum sandbox lifetime |
+| idleTimeoutSecs | `number \| null` | Stop after idle time |
+| portsTcp | `Array<readonly [number, number]>` | TCP host→guest mappings |
+| portsUdp | `Array<readonly [number, number]>` | UDP host→guest mappings |
+| registry | `RegistryConfig \| null` | Registry connection settings |
+| network | `NetworkConfig \| null` | Network configuration |
+| disableNetwork | `boolean` | Disable networking entirely |
+| secrets | `SecretEntry[]` | Secret entries (top-level) |
+
+### SandboxHandle
+
+A lightweight handle to an existing sandbox (running or stopped). Obtained via [`Sandbox.get()`](#sandboxget) or [`Sandbox.list()`](#sandboxlist).
+
+Handles from `Sandbox.get(name)` are **live** — they expose lifecycle methods (`start`, `stop`, `kill`, `connect`, etc). Handles in the array returned by `Sandbox.list()` are **read-only**: calling lifecycle methods on them throws. Use `Sandbox.get(name)` to upgrade to a live handle.
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| name | `string` | Sandbox name |
+| status | [`SandboxStatus`](#sandboxstatus) | Current status |
+| configJson | `string` | Raw JSON configuration |
+| createdAt | `Date \| null` | Creation timestamp |
+| updatedAt | `Date \| null` | Last update timestamp |
+| metrics() | `Promise<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
+| logs() | `Promise<`[`LogEntry`](#logentry)`[]>` | Read captured `exec.log` (works without starting) |
+| start() | `Promise<`[`Sandbox`](#instance-methods)`>` | Start in attached mode |
+| startDetached() | `Promise<`[`Sandbox`](#instance-methods)`>` | Start in detached mode |
+| connect() | `Promise<`[`Sandbox`](#instance-methods)`>` | Connect to a running sandbox without taking ownership |
+| stop() | `Promise<void>` | Graceful shutdown |
+| kill() | `Promise<void>` | Force terminate |
+| remove() | `Promise<void>` | Delete sandbox and state |
+
+### SandboxMetrics
+
+Point-in-time resource usage snapshot.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| cpuPercent | `number` | CPU usage as a percentage |
+| diskReadBytes | `number` | Total bytes read from disk since boot |
+| diskWriteBytes | `number` | Total bytes written to disk since boot |
+| memoryBytes | `number` | Current memory usage in bytes |
+| memoryLimitBytes | `number` | Memory limit in bytes |
+| netRxBytes | `number` | Total bytes received over the network since boot |
+| netTxBytes | `number` | Total bytes sent over the network since boot |
+| timestamp | `Date` | When this measurement was taken |
+| uptimeMs | `number` | Time since the sandbox was created (ms) |
+
+### SandboxStatus
+
+| Value | Description |
+|-------|-------------|
+| `'crashed'` | VM exited unexpectedly |
+| `'draining'` | Graceful shutdown in progress |
+| `'running'` | Guest agent is ready |
+| `'stopped'` | VM shut down; can be restarted |

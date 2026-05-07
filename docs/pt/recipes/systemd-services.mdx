@@ -1,0 +1,66 @@
+---
+title: "Serviços systemd"
+description: "Execute serviços systemd dentro do microsandbox"
+icon: "gear"
+---
+
+
+By default the microsandbox agent is PID 1. That's enough for one-shot processes, but anything that calls into `systemctl`, `loginctl`, or expects a session bus will fail.
+
+`--init auto` hands PID 1 over to systemd. The rest of the guest then behaves like a normal Linux box.
+
+## Step 1: Boot
+
+```bash
+msb run ghcr.io/superradcompany/debian-systemd:12 \
+  --memory 1G --cpus 2 \
+  --init auto \
+  -- bash
+```
+
+`debian-systemd` is one of the optional bases we maintain in [guest-images](https://github.com/superradcompany/guest-images) for cases like this. `--init auto` probes a small set of well-known paths and picks the first that exists. See [Custom init system](/pt/sandboxes/customize#custom-init-system) for the full list and for pinning to an exact path.
+
+## Step 2: Confirm systemd is PID 1
+
+```bash
+root@msb:/# systemctl status
+● msb
+    State: running
+    Units: 113 loaded (incl. loaded aliases)
+  systemd: 252.39-1~deb12u1
+```
+
+Or check directly:
+
+```bash
+root@msb:/# cat /proc/1/comm
+systemd
+```
+
+## Step 3: Manage units
+
+`systemctl` works as it does on bare metal. Inspect a unit shipped with the image:
+
+```bash
+root@msb:/# systemctl status systemd-journald
+● systemd-journald.service - Journal Service
+     Loaded: loaded (/lib/systemd/system/systemd-journald.service; static)
+     Active: active (running)
+```
+
+Install your own and start it:
+
+```bash
+root@msb:/# apt update && apt install -y nginx
+root@msb:/# systemctl enable --now nginx
+root@msb:/# curl -s localhost | head -1
+<!DOCTYPE html>
+```
+
+Microsandbox is detected as a container, so packages with `policy-rc.d` deferral install but don't auto-start. `systemctl enable --now <unit>` starts them in one step.
+
+## Notes
+
+- **Image choice matters.** Distroless / minimal images (`python:3.13-slim`, `alpine`) don't ship a systemd init binary; `--init auto` will fail and `kernel.log` will list every path it tried. Use a systemd-equipped base or layer one in.
+- **Memory budget.** systemd's idle footprint is ~50 MiB; daemons add more. Bump `--memory` if your service is hungry.
+- **Other inits work.** `--init` accepts any absolute path. s6, OpenRC, runit, or a hand-rolled `/sbin/init` shell script are all fine; `auto` just covers the systemd-on-Debian/Ubuntu case.

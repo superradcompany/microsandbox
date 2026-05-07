@@ -1,0 +1,68 @@
+---
+title: "Comandos de volumen"
+description: "Gestiona volúmenes con nombre desde la terminal"
+icon: "hard-drive"
+---
+
+
+Named volumes persist independently of sandboxes and are stored at `~/.microsandbox/volumes/`.
+
+## msb volume create
+
+```bash
+msb volume create my-data
+msb volume create my-data --size 10G
+```
+
+| Flag | Description |
+|------|-------------|
+| `--size` | Storage quota (e.g. `100M`, `1G`, `10G`) |
+| `-q`, `--quiet` | Suppress output (only print the volume name) |
+
+## msb volume ls
+
+```bash
+msb volume ls
+msb volume ls --format json
+msb volume ls -q               # Names only
+```
+
+| Flag | Description |
+|------|-------------|
+| `--format` | Output format (`json`) |
+| `-q`, `--quiet` | Show only volume names |
+
+## msb volume inspect
+
+```bash
+msb volume inspect my-data
+```
+
+## msb volume rm
+
+```bash
+msb volume rm my-data
+msb volume rm cache-1 cache-2   # Remove multiple
+```
+
+| Flag | Description |
+|------|-------------|
+| `-q`, `--quiet` | Suppress output |
+
+## Using volumes with sandboxes
+
+Mount a named volume when creating or running a sandbox. The volume name goes before the colon, the guest path after.
+
+```bash
+# Create a volume, then mount it
+msb volume create app-data --size 5G
+msb run --name worker -v app-data:/data python
+
+# Share between sandboxes
+msb run --name writer -v shared:/data alpine -- sh -c "echo hello > /data/msg.txt"
+msb run --name reader -v shared:/data alpine -- cat /data/msg.txt
+```
+
+<Tip>
+  The CLI distinguishes bind mounts from named volumes by looking for a `/` or `.` prefix. `./src:/app` is a bind mount (host path). `myvolume:/data` is a named volume. This matches Docker's convention.
+</Tip>

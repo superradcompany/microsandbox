@@ -1,0 +1,83 @@
+---
+title: "Disk imajları"
+description: "QCOW2, Raw ve VMDK disk imajlarından önyükleyin"
+icon: "compact-disc"
+---
+
+
+In addition to OCI container images, microsandbox can boot a sandbox directly from a disk image file. The guest gets raw block device access, and its kernel mounts the filesystem from the device directly.
+
+This is a fundamentally different path from OCI images. With OCI, microsandbox stacks image layers as a copy-on-write filesystem. With disk images, the guest owns the block device. No overlay, no copy-on-write between sandboxes.
+
+Use disk images when you need a pre-built VM template, a custom kernel configuration, or an OS that isn't available as a container image.
+
+## Supported formats
+
+| Format | Description |
+|--------|-------------|
+| **QCOW2** | QEMU Copy-On-Write v2. Supports thin provisioning and backing files. The most common format. |
+| **Raw** | Uncompressed raw disk image. No overhead, but no thin provisioning. |
+| **VMDK** | VMware virtual disk format. |
+
+## Usage
+
+When you pass a file path ending in `.qcow2`, `.raw`, or `.vmdk`, microsandbox auto-detects the format. For ambiguous cases, specify the format and filesystem type explicitly.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::size::SizeExt;
+
+// Auto-detect
+let sb = Sandbox::builder("custom-vm")
+    .image("./ubuntu-22.04.qcow2")
+    .cpus(2)
+    .memory(2.gib())
+    .create()
+    .await?;
+
+// Explicit
+let sb2 = Sandbox::builder("custom-vm")
+    .image_with(|i| i.disk("./alpine.raw").fstype("ext4"))
+    .cpus(1)
+    .memory(512)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+// Auto-detect format from the file extension
+await using sb = await Sandbox.builder("custom-vm")
+    .image("./ubuntu-22.04.qcow2")
+    .cpus(2)
+    .memory(2048)
+    .create();
+
+// Explicit format / fstype via a RootfsSource literal
+await using sb2 = await Sandbox.builder("custom-vm")
+    .image({
+        kind: "disk",
+        path: "./alpine.raw",
+        format: "raw",
+        fstype: "ext4",
+    })
+    .cpus(1)
+    .memory(512)
+    .create();
+```
+
+```python Python
+from microsandbox import Image, Sandbox
+
+# Auto-detect format from file extension
+sb = await Sandbox.create("custom-vm", image="./ubuntu-22.04.qcow2", cpus=2, memory=2048)
+
+# Explicit filesystem type
+sb2 = await Sandbox.create("custom-vm", image=Image.disk("./alpine.raw", fstype="ext4"), cpus=1, memory=512)
+```
+</CodeGroup>
+
+<Note>
+  The filesystem type (`ext4`, `xfs`, etc.) must match what's actually on the disk image. The guest kernel mounts it using the specified filesystem driver.
+</Note>

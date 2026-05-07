@@ -1,0 +1,91 @@
+---
+title: "Modello di sicurezza"
+description: "Come microsandbox protegge il livello di rete"
+icon: "shield-halved"
+---
+
+
+microsandbox's networking defaults are shaped around giving an AI agent, a scraper, or some other untrusted workload access to the internet without letting it pivot into your internal infrastructure. This page walks through the specific threats the stack is designed to handle and where each defense lives.
+
+## Private IPs and the host's local network
+
+The largest class of real damage comes from workloads reaching things that live *inside* your network: the host machine itself, a local database, another VM on the same subnet. The default policy addresses this by denying egress to anything outside `Group::Public` (the complement of the named local categories), which covers:
+
+- `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (RFC1918 + CGN private ranges)
+- `127.0.0.0/8`, `::1` (loopback)
+- `169.254.0.0/16`, `fe80::/10` (link-local)
+- `169.254.169.254` (cloud metadata, takes precedence over link-local)
+- the per-sandbox gateway IPs (`Group::Host`)
+
+If an agent runs `curl http://192.168.1.10` or `curl http://localhost:5432`, the packet is dropped before it leaves the host stack. Override the default with `--net-default-egress allow` only when the workload genuinely needs broad reach, or use `--no-net` when it doesn't need network at all.
+
+## Cloud metadata endpoints
+
+On AWS, GCP, Azure, and similar platforms, `169.254.169.254` is the instance metadata service, a well-known SSRF target because it hands out temporary credentials to anything that can connect. The default policy blocks it via the `Group::Public` complement. For custom policies that flip `default_egress` to `Allow`, `Group::Metadata` lets you deny it explicitly:
+
+```bash
+msb create python --name agent \
+    --net-default-egress allow \
+    --net-rule "deny@meta"
+```
+
+```rust
+NetworkPolicy::builder()
+    .default_allow()
+    .rule(|r| r.egress().deny_meta())
+    .build()?
+```
+
+## DNS rebinding
+
+An attacker who controls a domain can set up records that resolve to a public IP during the initial allowlist check and then flip to a private IP on a subsequent lookup. The guest ends up making a request that *looked* like it was going to `evil.example.com` and actually lands on `192.168.1.10`.
+
+Rebind protection catches this at the response level: when the DNS interceptor sees an answer resolving a domain to a private, loopback, or link-local IP, the response is rewritten to `REFUSED` and the connection never gets made. This is on by default. You can turn it off when you genuinely need domains to resolve to internal hosts (local development, split-horizon DNS):
+
+<CodeGroup>
+```rust Rust
+.network(|n| n.dns(|d| d.rebind_protection(false)))
+```
+
+```typescript TypeScript
+.network((n) => n.dns((d) => d.rebindProtection(false)))
+```
+
+```python Python
+network=Network(dns=DnsConfig(rebind_protection=False))
+```
+
+```bash CLI
+msb create python --name dev --no-dns-rebind-protection
+```
+
+</CodeGroup>
+
+## DNS-to-IP binding (TOCTOU)
+
+Even without rebinding tricks, a classic time-of-check/time-of-use race exists. An allowlisted domain resolves to an allowed IP when the policy is checked. The guest then looks it up again at connect time and reaches a different IP.
+
+Domain-based policy rules close this by maintaining a pin set of observed DNS answers. A connection only matches a domain rule if its destination IP was actually returned as an answer to a DNS query for that domain from this sandbox. A guest that hard-codes an IP it didn't resolve through the interceptor can't slip past a domain-based allowlist.
+
+The same mechanism gates host-scoped secret injection. When a `SecretEntry` is restricted via `allowed_hosts`, the secret is only injected into outbound requests whose destination IP the interceptor tied to one of those hosts. An exfiltration attempt that POSTs the secret to an arbitrary IP won't receive the injection in the first place.
+
+## DNS bypass surface
+
+DNS-based defenses (block list, rebind protection, domain pinning) only work on queries the interceptor sees. The gateway intercepts UDP/53 and TCP/53 directly, and DoT (TCP/853) when TLS interception is enabled. Alternative transports are either refused at the port layer (DoQ, mDNS, LLMNR, NetBIOS-NS) or indistinguishable from regular traffic (DoH on TCP/443). Tunneled DNS (VPN, SOCKS5 hostname mode, HTTP `CONNECT`) is carried inside the outer encrypted flow and never reaches the forwarder.
+
+For workloads where DNS integrity matters, pair DoT interception with a network policy that denies egress `UDP/53`, `TCP/53`, and `TCP/853` to anything except the gateway. Tunneled DNS is a network-layer concern: close it by restricting egress to an allowlist that excludes tunnel destinations. See [DNS](/it/networking/dns) for the transport-by-transport breakdown.
+
+## Out of scope
+
+The networking stack doesn't try to defend against:
+
+- **Kernel exploits inside the guest.** The microVM boundary is what keeps a compromised guest contained.
+- **Raw packet crafting from outside the sandbox.** Host-side privileged processes aren't in this threat model.
+- **Host tampering.** If a workload can modify host-side config, it's already past this layer.
+- **Deep ICMP behavior.** Supported ICMP is limited to unprivileged echo; `traceroute`-style flows are not proxied.
+- **Host trust store integrity.** When [`trust_host_cas`](/it/sdk/rust/networking#trust_host_cas) is opted into, an attacker who can plant a CA on the host has that trust inside every sandbox. Off by default for exactly this reason.
+
+## See also
+
+- [DNS](/it/networking/dns): the controls that ride on the DNS interceptor
+- [TLS interception](/it/networking/tls): plaintext visibility for per-host policy and secret injection

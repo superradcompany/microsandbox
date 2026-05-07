@@ -1,0 +1,67 @@
+---
+title: "Olaylar"
+description: "Olaylar API referansı"
+icon: "tower-broadcast"
+---
+
+
+<Note>
+  Events are coming soon and not yet available in the current SDK.
+</Note>
+
+See [Events](/tr/sandboxes/events) for usage examples and guest-side emitting.
+
+## Sandbox methods
+
+---
+
+#### emit()
+
+```typescript
+emit(eventName: string, data: any): Promise<void>
+```
+
+Send a named event with a JSON-serializable payload into the guest. Any process listening on the agent socket (`/run/agent.sock`) receives it.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| eventName | `string` | Event name (e.g. `"task.start"`) |
+| data | `any` | Event payload - must be JSON-serializable |
+
+---
+
+#### onEvent()
+
+```typescript
+onEvent(eventName: string, callback: (event: EventData) => void): Subscription
+```
+
+Subscribe to named events emitted by guest processes. The callback fires each time the guest sends a matching event through `/run/agent.sock`. Multiple subscriptions to the same event name are supported.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| eventName | `string` | Event name to subscribe to (e.g. `"task.progress"`) |
+| callback | `(event: EventData) => void` | Called with the event data each time |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Subscription` | Call `.unsubscribe()` to stop receiving events |
+
+---
+
+## Types
+
+### EventData
+
+Data received from a guest event.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| data | `any` | Event payload. `undefined` if the event had no data. |
+| event | `string` | Event name |

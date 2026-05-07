@@ -1,0 +1,113 @@
+---
+title: "İmaj komutları"
+description: "İmajları terminalden yönetin"
+icon: "layer-group"
+---
+
+
+## msb pull
+
+Pre-pull an image to the local cache. Layers are fetched in parallel with per-layer progress bars. Once cached, layers are content-addressable and deduplicated, so shared layers across images are only stored once.
+
+```bash
+msb pull python
+msb pull alpine
+msb pull ghcr.io/my-org/my-image:v1
+```
+
+| Flag | Description |
+|------|-------------|
+| `-f`, `--force` | Force re-download even if cached |
+| `-q`, `--quiet` | Suppress progress output |
+| `--insecure` | Connect over plain HTTP instead of HTTPS |
+| `--ca-certs <PATH>` | Path to a PEM file with additional CA root certificates |
+
+<Tip>
+  Pre-pulling is useful when you want sandbox creation to be instant. Without a pre-pull, the first `Sandbox.create` with a new image will block on the download.
+</Tip>
+
+## msb image ls
+
+List images in the local cache.
+
+```bash
+msb image ls
+msb image ls --format json
+msb image ls -q               # References only
+```
+
+| Flag | Description |
+|------|-------------|
+| `--format` | Output format (`json`) |
+| `-q`, `--quiet` | Show only image references |
+
+<Tip>
+  `msb images` is a shorthand alias for `msb image ls`.
+</Tip>
+
+## msb image inspect
+
+Show detailed metadata for a cached image (manifest, layers, config).
+
+```bash
+msb image inspect python
+msb image inspect python --format json
+```
+
+| Flag | Description |
+|------|-------------|
+| `--format` | Output format (`json`) |
+
+## msb image rm
+
+Remove one or more cached images and their layers (layers shared with other images are kept).
+
+```bash
+msb image rm python
+msb image rm alpine ubuntu   # Remove multiple
+```
+
+| Flag | Description |
+|------|-------------|
+| `-f`, `--force` | Remove even if the image is used by existing sandboxes |
+| `-q`, `--quiet` | Suppress output |
+
+<Tip>
+  `msb rmi` is a shorthand alias for `msb image rm`.
+</Tip>
+
+## msb registry
+
+Manage registry authentication.
+
+```bash
+msb registry login ghcr.io --username octocat
+printf '%s\n' "$GHCR_TOKEN" | msb registry login ghcr.io --username octocat --password-stdin
+msb registry logout ghcr.io
+msb registry ls
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `login` | Store credentials for a registry in the OS credential store |
+| `logout` | Remove stored credentials for a registry |
+| `list` (alias: `ls`) | List configured registries without printing secrets |
+
+**`msb registry login` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--username` | Registry username |
+| `--password-stdin` | Read password from stdin |
+
+`msb registry login` stores the secret in the OS credential store (for example Keychain, Credential Manager, or Secret Service) and writes only metadata to `~/.microsandbox/config.json`.
+
+For CI or other headless environments, configure `registries.auth` in `~/.microsandbox/config.json` with `password_env`. Advanced host setups can also use `secret_name` to point at a file-backed secret under `~/.microsandbox/secrets/registries/`.
+
+When pulling from a registry, microsandbox resolves auth in this order:
+
+1. Explicit SDK auth (`.registry_auth(...)`)
+2. OS credential store
+3. `registries.auth` config
+4. Docker credential store/config
+5. Anonymous

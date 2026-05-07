@@ -1,0 +1,402 @@
+---
+title: "Životní cyklus"
+description: "Vytváření, spouštění, zastavování a správa stavu sandboxu"
+icon: "rotate"
+---
+
+
+Each sandbox runs as a child process of whatever application creates it. `Sandbox.builder(...).create()` boots a microVM, starts the guest agent inside it, and establishes a communication channel back to the host.
+
+Understanding the lifecycle is useful once you start managing long-running sandboxes, graceful shutdown, or resilient agent workflows.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Creating: create()
+    Creating --> Running: boot complete
+    Running --> Paused: pause()
+    Paused --> Running: resume()
+    Running --> Draining: drain()
+    Running --> Stopped: stop()
+    Running --> Crashed: unexpected exit
+    Draining --> Stopped: drain complete
+    Stopped --> Running: start()
+    Stopped --> [*]: remove()
+    Crashed --> [*]: remove()
+```
+
+## States
+
+| Status | Description |
+|--------|-------------|
+| **Creating** | The VM is booting. The kernel is loaded, the filesystem is mounted, and the guest agent is initializing (configuring network, setting up the environment). |
+| **Running** | The guest agent is ready. You can call `exec`, `shell`, `fs`, and `emit`. |
+| **Paused** | All guest processes are frozen. No CPU cycles consumed. Resume is instant with no re-boot or re-init. |
+| **Draining** | Graceful shutdown in progress. Existing commands run to completion, but new `exec` calls are rejected. Transitions to Stopped when all commands finish. |
+| **Stopped** | The VM has shut down. Sandbox configuration and state are persisted to the database and can be restarted. |
+| **Crashed** | The VM exited unexpectedly (e.g., kernel panic, OOM kill). |
+
+## Create a sandbox
+
+Creating a sandbox boots the microVM, mounts the filesystem, initializes the guest agent, and waits until it's ready to accept commands.
+
+<CodeGroup>
+```rust Rust
+// Attached: sandbox stops when your process exits
+let sb = Sandbox::builder("worker").image("python").create().await?;
+
+// Detached: sandbox survives after your process exits
+let sb = Sandbox::builder("worker").image("python").create_detached().await?;
+```
+
+```typescript TypeScript
+// Attached: sandbox stops when your process exits
+await using sb = await Sandbox.builder("worker").image("python").create();
+
+// Detached: sandbox survives after your process exits
+const detached = await Sandbox.builder("worker").image("python").createDetached();
+```
+
+```python Python
+# Attached: sandbox stops when your process exits
+sb = await Sandbox.create("worker", image="python")
+
+# Detached: sandbox survives after your process exits
+sb = await Sandbox.create("worker", image="python", detached=True)
+```
+
+```bash CLI
+# Attached
+msb create python --name worker
+
+# Detached
+msb run -d python --name worker
+```
+
+</CodeGroup>
+
+## Stop and restart
+
+Stopping gracefully terminates guest processes and shuts down the VM. The sandbox moves to `Stopped` and can be restarted later with all its configuration preserved.
+
+<CodeGroup>
+```rust Rust
+sb.stop().await?;
+
+let sb = Sandbox::start("worker").await?;
+```
+
+```typescript TypeScript
+await sb.stop()
+
+// Later, resume where you left off
+const sb = await Sandbox.start("worker")
+```
+
+```python Python
+await sb.stop()
+
+# Later, resume where you left off
+sb = await Sandbox.start("worker")
+```
+
+```bash CLI
+msb stop worker
+
+# Later, resume where you left off
+msb start worker
+```
+
+</CodeGroup>
+
+## Kill immediately
+
+If a sandbox is unresponsive (e.g., stuck in a tight loop or a panic), force-kill it. The sandbox is terminated immediately with no graceful shutdown.
+
+<CodeGroup>
+```rust Rust
+sb.kill().await?;
+```
+
+```typescript TypeScript
+await sb.kill()
+```
+
+```python Python
+await sb.kill()
+```
+
+```bash CLI
+msb stop --force worker
+```
+
+</CodeGroup>
+
+## Pause and resume <sup><sup>coming soon</sup></sup>
+
+Freeze all guest processes without shutting down. The VM uses zero CPU while paused, and resume is instant. The guest continues exactly where it left off with no boot time and no re-init.
+
+<CodeGroup>
+```rust Rust
+sb.pause().await?;
+sb.resume().await?;
+```
+
+```typescript TypeScript
+await sb.pause()
+await sb.resume()
+```
+
+```python Python
+await sb.pause()
+await sb.resume()
+```
+
+</CodeGroup>
+
+## Detach
+
+Keeps a sandbox running after the parent process exits. It becomes a background process that you can reconnect to later with `Sandbox::get("worker")`.
+
+<CodeGroup>
+```rust Rust
+sb.detach().await;
+```
+
+```typescript TypeScript
+await sb.detach()
+```
+
+```python Python
+await sb.detach()
+```
+
+</CodeGroup>
+
+<Tip>
+  Detached sandboxes are tracked at `~/.microsandbox/db/`. A background reaper periodically checks for stale sandboxes that have exited unexpectedly and cleans up their records.
+</Tip>
+
+## Drain
+
+Trigger a graceful shutdown that lets existing commands finish but rejects new ones. The sandbox moves to `Draining` and transitions to `Stopped` when all in-flight commands complete. This is useful for zero-downtime rotation of worker sandboxes.
+
+<CodeGroup>
+```rust Rust
+sb.drain().await?;
+```
+
+```typescript TypeScript
+await sb.drain()
+```
+
+```python Python
+await sb.drain()
+```
+
+</CodeGroup>
+
+## Wait
+
+Block until the sandbox exits on its own, without triggering a stop.
+
+<CodeGroup>
+```rust Rust
+let exit_status = sb.wait().await?;
+```
+
+```typescript TypeScript
+const exitStatus = await sb.wait()
+```
+
+```python Python
+code, success = await sb.wait()
+```
+
+</CodeGroup>
+
+## Remove
+
+Delete a stopped sandbox and its associated state from disk.
+
+<CodeGroup>
+```rust Rust
+Sandbox::remove("worker").await?;
+```
+
+```typescript TypeScript
+await Sandbox.remove("worker")
+```
+
+```python Python
+await Sandbox.remove("worker")
+```
+
+```bash CLI
+msb rm worker
+```
+
+</CodeGroup>
+
+## List and inspect
+
+<CodeGroup>
+```rust Rust
+for handle in Sandbox::list().await? {
+    println!("{}: {:?}", handle.name(), handle.status());
+}
+```
+
+```typescript TypeScript
+const sandboxes = await Sandbox.list();
+for (const handle of sandboxes) {
+    console.log(`${handle.name}: ${handle.status}`);
+}
+
+const handle = await Sandbox.get("worker");
+console.log(handle.status); // "running" | "stopped" | ...
+```
+
+```python Python
+for handle in await Sandbox.list():
+    print(f"{handle.name}: {handle.status}")
+
+handle = await Sandbox.get("worker")
+print(handle.status)  # "running" | "stopped" | ...
+```
+
+```bash CLI
+msb ls
+msb ps worker
+```
+
+</CodeGroup>
+
+## Runtime process architecture
+
+Here's what's running and how the pieces talk to each other.
+
+```mermaid
+graph TD
+    subgraph Host["Host"]
+        A["Your Application<br/><small>microsandbox SDK</small>"]
+        B["Sandbox Process<br/><small>VM + networking + lifecycle</small>"]
+    end
+
+    subgraph Guest["Guest VM"]
+        F["agentd<br/><small>exec, fs, events</small>"]
+    end
+
+    A -- "spawn" --> B
+    B -- "boot" --> F
+    A -. "commands & responses" .-> F
+
+    style Host fill:#f5f0ff,stroke:#a770ef,color:#333
+    style Guest fill:#fef4e8,stroke:#e8a838,color:#333
+    style A fill:#d4bfff,stroke:#8b5cf6,color:#1a1a1a
+    style B fill:#d4bfff,stroke:#8b5cf6,color:#1a1a1a
+    style F fill:#fdd49e,stroke:#d97706,color:#1a1a1a
+```
+
+There are two layers here. The **sandbox process** runs the VM and the networking stack on the host side, and relays messages between the application and the **guest agent** inside the VM. Up to 16 clients can connect to the same sandbox simultaneously.
+
+The sandbox process also handles:
+
+- Graceful stop and drain signals
+- Cleanup when the sandbox exits
+- Idle detection (auto-drain after a configurable timeout)
+- Maximum sandbox lifetime enforcement
+
+The sandbox process does not execute guest commands itself. It only relays traffic between your application and the guest agent.
+
+## Logs and diagnostics
+
+Each sandbox keeps four files under `<sandbox-dir>/logs/`:
+
+| File | Producer | Contents |
+|------|----------|----------|
+| `exec.log` | Host relay (tap on guest frames) | User-program stdout/stderr/output as JSON Lines |
+| `runtime.log` | Sandbox process (host) | Runtime tracing — relay setup, lifecycle, network |
+| `kernel.log` | Guest VM virtio-console | Kernel boot messages and `agentd` console |
+| `boot-error.json` | Sandbox process | Present only when the most recent start failed before the agent came up |
+
+The user-facing surface for these is [`msb logs`](/cs/cli/sandbox-commands#msb-logs) and the SDK [`logs()`](/cs/sandboxes/logs) method — both work on running and stopped sandboxes alike. See the [Logs](/cs/sandboxes/logs) page for the capture model, source semantics, and diagnostic flows.
+
+When a sandbox is in the **Crashed** state, its log directory is left in place so you can read what happened. Use `msb logs --source system <name>` to see the runtime/kernel diagnostic merge.
+
+## Graceful shutdown with timeout fallback
+
+Attempt a graceful stop, then force-kill if the sandbox doesn't shut down in time.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+use std::time::Duration;
+
+let mut handle = Sandbox::get("worker").await?;
+match tokio::time::timeout(Duration::from_secs(30), handle.stop()).await {
+    Ok(Ok(())) => println!("Stopped"),
+    Ok(Err(e)) => eprintln!("Error: {e}"),
+    Err(_) => handle.kill().await?,
+}
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+const sb = await Sandbox.get("worker");
+try {
+    await Promise.race([
+        sb.stop(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 30_000)),
+    ]);
+} catch {
+    await sb.kill();
+}
+```
+
+```python Python
+import asyncio
+from microsandbox import Sandbox
+
+handle = await Sandbox.get("worker")
+sb = await handle.connect()
+try:
+    await asyncio.wait_for(sb.stop(), timeout=30)
+except asyncio.TimeoutError:
+    await sb.kill()
+```
+
+</CodeGroup>
+
+## Sandbox process policies
+
+For production workloads, configure how the sandbox process handles shutdown, idle detection, and maximum lifetime.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .max_duration(3600)
+    .idle_timeout(300)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .maxDuration(3600)   // maximum sandbox lifetime in seconds
+    .idleTimeout(300)    // auto-drain after 5 minutes of inactivity
+    .create();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    max_duration=3600,
+    idle_timeout=300,
+)
+```
+
+</CodeGroup>

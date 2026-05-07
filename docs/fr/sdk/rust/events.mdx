@@ -1,0 +1,67 @@
+---
+title: "Événements"
+description: "Référence d'API des événements"
+icon: "tower-broadcast"
+---
+
+
+<Note>
+  Events are coming soon and not yet available in the current SDK.
+</Note>
+
+See [Events](/fr/sandboxes/events) for usage examples and guest-side emitting.
+
+## Sandbox methods
+
+---
+
+#### emit()
+
+```rust
+async fn emit(&self, event_name: &str, data: impl Serialize) -> MicrosandboxResult<()>
+```
+
+Send a named event with a JSON-serializable payload into the guest. Any process listening on the agent socket (`/run/agent.sock`) receives it.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| event_name | `&str` | Event name (e.g. `"task.start"`) |
+| data | `impl Serialize` | Event payload - must be serializable to JSON |
+
+---
+
+#### on_event()
+
+```rust
+fn on_event(&self, event_name: &str, callback: impl FnMut(EventData) + Send + 'static) -> Subscription
+```
+
+Subscribe to named events emitted by guest processes. The callback fires each time the guest sends a matching event through `/run/agent.sock`. Multiple subscriptions to the same event name are supported.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| event_name | `&str` | Event name to subscribe to (e.g. `"task.progress"`) |
+| callback | `impl FnMut(EventData) + Send + 'static` | Called with the event data each time |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Subscription` | Handle that unsubscribes when dropped |
+
+---
+
+## Types
+
+### EventData
+
+Data received from a guest event.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| data | `Option<serde_json::Value>` | Event payload as a JSON value. `None` if the event had no data. |
+| event | `String` | Event name |

@@ -1,0 +1,1177 @@
+---
+title: "Sandbox"
+description: "Sandbox API 레퍼런스"
+icon: "cube"
+---
+
+
+See [Overview](/ko/sandboxes/overview) for configuration examples and [Lifecycle](/ko/sandboxes/lifecycle) for state management.
+
+## Static methods
+
+---
+
+#### Sandbox::builder()
+
+```rust
+fn builder(name: impl Into<String>) -> SandboxBuilder
+```
+
+Create a builder for configuring a new sandbox. The builder lets you set the image, resources, volumes, networking, secrets, and other options before booting the VM. See [`SandboxBuilder`](#sandboxbuilder) for all available options.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `impl Into<String>` | Sandbox name - must be unique among running sandboxes |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxBuilder`](#sandboxbuilder) | Builder for configuring the sandbox |
+
+---
+
+#### Sandbox::get()
+
+```rust
+async fn get(name: &str) -> MicrosandboxResult<SandboxHandle>
+```
+
+Get a handle to an existing sandbox (running or stopped). The handle provides status, configuration, and lifecycle control without requiring a full connection to the guest agent.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `&str` | Sandbox name |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxHandle`](#sandboxhandle) | Handle with status and lifecycle control |
+
+---
+
+#### Sandbox::list()
+
+```rust
+async fn list() -> MicrosandboxResult<Vec<SandboxHandle>>
+```
+
+List all sandboxes (running, stopped, and crashed).
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Vec<`[`SandboxHandle`](#sandboxhandle)`>` | All sandbox handles |
+
+---
+
+#### Sandbox::remove()
+
+```rust
+async fn remove(name: &str) -> MicrosandboxResult<()>
+```
+
+Delete a stopped sandbox and all its state from disk (configuration, logs, runtime directory). Fails if the sandbox is still running - stop it first.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `&str` | Sandbox name |
+
+---
+
+#### Sandbox::start()
+
+```rust
+async fn start(name: &str) -> MicrosandboxResult<Sandbox>
+```
+
+Restart a previously stopped sandbox. The VM reboots using the persisted configuration. The sandbox enters attached mode - it stops when your process exits.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `&str` | Name of a stopped sandbox |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Sandbox`](#instance-methods) | Running sandbox |
+
+---
+
+#### Sandbox::start_detached()
+
+```rust
+async fn start_detached(name: &str) -> MicrosandboxResult<Sandbox>
+```
+
+Restart a stopped sandbox in detached mode. The sandbox survives after your process exits.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `&str` | Name of a stopped sandbox |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Sandbox`](#instance-methods) | Running sandbox |
+
+---
+
+## Instance methods
+
+---
+
+#### config()
+
+```rust
+fn config(&self) -> &SandboxConfig
+```
+
+Access the sandbox's full configuration.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`&SandboxConfig`](#sandboxconfig) | Sandbox configuration |
+
+---
+
+#### detach()
+
+```rust
+async fn detach(self)
+```
+
+Release the handle without stopping the sandbox. The sandbox continues running as a background process. Reconnect later with [`Sandbox::get()`](#sandboxget).
+
+---
+
+#### drain()
+
+```rust
+async fn drain(&self) -> MicrosandboxResult<()>
+```
+
+Start a graceful drain. Existing commands run to completion, but new `exec` calls are rejected. The sandbox transitions to `Stopped` when all in-flight commands finish. Useful for zero-downtime rotation of worker sandboxes.
+
+---
+
+#### fs()
+
+```rust
+fn fs(&self) -> SandboxFs<'_>
+```
+
+Get a filesystem handle for reading and writing files inside the running sandbox. See [Filesystem](/ko/sdk/rust/filesystem) for the full API.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxFs`](/ko/sdk/rust/filesystem) | Filesystem handle |
+
+---
+
+#### kill()
+
+```rust
+async fn kill(&self) -> MicrosandboxResult<()>
+```
+
+Force-terminate the sandbox immediately with SIGKILL. No graceful shutdown - use when the sandbox is unresponsive.
+
+---
+
+#### metrics()
+
+```rust
+async fn metrics(&self) -> MicrosandboxResult<SandboxMetrics>
+```
+
+Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk I/O, network I/O, and uptime.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxMetrics`](#sandboxmetrics) | Resource metrics |
+
+---
+
+#### metrics_stream()
+
+```rust
+fn metrics_stream(&self, interval: Duration) -> impl Stream<Item = MicrosandboxResult<SandboxMetrics>>
+```
+
+Stream resource metrics at a regular interval. Returns an async stream that yields a new snapshot every `interval` duration.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| interval | `Duration` | Time between metric snapshots |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `impl Stream<Item = Result<`[`SandboxMetrics`](#sandboxmetrics)`>>` | Async stream of metrics |
+
+---
+
+#### logs()
+
+```rust
+fn logs(&self, opts: &LogOptions) -> MicrosandboxResult<Vec<LogEntry>>
+```
+
+Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike — there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
+
+The default sources are `Stdout`, `Stderr`, and `Output` (PTY-merged). Pass `LogSource::System` to also include synthetic lifecycle markers and runtime/kernel diagnostic lines.
+
+```rust
+use microsandbox::sandbox::{LogOptions, LogSource, Sandbox};
+
+let handle = Sandbox::get("web").await?;
+
+// Default — all user-program output, regardless of pipe/pty mode
+let entries = handle.logs(&LogOptions::default())?;
+
+for e in entries {
+    let source = match e.source {
+        LogSource::Stdout => "OUT",
+        LogSource::Stderr => "ERR",
+        LogSource::Output => "PTY",
+        LogSource::System => "SYS",
+    };
+    println!(
+        "[{}] {} {:?}: {}",
+        e.timestamp.to_rfc3339(),
+        source,
+        e.session_id,
+        String::from_utf8_lossy(&e.data).trim_end()
+    );
+}
+
+// Filtered: last 50 entries from the past hour, including system lines
+let recent = handle.logs(&LogOptions {
+    tail: Some(50),
+    since: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+    sources: vec![
+        LogSource::Stdout,
+        LogSource::Stderr,
+        LogSource::Output,
+        LogSource::System,
+    ],
+    ..Default::default()
+})?;
+```
+
+`logs()` is **synchronous** because it's a pure file read.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| opts | `&`[`LogOptions`](#logoptions) | Filters: `tail`, `since`, `until`, `sources`. `LogOptions::default()` returns everything for the default sources. |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Vec<`[`LogEntry`](#logentry)`>` | Matching entries in chronological order |
+
+---
+
+#### name()
+
+```rust
+fn name(&self) -> &str
+```
+
+Get the sandbox name.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `&str` | Sandbox name |
+
+---
+
+#### owns_lifecycle()
+
+```rust
+fn owns_lifecycle(&self) -> bool
+```
+
+Whether this handle owns the sandbox lifecycle. `true` in attached mode (sandbox stops when your process exits), `false` in detached mode.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `bool` | `true` if attached |
+
+---
+
+#### remove_persisted()
+
+```rust
+async fn remove_persisted(self) -> MicrosandboxResult<()>
+```
+
+Remove the sandbox and all its persisted state from disk.
+
+---
+
+#### stop()
+
+```rust
+async fn stop(&self) -> MicrosandboxResult<()>
+```
+
+Gracefully shut down the sandbox. Sends SIGTERM to all guest processes and waits for the VM to exit.
+
+---
+
+#### stop_and_wait()
+
+```rust
+async fn stop_and_wait(&self) -> MicrosandboxResult<ExitStatus>
+```
+
+Stop the sandbox and wait for the exit status.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExitStatus`](/ko/sdk/rust/execution#exitstatus) | Exit code and success flag |
+
+---
+
+#### wait()
+
+```rust
+async fn wait(&self) -> MicrosandboxResult<ExitStatus>
+```
+
+Block until the sandbox exits on its own (without triggering a stop). Returns the exit status.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExitStatus`](/ko/sdk/rust/execution#exitstatus) | Exit code and success flag |
+
+---
+
+## SandboxBuilder
+
+Builder for configuring a sandbox before creation. Obtained via [`Sandbox::builder(name)`](#sandboxbuilder-1).
+
+---
+
+#### cpus()
+
+```rust
+fn cpus(self, count: u8) -> Self
+```
+
+Set the number of virtual CPUs. This is a limit, not a reservation. Default: `1`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| count | `u8` | Number of vCPUs |
+
+---
+
+#### create()
+
+```rust
+async fn create(self) -> MicrosandboxResult<Sandbox>
+```
+
+Boot the sandbox in attached mode. The sandbox stops when your process exits.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Sandbox`](#instance-methods) | Running sandbox |
+
+---
+
+#### create_detached()
+
+```rust
+async fn create_detached(self) -> MicrosandboxResult<Sandbox>
+```
+
+Boot the sandbox in detached mode. The sandbox survives after your process exits.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Sandbox`](#instance-methods) | Running sandbox |
+
+---
+
+#### disable_network()
+
+```rust
+fn disable_network(self) -> Self
+```
+
+Fully disable networking. No network interface is created.
+
+---
+
+#### entrypoint()
+
+```rust
+fn entrypoint(self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self
+```
+
+Override the OCI image's entrypoint.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `impl IntoIterator<Item = impl Into<String>>` | Entrypoint command and arguments |
+
+---
+
+#### env()
+
+```rust
+fn env(self, key: impl Into<String>, value: impl Into<String>) -> Self
+```
+
+Set an environment variable visible to all commands. Can be called multiple times. Per-command env vars (via `exec_with`) are merged on top.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| key | `impl Into<String>` | Variable name |
+| value | `impl Into<String>` | Variable value |
+
+---
+
+#### hostname()
+
+```rust
+fn hostname(self, hostname: impl Into<String>) -> Self
+```
+
+Set the guest hostname.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| hostname | `impl Into<String>` | Hostname |
+
+---
+
+#### idle_timeout()
+
+```rust
+fn idle_timeout(self, secs: u64) -> Self
+```
+
+Auto-drain the sandbox after this many seconds of inactivity (no active exec sessions). Enforced on the host side.
+
+---
+
+#### init()
+
+```rust
+fn init(self, cmd: impl Into<PathBuf>) -> Self
+```
+
+Hand off PID 1 inside the guest to `cmd` after agentd finishes its boot-time setup. The agent forks; the parent execs the init and becomes PID 1, the agent continues as a child process. See [Custom init system](/ko/sandboxes/customize#custom-init-system) for image picks, shutdown semantics, and tradeoffs.
+
+`cmd` is either an absolute path inside the guest rootfs or the literal `"auto"` (probes `/sbin/init`, `/lib/systemd/systemd`, `/usr/lib/systemd/systemd`). For init binaries that take argv or extra env (rare), use [`init_with`](#init_with).
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `impl Into<PathBuf>` | Absolute path inside the guest, or `"auto"` |
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("jrei/systemd-debian:12")
+    .init("auto")
+    .create()
+    .await?;
+```
+
+---
+
+#### init_with()
+
+```rust
+fn init_with(
+    self,
+    cmd: impl Into<PathBuf>,
+    f: impl FnOnce(InitOptionsBuilder) -> InitOptionsBuilder,
+) -> Self
+```
+
+Like [`init`](#init), but with a closure-builder for argv and env vars. Mirrors `exec_with` in shape.
+
+The builder exposes `arg`, `args`, `env`, and `envs`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `impl Into<PathBuf>` | Absolute path to the init binary inside the guest |
+| f | `FnOnce(InitOptionsBuilder) -> InitOptionsBuilder` | Closure populating argv and env |
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("jrei/systemd-debian:12")
+    .init_with("/lib/systemd/systemd", |i| i
+        .args(["--unit=multi-user.target"])
+        .env("container", "microsandbox"))
+    .create()
+    .await?;
+```
+
+Calling `init` or `init_with` more than once overwrites — different from `env`, which appends. The init is one-shot pre-boot.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| secs | `u64` | Idle timeout in seconds |
+
+---
+
+#### image()
+
+```rust
+fn image(self, image: impl IntoImage) -> Self
+```
+
+Set the root filesystem source. Accepts OCI image names, local directory paths, or disk image paths. The format is auto-detected.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| image | `impl IntoImage` | OCI image name, local directory path, or disk image path |
+
+---
+
+#### image_with()
+
+```rust
+fn image_with(self, f: impl FnOnce(ImageBuilder) -> ImageBuilder) -> Self
+```
+
+Configure a disk image rootfs with explicit filesystem type. Use when the filesystem type can't be auto-detected.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| f | `ImageBuilder` | Configure the disk image rootfs. |
+
+---
+
+#### log_level()
+
+```rust
+fn log_level(self, level: LogLevel) -> Self
+```
+
+Override the sandbox process's log verbosity.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| level | [`LogLevel`](#loglevel) | Log level |
+
+---
+
+#### max_duration()
+
+```rust
+fn max_duration(self, secs: u64) -> Self
+```
+
+Set the maximum sandbox lifetime in seconds. When exceeded, the sandbox is drained and stopped. Enforced on the host side - the guest cannot override it.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| secs | `u64` | Maximum lifetime in seconds |
+
+---
+
+#### memory()
+
+```rust
+fn memory(self, size: impl Into<Mebibytes>) -> Self
+```
+
+Set the guest memory size. Physical pages are only allocated as the guest touches them, so this is a limit, not an upfront reservation. Default: `512` MiB.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| size | `impl Into<Mebibytes>` | Memory in MiB |
+
+---
+
+#### network()
+
+```rust
+fn network(self, f: impl FnOnce(NetworkBuilder) -> NetworkBuilder) -> Self
+```
+
+Configure networking. See [Networking](/ko/sdk/rust/networking) for the full builder API.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| f | [`NetworkBuilder`](/ko/sdk/rust/networking#networkbuilder) | Configure the network. |
+
+---
+
+#### patch()
+
+```rust
+fn patch(self, f: impl FnOnce(PatchBuilder) -> PatchBuilder) -> Self
+```
+
+Modify the rootfs before the VM boots. Patches go into the writable layer - the base image is untouched.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| f | `PatchBuilder` | Configure rootfs patches. |
+
+---
+
+#### port()
+
+```rust
+fn port(self, host_port: u16, guest_port: u16) -> Self
+```
+
+Publish a TCP port from the sandbox to the host.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| host_port | `u16` | Port on the host |
+| guest_port | `u16` | Port inside the sandbox |
+
+---
+
+#### port_udp()
+
+```rust
+fn port_udp(self, host_port: u16, guest_port: u16) -> Self
+```
+
+Publish a UDP port.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| host_port | `u16` | Port on the host |
+| guest_port | `u16` | Port inside the sandbox |
+
+---
+
+#### pull_policy()
+
+```rust
+fn pull_policy(self, policy: PullPolicy) -> Self
+```
+
+Control when the OCI image is pulled from the registry.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| policy | [`PullPolicy`](#pullpolicy) | Pull behavior |
+
+---
+
+#### registry_auth()
+
+```rust
+fn registry_auth(self, auth: RegistryAuth) -> Self
+```
+
+Authenticate to a private container registry.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| auth | [`RegistryAuth`](#registryauth) | Registry credentials |
+
+---
+
+#### replace()
+
+```rust
+fn replace(self) -> Self
+```
+
+If a sandbox with the same name already exists, stop it, remove it, and create a fresh one. Without this, creation fails on name conflict.
+
+---
+
+#### script()
+
+```rust
+fn script(self, name: impl Into<String>, content: impl Into<String>) -> Self
+```
+
+Add a named script at `/.msb/scripts/` inside the guest. Scripts are added to `PATH` and can be called by name via `exec()` or `shell()`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `impl Into<String>` | Script name (becomes the filename) |
+| content | `impl Into<String>` | Script content |
+
+---
+
+#### secret()
+
+```rust
+fn secret(self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self
+```
+
+Add a secret with full configuration. See [Secrets](/ko/sdk/rust/secrets) for the builder API. Automatically enables TLS interception.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| f | [`SecretBuilder`](/ko/sdk/rust/secrets#secretbuilder) | Configure the secret. |
+
+---
+
+#### secret_env()
+
+```rust
+fn secret_env(self, env_var: impl Into<String>, value: impl Into<String>, allowed_host: impl Into<String>) -> Self
+```
+
+Shorthand for adding a header-injected secret. Equivalent to `.secret(|s| s.env(env_var).value(value).allow_host(allowed_host))`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| env_var | `impl Into<String>` | Environment variable name |
+| value | `impl Into<String>` | Secret value |
+| allowed_host | `impl Into<String>` | Allowed destination host |
+
+---
+
+#### shell()
+
+```rust
+fn shell(self, shell: impl Into<String>) -> Self
+```
+
+Set the shell used by [`Sandbox::shell()`](#shell). Default: `/bin/sh`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| shell | `impl Into<String>` | Shell path (e.g. `"/bin/bash"`) |
+
+---
+
+#### user()
+
+```rust
+fn user(self, user: impl Into<String>) -> Self
+```
+
+Set the default guest user for all commands.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| user | `impl Into<String>` | User name or UID |
+
+---
+
+#### volume()
+
+```rust
+fn volume(self, guest_path: impl Into<String>, f: impl FnOnce(MountBuilder) -> MountBuilder) -> Self
+```
+
+Add a volume mount. See [Volumes](/ko/sdk/rust/volumes) for mount types.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| guest_path | `impl Into<String>` | Mount point inside the sandbox |
+| f | [`MountBuilder`](/ko/sdk/rust/volumes#mountbuilder) | Configure the mount. |
+
+---
+
+#### workdir()
+
+```rust
+fn workdir(self, path: impl Into<String>) -> Self
+```
+
+Set the default working directory for all commands.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl Into<String>` | Absolute path inside the guest |
+
+---
+
+## PatchBuilder
+
+Fluent builder for the ordered list of pre-boot rootfs patches. Used in `SandboxBuilder::patch(|p| p...)`. Each method appends one operation; calls are chainable. By default a method that targets a path already present in the image errors at boot; pass `replace = true` on the operation to allow overwriting. `mkdir` and `remove` are idempotent.
+
+See [Patches](/ko/sandboxes/customize#patches) for conceptual context.
+
+---
+
+#### append()
+
+```rust
+fn append(self, path: impl Into<String>, content: impl Into<String>) -> Self
+```
+
+Append `content` to an existing file at `path`. If the file lives in a lower image layer, it's copied up first.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl Into<String>` | Absolute path inside the guest |
+| content | `impl Into<String>` | Text to append |
+
+---
+
+#### copy_dir()
+
+```rust
+fn copy_dir(self, src: impl Into<PathBuf>, dst: impl Into<String>, replace: bool) -> Self
+```
+
+Recursively copy a host directory at `src` into the guest rootfs at `dst`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `impl Into<PathBuf>` | Host source directory |
+| dst | `impl Into<String>` | Absolute destination path inside the guest |
+| replace | `bool` | When `true`, overwrite an existing path at `dst` |
+
+---
+
+#### copy_file()
+
+```rust
+fn copy_file(
+    self,
+    src: impl Into<PathBuf>,
+    dst: impl Into<String>,
+    mode: Option<u32>,
+    replace: bool,
+) -> Self
+```
+
+Copy a single host file at `src` into the guest rootfs at `dst`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `impl Into<PathBuf>` | Host source file |
+| dst | `impl Into<String>` | Absolute destination path inside the guest |
+| mode | `Option<u32>` | File mode, e.g. `Some(0o644)`. `None` keeps the source mode |
+| replace | `bool` | When `true`, overwrite an existing path at `dst` |
+
+---
+
+#### file()
+
+```rust
+fn file(
+    self,
+    path: impl Into<String>,
+    content: impl Into<Vec<u8>>,
+    mode: Option<u32>,
+    replace: bool,
+) -> Self
+```
+
+Write raw bytes at `path`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl Into<String>` | Absolute path inside the guest |
+| content | `impl Into<Vec<u8>>` | Raw byte content |
+| mode | `Option<u32>` | File mode, e.g. `Some(0o644)` |
+| replace | `bool` | When `true`, overwrite an existing path |
+
+---
+
+#### mkdir()
+
+```rust
+fn mkdir(self, path: impl Into<String>, mode: Option<u32>) -> Self
+```
+
+Create a directory at `path`. Idempotent: a no-op if the directory already exists.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl Into<String>` | Absolute path inside the guest |
+| mode | `Option<u32>` | Directory mode, e.g. `Some(0o755)` |
+
+---
+
+#### remove()
+
+```rust
+fn remove(self, path: impl Into<String>) -> Self
+```
+
+Delete a file or directory at `path`. Idempotent: a no-op if the path doesn't exist.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl Into<String>` | Absolute path inside the guest |
+
+---
+
+#### symlink()
+
+```rust
+fn symlink(self, target: impl Into<String>, link: impl Into<String>, replace: bool) -> Self
+```
+
+Create a symlink at `link` pointing to `target`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| target | `impl Into<String>` | What the symlink points to (literal symlink target text) |
+| link | `impl Into<String>` | Absolute path of the symlink itself |
+| replace | `bool` | When `true`, overwrite an existing path at `link` |
+
+---
+
+#### text()
+
+```rust
+fn text(
+    self,
+    path: impl Into<String>,
+    content: impl Into<String>,
+    mode: Option<u32>,
+    replace: bool,
+) -> Self
+```
+
+Write UTF-8 text content at `path`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `impl Into<String>` | Absolute path inside the guest |
+| content | `impl Into<String>` | Text content |
+| mode | `Option<u32>` | File mode, e.g. `Some(0o644)` |
+| replace | `bool` | When `true`, overwrite an existing path |
+
+---
+
+## Types
+
+### LogEntry
+
+A single captured log entry returned by [`logs()`](#logs).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| timestamp | `DateTime<Utc>` | Wall-clock capture time on the host |
+| source | [`LogSource`](#logsource) | Where the chunk came from |
+| session_id | `Option<u64>` | Relay-monotonic session id; `None` for `System` entries |
+| data | `Bytes` | The chunk's bytes (UTF-8 lossy decoded by default; raw bytes if `--raw` mode was used) |
+
+### LogLevel
+
+Sandbox process log verbosity.
+
+| Value | Description |
+|-------|-------------|
+| `Error` | Errors only |
+| `Warn` | Warnings and errors only |
+| `Info` | Info and higher |
+| `Debug` | Debug and higher |
+| `Trace` | Most verbose - all diagnostic output |
+
+### LogOptions
+
+Filters passed to [`logs()`](#logs). All fields optional. `LogOptions::default()` returns everything for the default sources (`Stdout` + `Stderr` + `Output`).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| tail | `Option<usize>` | Show only the last N entries after other filters apply |
+| since | `Option<DateTime<Utc>>` | Inclusive lower bound on entry timestamp |
+| until | `Option<DateTime<Utc>>` | Exclusive upper bound on entry timestamp |
+| sources | `Vec<`[`LogSource`](#logsource)`>` | Sources to include. Empty = `[Stdout, Stderr, Output]` (the default user-program sources). Add `System` to merge runtime/kernel diagnostics. |
+
+### LogSource
+
+Tag indicating where a captured log entry came from.
+
+| Value | Description |
+|-------|-------------|
+| `Stdout` | Captured from a session's stdout (pipe mode — streams stayed separated) |
+| `Stderr` | Captured from a session's stderr (pipe mode) |
+| `Output` | Captured from a session running in pty mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `Output` rather than mislabelled as `Stdout`. |
+| `System` | Synthetic entry: lifecycle markers in `exec.log` plus runtime/kernel diagnostic lines merged in at read time when `System` is requested. |
+
+### PullPolicy
+
+Controls when the SDK fetches an OCI image from the registry.
+
+| Value | Description |
+|-------|-------------|
+| `Always` | Pull the image every time, even if cached locally |
+| `IfMissing` | Pull only if the image is not already cached. This is the default. |
+| `Never` | Never pull; fail if the image is not cached locally |
+
+### RegistryAuth
+
+Credentials for authenticating to a private container registry.
+
+| Variant | Fields | Description |
+|---------|--------|-------------|
+| `Basic` | - `username: String` <br/> - `password: String` | Username and password authentication |
+
+### SandboxConfig
+
+The full configuration of a sandbox. Obtained via [`config()`](#config) or built via [`SandboxBuilder`](#sandboxbuilder). Contains all settings used to create the sandbox.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| cpus | `u8` | Number of virtual CPUs |
+| env | `Vec<(String, String)>` | Environment variables |
+| idle_timeout_secs | `Option<u64>` | Idle timeout |
+| image | `RootfsSource` | Root filesystem source (OCI, bind, or disk image) |
+| max_duration_secs | `Option<u64>` | Maximum lifetime |
+| memory_mib | `u32` | Guest memory in MiB |
+| name | `String` | Sandbox name |
+| patches | `Vec<Patch>` | Rootfs patches |
+| scripts | `Vec<(String, String)>` | Named scripts |
+| shell | `Option<String>` | Shell for `shell()` calls |
+| volumes | `Vec<VolumeMount>` | Volume mounts |
+| workdir | `Option<String>` | Default working directory |
+
+### SandboxHandle
+
+A lightweight handle to an existing sandbox (running or stopped). Obtained via [`Sandbox::get()`](#sandboxget) or [`Sandbox::list()`](#sandboxlist). Provides status, configuration, and lifecycle control **without** an active connection to the guest agent. You cannot `exec` or `fs` on a handle - call `.start()` or `.connect()` to upgrade to a full [`Sandbox`](#instance-methods).
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| config() | `Result<`[`SandboxConfig`](#sandboxconfig)`>` | Parsed configuration |
+| config_json() | `&str` | Raw JSON configuration |
+| connect() | `Result<`[`Sandbox`](#instance-methods)`>` | Connect to a running sandbox |
+| created_at() | `Option<DateTime<Utc>>` | Creation timestamp |
+| kill() | `Result<()>` | Force terminate |
+| logs() | `Result<Vec<`[`LogEntry`](#logentry)`>>` | Read captured `exec.log` (works without starting) |
+| metrics() | `Result<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
+| name() | `&str` | Sandbox name |
+| remove() | `Result<()>` | Delete sandbox and state |
+| start() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in attached mode |
+| start_detached() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in detached mode |
+| status() | [`SandboxStatus`](#sandboxstatus) | Current status |
+| stop() | `Result<()>` | Graceful shutdown |
+| updated_at() | `Option<DateTime<Utc>>` | Last update timestamp |
+
+### SandboxMetrics
+
+Point-in-time resource usage snapshot.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| cpu_percent | `f32` | CPU usage as a percentage |
+| disk_read_bytes | `u64` | Total bytes read from disk since boot |
+| disk_write_bytes | `u64` | Total bytes written to disk since boot |
+| memory_bytes | `u64` | Current memory usage in bytes |
+| memory_limit_bytes | `u64` | Memory limit in bytes |
+| net_rx_bytes | `u64` | Total bytes received over the network since boot |
+| net_tx_bytes | `u64` | Total bytes sent over the network since boot |
+| timestamp | `DateTime<Utc>` | When this measurement was taken |
+| uptime | `Duration` | Time since the sandbox was created |
+
+### SandboxStatus
+
+| Value | Description |
+|-------|-------------|
+| `Crashed` | VM exited unexpectedly (kernel panic, OOM, etc.) |
+| `Draining` | Graceful shutdown in progress; existing commands finish, new ones rejected |
+| `Running` | Guest agent is ready; `exec`, `shell`, `fs` work |
+| `Stopped` | VM shut down; configuration persisted; can be restarted |

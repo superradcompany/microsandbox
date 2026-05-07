@@ -1,0 +1,339 @@
+---
+title: "Snapshot"
+description: "Cattura e riutilizza lo stato della sandbox"
+icon: "code-branch"
+---
+
+
+A snapshot is a portable, on-disk capture of a sandbox's writable filesystem. Move it with `scp`, archive it as `.tar.zst`, or boot fresh sandboxes from it.
+
+<Note>
+Snapshots are **disk-only and stopped-only**: the sandbox can't be running when you take one. Memory and CPU state, plus qcow2 backing chains, are future work.
+</Note>
+
+## What gets captured
+
+| Captured                                     | Not captured                      |
+| -------------------------------------------- | --------------------------------- |
+| `upper.ext4`, the sandbox's writable overlay | Memory contents                   |
+| Pinned image reference + manifest digest     | CPU registers / running processes |
+| `fstype`, `format`, optional labels          | Network state                     |
+| Optional content-integrity hash              | Open file handles                 |
+
+Booting from a snapshot is a cold boot of a fresh VM that reuses the captured upper layer as its starting filesystem. The image (lower layer) is re-resolved by digest from the local OCI cache, or re-pulled from the registry if missing.
+
+## Quick start
+
+You'll usually reach for the CLI first:
+
+```bash
+# 1. Run something, install state, then stop it
+msb run --name baseline --detach python:3.12 -- sleep 3600
+msb exec baseline -- pip install requests
+msb stop baseline
+
+# 2. Snapshot the stopped sandbox
+msb snapshot create after-pip-install --from baseline
+
+# 3. Boot a fresh sandbox from the snapshot
+msb run --name worker --snapshot after-pip-install \
+    -- python -c "import requests; print(requests.__version__)"
+```
+
+<Tip>
+The snapshot lives at `~/.microsandbox/snapshots/after-pip-install/`. That whole directory is the snapshot.
+</Tip>
+
+## Snapshot a stopped sandbox
+
+Snapshot under a bare name (resolved to `~/.microsandbox/snapshots/<name>/`) or to an explicit path:
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+
+let h = Sandbox::get("baseline").await?;
+
+// Bare name resolves under ~/.microsandbox/snapshots/<name>/
+let snap = h.snapshot("after-pip-install").await?;
+
+// Or write to an explicit path
+let snap = h.snapshot_to("/tmp/snaps/v1").await?;
+
+println!("{}", snap.digest()); // sha256:...
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+const h = await Sandbox.get("baseline");
+
+// Bare name resolves under ~/.microsandbox/snapshots/<name>/
+const snap = await h.snapshot("after-pip-install");
+
+// Or write to an explicit path
+const snap2 = await h.snapshotTo("/tmp/snaps/v1");
+
+console.log(snap.digest); // sha256:...
+```
+
+```python Python
+from microsandbox import Sandbox
+
+h = await Sandbox.get("baseline")
+
+# Bare name resolves under ~/.microsandbox/snapshots/<name>/
+snap = await h.snapshot("after-pip-install")
+
+# Or write to an explicit path
+snap2 = await h.snapshot_to("/tmp/snaps/v1")
+
+print(snap.digest)  # sha256:...
+```
+
+```bash CLI
+msb snapshot create after-pip-install --from baseline
+msb snapshot create ./snaps/v1     --from baseline   # Explicit path
+msb snapshot create after-pip-install --from baseline --label stage=ready
+```
+
+</CodeGroup>
+
+The sandbox must be stopped or crashed; running sandboxes are rejected.
+
+## Boot from a snapshot
+
+A snapshot already pins its image, so booting from one is mutually exclusive with the image source:
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("worker")
+    .from_snapshot("after-pip-install")
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+const sb = await Sandbox.builder("worker")
+    .fromSnapshot("after-pip-install")
+    .create();
+```
+
+```python Python
+from microsandbox import Sandbox
+
+# `snapshot=` is a peer of `image=` and mutually exclusive with it
+sb = await Sandbox.create("worker", snapshot="after-pip-install")
+```
+
+```bash CLI
+msb run --name worker --snapshot after-pip-install -- python -V
+```
+
+</CodeGroup>
+
+Booting validates the snapshot's manifest, re-resolves the pinned image from the local OCI cache (re-pulling and verifying the digest if it's missing), and reflinks the captured `upper.ext4` into the new sandbox's directory. Reflinks use `clonefile` on macOS APFS, `FICLONE` on btrfs/XFS, with a sparse-aware fallback on ext4, so each new sandbox gets an independent COW copy without paying the bytes again.
+
+## List, inspect, and remove
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Snapshot;
+
+let all = Snapshot::list().await?; // Indexed snapshots
+let h = Snapshot::get("after-pip-install").await?; // By name, digest, or path
+println!("{} ({})", h.name().unwrap_or("-"), h.digest());
+
+Snapshot::remove("after-pip-install", false).await?;
+Snapshot::reindex("~/.microsandbox/snapshots").await?;
+```
+
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+const all = await Snapshot.list();                       // Indexed snapshots
+const h = await Snapshot.get("after-pip-install");       // By name, digest, or path
+console.log(`${h.name ?? "-"} (${h.digest})`);
+
+await Snapshot.remove("after-pip-install");
+await Snapshot.reindex("~/.microsandbox/snapshots");
+```
+
+```python Python
+from microsandbox import Snapshot
+
+all = await Snapshot.list()                              # Indexed snapshots
+h = await Snapshot.get("after-pip-install")              # By name, digest, or path
+print(f"{h.name or '-'} ({h.digest})")
+
+await Snapshot.remove("after-pip-install")
+await Snapshot.reindex("~/.microsandbox/snapshots")
+```
+
+```bash CLI
+msb snapshot ls
+msb snapshot inspect after-pip-install
+msb snapshot rm after-pip-install
+
+# Also if it has indexed children
+msb snapshot rm after-pip-install --force
+
+# Rebuild the index from artifacts on disk
+msb snapshot reindex
+```
+
+</CodeGroup>
+
+Opening a snapshot is cheap: it validates the manifest and checks the upper file's size, but does **not** read the file's contents. The same path powers `inspect` and the boot flow; the load-bearing local operation has to stay fast.
+
+`list` and `get` are backed by a small local index DB. The index is just a cache for fast lookups, not a source of truth; if it ever gets out of sync (or you delete it), `reindex` rebuilds it from the artifacts on disk.
+
+## Move snapshots between machines
+
+The artifact is a directory containing `manifest.json` (canonical JSON; identity is the SHA-256 of these bytes) plus the captured `upper.ext4`. The directory **is** the snapshot; there's no hidden daemon state, so any of these three transports work:
+
+```bash
+# Copy the directory directly with scp (image must be cached or pullable on the target)
+scp -r ~/.microsandbox/snapshots/after-pip-install \
+    other-host:~/.microsandbox/snapshots/
+
+# Bundle into a .tar.zst, transport, then import
+msb snapshot export after-pip-install /tmp/snap.tar.zst
+scp /tmp/snap.tar.zst other-host:
+ssh other-host msb snapshot import /tmp/snap.tar.zst
+
+# Fully offline: include the OCI image cache so the target needs no network
+msb snapshot export after-pip-install /tmp/snap.tar.zst --with-image
+ssh other-host msb snapshot import /tmp/snap.tar.zst
+```
+
+Archives default to `.tar.zst` since zstd collapses sparse zero runs cheaply. Pass `--plain-tar` for a plain `.tar`; both are accepted on import via magic-byte detection.
+
+Or drive `export` and `import` from code:
+
+<CodeGroup>
+```rust Rust
+use std::path::Path;
+use microsandbox::Snapshot;
+use microsandbox::snapshot::ExportOpts;
+
+Snapshot::export(
+    "after-pip-install",
+    Path::new("/tmp/snap.tar.zst"),
+    ExportOpts { with_image: true, ..Default::default() },
+).await?;
+
+let snap = Snapshot::import(
+    Path::new("/tmp/snap.tar.zst"),
+    None,
+).await?;
+```
+
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+await Snapshot.export("after-pip-install", "/tmp/snap.tar.zst", {
+  withImage: true,
+});
+
+const snap = await Snapshot.import("/tmp/snap.tar.zst");
+```
+
+```python Python
+from microsandbox import Snapshot
+
+await Snapshot.export(
+    "after-pip-install",
+    "/tmp/snap.tar.zst",
+    with_image=True,
+)
+
+snap = await Snapshot.import_("/tmp/snap.tar.zst")  # Trailing _ avoids the keyword
+```
+
+```bash CLI
+msb snapshot export after-pip-install /tmp/snap.tar.zst --with-image
+msb snapshot import /tmp/snap.tar.zst
+```
+
+</CodeGroup>
+
+## Integrity verification
+
+By default, snapshot creation does **not** hash the upper file. The artifact carries the upper's size and the pinned image's manifest digest, which together catch any corruption that would stop it from booting. Skipping the hash keeps `inspect` fast on multi-GB sparse upper layers, where the cost would otherwise dominate.
+
+Opt in to a content-integrity hash when crossing a trust boundary:
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Snapshot;
+
+// Compute and record an integrity hash at create time
+let snap = Snapshot::builder("baseline")
+    .name("after-pip-install")
+    .record_integrity()
+    .create()
+    .await?;
+
+// Verify a snapshot's recorded integrity on demand
+let report = snap.verify().await?;
+
+```
+
+```typescript TypeScript
+import { Snapshot } from "microsandbox";
+
+// Compute and record an integrity hash at create time
+const snap = await Snapshot.builder("baseline")
+  .name("after-pip-install")
+  .recordIntegrity()
+  .create();
+
+// Verify a snapshot's recorded integrity on demand
+const report = await snap.verify();
+```
+
+```python Python
+from microsandbox import Snapshot
+
+# Compute and record an integrity hash at create time
+snap = await Snapshot.create(
+    "baseline",
+    name="after-pip-install",
+    record_integrity=True,
+)
+
+# Verify a snapshot's recorded integrity on demand
+report = await snap.verify()
+```
+
+```bash CLI
+# Compute and record an integrity hash at create time
+msb snapshot create after-pip-install --from baseline --integrity
+
+# Verify a snapshot's recorded integrity on demand
+msb snapshot verify after-pip-install
+msb snapshot inspect after-pip-install --verify
+```
+
+</CodeGroup>
+
+`msb snapshot export` automatically populates the integrity hash before bundling, and `msb snapshot import` verifies it on the way in. The local index path stays fast; the cross-machine path stays trustworthy.
+
+## Use cases
+
+- **Reusable build state.** Install dependencies once, snapshot, then `msb run --snapshot ...` repeatedly without paying the install cost. Common pattern for CI, agent workloads, and reproducible dev environments.
+- **Portable scratch state.** Capture a sandbox after a long setup, hand the artifact to a teammate or push it to shared storage, and let them boot from the same starting point.
+- **Local fork-by-copy.** Multiple sandboxes from one snapshot are independent; each copy of the upper layer diverges on its own.
+- **Disaster recovery.** Snapshot a sandbox before a risky migration; if it goes wrong, `msb rm` the broken one and `msb run --snapshot` from the pre-migration artifact.
+
+## What's not yet supported
+
+- **Live (running) snapshots.** The sandbox must be stopped first. Live capture requires an in-guest filesystem freeze and memory checkpointing that's tracked as future work.
+- **qcow2 backing chains.** Snapshots always copy the upper layer today. The manifest's `format` and `parent` fields are reserved so qcow2 chains can land additively without a schema break.
+- **Push/pull from a registry.** The artifact format is registry-shaped on purpose, but transport tooling beyond `scp` and `tar.zst` is a separate piece of work.
+- **Snapshotting `DiskImage` volumes.** The same mechanism would apply (reflink the disk file), but is currently out of scope.

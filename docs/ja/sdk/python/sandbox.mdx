@@ -1,0 +1,899 @@
+---
+title: "Sandbox"
+description: "Sandbox API リファレンス"
+icon: "cube"
+---
+
+
+See [Overview](/ja/sandboxes/overview) for configuration examples and [Lifecycle](/ja/sandboxes/lifecycle) for state management.
+
+## Static methods
+
+---
+
+#### Sandbox.create()
+
+```python
+@staticmethod
+async def create(name_or_config: str | dict, **kwargs) -> Sandbox
+```
+
+Create and boot a sandbox. The first argument is either a name (`str`) or a full config (`dict`). Keyword arguments provide individual config fields. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name_or_config | `str \| dict` | Sandbox name or full configuration dict |
+| image | `str \| ImageSource` | OCI image, local path, or disk image (required) |
+| cpus | `int` | Virtual CPUs (default `1`) |
+| memory | `int` | Guest memory in MiB (default `512`) |
+| workdir | `str` | Default working directory for commands |
+| shell | `str` | Shell for `shell()` calls (default `"/bin/sh"`) |
+| hostname | `str` | Guest hostname |
+| user | `str` | Default guest user |
+| entrypoint | `list[str]` | Override image entrypoint |
+| init | `str \| dict \|` [`InitConfig`](#initconfig) | Hand off PID 1 to a guest init binary. See [Custom init system](/ja/sandboxes/customize#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
+| replace | `bool` | Replace existing sandbox with same name |
+| max_duration | `float` | Maximum sandbox lifetime in seconds |
+| idle_timeout | `float` | Idle timeout in seconds |
+| env | `dict[str, str]` | Environment variables visible to all commands |
+| scripts | `dict[str, str]` | Named scripts mounted at `/.msb/scripts/` |
+| pull_policy | `str \| PullPolicy` | Image pull behavior |
+| log_level | `str \| LogLevel` | Override log verbosity |
+| registry_auth | [`RegistryAuth`](#registryauth) | Private registry credentials |
+| volumes | `dict[str, dict]` | Volume mounts. See [Volumes](/ja/sdk/python/volumes). |
+| patches | `list[PatchConfig]` | Rootfs modifications applied before boot |
+| ports | `dict[int, int]` | Port mappings (`host_port: guest_port`) |
+| network | [`Network`](/ja/sdk/python/networking#network) | Network policy and configuration |
+| secrets | `list[`[`SecretEntry`](/ja/sdk/python/secrets#secretentry)`]` | Secret injection |
+| detached | `bool` | If `True`, sandbox survives after your process exits |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Sandbox`](#instance-methods) | Running sandbox |
+
+The returned `Sandbox` is an async context manager. Use `async with` to guarantee cleanup; on exit the sandbox is killed and its persisted state removed:
+
+```python
+async with await Sandbox.create("my-sandbox", image="alpine") as sb:
+    output = await sb.shell("echo hello")
+    print(output.stdout_text)
+# sandbox is automatically killed and removed on exit
+```
+
+---
+
+#### Sandbox.create_with_progress()
+
+```python
+@staticmethod
+def create_with_progress(name_or_config: str | dict, **kwargs) -> PullSession
+```
+
+Same parameters as [`Sandbox.create()`](#sandboxcreate) but returns a [`PullSession`](#pullsession) that lets you track image pull progress before the sandbox is ready. This method is synchronous (not awaitable) -- the async work happens through the `PullSession`.
+
+**Parameters**
+
+Same as [`Sandbox.create()`](#sandboxcreate).
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`PullSession`](#pullsession) | Session for tracking pull progress and obtaining the final sandbox |
+
+---
+
+#### Sandbox.start()
+
+```python
+@staticmethod
+async def start(name: str, *, detached: bool = False) -> Sandbox
+```
+
+Restart a previously stopped sandbox. The VM reboots using the persisted configuration.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `str` | Name of a stopped sandbox |
+| detached | `bool` | If `True`, sandbox survives after your process exits (default `False`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`Sandbox`](#instance-methods) | Running sandbox |
+
+---
+
+#### Sandbox.get()
+
+```python
+@staticmethod
+async def get(name: str) -> SandboxHandle
+```
+
+Get a handle to an existing sandbox (running or stopped). The handle provides status, configuration, and lifecycle control.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `str` | Sandbox name |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxHandle`](#sandboxhandle) | Handle with status and lifecycle control |
+
+---
+
+#### Sandbox.list()
+
+```python
+@staticmethod
+async def list() -> list[SandboxHandle]
+```
+
+List all sandboxes (running, stopped, and crashed).
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `list[`[`SandboxHandle`](#sandboxhandle)`]` | All sandboxes |
+
+---
+
+#### Sandbox.remove()
+
+```python
+@staticmethod
+async def remove(name: str) -> None
+```
+
+Delete a stopped sandbox and all its state from disk. Fails if the sandbox is still running.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| name | `str` | Sandbox name |
+
+---
+
+## Instance properties
+
+---
+
+#### name
+
+```python
+@property
+async def name(self) -> str
+```
+
+Sandbox name. This is an async property -- use `await sb.name`.
+
+---
+
+#### owns_lifecycle
+
+```python
+@property
+async def owns_lifecycle(self) -> bool
+```
+
+Whether this handle owns the sandbox lifecycle. `True` in attached mode, `False` in detached mode. This is an async property -- use `await sb.owns_lifecycle`.
+
+---
+
+#### fs
+
+```python
+@property
+def fs(self) -> SandboxFs
+```
+
+Get a filesystem handle for reading and writing files inside the running sandbox. This is a synchronous property -- use `sb.fs` (no `await`). See [Filesystem](/ja/sdk/python/filesystem) for the full API.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxFs`](/ja/sdk/python/filesystem) | Filesystem handle |
+
+---
+
+## Instance methods
+
+---
+
+#### attach()
+
+```python
+async def attach(cmd: str, args_or_options: list[str] | ExecOptions | None = None) -> int
+```
+
+Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `str` | Command to run |
+| args_or_options | `list[str] \| ExecOptions \| None` | Command arguments or execution options |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `int` | Exit code of the process |
+
+---
+
+#### attach_shell()
+
+```python
+async def attach_shell() -> int
+```
+
+Attach to the sandbox's default shell.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `int` | Exit code |
+
+---
+
+#### detach()
+
+```python
+async def detach() -> None
+```
+
+Release the handle without stopping the sandbox. Reconnect later with [`Sandbox.get()`](#sandboxget).
+
+---
+
+#### drain()
+
+```python
+async def drain() -> None
+```
+
+Start a graceful drain (SIGUSR1). Existing commands run to completion, new `exec` calls are rejected.
+
+---
+
+#### exec()
+
+```python
+async def exec(cmd: str, args_or_options: list[str] | ExecOptions | None = None) -> ExecOutput
+```
+
+Run a command inside the sandbox and wait for it to complete. Collects all stdout and stderr into memory and returns them along with the exit code. For long-running processes or large output, use [`exec_stream()`](#exec_stream) instead.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `str` | Command to execute (e.g. `"python"`, `"/usr/bin/node"`) |
+| args_or_options | `list[str] \| ExecOptions \| None` | Command arguments (e.g. `["-c", "print('hello')"]`) or [`ExecOptions`](/ja/sdk/python/execution#execoptions) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecOutput`](/ja/sdk/python/execution#execoutput) | Collected stdout, stderr, and exit status |
+
+---
+
+#### exec_stream()
+
+```python
+async def exec_stream(cmd: str, args_or_options: list[str] | ExecOptions | None = None) -> ExecHandle
+```
+
+Run a command with streaming output. Returns a handle that emits stdout, stderr, and exit events as they happen, rather than buffering everything.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| cmd | `str` | Command to execute |
+| args_or_options | `list[str] \| ExecOptions \| None` | Command arguments or [`ExecOptions`](/ja/sdk/python/execution#execoptions) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecHandle`](/ja/sdk/python/execution#exechandle) | Streaming handle for receiving events and controlling the process |
+
+---
+
+#### kill()
+
+```python
+async def kill() -> None
+```
+
+Force-terminate the sandbox immediately (SIGKILL). No graceful shutdown.
+
+---
+
+#### metrics()
+
+```python
+async def metrics() -> SandboxMetrics
+```
+
+Get a point-in-time snapshot of the sandbox's resource usage.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxMetrics`](#sandboxmetrics) | CPU, memory, disk, network metrics |
+
+---
+
+#### metrics_stream()
+
+```python
+async def metrics_stream(interval: float = 1.0) -> MetricsStream
+```
+
+Stream resource metrics at a regular interval. The returned stream supports both `recv()` and `async for`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| interval | `float` | Seconds between metric snapshots (default `1.0`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`MetricsStream`](#metricsstream) | Async stream of metrics |
+
+---
+
+#### logs()
+
+```python
+async def logs(
+    tail: int | None = None,
+    since_ms: float | None = None,
+    until_ms: float | None = None,
+    sources: list[str] | None = None,
+) -> list[LogEntry]
+```
+
+Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike — there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
+
+The default sources are `"stdout"`, `"stderr"`, and `"output"` (PTY-merged). Pass `"system"` to also include synthetic lifecycle markers and runtime/kernel diagnostic lines.
+
+```python
+import asyncio
+import microsandbox
+
+async def main():
+    handle = await microsandbox.Sandbox.get("web")
+
+    # Default — all user-program output, regardless of pipe/pty mode
+    entries = await handle.logs()
+
+    for e in entries:
+        source = {
+            "stdout": "OUT",
+            "stderr": "ERR",
+            "output": "PTY",
+            "system": "SYS",
+        }[e.source]
+        print(
+            f"[{e.timestamp_ms / 1000:.3f}] "
+            f"{source} {e.session_id}: {e.text().rstrip()}"
+        )
+
+    # Filtered: last 50 entries from the past hour, including system lines
+    import time
+    recent = await handle.logs(
+        tail=50,
+        since_ms=(time.time() - 3600) * 1000,
+        sources=["stdout", "stderr", "output", "system"],
+    )
+
+asyncio.run(main())
+```
+
+Timestamps are exposed as `float` ms since the Unix epoch (UTC) for parity with `SandboxMetrics.timestamp_ms`. Convert to `datetime` if needed:
+
+```python
+from datetime import datetime, timezone
+dt = datetime.fromtimestamp(e.timestamp_ms / 1000, timezone.utc)
+```
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| tail | `int \| None` | Show only the last N entries after other filters apply |
+| since_ms | `float \| None` | Inclusive lower bound on entry timestamp (ms since epoch) |
+| until_ms | `float \| None` | Exclusive upper bound on entry timestamp (ms since epoch) |
+| sources | `list[str] \| None` | Sources to include. `None` = `["stdout", "stderr", "output"]`. Add `"system"` to merge runtime/kernel diagnostics. Use `"all"` as shorthand for all four. |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `list[`[`LogEntry`](#logentry)`]` | Matching entries in chronological order |
+
+---
+
+#### remove_persisted()
+
+```python
+async def remove_persisted() -> None
+```
+
+Remove the sandbox and all its persisted state from disk.
+
+---
+
+#### shell()
+
+```python
+async def shell(script: str) -> ExecOutput
+```
+
+Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Shell syntax like pipes, redirects, and `&&` chains works.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| script | `str` | Shell command string (e.g. `"ls -la /app && echo done"`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecOutput`](/ja/sdk/python/execution#execoutput) | Collected stdout, stderr, and exit status |
+
+---
+
+#### shell_stream()
+
+```python
+async def shell_stream(script: str) -> ExecHandle
+```
+
+Shell command with streaming output.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| script | `str` | Shell command string |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`ExecHandle`](/ja/sdk/python/execution#exechandle) | Streaming handle |
+
+---
+
+#### stop()
+
+```python
+async def stop() -> None
+```
+
+Gracefully shut down the sandbox (SIGTERM).
+
+---
+
+#### stop_and_wait()
+
+```python
+async def stop_and_wait() -> tuple[int, bool]
+```
+
+Stop the sandbox and wait for the exit status.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `tuple[int, bool]` | `(exit_code, success)` -- `success` is `True` if exit code is `0` |
+
+---
+
+#### wait()
+
+```python
+async def wait() -> tuple[int, bool]
+```
+
+Block until the sandbox exits on its own.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `tuple[int, bool]` | `(exit_code, success)` -- `success` is `True` if exit code is `0` |
+
+---
+
+## Patch
+
+Factory class for rootfs patches passed to `Sandbox.create(..., patches=[...])`. Each static method returns a [`PatchConfig`](#patchconfig). By default a patch that targets a path already present in the image errors at boot; pass `replace=True` on the operation to allow overwriting. `mkdir` and `remove` are idempotent.
+
+See [Patches](/ja/sandboxes/customize#patches) for conceptual context.
+
+---
+
+#### Patch.append()
+
+```python
+@staticmethod
+def append(path: str, content: str) -> PatchConfig
+```
+
+Append `content` to an existing file at `path`. If the file lives in a lower image layer, it's copied up first.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute path inside the guest |
+| content | `str` | Text to append |
+
+---
+
+#### Patch.copy_dir()
+
+```python
+@staticmethod
+def copy_dir(src: str, dst: str, *, replace: bool = False) -> PatchConfig
+```
+
+Recursively copy a host directory at `src` into the guest rootfs at `dst`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `str` | Host source directory |
+| dst | `str` | Absolute destination path inside the guest |
+| replace | `bool` | When `True`, overwrite an existing path at `dst` |
+
+---
+
+#### Patch.copy_file()
+
+```python
+@staticmethod
+def copy_file(
+    src: str,
+    dst: str,
+    *,
+    mode: int | None = None,
+    replace: bool = False,
+) -> PatchConfig
+```
+
+Copy a single host file at `src` into the guest rootfs at `dst`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `str` | Host source file |
+| dst | `str` | Absolute destination path inside the guest |
+| mode | `int \| None` | File mode, e.g. `0o644`. `None` keeps the source mode |
+| replace | `bool` | When `True`, overwrite an existing path at `dst` |
+
+---
+
+#### Patch.mkdir()
+
+```python
+@staticmethod
+def mkdir(path: str, *, mode: int | None = None) -> PatchConfig
+```
+
+Create a directory at `path`. Idempotent: a no-op if the directory already exists.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute path inside the guest |
+| mode | `int \| None` | Directory mode, e.g. `0o755` |
+
+---
+
+#### Patch.remove()
+
+```python
+@staticmethod
+def remove(path: str) -> PatchConfig
+```
+
+Delete a file or directory at `path`. Idempotent: a no-op if the path doesn't exist.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute path inside the guest |
+
+---
+
+#### Patch.symlink()
+
+```python
+@staticmethod
+def symlink(target: str, link: str, *, replace: bool = False) -> PatchConfig
+```
+
+Create a symlink at `link` pointing to `target`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| target | `str` | What the symlink points to (literal symlink target text) |
+| link | `str` | Absolute path of the symlink itself |
+| replace | `bool` | When `True`, overwrite an existing path at `link` |
+
+---
+
+#### Patch.text()
+
+```python
+@staticmethod
+def text(
+    path: str,
+    content: str,
+    *,
+    mode: int | None = None,
+    replace: bool = False,
+) -> PatchConfig
+```
+
+Write UTF-8 text content at `path`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute path inside the guest |
+| content | `str` | Text content |
+| mode | `int \| None` | File mode, e.g. `0o644` |
+| replace | `bool` | When `True`, overwrite an existing path |
+
+---
+
+## Types
+
+### LogLevel
+
+Sandbox process log verbosity.
+
+| Value | Description |
+|-------|-------------|
+| `"debug"` | Debug and higher |
+| `"error"` | Errors only |
+| `"info"` | Info and higher |
+| `"trace"` | Most verbose -- all diagnostic output |
+| `"warn"` | Warnings and errors only |
+
+### LogEntry
+
+A single captured log entry returned by [`logs()`](#logs).
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| timestamp_ms | `float` | Wall-clock capture time (ms since Unix epoch, UTC) |
+| source | `str` | Where the chunk came from. See [LogSource](#logsource). |
+| session_id | `int \| None` | Relay-monotonic session id; `None` for `"system"` entries |
+| data | `bytes` | The chunk's bytes (UTF-8 lossy decoded by default) |
+| `text()` | `str` | Convenience: UTF-8 decode of `data` (lossy — invalid bytes are replaced) |
+
+### LogSource
+
+The string values that the `source` field on a [`LogEntry`](#logentry) can take, also accepted by `logs(sources=[...])`.
+
+| Value | Description |
+|-------|-------------|
+| `"stdout"` | Captured from a session's stdout (pipe mode — streams stayed separated) |
+| `"stderr"` | Captured from a session's stderr (pipe mode) |
+| `"output"` | Captured from a session running in PTY mode. PTY allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `"output"` rather than mislabelled as `"stdout"`. |
+| `"system"` | Synthetic entry: lifecycle markers in `exec.log` plus runtime/kernel diagnostic lines merged in at read time when `"system"` is requested. |
+
+In addition, `logs(sources=["all"])` is a shorthand for all four.
+
+### MetricsStream
+
+Async stream for receiving periodic metrics snapshots.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `__aiter__` | `AsyncIterator[`[`SandboxMetrics`](#sandboxmetrics)`]` | Use with `async for` |
+| `recv()` | [`SandboxMetrics`](#sandboxmetrics) `\| None` | Receive next snapshot. Returns `None` when the stream ends. |
+
+### PatchConfig
+
+A single rootfs patch. Produced by the [`Patch`](#patch) factory; you'd normally not construct one directly. Frozen dataclass.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| kind | `str` | One of `"text"`, `"file"`, `"copy_file"`, `"copy_dir"`, `"symlink"`, `"mkdir"`, `"remove"`, `"append"` |
+| path | `str \| None` | Absolute guest path (used by text / file / mkdir / remove / append) |
+| content | `str \| None` | Text content (text / append) |
+| src | `str \| None` | Host source path (copy_file / copy_dir) |
+| dst | `str \| None` | Guest destination path (copy_file / copy_dir) |
+| target | `str \| None` | Symlink target |
+| link | `str \| None` | Symlink path |
+| mode | `int \| None` | File / directory mode (e.g. `0o644`) |
+| replace | `bool` | When `True`, overwrite an existing path at the destination. Defaults to `False` |
+
+### PullPolicy
+
+Controls when the SDK fetches an OCI image from the registry.
+
+| Value | Description |
+|-------|-------------|
+| `"always"` | Pull the image every time, even if cached locally |
+| `"if-missing"` | Pull only if the image is not already cached. This is the default. |
+| `"never"` | Never pull; fail if the image is not cached locally |
+
+### PullSession
+
+Returned by [`Sandbox.create_with_progress()`](#sandboxcreate_with_progress). Use as an async context manager to track image pull progress.
+
+```python
+session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
+async with session:
+    async for event in session.progress:
+        print(event)
+    sb = await session.result()
+```
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| progress | `AsyncIterator[PullProgress]` | Async iterator of pull progress events |
+| result() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Await to get the final running sandbox |
+
+### RegistryAuth
+
+Private registry credentials.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| username | `str` | Registry username |
+| password | `str` | Registry password |
+
+### SandboxConfig
+
+The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`Sandbox.create_with_progress()`](#sandboxcreate_with_progress).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| image | `str \| ImageSource` | - | OCI image, local path, or disk image (required) |
+| cpus | `int` | `1` | Virtual CPUs |
+| memory | `int` | `512` | Guest memory in MiB. This is a limit, not a reservation. |
+| workdir | `str` | - | Default working directory for commands |
+| shell | `str` | `"/bin/sh"` | Shell for `shell()` calls |
+| hostname | `str` | - | Guest hostname |
+| user | `str` | - | Default guest user |
+| entrypoint | `list[str]` | - | Override image entrypoint |
+| init | `str \| dict \|` [`InitConfig`](#initconfig) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/ja/sandboxes/customize#custom-init-system) |
+| replace | `bool` | `False` | Replace existing sandbox with same name |
+| max_duration | `float` | - | Maximum sandbox lifetime in seconds |
+| idle_timeout | `float` | - | Idle timeout in seconds |
+| env | `dict[str, str]` | `{}` | Environment variables visible to all commands |
+| scripts | `dict[str, str]` | `{}` | Named scripts mounted at `/.msb/scripts/` |
+| pull_policy | `str \| PullPolicy` | `"if-missing"` | Image pull behavior |
+| log_level | `str \| LogLevel` | - | Override log verbosity |
+| registry_auth | [`RegistryAuth`](#registryauth) | - | Private registry credentials |
+| volumes | `dict[str, dict]` | `{}` | Volume mounts. See [Volumes](/ja/sdk/python/volumes). |
+| patches | `list[PatchConfig]` | `[]` | Rootfs modifications applied before boot |
+| ports | `dict[int, int]` | `{}` | Port mappings (`host_port: guest_port`) |
+| network | [`Network`](/ja/sdk/python/networking#network) | `public_only` | Network policy and configuration |
+| secrets | `list[`[`SecretEntry`](/ja/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
+| detached | `bool` | `False` | If `True`, sandbox survives after your process exits |
+
+### InitConfig
+
+Custom init specification. Pass it (or one of the equivalent shorthand shapes) as the `init=` kwarg to [`Sandbox.create()`](#sandboxcreate) to hand PID 1 inside the guest off to your own init binary after agentd's setup. See [Custom init system](/ja/sandboxes/customize#custom-init-system) for image picks, shutdown semantics, and tradeoffs.
+
+```python
+from dataclasses import dataclass
+
+@dataclass(frozen=True, slots=True)
+class InitConfig:
+    cmd: str
+    args: tuple[str, ...] = ()
+    env: Mapping[str, str] = {}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| cmd | `str` | Absolute path or `"auto"` to the init binary inside the guest rootfs |
+| args | `tuple[str, ...]` | Supplemental argv (`argv[0]` is implicitly `cmd`) |
+| env | `dict[str, str]` | Extra env vars merged on top of the inherited env |
+
+The `init=` kwarg follows the same shape as other `Sandbox.create` kwargs that carry structured values (`image=`, `network=`, etc.): a bare scalar for the simple case, or a dataclass / dict for the rich case.
+
+| Form | Equivalent to |
+|------|---------------|
+| `init="auto"` or `init="/sbin/init"` | `InitConfig(cmd=...)` |
+| `init={"cmd": ..., "args": [...], "env": {...}}` | dict equivalent of `InitConfig` |
+| `init=InitConfig(cmd="/sbin/init", args=("--foo",))` | itself |
+
+```python
+from microsandbox import InitConfig, Sandbox
+
+# Common case: bare string.
+sb = await Sandbox.create("worker", image="jrei/systemd-debian:12", init="auto")
+
+# Argv / env: dataclass.
+sb = await Sandbox.create(
+    "worker",
+    image="jrei/systemd-debian:12",
+    init=InitConfig(
+        cmd="/lib/systemd/systemd",
+        args=("--unit=multi-user.target",),
+        env={"container": "microsandbox"},
+    ),
+)
+```
+
+### SandboxHandle
+
+A lightweight handle to an existing sandbox (running or stopped). Obtained via [`Sandbox.get()`](#sandboxget) or [`Sandbox.list()`](#sandboxlist). Provides status, configuration, and lifecycle control **without** an active connection to the guest agent. Call `.start()` or `.connect()` to upgrade to a full [`Sandbox`](#instance-methods).
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| name | `str` | Sandbox name |
+| status | `str` | Current status (`"running"`, `"stopped"`, `"crashed"`, `"draining"`, `"paused"`) |
+| config_json | `str` | Raw JSON configuration |
+| created_at | `float \| None` | Creation timestamp (ms since epoch) |
+| updated_at | `float \| None` | Last update timestamp (ms since epoch) |
+| connect() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Connect to a running sandbox |
+| start(*, detached=False) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Start in attached or detached mode |
+| stop() | `Awaitable[None]` | Graceful shutdown |
+| kill() | `Awaitable[None]` | Force terminate |
+| remove() | `Awaitable[None]` | Delete sandbox and state |
+| metrics() | `Awaitable[`[`SandboxMetrics`](#sandboxmetrics)`]` | Point-in-time resource metrics |
+| logs() | `Awaitable[list[`[`LogEntry`](#logentry)`]]` | Read captured `exec.log` (works without starting) |
+
+### SandboxMetrics
+
+Point-in-time resource usage snapshot.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| cpu_percent | `float` | CPU usage as a percentage |
+| disk_read_bytes | `int` | Total bytes read from disk since boot |
+| disk_write_bytes | `int` | Total bytes written to disk since boot |
+| memory_bytes | `int` | Current memory usage in bytes |
+| memory_limit_bytes | `int` | Memory limit in bytes |
+| net_rx_bytes | `int` | Total bytes received over the network since boot |
+| net_tx_bytes | `int` | Total bytes sent over the network since boot |
+| timestamp_ms | `float` | When this measurement was taken (ms since epoch) |
+| uptime_ms | `int` | Time since the sandbox was created (ms) |

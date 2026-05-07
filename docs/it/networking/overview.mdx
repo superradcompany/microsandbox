@@ -1,0 +1,233 @@
+---
+title: "Panoramica"
+description: "Criteri di rete, DNS e intercettazione TLS"
+icon: "network-wired"
+---
+
+
+All network traffic from a sandbox flows through a host-controlled networking stack. From inside, the sandbox sees a normal network interface, but on the host side every packet is subject to policy before it goes anywhere. The sandbox's only path to the outside world is through this stack, so blocked traffic never leaves the VM.
+
+## Defaults
+
+Without any policy flags, sandboxes get **public-internet egress only**: routable destinations work, but private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`), loopback (`127.0.0.0/8`), link-local (`169.254.0.0/16`), and the cloud metadata endpoint (`169.254.169.254`) are denied. Inbound traffic on published ports is unfiltered until you add an explicit ingress rule.
+
+To turn off networking entirely:
+
+```bash
+msb create python --name isolated --no-net
+```
+
+```rust
+let sb = Sandbox::builder("isolated")
+    .image("python")
+    .network(|n| n.enabled(false))
+    .create()
+    .await?;
+```
+
+## Custom policies
+
+A policy is a list of rules plus two direction-specific defaults:
+
+```text
+default_egress  : Allow | Deny     (action when no egress rule matches)
+default_ingress : Allow | Deny     (action when no ingress rule matches)
+rules           : [Rule, ...]      (first match wins)
+```
+
+Each rule carries its own direction (`Egress`, `Ingress`, or `Any`), a destination, an optional protocol set, an optional port set, and an action.
+
+### CLI
+
+`--net-rule` takes a comma-separated list of tokens shaped as
+`<action>[:<direction>]@<target>[:<proto>[:<ports>]]`. Direction defaults to `egress` when omitted. Repeating the flag concatenates tokens in argv order; first match wins.
+
+```bash
+# Public internet plus the host machine, deny everything else by default
+msb create python --name agent \
+    --net-rule "allow@public,allow@host"
+
+# Allow public internet plus a specific private host on tcp/443
+msb create alpine --name secure-agent \
+    --net-rule "allow@10.0.5.10:tcp:443,allow@public" \
+    --net-default-egress deny
+
+# Block tcp/445 to private IPs while keeping everything else open
+msb create alpine --name smb-blocked \
+    --net-default-egress allow \
+    --net-rule "deny@private:tcp:445"
+
+# Publish a port and only accept ingress from RFC1918 sources
+msb create python --name api \
+    --port 8080:8080 \
+    --net-rule "allow:ingress@private"
+```
+
+`<target>` accepts `any`, a group keyword (`public`, `private`, `loopback`, `link-local`, `meta`, `multicast`, `host`), an IP, a CIDR, a domain (with at least one dot), `domain=<name>` for single-label hostnames, or `suffix=<domain>` for subdomain matches.
+
+### Rust
+
+```rust
+use microsandbox::{NetworkPolicy, Sandbox};
+
+let policy = NetworkPolicy::builder()
+    .default_deny()
+    .egress(|e| e
+        .tcp().port(443).allow_public()
+        .udp().port(53).allow_public())
+    .build()?;
+
+let sb = Sandbox::builder("secure-agent")
+    .image("alpine")
+    .network(|n| n.policy(policy))
+    .create()
+    .await?;
+```
+
+The builder accepts string inputs (`.ip("10.0.0.5")`, `.cidr("10.0.0.0/24")`, `.domain("api.example.com")`, etc.) and parses them at `.build()` time, so the chain stays clean. See the [Rust reference](/it/sdk/rust/networking) for the full surface (per-category shortcuts, the explicit-rule sub-builder, shadow-rule warnings).
+
+### TypeScript / Python
+
+Both SDKs accept policies as plain config objects matching the wire format. Direction strings are `"egress"`, `"ingress"`, or `"any"`. Group keywords match the CLI grammar.
+
+```typescript
+import { Destination, PortRange, Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("secure-agent")
+    .image("alpine")
+    .network((n) => n.policy({
+        defaultEgress: "deny",
+        defaultIngress: "allow",
+        rules: [
+            {
+                direction: "egress",
+                destination: Destination.any(),
+                protocols: ["tcp"],
+                ports: [PortRange.single(443)],
+                action: "allow",
+            },
+            {
+                direction: "egress",
+                destination: Destination.any(),
+                protocols: ["udp"],
+                ports: [PortRange.single(53)],
+                action: "allow",
+            },
+        ],
+    }))
+    .create();
+```
+
+```python
+from microsandbox import Sandbox
+
+sb = await Sandbox.create(
+    "secure-agent",
+    image="alpine",
+    network={
+        "policy": {
+            "default_egress": "deny",
+            "default_ingress": "allow",
+            "rules": [
+                {"action": "allow", "direction": "egress", "protocol": "tcp", "port": "443"},
+                {"action": "allow", "direction": "egress", "protocol": "udp", "port": "53"},
+            ],
+        },
+    },
+)
+```
+
+Domain rules match flows where the guest resolved the name through the sandbox's DNS interceptor. See [DNS](/it/networking/dns) for how the resolved-hostname cache works.
+
+## Port mapping
+
+Expose ports from the sandbox to the host so services running inside the VM are reachable from your machine.
+
+<CodeGroup>
+```rust Rust
+let sb = Sandbox::builder("api")
+    .image("python")
+    .port(8080, 80)
+    .port_udp(5353, 5353)
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("api")
+    .image("python")
+    .port(8080, 80)
+    .portUdp(5353, 5353)
+    .create();
+```
+
+```python Python
+sb = await Sandbox.create(
+    "api",
+    image="python",
+    ports={8080: 80},
+)
+```
+
+```bash CLI
+msb create python --name api -p 8080:80
+```
+
+</CodeGroup>
+
+## Reaching the host
+
+From inside the sandbox, `host.microsandbox.internal` resolves to the host machine, same idea as Docker's `host.docker.internal`. Use it to call a dev server, database, or other process running on your machine without hard-coding an IP.
+
+```bash
+# Inside the sandbox:
+curl http://host.microsandbox.internal:8080
+```
+
+The name is wired through `/etc/hosts` and the DNS interceptor, so both standard resolvers and tools that bypass `/etc/hosts` (like `dig`) find it.
+
+The default policy denies host access — the sandbox gateway sits in a private range, same as any other local destination. Add the `host` group to open it:
+
+```bash
+msb create python --name dev-agent \
+    --net-rule "allow@public,allow@host"
+```
+
+```rust
+NetworkPolicy::builder()
+    .default_deny()
+    .egress(|e| e.allow_public().allow_host())
+    .build()?
+```
+
+### Loopback vs host: a common trap
+
+`Group::Loopback` (`127.0.0.0/8`, `::1`) and `Group::Host` (the per-sandbox gateway IPs) are different things. The two-word summary:
+
+- **`loopback`** = the guest's own loopback interface. Services running inside the same VM.
+- **`host`** = the host machine, reached through `host.microsandbox.internal`.
+
+If you're coming from Docker and reach for `.allow_loopback()` to "let the sandbox talk to my host's localhost," that's the trap — you want `.allow_host()` instead. `.allow_loopback()` only fires for traffic *inside* the guest, which doesn't reach the policy gate under normal kernel routing anyway.
+
+`.deny_loopback()` does have a real use case. In `--net-default-egress allow` configurations, a process inside the guest could craft a packet bound to `eth0` with `dst=127.0.0.1`, route it past the guest kernel, and have smoltcp on the host land it on the host's loopback. `.deny_loopback()` blocks that vector. Default policies (with the implicit deny on egress) already cover this.
+
+If you want "everything near the sandbox" — guest loopback, link-local, and the host machine — `.allow_local()` is sugar for that triple. `Metadata` is deliberately excluded so cloud-IMDS isn't quietly exposed; opt in via `.allow_meta()` if you need it.
+
+## Protocol support
+
+For most sandboxed workloads, networking behaves the way you'd expect:
+
+- Normal egress **TCP** and **UDP** traffic works, including common tools and libraries like `curl`, `wget`, package managers, HTTP clients, database drivers, and DNS lookups.
+- **DNS** queries are intercepted on the host side. See [DNS](/it/networking/dns) for blocking, pinned resolvers, and query timeouts.
+- **ICMP echo** is supported: pinging external hosts works on systems that support unprivileged ICMP echo sockets.
+- **Ingress** on published ports is gated by the same policy. Denied connections drop with TCP RST so the peer sees `ECONNRESET`.
+
+<Note>
+**Raw sockets** and **full ICMP forwarding** are not supported because they require elevated privileges on the host. Tools that depend on richer ICMP behavior, such as `traceroute`, are outside the current scope.
+</Note>
+
+## Next
+
+- [DNS](/it/networking/dns): domain blocking, pinned nameservers, query timeouts
+- [TLS interception](/it/networking/tls): HTTPS inspection with an auto-generated CA
+- [Security model](/it/networking/security-model): how the stack defends against SSRF, rebinding, and metadata exfiltration
