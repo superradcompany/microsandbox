@@ -54,6 +54,15 @@ Create and boot a sandbox. The first argument is either a name (`str`) or a full
 |------|-------------|
 | [`Sandbox`](#instance-methods) | Running sandbox |
 
+The returned `Sandbox` is an async context manager. Use `async with` to guarantee cleanup; on exit the sandbox is killed and its persisted state removed:
+
+```python
+async with await Sandbox.create("my-sandbox", image="alpine") as sb:
+    output = await sb.shell("echo hello")
+    print(output.stdout_text)
+# sandbox is automatically killed and removed on exit
+```
+
 ---
 
 #### Sandbox.create_with_progress()
@@ -523,19 +532,6 @@ Block until the sandbox exits on its own.
 | Type | Description |
 |------|-------------|
 | `tuple[int, bool]` | `(exit_code, success)` -- `success` is `True` if exit code is `0` |
-
----
-
-## Context manager
-
-```python
-async with await Sandbox.create("my-sandbox", image="alpine") as sb:
-    output = await sb.shell("echo hello")
-    print(output.stdout_text)
-# sandbox is automatically killed and removed on exit
-```
-
-Use `Sandbox` as an async context manager to ensure cleanup. On exit, the sandbox is killed and its persisted state is removed.
 
 ---
 
