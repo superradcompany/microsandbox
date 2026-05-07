@@ -1,0 +1,125 @@
+---
+title: Quickstart
+description: Get a sandbox running in under 5 minutes
+icon: "bolt"
+---
+
+<Note>
+  microsandbox requires **Linux with KVM** enabled, or **macOS with Apple Silicon** (M-series chip). Both use hardware virtualization.
+</Note>
+
+<Tip>
+  Boot a microVM in one command.
+
+  ```bash
+  npx microsandbox run debian
+  ```
+</Tip>
+
+<Steps>
+  <Step title="Install microsandbox">
+    The SDK **embeds the runtime directly**, so no separate server process is needed. Only install the `msb` CLI if you want to manage images, volumes, and sandboxes from the terminal.
+
+    <CodeGroup>
+    ```bash Rust
+    cargo add microsandbox
+    ```
+
+    ```bash TypeScript
+    npm install microsandbox
+    ```
+
+    ```bash Python
+    pip install microsandbox
+    ```
+
+    ```bash CLI
+    curl -fsSL https://install.microsandbox.dev | sh
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Run code in a sandbox">
+    Create a sandbox, execute code inside it, and get the result back.
+
+    <CodeGroup>
+    ```rust Rust
+    use microsandbox::Sandbox;
+
+    #[tokio::main]
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
+        let sb = Sandbox::builder("hello")
+            .image("python")
+            .memory(512)
+            .create()
+            .await?;
+
+        let output = sb.exec("python", ["-c", "print('Hello from a microVM!')"]).await?;
+        println!("{}", output.stdout()?); // Hello from a microVM!
+
+        sb.stop().await?;
+        Ok(())
+    }
+    ```
+
+    ```typescript TypeScript
+    import { Sandbox } from "microsandbox";
+
+    await using sb = await Sandbox.builder("hello")
+        .image("python")
+        .memory(512)
+        .create();
+
+    const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
+    console.log(output.stdout()); // Hello from a microVM!
+    ```
+
+    ```python Python
+    import asyncio
+    from microsandbox import Sandbox
+
+    async def main():
+        sb = await Sandbox.create(
+            "hello",
+            image="python",
+            memory=512,
+        )
+
+        output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"])
+        print(output.stdout_text)  # Hello from a microVM!
+
+        await sb.stop()
+
+    asyncio.run(main())
+    ```
+
+    ```bash CLI
+    msb run python -- python3 -c "print('Hello from a microVM!')"
+    ```
+
+    </CodeGroup>
+  </Step>
+</Steps>
+
+## What just happened?
+
+Here's what actually happened behind that `Sandbox.builder(...).create()` call:
+
+1. **Pulled the image** from Docker Hub (or skipped this if it was already cached, since shared layers are deduplicated).
+2. **Assembled the filesystem** by stacking the image layers into a copy-on-write filesystem, so nothing you do inside the sandbox modifies the base image.
+3. **Booted a microVM** as a child process. The 512 MiB you specified is a limit, not a reservation, so the VM only uses what it actually needs.
+4. **Started the guest agent** inside the VM, which set up the environment and opened a communication channel back to the host.
+
+The `exec` call sent a message to that guest agent, which spawned `python` inside the VM, streamed stdout back, and returned the exit code. No SSH involved, no network overhead. The command channel is completely separate from the sandbox's network stack.
+
+<Tip>
+  Because exec doesn't go through the network, it works even when a sandbox has networking disabled via `.disable_network()` and no network interfaces at all.
+</Tip>
+
+## Next steps
+
+- [Understand sandbox configuration](/sandboxes/overview): how the VM, filesystem, and networking fit together
+- [Run commands and stream output](/sandboxes/commands): `exec`, `shell`, `attach`, and streaming
+- [Control network access](/networking/overview): policies, DNS interception, and secret protection
+- [Manage sandboxes with the CLI](/cli/overview): create, inspect, and manage sandboxes from the terminal
