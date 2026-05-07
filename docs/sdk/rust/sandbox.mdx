@@ -503,6 +503,12 @@ fn idle_timeout(self, secs: u64) -> Self
 
 Auto-drain the sandbox after this many seconds of inactivity (no active exec sessions). Enforced on the host side.
 
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| secs | `u64` | Idle timeout in seconds |
+
 ---
 
 #### init()
@@ -563,12 +569,6 @@ let sb = Sandbox::builder("worker")
 ```
 
 Calling `init` or `init_with` more than once overwrites — different from `env`, which appends. The init is one-shot pre-boot.
-
-**Parameters**
-
-| Name | Type | Description |
-|------|------|-------------|
-| secs | `u64` | Idle timeout in seconds |
 
 ---
 
