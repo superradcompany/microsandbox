@@ -54,6 +54,15 @@ Create and boot a sandbox. The first argument is either a name (`str`) or a full
 |------|-------------|
 | [`Sandbox`](#instance-methods) | Running sandbox |
 
+The returned `Sandbox` is an async context manager. Use `async with` to guarantee cleanup; on exit the sandbox is killed and its persisted state removed:
+
+```python
+async with await Sandbox.create("my-sandbox", image="alpine") as sb:
+    output = await sb.shell("echo hello")
+    print(output.stdout_text)
+# sandbox is automatically killed and removed on exit
+```
+
 ---
 
 #### Sandbox.create_with_progress()
@@ -526,16 +535,154 @@ Block until the sandbox exits on its own.
 
 ---
 
-## Context manager
+## Patch
+
+Factory class for rootfs patches passed to `Sandbox.create(..., patches=[...])`. Each static method returns a [`PatchConfig`](#patchconfig). By default a patch that targets a path already present in the image errors at boot; pass `replace=True` on the operation to allow overwriting. `mkdir` and `remove` are idempotent.
+
+See [Patches](/sandboxes/customize#patches) for conceptual context.
+
+---
+
+#### Patch.append()
 
 ```python
-async with await Sandbox.create("my-sandbox", image="alpine") as sb:
-    output = await sb.shell("echo hello")
-    print(output.stdout_text)
-# sandbox is automatically killed and removed on exit
+@staticmethod
+def append(path: str, content: str) -> PatchConfig
 ```
 
-Use `Sandbox` as an async context manager to ensure cleanup. On exit, the sandbox is killed and its persisted state is removed.
+Append `content` to an existing file at `path`. If the file lives in a lower image layer, it's copied up first.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute path inside the guest |
+| content | `str` | Text to append |
+
+---
+
+#### Patch.copy_dir()
+
+```python
+@staticmethod
+def copy_dir(src: str, dst: str, *, replace: bool = False) -> PatchConfig
+```
+
+Recursively copy a host directory at `src` into the guest rootfs at `dst`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `str` | Host source directory |
+| dst | `str` | Absolute destination path inside the guest |
+| replace | `bool` | When `True`, overwrite an existing path at `dst` |
+
+---
+
+#### Patch.copy_file()
+
+```python
+@staticmethod
+def copy_file(
+    src: str,
+    dst: str,
+    *,
+    mode: int | None = None,
+    replace: bool = False,
+) -> PatchConfig
+```
+
+Copy a single host file at `src` into the guest rootfs at `dst`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `str` | Host source file |
+| dst | `str` | Absolute destination path inside the guest |
+| mode | `int \| None` | File mode, e.g. `0o644`. `None` keeps the source mode |
+| replace | `bool` | When `True`, overwrite an existing path at `dst` |
+
+---
+
+#### Patch.mkdir()
+
+```python
+@staticmethod
+def mkdir(path: str, *, mode: int | None = None) -> PatchConfig
+```
+
+Create a directory at `path`. Idempotent: a no-op if the directory already exists.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute path inside the guest |
+| mode | `int \| None` | Directory mode, e.g. `0o755` |
+
+---
+
+#### Patch.remove()
+
+```python
+@staticmethod
+def remove(path: str) -> PatchConfig
+```
+
+Delete a file or directory at `path`. Idempotent: a no-op if the path doesn't exist.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute path inside the guest |
+
+---
+
+#### Patch.symlink()
+
+```python
+@staticmethod
+def symlink(target: str, link: str, *, replace: bool = False) -> PatchConfig
+```
+
+Create a symlink at `link` pointing to `target`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| target | `str` | What the symlink points to (literal symlink target text) |
+| link | `str` | Absolute path of the symlink itself |
+| replace | `bool` | When `True`, overwrite an existing path at `link` |
+
+---
+
+#### Patch.text()
+
+```python
+@staticmethod
+def text(
+    path: str,
+    content: str,
+    *,
+    mode: int | None = None,
+    replace: bool = False,
+) -> PatchConfig
+```
+
+Write UTF-8 text content at `path`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `str` | Absolute path inside the guest |
+| content | `str` | Text content |
+| mode | `int \| None` | File mode, e.g. `0o644` |
+| replace | `bool` | When `True`, overwrite an existing path |
 
 ---
 
@@ -586,6 +733,22 @@ Async stream for receiving periodic metrics snapshots.
 |--------|---------|-------------|
 | `__aiter__` | `AsyncIterator[`[`SandboxMetrics`](#sandboxmetrics)`]` | Use with `async for` |
 | `recv()` | [`SandboxMetrics`](#sandboxmetrics) `\| None` | Receive next snapshot. Returns `None` when the stream ends. |
+
+### PatchConfig
+
+A single rootfs patch. Produced by the [`Patch`](#patch) factory; you'd normally not construct one directly. Frozen dataclass.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| kind | `str` | One of `"text"`, `"file"`, `"copy_file"`, `"copy_dir"`, `"symlink"`, `"mkdir"`, `"remove"`, `"append"` |
+| path | `str \| None` | Absolute guest path (used by text / file / mkdir / remove / append) |
+| content | `str \| None` | Text content (text / append) |
+| src | `str \| None` | Host source path (copy_file / copy_dir) |
+| dst | `str \| None` | Guest destination path (copy_file / copy_dir) |
+| target | `str \| None` | Symlink target |
+| link | `str \| None` | Symlink path |
+| mode | `int \| None` | File / directory mode (e.g. `0o644`) |
+| replace | `bool` | When `True`, overwrite an existing path at the destination. Defaults to `False` |
 
 ### PullPolicy
 

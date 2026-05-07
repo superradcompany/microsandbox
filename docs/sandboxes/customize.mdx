@@ -130,24 +130,13 @@ sb = await Sandbox.create(
 
 ### Available operations
 
-The patch builder is invoked through `SandboxBuilder.patch(p => ...)`. Each method appends an operation; calls are chainable.
+The patch builder appends operations in the order you call them; calls are chainable. Available operations across SDKs: `text`, `file`, `mkdir`, `append`, `copyFile` / `copy_file`, `copyDir` / `copy_dir`, `symlink`, `remove`.
 
-| Method | Description |
-|--------|-------------|
-| `text(path, content, opts?)` | Write text content to a file |
-| `file(path, bytes, opts?)` | Write raw bytes to a file |
-| `mkdir(path, opts?)` | Create a directory (idempotent) |
-| `append(path, content)` | Append content to an existing file |
-| `copyFile(src, dst, opts?)` | Copy a file from the host into the rootfs |
-| `copyDir(src, dst, opts?)` | Recursively copy a directory from the host |
-| `symlink(target, link, opts?)` | Create a symlink |
-| `remove(path)` | Delete a file or directory (idempotent) |
+Full per-language signatures, parameters, and option shapes are documented in the SDK references:
 
-`opts` is per-method and always optional:
-
-- `mode` (numeric file mode, e.g. `0o644`) and `replace` (overwrite if the path already exists): `text`, `file`, `copyFile`.
-- `replace` only: `copyDir`, `symlink`.
-- `mode` only: `mkdir`.
+- Rust: [`PatchBuilder`](/sdk/rust/sandbox#patchbuilder)
+- TypeScript: [`PatchBuilder`](/sdk/typescript/sandbox#patchbuilder)
+- Python: [`Patch`](/sdk/python/sandbox#patch) (factory) and [`PatchConfig`](/sdk/python/sandbox#patchconfig) (the value type)
 
 ## Custom init system
 

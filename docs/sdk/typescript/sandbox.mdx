@@ -378,6 +378,169 @@ Implements `AsyncDisposable` so the sandbox can be used with `await using`. When
 
 ---
 
+## PatchBuilder
+
+Fluent builder for the ordered list of pre-boot rootfs patches. Used in `SandboxBuilder.patch(p => p...)`. Each method appends one operation; calls are chainable. By default a method that targets a path already present in the image errors at boot; pass `{ replace: true }` on the operation to allow overwriting. `mkdir` and `remove` are idempotent.
+
+See [Patches](/sandboxes/customize#patches) for conceptual context.
+
+---
+
+#### append()
+
+```typescript
+append(path: string, content: string): this
+```
+
+Append `content` to an existing file at `path`. If the file lives in a lower image layer, it's copied up first.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Absolute path inside the guest |
+| content | `string` | Text to append |
+
+---
+
+#### copyDir()
+
+```typescript
+copyDir(src: string, dst: string, opts?: { replace?: boolean }): this
+```
+
+Recursively copy a host directory at `src` into the guest rootfs at `dst`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `string` | Host source directory |
+| dst | `string` | Absolute destination path inside the guest |
+| opts.replace | `boolean` | When `true`, overwrite an existing path at `dst` |
+
+---
+
+#### copyFile()
+
+```typescript
+copyFile(
+  src: string,
+  dst: string,
+  opts?: { mode?: number; replace?: boolean },
+): this
+```
+
+Copy a single host file at `src` into the guest rootfs at `dst`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| src | `string` | Host source file |
+| dst | `string` | Absolute destination path inside the guest |
+| opts.mode | `number` | File mode, e.g. `0o644`. Omit to keep the source mode |
+| opts.replace | `boolean` | When `true`, overwrite an existing path at `dst` |
+
+---
+
+#### file()
+
+```typescript
+file(
+  path: string,
+  content: Buffer,
+  opts?: { mode?: number; replace?: boolean },
+): this
+```
+
+Write raw bytes at `path`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Absolute path inside the guest |
+| content | `Buffer` | Raw byte content |
+| opts.mode | `number` | File mode, e.g. `0o644` |
+| opts.replace | `boolean` | When `true`, overwrite an existing path |
+
+---
+
+#### mkdir()
+
+```typescript
+mkdir(path: string, opts?: { mode?: number }): this
+```
+
+Create a directory at `path`. Idempotent: a no-op if the directory already exists.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Absolute path inside the guest |
+| opts.mode | `number` | Directory mode, e.g. `0o755` |
+
+---
+
+#### remove()
+
+```typescript
+remove(path: string): this
+```
+
+Delete a file or directory at `path`. Idempotent: a no-op if the path doesn't exist.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Absolute path inside the guest |
+
+---
+
+#### symlink()
+
+```typescript
+symlink(target: string, link: string, opts?: { replace?: boolean }): this
+```
+
+Create a symlink at `link` pointing to `target`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| target | `string` | What the symlink points to (literal symlink target text) |
+| link | `string` | Absolute path of the symlink itself |
+| opts.replace | `boolean` | When `true`, overwrite an existing path at `link` |
+
+---
+
+#### text()
+
+```typescript
+text(
+  path: string,
+  content: string,
+  opts?: { mode?: number; replace?: boolean },
+): this
+```
+
+Write UTF-8 text content at `path`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| path | `string` | Absolute path inside the guest |
+| content | `string` | Text content |
+| opts.mode | `number` | File mode, e.g. `0o644` |
+| opts.replace | `boolean` | When `true`, overwrite an existing path |
+
+---
+
 ## Types
 
 ### SandboxBuilder
