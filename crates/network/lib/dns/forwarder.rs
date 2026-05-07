@@ -32,7 +32,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::StreamExt;
 use hickory_client::client::Client;
-use hickory_client::proto::op::{Message, MessageType, ResponseCode};
+use hickory_client::proto::op::{Message, ResponseCode};
 use hickory_client::proto::rr::rdata::{A, AAAA};
 use hickory_client::proto::rr::{RData, Record, RecordType};
 use hickory_client::proto::serialize::binary::{BinDecodable, BinEncodable};
@@ -241,8 +241,12 @@ impl DnsForwarder {
             }
         }
 
-        // Preserve the guest's transaction id.
-        response_msg.set_id(guest_id);
+        // Preserve the guest's transaction id. `Message::set_id` is
+        // crate-private in hickory 0.26, so round-trip through `Header`,
+        // which is `Copy`.
+        let mut header = *response_msg.header();
+        header.set_id(guest_id);
+        response_msg.set_header(header);
         let response_bytes = response_msg.to_bytes().ok()?;
 
         // UDP truncation: if the wire response exceeds the buffer the
@@ -463,11 +467,8 @@ fn decide_upstream(
 /// SERVFAIL (upstream unreachable). The guest's transaction id, OPCODE
 /// and RD bit are echoed.
 fn build_status_response(query: &Message, rcode: ResponseCode) -> Option<Bytes> {
-    let mut response = Message::new();
-    response.set_id(query.id());
-    response.set_op_code(query.op_code());
+    let mut response = Message::response(query.id(), query.op_code());
     response.set_recursion_desired(query.recursion_desired());
-    response.set_message_type(MessageType::Response);
     response.set_response_code(rcode);
     response.set_recursion_available(true);
     if let Some(q) = query.queries().first() {
@@ -534,11 +535,8 @@ fn synthesize_host_alias_response(
         _ => return None,
     };
 
-    let mut response = Message::new();
-    response.set_id(query.id());
-    response.set_op_code(query.op_code());
+    let mut response = Message::response(query.id(), query.op_code());
     response.set_recursion_desired(query.recursion_desired());
-    response.set_message_type(MessageType::Response);
     response.set_response_code(ResponseCode::NoError);
     response.set_recursion_available(true);
     response.set_authoritative(true);
@@ -552,11 +550,8 @@ fn synthesize_host_alias_response(
 /// servers to set TC when truncating; the guest's stub then retries the
 /// query over TCP per RFC 7766.
 fn build_truncated_response(query: &Message) -> Option<Vec<u8>> {
-    let mut response = Message::new();
-    response.set_id(query.id());
-    response.set_op_code(query.op_code());
+    let mut response = Message::response(query.id(), query.op_code());
     response.set_recursion_desired(query.recursion_desired());
-    response.set_message_type(MessageType::Response);
     response.set_response_code(ResponseCode::NoError);
     response.set_recursion_available(true);
     response.set_truncated(true);
@@ -578,10 +573,7 @@ mod tests {
     use hickory_client::proto::rr::{DNSClass, Name, RecordType};
 
     fn make_query(name: &str, qtype: RecordType) -> Message {
-        let mut msg = Message::new();
-        msg.set_id(0x4242);
-        msg.set_message_type(MessageType::Query);
-        msg.set_op_code(OpCode::Query);
+        let mut msg = Message::new(0x4242, MessageType::Query, OpCode::Query);
         msg.set_recursion_desired(true);
         let parsed = Name::from_ascii(name).expect("valid dns name");
         let mut q = Query::new();
