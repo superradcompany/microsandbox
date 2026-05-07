@@ -70,10 +70,22 @@ pub(super) async fn build_dot_client(
     timeout: Duration,
 ) -> Option<Client> {
     use hickory_proto::rustls::tls_client_connect;
+    use rustls::pki_types::ServerName;
 
+    let server_name = match ServerName::try_from(sni.clone()) {
+        Ok(name) => name,
+        Err(e) => {
+            tracing::warn!(upstream = %addr, sni = %sni, error = %e, "invalid SNI for DoT");
+            return None;
+        }
+    };
     let client_config = dot_upstream_client_config();
-    let (stream_future, sender) =
-        tls_client_connect(addr, sni, client_config, TokioRuntimeProvider::new());
+    let (stream_future, sender) = tls_client_connect(
+        addr,
+        server_name,
+        client_config,
+        TokioRuntimeProvider::new(),
+    );
     let (client, bg) = match Client::with_timeout(stream_future, sender, timeout, None).await {
         Ok(pair) => pair,
         Err(e) => {
