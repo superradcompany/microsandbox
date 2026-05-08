@@ -24,6 +24,7 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(setup::install, m)?)?;
     m.add_function(wrap_pyfunction!(setup::is_installed, m)?)?;
     m.add_function(wrap_pyfunction!(set_runtime_msb_path, m)?)?;
+    m.add_function(wrap_pyfunction!(resolved_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(metrics::all_sandbox_metrics, m)?)?;
     m.add_class::<sandbox::PySandbox>()?;
     m.add_class::<sandbox_handle::PySandboxHandle>()?;
@@ -58,4 +59,14 @@ fn version() -> &'static str {
 #[pyfunction]
 fn set_runtime_msb_path(path: String) {
     microsandbox::config::set_sdk_msb_path(path);
+}
+
+/// Return the `msb` binary path the native resolver would currently use.
+///
+/// Intended as a test/diagnostic hook for verifying the Python-to-native bridge.
+#[pyfunction]
+fn resolved_msb_path() -> PyResult<String> {
+    microsandbox::config::resolve_msb_path()
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(error::to_py_err)
 }
