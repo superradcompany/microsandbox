@@ -44,7 +44,7 @@ use super::common::config::NormalizedDnsConfig;
 use super::common::filter::{is_private_ipv4, is_private_ipv6};
 use super::common::transport::Transport;
 use super::nameserver::{read_host_dns_servers, resolve_nameservers};
-use crate::policy::{DomainName, NetworkPolicy};
+use crate::policy::{Action, DomainName, NetworkPolicy};
 use crate::shared::{ResolvedHostnameFamily, SharedState};
 use crate::stack::GatewayIps;
 
@@ -160,10 +160,11 @@ impl DnsForwarder {
         let domain = question.name().to_string();
         let domain = domain.trim_end_matches('.').to_owned();
 
-        // Refuse queries denied by the network policy.
-        if let Ok(canonical) = domain.parse::<DomainName>()
-            && self.network_policy.dns_query_denied(&canonical)
-        {
+        // Refuse queries denied by the network policy. DNS is evaluated
+        // as egress over the guest-facing DNS transport, so deny-by-
+        // default policies fail closed unless a rule allows the name or
+        // the DNS protocol/port.
+        if decide_dns_action(&self.network_policy, &domain, transport).is_deny() {
             tracing::debug!(domain = %domain, "DNS query refused by network policy");
             return build_status_response(&query_msg, ResponseCode::Refused);
         }
@@ -460,6 +461,24 @@ fn decide_upstream(
         return UpstreamDecision::Refused;
     }
     UpstreamDecision::Direct(policy_dst)
+}
+
+/// Evaluate a guest-issued DNS query against the network policy. Pure
+/// function — no I/O — so the refusal logic is testable without a real
+/// upstream client. Names that don't parse as a [`DomainName`] take the
+/// nameless path, where only `Any` rules can match.
+fn decide_dns_action(policy: &NetworkPolicy, domain: &str, transport: Transport) -> Action {
+    match domain.parse::<DomainName>() {
+        Ok(canonical) => policy.evaluate_dns_query(
+            &canonical,
+            transport.policy_protocol(),
+            transport.upstream_port(),
+        ),
+        Err(_) => policy.evaluate_dns_query_without_name(
+            transport.policy_protocol(),
+            transport.upstream_port(),
+        ),
+    }
 }
 
 /// Build a status-only response (no answers, no authority) with the given
@@ -824,6 +843,140 @@ mod tests {
         assert_eq!(
             decide_upstream(&gw, &policy, &shared, dst, Transport::Dot),
             UpstreamDecision::Refused
+        );
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // decide_dns_action
+    //----------------------------------------------------------------------------------------------
+
+    #[test]
+    fn decide_dns_action_allows_under_default_allow() {
+        let policy = NetworkPolicy::allow_all();
+        assert_eq!(
+            decide_dns_action(&policy, "example.com", Transport::Udp),
+            Action::Allow
+        );
+    }
+
+    #[test]
+    fn decide_dns_action_refuses_under_deny_by_default() {
+        // Deny-by-default with no rule that grants the DNS transport must
+        // refuse the query — this is the regression the wider DNS-as-
+        // egress evaluation was added for.
+        let policy = NetworkPolicy::none();
+        assert_eq!(
+            decide_dns_action(&policy, "example.com", Transport::Udp),
+            Action::Deny
+        );
+        assert_eq!(
+            decide_dns_action(&policy, "example.com", Transport::Tcp),
+            Action::Deny
+        );
+        assert_eq!(
+            decide_dns_action(&policy, "example.com", Transport::Dot),
+            Action::Deny
+        );
+    }
+
+    #[test]
+    fn decide_dns_action_any_rule_grants_dns_when_protocol_and_port_match() {
+        // `Any udp/53` is the operator-friendly way to open DNS under a
+        // deny-by-default policy. Same rule must NOT grant TCP DNS.
+        use crate::policy::{Destination, Direction, PortRange, Rule};
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule {
+                direction: Direction::Egress,
+                destination: Destination::Any,
+                protocols: vec![Protocol::Udp],
+                ports: vec![PortRange::single(53)],
+                action: Action::Allow,
+            }],
+        };
+        assert_eq!(
+            decide_dns_action(&policy, "example.com", Transport::Udp),
+            Action::Allow
+        );
+        assert_eq!(
+            decide_dns_action(&policy, "example.com", Transport::Tcp),
+            Action::Deny
+        );
+    }
+
+    #[test]
+    fn decide_dns_action_dot_uses_tcp_and_port_853() {
+        // DoT rides TCP; an `Any tcp/853` rule must grant it, while a
+        // narrower `Any tcp/53` rule must NOT.
+        use crate::policy::{Destination, Direction, PortRange, Rule};
+        let policy_853 = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule {
+                direction: Direction::Egress,
+                destination: Destination::Any,
+                protocols: vec![Protocol::Tcp],
+                ports: vec![PortRange::single(853)],
+                action: Action::Allow,
+            }],
+        };
+        assert_eq!(
+            decide_dns_action(&policy_853, "example.com", Transport::Dot),
+            Action::Allow
+        );
+
+        let policy_53 = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule {
+                direction: Direction::Egress,
+                destination: Destination::Any,
+                protocols: vec![Protocol::Tcp],
+                ports: vec![PortRange::single(53)],
+                action: Action::Allow,
+            }],
+        };
+        assert_eq!(
+            decide_dns_action(&policy_53, "example.com", Transport::Dot),
+            Action::Deny
+        );
+    }
+
+    #[test]
+    fn decide_dns_action_unparseable_name_takes_nameless_path() {
+        // An empty label or otherwise invalid name fails DomainName
+        // parsing; only Any rules can match. A domain-targeted allow
+        // rule must NOT grant such queries.
+        let policy = NetworkPolicy::allow_all()
+            .deny_domain("evil.com")
+            .expect("valid name");
+        // "..something" has only empty labels after trim — DomainName
+        // parsing rejects it; the nameless path falls through to the
+        // default (allow_all → Allow).
+        assert_eq!(
+            decide_dns_action(&policy, "", Transport::Udp),
+            Action::Allow
+        );
+
+        // Under deny-by-default, an unparseable name with no Any rule
+        // refuses.
+        let deny = NetworkPolicy::none();
+        assert_eq!(decide_dns_action(&deny, "", Transport::Udp), Action::Deny);
+    }
+
+    #[test]
+    fn decide_dns_action_domain_rule_refuses_specific_name() {
+        let policy = NetworkPolicy::allow_all()
+            .deny_domain("evil.com")
+            .expect("valid name");
+        assert_eq!(
+            decide_dns_action(&policy, "evil.com", Transport::Udp),
+            Action::Deny
+        );
+        assert_eq!(
+            decide_dns_action(&policy, "good.com", Transport::Udp),
+            Action::Allow
         );
     }
 }
