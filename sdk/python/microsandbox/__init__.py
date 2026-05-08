@@ -1,16 +1,6 @@
 """microsandbox — Python SDK for secure, fast microVM-based sandboxing."""
 
-# Wire bundled msb path into the Rust resolver's env var so the Rust SDK
-# finds msb from the wheel bundle. libkrunfw is resolved relative to msb
-# automatically (../lib/ from the msb binary).
 import os as _os
-
-from microsandbox._runtime import msb_path as _msb_path
-
-if "MSB_PATH" not in _os.environ:
-    _bundled_msb = _msb_path()
-    if _bundled_msb.exists():
-        _os.environ["MSB_PATH"] = str(_bundled_msb)
 
 from microsandbox._microsandbox import (
     ExecHandle,
@@ -35,6 +25,10 @@ from microsandbox._microsandbox import (
     is_installed,
     version,
 )
+from microsandbox._microsandbox import (
+    set_runtime_msb_path as _set_runtime_msb_path,
+)
+from microsandbox._runtime import msb_path as _msb_path
 from microsandbox.errors import (
     ExecFailedError,
     ExecTimeoutError,
@@ -111,6 +105,13 @@ from microsandbox.types import (
     TlsConfig,
     ViolationAction,
 )
+
+# Pass the bundled msb path to Rust explicitly. `MSB_PATH` remains a user
+# override and is still honored first by the native resolver.
+if "MSB_PATH" not in _os.environ:
+    _bundled_msb = _msb_path()
+    if _bundled_msb.exists():
+        _set_runtime_msb_path(str(_bundled_msb))
 
 __all__ = [
     # Sandbox lifecycle (native)

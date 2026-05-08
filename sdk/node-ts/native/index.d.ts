@@ -1555,6 +1555,13 @@ export interface SecretInjection {
   body: boolean
 }
 
+/**
+ * Set the `msb` binary path resolved by the JS SDK.
+ *
+ * This avoids using `process.env` as an internal JS-to-native config channel.
+ */
+export declare function setRuntimeMsbPath(path: string): void
+
 /** Built snapshot configuration produced by `SnapshotBuilder.build()`. */
 export interface SnapshotConfig {
   sourceSandbox: string

@@ -22,6 +22,7 @@ mod network_policy_builder;
 mod patch_builder;
 mod pull_progress;
 mod registry_builder;
+mod runtime_config;
 mod sandbox;
 mod sandbox_builder;
 mod sandbox_handle;

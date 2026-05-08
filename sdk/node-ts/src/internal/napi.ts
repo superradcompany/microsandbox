@@ -1,18 +1,16 @@
 import { createRequire } from "node:module";
 import { msbPath } from "./resolve-binary.js";
 
-// Make the bundled msb visible to the Rust binding. `MSB_PATH` is the
-// hook the SDK's config layer honors first; libkrunfw is then resolved
-// alongside msb (msb_dir/../lib/libkrunfw.{so,dylib}). Set only when
-// unset so user-provided overrides win.
-if (!process.env.MSB_PATH) {
-  const resolved = msbPath();
-  if (resolved) process.env.MSB_PATH = resolved;
-}
+// Resolve the runtime binary once. User-provided MSB_PATH still wins, but the
+// SDK passes the resolved path to native code explicitly instead of relying on
+// JS-side process.env mutations being visible to Rust.
+const resolvedMsbPath = process.env.MSB_PATH || msbPath();
 
 const require = createRequire(import.meta.url);
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const native = require("../../native/index.cjs") as NativeBindings;
+
+if (resolvedMsbPath) native.setRuntimeMsbPath?.(resolvedMsbPath);
 
 export const napi = native;
 
@@ -22,6 +20,7 @@ export const napi = native;
 // dependency on the generated d.ts.
 
 export interface NativeBindings {
+  readonly setRuntimeMsbPath?: (path: string) => void;
   readonly Sandbox: NapiSandboxStatic;
   readonly SandboxBuilder: NapiSandboxBuilderCtor;
   readonly Volume: NapiVolumeStatic;

@@ -23,6 +23,7 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(setup::install, m)?)?;
     m.add_function(wrap_pyfunction!(setup::is_installed, m)?)?;
+    m.add_function(wrap_pyfunction!(set_runtime_msb_path, m)?)?;
     m.add_function(wrap_pyfunction!(metrics::all_sandbox_metrics, m)?)?;
     m.add_class::<sandbox::PySandbox>()?;
     m.add_class::<sandbox_handle::PySandboxHandle>()?;
@@ -51,4 +52,10 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[pyfunction]
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// Set the `msb` binary path resolved by the Python SDK.
+#[pyfunction]
+fn set_runtime_msb_path(path: String) {
+    microsandbox::config::set_sdk_msb_path(path);
 }

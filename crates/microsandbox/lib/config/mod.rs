@@ -117,8 +117,8 @@ pub struct DatabaseConfig {
 pub struct PathsConfig {
     /// Path to `msb` binary.
     ///
-    /// Resolution: `MSB_PATH` env → this → workspace-local (debug only)
-    /// → `~/.microsandbox/bin/msb` → PATH lookup.
+    /// Resolution: `MSB_PATH` env → SDK runtime path → this →
+    /// workspace-local (debug only) → `~/.microsandbox/bin/msb` → PATH lookup.
     pub msb: Option<PathBuf>,
 
     /// Path to `libkrunfw.{so,dylib}`.
@@ -248,6 +248,7 @@ struct KeyringRegistryCredential {
 //--------------------------------------------------------------------------------------------------
 
 static CONFIG: OnceLock<GlobalConfig> = OnceLock::new();
+static SDK_MSB_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 impl GlobalConfig {
     /// Get the resolved home directory.
@@ -606,18 +607,33 @@ pub fn set_config(config: GlobalConfig) -> Result<(), GlobalConfig> {
     CONFIG.set(config)
 }
 
+/// Set the `msb` binary path resolved by an SDK package.
+///
+/// This is an internal SDK bridge for runtimes where mutating `process.env`
+/// does not update the native process environment. User-provided `MSB_PATH`
+/// still wins over this value. Set-once: subsequent calls are ignored.
+pub fn set_sdk_msb_path(path: impl Into<PathBuf>) {
+    let _ = SDK_MSB_PATH.set(path.into());
+}
+
 /// Resolve the path to the `msb` binary.
 ///
 /// Resolution order:
 /// 1. `MSB_PATH` environment variable
-/// 2. `config().paths.msb`
-/// 3. workspace-local `build/msb` or `target/debug/msb` (debug builds only)
-/// 4. `~/.microsandbox/bin/msb`
-/// 5. `which::which("msb")`
+/// 2. SDK-provided runtime path
+/// 3. `config().paths.msb`
+/// 4. workspace-local `build/msb` or `target/debug/msb` (debug builds only)
+/// 5. `~/.microsandbox/bin/msb`
+/// 6. `which::which("msb")`
 pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
     if let Ok(path) = std::env::var("MSB_PATH") {
         tracing::debug!(path = %path, source = "MSB_PATH env", "resolved msb binary");
         return Ok(PathBuf::from(path));
+    }
+
+    if let Some(path) = SDK_MSB_PATH.get() {
+        tracing::debug!(path = %path.display(), source = "SDK runtime path", "resolved msb binary");
+        return Ok(path.clone());
     }
 
     if let Some(path) = &config().paths.msb {
