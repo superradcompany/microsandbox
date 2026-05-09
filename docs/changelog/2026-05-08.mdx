@@ -1,0 +1,57 @@
+---
+title: "Week of May 8, 2026"
+description: "Captured logs and `msb logs`, file-first disk snapshots, PID 1 init handoff, and more."
+icon: "bolt"
+---
+
+<Tip>
+  **Released this week:** [v0.4.4](https://github.com/superradcompany/microsandbox/releases/tag/v0.4.4) · [v0.4.5](https://github.com/superradcompany/microsandbox/releases/tag/v0.4.5)
+</Tip>
+
+## New features
+
+**Captured logs and `msb logs`**
+
+Every sandbox now records its captured stdout, stderr, and PTY output to an on-disk `exec.log` as JSON Lines, and a new `msb logs` command (plus `logs()` on the Rust, TypeScript, and Python SDKs) reads it back. Logs survive a stopped or crashed sandbox, so you can inspect what happened after the fact without keeping a process attached. Failed starts also produce a structured `boot-error.json` that surfaces the failure stage, errno, and a hint inline instead of a generic exit-status message.
+
+```bash
+msb logs devbox --tail 100
+msb logs devbox -f --grep ERROR
+msb logs devbox --source system
+```
+
+See the [Logs](/sandboxes/logs) page and the [`msb logs` reference](/cli/sandbox-commands#msb-logs).
+
+**File-first disk snapshots**
+
+Snapshot a stopped sandbox to a content-addressed directory on disk and boot a fresh sandbox from that artifact later, on the same host or a different one. Snapshots are sparse-aware (reflink on APFS, btrfs, and XFS; `SEEK_DATA`/`SEEK_HOLE` elsewhere) so they stay small. The CLI ships `msb snapshot create`, `open`, `list`, `remove`, `export`, `import`, `verify`, plus `msb run --from <name|path>` to fork. The Rust, TypeScript, and Python SDKs all gain matching `Snapshot`, `SnapshotHandle`, and `Sandbox(Builder)?` methods.
+
+```bash
+msb run --name worker alpine -- sh -lc "echo hello > /root/marker.txt && sync"
+msb stop worker
+msb snapshot create worker
+msb run --from worker alpine -- cat /root/marker.txt
+```
+
+See [Sandbox snapshots](/sandboxes/snapshots).
+
+**PID 1 init handoff**
+
+Hand PID 1 inside the guest off to systemd, OpenRC, s6, or any other init binary with `--init <PATH>` (or `--init auto` for the common systemd-on-Debian/Ubuntu case). The agent does its boot setup, then forks; the parent execs your init and becomes PID 1, and the agent stays alive in the child to keep the host channel up. All three SDKs gain matching `init` / `InitConfig` surfaces, and shutdown adapts to send the right signal to the new init.
+
+```bash
+msb run ghcr.io/superradcompany/debian-systemd:12 \
+  --init auto \
+  --memory 1G --cpus 2
+```
+
+See [Custom init system](/sandboxes/customize#custom-init-system).
+
+**Other features**
+
+- **`MSB_HOME` env override.** Point microsandbox at an isolated state directory without touching `$HOME`. Useful for parallel CI jobs that share a runner. See [Configuration](/configuration).
+
+## Bug fixes
+
+- IPv4 and IPv6 in the guest are now gated on whether the host actually has a route for each family, fixing DNS upstream flakes on v4-only hosts that previously got an IPv6 address regardless.
+- The 30 second relay handshake deadline is now enforced as wall-clock across the whole connect path, so a sandbox that stalls mid-handshake no longer hangs the CLI; on timeout, the runtime prefers the structured `boot-error.json` over the raw IO error.
