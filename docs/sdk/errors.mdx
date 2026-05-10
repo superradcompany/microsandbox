@@ -171,6 +171,50 @@ except ExecFailedError as e:
 
 The CLI maps these kinds to POSIX-style exit codes: `127` for `NotFound`, `126` for `PermissionDenied` and `NotExecutable`, `1` otherwise. SDK callers reading the error directly don't need to think about exit codes — branch on `kind` instead.
 
+## Name conflicts
+
+Creating a sandbox with a name that's already in use (and without `replace`) surfaces a typed error you can branch on to decide whether to recover (resume the existing one, regenerate the name, etc.).
+
+<CodeGroup>
+```rust Rust
+use microsandbox::Error;
+
+match Sandbox::builder("worker").image("alpine").create().await {
+    Ok(sb) => { /* ... */ }
+    Err(Error::SandboxAlreadyExists(name)) => {
+        eprintln!("sandbox {name} already exists; resume or pass .replace()");
+    }
+    Err(e) => return Err(e),
+}
+```
+
+```typescript TypeScript
+import { SandboxAlreadyExistsError } from "microsandbox";
+
+try {
+    const sb = await Sandbox.builder("worker").image("alpine").create();
+} catch (e) {
+    if (e instanceof SandboxAlreadyExistsError) {
+        console.error("sandbox already exists; resume or pass replace()");
+    } else {
+        throw e;
+    }
+}
+```
+
+```python Python
+from microsandbox import SandboxAlreadyExistsError
+
+try:
+    sb = await Sandbox.create("worker", image="alpine")
+except SandboxAlreadyExistsError:
+    print("sandbox already exists; resume or pass replace=True")
+```
+
+</CodeGroup>
+
+Pass `replace()` / `replace=True` / `--replace` to stop the existing sandbox and recreate it. See [Replace existing](/sandboxes/overview#replace-existing) for the grace-period knob.
+
 ## Sandbox start failures
 
 When a sandbox process exits before the agent relay is ready (mount errors, missing rootfs, network setup failures), the SDK surfaces a typed `BootStart` / `BootStartError`. The payload carries the failure stage and errno so callers can recover or report cleanly.

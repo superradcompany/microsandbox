@@ -96,6 +96,7 @@ export interface NapiSandboxBuilderSetters {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   registry(configure: (b: any) => any): this;
   replace(): this;
+  replaceGrace(graceMs: number): this;
   entrypoint(cmd: string[]): this;
   init(cmd: string, args?: string[]): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

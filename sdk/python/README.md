@@ -302,6 +302,36 @@ async with await Sandbox.create("temp", image="alpine", replace=True) as sb:
 # Sandbox is automatically killed and removed on exit.
 ```
 
+### Replace Existing
+
+`replace=True` stops a sandbox with the same name (if any) and
+recreates it. By default the existing one gets 10 seconds to exit
+cleanly after `SIGTERM` before `SIGKILL`; pass `replace_grace` (in
+seconds, fractional allowed) to override. Setting `replace_grace`
+implies `replace=True`.
+
+```python
+# Default 10s SIGTERM grace.
+sb = await Sandbox.create("worker", image="alpine", replace=True)
+
+# Wait longer for a workload that needs more time to shut down.
+sb = await Sandbox.create("worker", image="alpine", replace_grace=30)
+
+# Skip SIGTERM entirely; SIGKILL immediately.
+sb = await Sandbox.create("worker", image="alpine", replace_grace=0)
+```
+
+If you'd rather handle the conflict yourself, catch the typed error:
+
+```python
+from microsandbox import SandboxAlreadyExistsError
+
+try:
+    sb = await Sandbox.create("worker", image="alpine")
+except SandboxAlreadyExistsError:
+    print("already exists; resume or pass replace=True")
+```
+
 ### TLS Interception
 
 ```python

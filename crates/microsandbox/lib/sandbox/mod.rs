@@ -1716,22 +1716,22 @@ async fn prepare_create_target(
 
     if !config.replace_existing {
         if existing.is_some() || dir_exists {
-            return Err(crate::MicrosandboxError::Custom(format!(
+            return Err(crate::MicrosandboxError::SandboxAlreadyExists(format!(
                 "sandbox '{}' already exists; remove it, start the stopped sandbox, or recreate with .replace()",
                 config.name
             )));
         }
-
         return Ok(());
     }
 
     if let Some(model) = existing {
         let model = reconcile_sandbox_runtime_state(pools, model).await?;
-        if matches!(
+        let active = matches!(
             model.status,
             SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
-        ) {
-            stop_sandbox_for_replacement(pools, &model).await?;
+        );
+        if active {
+            stop_sandbox_for_replacement(pools, &model, config.replace_grace).await?;
         }
 
         sandbox_entity::Entity::delete_by_id(model.id)
@@ -1743,9 +1743,21 @@ async fn prepare_create_target(
     Ok(())
 }
 
+/// Stop the prior sandbox before recreating it.
+///
+/// Sends SIGTERM with the configured grace, then escalates to SIGKILL
+/// and waits a short reap window. Single path for both same-process and
+/// foreign-process owners: SIGKILL bypasses any signal handler so the
+/// process is dead within kernel time, and the reap completes via the
+/// owning process's existing wait machinery (tokio's SIGCHLD driver
+/// when we're the parent, or the foreign parent's own `waitpid`).
+/// Replaces the previous "wait 30s and give up" behavior, which spun
+/// the full timeout when libkrun's SIGTERM handler did a slow
+/// graceful shutdown.
 async fn stop_sandbox_for_replacement(
     pools: &DbPools,
     sandbox: &sandbox_entity::Model,
+    grace: std::time::Duration,
 ) -> MicrosandboxResult<()> {
     let run = load_active_run(pools.read(), sandbox.id).await?;
     let pids: Vec<i32> = run
@@ -1755,20 +1767,32 @@ async fn stop_sandbox_for_replacement(
         .into_iter()
         .collect();
 
-    for pid in &pids {
-        nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(*pid),
-            nix::sys::signal::Signal::SIGTERM,
-        )?;
-    }
+    if !pids.is_empty() {
+        // Polite phase: SIGTERM and wait up to `grace` for graceful exit.
+        if !grace.is_zero() {
+            for pid in &pids {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(*pid),
+                    nix::sys::signal::Signal::SIGTERM,
+                );
+            }
+            wait_for_pids_to_exit(&pids, grace).await;
+        }
 
-    wait_for_pids_to_exit(&pids, std::time::Duration::from_secs(30)).await;
-
-    if pids.iter().any(|pid| pid_is_alive(*pid)) {
-        return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
-            "cannot replace sandbox '{}': existing sandbox did not stop in time",
-            sandbox.name
-        )));
+        // SIGKILL anything still alive. We don't wait or verify after
+        // SIGKILL: it's uncatchable, so termination is bounded by kernel
+        // time, and the only state that would have us spin is the
+        // zombie window between exit and the parent's `waitpid`. That
+        // window is harmless: prepare_create_target wipes the DB row
+        // and the sandbox dir, the new spawn gets a fresh PID, and the
+        // zombie reaps on its own (tokio's SIGCHLD driver when we own
+        // it, or the foreign parent's wait machinery otherwise).
+        for pid in pids.iter().copied().filter(|p| pid_is_alive(*p)) {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
     }
 
     mark_sandbox_stopped_for_replacement(

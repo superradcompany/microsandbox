@@ -33,7 +33,8 @@ Create and boot a sandbox. The first argument is either a name (`str`) or a full
 | user | `str` | Default guest user |
 | entrypoint | `list[str]` | Override image entrypoint |
 | init | `str \| dict \|` [`InitConfig`](#initconfig) | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/customize#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
-| replace | `bool` | Replace existing sandbox with same name |
+| replace | `bool` | Replace existing sandbox with same name (10s SIGTERM grace, then SIGKILL) |
+| replace_grace | `float` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (default `10`; `0` skips `SIGTERM`). Implies `replace=True` |
 | max_duration | `float` | Maximum sandbox lifetime in seconds |
 | idle_timeout | `float` | Idle timeout in seconds |
 | env | `dict[str, str]` | Environment variables visible to all commands |

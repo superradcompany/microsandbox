@@ -758,6 +758,12 @@ export declare class SandboxBuilder {
   registry(configure: (arg: RegistryConfigBuilder) => RegistryConfigBuilder): this
   /** Replace any existing sandbox with the same name. */
   replace(): this
+  /**
+   * Grace period (in milliseconds) to wait for the existing sandbox
+   * to exit after SIGTERM before escalating to SIGKILL during a
+   * replace. Implies `replace`. Zero skips SIGTERM entirely.
+   */
+  replaceGrace(graceMs: number): this
   /** Override the image entrypoint. */
   entrypoint(cmd: Array<string>): this
   /**

@@ -20,6 +20,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::Database(_) => "Database",
         MicrosandboxError::InvalidConfig(_) => "InvalidConfig",
         MicrosandboxError::SandboxNotFound(_) => "SandboxNotFound",
+        MicrosandboxError::SandboxAlreadyExists(_) => "SandboxAlreadyExists",
         MicrosandboxError::SandboxStillRunning(_) => "SandboxStillRunning",
         MicrosandboxError::Runtime(_) => "Runtime",
         MicrosandboxError::BootStart { .. } => "BootStart",
