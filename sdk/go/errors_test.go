@@ -129,6 +129,7 @@ func TestKindFromFFIAllTags(t *testing.T) {
 		want ErrorKind
 	}{
 		{ffi.KindSandboxNotFound, ErrSandboxNotFound},
+		{ffi.KindSandboxAlreadyExists, ErrSandboxAlreadyExists},
 		{ffi.KindSandboxStillRunning, ErrSandboxStillRunning},
 		{ffi.KindVolumeNotFound, ErrVolumeNotFound},
 		{ffi.KindVolumeAlreadyExists, ErrVolumeAlreadyExists},

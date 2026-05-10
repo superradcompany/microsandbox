@@ -29,8 +29,9 @@ const (
 	ErrSandboxNotRunning
 
 	// ErrSandboxAlreadyExists indicates a sandbox with the given name
-	// already exists. Reserved for future use; currently surfaces as
-	// ErrInvalidConfig.
+	// already exists. Returned by CreateSandbox when the name is taken
+	// and WithReplace was not set, and by CreateSandbox with WithReplace
+	// when a live in-process Sandbox handle for that name is still held.
 	ErrSandboxAlreadyExists
 
 	// ErrSandboxStillRunning indicates a sandbox cannot be removed while
@@ -242,6 +243,8 @@ func kindFromFFI(kind string) ErrorKind {
 	switch kind {
 	case ffi.KindSandboxNotFound:
 		return ErrSandboxNotFound
+	case ffi.KindSandboxAlreadyExists:
+		return ErrSandboxAlreadyExists
 	case ffi.KindSandboxStillRunning:
 		return ErrSandboxStillRunning
 	case ffi.KindVolumeNotFound:
