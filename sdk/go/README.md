@@ -577,6 +577,7 @@ sb, err := h.Connect(ctx)
 | Constant | Meaning |
 |----------|---------|
 | `ErrSandboxNotFound` | No sandbox with that name |
+| `ErrSandboxAlreadyExists` | Name is taken; pass `WithReplace()` or drop the live handle first |
 | `ErrSandboxStillRunning` | Cannot remove a running sandbox |
 | `ErrVolumeNotFound` | No volume with that name |
 | `ErrVolumeAlreadyExists` | Volume name already in use |
@@ -594,7 +595,7 @@ sb, err := h.Connect(ctx)
 | `ErrLibraryNotLoaded` | `EnsureInstalled` was not called before using the SDK |
 | `ErrInternal` | Catch-all for unrecognised runtime errors |
 
-Additional kinds declared for forward compatibility with the Node/Python SDKs — currently surface as `ErrInternal` / `ErrInvalidConfig` / `ErrFilesystem` / `ErrImageNotFound`: `ErrSandboxNotRunning`, `ErrSandboxAlreadyExists`, `ErrExecFailed`, `ErrPathNotFound`, `ErrImagePullFailed`, `ErrNetworkPolicy`, `ErrSecretViolation`, `ErrTLS`.
+Additional kinds declared for forward compatibility with the Node/Python SDKs — currently surface as `ErrInternal` / `ErrInvalidConfig` / `ErrFilesystem` / `ErrImageNotFound`: `ErrSandboxNotRunning`, `ErrExecFailed`, `ErrPathNotFound`, `ErrImagePullFailed`, `ErrNetworkPolicy`, `ErrSecretViolation`, `ErrTLS`.
 
 Use `microsandbox.IsKind(err, microsandbox.ErrSandboxNotFound)` to test.
 
