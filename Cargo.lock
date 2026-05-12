@@ -2673,7 +2673,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "microsandbox-go-ffi"
+name = "microsandbox-go"
 version = "0.4.5"
 dependencies = [
  "base64 0.22.1",

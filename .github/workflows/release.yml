@@ -203,9 +203,9 @@ jobs:
           cp target/release/msb build/msb
 
       # -- Go FFI cdylib --
-      - name: Build microsandbox-go-ffi
+      - name: Build microsandbox-go
         run: |
-          cargo build --release -p microsandbox-go-ffi
+          cargo build --release -p microsandbox-go
           mkdir -p build
           if [ "${{ matrix.os }}" = "darwin" ]; then
             cp target/release/libmicrosandbox_go_ffi.dylib build/
@@ -553,6 +553,42 @@ jobs:
 
       - name: Publish to PyPI
         run: uv publish dist/*.whl
+
+  # ---------------------------------------------------------------------------
+  # Publish Go SDK by creating the subdirectory module tag
+  #
+  # Go modules in subdirectories of a repo use prefixed tags
+  # (`sdk/go/vX.Y.Z`) so `go get .../sdk/go@vX.Y.Z` resolves. proxy.golang.org
+  # picks up the tag automatically; there's nothing to upload.
+  #
+  # Runs after `assemble` so the GitHub release (carrying
+  # libmicrosandbox_go_ffi.{dylib,so} that EnsureInstalled downloads) exists
+  # by the time the module tag is resolvable.
+  # ---------------------------------------------------------------------------
+  go-sdk-tag:
+    name: Tag Go SDK module
+    needs: assemble
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag sdk/go at the same commit
+        run: |
+          set -euo pipefail
+          ROOT_TAG="${GITHUB_REF_NAME}"          # e.g. v0.4.6
+          GO_TAG="sdk/go/${ROOT_TAG}"
+          if git rev-parse "refs/tags/${GO_TAG}" >/dev/null 2>&1; then
+            echo "tag ${GO_TAG} already exists — skipping"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${GO_TAG}" -m "Go SDK ${ROOT_TAG}" "${GITHUB_SHA}"
+          git push origin "${GO_TAG}"
 
   # ---------------------------------------------------------------------------
   # Publish Docker image to GHCR

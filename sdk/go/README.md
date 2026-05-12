@@ -626,7 +626,7 @@ To use a locally-built FFI library instead of downloading a release:
 
 ```bash
 # Build the FFI crate from the repo root.
-cargo build -p microsandbox-go-ffi
+cargo build -p microsandbox-go
 
 # Point the SDK at it.
 export MICROSANDBOX_LIB_PATH=$PWD/target/debug/libmicrosandbox_go_ffi.dylib  # macOS

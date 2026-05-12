@@ -51,7 +51,7 @@ package ffi
 
 // ---------------------------------------------------------------------------
 // Function pointer typedefs — one per Rust extern "C" function.
-// Keep in sync with sdk/go-ffi/src/lib.rs and microsandbox_go_ffi.h.
+// Keep in sync with sdk/go/native/src/lib.rs and microsandbox_go_ffi.h.
 // ---------------------------------------------------------------------------
 typedef void     (*msb_free_string_fn)(char *ptr);
 typedef uint64_t (*msb_cancel_alloc_fn)(void);
@@ -634,7 +634,7 @@ type Error struct {
 
 func (e *Error) Error() string { return e.Message }
 
-// Error kind strings. Keep in sync with sdk/go-ffi/src/lib.rs FfiError::kind.
+// Error kind strings. Keep in sync with sdk/go/native/src/lib.rs FfiError::kind.
 const (
 	KindSandboxNotFound      = "sandbox_not_found"
 	KindSandboxAlreadyExists = "sandbox_already_exists"

@@ -35,7 +35,7 @@ members = [
     "examples/rust/volume-named",
     "sdk/node-ts",
     "sdk/python",
-    "sdk/go-ffi",
+    "sdk/go/native",
 ]
 
 [workspace.package]
