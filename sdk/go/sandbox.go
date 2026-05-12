@@ -27,16 +27,50 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 	}
 
 	ffiOpts := ffi.CreateOptions{
-		Image:     o.Image,
-		MemoryMiB: o.MemoryMiB,
-		CPUs:      o.CPUs,
-		Workdir:   o.Workdir,
-		Hostname:  o.Hostname,
-		User:      o.User,
-		Replace:   o.Replace,
-		Env:       o.Env,
-		Detached:  o.Detached,
-		Ports:     o.Ports,
+		Image:           o.Image,
+		MemoryMiB:       o.MemoryMiB,
+		CPUs:            o.CPUs,
+		Workdir:         o.Workdir,
+		Shell:           o.Shell,
+		Hostname:        o.Hostname,
+		User:            o.User,
+		Replace:         o.Replace,
+		Env:             o.Env,
+		Detached:        o.Detached,
+		Entrypoint:      o.Entrypoint,
+		LogLevel:        string(o.LogLevel),
+		QuietLogs:       o.QuietLogs,
+		Scripts:         o.Scripts,
+		PullPolicy:      string(o.PullPolicy),
+		MaxDurationSecs: durationSecsCeil(o.MaxDuration),
+		IdleTimeoutSecs: durationSecsCeil(o.IdleTimeout),
+		StopSignal:      o.StopSignal,
+		Labels:          o.Labels,
+		Ports:           o.Ports,
+		PortsUDP:        o.PortsUDP,
+	}
+	if o.ReplaceWithGrace != nil {
+		var ms uint64
+		if d := *o.ReplaceWithGrace; d > 0 {
+			ms = uint64((d + time.Millisecond - 1) / time.Millisecond)
+		}
+		ffiOpts.ReplaceWithGraceMs = &ms
+	}
+	if o.Init != nil {
+		init := &ffi.InitOptions{Cmd: o.Init.Cmd, Args: append([]string(nil), o.Init.Args...)}
+		if len(o.Init.Env) > 0 {
+			init.Env = make([][2]string, 0, len(o.Init.Env))
+			for k, v := range o.Init.Env {
+				init.Env = append(init.Env, [2]string{k, v})
+			}
+		}
+		ffiOpts.Init = init
+	}
+	if o.RegistryAuth != nil {
+		ffiOpts.RegistryAuth = &ffi.RegistryAuthOptions{
+			Username: o.RegistryAuth.Username,
+			Password: o.RegistryAuth.Password,
+		}
 	}
 
 	if len(o.Volumes) > 0 {
@@ -46,6 +80,9 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 				Bind:     m.Bind,
 				Named:    m.Named,
 				Tmpfs:    m.Tmpfs,
+				Disk:     m.Disk,
+				Format:   m.Format,
+				Fstype:   m.Fstype,
 				Readonly: m.Readonly,
 				SizeMiB:  m.SizeMiB,
 			}
@@ -64,12 +101,13 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 			AllowHostPatterns: s.AllowHostPatterns,
 			Placeholder:       s.Placeholder,
 			RequireTLS:        s.RequireTLS,
+			OnViolation:       string(s.OnViolation),
 		})
 	}
 
 	for _, p := range o.Patches {
 		ffiOpts.Patches = append(ffiOpts.Patches, ffi.PatchOptions{
-			Kind:    p.Kind,
+			Kind:    string(p.Kind),
 			Path:    p.Path,
 			Content: p.Content,
 			Mode:    p.Mode,
@@ -88,6 +126,15 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 	return &Sandbox{inner: inner}, nil
 }
 
+// durationSecsCeil rounds a Duration up to whole seconds. Sub-second values
+// round up to 1 so that "any positive timeout" remains positive on the wire.
+func durationSecsCeil(d time.Duration) uint64 {
+	if d <= 0 {
+		return 0
+	}
+	return uint64((d + time.Second - 1) / time.Second)
+}
+
 // CreateSandboxDetached creates and boots a sandbox in detached mode. The VM
 // continues running after the returned handle is released or the Go process
 // exits. Reattach via GetSandbox.
@@ -99,25 +146,44 @@ func CreateSandboxDetached(ctx context.Context, name string, opts ...SandboxOpti
 // buildFFINetwork converts a public NetworkConfig into its ffi counterpart.
 func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	out := &ffi.NetworkOptions{
-		Policy:              n.Policy,
-		BlockDomains:        n.BlockDomains,
-		BlockDomainSuffixes: n.BlockDomainSuffixes,
+		Policy:              string(n.Policy),
 		DNSRebindProtection: n.DNSRebindProtection,
+		DenyDomains:         n.DenyDomains,
+		DenyDomainSuffixes:  n.DenyDomainSuffixes,
 		Ports:               n.Ports,
+		MaxConnections:      n.MaxConnections,
+		OnSecretViolation:   string(n.OnSecretViolation),
+		TrustHostCAs:        n.TrustHostCAs,
 	}
 
-	if len(n.Rules) > 0 || n.DefaultAction != "" {
-		cp := &ffi.CustomNetworkPolicy{DefaultAction: n.DefaultAction}
+	if len(n.Rules) > 0 || n.DefaultEgress != "" || n.DefaultIngress != "" {
+		cp := &ffi.CustomNetworkPolicy{
+			DefaultEgress:  string(n.DefaultEgress),
+			DefaultIngress: string(n.DefaultIngress),
+		}
 		for _, r := range n.Rules {
-			cp.Rules = append(cp.Rules, ffi.NetworkRule{
-				Action:      r.Action,
-				Direction:   r.Direction,
+			rule := ffi.NetworkRule{
+				Action:      string(r.Action),
+				Direction:   string(r.Direction),
 				Destination: r.Destination,
-				Protocol:    r.Protocol,
+				Protocol:    string(r.Protocol),
 				Port:        r.Port,
-			})
+				Ports:       append([]string(nil), r.Ports...),
+			}
+			for _, p := range r.Protocols {
+				rule.Protocols = append(rule.Protocols, string(p))
+			}
+			cp.Rules = append(cp.Rules, rule)
 		}
 		out.CustomPolicy = cp
+	}
+
+	if n.DNS != nil {
+		out.DNS = &ffi.DNSOptions{
+			RebindProtection: n.DNS.RebindProtection,
+			Nameservers:      append([]string(nil), n.DNS.Nameservers...),
+			QueryTimeoutMs:   n.DNS.QueryTimeoutMs,
+		}
 	}
 
 	if n.TLS != nil {
@@ -128,6 +194,7 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 			BlockQUIC:        n.TLS.BlockQUIC,
 			CACert:           n.TLS.CACert,
 			CAKey:            n.TLS.CAKey,
+			UpstreamCACerts:  append([]string(nil), n.TLS.UpstreamCACerts...),
 		}
 	}
 
@@ -187,13 +254,18 @@ func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error) {
 	return out, nil
 }
 
-// ListSandboxes returns the names of all known sandboxes.
-func ListSandboxes(ctx context.Context) ([]string, error) {
-	names, err := ffi.ListSandboxes(ctx)
+// ListSandboxes returns metadata for every known sandbox (running or stopped),
+// ordered by creation time (newest first).
+func ListSandboxes(ctx context.Context) ([]*SandboxHandle, error) {
+	infos, err := ffi.ListSandboxes(ctx)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
-	return names, nil
+	out := make([]*SandboxHandle, len(infos))
+	for i, info := range infos {
+		out[i] = newSandboxHandle(info)
+	}
+	return out, nil
 }
 
 // RemoveSandbox removes a stopped sandbox's persisted state by name.
@@ -365,9 +437,19 @@ func (s *Sandbox) Wait(ctx context.Context) (int, error) {
 
 // OwnsLifecycle reports whether this handle owns the VM process. When true,
 // closing or stopping the handle terminates the sandbox.
-func (s *Sandbox) OwnsLifecycle() bool {
-	owns, _ := s.inner.OwnsLifecycle()
-	return owns
+//
+// The error return covers stale handles and FFI-layer failures; callers that
+// don't care can use OwnsLifecycleOrFalse.
+func (s *Sandbox) OwnsLifecycle() (bool, error) {
+	owns, err := s.inner.OwnsLifecycle()
+	return owns, wrapFFI(err)
+}
+
+// OwnsLifecycleOrFalse is a convenience that swallows the error and returns
+// false on any failure. Suitable for log lines and best-effort branching.
+func (s *Sandbox) OwnsLifecycleOrFalse() bool {
+	owns, err := s.inner.OwnsLifecycle()
+	return err == nil && owns
 }
 
 // RemovePersisted removes the sandbox's persisted state (filesystem and

@@ -69,6 +69,7 @@ func TestExecEventKindConstants(t *testing.T) {
 		ExecEventStdout,
 		ExecEventStderr,
 		ExecEventExited,
+		ExecEventFailed,
 		ExecEventDone,
 	}
 	seen := make(map[ExecEventKind]bool, len(kinds))
@@ -94,6 +95,11 @@ func TestExecEventFields(t *testing.T) {
 	exited := ExecEvent{Kind: ExecEventExited, ExitCode: 1}
 	if exited.ExitCode != 1 {
 		t.Errorf("ExitCode: got %d, want 1", exited.ExitCode)
+	}
+
+	failed := ExecEvent{Kind: ExecEventFailed, Failure: &ExecFailure{Message: "boom"}}
+	if failed.Failure == nil || failed.Failure.Message != "boom" {
+		t.Errorf("Failure: got %+v", failed.Failure)
 	}
 
 	done := ExecEvent{Kind: ExecEventDone}

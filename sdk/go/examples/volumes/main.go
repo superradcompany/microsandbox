@@ -29,7 +29,10 @@ func main() {
 	name := fmt.Sprintf("go-sdk-vol-%d", time.Now().Unix())
 	log.Printf("creating volume %q (64 MiB quota)", name)
 
-	vol, err := microsandbox.CreateVolume(ctx, name, microsandbox.WithVolumeQuota(64))
+	vol, err := microsandbox.CreateVolume(ctx, name,
+		microsandbox.WithVolumeQuota(64),
+		microsandbox.WithVolumeLabels(map[string]string{"team": "agents", "tier": "test"}),
+	)
 	if err != nil {
 		log.Fatalf("CreateVolume: %v", err)
 	}
@@ -83,7 +86,7 @@ func main() {
 	fmt.Println("OK — volumes example passed")
 }
 
-func containsVolume(vols []*microsandbox.Volume, name string) bool {
+func containsVolume(vols []*microsandbox.VolumeHandle, name string) bool {
 	for _, v := range vols {
 		if v.Name() == name {
 			return true

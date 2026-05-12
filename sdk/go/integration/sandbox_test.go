@@ -1,6 +1,6 @@
 //go:build integration
 
-package microsandbox_test
+package integration
 
 import (
 	"context"
@@ -67,19 +67,19 @@ func TestCreateSandboxAndClose(t *testing.T) {
 		t.Errorf("Name() = %q, want %q", sb.Name(), name)
 	}
 
-	names, err := microsandbox.ListSandboxes(ctx)
+	handles, err := microsandbox.ListSandboxes(ctx)
 	if err != nil {
 		t.Fatalf("ListSandboxes: %v", err)
 	}
 	found := false
-	for _, n := range names {
-		if n == name {
+	for _, h := range handles {
+		if h.Name() == name {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("sandbox %q not found in ListSandboxes result %v", name, names)
+		t.Errorf("sandbox %q not found in ListSandboxes result", name)
 	}
 
 	if err := sb.Stop(ctx); err != nil {
@@ -560,8 +560,8 @@ func TestDNSBlockDomain(t *testing.T) {
 	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-			Policy:       "allow-all",
-			BlockDomains: []string{"blocked-domain-test.example.com"},
+			Policy:      microsandbox.NetworkPolicyPresetAllowAll,
+			DenyDomains: []string{"blocked-domain-test.example.com"},
 		}),
 	)
 	if err != nil {
@@ -597,8 +597,8 @@ func TestDNSBlockDomainSuffix(t *testing.T) {
 	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-			Policy:              "allow-all",
-			BlockDomainSuffixes: []string{".blocked-suffix-test.invalid"},
+			Policy:             microsandbox.NetworkPolicyPresetAllowAll,
+			DenyDomainSuffixes: []string{".blocked-suffix-test.invalid"},
 		}),
 	)
 	if err != nil {
@@ -1002,12 +1002,12 @@ func TestRemoveSandbox(t *testing.T) {
 		t.Fatalf("RemoveSandbox: %v", err)
 	}
 
-	names, err := microsandbox.ListSandboxes(ctx)
+	handles, err := microsandbox.ListSandboxes(ctx)
 	if err != nil {
 		t.Fatalf("ListSandboxes: %v", err)
 	}
-	for _, n := range names {
-		if n == name {
+	for _, h := range handles {
+		if h.Name() == name {
 			t.Errorf("sandbox %q still present after RemoveSandbox", name)
 		}
 	}

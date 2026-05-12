@@ -90,9 +90,16 @@ const (
 	ExecEventStderr ExecEventKind = ffi.ExecEventStderr
 	// ExecEventExited is sent when the process exits. ExitCode is valid.
 	ExecEventExited ExecEventKind = ffi.ExecEventExited
+	// ExecEventFailed is sent when the user program never started (binary
+	// missing, permission denied, etc.). Distinct from Exited — Failure is
+	// populated and ExitCode is not meaningful.
+	ExecEventFailed ExecEventKind = ffi.ExecEventFailed
 	// ExecEventDone signals that all events have been consumed.
 	ExecEventDone ExecEventKind = ffi.ExecEventDone
 )
+
+// ExecFailure carries structured detail about a failed-to-start exec.
+type ExecFailure = ffi.ExecFailure
 
 // ExecEvent is one event from a streaming exec session.
 type ExecEvent struct {
@@ -108,10 +115,18 @@ type ExecEvent struct {
 
 	// ExitCode is the process exit code. Populated on ExecEventExited.
 	ExitCode int
+
+	// Failure carries the failure detail. Populated on ExecEventFailed.
+	Failure *ExecFailure
 }
 
 // ExecSink is a write-only pipe to a running process's stdin. Obtain via
 // ExecHandle.TakeStdin. Implements io.WriteCloser.
+//
+// Both Write and Close use context.Background() under the hood — there is no
+// way to cancel a stuck stdin write through the io.Writer interface alone.
+// For caller-controlled cancellation, use WriteCtx (see the FFI layer) or
+// tear the session down via ExecHandle.Kill / Close.
 type ExecSink = ffi.ExecSink
 
 // ExecHandle is a live streaming exec session. Obtain via Sandbox.ExecStream.
@@ -130,9 +145,16 @@ func (h *ExecHandle) ID() (string, error) {
 	return id, wrapFFI(err)
 }
 
-// TakeStdin returns the stdin sink for this exec session. Only valid when
-// started with WithExecStdinPipe. Returns nil if stdin was not piped.
-// The caller is responsible for closing the sink when done writing.
+// TakeStdin returns the stdin sink for this exec session.
+//
+// Returns nil when:
+//   - the session was not started with WithExecStdinPipe, or
+//   - TakeStdin has already been called on this handle (single-take, matching
+//     the Node and Python SDK semantics).
+//
+// The caller is responsible for closing the sink when done writing. Closing
+// the sink without closing the exec handle is fine — they own different
+// Rust-side resources.
 func (h *ExecHandle) TakeStdin() *ExecSink {
 	return h.inner.TakeStdin()
 }
@@ -153,6 +175,7 @@ func (h *ExecHandle) Recv(ctx context.Context) (*ExecEvent, error) {
 		PID:      ev.PID,
 		Data:     ev.Data,
 		ExitCode: ev.ExitCode,
+		Failure:  ev.Failure,
 	}, nil
 }
 

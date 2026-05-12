@@ -42,6 +42,7 @@ type PolicyDirection string
 const (
 	PolicyDirectionEgress  PolicyDirection = "egress"
 	PolicyDirectionIngress PolicyDirection = "ingress"
+	PolicyDirectionAny     PolicyDirection = "any"
 )
 
 // PolicyProtocol is the protocol half of a PolicyRule.
@@ -55,14 +56,15 @@ const (
 )
 
 // NetworkPolicyPreset is the preset name accepted by NetworkConfig.Policy.
-// Prefer the NetworkPolicy factory (NetworkPolicy.None / PublicOnly / AllowAll)
-// which returns a preconfigured *NetworkConfig.
+// Prefer the NetworkPolicy factory (NetworkPolicy.None / PublicOnly / AllowAll
+// / NonLocal) which returns a preconfigured *NetworkConfig.
 type NetworkPolicyPreset string
 
 const (
 	NetworkPolicyPresetNone       NetworkPolicyPreset = "none"
 	NetworkPolicyPresetPublicOnly NetworkPolicyPreset = "public-only"
 	NetworkPolicyPresetAllowAll   NetworkPolicyPreset = "allow-all"
+	NetworkPolicyPresetNonLocal   NetworkPolicyPreset = "non-local"
 )
 
 // PatchKind is the discriminator for PatchConfig.Kind. Prefer the Patch
@@ -80,12 +82,40 @@ const (
 	PatchKindCopyDir  PatchKind = "copy_dir"
 )
 
-// PullPolicy controls image pull behaviour. Reserved for a future WithPullPolicy
-// option; declared now for parity with the other SDKs.
+// PullPolicy controls image pull behaviour.
 type PullPolicy string
 
 const (
+	// PullPolicyDefault is the zero value; the runtime applies its default
+	// (currently equivalent to PullPolicyIfMissing).
+	PullPolicyDefault   PullPolicy = ""
 	PullPolicyAlways    PullPolicy = "always"
 	PullPolicyIfMissing PullPolicy = "if-missing"
 	PullPolicyNever     PullPolicy = "never"
+)
+
+// LogLevel selects the sandbox process log verbosity.
+type LogLevel string
+
+const (
+	LogLevelDefault LogLevel = ""
+	LogLevelTrace   LogLevel = "trace"
+	LogLevelDebug   LogLevel = "debug"
+	LogLevelInfo    LogLevel = "info"
+	LogLevelWarn    LogLevel = "warn"
+	LogLevelError   LogLevel = "error"
+)
+
+// ViolationAction selects what happens when a secret placeholder is detected
+// going to a host the secret isn't allowed to talk to.
+type ViolationAction string
+
+const (
+	// ViolationActionDefault leaves the runtime default in place
+	// (currently "block-and-log").
+	ViolationActionDefault     ViolationAction = ""
+	ViolationActionBlock       ViolationAction = "block"
+	ViolationActionBlockAndLog ViolationAction = "block-and-log"
+	// ViolationActionBlockAndTerminate also kills the sandbox.
+	ViolationActionBlockAndTerminate ViolationAction = "block-and-terminate"
 )

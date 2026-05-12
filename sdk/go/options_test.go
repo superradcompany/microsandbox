@@ -95,6 +95,42 @@ func TestWithDetached(t *testing.T) {
 	}
 }
 
+func TestWithReplace(t *testing.T) {
+	o := SandboxConfig{}
+	WithReplace()(&o)
+	if !o.Replace {
+		t.Error("WithReplace should set Replace to true")
+	}
+	if o.ReplaceWithGrace != nil {
+		t.Errorf("WithReplace should leave ReplaceWithGrace nil, got %v", *o.ReplaceWithGrace)
+	}
+}
+
+func TestWithReplaceWithGrace(t *testing.T) {
+	cases := []struct {
+		name  string
+		grace time.Duration
+	}{
+		{"five seconds", 5 * time.Second},
+		{"zero (immediate SIGKILL)", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			o := SandboxConfig{}
+			WithReplaceWithGrace(tc.grace)(&o)
+			if !o.Replace {
+				t.Error("WithReplaceWithGrace should imply Replace")
+			}
+			if o.ReplaceWithGrace == nil {
+				t.Fatal("ReplaceWithGrace should be set")
+			}
+			if *o.ReplaceWithGrace != tc.grace {
+				t.Errorf("ReplaceWithGrace: got %v, want %v", *o.ReplaceWithGrace, tc.grace)
+			}
+		})
+	}
+}
+
 func TestWithPortsMerge(t *testing.T) {
 	o := SandboxConfig{}
 	WithPorts(map[uint16]uint16{8080: 80})(&o)
@@ -120,7 +156,7 @@ func TestWithPortsNilInitial(t *testing.T) {
 
 func TestWithNetwork(t *testing.T) {
 	o := SandboxConfig{}
-	net := &NetworkConfig{Policy: "public-only"}
+	net := &NetworkConfig{Policy: NetworkPolicyPresetPublicOnly}
 	WithNetwork(net)(&o)
 	if o.Network != net {
 		t.Error("WithNetwork should set the Network pointer")
@@ -128,7 +164,7 @@ func TestWithNetwork(t *testing.T) {
 }
 
 func TestWithNetworkNilClearsPolicy(t *testing.T) {
-	o := SandboxConfig{Network: &NetworkConfig{Policy: "allow-all"}}
+	o := SandboxConfig{Network: &NetworkConfig{Policy: NetworkPolicyPresetAllowAll}}
 	WithNetwork(nil)(&o)
 	if o.Network != nil {
 		t.Error("WithNetwork(nil) should clear Network")
@@ -138,11 +174,12 @@ func TestWithNetworkNilClearsPolicy(t *testing.T) {
 func TestNetworkPolicyFactory(t *testing.T) {
 	cases := []struct {
 		got  *NetworkConfig
-		want string
+		want NetworkPolicyPreset
 	}{
-		{NetworkPolicy.None(), "none"},
-		{NetworkPolicy.PublicOnly(), "public-only"},
-		{NetworkPolicy.AllowAll(), "allow-all"},
+		{NetworkPolicy.None(), NetworkPolicyPresetNone},
+		{NetworkPolicy.PublicOnly(), NetworkPolicyPresetPublicOnly},
+		{NetworkPolicy.AllowAll(), NetworkPolicyPresetAllowAll},
+		{NetworkPolicy.NonLocal(), NetworkPolicyPresetNonLocal},
 	}
 	for _, c := range cases {
 		if c.got.Policy != c.want {
@@ -216,15 +253,15 @@ func TestPatchFactoryKinds(t *testing.T) {
 	mode := uint32(0o644)
 	cases := []struct {
 		patch PatchConfig
-		kind  string
+		kind  PatchKind
 	}{
-		{Patch.Text("/a", "x", PatchOptions{Mode: &mode, Replace: true}), "text"},
-		{Patch.Append("/b", "y"), "append"},
-		{Patch.Mkdir("/c", PatchOptions{}), "mkdir"},
-		{Patch.Remove("/d"), "remove"},
-		{Patch.Symlink("/target", "/link", PatchOptions{}), "symlink"},
-		{Patch.CopyFile("./src", "/dst", PatchOptions{Mode: &mode}), "copy_file"},
-		{Patch.CopyDir("./src", "/dst", PatchOptions{Replace: true}), "copy_dir"},
+		{Patch.Text("/a", "x", PatchOptions{Mode: &mode, Replace: true}), PatchKindText},
+		{Patch.Append("/b", "y"), PatchKindAppend},
+		{Patch.Mkdir("/c", PatchOptions{}), PatchKindMkdir},
+		{Patch.Remove("/d"), PatchKindRemove},
+		{Patch.Symlink("/target", "/link", PatchOptions{}), PatchKindSymlink},
+		{Patch.CopyFile("./src", "/dst", PatchOptions{Mode: &mode}), PatchKindCopyFile},
+		{Patch.CopyDir("./src", "/dst", PatchOptions{Replace: true}), PatchKindCopyDir},
 	}
 	for _, c := range cases {
 		if c.patch.Kind != c.kind {
@@ -277,7 +314,12 @@ func TestPatchCopyFileFields(t *testing.T) {
 }
 
 func TestNetworkConfigPreset(t *testing.T) {
-	for _, preset := range []string{"none", "public-only", "allow-all"} {
+	for _, preset := range []NetworkPolicyPreset{
+		NetworkPolicyPresetNone,
+		NetworkPolicyPresetPublicOnly,
+		NetworkPolicyPresetAllowAll,
+		NetworkPolicyPresetNonLocal,
+	} {
 		n := &NetworkConfig{Policy: preset}
 		o := SandboxConfig{}
 		WithNetwork(n)(&o)
@@ -289,30 +331,51 @@ func TestNetworkConfigPreset(t *testing.T) {
 
 func TestNetworkConfigDNS(t *testing.T) {
 	n := &NetworkConfig{
-		BlockDomains:        []string{"evil.com"},
-		BlockDomainSuffixes: []string{".ads"},
+		DenyDomains:        []string{"evil.com"},
+		DenyDomainSuffixes: []string{".ads"},
 	}
-	if n.BlockDomains[0] != "evil.com" {
-		t.Errorf("BlockDomains[0]: got %q", n.BlockDomains[0])
+	if n.DenyDomains[0] != "evil.com" {
+		t.Errorf("DenyDomains[0]: got %q", n.DenyDomains[0])
 	}
-	if n.BlockDomainSuffixes[0] != ".ads" {
-		t.Errorf("BlockDomainSuffixes[0]: got %q", n.BlockDomainSuffixes[0])
+	if n.DenyDomainSuffixes[0] != ".ads" {
+		t.Errorf("DenyDomainSuffixes[0]: got %q", n.DenyDomainSuffixes[0])
 	}
 }
 
 func TestNetworkConfigCustomRules(t *testing.T) {
 	n := &NetworkConfig{
-		DefaultAction: "deny",
+		DefaultEgress:  PolicyActionDeny,
+		DefaultIngress: PolicyActionAllow,
 		Rules: []PolicyRule{
-			{Action: "allow", Direction: "egress", Destination: "api.example.com", Protocol: "tcp", Port: 443},
+			{
+				Action:      PolicyActionAllow,
+				Direction:   PolicyDirectionEgress,
+				Destination: "api.example.com",
+				Protocol:    PolicyProtocolTCP,
+				Port:        "443",
+			},
+			{
+				Action:      PolicyActionDeny,
+				Direction:   PolicyDirectionEgress,
+				Destination: ".ads",
+				Ports:       []string{"8000-9000"},
+				Protocols:   []PolicyProtocol{PolicyProtocolTCP, PolicyProtocolUDP},
+			},
 		},
 	}
-	if n.DefaultAction != "deny" {
-		t.Errorf("DefaultAction: got %q", n.DefaultAction)
+	if n.DefaultEgress != PolicyActionDeny {
+		t.Errorf("DefaultEgress: got %q", n.DefaultEgress)
 	}
-	r := n.Rules[0]
-	if r.Action != "allow" || r.Destination != "api.example.com" || r.Port != 443 {
-		t.Errorf("Rule: got %+v", r)
+	if n.DefaultIngress != PolicyActionAllow {
+		t.Errorf("DefaultIngress: got %q", n.DefaultIngress)
+	}
+	r0 := n.Rules[0]
+	if r0.Action != PolicyActionAllow || r0.Destination != "api.example.com" || r0.Port != "443" {
+		t.Errorf("Rule[0]: got %+v", r0)
+	}
+	r1 := n.Rules[1]
+	if r1.Ports[0] != "8000-9000" || len(r1.Protocols) != 2 {
+		t.Errorf("Rule[1]: got %+v", r1)
 	}
 }
 
@@ -337,6 +400,163 @@ func TestTlsConfigFields(t *testing.T) {
 	}
 	if tls.CACert != "/ca.pem" {
 		t.Errorf("CACert: got %q", tls.CACert)
+	}
+}
+
+func TestWithShell(t *testing.T) {
+	o := SandboxConfig{}
+	WithShell("/bin/bash")(&o)
+	if o.Shell != "/bin/bash" {
+		t.Errorf("Shell: got %q", o.Shell)
+	}
+}
+
+func TestWithEntrypoint(t *testing.T) {
+	o := SandboxConfig{}
+	WithEntrypoint("/usr/bin/python", "-m", "myapp")(&o)
+	if len(o.Entrypoint) != 3 || o.Entrypoint[0] != "/usr/bin/python" {
+		t.Errorf("Entrypoint: got %v", o.Entrypoint)
+	}
+}
+
+func TestWithInitFactories(t *testing.T) {
+	o := SandboxConfig{}
+	WithInit(Init.Auto())(&o)
+	if o.Init == nil || o.Init.Cmd != "auto" {
+		t.Fatalf("Auto init: got %+v", o.Init)
+	}
+	o2 := SandboxConfig{}
+	WithInit(Init.Cmd("/sbin/init", InitOptions{
+		Args: []string{"--daemon"},
+		Env:  map[string]string{"FOO": "BAR"},
+	}))(&o2)
+	if o2.Init == nil || o2.Init.Cmd != "/sbin/init" {
+		t.Fatalf("Cmd init: got %+v", o2.Init)
+	}
+	if o2.Init.Args[0] != "--daemon" || o2.Init.Env["FOO"] != "BAR" {
+		t.Errorf("Cmd init args/env: got %+v", o2.Init)
+	}
+}
+
+func TestWithLogLevelAndQuietLogs(t *testing.T) {
+	o := SandboxConfig{}
+	WithLogLevel(LogLevelDebug)(&o)
+	WithQuietLogs()(&o)
+	if o.LogLevel != LogLevelDebug || !o.QuietLogs {
+		t.Errorf("got %q quiet=%v", o.LogLevel, o.QuietLogs)
+	}
+}
+
+func TestWithScriptsMerge(t *testing.T) {
+	o := SandboxConfig{}
+	WithScripts(map[string]string{"build": "make", "test": "go test"})(&o)
+	WithScripts(map[string]string{"test": "pytest", "lint": "ruff"})(&o)
+	want := map[string]string{"build": "make", "test": "pytest", "lint": "ruff"}
+	if !reflect.DeepEqual(o.Scripts, want) {
+		t.Errorf("Scripts: got %v want %v", o.Scripts, want)
+	}
+}
+
+func TestWithPullPolicy(t *testing.T) {
+	o := SandboxConfig{}
+	WithPullPolicy(PullPolicyAlways)(&o)
+	if o.PullPolicy != PullPolicyAlways {
+		t.Errorf("PullPolicy: got %q", o.PullPolicy)
+	}
+}
+
+func TestWithMaxDurationAndIdleTimeout(t *testing.T) {
+	o := SandboxConfig{}
+	WithMaxDuration(90 * time.Second)(&o)
+	WithIdleTimeout(30 * time.Second)(&o)
+	if o.MaxDuration != 90*time.Second {
+		t.Errorf("MaxDuration: got %v", o.MaxDuration)
+	}
+	if o.IdleTimeout != 30*time.Second {
+		t.Errorf("IdleTimeout: got %v", o.IdleTimeout)
+	}
+}
+
+func TestWithStopSignal(t *testing.T) {
+	o := SandboxConfig{}
+	WithStopSignal("SIGINT")(&o)
+	if o.StopSignal != "SIGINT" {
+		t.Errorf("StopSignal: got %q", o.StopSignal)
+	}
+}
+
+func TestWithLabelsMerge(t *testing.T) {
+	o := SandboxConfig{}
+	WithLabels(map[string]string{"team": "agents"})(&o)
+	WithLabels(map[string]string{"team": "platform", "tier": "prod"})(&o)
+	want := map[string]string{"team": "platform", "tier": "prod"}
+	if !reflect.DeepEqual(o.Labels, want) {
+		t.Errorf("Labels: got %v want %v", o.Labels, want)
+	}
+}
+
+func TestWithRegistryAuth(t *testing.T) {
+	o := SandboxConfig{}
+	WithRegistryAuth(RegistryAuth{Username: "u", Password: "p"})(&o)
+	if o.RegistryAuth == nil || o.RegistryAuth.Username != "u" || o.RegistryAuth.Password != "p" {
+		t.Errorf("RegistryAuth: got %+v", o.RegistryAuth)
+	}
+}
+
+func TestWithPortsUDP(t *testing.T) {
+	o := SandboxConfig{}
+	WithPortsUDP(map[uint16]uint16{53: 53})(&o)
+	if o.PortsUDP[53] != 53 {
+		t.Errorf("PortsUDP[53]: got %d", o.PortsUDP[53])
+	}
+}
+
+func TestMountFactoryKinds(t *testing.T) {
+	cases := []struct {
+		mount MountConfig
+		kind  MountKind
+	}{
+		{Mount.Bind("/host", MountOptions{}), MountKindBind},
+		{Mount.Named("vol", MountOptions{Readonly: true}), MountKindNamed},
+		{Mount.Tmpfs(TmpfsOptions{SizeMiB: 128}), MountKindTmpfs},
+		{Mount.Disk("/host/data.img", DiskOptions{Format: "raw", Fstype: "ext4"}), MountKindDisk},
+	}
+	for _, c := range cases {
+		if c.mount.Kind() != c.kind {
+			t.Errorf("Kind: got %d want %d", c.mount.Kind(), c.kind)
+		}
+	}
+}
+
+func TestMountReadonlyOption(t *testing.T) {
+	m := Mount.Bind("/etc/hosts", MountOptions{Readonly: true})
+	if !m.Readonly {
+		t.Error("Bind readonly: want true")
+	}
+	tm := Mount.Tmpfs(TmpfsOptions{SizeMiB: 64, Readonly: true})
+	if !tm.Readonly || tm.SizeMiB != 64 {
+		t.Errorf("Tmpfs: got %+v", tm)
+	}
+	d := Mount.Disk("/host/img", DiskOptions{Readonly: true, Fstype: "xfs"})
+	if !d.Readonly || d.Fstype != "xfs" {
+		t.Errorf("Disk: got %+v", d)
+	}
+}
+
+func TestWithVolumeLabelsMerge(t *testing.T) {
+	o := VolumeConfig{}
+	WithVolumeLabels(map[string]string{"a": "1"})(&o)
+	WithVolumeLabels(map[string]string{"a": "2", "b": "3"})(&o)
+	want := map[string]string{"a": "2", "b": "3"}
+	if !reflect.DeepEqual(o.Labels, want) {
+		t.Errorf("Labels: got %v want %v", o.Labels, want)
+	}
+}
+
+func TestSecretEnvOnViolation(t *testing.T) {
+	s := Secret.Env("TOK", "v", SecretEnvOptions{OnViolation: ViolationActionBlockAndTerminate})
+	if s.OnViolation != ViolationActionBlockAndTerminate {
+		t.Errorf("OnViolation: got %q", s.OnViolation)
 	}
 }
 

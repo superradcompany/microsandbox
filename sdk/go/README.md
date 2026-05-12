@@ -23,7 +23,7 @@ The `microsandbox` Go module provides native bindings to the [microsandbox](http
 
 ## Requirements
 
-- **Go** >= 1.21
+- **Go** >= 1.22
 - **Linux** with KVM enabled, or **macOS** with Apple Silicon (M-series)
 
 ## Supported Platforms
@@ -187,22 +187,25 @@ err = fs.RemoveDir(ctx, "/app/data")      // recursive
 ### Named Volumes
 
 ```go
-// Create a 100 MiB named volume.
+// Create a 100 MiB named volume with labels.
 vol, err := microsandbox.CreateVolume(ctx, "my-data",
     microsandbox.WithVolumeQuota(100),
+    microsandbox.WithVolumeLabels(map[string]string{"team": "agents"}),
 )
 if err != nil {
     log.Fatal(err)
 }
 defer microsandbox.RemoveVolume(ctx, "my-data")
 
-// Mount volumes into a sandbox.
+// Mount volumes into a sandbox. Mount factories take an option struct so
+// readonly / size / disk format can be passed at the call site.
 sb, err := microsandbox.CreateSandbox(ctx, "worker",
     microsandbox.WithImage("python:3.12"),
     microsandbox.WithMounts(map[string]microsandbox.MountConfig{
-        "/data":    microsandbox.Mount.Named("my-data"),
-        "/src":     microsandbox.MountConfig{Bind: "./src", Readonly: true},
-        "/scratch": microsandbox.Mount.Tmpfs(),
+        "/data":    microsandbox.Mount.Named("my-data", microsandbox.MountOptions{}),
+        "/src":     microsandbox.Mount.Bind("./src", microsandbox.MountOptions{Readonly: true}),
+        "/scratch": microsandbox.Mount.Tmpfs(microsandbox.TmpfsOptions{SizeMiB: 256}),
+        "/blob":    microsandbox.Mount.Disk("./pool.img", microsandbox.DiskOptions{Format: "raw"}),
     }),
 )
 
@@ -210,14 +213,20 @@ sb, err := microsandbox.CreateSandbox(ctx, "worker",
 handle, err := microsandbox.GetVolume(ctx, "my-data")
 fmt.Println(handle.Path())       // host filesystem path
 fmt.Println(handle.UsedBytes())  // bytes in use
+fmt.Println(handle.Labels())     // map[string]string
 
-// Direct host-side file ops via VolumeFs (no agent protocol).
+// Direct host-side file ops via VolumeFs (no agent protocol). Paths that
+// would escape the volume root via "../" or absolute components return
+// ErrPathEscape.
 vfs := handle.FS()
 err = vfs.WriteString("notes.txt", "hello")
 content, err := vfs.ReadString("notes.txt")
 
-// List all volumes.
+// List all volumes — returns rich VolumeHandle metadata.
 vols, err := microsandbox.ListVolumes(ctx)
+for _, v := range vols {
+    fmt.Println(v.Name(), v.Path(), v.QuotaMiB())
+}
 
 // ErrVolumeAlreadyExists on duplicate create.
 _, err = microsandbox.CreateVolume(ctx, "my-data")
@@ -247,13 +256,33 @@ sb, err = microsandbox.CreateSandbox(ctx, "open",
     microsandbox.WithNetwork(microsandbox.NetworkPolicy.AllowAll()),
 )
 
-// Custom rule set.
+// Allow public + private/LAN, deny loopback/link-local/metadata.
+sb, err = microsandbox.CreateSandbox(ctx, "lan",
+    microsandbox.WithImage("alpine:3.19"),
+    microsandbox.WithNetwork(microsandbox.NetworkPolicy.NonLocal()),
+)
+
+// Custom rule set with port ranges and asymmetric defaults.
 sb, err = microsandbox.CreateSandbox(ctx, "custom",
     microsandbox.WithImage("alpine:3.19"),
     microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-        DefaultAction: "deny",
+        DefaultEgress:  microsandbox.PolicyActionDeny,
+        DefaultIngress: microsandbox.PolicyActionAllow,
         Rules: []microsandbox.PolicyRule{
-            {Action: "allow", Destination: "api.openai.com", Protocol: "tcp", Port: 443},
+            {
+                Action:      microsandbox.PolicyActionAllow,
+                Direction:   microsandbox.PolicyDirectionEgress,
+                Destination: "api.openai.com",
+                Protocol:    microsandbox.PolicyProtocolTCP,
+                Port:        "443",
+            },
+            {
+                Action:      microsandbox.PolicyActionAllow,
+                Direction:   microsandbox.PolicyDirectionEgress,
+                Destination: ".internal",
+                Ports:       []string{"8000-9000"},
+                Protocols:   []microsandbox.PolicyProtocol{microsandbox.PolicyProtocolTCP},
+            },
         },
     }),
 )
@@ -265,8 +294,11 @@ sb, err = microsandbox.CreateSandbox(ctx, "custom",
 sb, err := microsandbox.CreateSandbox(ctx, "filtered",
     microsandbox.WithImage("alpine:3.19"),
     microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-        BlockDomains:        []string{"blocked.example.com"},
-        BlockDomainSuffixes: []string{".ads"},
+        DenyDomains:        []string{"blocked.example.com"},
+        DenyDomainSuffixes: []string{".ads"},
+        DNS: &microsandbox.DNSConfig{
+            Nameservers: []string{"1.1.1.1:53"},
+        },
     }),
 )
 ```
@@ -426,10 +458,15 @@ h.Close()
 ### Sandbox Listing
 
 ```go
-names, err := microsandbox.ListSandboxes(ctx)
-for _, name := range names {
-    fmt.Println(name)
+// ListSandboxes returns rich SandboxHandle metadata, ordered newest first.
+handles, err := microsandbox.ListSandboxes(ctx)
+for _, h := range handles {
+    fmt.Printf("%s [%s] created %s\n", h.Name(), h.Status(), h.CreatedAt())
 }
+
+// Reattach to a running sandbox by name.
+h, err := microsandbox.GetSandbox(ctx, "worker")
+sb, err := h.Connect(ctx)
 ```
 
 ## API Reference
@@ -444,7 +481,8 @@ for _, name := range names {
 | `StartSandbox(ctx, name)` | Boot a stopped sandbox by name |
 | `StartSandboxDetached(ctx, name)` | Boot a stopped sandbox in detached mode |
 | `GetSandbox(ctx, name)` | Fetch sandbox metadata; returns `*SandboxHandle` |
-| `ListSandboxes(ctx)` | List all known sandbox names |
+| `ListSandboxes(ctx)` | Rich metadata for all known sandboxes (newest first) |
+| `SDKVersion()` / `RuntimeVersion()` | SDK and loaded-runtime versions |
 | `RemoveSandbox(ctx, name)` | Remove a stopped sandbox by name |
 | `AllSandboxMetrics(ctx)` | Point-in-time metrics for all running sandboxes |
 | `CreateVolume(ctx, name, ...opts)` | Create a named persistent volume |
@@ -489,7 +527,8 @@ for _, name := range names {
 | `AttachShell(ctx)` | Interactive PTY session in the default shell |
 | `Drain(ctx)` | Send graceful drain signal (SIGUSR1) |
 | `Wait(ctx)` | Block until sandbox exits; returns exit code |
-| `OwnsLifecycle()` | Whether this handle controls the VM process |
+| `OwnsLifecycle()` | Whether this handle controls the VM process; returns `(bool, error)` |
+| `OwnsLifecycleOrFalse()` | Best-effort variant that swallows the error |
 | `RemovePersisted(ctx)` | Remove persisted state after the sandbox is stopped |
 | `Stop(ctx)` | Gracefully stop the sandbox (does not wait for VM exit) |
 | `StopAndWait(ctx)` | Stop the sandbox and wait for it to exit; returns the guest exit code |
@@ -508,13 +547,25 @@ for _, name := range names {
 | `WithEnv(map)` | Environment variables (merged across repeated calls) |
 | `WithDetached()` | Sandbox outlives the Go process |
 | `WithPorts(map)` | Publish host→guest TCP ports |
+| `WithPortsUDP(map)` | Publish host→guest UDP ports |
 | `WithNetwork(opts)` | Network policy, DNS filtering, TLS interception |
 | `WithSecrets(secrets...)` | Credential placeholders substituted at the network layer |
 | `WithPatches(patches...)` | Pre-boot rootfs modifications |
+| `WithMounts(map)` | Volume mounts keyed by guest path — use `Mount.Bind/Named/Tmpfs/Disk` |
 | `WithVolumeQuota(mib)` | Volume quota in MiB (zero = unlimited) |
+| `WithVolumeLabels(map)` | Key-value labels for organising volumes |
 | `WithHostname(hostname)` | Guest hostname |
 | `WithUser(user)` | User to run the sandbox process as (UID or name) |
 | `WithReplace()` | Kill any existing sandbox with the same name before creating |
+| `WithShell(path)` | Default shell binary inside the guest |
+| `WithEntrypoint(cmd...)` | Override the user-workload entrypoint |
+| `WithInit(cfg)` | Hand off PID 1 (use `Init.Auto()` or `Init.Cmd(...)`) |
+| `WithLogLevel(level)` / `WithQuietLogs()` | Sandbox-process logging |
+| `WithScripts(map)` | Named scripts the agent can run by key |
+| `WithPullPolicy(p)` | `PullPolicyAlways` / `PullPolicyIfMissing` / `PullPolicyNever` |
+| `WithMaxDuration(d)` / `WithIdleTimeout(d)` | Lifecycle caps |
+| `WithStopSignal(sig)` | Override the graceful-stop signal (default SIGTERM) |
+| `WithRegistryAuth(auth)` | Credentials for private OCI registries |
 | `WithMounts(map)` | Volume mounts keyed by guest path — use `Mount.Named/Bind/Tmpfs` |
 | `WithExecCwd(path)` | Working directory for a single `Exec`/`Shell` call |
 | `WithExecTimeout(d)` | Per-command timeout; returns `ErrExecTimeout` on breach |
@@ -547,6 +598,27 @@ Additional kinds declared for forward compatibility with the Node/Python SDKs �
 
 Use `microsandbox.IsKind(err, microsandbox.ErrSandboxNotFound)` to test.
 
+## Runnable Examples
+
+Each example is a self-contained `main.go` under `sdk/go/examples/`. Run any of them with `go run ./examples/<name>`:
+
+| Example | Covers |
+|---------|--------|
+| `basic` | end-to-end smoke: create, exec, read/write, metrics, stop, remove |
+| `filesystem` | Read/Write/List/Stat/Copy/Rename/Remove/Mkdir, host↔guest copy, ReadStream/WriteStream/WriterTo |
+| `network` | each policy preset (`None`, `PublicOnly`, `AllowAll`, `NonLocal`) and a custom rule list with port ranges and asymmetric egress/ingress defaults |
+| `ports` | TCP port publishing — listener inside the guest, dial from the host |
+| `secrets` | placeholder substitution at the network proxy; verifies the real value never enters the VM |
+| `patches` | each rootfs patch kind (`Text`, `Append`, `Mkdir`, `Symlink`, `CopyFile`, `CopyDir`, `Remove`) applied before boot |
+| `streaming` | streaming exec: events, signals, ctx cancellation |
+| `volumes` | named volumes with quotas/labels, ListVolumes, duplicate-create error |
+| `disk` | builds a tiny ext4 image at runtime, mounts it via `Mount.Disk`, then re-mounts read-only |
+| `detached` | detached lifecycle: detach, list, reattach by name, run, stop |
+| `tls` | TLS interception with a bypass list, intercepted-port set, and HTTP/3 fallback |
+| `metrics` | point-in-time `Metrics()`, streaming `MetricsStream()`, `AllSandboxMetrics()` |
+| `image-cache` | `Image.List` / `Get` / `Inspect` / `GCLayers` with full handle metadata, config, and layer listing |
+| `errors` | typed-error categories via `IsKind`, `errors.As`, and `*microsandbox.Error` |
+
 ## Development
 
 To use a locally-built FFI library instead of downloading a release:
@@ -562,17 +634,22 @@ export MICROSANDBOX_LIB_PATH=$PWD/target/debug/libmicrosandbox_go_ffi.so     # L
 go run ./examples/basic
 ```
 
-Run the unit tests:
+Run the unit tests (no FFI library required):
 
 ```bash
 go test ./...
 ```
 
-Run the integration tests (requires a built FFI library and a live microsandbox runtime):
+Run the full integration suite under `sdk/go/integration/` (requires a built FFI library and a live microsandbox runtime):
 
 ```bash
-go test -tags=integration ./...
+go test -tags=integration -v -count=1 ./integration/...
 ```
+
+The integration package is a black-box test suite organised by feature
+(`config_test.go`, `network_test.go`, `volume_test.go`, `fs_test.go`,
+`exec_test.go`, `metrics_test.go`, `lifecycle_test.go`, `sandbox_test.go`)
+and is built only with the `integration` tag.
 
 <small>Release version pins, download URLs, and on-disk runtime layout are kept consistent across the Go, Node, and Python SDKs in this repository.</small>
 

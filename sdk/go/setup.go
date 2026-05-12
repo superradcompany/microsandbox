@@ -23,7 +23,7 @@ import (
 // EnsureInstalled downloader fetches runtime artefacts (msb + libkrunfw +
 // libmicrosandbox_go_ffi) from the matching GitHub release. Bump when cutting
 // a new SDK release so it matches published artefacts.
-const sdkVersion = "0.3.13"
+const sdkVersion = "0.4.5"
 
 // libkrunfwABI is the major SONAME version of libkrunfw that msb links
 // against.
@@ -135,6 +135,19 @@ func IsInstalled() bool {
 		return false
 	}
 	return bundleInstalled(filepath.Join(baseDir, "bin"), filepath.Join(baseDir, "lib"))
+}
+
+// SDKVersion returns the microsandbox release version this SDK was compiled
+// against. Useful for logging and matching against the installed runtime.
+func SDKVersion() string {
+	return sdkVersion
+}
+
+// RuntimeVersion returns the version reported by the loaded library.
+// Returns ErrLibraryNotLoaded if EnsureInstalled has not been called.
+func RuntimeVersion() (string, error) {
+	v, err := ffi.Version()
+	return v, wrapFFI(err)
 }
 
 // defaultInstallDir returns ~/.microsandbox, creating it on first access.

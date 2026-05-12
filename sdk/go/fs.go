@@ -32,9 +32,36 @@ type FsStat struct {
 }
 
 // Read reads the contents of a file from the sandbox.
+//
+// The default FFI buffer is 1 MiB. For files larger than ~750 KiB (after
+// base64 inflation) the runtime returns BufferTooSmall on the single-shot
+// path; this method transparently falls back to ReadStream so callers get a
+// uniform Read-returns-bytes interface up to runtime memory limits.
 func (fs *SandboxFs) Read(ctx context.Context, path string) ([]byte, error) {
 	data, err := fs.sandbox.inner.FsRead(ctx, path)
-	return data, wrapFFI(err)
+	if err == nil {
+		return data, nil
+	}
+	wrapped := wrapFFI(err)
+	if !IsKind(wrapped, ErrBufferTooSmall) {
+		return nil, wrapped
+	}
+	stream, sErr := fs.ReadStream(ctx, path)
+	if sErr != nil {
+		return nil, wrapped
+	}
+	defer stream.Close()
+	var buf []byte
+	for {
+		chunk, rErr := stream.Recv(ctx)
+		if rErr != nil {
+			return nil, rErr
+		}
+		if chunk == nil {
+			return buf, nil
+		}
+		buf = append(buf, chunk...)
+	}
 }
 
 // ReadString reads a file and returns its contents as a string.
@@ -147,28 +174,36 @@ func (s *FsReadStream) Recv(ctx context.Context) ([]byte, error) {
 	return chunk, nil
 }
 
-// WriteTo implements io.WriterTo: drains the stream into w, returning total
-// bytes written. Closes the stream when done.
+// WriteTo implements io.WriterTo: drains the stream into w using
+// context.Background and returns the total bytes written. The caller still
+// owns the stream — Close it when done. For ctx-controlled draining, use
+// CopyTo.
+//
+// On a write error, WriteTo returns the partial byte count and the error;
+// the underlying read stream is left open so the caller can decide how to
+// recover or release it.
 func (s *FsReadStream) WriteTo(w io.Writer) (int64, error) {
+	return s.CopyTo(context.Background(), w)
+}
+
+// CopyTo drains the stream into w, honouring ctx for per-chunk cancellation.
+// The caller still owns the stream — Close it when done.
+func (s *FsReadStream) CopyTo(ctx context.Context, w io.Writer) (int64, error) {
 	var total int64
-	ctx := context.Background()
 	for {
 		chunk, err := s.Recv(ctx)
 		if err != nil {
-			_ = s.Close()
 			return total, err
 		}
 		if chunk == nil {
-			break
+			return total, nil
 		}
 		n, err := w.Write(chunk)
 		total += int64(n)
 		if err != nil {
-			_ = s.Close()
 			return total, err
 		}
 	}
-	return total, s.Close()
 }
 
 // Close releases the read stream handle.

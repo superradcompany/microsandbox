@@ -113,10 +113,18 @@ typedef char *(*msb_sandbox_remove_persisted_fn)(uint64_t cancel_id, uint64_t ha
 typedef char *(*msb_all_sandbox_metrics_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_metrics_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 
-typedef char *(*msb_volume_create_fn)(uint64_t cancel_id, const char *name, uint32_t quota_mib, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_volume_create_fn)(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_volume_remove_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_volume_list_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_volume_get_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_version_fn)(uint8_t *buf, size_t buf_len);
+
+typedef char *(*msb_image_get_fn)(uint64_t cancel_id, const char *reference, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_image_list_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_image_inspect_fn)(uint64_t cancel_id, const char *reference, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_image_remove_fn)(uint64_t cancel_id, const char *reference, bool force, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_image_gc_layers_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_image_gc_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_fs_read_stream_fn)(uint64_t cancel_id, uint64_t handle, const char *path, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_fs_read_stream_recv_fn)(uint64_t cancel_id, uint64_t stream_handle, uint8_t *buf, size_t buf_len);
@@ -190,6 +198,13 @@ static msb_fs_read_stream_close_fn ptr_msb_fs_read_stream_close = NULL;
 static msb_fs_write_stream_fn      ptr_msb_fs_write_stream      = NULL;
 static msb_fs_write_stream_write_fn ptr_msb_fs_write_stream_write = NULL;
 static msb_fs_write_stream_close_fn ptr_msb_fs_write_stream_close = NULL;
+static msb_version_fn              ptr_msb_version              = NULL;
+static msb_image_get_fn            ptr_msb_image_get            = NULL;
+static msb_image_list_fn           ptr_msb_image_list           = NULL;
+static msb_image_inspect_fn        ptr_msb_image_inspect        = NULL;
+static msb_image_remove_fn         ptr_msb_image_remove         = NULL;
+static msb_image_gc_layers_fn      ptr_msb_image_gc_layers      = NULL;
+static msb_image_gc_fn             ptr_msb_image_gc             = NULL;
 
 // dlopen handle — set once by load_microsandbox, never closed.
 static void *lib_handle = NULL;
@@ -285,6 +300,13 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_fs_write_stream);
 	RESOLVE(msb_fs_write_stream_write);
 	RESOLVE(msb_fs_write_stream_close);
+	RESOLVE(msb_version);
+	RESOLVE(msb_image_get);
+	RESOLVE(msb_image_list);
+	RESOLVE(msb_image_inspect);
+	RESOLVE(msb_image_remove);
+	RESOLVE(msb_image_gc_layers);
+	RESOLVE(msb_image_gc);
 	return NULL;
 }
 
@@ -454,8 +476,8 @@ char *call_msb_all_sandbox_metrics(uint64_t cancel_id, uint8_t *buf, size_t buf_
 char *call_msb_sandbox_handle_metrics(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_handle_metrics ? ptr_msb_sandbox_handle_metrics(cancel_id, name, buf, buf_len) : NULL;
 }
-char *call_msb_volume_create(uint64_t cancel_id, const char *name, uint32_t quota_mib, uint8_t *buf, size_t buf_len) {
-	return ptr_msb_volume_create ? ptr_msb_volume_create(cancel_id, name, quota_mib, buf, buf_len) : NULL;
+char *call_msb_volume_create(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_volume_create ? ptr_msb_volume_create(cancel_id, name, opts_json, buf, buf_len) : NULL;
 }
 char *call_msb_volume_remove(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_volume_remove ? ptr_msb_volume_remove(cancel_id, name, buf, buf_len) : NULL;
@@ -483,6 +505,27 @@ char *call_msb_fs_write_stream_write(uint64_t cancel_id, uint64_t stream_handle,
 }
 char *call_msb_fs_write_stream_close(uint64_t cancel_id, uint64_t stream_handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_fs_write_stream_close ? ptr_msb_fs_write_stream_close(cancel_id, stream_handle, buf, buf_len) : NULL;
+}
+char *call_msb_version(uint8_t *buf, size_t buf_len) {
+	return ptr_msb_version ? ptr_msb_version(buf, buf_len) : NULL;
+}
+char *call_msb_image_get(uint64_t cancel_id, const char *reference, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_image_get ? ptr_msb_image_get(cancel_id, reference, buf, buf_len) : NULL;
+}
+char *call_msb_image_list(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_image_list ? ptr_msb_image_list(cancel_id, buf, buf_len) : NULL;
+}
+char *call_msb_image_inspect(uint64_t cancel_id, const char *reference, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_image_inspect ? ptr_msb_image_inspect(cancel_id, reference, buf, buf_len) : NULL;
+}
+char *call_msb_image_remove(uint64_t cancel_id, const char *reference, bool force, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_image_remove ? ptr_msb_image_remove(cancel_id, reference, force, buf, buf_len) : NULL;
+}
+char *call_msb_image_gc_layers(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_image_gc_layers ? ptr_msb_image_gc_layers(cancel_id, buf, buf_len) : NULL;
+}
+char *call_msb_image_gc(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_image_gc ? ptr_msb_image_gc(cancel_id, buf, buf_len) : NULL;
 }
 */
 import "C"
@@ -720,20 +763,47 @@ func releaseHandle(handle uint64) {
 // CreateOptions matches the JSON payload shape expected by msb_sandbox_create.
 // Zero-valued fields are omitted; the Rust side applies defaults.
 type CreateOptions struct {
-	Image     string               `json:"image,omitempty"`
-	MemoryMiB uint32               `json:"memory_mib,omitempty"`
-	CPUs      uint8                `json:"cpus,omitempty"`
-	Workdir   string               `json:"workdir,omitempty"`
-	Hostname  string               `json:"hostname,omitempty"`
-	User      string               `json:"user,omitempty"`
-	Replace   bool                 `json:"replace,omitempty"`
-	Env       map[string]string    `json:"env,omitempty"`
-	Detached  bool                 `json:"detached,omitempty"`
-	Ports     map[uint16]uint16    `json:"ports,omitempty"`
-	Network   *NetworkOptions      `json:"network,omitempty"`
-	Secrets   []SecretOptions      `json:"secrets,omitempty"`
-	Patches   []PatchOptions       `json:"patches,omitempty"`
-	Volumes   map[string]MountSpec `json:"volumes,omitempty"`
+	Image           string               `json:"image,omitempty"`
+	MemoryMiB       uint32               `json:"memory_mib,omitempty"`
+	CPUs            uint8                `json:"cpus,omitempty"`
+	Workdir         string               `json:"workdir,omitempty"`
+	Shell           string               `json:"shell,omitempty"`
+	Hostname        string               `json:"hostname,omitempty"`
+	User            string               `json:"user,omitempty"`
+	Replace            bool    `json:"replace,omitempty"`
+	ReplaceWithGraceMs *uint64 `json:"replace_with_grace_ms,omitempty"`
+	Env                map[string]string `json:"env,omitempty"`
+	Detached        bool                 `json:"detached,omitempty"`
+	Entrypoint      []string             `json:"entrypoint,omitempty"`
+	Init            *InitOptions         `json:"init,omitempty"`
+	LogLevel        string               `json:"log_level,omitempty"`
+	QuietLogs       bool                 `json:"quiet_logs,omitempty"`
+	Scripts         map[string]string    `json:"scripts,omitempty"`
+	PullPolicy      string               `json:"pull_policy,omitempty"`
+	MaxDurationSecs uint64               `json:"max_duration_secs,omitempty"`
+	IdleTimeoutSecs uint64               `json:"idle_timeout_secs,omitempty"`
+	StopSignal      string               `json:"stop_signal,omitempty"`
+	Labels          map[string]string    `json:"labels,omitempty"`
+	RegistryAuth    *RegistryAuthOptions `json:"registry_auth,omitempty"`
+	Ports           map[uint16]uint16    `json:"ports,omitempty"`
+	PortsUDP        map[uint16]uint16    `json:"ports_udp,omitempty"`
+	Network         *NetworkOptions      `json:"network,omitempty"`
+	Secrets         []SecretOptions      `json:"secrets,omitempty"`
+	Patches         []PatchOptions       `json:"patches,omitempty"`
+	Volumes         map[string]MountSpec `json:"volumes,omitempty"`
+}
+
+// InitOptions describes a guest PID-1 init handoff.
+type InitOptions struct {
+	Cmd  string      `json:"cmd"`
+	Args []string    `json:"args,omitempty"`
+	Env  [][2]string `json:"env,omitempty"`
+}
+
+// RegistryAuthOptions carries credentials for a private OCI registry.
+type RegistryAuthOptions struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 // MountSpec describes a volume mount for a sandbox.
@@ -741,6 +811,9 @@ type MountSpec struct {
 	Bind     string `json:"bind,omitempty"`
 	Named    string `json:"named,omitempty"`
 	Tmpfs    bool   `json:"tmpfs,omitempty"`
+	Disk     string `json:"disk,omitempty"`
+	Format   string `json:"format,omitempty"`
+	Fstype   string `json:"fstype,omitempty"`
 	Readonly bool   `json:"readonly,omitempty"`
 	SizeMiB  uint32 `json:"size_mib,omitempty"`
 }
@@ -749,26 +822,42 @@ type MountSpec struct {
 type NetworkOptions struct {
 	Policy              string               `json:"policy,omitempty"`
 	CustomPolicy        *CustomNetworkPolicy `json:"custom_policy,omitempty"`
-	BlockDomains        []string             `json:"block_domains,omitempty"`
-	BlockDomainSuffixes []string             `json:"block_domain_suffixes,omitempty"`
+	DNS                 *DNSOptions          `json:"dns,omitempty"`
 	DNSRebindProtection *bool                `json:"dns_rebind_protection,omitempty"`
+	DenyDomains         []string             `json:"deny_domains,omitempty"`
+	DenyDomainSuffixes  []string             `json:"deny_domain_suffixes,omitempty"`
 	TLS                 *TLSOptions          `json:"tls,omitempty"`
 	Ports               map[uint16]uint16    `json:"ports,omitempty"`
+	MaxConnections      *uint                `json:"max_connections,omitempty"`
+	OnSecretViolation   string               `json:"on_secret_violation,omitempty"`
+	TrustHostCAs        *bool                `json:"trust_host_cas,omitempty"`
 }
 
-// CustomNetworkPolicy is an explicit allow/deny rule set.
+// DNSOptions configures the in-VM DNS proxy.
+type DNSOptions struct {
+	RebindProtection *bool    `json:"rebind_protection,omitempty"`
+	Nameservers      []string `json:"nameservers,omitempty"`
+	QueryTimeoutMs   *uint64  `json:"query_timeout_ms,omitempty"`
+}
+
+// CustomNetworkPolicy is an explicit allow/deny rule set with asymmetric
+// defaults: `default_egress` defaults to deny, `default_ingress` to allow.
 type CustomNetworkPolicy struct {
-	DefaultAction string        `json:"default_action,omitempty"`
-	Rules         []NetworkRule `json:"rules,omitempty"`
+	DefaultEgress  string        `json:"default_egress,omitempty"`
+	DefaultIngress string        `json:"default_ingress,omitempty"`
+	Rules          []NetworkRule `json:"rules,omitempty"`
 }
 
-// NetworkRule is a single firewall rule.
+// NetworkRule is a single firewall rule. Port may be a single port ("443")
+// or a range ("8000-9000"); Ports lets callers pass multiple at once.
 type NetworkRule struct {
-	Action      string `json:"action"`
-	Direction   string `json:"direction,omitempty"`
-	Destination string `json:"destination,omitempty"`
-	Protocol    string `json:"protocol,omitempty"`
-	Port        uint16 `json:"port,omitempty"`
+	Action      string   `json:"action"`
+	Direction   string   `json:"direction,omitempty"`
+	Destination string   `json:"destination,omitempty"`
+	Protocol    string   `json:"protocol,omitempty"`
+	Protocols   []string `json:"protocols,omitempty"`
+	Port        string   `json:"port,omitempty"`
+	Ports       []string `json:"ports,omitempty"`
 }
 
 // TLSOptions configures the transparent HTTPS interception proxy.
@@ -779,6 +868,7 @@ type TLSOptions struct {
 	BlockQUIC        *bool    `json:"block_quic,omitempty"`
 	CACert           string   `json:"ca_cert,omitempty"`
 	CAKey            string   `json:"ca_key,omitempty"`
+	UpstreamCACerts  []string `json:"upstream_ca_certs,omitempty"`
 }
 
 // SecretOptions is the JSON representation of a single credential.
@@ -789,6 +879,7 @@ type SecretOptions struct {
 	AllowHostPatterns []string `json:"allow_host_patterns,omitempty"`
 	Placeholder       string   `json:"placeholder,omitempty"`
 	RequireTLS        *bool    `json:"require_tls,omitempty"`
+	OnViolation       string   `json:"on_violation,omitempty"`
 }
 
 // PatchOptions is the JSON representation of a single rootfs patch.
@@ -1116,8 +1207,8 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 	return err
 }
 
-// ListSandboxes returns the names of all known sandboxes (running or stopped).
-func ListSandboxes(ctx context.Context) ([]string, error) {
+// ListSandboxes returns metadata for all known sandboxes (running or stopped).
+func ListSandboxes(ctx context.Context) ([]*SandboxHandleInfo, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
@@ -1127,11 +1218,11 @@ func ListSandboxes(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var names []string
-	if err := json.Unmarshal([]byte(out), &names); err != nil {
+	var infos []*SandboxHandleInfo
+	if err := json.Unmarshal([]byte(out), &infos); err != nil {
 		return nil, fmt.Errorf("parse sandbox list: %w", err)
 	}
-	return names, nil
+	return infos, nil
 }
 
 // RemoveSandbox removes a stopped sandbox's persisted state by name.
@@ -1213,6 +1304,11 @@ func (s *Sandbox) Exec(ctx context.Context, cmd string, opts ExecOptions) (*Exec
 // Not safe for concurrent use from multiple goroutines.
 type ExecStreamHandle struct {
 	handle C.uint64_t
+	// stdinPiped reflects whether the session was started with stdin_pipe=true.
+	// Used to make TakeStdin return nil when there is no stdin to take.
+	stdinPiped bool
+	// stdinTaken is set on the first TakeStdin to enforce single-take.
+	stdinTaken bool
 }
 
 // ExecEventKind identifies what an ExecStreamEvent carries.
@@ -1223,15 +1319,28 @@ const (
 	ExecEventStdout
 	ExecEventStderr
 	ExecEventExited
+	ExecEventFailed
 	ExecEventDone // all events consumed; no further Recv calls needed
 )
+
+// ExecFailure carries the structured payload for ExecEventFailed events.
+// All fields are best-effort — on serialisation failure the runtime falls
+// back to populating only Message.
+type ExecFailure struct {
+	Kind      string `json:"kind,omitempty"`
+	Errno     *int   `json:"errno,omitempty"`
+	ErrnoName string `json:"errno_name,omitempty"`
+	Message   string `json:"message"`
+	Path      string `json:"path,omitempty"`
+}
 
 // ExecStreamEvent is one event from a streaming exec session.
 type ExecStreamEvent struct {
 	Kind     ExecEventKind
-	PID      uint32 // ExecEventStarted
-	Data     []byte // ExecEventStdout / ExecEventStderr
-	ExitCode int    // ExecEventExited
+	PID      uint32       // ExecEventStarted
+	Data     []byte       // ExecEventStdout / ExecEventStderr
+	ExitCode int          // ExecEventExited
+	Failure  *ExecFailure // ExecEventFailed
 }
 
 // ExecSink is a write-only sink for sending data to a running process's stdin.
@@ -1314,13 +1423,18 @@ func (s *Sandbox) ExecStream(ctx context.Context, cmd string, opts ExecOptions) 
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		return nil, fmt.Errorf("parse exec_stream response: %w", err)
 	}
-	return &ExecStreamHandle{handle: C.uint64_t(resp.ExecHandle)}, nil
+	return &ExecStreamHandle{handle: C.uint64_t(resp.ExecHandle), stdinPiped: opts.StdinPipe}, nil
 }
 
-// TakeStdin returns a sink for writing to the process's stdin. Only valid when
-// the exec session was started with StdinPipe==true. Returns nil otherwise.
+// TakeStdin returns a sink for writing to the process's stdin. Returns nil
+// when the exec session was not started with StdinPipe==true, and on every
+// call after the first (matching the Node SDK's single-take semantics).
 // The sink is valid until the exec session is closed.
 func (h *ExecStreamHandle) TakeStdin() *ExecSink {
+	if !h.stdinPiped || h.stdinTaken {
+		return nil
+	}
+	h.stdinTaken = true
 	return &ExecSink{execHandle: h.handle}
 }
 
@@ -1338,10 +1452,11 @@ func (h *ExecStreamHandle) Recv(ctx context.Context) (*ExecStreamEvent, error) {
 		return nil, err
 	}
 	var raw struct {
-		Event string `json:"event"`
-		PID   uint32 `json:"pid"`
-		Data  string `json:"data"` // base64
-		Code  int    `json:"code"`
+		Event string          `json:"event"`
+		PID   uint32          `json:"pid"`
+		Data  string          `json:"data"` // base64
+		Code  int             `json:"code"`
+		Error json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
 		return nil, fmt.Errorf("parse exec event: %w", err)
@@ -1366,6 +1481,18 @@ func (h *ExecStreamHandle) Recv(ctx context.Context) (*ExecStreamEvent, error) {
 	case "exited":
 		ev.Kind = ExecEventExited
 		ev.ExitCode = raw.Code
+	case "failed":
+		ev.Kind = ExecEventFailed
+		var f ExecFailure
+		if len(raw.Error) > 0 {
+			// Best-effort decode. If the wire format ever diverges from the
+			// ExecFailure shape, surface the raw text as Message rather than
+			// failing the whole stream.
+			if jerr := json.Unmarshal(raw.Error, &f); jerr != nil {
+				f = ExecFailure{Message: string(raw.Error)}
+			}
+		}
+		ev.Failure = &f
 	case "done":
 		ev.Kind = ExecEventDone
 	default:
@@ -2122,18 +2249,57 @@ func (s *Sandbox) FsWriteStream(ctx context.Context, path string) (*FsWriteStrea
 // Volumes
 // =============================================================================
 
-// CreateVolume creates a named persistent volume. quotaMiB==0 means unlimited.
-func CreateVolume(ctx context.Context, name string, quotaMiB uint32) error {
+// VolumeCreateOptions is the JSON payload accepted by msb_volume_create.
+type VolumeCreateOptions struct {
+	QuotaMiB uint32            `json:"quota_mib,omitempty"`
+	Labels   map[string]string `json:"labels,omitempty"`
+}
+
+// CreateVolume creates a named persistent volume and returns its metadata.
+func CreateVolume(ctx context.Context, name string, opts VolumeCreateOptions) (*VolumeHandleInfo, error) {
 	if err := ensureLoaded(); err != nil {
-		return err
+		return nil, err
+	}
+	optsJSON, err := json.Marshal(opts)
+	if err != nil {
+		return nil, fmt.Errorf("marshal volume opts: %w", err)
 	}
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
+	cOpts := C.CString(string(optsJSON))
+	defer C.free(unsafe.Pointer(cOpts))
 
-	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_volume_create(cancelID, cName, C.uint32_t(quotaMiB), buf, bufLen)
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_volume_create(cancelID, cName, cOpts, buf, bufLen)
 	})
-	return err
+	if err != nil {
+		return nil, err
+	}
+	return parseVolumeHandle(out)
+}
+
+// parseVolumeHandle decodes the JSON written by `volume_handle_json` on the
+// Rust side into a VolumeHandleInfo.
+func parseVolumeHandle(s string) (*VolumeHandleInfo, error) {
+	var raw struct {
+		Name          string            `json:"name"`
+		Path          string            `json:"path"`
+		QuotaMiB      *uint32           `json:"quota_mib"`
+		UsedBytes     uint64            `json:"used_bytes"`
+		Labels        map[string]string `json:"labels"`
+		CreatedAtUnix *int64            `json:"created_at_unix"`
+	}
+	if err := json.Unmarshal([]byte(s), &raw); err != nil {
+		return nil, fmt.Errorf("parse volume handle: %w", err)
+	}
+	return &VolumeHandleInfo{
+		Name:          raw.Name,
+		Path:          raw.Path,
+		QuotaMiB:      raw.QuotaMiB,
+		UsedBytes:     raw.UsedBytes,
+		Labels:        raw.Labels,
+		CreatedAtUnix: raw.CreatedAtUnix,
+	}, nil
 }
 
 // RemoveVolume removes a named volume.
@@ -2150,8 +2316,8 @@ func RemoveVolume(ctx context.Context, name string) error {
 	return err
 }
 
-// ListVolumes returns the names of all volumes.
-func ListVolumes(ctx context.Context) ([]string, error) {
+// ListVolumes returns metadata for every named volume on the host.
+func ListVolumes(ctx context.Context) ([]*VolumeHandleInfo, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
@@ -2161,21 +2327,50 @@ func ListVolumes(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var names []string
-	if err := json.Unmarshal([]byte(out), &names); err != nil {
+	var infos []*VolumeHandleInfo
+	if err := json.Unmarshal([]byte(out), &infos); err != nil {
 		return nil, fmt.Errorf("parse volume list: %w", err)
 	}
-	return names, nil
+	return infos, nil
+}
+
+// Version returns the runtime version reported by the loaded library.
+func Version() (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	buf := make([]byte, defaultBufSize)
+	errPtr := C.call_msb_version((*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+	if errPtr != nil {
+		msg := C.GoString(errPtr)
+		C.call_msb_free_string(errPtr)
+		var e Error
+		if jerr := json.Unmarshal([]byte(msg), &e); jerr != nil {
+			e = Error{Kind: KindInternal, Message: msg}
+		}
+		return "", &e
+	}
+	end := 0
+	for end < len(buf) && buf[end] != 0 {
+		end++
+	}
+	var resp struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(buf[:end], &resp); err != nil {
+		return "", fmt.Errorf("parse version: %w", err)
+	}
+	return resp.Version, nil
 }
 
 // VolumeHandleInfo carries metadata for a volume returned by GetVolume.
 type VolumeHandleInfo struct {
-	Name          string
-	Path          string
-	QuotaMiB      *uint32
-	UsedBytes     uint64
-	Labels        map[string]string
-	CreatedAtUnix *int64
+	Name          string            `json:"name"`
+	Path          string            `json:"path"`
+	QuotaMiB      *uint32           `json:"quota_mib"`
+	UsedBytes     uint64            `json:"used_bytes"`
+	Labels        map[string]string `json:"labels"`
+	CreatedAtUnix *int64            `json:"created_at_unix"`
 }
 
 // GetVolume looks up a volume by name and returns its metadata.
@@ -2210,4 +2405,161 @@ func GetVolume(ctx context.Context, name string) (*VolumeHandleInfo, error) {
 		Labels:        raw.Labels,
 		CreatedAtUnix: raw.CreatedAtUnix,
 	}, nil
+}
+
+// =============================================================================
+// Image cache
+// =============================================================================
+
+// ImageHandleInfo is the JSON shape of an image handle returned by the FFI.
+type ImageHandleInfo struct {
+	Reference      string `json:"reference"`
+	ManifestDigest string `json:"manifest_digest"`
+	Architecture   string `json:"architecture"`
+	OS             string `json:"os"`
+	LayerCount     uint   `json:"layer_count"`
+	SizeBytes      *int64 `json:"size_bytes"`
+	CreatedAtUnix  *int64 `json:"created_at_unix"`
+	LastUsedAtUnix *int64 `json:"last_used_at_unix"`
+}
+
+// ImageConfigDetail mirrors the parsed OCI config block.
+type ImageConfigDetail struct {
+	Digest     string            `json:"digest"`
+	Env        []string          `json:"env"`
+	Cmd        []string          `json:"cmd"`
+	Entrypoint []string          `json:"entrypoint"`
+	WorkingDir string            `json:"working_dir"`
+	User       string            `json:"user"`
+	Labels     map[string]string `json:"labels"`
+	StopSignal string            `json:"stop_signal"`
+}
+
+// ImageLayerDetail describes one layer of an image manifest.
+type ImageLayerDetail struct {
+	DiffID              string `json:"diff_id"`
+	BlobDigest          string `json:"blob_digest"`
+	MediaType           string `json:"media_type"`
+	CompressedSizeBytes *int64 `json:"compressed_size_bytes"`
+	ErofsSizeBytes      *int64 `json:"erofs_size_bytes"`
+	Position            int32  `json:"position"`
+}
+
+// ImageDetailInfo is the full inspect payload (handle + config + layers).
+type ImageDetailInfo struct {
+	ImageHandleInfo
+	Config *ImageConfigDetail `json:"config"`
+	Layers []ImageLayerDetail `json:"layers"`
+}
+
+// ImageGet fetches a single image by reference.
+func ImageGet(ctx context.Context, reference string) (*ImageHandleInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cRef := C.CString(reference)
+	defer C.free(unsafe.Pointer(cRef))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_image_get(cancelID, cRef, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var info ImageHandleInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse image_get: %w", err)
+	}
+	return &info, nil
+}
+
+// ImageList returns all cached images, newest first.
+func ImageList(ctx context.Context) ([]*ImageHandleInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_image_list(cancelID, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var infos []*ImageHandleInfo
+	if err := json.Unmarshal([]byte(out), &infos); err != nil {
+		return nil, fmt.Errorf("parse image_list: %w", err)
+	}
+	return infos, nil
+}
+
+// ImageInspect returns full image detail (handle + config + layers).
+func ImageInspect(ctx context.Context, reference string) (*ImageDetailInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cRef := C.CString(reference)
+	defer C.free(unsafe.Pointer(cRef))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_image_inspect(cancelID, cRef, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var info ImageDetailInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse image_inspect: %w", err)
+	}
+	return &info, nil
+}
+
+// ImageRemove deletes an image and (if force=false) errors when sandboxes
+// still reference it.
+func ImageRemove(ctx context.Context, reference string, force bool) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	cRef := C.CString(reference)
+	defer C.free(unsafe.Pointer(cRef))
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_image_remove(cancelID, cRef, C.bool(force), buf, bufLen)
+	})
+	return err
+}
+
+// ImageGCLayers garbage-collects orphaned layers and returns the count removed.
+func ImageGCLayers(ctx context.Context) (uint32, error) {
+	if err := ensureLoaded(); err != nil {
+		return 0, err
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_image_gc_layers(cancelID, buf, bufLen)
+	})
+	if err != nil {
+		return 0, err
+	}
+	var resp struct {
+		Removed uint32 `json:"removed"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return 0, fmt.Errorf("parse image_gc_layers: %w", err)
+	}
+	return resp.Removed, nil
+}
+
+// ImageGC garbage-collects everything reclaimable. Returns the count removed.
+func ImageGC(ctx context.Context) (uint32, error) {
+	if err := ensureLoaded(); err != nil {
+		return 0, err
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_image_gc(cancelID, buf, bufLen)
+	})
+	if err != nil {
+		return 0, err
+	}
+	var resp struct {
+		Removed uint32 `json:"removed"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return 0, fmt.Errorf("parse image_gc: %w", err)
+	}
+	return resp.Removed, nil
 }
