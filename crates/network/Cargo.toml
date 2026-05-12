@@ -11,6 +11,7 @@ edition.workspace = true
 path = "lib/lib.rs"
 
 [dependencies]
+base64 = "0.22"
 bytes = { workspace = true }
 crossbeam-queue = { workspace = true }
 dirs = { workspace = true }

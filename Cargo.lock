@@ -2697,6 +2697,7 @@ dependencies = [
 name = "microsandbox-network"
 version = "0.4.5"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "core-foundation 0.9.4",
  "crossbeam-queue",

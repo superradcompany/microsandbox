@@ -5,6 +5,8 @@
 
 use std::borrow::Cow;
 
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+
 use super::config::{SecretsConfig, ViolationAction};
 
 //--------------------------------------------------------------------------------------------------
@@ -42,6 +44,66 @@ struct EligibleSecret {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl EligibleSecret {
+    /// Returns true if any of the header-side injection scopes is enabled
+    /// (`headers`, `basic_auth`, or `query_params`).
+    fn wants_header_injection(&self) -> bool {
+        self.inject_headers || self.inject_basic_auth || self.inject_query_params
+    }
+
+    /// Substitute this secret's placeholder in the headers portion, scoped by
+    /// the secret's `headers` / `basic_auth` / `query_params` flags.
+    fn substitute_in_headers(&self, headers: &str) -> String {
+        let mut result = String::with_capacity(headers.len());
+        for (i, line) in headers.split("\r\n").enumerate() {
+            if i > 0 {
+                result.push_str("\r\n");
+            }
+            match self.substitute_in_header_line(line, i == 0) {
+                Some(s) => result.push_str(&s),
+                None => result.push_str(line),
+            }
+        }
+        result
+    }
+
+    /// Substitute this secret's placeholder in a single header line. Returns
+    /// `None` if the line is not in scope for any of the requested injection
+    /// modes.
+    fn substitute_in_header_line(&self, line: &str, is_request_line: bool) -> Option<String> {
+        if self.inject_basic_auth && is_authorization_header(line) {
+            return Some(self.substitute_basic_auth_header(line));
+        }
+        if self.inject_headers {
+            return Some(line.replace(&self.placeholder, &self.value));
+        }
+        if is_request_line && self.inject_query_params {
+            return Some(line.replace(&self.placeholder, &self.value));
+        }
+        None
+    }
+
+    /// Substitute this secret's placeholder inside an `Authorization` header.
+    /// For `Basic <base64>` headers the base64 payload is decoded, the
+    /// placeholder is substituted in the decoded credentials, and the result
+    /// is re-encoded. All other schemes (e.g. `Bearer`) fall back to a literal
+    /// replacement so placeholders appearing in plaintext tokens are still
+    /// substituted.
+    fn substitute_basic_auth_header(&self, line: &str) -> String {
+        let Some(decoded) = decode_basic_credentials(line) else {
+            return line.replace(&self.placeholder, &self.value);
+        };
+        if !decoded.contains(&self.placeholder) {
+            return line.replace(&self.placeholder, &self.value);
+        }
+        let Some((name, _)) = line.split_once(':') else {
+            return line.replace(&self.placeholder, &self.value);
+        };
+        let replaced = decoded.replace(&self.placeholder, &self.value);
+        format!("{name}: Basic {}", BASE64.encode(replaced.as_bytes()))
+    }
+}
 
 impl SecretsHandler {
     /// Create a handler for a specific connection.
@@ -95,33 +157,6 @@ impl SecretsHandler {
     /// Returns `None` if a violation is detected (placeholder going to a
     /// disallowed host) or `BlockAndTerminate` is triggered.
     pub fn substitute<'a>(&self, data: &'a [u8]) -> Option<Cow<'a, [u8]>> {
-        // Fast path: skip violation check when no ineligible secrets exist.
-        if self.has_ineligible {
-            let text = String::from_utf8_lossy(data);
-            if self.has_violation(&text) {
-                match self.on_violation {
-                    ViolationAction::Block => return None,
-                    ViolationAction::BlockAndLog => {
-                        tracing::warn!(
-                            "secret violation: placeholder detected for disallowed host"
-                        );
-                        return None;
-                    }
-                    ViolationAction::BlockAndTerminate => {
-                        tracing::error!(
-                            "secret violation: placeholder detected for disallowed host — terminating"
-                        );
-                        return None;
-                    }
-                }
-            }
-        }
-
-        if self.eligible.is_empty() {
-            // No substitution needed — return borrowed slice (zero-copy).
-            return Some(Cow::Borrowed(data));
-        }
-
         // Split raw bytes at the header boundary BEFORE converting to owned strings.
         // This avoids position shifts from from_utf8_lossy replacement chars.
         let boundary = find_header_boundary(data);
@@ -136,37 +171,38 @@ impl SecretsHandler {
             String::new()
         };
 
+        // Fast path: skip violation check when no ineligible secrets exist.
+        if self.has_ineligible && self.has_violation(&header_str, &body_str) {
+            match self.on_violation {
+                ViolationAction::Block => return None,
+                ViolationAction::BlockAndLog => {
+                    tracing::warn!("secret violation: placeholder detected for disallowed host");
+                    return None;
+                }
+                ViolationAction::BlockAndTerminate => {
+                    tracing::error!(
+                        "secret violation: placeholder detected for disallowed host — terminating"
+                    );
+                    return None;
+                }
+            }
+        }
+
+        if self.eligible.is_empty() {
+            // No substitution needed. Return borrowed slice (zero-copy).
+            return Some(Cow::Borrowed(data));
+        }
+
         for secret in &self.eligible {
             // Skip secrets that require TLS identity on non-intercepted connections.
             if secret.require_tls_identity && !self.tls_intercepted {
                 continue;
             }
-
-            if boundary.is_some() {
-                // Header portion: substitute based on headers/basic_auth/query_params scopes.
-                if secret.inject_headers || secret.inject_basic_auth || secret.inject_query_params {
-                    // Guard: only allocate a new String if the placeholder is actually present.
-                    if header_str.contains(&secret.placeholder) {
-                        header_str = substitute_in_headers(
-                            &header_str,
-                            &secret.placeholder,
-                            &secret.value,
-                            secret.inject_headers,
-                            secret.inject_basic_auth,
-                            secret.inject_query_params,
-                        );
-                    }
-                }
-
-                // Body portion.
-                if secret.inject_body && body_str.contains(&secret.placeholder) {
-                    body_str = body_str.replace(&secret.placeholder, &secret.value);
-                }
-            } else {
-                // No boundary found — treat entire message as headers.
-                if secret.inject_headers && header_str.contains(&secret.placeholder) {
-                    header_str = header_str.replace(&secret.placeholder, &secret.value);
-                }
+            if secret.wants_header_injection() {
+                header_str = secret.substitute_in_headers(&header_str);
+            }
+            if boundary.is_some() && secret.inject_body && body_str.contains(&secret.placeholder) {
+                body_str = body_str.replace(&secret.placeholder, &secret.value);
             }
         }
 
@@ -189,11 +225,9 @@ impl SecretsHandler {
     pub fn terminates_on_violation(&self) -> bool {
         matches!(self.on_violation, ViolationAction::BlockAndTerminate)
     }
-}
 
-impl SecretsHandler {
     /// Check if any placeholder appears in data for a host that isn't allowed.
-    fn has_violation(&self, text: &str) -> bool {
+    fn has_violation(&self, headers: &str, body: &str) -> bool {
         // Fast path: if all placeholders have matching eligible entries, no
         // violation is possible (every secret is allowed for this host).
         if self.eligible.len() == self.all_placeholders.len() {
@@ -201,8 +235,12 @@ impl SecretsHandler {
         }
 
         for placeholder in &self.all_placeholders {
-            if text.contains(placeholder.as_str())
-                && !self.eligible.iter().any(|s| s.placeholder == *placeholder)
+            if self.eligible.iter().any(|s| s.placeholder == *placeholder) {
+                continue;
+            }
+            if headers.contains(placeholder.as_str())
+                || body.contains(placeholder.as_str())
+                || basic_auth_decoded_contains(headers, placeholder)
             {
                 return true;
             }
@@ -216,47 +254,43 @@ impl SecretsHandler {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Substitute a placeholder in the headers portion with scoping:
-/// - `headers`: replace anywhere in headers
-/// - `basic_auth`: replace only in Authorization header lines
-/// - `query_params`: replace only in the request line's query string
-fn substitute_in_headers(
-    headers: &str,
-    placeholder: &str,
-    value: &str,
-    inject_all_headers: bool,
-    inject_basic_auth: bool,
-    inject_query_params: bool,
-) -> String {
-    if inject_all_headers {
-        // Replace everywhere in headers.
-        return headers.replace(placeholder, value);
+/// Returns true if `line` starts with the `Authorization:` header name
+/// (case-insensitive).
+fn is_authorization_header(line: &str) -> bool {
+    line.as_bytes()
+        .get(..14)
+        .is_some_and(|b| b.eq_ignore_ascii_case(b"authorization:"))
+}
+
+/// Decode the credentials of a `Basic` `Authorization` header line. Returns
+/// `None` if the line is not `Basic`-scheme or the payload is not valid
+/// base64 / UTF-8.
+fn decode_basic_credentials(line: &str) -> Option<String> {
+    let (_, raw_value) = line.split_once(':')?;
+    let (scheme, encoded) = split_auth_scheme(raw_value.trim_start())?;
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return None;
     }
+    let bytes = BASE64.decode(encoded.trim()).ok()?;
+    String::from_utf8(bytes).ok()
+}
 
-    // Line-by-line scoping.
-    let mut result = String::with_capacity(headers.len());
-    for (i, line) in headers.split("\r\n").enumerate() {
-        if i > 0 {
-            result.push_str("\r\n");
-        }
+/// Split an `Authorization` header value into `(scheme, rest)` at the first
+/// whitespace. Returns `None` if no whitespace separator is found.
+fn split_auth_scheme(header_value: &str) -> Option<(&str, &str)> {
+    let split_at = header_value.find(char::is_whitespace)?;
+    let (scheme, rest) = header_value.split_at(split_at);
+    Some((scheme, rest.trim_start()))
+}
 
-        if i == 0 && inject_query_params {
-            // Request line — substitute in query portion.
-            result.push_str(&line.replace(placeholder, value));
-        } else if inject_basic_auth
-            && line
-                .as_bytes()
-                .get(..14)
-                .is_some_and(|b| b.eq_ignore_ascii_case(b"authorization:"))
-        {
-            // Authorization header — substitute.
-            result.push_str(&line.replace(placeholder, value));
-        } else {
-            result.push_str(line);
-        }
-    }
-
-    result
+/// Returns true if any `Authorization: Basic` line in `headers` decodes to
+/// credentials containing `placeholder`.
+fn basic_auth_decoded_contains(headers: &str, placeholder: &str) -> bool {
+    headers
+        .split("\r\n")
+        .filter(|line| is_authorization_header(line))
+        .filter_map(decode_basic_credentials)
+        .any(|decoded| decoded.contains(placeholder))
 }
 
 /// Update the Content-Length header value in `headers` to `new_len`.
@@ -313,6 +347,15 @@ mod tests {
             allowed_hosts: vec![HostPattern::Exact(host.into())],
             injection: SecretInjection::default(),
             require_tls_identity: true,
+        }
+    }
+
+    fn basic_auth_only() -> SecretInjection {
+        SecretInjection {
+            headers: false,
+            basic_auth: true,
+            query_params: false,
+            body: false,
         }
     }
 
@@ -446,12 +489,7 @@ mod tests {
     #[test]
     fn basic_auth_only_substitution() {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
-        secret.injection = SecretInjection {
-            headers: false,
-            basic_auth: true,
-            query_params: false,
-            body: false,
-        };
+        secret.injection = basic_auth_only();
         let config = make_config(vec![secret]);
         let handler = SecretsHandler::new(&config, "api.openai.com", true);
 
@@ -462,6 +500,62 @@ mod tests {
         assert!(result.contains("Authorization: Bearer real-secret"));
         // Other headers should NOT be substituted.
         assert!(result.contains("X-Custom: $KEY"));
+    }
+
+    #[test]
+    fn basic_auth_decodes_substitutes_and_reencodes_credentials() {
+        let mut user = make_secret("$MSB_USER", "alice", "api.openai.com");
+        user.env_var = "USER".into();
+        user.injection = basic_auth_only();
+        let mut password = make_secret("$MSB_PASSWORD", "s3cr3t", "api.openai.com");
+        password.env_var = "PASSWORD".into();
+        password.injection = basic_auth_only();
+        let config = make_config(vec![user, password]);
+        let handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let encoded = BASE64.encode(b"$MSB_USER:$MSB_PASSWORD");
+        let input = format!("GET / HTTP/1.1\r\nAuthorization: Basic {encoded}\r\n\r\n");
+        let output = handler.substitute(input.as_bytes()).unwrap();
+        let result = String::from_utf8(output.into_owned()).unwrap();
+
+        assert!(result.contains(&format!(
+            "Authorization: Basic {}",
+            BASE64.encode(b"alice:s3cr3t")
+        )));
+        assert!(!result.contains("$MSB_USER"));
+        assert!(!result.contains("$MSB_PASSWORD"));
+    }
+
+    #[test]
+    fn basic_auth_encoded_placeholder_is_blocked_for_wrong_host() {
+        let mut secret = make_secret("$MSB_PASSWORD", "s3cr3t", "api.openai.com");
+        secret.injection = basic_auth_only();
+        let config = make_config(vec![secret]);
+        let handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let encoded = BASE64.encode(b"user:$MSB_PASSWORD");
+        let input = format!("GET / HTTP/1.1\r\nAuthorization: Basic {encoded}\r\n\r\n");
+
+        assert!(handler.substitute(input.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn basic_auth_encoded_placeholder_is_not_replaced_when_scope_disabled() {
+        let mut secret = make_secret("$MSB_PASSWORD", "s3cr3t", "api.openai.com");
+        secret.injection = SecretInjection {
+            headers: false,
+            basic_auth: false,
+            query_params: false,
+            body: false,
+        };
+        let config = make_config(vec![secret]);
+        let handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let encoded = BASE64.encode(b"user:$MSB_PASSWORD");
+        let input = format!("GET / HTTP/1.1\r\nAuthorization: Basic {encoded}\r\n\r\n");
+        let output = handler.substitute(input.as_bytes()).unwrap();
+
+        assert_eq!(String::from_utf8(output.into_owned()).unwrap(), input);
     }
 
     #[test]
