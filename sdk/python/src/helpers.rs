@@ -840,6 +840,19 @@ fn apply_secret(
     let placeholder: Option<String> = extract_opt(secret, "placeholder")?;
     let require_tls: Option<bool> = extract_opt(secret, "require_tls")?;
 
+    let (inject_headers, inject_basic_auth, inject_query_params, inject_body) =
+        if let Some(injection_obj) = secret.get_item("injection")? {
+            let injection = as_dict(&injection_obj)?;
+            (
+                extract_opt::<bool>(&injection, "headers")?,
+                extract_opt::<bool>(&injection, "basic_auth")?,
+                extract_opt::<bool>(&injection, "query_params")?,
+                extract_opt::<bool>(&injection, "body")?,
+            )
+        } else {
+            (None, None, None, None)
+        };
+
     Ok(builder.secret(|s| {
         let mut s = s.env(&env_var).value(value.clone());
         for host in &allow_hosts {
@@ -853,6 +866,18 @@ fn apply_secret(
         }
         if let Some(req) = require_tls {
             s = s.require_tls_identity(req);
+        }
+        if let Some(v) = inject_headers {
+            s = s.inject_headers(v);
+        }
+        if let Some(v) = inject_basic_auth {
+            s = s.inject_basic_auth(v);
+        }
+        if let Some(v) = inject_query_params {
+            s = s.inject_query(v);
+        }
+        if let Some(v) = inject_body {
+            s = s.inject_body(v);
         }
         s
     }))

@@ -106,6 +106,7 @@ from microsandbox.types import (
     SandboxStatus,
     Secret,
     SecretEntry,
+    SecretInjection,
     Size,
     Stdin,
     TlsConfig,
@@ -174,6 +175,7 @@ __all__ = [
     # Secrets & TLS
     "Secret",
     "SecretEntry",
+    "SecretInjection",
     "TlsConfig",
     "ViolationAction",
     # Images / rootfs
