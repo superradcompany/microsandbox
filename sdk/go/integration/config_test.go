@@ -129,15 +129,19 @@ func TestWithInitAuto(t *testing.T) {
 	}
 }
 
-// TestWithLogLevelAndQuietLogsRoundTrip exercises both options together.
-func TestWithLogLevelAndQuietLogsRoundTrip(t *testing.T) {
+// TestWithLogLevelRoundTrip verifies that WithLogLevel surfaces in the
+// persisted ConfigJSON.
+//
+// WithLogLevel and WithQuietLogs are mutually exclusive in the underlying
+// SDK: `quiet_logs()` sets log_level to None, so calling both with quiet
+// last clears the level. They're tested separately for that reason.
+func TestWithLogLevelRoundTrip(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-log-" + t.Name()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
 		microsandbox.WithLogLevel(microsandbox.LogLevelInfo),
-		microsandbox.WithQuietLogs(),
 	)
 	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
@@ -157,10 +161,36 @@ func TestWithLogLevelAndQuietLogsRoundTrip(t *testing.T) {
 	if !strings.Contains(cfg, `"info"`) {
 		t.Errorf("LogLevel not in ConfigJSON: %s", cfg)
 	}
-	// quiet_logs is a bool — accept either "quiet_logs":true or the named
-	// equivalent that the runtime serialises into.
-	if !strings.Contains(cfg, "quiet") {
-		t.Errorf("QuietLogs not in ConfigJSON: %s", cfg)
+}
+
+// TestWithQuietLogsClearsLogLevel verifies that WithQuietLogs results in
+// a null log_level in the persisted ConfigJSON (quiet is a "clear the
+// level" intent, not its own field).
+func TestWithQuietLogsClearsLogLevel(t *testing.T) {
+	ctx := integrationCtx(t)
+	name := "go-sdk-quiet-" + t.Name()
+
+	sb, err := microsandbox.CreateSandbox(ctx, name,
+		microsandbox.WithImage("alpine:3.19"),
+		microsandbox.WithQuietLogs(),
+	)
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = sb.Stop(stopCtx)
+		_ = sb.Close()
+	})
+
+	h, err := microsandbox.GetSandbox(ctx, name)
+	if err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+	cfg := h.ConfigJSON()
+	if !strings.Contains(cfg, `"log_level":null`) {
+		t.Errorf("expected log_level:null in ConfigJSON, got: %s", cfg)
 	}
 }
 

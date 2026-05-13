@@ -504,20 +504,22 @@ func TestNetworkPolicyNone(t *testing.T) {
 		_ = sb.Close()
 	})
 
-	// ping should fail when the policy denies all outbound traffic.
-	out, err := sb.Shell(ctx, "ping -c 1 -W 3 1.1.1.1",
+	// TCP egress check (wget) rather than ICMP — see comment in
+	// TestNetworkPolicyNonLocal. Should fail under policy=none regardless.
+	out, err := sb.Shell(ctx, "wget -q -O - --timeout=3 http://1.1.1.1/",
 		microsandbox.WithExecTimeout(10*time.Second))
 	if err != nil {
 		t.Fatalf("Shell: %v", err)
 	}
 	if out.Success() {
-		t.Errorf("expected ping to fail with policy=none, got stdout=%q stderr=%q",
+		t.Errorf("expected wget to fail with policy=none, got stdout=%q stderr=%q",
 			out.Stdout(), out.Stderr())
 	}
 }
 
 // TestNetworkPolicyAllowAll verifies that allow-all policy lets the sandbox
-// reach the network. We use a simple wget to a well-known IP.
+// reach the network. Uses wget over TCP rather than ping to avoid
+// CI-environment ICMP restrictions.
 func TestNetworkPolicyAllowAll(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-netallow-" + t.Name()
@@ -536,14 +538,13 @@ func TestNetworkPolicyAllowAll(t *testing.T) {
 		_ = sb.Close()
 	})
 
-	// Ping 1.1.1.1 — should succeed with allow-all.
-	out, err := sb.Shell(ctx, "ping -c 1 -W 5 1.1.1.1",
-		microsandbox.WithExecTimeout(15*time.Second))
+	out, err := sb.Shell(ctx, "wget -q -O - --timeout=10 http://1.1.1.1/",
+		microsandbox.WithExecTimeout(20*time.Second))
 	if err != nil {
 		t.Fatalf("Shell: %v", err)
 	}
 	if !out.Success() {
-		t.Errorf("ping failed with allow-all policy: stdout=%q stderr=%q",
+		t.Errorf("wget failed with allow-all policy: stdout=%q stderr=%q",
 			out.Stdout(), out.Stderr())
 	}
 }
@@ -730,11 +731,13 @@ func TestPatchSymlink(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-patch-symlink-" + t.Name()
 
+	// /etc, not /tmp: alpine's default sandbox config mounts a fresh
+	// tmpfs over /tmp at boot, which wipes anything patches put there.
 	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
 		microsandbox.WithPatches(
-			microsandbox.Patch.Text("/tmp/original.txt", "original\n", microsandbox.PatchOptions{}),
-			microsandbox.Patch.Symlink("/tmp/original.txt", "/tmp/link.txt", microsandbox.PatchOptions{}),
+			microsandbox.Patch.Text("/etc/original.txt", "original\n", microsandbox.PatchOptions{}),
+			microsandbox.Patch.Symlink("/etc/original.txt", "/etc/link.txt", microsandbox.PatchOptions{}),
 		),
 	)
 	if err != nil {
@@ -747,7 +750,7 @@ func TestPatchSymlink(t *testing.T) {
 		_ = sb.Close()
 	})
 
-	out, err := sb.Shell(ctx, "cat /tmp/link.txt")
+	out, err := sb.Shell(ctx, "cat /etc/link.txt")
 	if err != nil {
 		t.Fatalf("Shell: %v", err)
 	}

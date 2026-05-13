@@ -296,15 +296,19 @@ func TestTmpfsMountWithSizeLimit(t *testing.T) {
 }
 
 // TestBindMountReadonly verifies that a host bind mount marked Readonly
-// rejects guest writes. We bind /tmp because every host has it.
+// rejects guest writes. Uses a per-test t.TempDir() rather than /tmp:
+// some CI environments restrict bind-mounting world-sticky directories
+// like /tmp (Operation not permitted), and a unique per-test path also
+// avoids cross-test interference.
 func TestBindMountReadonly(t *testing.T) {
 	ctx := integrationCtx(t)
 	name := "go-sdk-bindro-" + t.Name()
+	hostDir := t.TempDir()
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
 		microsandbox.WithMounts(map[string]microsandbox.MountConfig{
-			"/host-tmp": microsandbox.Mount.Bind("/tmp", microsandbox.MountOptions{Readonly: true}),
+			"/host-tmp": microsandbox.Mount.Bind(hostDir, microsandbox.MountOptions{Readonly: true}),
 		}),
 	)
 	if err != nil {

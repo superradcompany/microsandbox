@@ -553,7 +553,10 @@ jobs:
           # ${MSB_HOME}/sandboxes/<name>/runtime/agent.sock. The runner's
           # default $_TEMP is too deep (~32 chars) and the path blows the
           # limit. Anchor MSB_HOME under /tmp with a short, unique suffix.
-          MSB_HOME=$(mktemp -d -p /tmp msb-XXXXXX)
+          # Use the shortest possible template that mktemp accepts (XXX)
+          # so paths like /tmp/aBc (8 chars) leave ~100 bytes of headroom
+          # for the sandbox name + /sandboxes/<name>/runtime/agent.sock.
+          MSB_HOME=$(mktemp -d -p /tmp XXX)
           trap "rm -rf '$MSB_HOME'" EXIT
           export MSB_HOME
           export PATH="$HOME/.microsandbox/bin:$PATH"

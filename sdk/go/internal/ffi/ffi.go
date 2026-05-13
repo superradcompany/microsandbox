@@ -625,6 +625,14 @@ func ensureLoaded() error {
 // KindBufferTooSmall; streaming is a follow-up.
 const defaultBufSize = 1 << 20
 
+// fsStreamBufSize is the output buffer used for fs read-stream Recv calls.
+// The protocol's FS_CHUNK_SIZE is 3 MiB; after base64 inflation (~33%) plus
+// the {"chunk_b64":"..."} JSON wrapper, each Recv response can reach ~4.1
+// MiB. 6 MiB leaves comfortable headroom. The Rust side consumes the chunk
+// before checking buffer size, so undersizing would silently drop data —
+// don't grow this until the FFI also buffers across calls.
+const fsStreamBufSize = 6 << 20
+
 // Error is the typed error surfaced across the FFI boundary. The Rust side
 // serialises {kind, message} JSON; this type unmarshals it. The public SDK
 // maps Kind back into microsandbox.ErrorKind.
@@ -685,12 +693,19 @@ func (s *Sandbox) Name() string { return s.name }
 // Rust's run_c helper (and the close/exec_close/exec_recv/exec_signal paths)
 // call msb_cancel_unregister themselves; nothing to do here.
 func call(ctx context.Context, fn func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char) (string, error) {
+	return callBuf(ctx, defaultBufSize, fn)
+}
+
+// callBuf is call() with a configurable output buffer. Use for FFI calls
+// whose response can exceed defaultBufSize — chiefly streaming Recv paths
+// that relay protocol chunks larger than 1 MiB.
+func callBuf(ctx context.Context, bufSize int, fn func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char) (string, error) {
 	type res struct {
 		out string
 		err error
 	}
 	done := make(chan res, 1)
-	buf := make([]byte, defaultBufSize)
+	buf := make([]byte, bufSize)
 	cancelID := C.call_msb_cancel_alloc()
 
 	go func() {
@@ -2131,7 +2146,10 @@ func (h *FsReadStreamHandle) Recv(ctx context.Context) ([]byte, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
-	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+	// Use the larger streaming buffer: each chunk is up to FS_CHUNK_SIZE
+	// (3 MiB) base64-inflated to ~4 MiB before the {"chunk_b64":...}
+	// wrapper. defaultBufSize would force the Rust side to drop the chunk.
+	out, err := callBuf(ctx, fsStreamBufSize, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_fs_read_stream_recv(cancelID, h.handle, buf, bufLen)
 	})
 	if err != nil {

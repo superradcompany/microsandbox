@@ -32,13 +32,16 @@ func TestNetworkPolicyNonLocal(t *testing.T) {
 		_ = sb.Close()
 	})
 
-	out, err := sb.Shell(ctx, "ping -c 1 -W 5 1.1.1.1",
-		microsandbox.WithExecTimeout(15*time.Second))
+	// TCP reach check (wget) rather than ICMP (ping) — many CI runners
+	// strip CAP_NET_RAW or block ICMP egress, which would falsely fail
+	// what is fundamentally an egress-policy test.
+	out, err := sb.Shell(ctx, "wget -q -O - --timeout=10 http://1.1.1.1/",
+		microsandbox.WithExecTimeout(20*time.Second))
 	if err != nil {
 		t.Fatalf("Shell: %v", err)
 	}
 	if !out.Success() {
-		t.Errorf("expected NonLocal preset to permit public ping; stdout=%q stderr=%q",
+		t.Errorf("expected NonLocal preset to permit public TCP; stdout=%q stderr=%q",
 			out.Stdout(), out.Stderr())
 	}
 }
