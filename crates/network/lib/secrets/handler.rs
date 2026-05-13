@@ -6,6 +6,7 @@
 use std::borrow::Cow;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use percent_encoding::percent_decode;
 
 use super::config::{SecretsConfig, ViolationAction};
 
@@ -350,22 +351,8 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 /// Returns true if `haystack`, after URL percent-decoding, contains `needle`.
-/// Invalid `%XX` sequences pass through as-is.
 fn url_decoded_contains(haystack: &[u8], needle: &[u8]) -> bool {
-    let mut decoded = Vec::with_capacity(haystack.len());
-    let mut i = 0;
-    while i < haystack.len() {
-        if haystack[i] == b'%'
-            && i + 2 < haystack.len()
-            && let (Some(hi), Some(lo)) = (hex_digit(haystack[i + 1]), hex_digit(haystack[i + 2]))
-        {
-            decoded.push((hi << 4) | lo);
-            i += 3;
-            continue;
-        }
-        decoded.push(haystack[i]);
-        i += 1;
-    }
+    let decoded: Vec<u8> = percent_decode(haystack).collect();
     contains_bytes(&decoded, needle)
 }
 
@@ -401,12 +388,7 @@ fn json_escaped_contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn hex_digit(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
+    (b as char).to_digit(16).map(|d| d as u8)
 }
 
 /// Update the Content-Length header value in `headers` to `new_len`.

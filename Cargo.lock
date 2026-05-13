@@ -2713,6 +2713,7 @@ dependencies = [
  "msb_krun",
  "parking_lot",
  "pem",
+ "percent-encoding",
  "rcgen",
  "resolv-conf",
  "rustls",
