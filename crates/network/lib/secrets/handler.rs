@@ -79,8 +79,11 @@ impl EligibleSecret {
     /// `None` if the line is not in scope for any of the requested injection
     /// modes.
     fn substitute_in_header_line(&self, line: &str, is_request_line: bool) -> Option<String> {
-        if self.inject_basic_auth && is_authorization_header(line) {
-            return Some(self.substitute_basic_auth_header(line));
+        if self.inject_basic_auth
+            && is_authorization_header(line)
+            && let Some(replaced) = self.substitute_basic_auth_header(line)
+        {
+            return Some(replaced);
         }
         if self.inject_headers {
             return Some(line.replace(&self.placeholder, &self.value));
@@ -91,24 +94,22 @@ impl EligibleSecret {
         None
     }
 
-    /// Substitute this secret's placeholder inside an `Authorization` header.
-    /// For `Basic <base64>` headers the base64 payload is decoded, the
-    /// placeholder is substituted in the decoded credentials, and the result
-    /// is re-encoded. All other schemes (e.g. `Bearer`) fall back to a literal
-    /// replacement so placeholders appearing in plaintext tokens are still
-    /// substituted.
-    fn substitute_basic_auth_header(&self, line: &str) -> String {
-        let Some(decoded) = decode_basic_credentials(line) else {
-            return line.replace(&self.placeholder, &self.value);
-        };
+    /// Decode `Basic <base64>` credentials, substitute the placeholder in the
+    /// decoded `user:password`, and return the re-encoded line. Returns `None`
+    /// if the line isn't `Basic` scheme or the decoded credentials don't
+    /// contain the placeholder. Non-Basic schemes (e.g. `Bearer`) are handled
+    /// by `inject_headers` instead.
+    fn substitute_basic_auth_header(&self, line: &str) -> Option<String> {
+        let decoded = decode_basic_credentials(line)?;
         if !decoded.contains(&self.placeholder) {
-            return line.replace(&self.placeholder, &self.value);
+            return None;
         }
-        let Some((name, _)) = line.split_once(':') else {
-            return line.replace(&self.placeholder, &self.value);
-        };
+        let (name, _) = line.split_once(':')?;
         let replaced = decoded.replace(&self.placeholder, &self.value);
-        format!("{name}: Basic {}", BASE64.encode(replaced.as_bytes()))
+        Some(format!(
+            "{name}: Basic {}",
+            BASE64.encode(replaced.as_bytes())
+        ))
     }
 }
 
@@ -585,18 +586,17 @@ mod tests {
     }
 
     #[test]
-    fn basic_auth_only_substitution() {
+    fn basic_auth_only_does_not_substitute_other_schemes() {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.injection = basic_auth_only();
         let config = make_config(vec![secret]);
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
 
+        // basic_auth only handles Basic credentials; Bearer needs inject_headers.
         let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nX-Custom: $KEY\r\n\r\n";
         let output = handler.substitute(input).unwrap();
         let result = String::from_utf8(output.into_owned()).unwrap();
-        // Authorization header should be substituted.
-        assert!(result.contains("Authorization: Bearer real-secret"));
-        // Other headers should NOT be substituted.
+        assert!(result.contains("Authorization: Bearer $KEY"));
         assert!(result.contains("X-Custom: $KEY"));
     }
 
