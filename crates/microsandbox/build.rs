@@ -1,4 +1,5 @@
-//! Build script — downloads prebuilt msb + libkrunfw to ~/.microsandbox/{bin,lib}/.
+//! Build script — downloads prebuilt msb + libkrunfw to `$MSB_HOME` (or
+//! `~/.microsandbox/`) under `{bin,lib}/`.
 
 use std::fs;
 use std::io::{self, Cursor, Read};
@@ -7,35 +8,30 @@ use std::process::Command;
 
 use microsandbox_utils::{
     LIBKRUNFW_ABI, MSB_BINARY, PREBUILT_VERSION, bundle_download_url,
-    libkrunfw_filename as utils_libkrunfw_filename,
+    libkrunfw_filename as utils_libkrunfw_filename, resolve_home,
 };
 
 fn main() {
+    // Re-run if MSB_HOME changes — it determines where binaries are placed.
+    println!("cargo:rerun-if-env-changed=MSB_HOME");
+    println!("cargo:rerun-if-env-changed=HOME");
+
+    let base_dir = resolve_home();
     // Re-run if the binaries are deleted so we can re-download.
-    let home = home_dir();
-    if let Some(ref home) = home {
-        let base_dir = home.join(".microsandbox");
-        println!(
-            "cargo:rerun-if-changed={}",
-            base_dir.join("bin").join(MSB_BINARY).display()
-        );
-        println!(
-            "cargo:rerun-if-changed={}",
-            base_dir.join("lib").join(libkrunfw_filename()).display()
-        );
-    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        base_dir.join("bin").join(MSB_BINARY).display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        base_dir.join("lib").join(libkrunfw_filename()).display()
+    );
 
     // Only download when the prebuilt feature is enabled.
     if std::env::var("CARGO_FEATURE_PREBUILT").is_err() {
         return;
     }
 
-    let Some(home) = home else {
-        println!("cargo:warning=could not determine home directory, skipping prebuilt download");
-        return;
-    };
-
-    let base_dir = home.join(".microsandbox");
     let bin_dir = base_dir.join("bin");
     let lib_dir = base_dir.join("lib");
 
@@ -76,17 +72,6 @@ fn main() {
         lib_dir.join(&libkrunfw_name).exists(),
         "{libkrunfw_name} not found after extraction"
     );
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    {
-        std::env::var("HOME").ok().map(PathBuf::from)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        None
-    }
 }
 
 fn libkrunfw_filename() -> String {
