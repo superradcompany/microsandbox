@@ -194,6 +194,11 @@ impl JsSandboxBuilder {
     }
 
     /// Replace any existing sandbox with the same name.
+    ///
+    /// SIGTERMs the prior instance, waits up to 10 seconds for a
+    /// graceful exit, then SIGKILLs. To override the grace, use
+    /// `replaceWithGrace(ms)`; `replaceWithGrace(0)` skips SIGTERM and
+    /// SIGKILLs immediately.
     #[napi]
     pub fn replace(&mut self) -> &Self {
         let prev = self.take_inner();
@@ -201,9 +206,13 @@ impl JsSandboxBuilder {
         self
     }
 
-    /// Grace period (in milliseconds) to wait for the existing sandbox
-    /// to exit after SIGTERM before escalating to SIGKILL during a
-    /// replace. Implies `replace`. Zero skips SIGTERM entirely.
+    /// Replace any existing sandbox, overriding the SIGTERM-to-SIGKILL
+    /// grace. Implies `replace` — calling this alone is enough.
+    ///
+    /// - `graceMs > 0`: SIGTERM, wait up to `graceMs`, then SIGKILL.
+    /// - `graceMs == 0`: SIGKILL immediately (skip SIGTERM).
+    ///
+    /// The default grace used by `replace` is 10_000 ms.
     #[napi]
     pub fn replace_with_grace(&mut self, grace_ms: u32) -> &Self {
         let prev = self.take_inner();

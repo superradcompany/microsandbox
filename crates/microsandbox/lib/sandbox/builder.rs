@@ -226,22 +226,29 @@ impl SandboxBuilder {
 
     /// Replace an existing sandbox with the same name during create.
     ///
-    /// If the existing sandbox is still active, microsandbox stops it
-    /// before recreating it. When the prior sandbox is owned by an
-    /// in-process `Sandbox` handle, the handle's underlying child is
-    /// signalled and reaped directly. Otherwise the existing PID is
-    /// signalled with SIGTERM, given [`replace_with_grace`](Self::replace_with_grace)
-    /// to exit, then SIGKILLed.
+    /// If a sandbox with this name is already active, microsandbox stops
+    /// the prior instance before recreating it: SIGTERM, wait up to ten
+    /// seconds for a graceful exit, then SIGKILL. When the prior sandbox
+    /// is owned by an in-process `Sandbox` handle, the handle's
+    /// underlying child is signalled and reaped directly.
+    ///
+    /// To override the ten-second grace, use [`replace_with_grace`]; pass
+    /// `Duration::ZERO` to skip SIGTERM and SIGKILL immediately.
+    ///
+    /// [`replace_with_grace`]: Self::replace_with_grace
     pub fn replace(mut self) -> Self {
         self.config.replace_existing = true;
         self
     }
 
-    /// How long to give the existing sandbox after SIGTERM before
-    /// escalating to SIGKILL during a replace. Implies [`replace`](Self::replace).
+    /// Replace an existing sandbox, overriding the SIGTERM-to-SIGKILL
+    /// grace. Implies [`replace`](Self::replace) — calling this alone is
+    /// enough.
     ///
-    /// A zero duration skips SIGTERM entirely. Default (when only
-    /// `.replace()` is set) is ten seconds.
+    /// - `grace > 0`: SIGTERM, wait up to `grace`, then SIGKILL.
+    /// - `grace == Duration::ZERO`: SIGKILL immediately (skip SIGTERM).
+    ///
+    /// The default grace used by [`replace`](Self::replace) is ten seconds.
     pub fn replace_with_grace(mut self, grace: std::time::Duration) -> Self {
         self.config.replace_existing = true;
         self.config.replace_with_grace = grace;
