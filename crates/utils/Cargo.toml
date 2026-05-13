@@ -10,11 +10,15 @@ edition.workspace = true
 [lib]
 path = "lib/lib.rs"
 
+[features]
+http-client = ["dep:ureq"]
+
 [dependencies]
 dirs.workspace = true
 libc.workspace = true
 reflink-copy.workspace = true
 scopeguard.workspace = true
+ureq = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

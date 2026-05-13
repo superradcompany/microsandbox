@@ -155,6 +155,19 @@ pub fn bundle_download_url(version: &str, arch: &str, os: &str) -> String {
     )
 }
 
+/// Returns an HTTP client configured for release asset downloads.
+#[cfg(feature = "http-client")]
+pub fn http_client() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .build()
+        .new_agent()
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------

@@ -90,6 +90,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Install agentd build deps
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -142,6 +144,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       # -- Linux build deps --
       - name: Install build deps (Linux)

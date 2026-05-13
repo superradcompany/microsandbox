@@ -2601,7 +2601,6 @@ dependencies = [
  "tokio",
  "tracing",
  "typed-builder",
- "ureq",
  "which",
 ]
 
@@ -2656,7 +2655,6 @@ dependencies = [
  "scopeguard",
  "tempfile",
  "tracing",
- "ureq",
 ]
 
 [[package]]
@@ -2807,6 +2805,7 @@ dependencies = [
  "reflink-copy",
  "scopeguard",
  "tempfile",
+ "ureq",
 ]
 
 [[package]]
@@ -5519,6 +5518,7 @@ dependencies = [
  "percent-encoding",
  "rustls",
  "rustls-pki-types",
+ "rustls-platform-verifier",
  "ureq-proto",
  "utf8-zero",
  "webpki-roots 1.0.6",

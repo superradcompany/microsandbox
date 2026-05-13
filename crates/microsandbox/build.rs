@@ -1,18 +1,25 @@
 //! Build script — downloads prebuilt msb + libkrunfw to `$MSB_HOME` (or
 //! `~/.microsandbox/`) under `{bin,lib}/`.
 
+#[cfg(feature = "prebuilt")]
 use std::fs;
+#[cfg(feature = "prebuilt")]
 use std::io::{self, Cursor, Read};
+#[cfg(feature = "prebuilt")]
 use std::path::{Path, PathBuf};
+#[cfg(feature = "prebuilt")]
 use std::process::Command;
 
+#[cfg(feature = "prebuilt")]
+use microsandbox_utils::http_client;
+#[cfg(feature = "prebuilt")]
+use microsandbox_utils::{LIBKRUNFW_ABI, PREBUILT_VERSION, bundle_download_url};
 use microsandbox_utils::{
-    LIBKRUNFW_ABI, MSB_BINARY, PREBUILT_VERSION, bundle_download_url,
-    libkrunfw_filename as utils_libkrunfw_filename, resolve_home,
+    MSB_BINARY, libkrunfw_filename as utils_libkrunfw_filename, resolve_home,
 };
 
 fn main() {
-    // Re-run if MSB_HOME changes — it determines where binaries are placed.
+    // Re-run if MSB_HOME changes - it determines where binaries are placed.
     println!("cargo:rerun-if-env-changed=MSB_HOME");
     println!("cargo:rerun-if-env-changed=HOME");
 
@@ -27,11 +34,12 @@ fn main() {
         base_dir.join("lib").join(libkrunfw_filename()).display()
     );
 
-    // Only download when the prebuilt feature is enabled.
-    if std::env::var("CARGO_FEATURE_PREBUILT").is_err() {
-        return;
-    }
+    #[cfg(feature = "prebuilt")]
+    install_prebuilt(base_dir);
+}
 
+#[cfg(feature = "prebuilt")]
+fn install_prebuilt(base_dir: PathBuf) {
     let bin_dir = base_dir.join("bin");
     let lib_dir = base_dir.join("lib");
 
@@ -83,6 +91,7 @@ fn libkrunfw_filename() -> String {
     utils_libkrunfw_filename(os)
 }
 
+#[cfg(feature = "prebuilt")]
 fn bundle_url() -> String {
     let arch = std::env::consts::ARCH;
     let os = if cfg!(target_os = "macos") {
@@ -93,6 +102,7 @@ fn bundle_url() -> String {
     bundle_download_url(PREBUILT_VERSION, arch, os)
 }
 
+#[cfg(feature = "prebuilt")]
 fn installed_msb_version(path: &Path) -> Option<String> {
     if !path.exists() {
         return None;
@@ -110,6 +120,7 @@ fn installed_msb_version(path: &Path) -> Option<String> {
         .map(std::string::ToString::to_string)
 }
 
+#[cfg(feature = "prebuilt")]
 fn install_ci_local_bundle(
     bin_dir: &Path,
     lib_dir: &Path,
@@ -147,6 +158,7 @@ fn install_ci_local_bundle(
     Ok(true)
 }
 
+#[cfg(feature = "prebuilt")]
 fn workspace_build_dir() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent()?.parent()?;
@@ -156,13 +168,15 @@ fn workspace_build_dir() -> Option<PathBuf> {
     Some(workspace_root.join("build"))
 }
 
+#[cfg(feature = "prebuilt")]
 fn download(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let resp = ureq::get(url).call()?;
+    let resp = http_client().get(url).call()?;
     let mut buf = Vec::new();
     resp.into_body().into_reader().read_to_end(&mut buf)?;
     Ok(buf)
 }
 
+#[cfg(feature = "prebuilt")]
 fn extract_bundle(data: &[u8], bin_dir: &Path, lib_dir: &Path) -> io::Result<()> {
     let decoder = flate2::read::GzDecoder::new(Cursor::new(data));
     let mut archive = tar::Archive::new(decoder);
@@ -192,6 +206,7 @@ fn extract_bundle(data: &[u8], bin_dir: &Path, lib_dir: &Path) -> io::Result<()>
     Ok(())
 }
 
+#[cfg(feature = "prebuilt")]
 fn create_symlinks(lib_dir: &Path, libkrunfw_name: &str) {
     #[cfg(unix)]
     {

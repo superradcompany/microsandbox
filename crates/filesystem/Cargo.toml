@@ -20,8 +20,7 @@ tracing.workspace = true
 
 [features]
 default = ["prebuilt"]
-prebuilt = ["dep:ureq"]
+prebuilt = ["microsandbox-utils/http-client"]
 
 [build-dependencies]
 microsandbox-utils = { version = "0.4.5", path = "../utils" }
-ureq = { workspace = true, optional = true }

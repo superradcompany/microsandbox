@@ -18,7 +18,11 @@ path = "bin/main.rs"
 [features]
 default = ["keyring", "net", "prebuilt"]
 keyring = ["dep:dbus", "dep:keyring"]
-prebuilt = ["microsandbox-filesystem/prebuilt", "microsandbox-runtime/prebuilt"]
+prebuilt = [
+    "microsandbox-filesystem/prebuilt",
+    "microsandbox-runtime/prebuilt",
+    "microsandbox-utils/http-client",
+]
 net = ["dep:microsandbox-network", "microsandbox-runtime/net"]
 
 [dependencies]
@@ -61,7 +65,6 @@ which.workspace = true
 flate2.workspace = true
 microsandbox-utils = { version = "0.4.5", path = "../utils" }
 tar.workspace = true
-ureq.workspace = true
 
 [dev-dependencies]
 ipnetwork.workspace = true
