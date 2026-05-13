@@ -87,6 +87,12 @@ pub enum MessageType {
     /// Host sends stdin data.
     ExecStdin,
 
+    /// Guest reports that a prior `ExecStdin` write to the child's
+    /// stdin failed (e.g. the child closed its read end). Non-terminal:
+    /// the session continues and may still produce stdout/stderr and
+    /// an exit code.
+    ExecStdinError,
+
     /// Guest sends stdout data.
     ExecStdout,
 
@@ -177,6 +183,7 @@ impl MessageType {
             Self::ExecRequest => "core.exec.request",
             Self::ExecStarted => "core.exec.started",
             Self::ExecStdin => "core.exec.stdin",
+            Self::ExecStdinError => "core.exec.stdin.error",
             Self::ExecStdout => "core.exec.stdout",
             Self::ExecStderr => "core.exec.stderr",
             Self::ExecExited => "core.exec.exited",
@@ -197,6 +204,7 @@ impl MessageType {
             "core.exec.request" => Some(Self::ExecRequest),
             "core.exec.started" => Some(Self::ExecStarted),
             "core.exec.stdin" => Some(Self::ExecStdin),
+            "core.exec.stdin.error" => Some(Self::ExecStdinError),
             "core.exec.stdout" => Some(Self::ExecStdout),
             "core.exec.stderr" => Some(Self::ExecStderr),
             "core.exec.exited" => Some(Self::ExecExited),
@@ -251,6 +259,7 @@ mod tests {
             (MessageType::ExecRequest, "core.exec.request"),
             (MessageType::ExecStarted, "core.exec.started"),
             (MessageType::ExecStdin, "core.exec.stdin"),
+            (MessageType::ExecStdinError, "core.exec.stdin.error"),
             (MessageType::ExecStdout, "core.exec.stdout"),
             (MessageType::ExecStderr, "core.exec.stderr"),
             (MessageType::ExecExited, "core.exec.exited"),
@@ -276,6 +285,7 @@ mod tests {
             MessageType::ExecRequest,
             MessageType::ExecStarted,
             MessageType::ExecStdin,
+            MessageType::ExecStdinError,
             MessageType::ExecStdout,
             MessageType::ExecStderr,
             MessageType::ExecExited,

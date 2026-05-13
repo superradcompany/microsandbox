@@ -237,5 +237,13 @@ fn exec_event_to_js(event: RustExecEvent) -> ExecEvent {
             data: Some(payload.message.into_bytes().into()),
             code: payload.errno,
         },
+        // Stdin write failure (e.g. broken pipe). Non-terminal: the
+        // session continues and an "exited" event will follow.
+        RustExecEvent::StdinError(payload) => ExecEvent {
+            event_type: "stdin_error".to_string(),
+            pid: None,
+            data: Some(payload.message.into_bytes().into()),
+            code: payload.errno,
+        },
     }
 }

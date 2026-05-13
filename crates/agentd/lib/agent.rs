@@ -14,7 +14,7 @@ use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::Ready;
 use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
-    ExecStderr, ExecStdin, ExecStdout,
+    ExecStderr, ExecStdin, ExecStdinError, ExecStdout,
 };
 use microsandbox_protocol::fs::{FsData, FsRequest};
 use microsandbox_protocol::message::{Message, MessageType};
@@ -272,8 +272,17 @@ async fn handle_message(
                 if stdin.data.is_empty() {
                     // Empty data signals EOF — close stdin.
                     session.close_stdin();
-                } else {
-                    let _ = session.write_stdin(&stdin.data).await;
+                } else if let Err(e) = session.write_stdin(&stdin.data).await {
+                    let payload = stdin_error_payload(&e);
+                    eprintln!("stdin write error on session {}: {e}", msg.id);
+                    let reply =
+                        Message::with_payload(MessageType::ExecStdinError, msg.id, &payload)
+                            .map_err(|e| {
+                                AgentdError::ExecSession(format!("encode stdin error: {e}"))
+                            })?;
+                    codec::encode_to_buf(&reply, out_buf).map_err(|e| {
+                        AgentdError::ExecSession(format!("encode stdin error frame: {e}"))
+                    })?;
                 }
             }
         }
@@ -368,6 +377,35 @@ async fn handle_message(
 /// inherits from agentd's environment and prepends.
 /// Default PATH for the guest when no PATH is inherited.
 const DEFAULT_GUEST_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// Build an `ExecStdinError` payload from a failed `write_stdin` result.
+fn stdin_error_payload(err: &AgentdError) -> ExecStdinError {
+    let io_err = match err {
+        AgentdError::Io(e) => Some(e),
+        _ => None,
+    };
+    let errno = io_err.and_then(|e| e.raw_os_error());
+    ExecStdinError {
+        errno,
+        errno_name: errno.and_then(errno_name),
+        message: err.to_string(),
+    }
+}
+
+/// Map common errno values to their standard names. Returns `None` for
+/// codes we don't recognize; callers fall back to the numeric `errno`.
+fn errno_name(code: i32) -> Option<String> {
+    let name = match code {
+        libc::EPIPE => "EPIPE",
+        libc::EBADF => "EBADF",
+        libc::EINVAL => "EINVAL",
+        libc::EIO => "EIO",
+        libc::ENOSPC => "ENOSPC",
+        libc::EFBIG => "EFBIG",
+        _ => return None,
+    };
+    Some(name.to_string())
+}
 
 fn prepend_scripts_to_path(req: &mut microsandbox_protocol::exec::ExecRequest) {
     let scripts = microsandbox_protocol::SCRIPTS_PATH;

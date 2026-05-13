@@ -252,6 +252,14 @@ fn convert_exec_event(event: microsandbox::ExecEvent) -> PyExecEvent {
             data: Some(payload.message.into_bytes()),
             code: payload.errno,
         },
+        // Stdin write failure (e.g. broken pipe). Non-terminal: the
+        // session continues and an `exited` event will follow.
+        microsandbox::ExecEvent::StdinError(payload) => PyExecEvent {
+            event_type: "stdin_error",
+            pid: None,
+            data: Some(payload.message.into_bytes()),
+            code: payload.errno,
+        },
     }
 }
 

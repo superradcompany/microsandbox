@@ -115,6 +115,24 @@ pub struct ExecStdin {
     pub data: Vec<u8>,
 }
 
+/// Notification that an `ExecStdin` write to the child's stdin failed.
+/// The most common cause is the child closing its read end (EPIPE);
+/// the session is otherwise alive and may still produce output and an
+/// exit code, so this is delivered as a non-terminal event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecStdinError {
+    /// `errno` from the underlying write, if available.
+    #[serde(default)]
+    pub errno: Option<i32>,
+
+    /// Standard errno name like `"EPIPE"`, populated when `errno` is.
+    #[serde(default)]
+    pub errno_name: Option<String>,
+
+    /// Human-readable description from agentd.
+    pub message: String,
+}
+
 /// Stdout data from a running command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecStdout {

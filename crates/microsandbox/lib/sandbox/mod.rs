@@ -1318,6 +1318,13 @@ async fn event_mapper_task(
                 }
                 break;
             }
+            MessageType::ExecStdinError => {
+                if let Ok(payload) = msg.payload::<microsandbox_protocol::exec::ExecStdinError>() {
+                    ExecEvent::StdinError(payload)
+                } else {
+                    continue;
+                }
+            }
             _ => continue,
         };
         if tx.send(event).is_err() {

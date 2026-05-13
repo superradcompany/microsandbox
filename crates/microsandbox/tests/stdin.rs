@@ -175,6 +175,70 @@ async fn stdin_pipe_streams_chunks_in_order() {
     assert_eq!(actual_sha, expected_sha);
 }
 
+/// Broken-pipe test: the child reads only a short prefix of stdin and
+/// exits, closing its read end before the host's full payload has been
+/// delivered. The agent's stdin write should fail with EPIPE, which
+/// surfaces to the host as `ExecOutput::stdin_error()`. The session
+/// itself still completes with a normal exit code and stdout — the
+/// stdin failure is non-terminal.
+#[msb_test]
+async fn stdin_bytes_reports_broken_pipe_when_child_exits_early() {
+    let name = "stdin-broken-pipe";
+    let payload = vec![b'z'; ONE_MIB];
+
+    let sandbox = Sandbox::builder(name)
+        .image("mirror.gcr.io/library/alpine")
+        .cpus(1)
+        .memory(512)
+        .replace()
+        .create()
+        .await
+        .expect("create sandbox");
+
+    let output = sandbox
+        .exec_with("sh", |exec| {
+            exec.args([
+                "-c",
+                "dd bs=1 count=16 of=/tmp/prefix.bin 2>/dev/null && wc -c /tmp/prefix.bin",
+            ])
+            .stdin_bytes(payload)
+        })
+        .await
+        .expect("exec returned");
+
+    sandbox.stop_and_wait().await.expect("stop");
+    Sandbox::remove(name).await.expect("remove");
+
+    assert!(
+        output.status().success,
+        "guest command failed: stdout=`{}` stderr=`{}`",
+        output.stdout().unwrap_or_default(),
+        output.stderr().unwrap_or_default()
+    );
+
+    let stdout = output.stdout().expect("stdout is utf8");
+    let prefix_count = stdout
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().next())
+        .expect("byte count line");
+    assert_eq!(
+        prefix_count, "16",
+        "child should have read exactly 16 bytes"
+    );
+
+    let stdin_err = output
+        .stdin_error()
+        .expect("host should observe a stdin write failure");
+    assert_eq!(
+        stdin_err.errno,
+        Some(libc::EPIPE),
+        "expected EPIPE on broken pipe, got errno={:?} message={}",
+        stdin_err.errno,
+        stdin_err.message,
+    );
+}
+
 fn parse_wc_and_sha(stdout: &str) -> (String, String) {
     let mut lines = stdout.lines();
     let byte_count = lines
