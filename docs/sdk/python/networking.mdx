@@ -229,6 +229,37 @@ Create a rule that blocks matching traffic.
 
 ---
 
+#### Rule.allow_dns()
+
+```python
+@classmethod
+def allow_dns() -> tuple[Rule, Rule]
+```
+
+Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway, i.e. the in-process DNS forwarder. The standard one-liner for opening DNS under a deny-by-default policy. See [DNS as egress](/networking/dns#dns-as-egress) for the underlying semantics.
+
+Returns the pair `(udp_rule, tcp_rule)` since this SDK's `Rule` shape carries a single protocol; splat into `NetworkPolicy.rules`:
+
+```python
+policy = NetworkPolicy(
+    default_egress=Action.DENY,
+    rules=(
+        *Rule.allow_dns(),
+        Rule.allow(protocol=Protocol.TCP, port=443, destination="public"),
+    ),
+)
+```
+
+DoT (TCP/853) is intentionally not included; add an explicit `Rule.allow(destination="host", protocol=Protocol.TCP, port=853)` if needed (and pair with TLS interception).
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `tuple[`[`Rule`](#rule)`, `[`Rule`](#rule)`]` | `(udp_rule, tcp_rule)` for `Group::Host` on port 53 |
+
+---
+
 ## DnsConfig
 
 Frozen dataclass for DNS interception settings.

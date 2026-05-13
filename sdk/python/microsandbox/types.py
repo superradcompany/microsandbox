@@ -547,6 +547,25 @@ class Rule:
              port: int | str | None = None, destination: str | None = None) -> Rule:
         return cls(Action.DENY, direction, destination, protocol, port)
 
+    @classmethod
+    def allow_dns(cls) -> tuple[Rule, Rule]:
+        """Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway.
+
+        Returns the pair `(udp_rule, tcp_rule)` since this SDK's
+        `Rule` shape is single-protocol. Splat into `NetworkPolicy.rules`
+        to open DNS under a deny-by-default policy:
+
+            NetworkPolicy(rules=(*Rule.allow_dns(), ...))
+
+        DoT (TCP/853) is intentionally not included; add an explicit
+        `destination="host"`, `protocol=Protocol.TCP`, `port=853` rule
+        if needed (and pair with TLS interception).
+        """
+        return (
+            cls(Action.ALLOW, Direction.EGRESS, "host", Protocol.UDP, 53),
+            cls(Action.ALLOW, Direction.EGRESS, "host", Protocol.TCP, 53),
+        )
+
 @dataclass(frozen=True, slots=True)
 class NetworkPolicy:
     """Custom network policy with rules.

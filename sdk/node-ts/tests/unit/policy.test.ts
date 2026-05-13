@@ -24,25 +24,31 @@ describe("NetworkPolicy presets", () => {
     });
   });
 
-  it("publicOnly denies egress by default and adds an allow-public rule", () => {
+  it("publicOnly denies egress by default and adds DNS + allow-public rules", () => {
     const p = NetworkPolicy.publicOnly();
     expect(p.defaultEgress).toBe("deny");
     expect(p.defaultIngress).toBe("allow");
-    expect(p.rules).toHaveLength(1);
+    expect(p.rules).toHaveLength(2);
     expect(p.rules[0]).toMatchObject({
+      direction: "egress",
+      action: "allow",
+      destination: { kind: "group", group: "host" },
+      protocols: ["udp", "tcp"],
+      ports: [{ start: 53, end: 53 }],
+    });
+    expect(p.rules[1]).toMatchObject({
       direction: "egress",
       action: "allow",
       destination: { kind: "group", group: "public" },
     });
   });
 
-  it("nonLocal allows public + private egress", () => {
+  it("nonLocal allows DNS + public + private egress", () => {
     const p = NetworkPolicy.nonLocal();
-    expect(p.rules).toHaveLength(2);
-    expect(p.rules[1]).toMatchObject({
-      direction: "egress",
-      destination: { kind: "group", group: "private" },
-    });
+    expect(p.rules).toHaveLength(3);
+    expect(p.rules[0].destination).toMatchObject({ kind: "group", group: "host" });
+    expect(p.rules[1].destination).toMatchObject({ kind: "group", group: "public" });
+    expect(p.rules[2].destination).toMatchObject({ kind: "group", group: "private" });
   });
 });
 
@@ -61,6 +67,16 @@ describe("Rule factory", () => {
   it("anyDirection rules flag both ways", () => {
     expect(Rule.allowAny(Destination.any()).direction).toBe("any");
     expect(Rule.denyIngress(Destination.domain("x.com")).action).toBe("deny");
+  });
+
+  it("allowDns returns a Group::Host UDP+TCP/53 allow rule", () => {
+    expect(Rule.allowDns()).toEqual({
+      direction: "egress",
+      destination: { kind: "group", group: "host" },
+      protocols: ["udp", "tcp"],
+      ports: [{ start: 53, end: 53 }],
+      action: "allow",
+    });
   });
 });
 

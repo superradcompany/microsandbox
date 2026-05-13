@@ -796,6 +796,18 @@ Deny rule with direction `ingress`.
 
 ---
 
+#### Rule.allowDns()
+
+```typescript
+static allowDns(): Rule
+```
+
+Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway, i.e. the in-process DNS forwarder. The standard one-liner for opening DNS under a deny-by-default policy. See [DNS as egress](/networking/dns#dns-as-egress) for the underlying semantics.
+
+DoT (TCP/853) is intentionally not included; add an explicit `Group::Host tcp/853` allow rule if needed (and pair with TLS interception).
+
+---
+
 ## Destination
 
 Factory for rule destinations.

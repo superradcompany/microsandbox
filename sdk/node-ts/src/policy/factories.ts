@@ -50,6 +50,20 @@ const denyAnyRule = (destination: Types.Destination): Types.Rule => ({
   action: "deny",
 });
 
+/**
+ * Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway, i.e. the
+ * in-process DNS forwarder. The standard one-liner for opening DNS
+ * under a deny-by-default policy. DoT (TCP/853) is intentionally not
+ * included; add an explicit `Group::Host tcp/853` allow rule if needed.
+ */
+const allowDnsRule = (): Types.Rule => ({
+  direction: "egress",
+  destination: { kind: "group", group: "host" },
+  protocols: ["udp", "tcp"],
+  ports: [{ start: 53, end: 53 }],
+  action: "allow",
+});
+
 export const Rule = {
   allowEgress: allowEgressRule,
   denyEgress: denyEgressRule,
@@ -57,6 +71,7 @@ export const Rule = {
   denyIngress: denyIngressRule,
   allowAny: allowAnyRule,
   denyAny: denyAnyRule,
+  allowDns: allowDnsRule,
 };
 
 export const Destination = {
@@ -97,7 +112,10 @@ export const NetworkPolicy = {
   publicOnly: (): Types.NetworkPolicy => ({
     defaultEgress: "deny",
     defaultIngress: "allow",
-    rules: [allowEgressRule({ kind: "group", group: "public" })],
+    rules: [
+      allowDnsRule(),
+      allowEgressRule({ kind: "group", group: "public" }),
+    ],
   }),
 
   /** Egress allowed to public + private (LAN); ingress allowed by default. */
@@ -105,6 +123,7 @@ export const NetworkPolicy = {
     defaultEgress: "deny",
     defaultIngress: "allow",
     rules: [
+      allowDnsRule(),
       allowEgressRule({ kind: "group", group: "public" }),
       allowEgressRule({ kind: "group", group: "private" }),
     ],
