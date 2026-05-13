@@ -438,7 +438,27 @@ jobs:
 
       - name: Regenerate lockfile
         working-directory: sdk/node-ts
-        run: npm install --package-lock-only --ignore-scripts
+        # bump-version.sh text-bumps version + URL fields in the lockfile
+        # but leaves integrity hashes from the prior release carried
+        # forward (the new version isn't on npm yet at bump-PR time, so
+        # it can't resolve real hashes). post-publish, a bare
+        # `npm install --package-lock-only` short-circuits — paper
+        # versions already match what's wanted, so npm never re-fetches
+        # metadata and the stale hashes stick. strip the microsandbox
+        # platform-package entries first so the install is forced to
+        # re-resolve them against the registry with correct integrity.
+        run: |
+          node -e '
+            const fs = require("fs");
+            const lock = JSON.parse(fs.readFileSync("package-lock.json"));
+            for (const key of Object.keys(lock.packages)) {
+              if (key.startsWith("node_modules/@superradcompany/microsandbox-")) {
+                delete lock.packages[key];
+              }
+            }
+            fs.writeFileSync("package-lock.json", JSON.stringify(lock, null, 2) + "\n");
+          '
+          npm install --package-lock-only --ignore-scripts
 
       - uses: peter-evans/create-pull-request@v7
         with:
