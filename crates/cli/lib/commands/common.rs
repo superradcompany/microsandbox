@@ -46,6 +46,12 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub replace: bool,
 
+    /// Grace period the existing sandbox gets after SIGTERM before it
+    /// is SIGKILLed during a replace. Accepts `0`, `500ms`, `5s`, `2m`.
+    /// Implies `--replace`. Default 10s when `--replace` is set on its own.
+    #[arg(long, value_name = "DURATION")]
+    pub replace_grace: Option<String>,
+
     /// Suppress progress output.
     #[arg(short, long)]
     pub quiet: bool,
@@ -331,7 +337,10 @@ pub fn apply_sandbox_opts(
     if let Some(ref shell) = opts.shell {
         builder = builder.shell(shell);
     }
-    if opts.replace {
+    if let Some(ref grace) = opts.replace_grace {
+        let d = parse_duration(grace).map_err(|e| anyhow::anyhow!("--replace-grace: {e}"))?;
+        builder = builder.replace_grace(d);
+    } else if opts.replace {
         builder = builder.replace();
     }
 
@@ -614,6 +623,28 @@ pub fn parse_duration_secs(s: &str) -> anyhow::Result<u64> {
         Ok(n.trim().parse::<u64>()? * 3600)
     } else {
         Ok(s.parse::<u64>()?)
+    }
+}
+
+/// Parse a duration string with sub-second granularity. Accepts `0`,
+/// `500ms`, `5s`, `2m`, `1h`. Bare numbers are treated as seconds for
+/// consistency with [`parse_duration_secs`].
+pub fn parse_duration(s: &str) -> anyhow::Result<std::time::Duration> {
+    let s = s.trim();
+    if let Some(n) = s.strip_suffix("ms") {
+        Ok(std::time::Duration::from_millis(n.trim().parse::<u64>()?))
+    } else if let Some(n) = s.strip_suffix('s') {
+        Ok(std::time::Duration::from_secs(n.trim().parse::<u64>()?))
+    } else if let Some(n) = s.strip_suffix('m') {
+        Ok(std::time::Duration::from_secs(
+            n.trim().parse::<u64>()? * 60,
+        ))
+    } else if let Some(n) = s.strip_suffix('h') {
+        Ok(std::time::Duration::from_secs(
+            n.trim().parse::<u64>()? * 3600,
+        ))
+    } else {
+        Ok(std::time::Duration::from_secs(s.parse::<u64>()?))
     }
 }
 

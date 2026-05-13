@@ -659,3 +659,4 @@ module.exports.imageList = nativeBinding.imageList
 module.exports.imageRemove = nativeBinding.imageRemove
 module.exports.install = nativeBinding.install
 module.exports.isInstalled = nativeBinding.isInstalled
+module.exports.setRuntimeMsbPath = nativeBinding.setRuntimeMsbPath

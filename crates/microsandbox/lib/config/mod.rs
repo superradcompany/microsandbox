@@ -117,8 +117,8 @@ pub struct DatabaseConfig {
 pub struct PathsConfig {
     /// Path to `msb` binary.
     ///
-    /// Resolution: `MSB_PATH` env → this → workspace-local (debug only)
-    /// → `~/.microsandbox/bin/msb` → PATH lookup.
+    /// Resolution: `MSB_PATH` env → SDK runtime path → this →
+    /// workspace-local (debug only) → `~/.microsandbox/bin/msb` → PATH lookup.
     pub msb: Option<PathBuf>,
 
     /// Path to `libkrunfw.{so,dylib}`.
@@ -248,6 +248,7 @@ struct KeyringRegistryCredential {
 //--------------------------------------------------------------------------------------------------
 
 static CONFIG: OnceLock<GlobalConfig> = OnceLock::new();
+static SDK_MSB_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 impl GlobalConfig {
     /// Get the resolved home directory.
@@ -606,65 +607,111 @@ pub fn set_config(config: GlobalConfig) -> Result<(), GlobalConfig> {
     CONFIG.set(config)
 }
 
+/// Set the `msb` binary path resolved by an SDK package.
+///
+/// This is an internal SDK bridge for runtimes where mutating `process.env`
+/// does not update the native process environment. User-provided `MSB_PATH`
+/// still wins over this value. Set-once: subsequent calls are ignored.
+pub fn set_sdk_msb_path(path: impl Into<PathBuf>) {
+    let _ = SDK_MSB_PATH.set(path.into());
+}
+
 /// Resolve the path to the `msb` binary.
 ///
 /// Resolution order:
 /// 1. `MSB_PATH` environment variable
-/// 2. `config().paths.msb`
-/// 3. workspace-local `build/msb` or `target/debug/msb` (debug builds only)
-/// 4. `~/.microsandbox/bin/msb`
-/// 5. `which::which("msb")`
+/// 2. SDK-provided runtime path
+/// 3. `config().paths.msb`
+/// 4. workspace-local `build/msb` or `target/debug/msb` (debug builds only)
+/// 5. `~/.microsandbox/bin/msb`
+/// 6. `which::which("msb")`
 pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
-    if let Ok(path) = std::env::var("MSB_PATH") {
+    let env_msb = std::env::var("MSB_PATH").ok();
+    let sdk_msb = SDK_MSB_PATH.get().cloned();
+    let config_msb = config().paths.msb.clone();
+
+    let debug_probe = || -> Option<PathBuf> {
+        // Only probe workspace-local dev builds in debug builds to prevent
+        // binary hijacking from untrusted parent directories in production.
+        #[cfg(debug_assertions)]
+        {
+            let mut local_candidates = Vec::new();
+            if let Ok(current_dir) = std::env::current_dir() {
+                local_candidates.extend(dev_msb_candidates_from(&current_dir));
+            }
+            if let Ok(current_exe) = std::env::current_exe()
+                && let Some(exe_dir) = current_exe.parent()
+            {
+                local_candidates.extend(dev_msb_candidates_from(exe_dir));
+            }
+            dedupe_paths(&mut local_candidates);
+            local_candidates.into_iter().find(|path| path.is_file())
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            None
+        }
+    };
+
+    let home_probe = || -> Option<PathBuf> {
+        let home_bin = config()
+            .home()
+            .join(microsandbox_utils::BIN_SUBDIR)
+            .join(microsandbox_utils::MSB_BINARY);
+        home_bin.is_file().then_some(home_bin)
+    };
+
+    let which_probe = || -> Option<PathBuf> { which::which(microsandbox_utils::MSB_BINARY).ok() };
+
+    resolve_msb_path_from(
+        env_msb.as_deref(),
+        sdk_msb.as_deref(),
+        config_msb.as_deref(),
+        &debug_probe,
+        &home_probe,
+        &which_probe,
+    )
+}
+
+/// Pure precedence ladder for `resolve_msb_path`. Probe closures encapsulate
+/// the filesystem-touching tiers so unit tests can supply fakes.
+fn resolve_msb_path_from(
+    env_msb: Option<&str>,
+    sdk_msb: Option<&Path>,
+    config_msb: Option<&Path>,
+    debug_probe: &dyn Fn() -> Option<PathBuf>,
+    home_probe: &dyn Fn() -> Option<PathBuf>,
+    which_probe: &dyn Fn() -> Option<PathBuf>,
+) -> MicrosandboxResult<PathBuf> {
+    if let Some(path) = env_msb {
         tracing::debug!(path = %path, source = "MSB_PATH env", "resolved msb binary");
         return Ok(PathBuf::from(path));
     }
-
-    if let Some(path) = &config().paths.msb {
+    if let Some(path) = sdk_msb {
+        tracing::debug!(path = %path.display(), source = "SDK runtime path", "resolved msb binary");
+        return Ok(path.to_path_buf());
+    }
+    if let Some(path) = config_msb {
         tracing::debug!(path = %path.display(), source = "config.paths.msb", "resolved msb binary");
-        return Ok(path.clone());
+        return Ok(path.to_path_buf());
     }
-
-    // Only probe workspace-local dev builds in debug builds to prevent
-    // binary hijacking from untrusted parent directories in production.
-    #[cfg(debug_assertions)]
-    {
-        let mut local_candidates = Vec::new();
-        if let Ok(current_dir) = std::env::current_dir() {
-            local_candidates.extend(dev_msb_candidates_from(&current_dir));
-        }
-        if let Ok(current_exe) = std::env::current_exe()
-            && let Some(exe_dir) = current_exe.parent()
-        {
-            local_candidates.extend(dev_msb_candidates_from(exe_dir));
-        }
-        dedupe_paths(&mut local_candidates);
-
-        if let Some(path) = local_candidates.iter().find(|path| path.is_file()) {
-            tracing::debug!(path = %path.display(), source = "workspace-local msb", "resolved msb binary");
-            return Ok(path.clone());
-        }
+    if let Some(path) = debug_probe() {
+        tracing::debug!(path = %path.display(), source = "workspace-local msb", "resolved msb binary");
+        return Ok(path);
     }
-
-    // Check ~/.microsandbox/bin/msb.
-    let home_bin = config()
-        .home()
-        .join(microsandbox_utils::BIN_SUBDIR)
-        .join(microsandbox_utils::MSB_BINARY);
-    if home_bin.is_file() {
-        tracing::debug!(path = %home_bin.display(), source = "~/.microsandbox/bin/msb", "resolved msb binary");
-        return Ok(home_bin);
+    if let Some(path) = home_probe() {
+        tracing::debug!(path = %path.display(), source = "~/.microsandbox/bin/msb", "resolved msb binary");
+        return Ok(path);
     }
-
-    let path = which::which(microsandbox_utils::MSB_BINARY).map_err(|_| {
-        MicrosandboxError::Custom(
-            "msb binary not found. Run `cargo clean -p microsandbox && cargo build` to reinstall, \
-             or set MSB_PATH to the binary location"
-                .into(),
-        )
-    })?;
-    tracing::debug!(path = %path.display(), source = "PATH lookup", "resolved msb binary");
-    Ok(path)
+    if let Some(path) = which_probe() {
+        tracing::debug!(path = %path.display(), source = "PATH lookup", "resolved msb binary");
+        return Ok(path);
+    }
+    Err(MicrosandboxError::Custom(
+        "msb binary not found. Run `cargo clean -p microsandbox && cargo build` to reinstall, \
+         or set MSB_PATH to the binary location"
+            .into(),
+    ))
 }
 
 /// Resolve the path to `libkrunfw`.
@@ -1455,5 +1502,97 @@ mod tests {
 
         let insecure = cfg.insecure_registries();
         assert_eq!(insecure, vec!["localhost:5050"]);
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // resolve_msb_path precedence
+    //----------------------------------------------------------------------------------------------
+
+    fn pb(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    fn none() -> Option<PathBuf> {
+        None
+    }
+
+    #[test]
+    fn resolve_msb_path_env_wins_over_everything() {
+        let got = resolve_msb_path_from(
+            Some("/from/env"),
+            Some(Path::new("/from/sdk")),
+            Some(Path::new("/from/config")),
+            &|| Some(pb("/from/debug")),
+            &|| Some(pb("/from/home")),
+            &|| Some(pb("/from/which")),
+        )
+        .unwrap();
+        assert_eq!(got, pb("/from/env"));
+    }
+
+    #[test]
+    fn resolve_msb_path_sdk_wins_when_env_missing() {
+        let got = resolve_msb_path_from(
+            None,
+            Some(Path::new("/from/sdk")),
+            Some(Path::new("/from/config")),
+            &|| Some(pb("/from/debug")),
+            &|| Some(pb("/from/home")),
+            &|| Some(pb("/from/which")),
+        )
+        .unwrap();
+        assert_eq!(got, pb("/from/sdk"));
+    }
+
+    #[test]
+    fn resolve_msb_path_config_wins_over_filesystem_tiers() {
+        let got = resolve_msb_path_from(
+            None,
+            None,
+            Some(Path::new("/from/config")),
+            &|| Some(pb("/from/debug")),
+            &|| Some(pb("/from/home")),
+            &|| Some(pb("/from/which")),
+        )
+        .unwrap();
+        assert_eq!(got, pb("/from/config"));
+    }
+
+    #[test]
+    fn resolve_msb_path_debug_probe_wins_over_home_and_which() {
+        let got = resolve_msb_path_from(
+            None,
+            None,
+            None,
+            &|| Some(pb("/from/debug")),
+            &|| Some(pb("/from/home")),
+            &|| Some(pb("/from/which")),
+        )
+        .unwrap();
+        assert_eq!(got, pb("/from/debug"));
+    }
+
+    #[test]
+    fn resolve_msb_path_home_wins_over_which() {
+        let got =
+            resolve_msb_path_from(None, None, None, &none, &|| Some(pb("/from/home")), &|| {
+                Some(pb("/from/which"))
+            })
+            .unwrap();
+        assert_eq!(got, pb("/from/home"));
+    }
+
+    #[test]
+    fn resolve_msb_path_which_is_last_resort() {
+        let got =
+            resolve_msb_path_from(None, None, None, &none, &none, &|| Some(pb("/from/which")))
+                .unwrap();
+        assert_eq!(got, pb("/from/which"));
+    }
+
+    #[test]
+    fn resolve_msb_path_errors_when_all_tiers_empty() {
+        let result = resolve_msb_path_from(None, None, None, &none, &none, &none);
+        assert!(matches!(result, Err(MicrosandboxError::Custom(_))));
     }
 }

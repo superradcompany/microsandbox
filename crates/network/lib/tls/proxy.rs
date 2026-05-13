@@ -165,7 +165,7 @@ async fn intercept_relay(
 ) -> io::Result<()> {
     // Create secrets handler for this connection (filters by SNI).
     // tls_intercepted = true because we're in intercept_relay (not bypass).
-    let secrets_handler = SecretsHandler::new(&tls_state.secrets, sni_name, true);
+    let mut secrets_handler = SecretsHandler::new(&tls_state.secrets, sni_name, true);
 
     // Get or generate per-domain certificate (includes cached ServerConfig).
     let domain_cert = tls_state.get_or_generate_cert(sni_name);
@@ -233,7 +233,7 @@ async fn intercept_relay(
     forward_plaintext(
         &mut guest_tls,
         &mut server_tls,
-        &secrets_handler,
+        &mut secrets_handler,
         &shared,
         &mut plaintext_buf,
     )
@@ -261,7 +261,7 @@ async fn intercept_relay(
                 forward_plaintext(
                     &mut guest_tls,
                     &mut server_tls,
-                    &secrets_handler,
+                    &mut secrets_handler,
                     &shared,
                     &mut plaintext_buf,
                 )
@@ -318,7 +318,7 @@ async fn extract_sni_from_channel(
 async fn forward_plaintext(
     guest_tls: &mut rustls::ServerConnection,
     server_tls: &mut tokio_rustls::client::TlsStream<TcpStream>,
-    secrets_handler: &SecretsHandler,
+    secrets_handler: &mut SecretsHandler,
     shared: &SharedState,
     buf: &mut [u8],
 ) -> io::Result<()> {

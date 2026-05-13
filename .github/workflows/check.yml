@@ -276,6 +276,10 @@ jobs:
         working-directory: sdk/python
         run: uv run maturin develop --release
 
+      - name: Test Python SDK
+        working-directory: sdk/python
+        run: uv run pytest
+
       - name: Lint Python SDK (ruff)
         working-directory: sdk/python
         run: uv run ruff check .
@@ -386,6 +390,16 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Node.js SDK smoke tests (requires KVM)
+  #
+  # Runs the smoke suite under both Node and Bun. The two are sequential
+  # in one job so they don't fight over the workspace on the self-hosted
+  # runner.
+  #
+  # No `~/.microsandbox` install: the SDK uses its bundled platform-pkg
+  # binaries. We patch in the freshly-built msb + libkrunfw so the test
+  # exercises current code, not the lagged published binary. With no home
+  # fallback, the bridge is the only path msb can reach native — under Bun
+  # pre-fix, sandbox creation fails clean instead of being silently masked.
   # ---------------------------------------------------------------------------
   node-sdk-test:
     name: Node.js SDK Tests
@@ -402,7 +416,6 @@ jobs:
         with:
           node-version: 22
 
-      # -- Download pre-built artifacts --
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -415,39 +428,39 @@ jobs:
           name: node-sdk-linux-x86_64
           path: sdk/node-ts/
 
-      # -- Install msb + libkrunfw --
-      - name: Install msb
-        run: |
-          rm -f ~/.microsandbox/db/microsandbox.db
-          chmod +x build/msb
-          mkdir -p ~/.microsandbox/bin ~/.microsandbox/lib
-          install -m755 build/msb ~/.microsandbox/bin/msb
-          install -m644 build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/
-          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
-          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
-
-      # -- Install deps & run tests --
       - name: Install Node.js dependencies
         working-directory: sdk/node-ts
         run: npm ci --ignore-scripts
 
-      - name: Run SDK smoke tests
+      # The published platform-pkg msb may lag the SDK; replace it with the
+      # freshly-built binaries so the smoke test runs against current code.
+      - name: Use fresh runtime binaries in platform package
         working-directory: sdk/node-ts
-        # MSB_PATH forces the SDK to use the freshly-built msb installed at
-        # ~/.microsandbox/bin/msb. Without it, the SDK's resolve-binary.js
-        # prefers the platform-pkg-bundled msb (older published version)
-        # under node_modules/@superradcompany/microsandbox-linux-x64-gnu/bin/msb,
-        # which can lag the SDK's CLI args and cause clap parse failures.
-        env:
-          # Per-job isolated state directory so concurrent / sequential
-          # runs of this job don't share `~/.microsandbox/{db,sandboxes}`.
-          # `$RUNNER_TEMP` is wiped between jobs, so cleanup is automatic.
-          MSB_HOME: ${{ runner.temp }}/msb-home-${{ github.run_id }}
         run: |
-          export PATH="$HOME/.microsandbox/bin:$PATH"
-          export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
-          export MSB_PATH="$HOME/.microsandbox/bin/msb"
-          npm test
+          PKG=node_modules/@superradcompany/microsandbox-linux-x64-gnu
+          chmod +x ${{ github.workspace }}/build/msb
+          install -m755 ${{ github.workspace }}/build/msb $PKG/bin/msb
+          rm -f $PKG/lib/libkrunfw*
+          cp -P ${{ github.workspace }}/build/libkrunfw.so* $PKG/lib/
+
+      - name: Run SDK tests (Node)
+        working-directory: sdk/node-ts
+        env:
+          MSB_HOME: ${{ runner.temp }}/msb-home-${{ github.run_id }}-node
+        run: npm test
+
+      # setup-bun downloads a zipped release; unzip isn't preinstalled on
+      # the self-hosted runner.
+      - name: Install unzip
+        run: sudo apt-get update && sudo apt-get install -y unzip
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Run SDK tests (Bun)
+        working-directory: sdk/node-ts
+        env:
+          MSB_HOME: ${{ runner.temp }}/msb-home-${{ github.run_id }}-bun
+        run: bunx --bun vitest run
 
   # ---------------------------------------------------------------------------
   # Aggregator: a single status check that always reports, regardless of

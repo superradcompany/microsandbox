@@ -567,7 +567,8 @@ Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter r
 | `envs(record \| iter)` | Add many env vars |
 | `script(name, content)` | Mount a script at `/.msb/scripts/<name>` |
 | `scripts(record \| iter)` | Mount many scripts |
-| `replace()` | Replace any existing sandbox with the same name |
+| `replace()` | Replace any existing sandbox with the same name (10s SIGTERM grace, then SIGKILL) |
+| `replaceGrace(graceMs)` | Same as `replace()` with a custom SIGTERM grace in milliseconds. `0` skips SIGTERM. Implies `replace()` |
 | `maxDuration(secs)` | Maximum sandbox lifetime |
 | `idleTimeout(secs)` | Stop the sandbox after this many idle seconds |
 | `volume(guestPath, m => ...)` | Mount a volume — see [Volumes](/sdk/typescript/volumes) |
@@ -679,6 +680,7 @@ Frozen configuration object — produced by `SandboxBuilder.build()` and exposed
 | patches | `Patch[]` | Rootfs modifications applied before boot |
 | pullPolicy | `PullPolicy \| null` | Image pull behavior |
 | replace | `boolean` | Replace existing sandbox with same name |
+| replaceGraceMs | `number` | Milliseconds to wait after `SIGTERM` before escalating to `SIGKILL` (default `10000`; `0` skips `SIGTERM`) |
 | maxDurationSecs | `number \| null` | Maximum sandbox lifetime |
 | idleTimeoutSecs | `number \| null` | Stop after idle time |
 | portsTcp | `Array<readonly [number, number]>` | TCP host→guest mappings |

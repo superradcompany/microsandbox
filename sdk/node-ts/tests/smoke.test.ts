@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { isInstalled, Sandbox } from "../dist/index.js";
+import { Sandbox } from "../dist/index.js";
+import { msbPath } from "../dist/internal/resolve-binary.js";
 
 const SANDBOX_NAME = "sdk-smoke-test";
 
-describe.skipIf(!isInstalled())("end-to-end smoke", () => {
+describe.skipIf(!msbPath())("end-to-end smoke", () => {
   let sb: Sandbox;
 
   beforeAll(async () => {

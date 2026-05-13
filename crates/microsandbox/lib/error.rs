@@ -34,6 +34,14 @@ pub enum MicrosandboxError {
     #[error("sandbox not found: {0}")]
     SandboxNotFound(String),
 
+    /// A sandbox with the given name already exists. Returned by
+    /// `Sandbox::create` when the name is taken and `replace_existing`
+    /// was not set, and by `Sandbox::create` with `replace_existing`
+    /// when an in-process `Sandbox` handle for that name is still
+    /// alive (the caller must drop or stop the existing handle first).
+    #[error("sandbox already exists: {0}")]
+    SandboxAlreadyExists(String),
+
     /// The sandbox is still running and cannot be removed.
     #[error("sandbox still running: {0}")]
     SandboxStillRunning(String),

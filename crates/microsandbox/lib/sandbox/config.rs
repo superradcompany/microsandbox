@@ -215,6 +215,19 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub replace_existing: bool,
 
+    /// How long to wait after SIGTERM for the existing sandbox process to
+    /// exit gracefully before escalating to SIGKILL during a replace.
+    ///
+    /// Only consulted when `replace_existing` is true. A zero duration
+    /// skips SIGTERM entirely and goes straight to SIGKILL. Default is
+    /// ten seconds, which gives the exit observer plenty of headroom
+    /// to flush logs and clean up the agent socket on a healthy
+    /// sandbox before we escalate.
+    ///
+    /// This is an operation flag, not persisted sandbox state.
+    #[serde(skip)]
+    pub replace_grace: std::time::Duration,
+
     /// Manifest digest for the resolved OCI image.
     ///
     /// Set at create time. Used by spawn to derive VMDK and fsmeta paths
@@ -407,6 +420,7 @@ impl Default for SandboxConfig {
             insecure: false,
             ca_certs: Vec::new(),
             replace_existing: false,
+            replace_grace: std::time::Duration::from_secs(10),
             manifest_digest: None,
             snapshot_upper_source: None,
         }

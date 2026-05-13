@@ -226,10 +226,25 @@ impl SandboxBuilder {
 
     /// Replace an existing sandbox with the same name during create.
     ///
-    /// If the existing sandbox is still active, microsandbox stops it and
-    /// waits for it to exit before recreating it.
+    /// If the existing sandbox is still active, microsandbox stops it
+    /// before recreating it. When the prior sandbox is owned by an
+    /// in-process `Sandbox` handle, the handle's underlying child is
+    /// signalled and reaped directly. Otherwise the existing PID is
+    /// signalled with SIGTERM, given [`replace_grace`](Self::replace_grace)
+    /// to exit, then SIGKILLed.
     pub fn replace(mut self) -> Self {
         self.config.replace_existing = true;
+        self
+    }
+
+    /// How long to give the existing sandbox after SIGTERM before
+    /// escalating to SIGKILL during a replace. Implies [`replace`](Self::replace).
+    ///
+    /// A zero duration skips SIGTERM entirely. Default (when only
+    /// `.replace()` is set) is ten seconds.
+    pub fn replace_grace(mut self, grace: std::time::Duration) -> Self {
+        self.config.replace_existing = true;
+        self.config.replace_grace = grace;
         self
     }
 

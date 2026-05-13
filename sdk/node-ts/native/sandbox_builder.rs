@@ -201,6 +201,16 @@ impl JsSandboxBuilder {
         self
     }
 
+    /// Grace period (in milliseconds) to wait for the existing sandbox
+    /// to exit after SIGTERM before escalating to SIGKILL during a
+    /// replace. Implies `replace`. Zero skips SIGTERM entirely.
+    #[napi]
+    pub fn replace_grace(&mut self, grace_ms: u32) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.replace_grace(std::time::Duration::from_millis(grace_ms.into())));
+        self
+    }
+
     /// Override the image entrypoint.
     #[napi]
     pub fn entrypoint(&mut self, cmd: Vec<String>) -> &Self {

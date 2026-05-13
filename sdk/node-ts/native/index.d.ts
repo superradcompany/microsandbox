@@ -758,6 +758,12 @@ export declare class SandboxBuilder {
   registry(configure: (arg: RegistryConfigBuilder) => RegistryConfigBuilder): this
   /** Replace any existing sandbox with the same name. */
   replace(): this
+  /**
+   * Grace period (in milliseconds) to wait for the existing sandbox
+   * to exit after SIGTERM before escalating to SIGKILL during a
+   * replace. Implies `replace`. Zero skips SIGTERM entirely.
+   */
+  replaceGrace(graceMs: number): this
   /** Override the image entrypoint. */
   entrypoint(cmd: Array<string>): this
   /**
@@ -1554,6 +1560,13 @@ export interface SecretInjection {
   queryParams: boolean
   body: boolean
 }
+
+/**
+ * Set the `msb` binary path resolved by the JS SDK.
+ *
+ * This avoids using `process.env` as an internal JS-to-native config channel.
+ */
+export declare function setRuntimeMsbPath(path: string): void
 
 /** Built snapshot configuration produced by `SnapshotBuilder.build()`. */
 export interface SnapshotConfig {

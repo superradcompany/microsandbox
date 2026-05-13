@@ -450,6 +450,26 @@ class Patch:
 #--------------------------------------------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
+class SecretInjection:
+    """Where in the HTTP request the secret value can be substituted."""
+    headers: bool = True
+    basic_auth: bool = True
+    query_params: bool = False
+    body: bool = False
+
+    def _to_dict(self) -> dict:
+        d: dict = {}
+        if not self.headers:
+            d["headers"] = False
+        if not self.basic_auth:
+            d["basic_auth"] = False
+        if self.query_params:
+            d["query_params"] = True
+        if self.body:
+            d["body"] = True
+        return d
+
+@dataclass(frozen=True, slots=True)
 class SecretEntry:
     """A secret entry for the secrets array."""
     env_var: str
@@ -459,6 +479,7 @@ class SecretEntry:
     placeholder: str | None = None
     require_tls: bool = True
     on_violation: ViolationAction = ViolationAction.BLOCK_AND_LOG
+    injection: SecretInjection = field(default_factory=SecretInjection)
 
     def _to_dict(self) -> dict:
         d: dict = {"env_var": self.env_var, "value": self.value}
@@ -472,6 +493,9 @@ class SecretEntry:
             d["require_tls"] = False
         if self.on_violation != ViolationAction.BLOCK_AND_LOG:
             d["on_violation"] = str(self.on_violation)
+        injection = self.injection._to_dict()
+        if injection:
+            d["injection"] = injection
         return d
 
 class Secret:
@@ -487,6 +511,7 @@ class Secret:
         placeholder: str | None = None,
         require_tls: bool = True,
         on_violation: ViolationAction = ViolationAction.BLOCK_AND_LOG,
+        injection: SecretInjection | None = None,
     ) -> SecretEntry:
         return SecretEntry(
             env_var=env_var,
@@ -496,6 +521,7 @@ class Secret:
             placeholder=placeholder,
             require_tls=require_tls,
             on_violation=on_violation,
+            injection=injection if injection is not None else SecretInjection(),
         )
 
 #--------------------------------------------------------------------------------------------------

@@ -23,6 +23,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
         let (cls_name, msg) = match &err {
             InvalidConfig(_) => ("InvalidConfigError", err.to_string()),
             SandboxNotFound(_) => ("SandboxNotFoundError", err.to_string()),
+            SandboxAlreadyExists(_) => ("SandboxAlreadyExistsError", err.to_string()),
             SandboxStillRunning(_) => ("SandboxStillRunningError", err.to_string()),
             ExecTimeout(_) => ("ExecTimeoutError", err.to_string()),
             SandboxFs(_) => ("FilesystemError", err.to_string()),

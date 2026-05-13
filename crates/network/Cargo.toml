@@ -11,6 +11,7 @@ edition.workspace = true
 path = "lib/lib.rs"
 
 [dependencies]
+base64 = "0.22"
 bytes = { workspace = true }
 crossbeam-queue = { workspace = true }
 dirs = { workspace = true }
@@ -28,6 +29,7 @@ microsandbox-utils = { version = "0.4.5", path = "../utils" }
 msb_krun = { version = "0.1.12", features = ["net"] }
 parking_lot = { workspace = true }
 pem = "3"
+percent-encoding = "2"
 rcgen = { workspace = true }
 resolv-conf = { workspace = true }
 rustls = { workspace = true }

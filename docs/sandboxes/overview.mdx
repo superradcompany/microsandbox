@@ -217,7 +217,7 @@ msb create ./alpine.qcow2 --name worker
 
 ## Replace existing
 
-Replace a stopped sandbox with the same name instead of failing on conflict. This stops the old sandbox (if still running), removes it, and creates a fresh one.
+Replace a stopped or running sandbox with the same name instead of failing on conflict. This stops the old sandbox (if still running), removes it, and creates a fresh one.
 
 <CodeGroup>
 ```rust Rust
@@ -244,6 +244,41 @@ msb create --replace python --name worker
 ```
 
 </CodeGroup>
+
+### Grace period
+
+If the existing sandbox is still running, microsandbox sends it `SIGTERM` and waits for it to exit before falling back to `SIGKILL`. The default wait is 10 seconds. Pass a longer grace if the workload needs more time to shut down cleanly, or `0` to skip `SIGTERM` and kill immediately.
+
+<CodeGroup>
+```rust Rust
+use std::time::Duration;
+
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .replace_grace(Duration::from_secs(30))
+    .create()
+    .await?;
+```
+
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .replaceGrace(30_000)  // milliseconds
+    .create();
+```
+
+```python Python
+sb = await Sandbox.create("worker", image="python", replace_grace=30)  # seconds
+```
+
+```bash CLI
+msb create --replace-grace 30s python --name worker
+msb create --replace-grace 0 python --name worker  # SIGKILL immediately
+```
+
+</CodeGroup>
+
+`replace_grace` / `--replace-grace` implies `replace` / `--replace`, so you don't need to pass both.
 
 ## Private registry
 

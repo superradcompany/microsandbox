@@ -372,19 +372,57 @@ const reclaimed = await Image.gcLayers();
 console.log(`reclaimed ${reclaimed} orphaned layers`);
 ```
 
+### Replace Existing
+
+`replace()` stops a sandbox with the same name (if any) and recreates
+it. By default the existing sandbox gets 10 seconds to exit cleanly
+after `SIGTERM` before `SIGKILL`; pass `replaceGrace(ms)` to override.
+
+```typescript
+import { Sandbox } from "microsandbox";
+
+// Default 10s SIGTERM grace.
+await using sb = await Sandbox.builder("worker")
+  .image("alpine")
+  .replace()
+  .create();
+
+// Wait longer for a workload that needs more time to shut down.
+await using slow = await Sandbox.builder("worker")
+  .image("alpine")
+  .replaceGrace(30_000)
+  .create();
+
+// Skip SIGTERM entirely; SIGKILL immediately.
+await using fast = await Sandbox.builder("worker")
+  .image("alpine")
+  .replaceGrace(0)
+  .create();
+```
+
 ### Typed Errors
 
 Every `MicrosandboxError` variant has a dedicated subclass — use
 `instanceof` instead of parsing message strings.
 
 ```typescript
-import { ExecTimeoutError, Sandbox, SandboxNotFoundError } from "microsandbox";
+import { ExecTimeoutError, Sandbox, SandboxAlreadyExistsError, SandboxNotFoundError } from "microsandbox";
 
 try {
   await Sandbox.remove("ghost");
 } catch (e) {
   if (e instanceof SandboxNotFoundError) {
     console.log("nothing to remove:", e.message);
+  } else {
+    throw e;
+  }
+}
+
+try {
+  await Sandbox.builder("worker").image("alpine").create();
+} catch (e) {
+  if (e instanceof SandboxAlreadyExistsError) {
+    console.log("already exists; resume or pass replace()");
   } else {
     throw e;
   }
