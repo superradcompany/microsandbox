@@ -32,8 +32,10 @@
 #   - sdk/go/setup.go (sdkVersion constant; consumed by EnsureInstalled to
 #     resolve the GitHub release artefact URL for libmicrosandbox_go_ffi)
 #
-# Does NOT regenerate the workspace Cargo.lock — run `cargo check`
-# afterwards. The next-steps block below lists the exact commands.
+# Cargo.lock entries for workspace-versioned crates are bumped by sed,
+# but the script does not do a full cargo-driven regen — run `cargo
+# check` afterwards if you also need any dependency-graph changes
+# reflected. The next-steps block below lists the exact commands.
 
 set -euo pipefail
 
