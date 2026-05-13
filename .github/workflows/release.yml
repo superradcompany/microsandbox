@@ -438,22 +438,7 @@ jobs:
 
       - name: Regenerate lockfile
         working-directory: sdk/node-ts
-        # strip the microsandbox platform-package entries so npm
-        # re-resolves them against the registry; otherwise the install
-        # short-circuits on the stale integrity hashes bump-version.sh
-        # carried forward.
-        run: |
-          node -e '
-            const fs = require("fs");
-            const lock = JSON.parse(fs.readFileSync("package-lock.json"));
-            for (const key of Object.keys(lock.packages)) {
-              if (key.startsWith("node_modules/@superradcompany/microsandbox-")) {
-                delete lock.packages[key];
-              }
-            }
-            fs.writeFileSync("package-lock.json", JSON.stringify(lock, null, 2) + "\n");
-          '
-          npm install --package-lock-only --ignore-scripts
+        run: npm install --package-lock-only --ignore-scripts
 
       - uses: peter-evans/create-pull-request@v7
         with:
