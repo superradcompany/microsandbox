@@ -274,9 +274,10 @@ impl NetworkPolicy {
         Self {
             default_egress: Action::Deny,
             default_ingress: Action::Allow,
-            rules: vec![Rule::allow_egress(Destination::Group(
-                DestinationGroup::Public,
-            ))],
+            rules: vec![
+                Rule::allow_dns(),
+                Rule::allow_egress(Destination::Group(DestinationGroup::Public)),
+            ],
         }
     }
 
@@ -288,6 +289,7 @@ impl NetworkPolicy {
             default_egress: Action::Deny,
             default_ingress: Action::Allow,
             rules: vec![
+                Rule::allow_dns(),
                 Rule::allow_egress(Destination::Group(DestinationGroup::Public)),
                 Rule::allow_egress(Destination::Group(DestinationGroup::Private)),
             ],
@@ -418,12 +420,16 @@ impl NetworkPolicy {
     /// Evaluate a DNS query name against egress policy.
     ///
     /// DNS queries do not have a resolved destination IP yet, so
-    /// IP-based destinations (`Cidr` / `Group`) cannot match here.
-    /// Name-based destinations (`Domain` / `DomainSuffix`) match the
-    /// query name directly, ignoring protocol and port filters that
-    /// apply to the later connection. `Any` rules still match the DNS
-    /// transport's protocol and port. If no rule matches,
-    /// `default_egress` applies.
+    /// IP-based destinations (`Cidr`, most `Group` variants) cannot
+    /// match here. `Group::Host` is the one exception: it names the
+    /// gateway forwarder the query is actually delivered to, so a
+    /// `Group::Host` rule is honored for DNS subject to its
+    /// protocol/port filter. Name-based destinations
+    /// (`Domain` / `DomainSuffix`) match the query name directly,
+    /// ignoring protocol and port filters that apply to the later
+    /// connection. `Any` rules still match the DNS transport's
+    /// protocol and port. If no rule matches, `default_egress`
+    /// applies.
     pub fn evaluate_dns_query(&self, name: &DomainName, protocol: Protocol, port: u16) -> Action {
         self.evaluate_dns_query_inner(Some(name), protocol, port)
     }
@@ -447,6 +453,9 @@ impl NetworkPolicy {
             }
             let matched = match &rule.destination {
                 Destination::Any => rule_matches_protocol_and_port(rule, protocol, port),
+                Destination::Group(DestinationGroup::Host) => {
+                    rule_matches_protocol_and_port(rule, protocol, port)
+                }
                 Destination::Domain(d) => name == Some(d),
                 Destination::DomainSuffix(s) => {
                     name.is_some_and(|name| matches_suffix(name.as_str(), s.as_str()))
@@ -637,6 +646,35 @@ impl Rule {
             protocols: Vec::new(),
             ports: Vec::new(),
             action,
+        }
+    }
+
+    /// Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway, i.e.
+    /// the in-process DNS forwarder.
+    ///
+    /// Building block for deny-by-default policies: under the
+    /// DNS-as-egress evaluation rules, generic IP-based destinations
+    /// (`Cidr` / non-`Host` `Group`) cannot match a query because the
+    /// name has no resolved IP yet, so a policy of
+    /// `default_egress = Deny` with only those rules refuses every DNS
+    /// query. `Group::Host` is the one IP-based destination that *is*
+    /// honored at DNS-decision time, since it names the gateway
+    /// forwarder the query is delivered to.
+    ///
+    /// At connection-time this rule stays narrow: it only matches the
+    /// gateway IPs, not arbitrary private resolvers a guest might aim
+    /// at directly.
+    ///
+    /// DoT (TCP/853) is not included; if you need it, add an explicit
+    /// `Group::Host tcp/853` allow rule (and pair it with TLS
+    /// interception).
+    pub fn allow_dns() -> Self {
+        Self {
+            direction: Direction::Egress,
+            destination: Destination::Group(DestinationGroup::Host),
+            protocols: vec![Protocol::Udp, Protocol::Tcp],
+            ports: vec![PortRange::single(53)],
+            action: Action::Allow,
         }
     }
 }
@@ -1467,6 +1505,56 @@ mod tests {
         assert_eq!(
             policy.evaluate_dns_query(&name("anything.example"), Protocol::Udp, 53),
             Action::Allow
+        );
+    }
+
+    #[test]
+    fn evaluate_dns_query_group_host_grants_dns_under_deny_by_default() {
+        // `Group::Host` represents the gateway forwarder the query is
+        // delivered to, so it is the one IP-based destination honored
+        // at DNS-decision time. Its protocol/port filter still applies.
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule::allow_dns()],
+        };
+        assert_eq!(
+            policy.evaluate_dns_query(&name("example.com"), Protocol::Udp, 53),
+            Action::Allow
+        );
+        assert_eq!(
+            policy.evaluate_dns_query(&name("example.com"), Protocol::Tcp, 53),
+            Action::Allow
+        );
+        // DoT (TCP/853) is intentionally not covered by `allow_dns()`.
+        assert_eq!(
+            policy.evaluate_dns_query(&name("example.com"), Protocol::Tcp, 853),
+            Action::Deny
+        );
+    }
+
+    #[test]
+    fn evaluate_dns_query_group_host_respects_protocol_port_filter() {
+        // A `Group::Host udp/53` allow rule grants UDP DNS but not
+        // TCP fallback or DoT.
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule {
+                direction: Direction::Egress,
+                destination: Destination::Group(DestinationGroup::Host),
+                protocols: vec![Protocol::Udp],
+                ports: vec![PortRange::single(53)],
+                action: Action::Allow,
+            }],
+        };
+        assert_eq!(
+            policy.evaluate_dns_query(&name("example.com"), Protocol::Udp, 53),
+            Action::Allow
+        );
+        assert_eq!(
+            policy.evaluate_dns_query(&name("example.com"), Protocol::Tcp, 53),
+            Action::Deny
         );
     }
 

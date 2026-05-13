@@ -875,6 +875,7 @@ Convenience constructors:
 | `Rule::deny_ingress(destination)` | Deny rule, direction `Ingress` |
 | `Rule::allow_any(destination)` | Allow rule, direction `Any` |
 | `Rule::deny_any(destination)` | Deny rule, direction `Any` |
+| `Rule::allow_dns()` | Allow plain DNS (UDP/53 + TCP/53) to the gateway forwarder (`Group::Host`). The standard one-liner for opening DNS under a deny-by-default policy. See [DNS as egress](/networking/dns#dns-as-egress) |
 
 ### ExplicitRuleBuilder
 

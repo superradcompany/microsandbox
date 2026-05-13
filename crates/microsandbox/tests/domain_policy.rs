@@ -173,9 +173,10 @@ async fn domain_policy_allows_whitelisted_https() {
     };
     let sb = setup_alpine(name, policy).await;
 
-    // DNS resolution itself must succeed: the interceptor bypasses
-    // the egress policy for queries aimed at the gateway, so the
-    // guest can populate its cache before the policy-gated connect.
+    // DNS resolution must succeed for `cloudflare.com`: the Domain
+    // allow rule matches by name at DNS-decision time (ignoring its
+    // proto/port filter), so the query is permitted and the guest's
+    // cache is populated before the policy-gated connect.
     let dns_out = dns_lookup(&sb, "cloudflare.com").await;
     assert!(
         !dns_out.is_empty(),
@@ -288,35 +289,41 @@ async fn domain_policy_deny_suffix_refuses_dns_apex_and_subdomain() {
 }
 
 /// SNI-based enforcement on shared-CDN IPs (the over-allow fix).
-/// Allow only `files.pythonhosted.org`, resolve both that name and
-/// `pypi.org` (often co-located on Fastly), and assert HTTPS to
-/// `pypi.org` fails while `files.pythonhosted.org` succeeds.
+/// Allow only `files.pythonhosted.org` for HTTPS plus DNS via the
+/// gateway, resolve both that name and `pypi.org` (often co-located
+/// on Fastly), and assert HTTPS to `pypi.org` fails while
+/// `files.pythonhosted.org` succeeds.
 #[msb_test]
 async fn domain_policy_sni_disambiguates_shared_cdn_ip() {
     let name = "net-domain-policy-sni-shared-ip";
     let policy = NetworkPolicy {
         default_egress: Action::Deny,
         default_ingress: Action::Allow,
-        // Allow only files.pythonhosted.org. pypi.org has no allow rule.
-        rules: vec![allow_domain_https("files.pythonhosted.org")],
+        // Allow DNS for any name via the gateway forwarder, but only
+        // permit HTTPS to files.pythonhosted.org. pypi.org has no
+        // connection-level allow rule.
+        rules: vec![
+            Rule::allow_dns(),
+            allow_domain_https("files.pythonhosted.org"),
+        ],
     };
     let sb = setup_alpine(name, policy).await;
 
     // Resolve both names so the DNS cache associates each with its IP
-    // (and any shared Fastly addresses with both names). The
-    // disallowed name's resolution succeeds because there is no deny
-    // rule for it — only its connection is gated. Retry the priming
+    // (and any shared Fastly addresses with both names). Both lookups
+    // succeed because `allow_dns()` permits DNS regardless of name;
+    // SNI then disambiguates at connect time. Retry the priming
     // lookups so a single transient forward doesn't leave curl
     // resolving from scratch.
     let pypi_ip = dns_lookup(&sb, "pypi.org").await;
     let files_ip = dns_lookup(&sb, "files.pythonhosted.org").await;
     assert!(
         !pypi_ip.is_empty(),
-        "pypi.org should resolve under default-allow"
+        "pypi.org should resolve when DNS is explicitly allowed"
     );
     assert!(
         !files_ip.is_empty(),
-        "files.pythonhosted.org should resolve under default-allow"
+        "files.pythonhosted.org should resolve when DNS is explicitly allowed"
     );
 
     // Allowed name: SNI matches the rule, connection proceeds.

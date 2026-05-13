@@ -13,6 +13,18 @@ DNS queries from the sandbox are intercepted on the host. Rather than letting th
 
 The knobs below cover the day-to-day controls. For the rebinding and TOCTOU protections that also ride on the interceptor, see the [security model](/networking/security-model).
 
+## DNS as egress
+
+A DNS query is itself an egress action that the policy evaluates before the forwarder will answer. The walk runs once per query, against the transport the guest used to send it (UDP/53, TCP/53, or DoT TCP/853), and returns the action of the first matching rule (or `default_egress` if nothing matches):
+
+- **Name-based rules** (`Domain`, `DomainSuffix`) match the query name directly and ignore their protocol/port filter, so a `Domain` allow rule grants the lookup regardless of which port the rule was scoped to.
+- **`Any` rules** match the DNS transport's actual protocol and port. An `Any udp/53 allow` is the standard way to grant plain DNS broadly.
+- **IP-based rules** mostly can't match — a query has no resolved IP yet — with one exception: `Group::Host` matches because it names the gateway forwarder the query is delivered to. A `Group::Host udp/53 + tcp/53 allow` rule is the narrow way to open DNS while still denying the guest from aiming queries at arbitrary resolver IPs.
+
+Under a deny-by-default policy whose rules are all IP-based (`Cidr` / non-`Host` `Group`), nothing matches at DNS-decision time and every query is refused. The default `public_only` and `non_local` presets ship with an explicit `Group::Host udp/53 + tcp/53 allow` rule (available as `Rule::allow_dns()` in Rust) so DNS works under those policies; custom deny-by-default policies need an equivalent allow.
+
+DoT (TCP/853) is a separate port; `allow_dns()` does not include it. Pair an `Any tcp/853 allow` (or `Group::Host tcp/853 allow`) with [TLS interception](/networking/tls) if you need DoT.
+
 ## Blocking domains
 
 Domain blocking lives in the network policy as `deny Domain(...)` / `deny DomainSuffix(...)` rules. The interceptor enforces them at three layers:

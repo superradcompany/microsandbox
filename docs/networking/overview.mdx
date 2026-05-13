@@ -71,9 +71,8 @@ use microsandbox::{NetworkPolicy, Sandbox};
 
 let policy = NetworkPolicy::builder()
     .default_deny()
-    .egress(|e| e
-        .tcp().port(443).allow_public()
-        .udp().port(53).allow_public())
+    .egress(|e| e.tcp().port(443).allow_public())
+    .egress(|e| e.udp().tcp().port(53).allow_host())
     .build()?;
 
 let sb = Sandbox::builder("secure-agent")
@@ -82,6 +81,8 @@ let sb = Sandbox::builder("secure-agent")
     .create()
     .await?;
 ```
+
+`Group::Host` covers the sandbox gateway, which is where DNS is delivered — that's why DNS rules typically target it under a deny-by-default policy. See the [DNS-as-egress](/networking/dns#dns-as-egress) breakdown for the full rule, including why other IP-based destinations can't grant DNS.
 
 The builder accepts string inputs (`.ip("10.0.0.5")`, `.cidr("10.0.0.0/24")`, `.domain("api.example.com")`, etc.) and parses them at `.build()` time, so the chain stays clean. See the [Rust reference](/sdk/rust/networking) for the full surface (per-category shortcuts, the explicit-rule sub-builder, shadow-rule warnings).
 
