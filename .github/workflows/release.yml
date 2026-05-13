@@ -438,15 +438,10 @@ jobs:
 
       - name: Regenerate lockfile
         working-directory: sdk/node-ts
-        # bump-version.sh text-bumps version + URL fields in the lockfile
-        # but leaves integrity hashes from the prior release carried
-        # forward (the new version isn't on npm yet at bump-PR time, so
-        # it can't resolve real hashes). post-publish, a bare
-        # `npm install --package-lock-only` short-circuits — paper
-        # versions already match what's wanted, so npm never re-fetches
-        # metadata and the stale hashes stick. strip the microsandbox
-        # platform-package entries first so the install is forced to
-        # re-resolve them against the registry with correct integrity.
+        # strip the microsandbox platform-package entries so npm
+        # re-resolves them against the registry; otherwise the install
+        # short-circuits on the stale integrity hashes bump-version.sh
+        # carried forward.
         run: |
           node -e '
             const fs = require("fs");
