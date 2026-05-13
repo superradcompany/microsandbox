@@ -12,7 +12,7 @@ path = "lib/lib.rs"
 
 [dependencies]
 libc.workspace = true
-microsandbox-utils = { version = "0.4.5", path = "../utils" }
+microsandbox-utils = { version = "0.4.6", path = "../utils" }
 msb_krun = "0.1.12"
 scopeguard.workspace = true
 tempfile.workspace = true
@@ -23,4 +23,4 @@ default = ["prebuilt"]
 prebuilt = ["microsandbox-utils/http-client"]
 
 [build-dependencies]
-microsandbox-utils = { version = "0.4.5", path = "../utils" }
+microsandbox-utils = { version = "0.4.6", path = "../utils" }
