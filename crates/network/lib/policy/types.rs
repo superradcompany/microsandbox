@@ -768,7 +768,12 @@ impl From<bool> for DestinationMatch {
 /// `source`:
 ///
 /// - [`HostnameSource::Sni`]: byte-equality against the canonicalized
-///   SNI string (or label-aware suffix match).
+///   SNI string (or label-aware suffix match) AND a resolved-hostname
+///   cache binding tying the claimed name to `addr`. The cache check
+///   stops a guest from declaring an arbitrary SNI on an unresolved
+///   IP to pass a `Domain`-allow rule (lax-SNI server spoof). Genuine
+///   shared-CDN traffic still passes because the guest resolves the
+///   name before connecting, populating the cache.
 /// - [`HostnameSource::CacheOnly`]: query the resolved-hostname cache
 ///   on `shared` for any prior resolution of `addr` that matches.
 /// - [`HostnameSource::Deferred`]: short-circuits to
@@ -784,14 +789,20 @@ fn matches_destination_with_source(
         Destination::Cidr(network) => matches_cidr(network, addr).into(),
         Destination::Group(group) => matches_group(*group, addr, shared).into(),
         Destination::Domain(domain) => match source {
-            HostnameSource::Sni(name) => (name == domain.as_str()).into(),
+            HostnameSource::Sni(name) => (name == domain.as_str()
+                && shared.any_resolved_hostname(addr, |hostname| hostname == domain.as_str()))
+            .into(),
             HostnameSource::CacheOnly => shared
                 .any_resolved_hostname(addr, |hostname| hostname == domain.as_str())
                 .into(),
             HostnameSource::Deferred => DestinationMatch::Defer,
         },
         Destination::DomainSuffix(suffix) => match source {
-            HostnameSource::Sni(name) => matches_suffix(name, suffix.as_str()).into(),
+            HostnameSource::Sni(name) => (matches_suffix(name, suffix.as_str())
+                && shared.any_resolved_hostname(addr, |hostname| {
+                    matches_suffix(hostname, suffix.as_str())
+                }))
+            .into(),
             HostnameSource::CacheOnly => shared
                 .any_resolved_hostname(addr, |hostname| matches_suffix(hostname, suffix.as_str()))
                 .into(),
@@ -1718,12 +1729,15 @@ mod tests {
     // evaluate_egress_with_source / HostnameSource
     //----------------------------------------------------------------------------------------------
 
-    /// Cache says IP X corresponds to `evil.com`; policy allows
-    /// `pypi.org`; SNI says `pypi.org`. SNI must take precedence over
-    /// the cache and the connection must be allowed. (Fixes over-block.)
+    /// Shared-CDN: IP X resolved to both `evil.com` and `pypi.org`;
+    /// policy allows `pypi.org`; SNI claims `pypi.org`. SNI matches the
+    /// rule AND the cache has a `pypi.org` binding for X, so the
+    /// connection is allowed. Legitimate path the SNI+cache AND-check
+    /// must not block.
     #[test]
-    fn hostname_source_sni_ignores_dns_cache() {
+    fn hostname_source_sni_allows_when_cache_pins_claimed_name() {
         let shared = shared_with_host("evil.com", PYPI_V4);
+        cache(&shared, "pypi.org", ResolvedHostnameFamily::Ipv4, PYPI_V4);
         let policy = allow_rule(Destination::Domain(name("pypi.org")));
         let eval = policy.evaluate_egress_with_source(
             sock(PYPI_V4, 443),
@@ -1734,11 +1748,46 @@ mod tests {
         assert_eq!(eval, EgressEvaluation::Allow);
     }
 
-    /// Cache says IP X corresponds to `pypi.org`; policy allows
-    /// `pypi.org`; SNI says `evil.com`. The cache would over-allow,
-    /// but SNI is authoritative — connection denied. (Fixes over-allow.)
+    /// SNI spoof: cache has `evil.com` only for IP X; the guest aims
+    /// at X and claims SNI `pypi.org`. Byte-equality with the rule
+    /// would pass, but no DNS lookup ever bound `pypi.org` to X, so
+    /// the cache check fails and the connection is denied. This is
+    /// the lax-SNI server spoof.
     #[test]
-    fn hostname_source_sni_denies_when_cache_would_allow() {
+    fn hostname_source_sni_denies_spoofed_claim_on_unrelated_ip() {
+        let shared = shared_with_host("evil.com", PYPI_V4);
+        let policy = allow_rule(Destination::Domain(name("pypi.org")));
+        let eval = policy.evaluate_egress_with_source(
+            sock(PYPI_V4, 443),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Sni("pypi.org"),
+        );
+        assert_eq!(eval, EgressEvaluation::Deny);
+    }
+
+    /// Hard-coded IP, no DNS lookup at all: cache is empty for X.
+    /// Even if SNI matches the rule's domain, with no binding the
+    /// connection is denied. Same spoof pattern, simpler form.
+    #[test]
+    fn hostname_source_sni_denies_when_cache_has_no_binding_for_ip() {
+        let shared = SharedState::new(4);
+        let policy = allow_rule(Destination::Domain(name("pypi.org")));
+        let eval = policy.evaluate_egress_with_source(
+            sock(PYPI_V4, 443),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Sni("pypi.org"),
+        );
+        assert_eq!(eval, EgressEvaluation::Deny);
+    }
+
+    /// Cache says IP X corresponds to `pypi.org`; policy allows
+    /// `pypi.org`; SNI says `evil.com`. SNI byte-equality fails
+    /// against the rule, so the connection is denied regardless of
+    /// the cache.
+    #[test]
+    fn hostname_source_sni_denies_when_claim_does_not_match_rule() {
         let shared = shared_with_host("pypi.org", PYPI_V4);
         let policy = allow_rule(Destination::Domain(name("pypi.org")));
         let eval = policy.evaluate_egress_with_source(
@@ -1878,10 +1927,44 @@ mod tests {
     }
 
     /// `Sni` against a `DomainSuffix` rule: label-aware suffix match
-    /// applied directly to the SNI string, no cache consulted.
+    /// AND a cache binding tying any name under the suffix to the IP.
+    /// Genuine traffic that resolved the name first passes.
     #[test]
-    fn hostname_source_sni_matches_domain_suffix() {
-        let shared = SharedState::new(4); // empty cache
+    fn hostname_source_sni_matches_domain_suffix_with_cache_binding() {
+        let shared = shared_with_host("files.pythonhosted.org", FILES_V4);
+        let policy = allow_rule(Destination::DomainSuffix(name(".pythonhosted.org")));
+        let eval = policy.evaluate_egress_with_source(
+            sock(FILES_V4, 443),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Sni("files.pythonhosted.org"),
+        );
+        assert_eq!(eval, EgressEvaluation::Allow);
+    }
+
+    /// `Sni` against a `DomainSuffix` rule with no cache binding for
+    /// the IP. SNI byte-matches the suffix but no DNS lookup tied any
+    /// `*.pythonhosted.org` name to the destination — denied.
+    #[test]
+    fn hostname_source_sni_denies_domain_suffix_without_cache_binding() {
+        let shared = SharedState::new(4);
+        let policy = allow_rule(Destination::DomainSuffix(name(".pythonhosted.org")));
+        let eval = policy.evaluate_egress_with_source(
+            sock(FILES_V4, 443),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Sni("files.pythonhosted.org"),
+        );
+        assert_eq!(eval, EgressEvaluation::Deny);
+    }
+
+    /// `Sni` against a `DomainSuffix` rule where the cache binds a
+    /// sibling subdomain. The suffix-allow intent covers any name
+    /// under the suffix, so an IP resolved as `other.pythonhosted.org`
+    /// can serve a different subdomain via SNI. Real shared-CDN case.
+    #[test]
+    fn hostname_source_sni_domain_suffix_allows_sibling_cache_binding() {
+        let shared = shared_with_host("other.pythonhosted.org", FILES_V4);
         let policy = allow_rule(Destination::DomainSuffix(name(".pythonhosted.org")));
         let eval = policy.evaluate_egress_with_source(
             sock(FILES_V4, 443),

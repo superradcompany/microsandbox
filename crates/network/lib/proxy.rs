@@ -515,10 +515,11 @@ mod tests {
         );
     }
 
-    /// SNI matches a `DomainSuffix` rule directly without the cache.
+    /// SNI matches a `DomainSuffix` rule with a cache binding for the
+    /// claimed name. Genuine pre-resolved traffic passes.
     #[tokio::test]
-    async fn integration_sni_matches_domain_suffix_without_cache() {
-        let shared = SharedState::new(4); // empty cache
+    async fn integration_sni_matches_domain_suffix_with_cache_binding() {
+        let shared = shared_with("files.pythonhosted.org", SHARED_FASTLY_IP);
         let policy = NetworkPolicy {
             default_egress: Action::Deny,
             default_ingress: Action::Allow,
@@ -547,5 +548,42 @@ mod tests {
             .unwrap_or(HostnameSource::CacheOnly);
         let eval = policy.evaluate_egress_with_source(dst, Protocol::Tcp, &shared, source);
         assert_eq!(eval, EgressEvaluation::Allow);
+    }
+
+    /// Spoofed SNI on an IP with no cache binding for any matching
+    /// name: byte-equality with the suffix passes, but no DNS lookup
+    /// ever tied a `*.pythonhosted.org` name to the destination, so
+    /// the AND-check fails and the connection is denied.
+    #[tokio::test]
+    async fn integration_sni_denies_domain_suffix_without_cache_binding() {
+        let shared = SharedState::new(4); // empty cache
+        let policy = NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![Rule {
+                direction: crate::policy::Direction::Egress,
+                destination: Destination::DomainSuffix(".pythonhosted.org".parse().unwrap()),
+                protocols: vec![Protocol::Tcp],
+                ports: vec![PortRange::single(443)],
+                action: Action::Allow,
+            }],
+        };
+        let dst = SocketAddr::new(SHARED_FASTLY_IP.parse().unwrap(), 443);
+
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Bytes::from(synthetic_client_hello(
+            "files.pythonhosted.org",
+        )))
+        .await
+        .unwrap();
+        drop(tx);
+
+        let (_buf, sni) = peek_for_sni(&mut rx, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+        let source = sni
+            .as_deref()
+            .map(HostnameSource::Sni)
+            .unwrap_or(HostnameSource::CacheOnly);
+        let eval = policy.evaluate_egress_with_source(dst, Protocol::Tcp, &shared, source);
+        assert_eq!(eval, EgressEvaluation::Deny);
     }
 }

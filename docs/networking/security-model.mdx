@@ -68,6 +68,21 @@ Domain-based policy rules close this by maintaining a pin set of observed DNS an
 
 The same mechanism gates host-scoped secret injection. When a `SecretEntry` is restricted via `allowed_hosts`, the secret is only injected into outbound requests whose destination IP the interceptor tied to one of those hosts. An exfiltration attempt that POSTs the secret to an arbitrary IP won't receive the injection in the first place.
 
+## SNI spoofing
+
+A TLS client picks the SNI in its ClientHello — it's plaintext, not signed by anything. Some servers don't reject a mismatched SNI: they complete the handshake against their default certificate anyway. That gives a workload a way to claim an allowed name in the ClientHello while actually connecting somewhere else.
+
+Concretely: the guest opens a TCP connection to some IP, sends `SNI=allowed.com`, and the lax server on the other end accepts the handshake against whatever cert it has. The policy saw `allowed.com` and would otherwise let it through.
+
+To prevent this, domain rules check two things when SNI is present, and both must pass:
+
+1. The SNI matches the rule's `Domain` (or fits the suffix for `DomainSuffix`).
+2. The destination IP is bound to the claimed name in the resolved-hostname pin set — the same set the [TOCTOU defense](#dns-to-ip-binding-toctou) uses.
+
+Real traffic clears check 2 because the client calls `getaddrinfo` before connecting, and the interceptor records the answer. The spoof fails it because no DNS lookup ever tied the claimed name to that IP.
+
+One legitimate pattern this rejects: hard-coding an IP and forging a non-matching SNI (e.g. `curl --resolve allowed.com:443:<ip>`). Route the lookup through the gateway, or add a `tls.bypass` entry for that name.
+
 ## DNS bypass surface
 
 DNS-based defenses (block list, rebind protection, domain pinning) only work on queries the interceptor sees. The gateway intercepts UDP/53 and TCP/53 directly, and DoT (TCP/853) when TLS interception is enabled. Alternative transports are either refused at the port layer (DoQ, mDNS, LLMNR, NetBIOS-NS) or indistinguishable from regular traffic (DoH on TCP/443). Tunneled DNS (VPN, SOCKS5 hostname mode, HTTP `CONNECT`) is carried inside the outer encrypted flow and never reaches the forwarder.

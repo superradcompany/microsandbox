@@ -346,6 +346,69 @@ async fn domain_policy_sni_disambiguates_shared_cdn_ip() {
     let _ = Sandbox::remove(name).await;
 }
 
+/// SNI spoofing defense: claiming an allowed name in the ClientHello
+/// while connecting to an IP no DNS lookup ever tied to that name
+/// must be denied. Legit traffic for the same allowed name (resolved
+/// via the gateway, cache populated) must still pass.
+#[msb_test]
+async fn domain_policy_sni_spoof_on_unrelated_ip_is_denied() {
+    let name = "net-domain-policy-sni-spoof";
+    let policy = NetworkPolicy {
+        default_egress: Action::Deny,
+        default_ingress: Action::Allow,
+        // DNS opens via the gateway, HTTPS allowed only for example.com.
+        rules: vec![Rule::allow_dns(), allow_domain_https("example.com")],
+    };
+    let sb = setup_alpine(name, policy).await;
+
+    // Prime an unrelated CDN's IP into the cache under its real name.
+    // The same IP will be reused as the spoof target; nothing will
+    // ever bind `example.com` to it.
+    let spoof_ip = dns_lookup(&sb, "files.pythonhosted.org").await;
+    assert!(
+        !spoof_ip.is_empty(),
+        "shared-cdn DNS lookup should resolve under allow_dns; got empty"
+    );
+
+    // Honest path: legitimate fetch of example.com (DNS via gateway,
+    // example.com bound to its real IP in the cache) must succeed.
+    // Establishes that the SNI+cache AND-check doesn't block normal
+    // traffic before we test the spoof denial.
+    let honest = probe_https_with_retry(&sb, "https://example.com/").await;
+    assert!(
+        reached_server(&honest),
+        "honest example.com fetch should be allowed: got `{honest}`"
+    );
+
+    // Spoof: force curl to skip DNS and connect to the unrelated CDN
+    // IP while sending `Host: example.com` and SNI=example.com.
+    // The SNI byte-matches the rule, but no DNS lookup ever bound
+    // `example.com` to this IP, so the cache check fails and the
+    // proxy refuses to relay.
+    let cmd = format!(
+        "tmp=$(mktemp); \
+         code=$(curl -sS --max-time 30 -o /dev/null \
+                -w '%{{http_code}}' \
+                --resolve example.com:443:{spoof_ip} \
+                https://example.com/ 2>\"$tmp\"); \
+         exit=$?; \
+         err=$(tr '\\n' ' ' <\"$tmp\"; rm -f \"$tmp\"); \
+         case \"$code\" in \
+             000|\"\") printf 'FAIL exit=%s err=%s' \"$exit\" \"$err\" ;; \
+             *) printf '%s' \"$code\" ;; \
+         esac"
+    );
+    let spoof = sb.shell(&cmd).await.expect("curl spoof shell");
+    let spoof_out = spoof.stdout().unwrap_or_default().trim().to_string();
+    assert!(
+        curl_failed(&spoof_out),
+        "SNI spoof on unrelated IP {spoof_ip} should be denied: got `{spoof_out}`"
+    );
+
+    sb.stop_and_wait().await.expect("stop");
+    let _ = Sandbox::remove(name).await;
+}
+
 /// `Destination::DomainSuffix` matches subdomains but not unrelated
 /// hosts: `www.cloudflare.com` matches `.cloudflare.com`,
 /// `example.com` does not.
