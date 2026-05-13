@@ -276,9 +276,9 @@ jobs:
         working-directory: sdk/python
         run: uv run maturin develop --release
 
-      - name: Test Python SDK runtime bridge
+      - name: Test Python SDK
         working-directory: sdk/python
-        run: uv run pytest tests/test_runtime_binary.py
+        run: uv run pytest
 
       - name: Lint Python SDK (ruff)
         working-directory: sdk/python
