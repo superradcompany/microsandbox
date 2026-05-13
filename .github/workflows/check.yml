@@ -541,14 +541,21 @@ jobs:
       - name: Run Go integration tests
         working-directory: sdk/go
         env:
-          # Per-job isolated state (matches node-sdk-test).
-          MSB_HOME: ${{ runner.temp }}/msb-home-${{ github.run_id }}
           # Bypass EnsureInstalled's download; load the just-built cdylib.
           MICROSANDBOX_LIB_PATH: ${{ github.workspace }}/build/libmicrosandbox_go_ffi.so
           # Force the SDK to spawn the freshly-built msb (mirrors node-sdk-test
           # reasoning: avoid running against a stale bundled binary).
           MSB_PATH: ${{ github.workspace }}/build/msb
         run: |
+          # Linux's sockaddr_un.sun_path is 108 bytes. The Go integration
+          # tests derive sandbox names from test function names — some run
+          # 57+ chars — and the agent socket lives at
+          # ${MSB_HOME}/sandboxes/<name>/runtime/agent.sock. The runner's
+          # default $_TEMP is too deep (~32 chars) and the path blows the
+          # limit. Anchor MSB_HOME under /tmp with a short, unique suffix.
+          MSB_HOME=$(mktemp -d -p /tmp msb-XXXXXX)
+          trap "rm -rf '$MSB_HOME'" EXIT
+          export MSB_HOME
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
           go test -tags integration -count=1 -timeout 20m ./integration/...
