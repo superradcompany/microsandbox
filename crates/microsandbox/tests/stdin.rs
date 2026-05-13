@@ -177,10 +177,10 @@ async fn stdin_pipe_streams_chunks_in_order() {
 
 /// Broken-pipe test: the child reads only a short prefix of stdin and
 /// exits, closing its read end before the host's full payload has been
-/// delivered. The agent's stdin write should fail with EPIPE, which
-/// surfaces to the host as `ExecOutput::stdin_error()`. The session
-/// itself still completes with a normal exit code and stdout — the
-/// stdin failure is non-terminal.
+/// delivered. The agent's stdin write fails with EPIPE and surfaces
+/// mid-stream as `ExecEvent::StdinError`, while the session itself
+/// still produces a normal `Exited { code: 0 }` event — the stdin
+/// failure is non-terminal.
 #[msb_test]
 async fn stdin_bytes_reports_broken_pipe_when_child_exits_early() {
     let name = "stdin-broken-pipe";
@@ -195,8 +195,8 @@ async fn stdin_bytes_reports_broken_pipe_when_child_exits_early() {
         .await
         .expect("create sandbox");
 
-    let output = sandbox
-        .exec_with("sh", |exec| {
+    let mut handle = sandbox
+        .exec_stream_with("sh", |exec| {
             exec.args([
                 "-c",
                 "dd bs=1 count=16 of=/tmp/prefix.bin 2>/dev/null && wc -c /tmp/prefix.bin",
@@ -204,20 +204,37 @@ async fn stdin_bytes_reports_broken_pipe_when_child_exits_early() {
             .stdin_bytes(payload)
         })
         .await
-        .expect("exec returned");
+        .expect("start exec");
+
+    let mut stdout = Vec::new();
+    let mut exit_code: Option<i32> = None;
+    let mut stdin_error = None;
+    while let Some(event) = handle.recv().await {
+        match event {
+            ExecEvent::Stdout(data) => stdout.extend_from_slice(&data),
+            ExecEvent::StdinError(payload) => {
+                if stdin_error.is_none() {
+                    stdin_error = Some(payload);
+                }
+            }
+            ExecEvent::Exited { code } => {
+                exit_code = Some(code);
+                break;
+            }
+            ExecEvent::Failed(payload) => {
+                panic!("exec failed: {payload:?}");
+            }
+            _ => {}
+        }
+    }
 
     sandbox.stop_and_wait().await.expect("stop");
     Sandbox::remove(name).await.expect("remove");
 
-    assert!(
-        output.status().success,
-        "guest command failed: stdout=`{}` stderr=`{}`",
-        output.stdout().unwrap_or_default(),
-        output.stderr().unwrap_or_default()
-    );
+    assert_eq!(exit_code, Some(0), "guest command exited non-zero");
 
-    let stdout = output.stdout().expect("stdout is utf8");
-    let prefix_count = stdout
+    let stdout_text = String::from_utf8(stdout).expect("stdout is utf8");
+    let prefix_count = stdout_text
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().next())
@@ -227,9 +244,7 @@ async fn stdin_bytes_reports_broken_pipe_when_child_exits_early() {
         "child should have read exactly 16 bytes"
     );
 
-    let stdin_err = output
-        .stdin_error()
-        .expect("host should observe a stdin write failure");
+    let stdin_err = stdin_error.expect("host should observe a StdinError event");
     assert_eq!(
         stdin_err.errno,
         Some(libc::EPIPE),

@@ -77,11 +77,6 @@ pub struct ExecOutput {
 
     /// Captured stderr.
     stderr: Bytes,
-
-    /// Set if the guest reported a stdin write failure (e.g. the child
-    /// closed its read end). The session still produced an exit status,
-    /// so `status` and the output buffers remain meaningful.
-    stdin_error: Option<microsandbox_protocol::exec::ExecStdinError>,
 }
 
 /// Process exit status.
@@ -308,17 +303,6 @@ impl ExecOutput {
     pub fn stderr_bytes(&self) -> &Bytes {
         &self.stderr
     }
-
-    /// Returns the stdin write failure reported by the guest, if any.
-    ///
-    /// Set when at least one host-supplied stdin chunk could not be
-    /// delivered to the child (typically because the child closed its
-    /// read end). The session still produced a normal exit status, so
-    /// `status()` and the captured output remain meaningful. If multiple
-    /// stdin writes failed, this reflects the first failure.
-    pub fn stdin_error(&self) -> Option<&microsandbox_protocol::exec::ExecStdinError> {
-        self.stdin_error.as_ref()
-    }
 }
 
 impl ExecHandle {
@@ -383,7 +367,6 @@ impl ExecHandle {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut exit_code: Option<i32> = None;
-        let mut stdin_error = None;
 
         while let Some(event) = self.events.recv().await {
             match event {
@@ -401,11 +384,7 @@ impl ExecHandle {
                 ExecEvent::Failed(payload) => {
                     return Err(crate::MicrosandboxError::ExecFailed(payload));
                 }
-                ExecEvent::StdinError(payload) => {
-                    if stdin_error.is_none() {
-                        stdin_error = Some(payload);
-                    }
-                }
+                ExecEvent::StdinError(_) => {}
             }
         }
 
@@ -420,7 +399,6 @@ impl ExecHandle {
             },
             stdout: Bytes::from(stdout),
             stderr: Bytes::from(stderr),
-            stdin_error,
         })
     }
 
