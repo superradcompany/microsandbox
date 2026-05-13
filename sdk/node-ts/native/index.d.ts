@@ -763,7 +763,7 @@ export declare class SandboxBuilder {
    * to exit after SIGTERM before escalating to SIGKILL during a
    * replace. Implies `replace`. Zero skips SIGTERM entirely.
    */
-  replaceGrace(graceMs: number): this
+  replaceWithGrace(graceMs: number): this
   /** Override the image entrypoint. */
   entrypoint(cmd: Array<string>): this
   /**

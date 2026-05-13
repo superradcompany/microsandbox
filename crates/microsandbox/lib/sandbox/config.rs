@@ -226,7 +226,7 @@ pub struct SandboxConfig {
     ///
     /// This is an operation flag, not persisted sandbox state.
     #[serde(skip)]
-    pub replace_grace: std::time::Duration,
+    pub replace_with_grace: std::time::Duration,
 
     /// Manifest digest for the resolved OCI image.
     ///
@@ -420,7 +420,7 @@ impl Default for SandboxConfig {
             insecure: false,
             ca_certs: Vec::new(),
             replace_existing: false,
-            replace_grace: std::time::Duration::from_secs(10),
+            replace_with_grace: std::time::Duration::from_secs(10),
             manifest_digest: None,
             snapshot_upper_source: None,
         }

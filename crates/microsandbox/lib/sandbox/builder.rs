@@ -230,7 +230,7 @@ impl SandboxBuilder {
     /// before recreating it. When the prior sandbox is owned by an
     /// in-process `Sandbox` handle, the handle's underlying child is
     /// signalled and reaped directly. Otherwise the existing PID is
-    /// signalled with SIGTERM, given [`replace_grace`](Self::replace_grace)
+    /// signalled with SIGTERM, given [`replace_with_grace`](Self::replace_with_grace)
     /// to exit, then SIGKILLed.
     pub fn replace(mut self) -> Self {
         self.config.replace_existing = true;
@@ -242,9 +242,9 @@ impl SandboxBuilder {
     ///
     /// A zero duration skips SIGTERM entirely. Default (when only
     /// `.replace()` is set) is ten seconds.
-    pub fn replace_grace(mut self, grace: std::time::Duration) -> Self {
+    pub fn replace_with_grace(mut self, grace: std::time::Duration) -> Self {
         self.config.replace_existing = true;
-        self.config.replace_grace = grace;
+        self.config.replace_with_grace = grace;
         self
     }
 

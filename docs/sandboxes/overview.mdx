@@ -255,7 +255,7 @@ use std::time::Duration;
 
 let sb = Sandbox::builder("worker")
     .image("python")
-    .replace_grace(Duration::from_secs(30))
+    .replace_with_grace(Duration::from_secs(30))
     .create()
     .await?;
 ```
@@ -263,22 +263,22 @@ let sb = Sandbox::builder("worker")
 ```typescript TypeScript
 await using sb = await Sandbox.builder("worker")
     .image("python")
-    .replaceGrace(30_000)  // milliseconds
+    .replaceWithGrace(30_000)  // milliseconds
     .create();
 ```
 
 ```python Python
-sb = await Sandbox.create("worker", image="python", replace_grace=30)  # seconds
+sb = await Sandbox.create("worker", image="python", replace_with_grace=30)  # seconds
 ```
 
 ```bash CLI
-msb create --replace-grace 30s python --name worker
-msb create --replace-grace 0 python --name worker  # SIGKILL immediately
+msb create --replace-with-grace 30s python --name worker
+msb create --replace-with-grace 0 python --name worker  # SIGKILL immediately
 ```
 
 </CodeGroup>
 
-`replace_grace` / `--replace-grace` implies `replace` / `--replace`, so you don't need to pass both.
+`replace_with_grace` / `--replace-with-grace` implies `replace` / `--replace`, so you don't need to pass both.
 
 ## Private registry
 

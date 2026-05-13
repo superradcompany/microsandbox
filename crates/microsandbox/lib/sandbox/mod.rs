@@ -1731,7 +1731,7 @@ async fn prepare_create_target(
             SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
         );
         if active {
-            stop_sandbox_for_replacement(pools, &model, config.replace_grace).await?;
+            stop_sandbox_for_replacement(pools, &model, config.replace_with_grace).await?;
         }
 
         sandbox_entity::Entity::delete_by_id(model.id)

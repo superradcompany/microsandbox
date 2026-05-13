@@ -123,11 +123,11 @@ async fn create_without_replace_returns_typed_already_exists() {
     cleanup(name).await;
 }
 
-/// `.replace_grace(0)` skips SIGTERM and goes straight to SIGKILL.
+/// `.replace_with_grace(0)` skips SIGTERM and goes straight to SIGKILL.
 /// Should be at least as fast as the default 10-second grace.
 #[msb_test]
-async fn replace_grace_zero_succeeds() {
-    let name = "replace-grace-zero";
+async fn replace_with_grace_zero_succeeds() {
+    let name = "replace-with-grace-zero";
     cleanup(name).await;
 
     let sb1 = Sandbox::builder(name)
@@ -145,7 +145,7 @@ async fn replace_grace_zero_succeeds() {
             .image(IMAGE)
             .cpus(1)
             .memory(256)
-            .replace_grace(Duration::from_secs(0))
+            .replace_with_grace(Duration::from_secs(0))
             .create(),
     )
     .await

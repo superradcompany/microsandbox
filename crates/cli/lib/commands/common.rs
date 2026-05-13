@@ -50,7 +50,7 @@ pub struct SandboxOpts {
     /// is SIGKILLed during a replace. Accepts `0`, `500ms`, `5s`, `2m`.
     /// Implies `--replace`. Default 10s when `--replace` is set on its own.
     #[arg(long, value_name = "DURATION")]
-    pub replace_grace: Option<String>,
+    pub replace_with_grace: Option<String>,
 
     /// Suppress progress output.
     #[arg(short, long)]
@@ -337,9 +337,9 @@ pub fn apply_sandbox_opts(
     if let Some(ref shell) = opts.shell {
         builder = builder.shell(shell);
     }
-    if let Some(ref grace) = opts.replace_grace {
-        let d = parse_duration(grace).map_err(|e| anyhow::anyhow!("--replace-grace: {e}"))?;
-        builder = builder.replace_grace(d);
+    if let Some(ref grace) = opts.replace_with_grace {
+        let d = parse_duration(grace).map_err(|e| anyhow::anyhow!("--replace-with-grace: {e}"))?;
+        builder = builder.replace_with_grace(d);
     } else if opts.replace {
         builder = builder.replace();
     }

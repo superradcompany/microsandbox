@@ -101,9 +101,9 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     let name = args.sandbox.name.clone().unwrap_or_else(ui::generate_name);
 
     // Named sandboxes are reused if they already exist (unless --replace
-    // or --replace-grace). --replace-grace implies --replace, so either
+    // or --replace-with-grace). --replace-with-grace implies --replace, so either
     // flag opts out of the reuse path.
-    let replace_requested = args.sandbox.replace || args.sandbox.replace_grace.is_some();
+    let replace_requested = args.sandbox.replace || args.sandbox.replace_with_grace.is_some();
     if is_named && !replace_requested && Sandbox::get(&name).await.is_ok() {
         return run_existing(name, args).await;
     }

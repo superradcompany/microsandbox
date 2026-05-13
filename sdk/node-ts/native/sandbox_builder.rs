@@ -205,9 +205,10 @@ impl JsSandboxBuilder {
     /// to exit after SIGTERM before escalating to SIGKILL during a
     /// replace. Implies `replace`. Zero skips SIGTERM entirely.
     #[napi]
-    pub fn replace_grace(&mut self, grace_ms: u32) -> &Self {
+    pub fn replace_with_grace(&mut self, grace_ms: u32) -> &Self {
         let prev = self.take_inner();
-        self.inner = Some(prev.replace_grace(std::time::Duration::from_millis(grace_ms.into())));
+        self.inner =
+            Some(prev.replace_with_grace(std::time::Duration::from_millis(grace_ms.into())));
         self
     }
 

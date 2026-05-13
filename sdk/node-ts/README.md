@@ -376,7 +376,7 @@ console.log(`reclaimed ${reclaimed} orphaned layers`);
 
 `replace()` stops a sandbox with the same name (if any) and recreates
 it. By default the existing sandbox gets 10 seconds to exit cleanly
-after `SIGTERM` before `SIGKILL`; pass `replaceGrace(ms)` to override.
+after `SIGTERM` before `SIGKILL`; pass `replaceWithGrace(ms)` to override.
 
 ```typescript
 import { Sandbox } from "microsandbox";
@@ -390,13 +390,13 @@ await using sb = await Sandbox.builder("worker")
 // Wait longer for a workload that needs more time to shut down.
 await using slow = await Sandbox.builder("worker")
   .image("alpine")
-  .replaceGrace(30_000)
+  .replaceWithGrace(30_000)
   .create();
 
 // Skip SIGTERM entirely; SIGKILL immediately.
 await using fast = await Sandbox.builder("worker")
   .image("alpine")
-  .replaceGrace(0)
+  .replaceWithGrace(0)
   .create();
 ```
 
