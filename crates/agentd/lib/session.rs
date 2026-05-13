@@ -790,7 +790,20 @@ async fn blocking_write_fd(fd: RawFd, data: &[u8]) -> AgentdResult<()> {
             let ptr = unsafe { data.as_ptr().add(written) as *const libc::c_void };
             let ret = unsafe { libc::write(fd, ptr, data.len() - written) };
             if ret < 0 {
-                return Err(AgentdError::Io(std::io::Error::last_os_error()));
+                let err = std::io::Error::last_os_error();
+                let code = err.raw_os_error();
+                if code == Some(libc::EAGAIN) || code == Some(libc::EWOULDBLOCK) {
+                    wait_fd_writable(fd)?;
+                    continue;
+                }
+                if code == Some(libc::EINTR) {
+                    continue;
+                }
+                return Err(AgentdError::Io(err));
+            }
+            if ret == 0 {
+                wait_fd_writable(fd)?;
+                continue;
             }
             written += ret as usize;
         }
@@ -798,6 +811,33 @@ async fn blocking_write_fd(fd: RawFd, data: &[u8]) -> AgentdResult<()> {
     })
     .await
     .map_err(|e| AgentdError::ExecSession(format!("stdin write join error: {e}")))?
+}
+
+fn wait_fd_writable(fd: RawFd) -> AgentdResult<()> {
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+
+    loop {
+        let ret = unsafe { libc::poll(&mut pollfd, 1, -1) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(AgentdError::Io(err));
+        }
+        if ret == 0 {
+            continue;
+        }
+        // Any positive return means the fd is actionable: POLLOUT lets the
+        // next write make progress, and POLLHUP/POLLERR/POLLNVAL will cause
+        // the next write to fail with a real errno (typically EPIPE) which
+        // is more meaningful than poll's revents.
+        return Ok(());
+    }
 }
 
 /// Background task that reads from a PTY master fd and sends output events.
