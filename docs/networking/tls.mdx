@@ -59,10 +59,10 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "agent",
-    microsandbox.WithImage("python"),
-    microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-        TLS: &microsandbox.TLSConfig{
+sb, err := m.CreateSandbox(ctx, "agent",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
+        TLS: &m.TLSConfig{
             Bypass: []string{"pinned-api.example.com", "*.gov"},
         },
     }),
@@ -129,9 +129,9 @@ sb = await Sandbox.create(
 
 ```go Go
 trustHostCAs := true
-sb, err := microsandbox.CreateSandbox(ctx, "agent",
-    microsandbox.WithImage("alpine"),
-    microsandbox.WithNetwork(&microsandbox.NetworkConfig{
+sb, err := m.CreateSandbox(ctx, "agent",
+    m.WithImage("alpine"),
+    m.WithNetwork(&m.NetworkConfig{
         TrustHostCAs: &trustHostCAs,
     }),
 )

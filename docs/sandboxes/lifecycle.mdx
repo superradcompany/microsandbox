@@ -65,12 +65,12 @@ sb = await Sandbox.create("worker", image="python", detached=True)
 
 ```go Go
 // Attached: sandbox stops when your process exits
-sb, err := microsandbox.CreateSandbox(ctx, "worker", microsandbox.WithImage("python"))
+sb, err := m.CreateSandbox(ctx, "worker", m.WithImage("python"))
 
 // Detached: sandbox survives after your process exits
-detached, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("python"),
-    microsandbox.WithDetached(),
+detached, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithDetached(),
 )
 ```
 
@@ -113,7 +113,7 @@ sb = await Sandbox.start("worker")
 _ = sb.Stop(ctx)
 
 // Later, resume where you left off
-sb, err := microsandbox.StartSandbox(ctx, "worker")
+sb, err := m.StartSandbox(ctx, "worker")
 ```
 
 ```bash CLI
@@ -269,7 +269,7 @@ await Sandbox.remove("worker")
 ```
 
 ```go Go
-err := microsandbox.RemoveSandbox(ctx, "worker")
+err := m.RemoveSandbox(ctx, "worker")
 ```
 
 ```bash CLI
@@ -306,12 +306,12 @@ print(handle.status)  # "running" | "stopped" | ...
 ```
 
 ```go Go
-handles, err := microsandbox.ListSandboxes(ctx)
+handles, err := m.ListSandboxes(ctx)
 for _, handle := range handles {
     fmt.Printf("%s: %s\n", handle.Name(), handle.Status())
 }
 
-handle, err := microsandbox.GetSandbox(ctx, "worker")
+handle, err := m.GetSandbox(ctx, "worker")
 fmt.Println(handle.Status()) // "running" | "stopped" | ...
 ```
 
@@ -418,7 +418,7 @@ except asyncio.TimeoutError:
 ```
 
 ```go Go
-handle, err := microsandbox.GetSandbox(ctx, "worker")
+handle, err := m.GetSandbox(ctx, "worker")
 sb, err := handle.Connect(ctx)
 stopCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 defer cancel()
@@ -461,10 +461,10 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("python"),
-    microsandbox.WithMaxDuration(time.Hour),
-    microsandbox.WithIdleTimeout(5*time.Minute),
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithMaxDuration(time.Hour),
+    m.WithIdleTimeout(5*time.Minute),
 )
 ```
 

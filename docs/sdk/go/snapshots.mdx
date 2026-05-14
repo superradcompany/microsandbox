@@ -7,7 +7,7 @@ icon: "code-branch"
 Disk-only snapshots of a stopped sandbox. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs; this page is the Go SDK reference.
 
 ```go
-import microsandbox "github.com/superradcompany/microsandbox/sdk/go"
+import m "github.com/superradcompany/microsandbox/sdk/go"
 ```
 
 <Note>
@@ -19,8 +19,8 @@ import microsandbox "github.com/superradcompany/microsandbox/sdk/go"
 Pass [`WithSnapshot`](#withsnapshot) to [`CreateSandbox`](/sdk/go/sandbox#createsandbox). It is mutually exclusive with [`WithImage`](/sdk/go/sandbox#withimage).
 
 ```go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithSnapshot("after-pip-install"),
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithSnapshot("after-pip-install"),
 )
 ```
 
@@ -42,7 +42,7 @@ Snapshots are taken from a metadata handle, so stop the sandbox first and then c
 _ = sb.Stop(ctx)
 _ = sb.Close()
 
-h, err := microsandbox.GetSandbox(ctx, "baseline")
+h, err := m.GetSandbox(ctx, "baseline")
 if err != nil {
     return err
 }
@@ -88,8 +88,8 @@ func (snapshotFactory) Create(
 Create a snapshot from a stopped sandbox. Set exactly one of `SnapshotCreateOptions.Name` or `SnapshotCreateOptions.Path`.
 
 ```go
-snap, err := microsandbox.Snapshot.Create(ctx, "baseline",
-    microsandbox.SnapshotCreateOptions{
+snap, err := m.Snapshot.Create(ctx, "baseline",
+    m.SnapshotCreateOptions{
         Name:            "after-pip-install",
         Labels:          map[string]string{"stage": "post-deps"},
         RecordIntegrity: true,

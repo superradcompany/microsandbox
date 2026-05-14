@@ -9,7 +9,7 @@ See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/
 The Go SDK uses **functional options** rather than a fluent builder — pass `WithImage(...)`, `WithMemory(...)`, etc. as variadic arguments to [`CreateSandbox`](#createsandbox). Every operation takes a `context.Context` for cancellation and deadline propagation. The package is imported as:
 
 ```go
-import microsandbox "github.com/superradcompany/microsandbox/sdk/go"
+import m "github.com/superradcompany/microsandbox/sdk/go"
 ```
 
 ## Setup
@@ -18,7 +18,7 @@ Call [`EnsureInstalled`](#ensureinstalled) once at program startup before any ot
 
 ```go
 ctx := context.Background()
-if err := microsandbox.EnsureInstalled(ctx); err != nil {
+if err := m.EnsureInstalled(ctx); err != nil {
     log.Fatalf("microsandbox setup: %v", err)
 }
 ```
@@ -105,11 +105,11 @@ Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts t
 | `error` | Typed `*Error` — see [Error Handling](/sdk/errors) |
 
 ```go
-sb, err := microsandbox.CreateSandbox(ctx, "my-sandbox",
-    microsandbox.WithImage("python:3.12"),
-    microsandbox.WithMemory(512),
-    microsandbox.WithCPUs(2),
-    microsandbox.WithEnv(map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}),
+sb, err := m.CreateSandbox(ctx, "my-sandbox",
+    m.WithImage("python:3.12"),
+    m.WithMemory(512),
+    m.WithCPUs(2),
+    m.WithEnv(map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}),
 )
 if err != nil {
     return err
@@ -449,9 +449,9 @@ func (s *Sandbox) Metrics(ctx context.Context) (*Metrics, error)
 Get a point-in-time snapshot of the sandbox's resource usage.
 
 ```go
-m, err := sb.Metrics(ctx)
+metrics, err := sb.Metrics(ctx)
 fmt.Printf("CPU: %.1f%% Mem: %d bytes Uptime: %s\n",
-    m.CPUPercent, m.MemoryBytes, m.Uptime)
+    metrics.CPUPercent, metrics.MemoryBytes, metrics.Uptime)
 ```
 
 ---
@@ -475,11 +475,11 @@ if err != nil {
 defer stream.Close()
 
 for {
-    m, err := stream.Recv(ctx)
-    if err != nil || m == nil {
+    metrics, err := stream.Recv(ctx)
+    if err != nil || metrics == nil {
         break
     }
-    fmt.Printf("CPU: %.1f%%  Mem: %d bytes\n", m.CPUPercent, m.MemoryBytes)
+    fmt.Printf("CPU: %.1f%%  Mem: %d bytes\n", metrics.CPUPercent, metrics.MemoryBytes)
 }
 ```
 
@@ -578,7 +578,7 @@ func (initFactory) Auto() InitConfig
 Probe common init paths inside the guest (`/sbin/init`, `/lib/systemd/systemd`, ...).
 
 ```go
-microsandbox.WithInit(microsandbox.Init.Auto())
+m.WithInit(m.Init.Auto())
 ```
 
 ---
@@ -592,9 +592,9 @@ func (initFactory) Cmd(cmd string, opts InitOptions) InitConfig
 Specify the init binary explicitly with optional argv/env. `cmd` must be an absolute path inside the guest rootfs.
 
 ```go
-microsandbox.WithInit(microsandbox.Init.Cmd(
+m.WithInit(m.Init.Cmd(
     "/lib/systemd/systemd",
-    microsandbox.InitOptions{
+    m.InitOptions{
         Args: []string{"--unit=multi-user.target"},
         Env:  map[string]string{"container": "microsandbox"},
     },

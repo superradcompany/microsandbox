@@ -103,24 +103,24 @@ import (
     "fmt"
     "log"
 
-    microsandbox "github.com/superradcompany/microsandbox/sdk/go"
+    m "github.com/superradcompany/microsandbox/sdk/go"
 )
 
 func main() {
     ctx := context.Background()
-    if err := microsandbox.EnsureInstalled(ctx); err != nil {
+    if err := m.EnsureInstalled(ctx); err != nil {
         log.Fatal(err)
     }
 
-    sb, err := microsandbox.CreateSandbox(ctx, "my-sandbox",
-        microsandbox.WithImage("python"),
-        microsandbox.WithMemory(512),
-        microsandbox.WithCPUs(2),
-        microsandbox.WithEnv(map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}),
-        microsandbox.WithMounts(map[string]microsandbox.MountConfig{
-            "/app/src": microsandbox.Mount.Bind("./src", microsandbox.MountOptions{Readonly: true}),
+    sb, err := m.CreateSandbox(ctx, "my-sandbox",
+        m.WithImage("python"),
+        m.WithMemory(512),
+        m.WithCPUs(2),
+        m.WithEnv(map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}),
+        m.WithMounts(map[string]m.MountConfig{
+            "/app/src": m.Mount.Bind("./src", m.MountOptions{Readonly: true}),
         }),
-        microsandbox.WithNetwork(microsandbox.NetworkPolicy.PublicOnly()),
+        m.WithNetwork(m.NetworkPolicy.PublicOnly()),
     )
     if err != nil {
         log.Fatal(err)

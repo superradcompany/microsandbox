@@ -107,18 +107,18 @@ icon: "bolt"
         "log"
         "strings"
 
-        microsandbox "github.com/superradcompany/microsandbox/sdk/go"
+        m "github.com/superradcompany/microsandbox/sdk/go"
     )
 
     func main() {
         ctx := context.Background()
-        if err := microsandbox.EnsureInstalled(ctx); err != nil {
+        if err := m.EnsureInstalled(ctx); err != nil {
             log.Fatal(err)
         }
 
-        sb, err := microsandbox.CreateSandbox(ctx, "hello",
-            microsandbox.WithImage("python"),
-            microsandbox.WithMemory(512),
+        sb, err := m.CreateSandbox(ctx, "hello",
+            m.WithImage("python"),
+            m.WithMemory(512),
         )
         if err != nil {
             log.Fatal(err)

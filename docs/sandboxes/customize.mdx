@@ -64,9 +64,9 @@ output = await sb.shell("start")
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("ubuntu"),
-    microsandbox.WithScripts(map[string]string{
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("ubuntu"),
+    m.WithScripts(map[string]string{
         "setup": "#!/bin/bash\napt-get update && apt-get install -y python3 curl",
         "start": "#!/bin/bash\nexec python3 /app/main.py",
     }),
@@ -142,15 +142,15 @@ sb = await Sandbox.create(
 ```go Go
 mode755 := uint32(0o755)
 mode644 := uint32(0o644)
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("alpine"),
-    microsandbox.WithPatches(
-        microsandbox.Patch.Text("/etc/greeting.txt", "Hello from a patched rootfs!\n", microsandbox.PatchOptions{}),
-        microsandbox.Patch.Text("/etc/motd", "Custom message of the day.\n", microsandbox.PatchOptions{Replace: true}),
-        microsandbox.Patch.Mkdir("/app", microsandbox.PatchOptions{Mode: &mode755}),
-        microsandbox.Patch.Text("/app/config.json", `{"debug": true}`, microsandbox.PatchOptions{Mode: &mode644}),
-        microsandbox.Patch.CopyFile("./cert.pem", "/etc/ssl/cert.pem", microsandbox.PatchOptions{}),
-        microsandbox.Patch.Append("/etc/hosts", "127.0.0.1 myapp.local\n"),
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("alpine"),
+    m.WithPatches(
+        m.Patch.Text("/etc/greeting.txt", "Hello from a patched rootfs!\n", m.PatchOptions{}),
+        m.Patch.Text("/etc/motd", "Custom message of the day.\n", m.PatchOptions{Replace: true}),
+        m.Patch.Mkdir("/app", m.PatchOptions{Mode: &mode755}),
+        m.Patch.Text("/app/config.json", `{"debug": true}`, m.PatchOptions{Mode: &mode644}),
+        m.Patch.CopyFile("./cert.pem", "/etc/ssl/cert.pem", m.PatchOptions{}),
+        m.Patch.Append("/etc/hosts", "127.0.0.1 myapp.local\n"),
     ),
 )
 ```
@@ -226,11 +226,11 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("ghcr.io/superradcompany/debian-systemd:12"),
-    microsandbox.WithMemory(1024),
-    microsandbox.WithCPUs(2),
-    microsandbox.WithInit(microsandbox.Init.Auto()),
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("ghcr.io/superradcompany/debian-systemd:12"),
+    m.WithMemory(1024),
+    m.WithCPUs(2),
+    m.WithInit(m.Init.Auto()),
 )
 ```
 
@@ -304,10 +304,10 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("ghcr.io/superradcompany/debian-systemd:12"),
-    microsandbox.WithInit(microsandbox.Init.Cmd("/lib/systemd/systemd",
-        microsandbox.InitOptions{
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("ghcr.io/superradcompany/debian-systemd:12"),
+    m.WithInit(m.Init.Cmd("/lib/systemd/systemd",
+        m.InitOptions{
             Args: []string{"--unit=multi-user.target"},
             Env:  map[string]string{"container": "microsandbox"},
         },

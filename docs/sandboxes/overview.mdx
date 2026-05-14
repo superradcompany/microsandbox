@@ -31,8 +31,8 @@ sb = await Sandbox.create("worker", image="python")
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("python"),
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
 )
 ```
 
@@ -93,18 +93,18 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("python"),
-    microsandbox.WithMemory(1024),
-    microsandbox.WithCPUs(2),
-    microsandbox.WithEnv(map[string]string{
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithMemory(1024),
+    m.WithCPUs(2),
+    m.WithEnv(map[string]string{
         "DEBUG": "true",
         "API_PORT": "8000",
     }),
-    microsandbox.WithMounts(map[string]microsandbox.MountConfig{
-        "/app/src":     microsandbox.Mount.Bind("./src", microsandbox.MountOptions{Readonly: true}),
-        "/data":        microsandbox.Mount.Named("my-data", microsandbox.MountOptions{}),
-        "/tmp/scratch": microsandbox.Mount.Tmpfs(microsandbox.TmpfsOptions{SizeMiB: 100}),
+    m.WithMounts(map[string]m.MountConfig{
+        "/app/src":     m.Mount.Bind("./src", m.MountOptions{Readonly: true}),
+        "/data":        m.Mount.Named("my-data", m.MountOptions{}),
+        "/tmp/scratch": m.Mount.Tmpfs(m.TmpfsOptions{SizeMiB: 100}),
     }),
 )
 ```
@@ -160,8 +160,8 @@ await Sandbox.create("worker", image="python")
 ```
 
 ```go Go
-_, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("python"),
+_, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
 )
 ```
 
@@ -189,8 +189,8 @@ await Sandbox.create("worker", image="./my-rootfs")
 ```
 
 ```go Go
-_, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("./my-rootfs"),
+_, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("./my-rootfs"),
 )
 ```
 
@@ -242,8 +242,8 @@ await Sandbox.create("worker", image=Image.disk("./alpine.raw", fstype="ext4"))
 
 ```go Go
 // Auto-detect the disk image format from the file extension.
-_, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("./alpine.qcow2"),
+_, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("./alpine.qcow2"),
 )
 
 // Explicit root disk image filesystem selection is coming soon for Go.
@@ -285,9 +285,9 @@ sb = await Sandbox.create("worker", image="python", replace=True)
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("python"),
-    microsandbox.WithReplace(),
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithReplace(),
 )
 ```
 
@@ -324,9 +324,9 @@ sb = await Sandbox.create("worker", image="python", replace_with_grace=30)  # se
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("python"),
-    microsandbox.WithReplaceWithGrace(30*time.Second),
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithReplaceWithGrace(30*time.Second),
 )
 ```
 
@@ -385,13 +385,13 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("private.registry.io/org/app:v1"),
-    microsandbox.WithRegistryAuth(microsandbox.RegistryAuth{
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("private.registry.io/org/app:v1"),
+    m.WithRegistryAuth(m.RegistryAuth{
         Username: "deploy",
         Password: os.Getenv("REGISTRY_PASSWORD"),
     }),
-    microsandbox.WithPullPolicy(microsandbox.PullPolicyAlways),
+    m.WithPullPolicy(m.PullPolicyAlways),
 )
 ```
 
@@ -453,9 +453,9 @@ sb = await Sandbox.create(config)
 ```go Go
 // Config inspection is coming soon for Go.
 // Create sandboxes directly for now:
-sb, err := microsandbox.CreateSandbox(ctx, "preview",
-    microsandbox.WithImage("python"),
-    microsandbox.WithMemory(1024),
+sb, err := m.CreateSandbox(ctx, "preview",
+    m.WithImage("python"),
+    m.WithMemory(1024),
 )
 ```
 

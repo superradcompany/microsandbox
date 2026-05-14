@@ -46,11 +46,11 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "dev",
-    microsandbox.WithImage("python"),
-    microsandbox.WithMounts(map[string]microsandbox.MountConfig{
-        "/app/src":  microsandbox.Mount.Bind("./src", microsandbox.MountOptions{Readonly: true}),
-        "/app/data": microsandbox.Mount.Bind("./data", microsandbox.MountOptions{}),
+sb, err := m.CreateSandbox(ctx, "dev",
+    m.WithImage("python"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/app/src":  m.Mount.Bind("./src", m.MountOptions{Readonly: true}),
+        "/app/data": m.Mount.Bind("./data", m.MountOptions{}),
     }),
 )
 ```
@@ -88,8 +88,8 @@ cache = await Volume.create("pip-cache", quota_mib=1024)
 ```
 
 ```go Go
-cache, err := microsandbox.CreateVolume(ctx, "pip-cache",
-    microsandbox.WithVolumeQuota(1024),
+cache, err := m.CreateVolume(ctx, "pip-cache",
+    m.WithVolumeQuota(1024),
 )
 ```
 
@@ -128,10 +128,10 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("python"),
-    microsandbox.WithMounts(map[string]microsandbox.MountConfig{
-        "/root/.cache/pip": microsandbox.Mount.Named(cache.Name(), microsandbox.MountOptions{}),
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/root/.cache/pip": m.Mount.Named(cache.Name(), m.MountOptions{}),
     }),
 )
 ```
@@ -205,19 +205,19 @@ output = await reader.exec("cat", ["/data/message.txt"])
 
 ```go Go
 // Writer
-writer, err := microsandbox.CreateSandbox(ctx, "writer",
-    microsandbox.WithImage("alpine"),
-    microsandbox.WithMounts(map[string]microsandbox.MountConfig{
-        "/data": microsandbox.Mount.Named("shared-data", microsandbox.MountOptions{}),
+writer, err := m.CreateSandbox(ctx, "writer",
+    m.WithImage("alpine"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/data": m.Mount.Named("shared-data", m.MountOptions{}),
     }),
 )
 _, err = writer.Shell(ctx, "echo 'hello' > /data/message.txt")
 
 // Reader (read-only)
-reader, err := microsandbox.CreateSandbox(ctx, "reader",
-    microsandbox.WithImage("alpine"),
-    microsandbox.WithMounts(map[string]microsandbox.MountConfig{
-        "/data": microsandbox.Mount.Named("shared-data", microsandbox.MountOptions{Readonly: true}),
+reader, err := m.CreateSandbox(ctx, "reader",
+    m.WithImage("alpine"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/data": m.Mount.Named("shared-data", m.MountOptions{Readonly: true}),
     }),
 )
 output, err := reader.Exec(ctx, "cat", []string{"/data/message.txt"})
@@ -251,7 +251,7 @@ await vol.fs.write("/requirements.txt", b"requests==2.28.0")
 ```
 
 ```go Go
-vol, err := microsandbox.GetVolume(ctx, "pip-cache")
+vol, err := m.GetVolume(ctx, "pip-cache")
 err = vol.FS().WriteString("requirements.txt", "requests==2.28.0")
 ```
 
@@ -276,8 +276,8 @@ await Volume.remove("old-cache")
 ```
 
 ```go Go
-volumes, err := microsandbox.ListVolumes(ctx)
-err = microsandbox.RemoveVolume(ctx, "old-cache")
+volumes, err := m.ListVolumes(ctx)
+err = m.RemoveVolume(ctx, "old-cache")
 ```
 
 ```bash CLI
@@ -320,10 +320,10 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("alpine"),
-    microsandbox.WithMounts(map[string]microsandbox.MountConfig{
-        "/tmp/scratch": microsandbox.Mount.Tmpfs(microsandbox.TmpfsOptions{SizeMiB: 100}),
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("alpine"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/tmp/scratch": m.Mount.Tmpfs(m.TmpfsOptions{SizeMiB: 100}),
     }),
 )
 ```

@@ -85,9 +85,9 @@ output = await sb.exec("python", ExecOptions(
 
 ```go Go
 output, err := sb.Exec(ctx, "python", []string{"compute.py"},
-    microsandbox.WithExecCwd("/app"),
-    microsandbox.WithExecEnv(map[string]string{"PYTHONPATH": "/app/lib"}),
-    microsandbox.WithExecTimeout(30*time.Second),
+    m.WithExecCwd("/app"),
+    m.WithExecEnv(map[string]string{"PYTHONPATH": "/app/lib"}),
+    m.WithExecTimeout(30*time.Second),
 )
 ```
 
@@ -177,13 +177,13 @@ for {
         return err
     }
     switch event.Kind {
-    case microsandbox.ExecEventStdout:
+    case m.ExecEventStdout:
         os.Stdout.Write(event.Data)
-    case microsandbox.ExecEventStderr:
+    case m.ExecEventStderr:
         os.Stderr.Write(event.Data)
-    case microsandbox.ExecEventExited:
+    case m.ExecEventExited:
         fmt.Printf("Exited: %d\n", event.ExitCode)
-    case microsandbox.ExecEventDone:
+    case m.ExecEventDone:
         return nil
     }
 }
@@ -283,7 +283,7 @@ await handle.wait()
 ```
 
 ```go Go
-handle, err := sb.ExecStream(ctx, "python", nil, microsandbox.WithExecStdinPipe())
+handle, err := sb.ExecStream(ctx, "python", nil, m.WithExecStdinPipe())
 stdin := handle.TakeStdin()
 _, _ = stdin.Write([]byte("print('hello')\n"))
 _, _ = stdin.Write([]byte("exit()\n"))

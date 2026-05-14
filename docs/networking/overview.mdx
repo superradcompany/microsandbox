@@ -25,9 +25,9 @@ let sb = Sandbox::builder("isolated")
 ```
 
 ```go
-sb, err := microsandbox.CreateSandbox(ctx, "isolated",
-    microsandbox.WithImage("python"),
-    microsandbox.WithNetwork(microsandbox.NetworkPolicy.None()),
+sb, err := m.CreateSandbox(ctx, "isolated",
+    m.WithImage("python"),
+    m.WithNetwork(m.NetworkPolicy.None()),
 )
 ```
 
@@ -145,24 +145,24 @@ sb = await Sandbox.create(
 ```
 
 ```go
-sb, err := microsandbox.CreateSandbox(ctx, "secure-agent",
-    microsandbox.WithImage("alpine"),
-    microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-        DefaultEgress:  microsandbox.PolicyActionDeny,
-        DefaultIngress: microsandbox.PolicyActionAllow,
-        Rules: []microsandbox.PolicyRule{
+sb, err := m.CreateSandbox(ctx, "secure-agent",
+    m.WithImage("alpine"),
+    m.WithNetwork(&m.NetworkConfig{
+        DefaultEgress:  m.PolicyActionDeny,
+        DefaultIngress: m.PolicyActionAllow,
+        Rules: []m.PolicyRule{
             {
-                Action:      microsandbox.PolicyActionAllow,
-                Direction:   microsandbox.PolicyDirectionEgress,
+                Action:      m.PolicyActionAllow,
+                Direction:   m.PolicyDirectionEgress,
                 Destination: "*",
-                Protocol:    microsandbox.PolicyProtocolTCP,
+                Protocol:    m.PolicyProtocolTCP,
                 Port:        "443",
             },
             {
-                Action:      microsandbox.PolicyActionAllow,
-                Direction:   microsandbox.PolicyDirectionEgress,
+                Action:      m.PolicyActionAllow,
+                Direction:   m.PolicyDirectionEgress,
                 Destination: "*",
-                Protocol:    microsandbox.PolicyProtocolUDP,
+                Protocol:    m.PolicyProtocolUDP,
                 Port:        "53",
             },
         },
@@ -203,10 +203,10 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "api",
-    microsandbox.WithImage("python"),
-    microsandbox.WithPorts(map[uint16]uint16{8080: 80}),
-    microsandbox.WithPortsUDP(map[uint16]uint16{5353: 5353}),
+sb, err := m.CreateSandbox(ctx, "api",
+    m.WithImage("python"),
+    m.WithPorts(map[uint16]uint16{8080: 80}),
+    m.WithPortsUDP(map[uint16]uint16{5353: 5353}),
 )
 ```
 
@@ -242,13 +242,13 @@ NetworkPolicy::builder()
 ```
 
 ```go
-sb, err := microsandbox.CreateSandbox(ctx, "dev-agent",
-    microsandbox.WithImage("python"),
-    microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-        DefaultEgress: microsandbox.PolicyActionDeny,
-        Rules: []microsandbox.PolicyRule{
-            {Action: microsandbox.PolicyActionAllow, Direction: microsandbox.PolicyDirectionEgress, Destination: "public"},
-            {Action: microsandbox.PolicyActionAllow, Direction: microsandbox.PolicyDirectionEgress, Destination: "host"},
+sb, err := m.CreateSandbox(ctx, "dev-agent",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
+        DefaultEgress: m.PolicyActionDeny,
+        Rules: []m.PolicyRule{
+            {Action: m.PolicyActionAllow, Direction: m.PolicyDirectionEgress, Destination: "public"},
+            {Action: m.PolicyActionAllow, Direction: m.PolicyDirectionEgress, Destination: "host"},
         },
     }),
 )

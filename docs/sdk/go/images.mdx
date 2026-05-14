@@ -7,7 +7,7 @@ icon: "image"
 The Go SDK exposes local OCI image-cache operations through the package-level `Image` factory. These APIs inspect and prune images that have already been pulled by sandbox creation.
 
 ```go
-import microsandbox "github.com/superradcompany/microsandbox/sdk/go"
+import m "github.com/superradcompany/microsandbox/sdk/go"
 ```
 
 ## Image
@@ -33,7 +33,7 @@ func (imageFactory) List(ctx context.Context) ([]*ImageHandle, error)
 Return every cached image, ordered newest first.
 
 ```go
-images, err := microsandbox.Image.List(ctx)
+images, err := m.Image.List(ctx)
 if err != nil {
     return err
 }

@@ -211,10 +211,10 @@ sb = await Sandbox.create(
 ```go Go
 // Filesystem hooks are coming soon for Go. For now, mount the host
 // directory directly:
-sb, err := microsandbox.CreateSandbox(ctx, "encrypted",
-    microsandbox.WithImage("python"),
-    microsandbox.WithMounts(map[string]microsandbox.MountConfig{
-        "/secrets": microsandbox.Mount.Bind("/data/secrets", microsandbox.MountOptions{}),
+sb, err := m.CreateSandbox(ctx, "encrypted",
+    m.WithImage("python"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/secrets": m.Mount.Bind("/data/secrets", m.MountOptions{}),
     }),
 )
 ```

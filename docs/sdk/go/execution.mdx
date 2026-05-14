@@ -125,17 +125,17 @@ for {
         return err
     }
     switch ev.Kind {
-    case microsandbox.ExecEventStarted:
+    case m.ExecEventStarted:
         fmt.Printf("started pid=%d\n", ev.PID)
-    case microsandbox.ExecEventStdout:
+    case m.ExecEventStdout:
         os.Stdout.Write(ev.Data)
-    case microsandbox.ExecEventStderr:
+    case m.ExecEventStderr:
         os.Stderr.Write(ev.Data)
-    case microsandbox.ExecEventExited:
+    case m.ExecEventExited:
         fmt.Printf("exited code=%d\n", ev.ExitCode)
-    case microsandbox.ExecEventStdinError:
+    case m.ExecEventStdinError:
         fmt.Printf("stdin error: %s\n", ev.Failure.Message)
-    case microsandbox.ExecEventDone:
+    case m.ExecEventDone:
         return nil
     }
 }
@@ -244,7 +244,7 @@ Release the Rust-side exec handle. Does not kill the running process; call `Sign
 A write-only pipe to a running process's stdin, obtained from [`ExecHandle.TakeStdin`](#takestdin). Implements `io.WriteCloser`.
 
 ```go
-h, err := sb.ExecStream(ctx, "cat", nil, microsandbox.WithExecStdinPipe())
+h, err := sb.ExecStream(ctx, "cat", nil, m.WithExecStdinPipe())
 if err != nil {
     return err
 }
@@ -354,8 +354,8 @@ Per-command timeout. When exceeded, the guest terminates the process and the cal
 
 ```go
 out, err := sb.Shell(ctx, "long-running-task",
-    microsandbox.WithExecTimeout(30*time.Second))
-if microsandbox.IsKind(err, microsandbox.ErrExecTimeout) {
+    m.WithExecTimeout(30*time.Second))
+if m.IsKind(err, m.ErrExecTimeout) {
     log.Println("timed out")
 }
 ```
@@ -392,7 +392,7 @@ Per-command environment variables. Called repeatedly, maps merge; later keys ove
 
 ```go
 out, err := sb.Exec(ctx, "make", []string{"build"},
-    microsandbox.WithExecCwd("/app"),
-    microsandbox.WithExecEnv(map[string]string{"DEBUG": "1"}),
+    m.WithExecCwd("/app"),
+    m.WithExecEnv(map[string]string{"DEBUG": "1"}),
 )
 ```

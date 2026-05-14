@@ -27,8 +27,8 @@ print(f"CPU: {m.cpu_percent:.1f}%, Mem: {m.memory_bytes // 1024 // 1024} MB")
 ```
 
 ```go Go
-m, err := sb.Metrics(ctx)
-fmt.Printf("CPU: %.1f%%, Mem: %d MB\n", m.CPUPercent, m.MemoryBytes/1024/1024)
+metrics, err := sb.Metrics(ctx)
+fmt.Printf("CPU: %.1f%%, Mem: %d MB\n", metrics.CPUPercent, metrics.MemoryBytes/1024/1024)
 ```
 
 </CodeGroup>
@@ -64,14 +64,14 @@ async for m in await sb.metrics_stream(interval=1.0):
 stream, err := sb.MetricsStream(ctx, time.Second)
 defer stream.Close()
 for {
-    m, err := stream.Recv(ctx)
+    metrics, err := stream.Recv(ctx)
     if err != nil {
         return err
     }
-    if m == nil {
+    if metrics == nil {
         break
     }
-    fmt.Printf("CPU: %.1f%%\n", m.CPUPercent)
+    fmt.Printf("CPU: %.1f%%\n", metrics.CPUPercent)
 }
 ```
 
@@ -101,7 +101,7 @@ all_metrics = await all_sandbox_metrics()
 ```
 
 ```go Go
-all, err := microsandbox.AllSandboxMetrics(ctx)
+all, err := m.AllSandboxMetrics(ctx)
 ```
 
 </CodeGroup>

@@ -43,9 +43,9 @@ sb = await Sandbox.create("worker", image="python", pull_policy=PullPolicy.ALWAY
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("python"),
-    microsandbox.WithPullPolicy(microsandbox.PullPolicyAlways),
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithPullPolicy(m.PullPolicyAlways),
 )
 ```
 </CodeGroup>
@@ -96,13 +96,13 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("registry.corp.io/team/app:latest"),
-    microsandbox.WithRegistryAuth(microsandbox.RegistryAuth{
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("registry.corp.io/team/app:latest"),
+    m.WithRegistryAuth(m.RegistryAuth{
         Username: "deploy",
         Password: os.Getenv("REGISTRY_PASSWORD"),
     }),
-    microsandbox.WithPullPolicy(microsandbox.PullPolicyAlways),
+    m.WithPullPolicy(m.PullPolicyAlways),
 )
 ```
 </CodeGroup>
@@ -180,8 +180,8 @@ await using sb = await Sandbox.builder("worker")
 
 ```go Go
 // Per-registry TLS configuration is read from ~/.microsandbox/config.json.
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("localhost:5050/my-app:latest"),
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("localhost:5050/my-app:latest"),
 )
 ```
 </CodeGroup>

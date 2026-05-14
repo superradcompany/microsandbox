@@ -91,7 +91,7 @@ print(snap.digest)  # sha256:...
 ```
 
 ```go Go
-h, err := microsandbox.GetSandbox(ctx, "baseline")
+h, err := m.GetSandbox(ctx, "baseline")
 if err != nil {
     return err
 }
@@ -145,8 +145,8 @@ sb = await Sandbox.create("worker", snapshot="after-pip-install")
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithSnapshot("after-pip-install"),
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithSnapshot("after-pip-install"),
 )
 ```
 
@@ -195,16 +195,16 @@ await Snapshot.reindex("~/.microsandbox/snapshots")
 ```
 
 ```go Go
-all, err := microsandbox.Snapshot.List(ctx)            // Indexed snapshots
-h, err := microsandbox.Snapshot.Get(ctx, "after-pip-install") // By name, digest, or path
+all, err := m.Snapshot.List(ctx)            // Indexed snapshots
+h, err := m.Snapshot.Get(ctx, "after-pip-install") // By name, digest, or path
 name := "-"
 if h.Name() != nil {
     name = *h.Name()
 }
 fmt.Printf("%s (%s)\n", name, h.Digest())
 
-err = microsandbox.Snapshot.Remove(ctx, "after-pip-install", false)
-_, err = microsandbox.Snapshot.Reindex(ctx, "~/.microsandbox/snapshots")
+err = m.Snapshot.Remove(ctx, "after-pip-install", false)
+_, err = m.Snapshot.Reindex(ctx, "~/.microsandbox/snapshots")
 ```
 
 ```bash CLI
@@ -289,13 +289,13 @@ snap = await Snapshot.import_("/tmp/snap.tar.zst")  # Trailing _ avoids the keyw
 ```
 
 ```go Go
-err := microsandbox.Snapshot.Export(ctx,
+err := m.Snapshot.Export(ctx,
     "after-pip-install",
     "/tmp/snap.tar.zst",
-    microsandbox.SnapshotExportOptions{WithImage: true},
+    m.SnapshotExportOptions{WithImage: true},
 )
 
-snap, err := microsandbox.Snapshot.Import(ctx, "/tmp/snap.tar.zst", "")
+snap, err := m.Snapshot.Import(ctx, "/tmp/snap.tar.zst", "")
 ```
 
 ```bash CLI
@@ -356,8 +356,8 @@ report = await snap.verify()
 
 ```go Go
 // Compute and record an integrity hash at create time
-snap, err := microsandbox.Snapshot.Create(ctx, "baseline",
-    microsandbox.SnapshotCreateOptions{
+snap, err := m.Snapshot.Create(ctx, "baseline",
+    m.SnapshotCreateOptions{
         Name:            "after-pip-install",
         RecordIntegrity: true,
     },

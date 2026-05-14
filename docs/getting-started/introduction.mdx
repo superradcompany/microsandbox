@@ -63,16 +63,16 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "sandbox",
-    microsandbox.WithImage("python"),
-    microsandbox.WithMemory(512),
-    microsandbox.WithCPUs(2),
-    microsandbox.WithSecrets(
-        microsandbox.Secret.Env("OPENAI_API_KEY", os.Getenv("OPENAI_API_KEY"),
-            microsandbox.SecretEnvOptions{AllowHosts: []string{"api.openai.com"}},
+sb, err := m.CreateSandbox(ctx, "sandbox",
+    m.WithImage("python"),
+    m.WithMemory(512),
+    m.WithCPUs(2),
+    m.WithSecrets(
+        m.Secret.Env("OPENAI_API_KEY", os.Getenv("OPENAI_API_KEY"),
+            m.SecretEnvOptions{AllowHosts: []string{"api.openai.com"}},
         ),
     ),
-    microsandbox.WithNetwork(microsandbox.NetworkPolicy.PublicOnly()),
+    m.WithNetwork(m.NetworkPolicy.PublicOnly()),
 )
 ```
 
@@ -132,11 +132,11 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "sandbox",
-    microsandbox.WithImage("python"),
-    microsandbox.WithSecrets(
-        microsandbox.Secret.Env("OPENAI_API_KEY", os.Getenv("OPENAI_API_KEY"),
-            microsandbox.SecretEnvOptions{AllowHosts: []string{"api.openai.com"}},
+sb, err := m.CreateSandbox(ctx, "sandbox",
+    m.WithImage("python"),
+    m.WithSecrets(
+        m.Secret.Env("OPENAI_API_KEY", os.Getenv("OPENAI_API_KEY"),
+            m.SecretEnvOptions{AllowHosts: []string{"api.openai.com"}},
         ),
     ),
 )
@@ -194,13 +194,13 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "sandbox",
-    microsandbox.WithImage("python"),
-    microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-        DefaultEgress: microsandbox.PolicyActionDeny,
-        Rules: []microsandbox.PolicyRule{
-            {Action: microsandbox.PolicyActionAllow, Direction: microsandbox.PolicyDirectionEgress, Destination: "api.openai.com"},
-            {Action: microsandbox.PolicyActionAllow, Direction: microsandbox.PolicyDirectionEgress, Destination: "pypi.org"},
+sb, err := m.CreateSandbox(ctx, "sandbox",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
+        DefaultEgress: m.PolicyActionDeny,
+        Rules: []m.PolicyRule{
+            {Action: m.PolicyActionAllow, Direction: m.PolicyDirectionEgress, Destination: "api.openai.com"},
+            {Action: m.PolicyActionAllow, Direction: m.PolicyDirectionEgress, Destination: "pypi.org"},
         },
     }),
 )
@@ -253,10 +253,10 @@ sb = await Sandbox.create(
 ```go Go
 // Filesystem hooks are coming soon for Go. For now, mount the host
 // directory directly:
-sb, err := microsandbox.CreateSandbox(ctx, "encrypted",
-    microsandbox.WithImage("python"),
-    microsandbox.WithMounts(map[string]microsandbox.MountConfig{
-        "/secrets": microsandbox.Mount.Bind("/data/secrets", microsandbox.MountOptions{}),
+sb, err := m.CreateSandbox(ctx, "encrypted",
+    m.WithImage("python"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/secrets": m.Mount.Bind("/data/secrets", m.MountOptions{}),
     }),
 )
 ```
@@ -342,20 +342,20 @@ workers = await asyncio.gather(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "baseline", microsandbox.WithImage("python"))
+sb, err := m.CreateSandbox(ctx, "baseline", m.WithImage("python"))
 _, err = sb.Exec(ctx, "pip", []string{"install", "-r", "requirements.txt"})
 _, err = sb.StopAndWait(ctx)
 _ = sb.Close()
 
-h, err := microsandbox.GetSandbox(ctx, "baseline")
+h, err := m.GetSandbox(ctx, "baseline")
 _, err = h.Snapshot(ctx, "after-pip-install")
 
 // Boot 10 workers from the same snapshot
-workers := make([]*microsandbox.Sandbox, 10)
+workers := make([]*m.Sandbox, 10)
 for i := range workers {
-    workers[i], err = microsandbox.CreateSandbox(ctx,
+    workers[i], err = m.CreateSandbox(ctx,
         fmt.Sprintf("worker-%d", i),
-        microsandbox.WithSnapshot("after-pip-install"),
+        m.WithSnapshot("after-pip-install"),
     )
 }
 ```
@@ -419,7 +419,7 @@ await sb.emit("task.start", {
 // Events are coming soon for Go.
 // Planned shape:
 //
-// sub, err := sb.OnEvent("task.progress", func(event microsandbox.EventData) {
+// sub, err := sb.OnEvent("task.progress", func(event m.EventData) {
 //     fmt.Println(event.Data)
 // })
 // err = sb.Emit(ctx, "task.start", map[string]any{

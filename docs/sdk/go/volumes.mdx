@@ -11,9 +11,9 @@ See [Volumes](/sandboxes/volumes) for usage examples and patterns.
 Named volumes are managed by microsandbox and stored at `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox.
 
 ```go
-vol, err := microsandbox.CreateVolume(ctx, "my-data",
-    microsandbox.WithVolumeQuota(100),
-    microsandbox.WithVolumeLabels(map[string]string{"env": "prod"}),
+vol, err := m.CreateVolume(ctx, "my-data",
+    m.WithVolumeQuota(100),
+    m.WithVolumeLabels(map[string]string{"env": "prod"}),
 )
 ```
 
@@ -251,7 +251,7 @@ var ErrPathEscape = errors.New("microsandbox: path escapes volume root")
 Returned by every `VolumeFs` method when `relPath` is absolute, contains a `..` sequence that resolves outside the volume root, or otherwise escapes the volume's directory after `filepath.Clean`.
 
 ```go
-if _, err := vfs.Read("../etc/passwd"); errors.Is(err, microsandbox.ErrPathEscape) {
+if _, err := vfs.Read("../etc/passwd"); errors.Is(err, m.ErrPathEscape) {
     log.Println("nice try")
 }
 ```
@@ -263,13 +263,13 @@ if _, err := vfs.Read("../etc/passwd"); errors.Is(err, microsandbox.ErrPathEscap
 Volume mounts attach a host directory, named volume, tmpfs, or disk image to a guest path. Configure them via [`WithMounts`](/sdk/go/sandbox#withmounts) on the sandbox:
 
 ```go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("alpine"),
-    microsandbox.WithMounts(map[string]microsandbox.MountConfig{
-        "/host":    microsandbox.Mount.Bind("/var/data", microsandbox.MountOptions{}),
-        "/data":    microsandbox.Mount.Named("my-data", microsandbox.MountOptions{}),
-        "/scratch": microsandbox.Mount.Tmpfs(microsandbox.TmpfsOptions{SizeMiB: 128}),
-        "/img":     microsandbox.Mount.Disk("./data.qcow2", microsandbox.DiskOptions{
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("alpine"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/host":    m.Mount.Bind("/var/data", m.MountOptions{}),
+        "/data":    m.Mount.Named("my-data", m.MountOptions{}),
+        "/scratch": m.Mount.Tmpfs(m.TmpfsOptions{SizeMiB: 128}),
+        "/img":     m.Mount.Disk("./data.qcow2", m.DiskOptions{
             Format:   "qcow2",
             Fstype:   "ext4",
             Readonly: true,
@@ -379,7 +379,7 @@ type MountKind uint8
 | `MountKindTmpfs` | In-memory tmpfs |
 | `MountKindDisk` | Host disk image |
 
-Inspect via `m.Kind()`.
+Inspect via `mount.Kind()`.
 
 ---
 

@@ -4,7 +4,7 @@ description: Typed errors and resource cleanup patterns
 icon: "triangle-exclamation"
 ---
 
-All SDKs surface typed errors so you can match on specific failure modes instead of parsing strings. Rust has an `Error` enum, TypeScript exposes a dedicated subclass per variant (use `instanceof`), Python provides dedicated exception classes, and Go provides an `*Error` value with an `ErrorKind` discriminator matched via `microsandbox.IsKind(err, kind)` or `errors.As`.
+All SDKs surface typed errors so you can match on specific failure modes instead of parsing strings. Rust has an `Error` enum, TypeScript exposes a dedicated subclass per variant (use `instanceof`), Python provides dedicated exception classes, and Go provides an `*Error` value with an `ErrorKind` discriminator matched via `m.IsKind(err, kind)` or `errors.As`.
 
 ## Matching errors
 
@@ -97,15 +97,15 @@ import (
     "errors"
     "log"
 
-    microsandbox "github.com/superradcompany/microsandbox/sdk/go"
+    m "github.com/superradcompany/microsandbox/sdk/go"
 )
 
-func getOrCreate(ctx context.Context, name string) (*microsandbox.Sandbox, error) {
-    handle, err := microsandbox.GetSandbox(ctx, name)
+func getOrCreate(ctx context.Context, name string) (*m.Sandbox, error) {
+    handle, err := m.GetSandbox(ctx, name)
     if err != nil {
-        if microsandbox.IsKind(err, microsandbox.ErrSandboxNotFound) {
-            return microsandbox.CreateSandbox(ctx, name,
-                microsandbox.WithImage("python"))
+        if m.IsKind(err, m.ErrSandboxNotFound) {
+            return m.CreateSandbox(ctx, name,
+                m.WithImage("python"))
         }
         return nil, err
     }
@@ -116,11 +116,11 @@ out, err := sb.Exec(ctx, "python", []string{"script.py"})
 switch {
 case err == nil && !out.Success():
     log.Printf("exit %d: %s", out.ExitCode(), out.Stderr())
-case microsandbox.IsKind(err, microsandbox.ErrExecTimeout):
+case m.IsKind(err, m.ErrExecTimeout):
     log.Println("timed out")
 case err != nil:
     // errors.As for deeper inspection.
-    var me *microsandbox.Error
+    var me *m.Error
     if errors.As(err, &me) {
         log.Printf("kind=%s message=%s", me.Kind, me.Message)
     }
@@ -218,10 +218,10 @@ for {
         return err
     }
     switch ev.Kind {
-    case microsandbox.ExecEventExited:
+    case m.ExecEventExited:
         // Program ran — inspect ev.ExitCode.
-    case microsandbox.ExecEventFailed:
-        f := ev.Failure // *microsandbox.ExecFailure
+    case m.ExecEventFailed:
+        f := ev.Failure // *m.ExecFailure
         switch f.Kind {
         case "not_found":
             log.Printf("Binary not on PATH: %s", f.Message)
@@ -231,7 +231,7 @@ for {
             log.Printf("Spawn failed (%s): %s", f.Kind, f.Message)
         }
         // f.Errno (*int), f.ErrnoName, f.Path are also available.
-    case microsandbox.ExecEventDone:
+    case m.ExecEventDone:
         return nil
     }
 }
@@ -281,9 +281,9 @@ except SandboxAlreadyExistsError:
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "worker",
-    microsandbox.WithImage("alpine"))
-if microsandbox.IsKind(err, microsandbox.ErrSandboxAlreadyExists) {
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("alpine"))
+if m.IsKind(err, m.ErrSandboxAlreadyExists) {
     log.Println("sandbox already exists; resume or pass WithReplace()")
 }
 ```
@@ -342,11 +342,11 @@ except BootStartError as e:
 ```
 
 ```go Go
-// The Go SDK currently surfaces boot failures as a generic *microsandbox.Error
+// The Go SDK currently surfaces boot failures as a generic *m.Error
 // (typically Kind=ErrInternal or ErrInvalidConfig). A dedicated BootStart
 // kind with stage+errno detail lands in a future release.
-_, err := microsandbox.CreateSandbox(ctx, "svc", microsandbox.WithImage("alpine"))
-var me *microsandbox.Error
+_, err := m.CreateSandbox(ctx, "svc", m.WithImage("alpine"))
+var me *m.Error
 if errors.As(err, &me) {
     log.Printf("sandbox boot failed (kind=%s): %s", me.Kind, me.Message)
 }
@@ -396,9 +396,9 @@ async with await Sandbox.create("temp", image="python") as sb:
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "temp",
-    microsandbox.WithImage("python"),
-    microsandbox.WithReplace(),
+sb, err := m.CreateSandbox(ctx, "temp",
+    m.WithImage("python"),
+    m.WithReplace(),
 )
 if err != nil {
     log.Fatal(err)

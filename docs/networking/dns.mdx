@@ -77,9 +77,9 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-sb, err := microsandbox.CreateSandbox(ctx, "safe-agent",
-    microsandbox.WithImage("python"),
-    microsandbox.WithNetwork(&microsandbox.NetworkConfig{
+sb, err := m.CreateSandbox(ctx, "safe-agent",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
         DenyDomains:        []string{"malware.example.com"},
         DenyDomainSuffixes: []string{".tracking.com"},
     }),
@@ -150,10 +150,10 @@ sb = await Sandbox.create(
 
 ```go Go
 timeout := uint64(3000)
-sb, err := microsandbox.CreateSandbox(ctx, "safe-agent",
-    microsandbox.WithImage("python"),
-    microsandbox.WithNetwork(&microsandbox.NetworkConfig{
-        DNS: &microsandbox.DNSConfig{
+sb, err := m.CreateSandbox(ctx, "safe-agent",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
+        DNS: &m.DNSConfig{
             Nameservers:    []string{"1.1.1.1", "1.0.0.1"},
             QueryTimeoutMs: &timeout,
         },
