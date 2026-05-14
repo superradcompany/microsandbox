@@ -267,16 +267,11 @@ sb, err := m.CreateSandbox(ctx, "dev-agent",
 
 ### Loopback vs host: a common trap
 
-`Group::Loopback` (`127.0.0.0/8`, `::1`) and `Group::Host` (the per-sandbox gateway IPs) are different things. The two-word summary:
+`loopback` means the sandbox's own `127.0.0.1`. It does not mean your laptop's localhost.
 
-- **`loopback`** = the guest's own loopback interface. Services running inside the same VM.
-- **`host`** = the host machine, reached through `host.microsandbox.internal`.
+Use `host` when the sandbox needs to reach a service running on your machine via `host.microsandbox.internal`. This is the Docker-style "talk to the host" path.
 
-If you're coming from Docker and reach for `.allow_loopback()` to "let the sandbox talk to my host's localhost," that's the trap — you want `.allow_host()` instead. `.allow_loopback()` only fires for traffic *inside* the guest, which doesn't reach the policy gate under normal kernel routing anyway.
-
-`.deny_loopback()` does have a real use case. In `--net-default-egress allow` configurations, a process inside the guest could craft a packet bound to `eth0` with `dst=127.0.0.1`, route it past the guest kernel, and have smoltcp on the host land it on the host's loopback. `.deny_loopback()` blocks that vector. Default policies (with the implicit deny on egress) already cover this.
-
-If you want "everything near the sandbox" — guest loopback, link-local, and the host machine — `.allow_local()` is sugar for that triple. `Metadata` is deliberately excluded so cloud-IMDS isn't quietly exposed; opt in via `.allow_meta()` if you need it.
+Use `local` when you intentionally want to allow guest loopback, link-local addresses, and the host together. Cloud metadata stays separate; allow `meta` explicitly only if you need it.
 
 ## Protocol support
 
