@@ -496,13 +496,16 @@ impl JsSandboxBuilder {
 
     /// Materialize the built configuration without creating a sandbox.
     /// Returns the JSON-serialized `SandboxConfig` for inspection.
+    ///
+    /// # Safety
+    /// See `create` for the `&mut self` async + `unsafe` rationale.
     #[napi]
-    pub fn build(&mut self) -> Result<String> {
+    pub async unsafe fn build(&mut self) -> Result<String> {
         let b = self
             .inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("SandboxBuilder already consumed"))?;
-        let cfg = b.build().map_err(to_napi_error)?;
+        let cfg = b.build().await.map_err(to_napi_error)?;
         serde_json::to_string(&cfg)
             .map_err(|e| napi::Error::from_reason(format!("failed to serialize config: {e}")))
     }

@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use tokio::sync::Mutex;
 
-use crate::config::resolve_config;
 use crate::error::to_py_err;
 use crate::exec::{PyExecHandle, PyExecOutput};
 use crate::fs::PySandboxFs;
+use crate::helpers::sandbox_builder_from_args;
 use crate::logs::read_logs_blocking;
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
@@ -69,7 +70,18 @@ impl PySandbox {
         name_or_config: &Bound<'py, PyAny>,
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let config = resolve_config(name_or_config, kwargs)?;
+        let (name, kwargs) = match name_or_config.downcast::<PyDict>() {
+            Err(_) => (name_or_config.extract()?, kwargs),
+            Ok(config_dict) => (
+                config_dict
+                    .get_item("name")?
+                    .ok_or_else(|| PyValueError::new_err("config.name is required"))?
+                    .extract()?,
+                Some(config_dict),
+            ),
+        };
+
+        let builder = sandbox_builder_from_args(name, kwargs)?;
         let detached = kwargs
             .and_then(|kw| kw.get_item("detached").ok().flatten())
             .and_then(|v| v.extract::<bool>().ok())
@@ -77,13 +89,9 @@ impl PySandbox {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sb = if detached {
-                microsandbox::sandbox::Sandbox::create_detached(config)
-                    .await
-                    .map_err(to_py_err)?
+                builder.create_detached().await.map_err(to_py_err)?
             } else {
-                microsandbox::sandbox::Sandbox::create(config)
-                    .await
-                    .map_err(to_py_err)?
+                builder.create().await.map_err(to_py_err)?
             };
             Ok(PySandbox::from_rust(sb))
         })
@@ -116,15 +124,21 @@ impl PySandbox {
         name_or_config: &Bound<'py, PyAny>,
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<PyPullSession> {
-        let config = resolve_config(name_or_config, kwargs)?;
+        let (name, kwargs) = if let Ok(config_dict) = name_or_config.downcast::<PyDict>() {
+            let name: String = config_dict
+                .get_item("name")?
+                .ok_or_else(|| PyValueError::new_err("config.name is required"))?
+                .extract()?;
+            (name, Some(config_dict))
+        } else {
+            (name_or_config.extract()?, kwargs)
+        };
+        let builder = sandbox_builder_from_args(name, kwargs)?;
         let detached = kwargs
             .and_then(|kw| kw.get_item("detached").ok().flatten())
             .and_then(|v| v.extract::<bool>().ok())
             .unwrap_or(false);
 
-        // create_with_pull_progress is on the builder, not Sandbox directly.
-        // We need to build a config first, then use the builder.
-        let builder = microsandbox::sandbox::SandboxBuilder::from(config);
         let (progress, task) = if detached {
             builder
                 .create_detached_with_pull_progress()
@@ -644,7 +658,7 @@ fn parse_exec_args(
                                 | "rttime"
                         );
                         if !valid {
-                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            return Err(PyValueError::new_err(format!(
                                 "unknown rlimit resource: {resource}"
                             )));
                         }

@@ -1,20 +1,24 @@
-use microsandbox::sandbox::{NetworkPolicy, Patch, PullPolicy, SandboxConfig};
+use microsandbox::sandbox::{NetworkPolicy, Patch, PullPolicy, SandboxBuilder};
 use microsandbox::{LogLevel, RegistryAuth};
 use microsandbox_network::dns::Nameserver;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use crate::error::to_py_err;
-
 //--------------------------------------------------------------------------------------------------
 // Functions: Config Conversion
 //--------------------------------------------------------------------------------------------------
 
-/// Build a `SandboxConfig` from Python kwargs.
-pub fn build_config_from_kwargs(
+/// Build a `SandboxBuilder` from the `(name, **kwargs)` form of
+/// `Sandbox.create`.
+///
+/// Returns the builder so the async caller can drive `build().await` or
+/// `create().await` itself — the kwarg-extraction phase has to stay sync
+/// (PyO3 dict access needs the GIL), but the config materialization step
+/// is async because of snapshot manifest I/O.
+pub fn sandbox_builder_from_args(
     name: String,
     kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<SandboxConfig> {
+) -> PyResult<SandboxBuilder> {
     let Some(kwargs) = kwargs else {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "image= or snapshot= is required",
@@ -50,9 +54,9 @@ pub fn build_config_from_kwargs(
         };
         // Resolve the snapshot synchronously: read the manifest and
         // pin the image. We can't use the async `from_snapshot` here
-        // because `build_config_from_kwargs` runs in sync context;
-        // instead we replicate the resolution against the on-disk
-        // artifact directly via `snapshot_resolved`.
+        // because `sandbox_builder_from_args` runs in sync context; instead
+        // we replicate the resolution against the on-disk artifact
+        // directly via `snapshot_resolved`.
         let snap_dir = resolve_snapshot_dir(&snap_str);
         if !snap_dir.exists() {
             return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
@@ -291,8 +295,7 @@ pub fn build_config_from_kwargs(
         builder = builder.network(|n| n.on_secret_violation(action));
     }
 
-    let config = builder.build().map_err(to_py_err)?;
-    Ok(config)
+    Ok(builder)
 }
 
 //--------------------------------------------------------------------------------------------------
