@@ -1,0 +1,42 @@
+---
+title: Events
+description: Go SDK - Events API reference
+icon: "tower-broadcast"
+---
+
+<Note>
+  Events are coming soon and not yet available in the current SDK.
+</Note>
+
+See [Events](/sandboxes/events) for usage examples and guest-side emitting. The planned Go surface mirrors the Rust and TypeScript references, using `context.Context` for calls and a subscription handle for listeners.
+
+## Planned Sandbox methods
+
+---
+
+#### Emit()
+
+```go
+func (s *Sandbox) Emit(ctx context.Context, eventName string, data any) error
+```
+
+Send a named event with a JSON-serializable payload into the guest. Any process listening on the agent socket (`/run/agent.sock`) receives it.
+
+---
+
+#### OnEvent()
+
+```go
+func (s *Sandbox) OnEvent(eventName string, callback func(EventData)) (*Subscription, error)
+```
+
+Subscribe to named events emitted by guest processes. The callback fires each time the guest sends a matching event through `/run/agent.sock`.
+
+## Planned types
+
+```go
+type EventData struct {
+    Event string
+    Data  any
+}
+```

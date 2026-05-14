@@ -28,6 +28,7 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 
 	ffiOpts := ffi.CreateOptions{
 		Image:           o.Image,
+		Snapshot:        o.Snapshot,
 		MemoryMiB:       o.MemoryMiB,
 		CPUs:            o.CPUs,
 		Workdir:         o.Workdir,
@@ -374,6 +375,25 @@ func (h *SandboxHandle) Kill(ctx context.Context) error {
 // Remove deletes the sandbox's persisted state. The sandbox must be stopped.
 func (h *SandboxHandle) Remove(ctx context.Context) error {
 	return RemoveSandbox(ctx, h.name)
+}
+
+// Snapshot captures this stopped sandbox under a bare name in the default
+// snapshots directory.
+func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArtifact, error) {
+	info, err := ffi.SandboxHandleSnapshot(ctx, h.name, name)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return snapshotFromInfo(info), nil
+}
+
+// SnapshotTo captures this stopped sandbox to an explicit artifact directory.
+func (h *SandboxHandle) SnapshotTo(ctx context.Context, path string) (*SnapshotArtifact, error) {
+	info, err := ffi.SandboxHandleSnapshotTo(ctx, h.name, path)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return snapshotFromInfo(info), nil
 }
 
 // ---------------------------------------------------------------------------

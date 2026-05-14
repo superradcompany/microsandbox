@@ -1,0 +1,322 @@
+---
+title: Filesystem
+description: Go SDK - Filesystem API reference
+icon: "folder-open"
+---
+
+See [Filesystem](/sandboxes/filesystem) for usage examples and extensible backends.
+
+## SandboxFs
+
+Filesystem accessor for a running sandbox. Obtained via [`Sandbox.FS()`](/sdk/go/sandbox#fs). All operations go through the same host-guest channel as command execution — no SSH, no network involved. For bulk file operations, consider using a [volume](/sdk/go/volumes) instead.
+
+```go
+fs := sb.FS()
+
+if err := fs.WriteString(ctx, "/tmp/config.json", `{"debug": true}`); err != nil {
+    return err
+}
+content, err := fs.ReadString(ctx, "/tmp/config.json")
+```
+
+---
+
+#### Read()
+
+```go
+func (fs *SandboxFs) Read(ctx context.Context, path string) ([]byte, error)
+```
+
+Read the entire contents of a file as raw bytes.
+
+The default FFI buffer is 1 MiB. For files larger than ~750 KiB (after base64 inflation) the runtime returns `BufferTooSmall` on the single-shot path; this method transparently falls back to `ReadStream` so callers get a uniform "Read returns bytes" interface up to runtime memory limits.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| ctx | `context.Context` | Cancels the read |
+| path | `string` | Absolute path inside the guest (e.g. `"/app/config.json"`) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `[]byte` | File contents |
+
+---
+
+#### ReadString()
+
+```go
+func (fs *SandboxFs) ReadString(ctx context.Context, path string) (string, error)
+```
+
+Read the entire contents of a file and return as a string (UTF-8 reinterpretation of the bytes; no validation).
+
+---
+
+#### Write()
+
+```go
+func (fs *SandboxFs) Write(ctx context.Context, path string, data []byte) error
+```
+
+Write bytes to a file, creating it if it doesn't exist and truncating if it does.
+
+---
+
+#### WriteString()
+
+```go
+func (fs *SandboxFs) WriteString(ctx context.Context, path, content string) error
+```
+
+Write a UTF-8 string to a file.
+
+---
+
+#### List()
+
+```go
+func (fs *SandboxFs) List(ctx context.Context, path string) ([]FsEntry, error)
+```
+
+List the entries in a directory.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `[]`[`FsEntry`](#fsentry) | Directory entries |
+
+```go
+entries, err := fs.List(ctx, "/etc")
+for _, e := range entries {
+    fmt.Printf("%s (%s, %d bytes)\n", e.Path, e.Kind, e.Size)
+}
+```
+
+---
+
+#### Stat()
+
+```go
+func (fs *SandboxFs) Stat(ctx context.Context, path string) (*FsStat, error)
+```
+
+Get detailed metadata for a file or directory.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`*FsStat`](#fsstat) | File metadata |
+
+---
+
+#### Mkdir()
+
+```go
+func (fs *SandboxFs) Mkdir(ctx context.Context, path string) error
+```
+
+Create a directory and all missing parents.
+
+---
+
+#### Remove()
+
+```go
+func (fs *SandboxFs) Remove(ctx context.Context, path string) error
+```
+
+Remove a single file. Use [`RemoveDir`](#removedir) for directories.
+
+---
+
+#### RemoveDir()
+
+```go
+func (fs *SandboxFs) RemoveDir(ctx context.Context, path string) error
+```
+
+Remove a directory recursively.
+
+---
+
+#### Copy()
+
+```go
+func (fs *SandboxFs) Copy(ctx context.Context, src, dst string) error
+```
+
+Copy a file within the sandbox.
+
+---
+
+#### Rename()
+
+```go
+func (fs *SandboxFs) Rename(ctx context.Context, src, dst string) error
+```
+
+Rename or move a file or directory within the sandbox.
+
+---
+
+#### Exists()
+
+```go
+func (fs *SandboxFs) Exists(ctx context.Context, path string) (bool, error)
+```
+
+Report whether a path exists inside the sandbox.
+
+---
+
+#### CopyFromHost()
+
+```go
+func (fs *SandboxFs) CopyFromHost(ctx context.Context, hostPath, guestPath string) error
+```
+
+Copy a file from the host machine into the sandbox. For transferring many files, consider a [bind-mounted volume](/sdk/go/volumes#mountbind) instead.
+
+---
+
+#### CopyToHost()
+
+```go
+func (fs *SandboxFs) CopyToHost(ctx context.Context, guestPath, hostPath string) error
+```
+
+Copy a file from the sandbox to the host machine.
+
+---
+
+#### ReadStream()
+
+```go
+func (fs *SandboxFs) ReadStream(ctx context.Context, path string) (*FsReadStream, error)
+```
+
+Open a streaming reader for a file. Data is transferred in chunks (~3 MiB each). Use this for files too large to fit in memory. The caller must `Close` the returned [`*FsReadStream`](#fsreadstream).
+
+```go
+rs, err := fs.ReadStream(ctx, "/var/log/syslog")
+if err != nil {
+    return err
+}
+defer rs.Close()
+
+// Streaming pattern.
+for {
+    chunk, err := rs.Recv(ctx)
+    if err != nil {
+        return err
+    }
+    if chunk == nil {
+        break // EOF
+    }
+    os.Stdout.Write(chunk)
+}
+
+// Or as an io.WriterTo.
+_, err = rs.WriteTo(os.Stdout)
+```
+
+---
+
+#### WriteStream()
+
+```go
+func (fs *SandboxFs) WriteStream(ctx context.Context, path string) (*FsWriteStream, error)
+```
+
+Open a streaming writer for a file. Use this for files too large to fit in memory. The caller must call `Close(ctx)` on the returned [`*FsWriteStream`](#fswritestream) to finalise the operation.
+
+```go
+ws, err := fs.WriteStream(ctx, "/tmp/big.bin")
+if err != nil {
+    return err
+}
+
+if _, err := ws.Write(largeChunk); err != nil {
+    return err
+}
+if err := ws.Close(ctx); err != nil {
+    return err
+}
+```
+
+---
+
+## Types
+
+### FsEntry
+
+A single directory listing entry returned by [`List`](#list).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Path | `string` | File path |
+| Kind | [`FsEntryKind`](#fsentrykind) | Entry type |
+| Size | `int64` | File size in bytes |
+| Mode | `uint32` | Unix permission bits |
+
+### FsEntryKind
+
+```go
+type FsEntryKind string
+```
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `FsEntryKindFile` | `"file"` | Regular file |
+| `FsEntryKindDirectory` | `"directory"` | Directory |
+| `FsEntryKindSymlink` | `"symlink"` | Symbolic link |
+| `FsEntryKindOther` | `"other"` | Other entry type |
+
+### FsStat
+
+Detailed file metadata returned by [`Stat`](#stat).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Path | `string` | File path |
+| Size | `int64` | File size in bytes |
+| Mode | `uint32` | Unix permission bits |
+| ModTime | `time.Time` | Last modified timestamp (zero value if the guest did not report one) |
+| IsDir | `bool` | Whether the path is a directory |
+
+### FsReadStream
+
+Streaming file read returned by [`ReadStream`](#readstream). Must be closed when done.
+
+```go
+type FsReadStream struct { /* ... */ }
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Recv(ctx)` | `([]byte, error)` | Receive the next chunk. Returns `(nil, nil)` at EOF |
+| `WriteTo(w io.Writer)` | `(int64, error)` | Drain the stream into `w` using `context.Background()` — implements `io.WriterTo` |
+| `CopyTo(ctx, w io.Writer)` | `(int64, error)` | Drain into `w` with caller-supplied context |
+| `Close()` | `error` | Release the read stream handle |
+
+`WriteTo` and `CopyTo` leave the stream open on error and partial writes so the caller can decide how to recover; close it explicitly in either case.
+
+### FsWriteStream
+
+Streaming file write returned by [`WriteStream`](#writestream). Must be closed via `Close(ctx)` to finalise.
+
+```go
+type FsWriteStream struct { /* ... */ }
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Write(p []byte)` | `(int, error)` | Implements `io.Writer`. Uses `context.Background()` internally |
+| `WriteCtx(ctx, data []byte)` | `error` | Write with explicit context |
+| `Close(ctx)` | `error` | Send EOF and finalise the file |

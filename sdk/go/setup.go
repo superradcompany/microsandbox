@@ -23,7 +23,7 @@ import (
 // EnsureInstalled downloader fetches runtime artefacts (msb + libkrunfw +
 // libmicrosandbox_go_ffi) from the matching GitHub release. Bump when cutting
 // a new SDK release so it matches published artefacts.
-const sdkVersion = "0.4.5"
+const sdkVersion = "0.4.6"
 
 // libkrunfwABI is the major SONAME version of libkrunfw that msb links
 // against.

@@ -39,6 +39,7 @@ use std::{
     collections::HashMap,
     ffi::{CStr, CString},
     os::raw::{c_char, c_uchar},
+    path::PathBuf,
     sync::{
         OnceLock, RwLock,
         atomic::{AtomicU64, Ordering},
@@ -48,12 +49,13 @@ use std::{
 
 use base64::Engine;
 use microsandbox::{
-    LogLevel, MicrosandboxError, RegistryAuth, Sandbox,
+    LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
     sandbox::{
         FsEntryKind, PullPolicy, all_sandbox_metrics,
         exec::{ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
     },
+    snapshot::{ExportOpts, SnapshotDestination, SnapshotFormat},
     volume::{Volume, VolumeBuilder, VolumeHandle},
 };
 use microsandbox_network::secrets::config::ViolationAction;
@@ -287,6 +289,11 @@ mod error_kind {
     pub const FILESYSTEM: &str = "filesystem";
     pub const IMAGE_NOT_FOUND: &str = "image_not_found";
     pub const IMAGE_IN_USE: &str = "image_in_use";
+    pub const SNAPSHOT_NOT_FOUND: &str = "snapshot_not_found";
+    pub const SNAPSHOT_ALREADY_EXISTS: &str = "snapshot_already_exists";
+    pub const SNAPSHOT_SANDBOX_RUNNING: &str = "snapshot_sandbox_running";
+    pub const SNAPSHOT_IMAGE_MISSING: &str = "snapshot_image_missing";
+    pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
     pub const PATCH_FAILED: &str = "patch_failed";
     pub const IO: &str = "io";
 }
@@ -339,6 +346,11 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SandboxFs(_) => error_kind::FILESYSTEM,
             MicrosandboxError::ImageNotFound(_) => error_kind::IMAGE_NOT_FOUND,
             MicrosandboxError::ImageInUse(_) => error_kind::IMAGE_IN_USE,
+            MicrosandboxError::SnapshotNotFound(_) => error_kind::SNAPSHOT_NOT_FOUND,
+            MicrosandboxError::SnapshotAlreadyExists(_) => error_kind::SNAPSHOT_ALREADY_EXISTS,
+            MicrosandboxError::SnapshotSandboxRunning(_) => error_kind::SNAPSHOT_SANDBOX_RUNNING,
+            MicrosandboxError::SnapshotImageMissing(_) => error_kind::SNAPSHOT_IMAGE_MISSING,
+            MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
             MicrosandboxError::Io(_) => error_kind::IO,
             _ => error_kind::INTERNAL,
@@ -653,6 +665,7 @@ struct RegistryAuthOpts {
 #[derive(serde::Deserialize)]
 struct SandboxCreateOpts {
     image: Option<String>,
+    snapshot: Option<String>,
     memory_mib: Option<u32>,
     cpus: Option<u8>,
     workdir: Option<String>,
@@ -709,6 +722,28 @@ struct SandboxCreateOpts {
     /// Volume mounts: guest_path → MountSpec.
     #[serde(default)]
     volumes: HashMap<String, MountSpec>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SnapshotCreateOpts {
+    name: Option<String>,
+    path: Option<String>,
+    #[serde(default)]
+    labels: HashMap<String, String>,
+    #[serde(default)]
+    force: bool,
+    #[serde(default)]
+    record_integrity: bool,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SnapshotExportOpts {
+    #[serde(default)]
+    with_parents: bool,
+    #[serde(default)]
+    with_image: bool,
+    #[serde(default)]
+    plain_tar: bool,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1312,8 +1347,16 @@ pub unsafe extern "C" fn msb_sandbox_create(
 
         Ok(Box::pin(async move {
             let mut builder = Sandbox::builder(&name);
+            if opts.image.is_some() && opts.snapshot.is_some() {
+                return Err(FfiError::invalid_argument(
+                    "image and snapshot are mutually exclusive",
+                ));
+            }
             if let Some(img) = opts.image {
                 builder = builder.image(img.as_str());
+            }
+            if let Some(snapshot) = opts.snapshot {
+                builder = builder.from_snapshot(snapshot);
             }
             if let Some(m) = opts.memory_mib {
                 builder = builder.memory(m);
@@ -3093,6 +3136,345 @@ pub unsafe extern "C" fn msb_image_gc(
                 .await
                 .map_err(FfiError::from)?;
             Ok(format!(r#"{{"removed":{removed}}}"#))
+        }))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Snapshots
+// ---------------------------------------------------------------------------
+
+fn snapshot_format_str(f: SnapshotFormat) -> &'static str {
+    match f {
+        SnapshotFormat::Raw => "raw",
+        SnapshotFormat::Qcow2 => "qcow2",
+    }
+}
+
+fn snapshot_json(s: &Snapshot) -> serde_json::Value {
+    let manifest = s.manifest();
+    let labels: HashMap<String, String> = manifest
+        .labels
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    serde_json::json!({
+        "path": s.path().display().to_string(),
+        "digest": s.digest(),
+        "size_bytes": s.size_bytes(),
+        "image_ref": manifest.image.reference,
+        "image_manifest_digest": manifest.image.manifest_digest,
+        "format": snapshot_format_str(manifest.format),
+        "fstype": manifest.fstype,
+        "parent": manifest.parent,
+        "created_at": manifest.created_at,
+        "labels": labels,
+        "source_sandbox": manifest.source_sandbox,
+    })
+}
+
+fn snapshot_handle_json(h: &microsandbox::SnapshotHandle) -> serde_json::Value {
+    serde_json::json!({
+        "digest": h.digest(),
+        "name": h.name(),
+        "parent_digest": h.parent_digest(),
+        "image_ref": h.image_ref(),
+        "format": snapshot_format_str(h.format()),
+        "size_bytes": h.size_bytes(),
+        "created_at_unix": h.created_at().and_utc().timestamp(),
+        "path": h.path().display().to_string(),
+    })
+}
+
+fn verify_report_json(report: microsandbox::snapshot::SnapshotVerifyReport) -> serde_json::Value {
+    let upper = match report.upper {
+        UpperVerifyStatus::NotRecorded => serde_json::json!({"kind":"not_recorded"}),
+        UpperVerifyStatus::Verified { algorithm, digest } => {
+            serde_json::json!({"kind":"verified","algorithm":algorithm,"digest":digest})
+        }
+    };
+    serde_json::json!({
+        "digest": report.digest,
+        "path": report.path.display().to_string(),
+        "upper": upper,
+    })
+}
+
+fn apply_snapshot_create_opts(
+    mut builder: microsandbox::SnapshotBuilder,
+    opts: SnapshotCreateOpts,
+) -> Result<microsandbox::SnapshotBuilder, FfiError> {
+    match (opts.name, opts.path) {
+        (Some(name), None) => {
+            builder = builder.destination(SnapshotDestination::Name(name));
+        }
+        (None, Some(path)) => {
+            builder = builder.destination(SnapshotDestination::Path(PathBuf::from(path)));
+        }
+        (Some(_), Some(_)) => {
+            return Err(FfiError::invalid_argument(
+                "snapshot create accepts either name or path, not both",
+            ));
+        }
+        (None, None) => {
+            return Err(FfiError::invalid_argument(
+                "snapshot create requires name or path",
+            ));
+        }
+    }
+    for (k, v) in opts.labels {
+        builder = builder.label(k, v);
+    }
+    if opts.force {
+        builder = builder.force();
+    }
+    if opts.record_integrity {
+        builder = builder.record_integrity();
+    }
+    Ok(builder)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_snapshot(
+    cancel_id: u64,
+    sandbox_name: *const c_char,
+    snapshot_name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sandbox_name = unsafe { cstr(sandbox_name) }?;
+        let snapshot_name = unsafe { cstr(snapshot_name) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&sandbox_name).await.map_err(FfiError::from)?;
+            let snap = h.snapshot(&snapshot_name).await.map_err(FfiError::from)?;
+            Ok(snapshot_json(&snap).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_snapshot_to(
+    cancel_id: u64,
+    sandbox_name: *const c_char,
+    path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sandbox_name = unsafe { cstr(sandbox_name) }?;
+        let path = unsafe { cstr(path) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&sandbox_name).await.map_err(FfiError::from)?;
+            let snap = h
+                .snapshot_to(PathBuf::from(path))
+                .await
+                .map_err(FfiError::from)?;
+            Ok(snapshot_json(&snap).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_create(
+    cancel_id: u64,
+    source_sandbox: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let source_sandbox = unsafe { cstr(source_sandbox) }?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SnapshotCreateOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid opts JSON: {e}")))?;
+        let builder = apply_snapshot_create_opts(Snapshot::builder(&source_sandbox), opts)?;
+        Ok(Box::pin(async move {
+            let snap = builder.create().await.map_err(FfiError::from)?;
+            Ok(snapshot_json(&snap).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_open(
+    cancel_id: u64,
+    path_or_name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let path_or_name = unsafe { cstr(path_or_name) }?;
+        Ok(Box::pin(async move {
+            let snap = Snapshot::open(&path_or_name)
+                .await
+                .map_err(FfiError::from)?;
+            Ok(snapshot_json(&snap).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_verify(
+    cancel_id: u64,
+    path_or_name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let path_or_name = unsafe { cstr(path_or_name) }?;
+        Ok(Box::pin(async move {
+            let snap = Snapshot::open(&path_or_name)
+                .await
+                .map_err(FfiError::from)?;
+            let report = snap.verify().await.map_err(FfiError::from)?;
+            Ok(verify_report_json(report).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_get(
+    cancel_id: u64,
+    name_or_digest: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name_or_digest = unsafe { cstr(name_or_digest) }?;
+        Ok(Box::pin(async move {
+            let h = Snapshot::get(&name_or_digest)
+                .await
+                .map_err(FfiError::from)?;
+            Ok(snapshot_handle_json(&h).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_list(
+    cancel_id: u64,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        Ok(Box::pin(async move {
+            let handles = Snapshot::list().await.map_err(FfiError::from)?;
+            let arr: Vec<serde_json::Value> = handles.iter().map(snapshot_handle_json).collect();
+            Ok(serde_json::Value::Array(arr).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_list_dir(
+    cancel_id: u64,
+    dir: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let dir = unsafe { cstr(dir) }?;
+        Ok(Box::pin(async move {
+            let snaps = Snapshot::list_dir(PathBuf::from(dir))
+                .await
+                .map_err(FfiError::from)?;
+            let arr: Vec<serde_json::Value> = snaps.iter().map(snapshot_json).collect();
+            Ok(serde_json::Value::Array(arr).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_remove(
+    cancel_id: u64,
+    path_or_name: *const c_char,
+    force: bool,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let path_or_name = unsafe { cstr(path_or_name) }?;
+        Ok(Box::pin(async move {
+            Snapshot::remove(&path_or_name, force)
+                .await
+                .map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_reindex(
+    cancel_id: u64,
+    dir: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let dir = unsafe { cstr(dir) }?;
+        Ok(Box::pin(async move {
+            let indexed = Snapshot::reindex(PathBuf::from(dir))
+                .await
+                .map_err(FfiError::from)?;
+            Ok(format!(r#"{{"indexed":{indexed}}}"#))
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_export(
+    cancel_id: u64,
+    name_or_path: *const c_char,
+    out: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name_or_path = unsafe { cstr(name_or_path) }?;
+        let out = unsafe { cstr(out) }?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SnapshotExportOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid opts JSON: {e}")))?;
+        Ok(Box::pin(async move {
+            Snapshot::export(
+                &name_or_path,
+                &PathBuf::from(out),
+                ExportOpts {
+                    with_parents: opts.with_parents,
+                    with_image: opts.with_image,
+                    plain_tar: opts.plain_tar,
+                },
+            )
+            .await
+            .map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_import(
+    cancel_id: u64,
+    archive: *const c_char,
+    dest: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let archive = unsafe { cstr(archive) }?;
+        let dest = unsafe { cstr(dest) }?;
+        let dest = if dest.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(dest))
+        };
+        Ok(Box::pin(async move {
+            let h = Snapshot::import(&PathBuf::from(archive), dest.as_deref())
+                .await
+                .map_err(FfiError::from)?;
+            Ok(snapshot_handle_json(&h).to_string())
         }))
     })
 }

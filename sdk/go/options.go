@@ -8,39 +8,40 @@ import "time"
 // SandboxConfig is exported for callers that prefer to build a config value
 // directly and pass it via WithConfig.
 type SandboxConfig struct {
-	Image           string
-	MemoryMiB       uint32
-	CPUs            uint8
-	Workdir         string
-	Shell           string
-	Hostname        string
-	User            string
-	Replace         bool
+	Image     string
+	Snapshot  string
+	MemoryMiB uint32
+	CPUs      uint8
+	Workdir   string
+	Shell     string
+	Hostname  string
+	User      string
+	Replace   bool
 	// ReplaceWithGrace, if non-nil, sets a specific grace period
 	// between SIGTERM and SIGKILL when replacing an existing sandbox.
 	// nil means "use the runtime default" (10s when Replace is set).
 	// Setting this implies Replace=true. Zero is honored — it skips
 	// SIGTERM and SIGKILLs immediately. Use WithReplaceWithGrace.
 	ReplaceWithGrace *time.Duration
-	Env             map[string]string
-	Detached        bool
-	Entrypoint      []string
-	Init            *InitConfig
-	LogLevel        LogLevel
-	QuietLogs       bool
-	Scripts         map[string]string
-	PullPolicy      PullPolicy
-	MaxDuration     time.Duration
-	IdleTimeout     time.Duration
-	StopSignal      string
-	Labels          map[string]string
-	RegistryAuth    *RegistryAuth
-	Ports           map[uint16]uint16 // host port → guest port (TCP)
-	PortsUDP        map[uint16]uint16 // host port → guest port (UDP)
-	Network         *NetworkConfig
-	Secrets         []SecretEntry
-	Patches         []PatchConfig
-	Volumes         map[string]MountConfig // guest path → mount config
+	Env              map[string]string
+	Detached         bool
+	Entrypoint       []string
+	Init             *InitConfig
+	LogLevel         LogLevel
+	QuietLogs        bool
+	Scripts          map[string]string
+	PullPolicy       PullPolicy
+	MaxDuration      time.Duration
+	IdleTimeout      time.Duration
+	StopSignal       string
+	Labels           map[string]string
+	RegistryAuth     *RegistryAuth
+	Ports            map[uint16]uint16 // host port → guest port (TCP)
+	PortsUDP         map[uint16]uint16 // host port → guest port (UDP)
+	Network          *NetworkConfig
+	Secrets          []SecretEntry
+	Patches          []PatchConfig
+	Volumes          map[string]MountConfig // guest path → mount config
 }
 
 // SandboxOption is a functional option for configuring a sandbox.
@@ -49,6 +50,12 @@ type SandboxOption func(*SandboxConfig)
 // WithImage sets the container image to use (e.g. "python:3.12").
 func WithImage(image string) SandboxOption {
 	return func(o *SandboxConfig) { o.Image = image }
+}
+
+// WithSnapshot boots from a snapshot artifact by bare name or filesystem path.
+// It is mutually exclusive with WithImage.
+func WithSnapshot(pathOrName string) SandboxOption {
+	return func(o *SandboxConfig) { o.Snapshot = pathOrName }
 }
 
 // WithMemory sets the memory limit in MiB.
