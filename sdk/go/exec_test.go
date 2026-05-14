@@ -70,6 +70,7 @@ func TestExecEventKindConstants(t *testing.T) {
 		ExecEventStderr,
 		ExecEventExited,
 		ExecEventFailed,
+		ExecEventStdinError,
 		ExecEventDone,
 	}
 	seen := make(map[ExecEventKind]bool, len(kinds))
