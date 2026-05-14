@@ -239,8 +239,19 @@ msb exec -t worker -e DEBUG=1 -w /app -- python
 ```
 
 ```go Go
-// Interactive attach is coming soon for Go.
-// Use ExecStream for programmatic streaming today.
+// Attach to the default shell.
+exitCode, err := sb.AttachShell(ctx)
+if err != nil {
+    return err
+}
+fmt.Println("shell exited with", exitCode)
+
+// Attach to a specific command.
+exitCode, err = sb.Attach(ctx, "python")
+if err != nil {
+    return err
+}
+fmt.Println("python exited with", exitCode)
 ```
 
 </CodeGroup>
