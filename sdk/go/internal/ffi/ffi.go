@@ -895,8 +895,6 @@ type CreateOptions struct {
 	PullPolicy         string               `json:"pull_policy,omitempty"`
 	MaxDurationSecs    uint64               `json:"max_duration_secs,omitempty"`
 	IdleTimeoutSecs    uint64               `json:"idle_timeout_secs,omitempty"`
-	StopSignal         string               `json:"stop_signal,omitempty"`
-	Labels             map[string]string    `json:"labels,omitempty"`
 	RegistryAuth       *RegistryAuthOptions `json:"registry_auth,omitempty"`
 	Ports              map[uint16]uint16    `json:"ports,omitempty"`
 	PortsUDP           map[uint16]uint16    `json:"ports_udp,omitempty"`

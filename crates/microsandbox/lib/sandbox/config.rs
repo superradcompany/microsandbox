@@ -153,14 +153,6 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub user: Option<String>,
 
-    /// Image labels (merged from image config, user labels override).
-    #[serde(default)]
-    pub labels: HashMap<String, String>,
-
-    /// Signal for graceful shutdown (inherited from image config, overridable).
-    #[serde(default)]
-    pub stop_signal: Option<String>,
-
     /// Hand off PID 1 to a guest init binary after agentd's setup.
     ///
     /// When set, agentd performs initial setup (mounts, runtime
@@ -262,8 +254,7 @@ impl SandboxConfig {
     /// Apply OCI image config as defaults. User-provided values take precedence.
     ///
     /// - `env`: image env vars form the base; user env vars override by key, otherwise append.
-    /// - `cmd`, `entrypoint`, `workdir`, `user`, `stop_signal`: image value used only if user did not set one.
-    /// - `labels`: image labels form the base; user labels override on key conflict.
+    /// - `cmd`, `entrypoint`, `workdir`, `user`: image value used only if user did not set one.
     pub fn merge_image_defaults(&mut self, image: &ImageConfig) {
         self.env = merge_env(&image.env, &self.env);
 
@@ -287,17 +278,6 @@ impl SandboxConfig {
                 .filter(|s| !s.is_empty())
                 .map(String::from);
         }
-        if self.stop_signal.is_none() {
-            self.stop_signal = image
-                .stop_signal
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(String::from);
-        }
-
-        let mut merged = image.labels.clone();
-        merged.extend(self.labels.drain());
-        self.labels = merged;
     }
 
     /// Apply runtime defaults that should exist for OCI sandboxes unless the
@@ -410,8 +390,6 @@ impl Default for SandboxConfig {
             entrypoint: None,
             cmd: None,
             user: None,
-            labels: HashMap::new(),
-            stop_signal: None,
             init: None,
             pull_policy: PullPolicy::default(),
             policy: SandboxPolicy::default(),
@@ -497,7 +475,6 @@ mod tests {
             entrypoint: Some(vec!["/entrypoint.sh".to_string()]),
             working_dir: Some("/app".to_string()),
             user: Some("appuser".to_string()),
-            stop_signal: Some("SIGTERM".to_string()),
             ..Default::default()
         };
 
@@ -508,7 +485,6 @@ mod tests {
         assert_eq!(config.entrypoint, Some(vec!["/entrypoint.sh".to_string()]));
         assert_eq!(config.workdir, Some("/app".to_string()));
         assert_eq!(config.user, Some("appuser".to_string()));
-        assert_eq!(config.stop_signal, Some("SIGTERM".to_string()));
     }
 
     #[test]
@@ -518,7 +494,6 @@ mod tests {
             entrypoint: Some(vec!["/entrypoint.sh".to_string()]),
             working_dir: Some("/app".to_string()),
             user: Some("appuser".to_string()),
-            stop_signal: Some("SIGTERM".to_string()),
             ..Default::default()
         };
 
@@ -534,31 +509,6 @@ mod tests {
         assert_eq!(config.entrypoint, Some(vec!["/entrypoint.sh".to_string()]));
         assert_eq!(config.workdir, Some("/workspace".to_string()));
         assert_eq!(config.user, Some("root".to_string()));
-        assert_eq!(config.stop_signal, Some("SIGTERM".to_string()));
-    }
-
-    #[test]
-    fn test_merge_image_defaults_labels_merged_user_wins() {
-        let image = ImageConfig {
-            labels: HashMap::from([
-                ("maintainer".to_string(), "alice".to_string()),
-                ("version".to_string(), "1.0".to_string()),
-            ]),
-            ..Default::default()
-        };
-
-        let mut config = SandboxConfig {
-            labels: HashMap::from([
-                ("version".to_string(), "custom".to_string()),
-                ("my.label".to_string(), "foo".to_string()),
-            ]),
-            ..Default::default()
-        };
-        config.merge_image_defaults(&image);
-
-        assert_eq!(config.labels.get("maintainer").unwrap(), "alice");
-        assert_eq!(config.labels.get("version").unwrap(), "custom");
-        assert_eq!(config.labels.get("my.label").unwrap(), "foo");
     }
 
     #[test]
@@ -566,7 +516,6 @@ mod tests {
         let image = ImageConfig {
             working_dir: Some(String::new()),
             user: Some(String::new()),
-            stop_signal: Some(String::new()),
             ..Default::default()
         };
 
@@ -578,10 +527,6 @@ mod tests {
             "empty working_dir should not propagate"
         );
         assert!(config.user.is_none(), "empty user should not propagate");
-        assert!(
-            config.stop_signal.is_none(),
-            "empty stop_signal should not propagate"
-        );
     }
 
     #[test]

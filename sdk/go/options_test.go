@@ -496,24 +496,6 @@ func TestWithMaxDurationAndIdleTimeout(t *testing.T) {
 	}
 }
 
-func TestWithStopSignal(t *testing.T) {
-	o := SandboxConfig{}
-	WithStopSignal("SIGINT")(&o)
-	if o.StopSignal != "SIGINT" {
-		t.Errorf("StopSignal: got %q", o.StopSignal)
-	}
-}
-
-func TestWithLabelsMerge(t *testing.T) {
-	o := SandboxConfig{}
-	WithLabels(map[string]string{"team": "agents"})(&o)
-	WithLabels(map[string]string{"team": "platform", "tier": "prod"})(&o)
-	want := map[string]string{"team": "platform", "tier": "prod"}
-	if !reflect.DeepEqual(o.Labels, want) {
-		t.Errorf("Labels: got %v want %v", o.Labels, want)
-	}
-}
-
 func TestWithRegistryAuth(t *testing.T) {
 	o := SandboxConfig{}
 	WithRegistryAuth(RegistryAuth{Username: "u", Password: "p"})(&o)

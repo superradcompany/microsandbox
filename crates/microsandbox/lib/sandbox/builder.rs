@@ -773,6 +773,14 @@ impl SandboxBuilder {
         // Check that image is set (non-empty OCI string or Bind path).
         match &self.config.image {
             RootfsSource::Oci(s) if s.is_empty() => {
+                if self.pending_snapshot.is_some() {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "from_snapshot() set but unresolved: call \
+                         resolve_pending().await before build(), or use one \
+                         of the create*() helpers which resolves automatically"
+                            .into(),
+                    ));
+                }
                 return Err(crate::MicrosandboxError::InvalidConfig(
                     "image source is required".into(),
                 ));
@@ -941,6 +949,21 @@ mod tests {
             .unwrap();
 
         assert!(config.replace_existing);
+    }
+
+    #[test]
+    fn test_builder_from_snapshot_without_resolve_errors_clearly() {
+        let err = SandboxBuilder::new("test")
+            .from_snapshot("ignored-not-resolved")
+            .build()
+            .expect_err("expected validate() to reject unresolved snapshot");
+
+        let msg = err.to_string();
+        assert!(msg.contains("from_snapshot"), "got: {msg}");
+        assert!(
+            msg.contains("resolve_pending") || msg.contains("create()"),
+            "got: {msg}"
+        );
     }
 
     #[test]

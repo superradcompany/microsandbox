@@ -323,6 +323,14 @@ jobs:
           mkdir -p build
           cp target/debug/libmicrosandbox_go_ffi.so build/
 
+      # -- Smoke-test the FFI boundary (no KVM needed) --
+      - name: Smoke-test Go SDK FFI
+        if: matrix.target == 'linux-x86_64'
+        working-directory: sdk/go
+        env:
+          MICROSANDBOX_LIB_PATH: ${{ github.workspace }}/build/libmicrosandbox_go_ffi.so
+        run: go test -tags smoke -count=1 -timeout 2m .
+
       # -- Upload artifacts (linux-x86_64 only, for SDK smoke tests) --
       - name: Upload build artifacts
         if: matrix.target == 'linux-x86_64'

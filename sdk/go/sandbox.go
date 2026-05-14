@@ -26,6 +26,18 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 		opt(&o)
 	}
 
+	ffiOpts := buildFFICreateOptions(o)
+
+	inner, err := ffi.CreateSandbox(ctx, name, ffiOpts)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
+}
+
+// buildFFICreateOptions translates SandboxConfig into the FFI wire shape.
+// Extracted so tests can assert the JSON envelope without booting the runtime.
+func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	ffiOpts := ffi.CreateOptions{
 		Image:           o.Image,
 		ImageFstype:     o.ImageFstype,
@@ -46,8 +58,6 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 		PullPolicy:      string(o.PullPolicy),
 		MaxDurationSecs: durationSecsCeil(o.MaxDuration),
 		IdleTimeoutSecs: durationSecsCeil(o.IdleTimeout),
-		StopSignal:      o.StopSignal,
-		Labels:          o.Labels,
 		Ports:           o.Ports,
 		PortsUDP:        o.PortsUDP,
 	}
@@ -121,11 +131,7 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 		})
 	}
 
-	inner, err := ffi.CreateSandbox(ctx, name, ffiOpts)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return &Sandbox{inner: inner}, nil
+	return ffiOpts
 }
 
 // durationSecsCeil rounds a Duration up to whole seconds. Sub-second values

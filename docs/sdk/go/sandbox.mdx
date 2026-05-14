@@ -354,7 +354,7 @@ Send a graceful drain signal (SIGUSR1) to the sandbox. Existing commands run to 
 func (s *Sandbox) Stop(ctx context.Context) error
 ```
 
-Gracefully shut down the sandbox (SIGTERM by default; override with [`WithStopSignal`](#withstopsignal)). Does **not** wait for the VM process to exit — use [`StopAndWait`](#stopandwait) for that.
+Gracefully shut down the sandbox (SIGTERM). Does **not** wait for the VM process to exit — use [`StopAndWait`](#stopandwait) for that.
 
 ---
 
@@ -835,16 +835,6 @@ Stop the sandbox after this much wall-clock time without exec activity. Zero mea
 
 ---
 
-#### WithStopSignal()
-
-```go
-func WithStopSignal(sig string) SandboxOption
-```
-
-Override the signal sent on graceful stop. Defaults to `SIGTERM`. Pass standard names like `"SIGTERM"` or `"SIGINT"`.
-
----
-
 #### WithRegistryAuth()
 
 ```go
@@ -852,16 +842,6 @@ func WithRegistryAuth(auth RegistryAuth) SandboxOption
 ```
 
 Credentials for pulling from a private OCI registry. See [`RegistryAuth`](#registryauth).
-
----
-
-#### WithLabels()
-
-```go
-func WithLabels(labels map[string]string) SandboxOption
-```
-
-Attach key-value labels to the sandbox config. Merges on top of any image-level labels (user values win on conflict).
 
 ---
 
@@ -978,8 +958,6 @@ The config struct populated by [`SandboxOption`](#sandboxoption) functions. Most
 | PullPolicy | [`PullPolicy`](#pullpolicy) | Image pull behaviour |
 | MaxDuration | `time.Duration` | Maximum sandbox lifetime |
 | IdleTimeout | `time.Duration` | Idle timeout |
-| StopSignal | `string` | Signal sent on graceful stop |
-| Labels | `map[string]string` | User labels |
 | RegistryAuth | [`*RegistryAuth`](#registryauth) | Private registry credentials |
 | Ports | `map[uint16]uint16` | Host→guest TCP port mappings |
 | PortsUDP | `map[uint16]uint16` | Host→guest UDP port mappings |

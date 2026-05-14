@@ -169,7 +169,6 @@ pub fn build_config_from_kwargs(
         }
         builder = builder.idle_timeout(idle_timeout as u64);
     }
-    let stop_signal_val = extract_opt::<String>(kwargs, "stop_signal")?;
 
     // Environment variables.
     if let Some(env) = kwargs.get_item("env")? {
@@ -292,10 +291,7 @@ pub fn build_config_from_kwargs(
         builder = builder.network(|n| n.on_secret_violation(action));
     }
 
-    let mut config = builder.build().map_err(to_py_err)?;
-    if let Some(sig) = stop_signal_val {
-        config.stop_signal = Some(sig);
-    }
+    let config = builder.build().map_err(to_py_err)?;
     Ok(config)
 }
 

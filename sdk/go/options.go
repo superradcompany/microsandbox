@@ -34,8 +34,6 @@ type SandboxConfig struct {
 	PullPolicy       PullPolicy
 	MaxDuration      time.Duration
 	IdleTimeout      time.Duration
-	StopSignal       string
-	Labels           map[string]string
 	RegistryAuth     *RegistryAuth
 	Ports            map[uint16]uint16 // host port → guest port (TCP)
 	PortsUDP         map[uint16]uint16 // host port → guest port (UDP)
@@ -198,31 +196,11 @@ func WithIdleTimeout(d time.Duration) SandboxOption {
 	return func(o *SandboxConfig) { o.IdleTimeout = d }
 }
 
-// WithStopSignal overrides the signal sent on graceful stop (defaults to SIGTERM).
-// Pass standard names like "SIGTERM" or "SIGINT".
-func WithStopSignal(sig string) SandboxOption {
-	return func(o *SandboxConfig) { o.StopSignal = sig }
-}
-
 // WithRegistryAuth sets credentials for pulling private OCI images.
 func WithRegistryAuth(auth RegistryAuth) SandboxOption {
 	return func(o *SandboxConfig) {
 		a := auth
 		o.RegistryAuth = &a
-	}
-}
-
-// WithLabels attaches key-value labels to the sandbox config. They merge on
-// top of any image-level labels (user values win on conflict). Multiple calls
-// merge; later keys overwrite earlier ones.
-func WithLabels(labels map[string]string) SandboxOption {
-	return func(o *SandboxConfig) {
-		if o.Labels == nil {
-			o.Labels = make(map[string]string, len(labels))
-		}
-		for k, v := range labels {
-			o.Labels[k] = v
-		}
 	}
 }
 

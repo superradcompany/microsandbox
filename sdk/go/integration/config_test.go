@@ -194,66 +194,6 @@ func TestWithQuietLogsClearsLogLevel(t *testing.T) {
 	}
 }
 
-// TestWithLabelsVisibleInConfig verifies that labels survive round-tripping
-// through SandboxConfig.
-func TestWithLabelsVisibleInConfig(t *testing.T) {
-	ctx := integrationCtx(t)
-	name := "go-sdk-labels-" + t.Name()
-
-	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
-		microsandbox.WithLabels(map[string]string{"team": "agents", "tier": "test"}),
-	)
-	if err != nil {
-		t.Fatalf("CreateSandbox: %v", err)
-	}
-	t.Cleanup(func() {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_ = sb.Stop(stopCtx)
-		_ = sb.Close()
-	})
-
-	h, err := microsandbox.GetSandbox(ctx, name)
-	if err != nil {
-		t.Fatalf("GetSandbox: %v", err)
-	}
-	cfg := h.ConfigJSON()
-	if !strings.Contains(cfg, "agents") || !strings.Contains(cfg, "tier") {
-		t.Errorf("Labels not in ConfigJSON: %s", cfg)
-	}
-}
-
-// TestWithStopSignalVisibleInConfig ensures the stop signal override
-// round-trips. Actually delivering SIGINT during shutdown is upstream's
-// concern — we only verify the SDK-side wiring.
-func TestWithStopSignalVisibleInConfig(t *testing.T) {
-	ctx := integrationCtx(t)
-	name := "go-sdk-stopsig-" + t.Name()
-
-	sb, err := microsandbox.CreateSandbox(ctx, name,
-		microsandbox.WithImage("alpine:3.19"),
-		microsandbox.WithStopSignal("SIGINT"),
-	)
-	if err != nil {
-		t.Fatalf("CreateSandbox: %v", err)
-	}
-	t.Cleanup(func() {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_ = sb.Stop(stopCtx)
-		_ = sb.Close()
-	})
-
-	h, err := microsandbox.GetSandbox(ctx, name)
-	if err != nil {
-		t.Fatalf("GetSandbox: %v", err)
-	}
-	if !strings.Contains(h.ConfigJSON(), "SIGINT") {
-		t.Errorf("StopSignal not in ConfigJSON: %s", h.ConfigJSON())
-	}
-}
-
 // TestWithMaxDurationAndIdleTimeoutCreates is a creation smoke test:
 // timeouts are wall-clock-driven and not deterministic in CI, so we only
 // confirm the runtime accepts the configuration without erroring.

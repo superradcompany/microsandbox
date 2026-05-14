@@ -566,7 +566,6 @@ sb, err := h.Connect(ctx)
 | `WithScripts(map)` | Named scripts the agent can run by key |
 | `WithPullPolicy(p)` | `PullPolicyAlways` / `PullPolicyIfMissing` / `PullPolicyNever` |
 | `WithMaxDuration(d)` / `WithIdleTimeout(d)` | Lifecycle caps |
-| `WithStopSignal(sig)` | Override the graceful-stop signal (default SIGTERM) |
 | `WithRegistryAuth(auth)` | Credentials for private OCI registries |
 | `WithMounts(map)` | Volume mounts keyed by guest path — use `Mount.Named/Bind/Tmpfs` |
 | `WithExecCwd(path)` | Working directory for a single `Exec`/`Shell` call |

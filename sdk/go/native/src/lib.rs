@@ -702,12 +702,6 @@ struct SandboxCreateOpts {
     max_duration_secs: Option<u64>,
     /// Idle timeout in seconds (0 = unlimited).
     idle_timeout_secs: Option<u64>,
-    /// Override the stop signal (default SIGTERM).
-    stop_signal: Option<String>,
-    /// Sandbox-level labels merged into SandboxConfig.labels post-build.
-    /// Image-level labels still merge in first; these override on conflict.
-    #[serde(default)]
-    labels: HashMap<String, String>,
     /// Registry credentials for pulling private images.
     registry_auth: Option<RegistryAuthOpts>,
     network: Option<NetworkOpts>,
@@ -1461,19 +1455,10 @@ pub unsafe extern "C" fn msb_sandbox_create(
                 builder = apply_volume(builder, guest_path, mount)?;
             }
 
-            let mut config = builder.build()?;
-            if let Some(sig) = opts.stop_signal {
-                config.stop_signal = Some(sig);
-            }
-            // Labels merge after build so image-config labels still come first
-            // and user labels override on conflict.
-            for (k, v) in opts.labels {
-                config.labels.insert(k, v);
-            }
             let sandbox = if opts.detached {
-                Sandbox::create_detached(config).await?
+                builder.create_detached().await?
             } else {
-                Sandbox::create(config).await?
+                builder.create().await?
             };
             let handle = register(sandbox)?;
             Ok(format!(r#"{{"handle":{handle}}}"#))
