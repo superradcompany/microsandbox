@@ -228,6 +228,8 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
   // serializing.
   const camelToSnake = (k: string): string =>
     k.replace(/[A-Z]/g, (c) => "_" + c.toLowerCase());
+  // The Rust enums are `serde(rename_all = "snake_case")`, while TS uses kebab-case.
+  const kebabToSnake = (s: string): string => s.replace(/-/g, "_");
   // Detect a TS-side Destination object (carries `kind` discriminator
   // produced by `Destination.any/cidr/domain/domainSuffix/group`) and
   // rewrite it to the Rust externally-tagged form.
@@ -248,7 +250,13 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
     // `cidr`, domain → `domain`, domainSuffix → `suffix`, group → `group`.
     // Map each to its Rust externally-tagged data slot.
     const dataField = v.kind === "domainSuffix" ? "suffix" : v.kind;
-    return { [tag]: deep(v[dataField]) };
+    // Only `group` carries an enum string ("link-local" -> "link_local").
+    // The other strings must be preserved as-is.
+    const value =
+      v.kind === "group" && typeof v.group === "string"
+        ? kebabToSnake(v.group)
+        : deep(v[dataField]);
+    return { [tag]: value };
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const remapKeys = (v: any): any => {
