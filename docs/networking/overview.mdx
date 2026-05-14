@@ -12,11 +12,12 @@ Without any policy flags, sandboxes get **public-internet egress only**: routabl
 
 To turn off networking entirely:
 
-```bash
+<CodeGroup>
+```bash CLI
 msb create python --name isolated --no-net
 ```
 
-```rust
+```rust Rust
 let sb = Sandbox::builder("isolated")
     .image("python")
     .network(|n| n.enabled(false))
@@ -24,12 +25,30 @@ let sb = Sandbox::builder("isolated")
     .await?;
 ```
 
-```go
+```typescript TypeScript
+await using sb = await Sandbox.builder("isolated")
+    .image("python")
+    .disableNetwork()
+    .create();
+```
+
+```python Python
+from microsandbox import Network, Sandbox
+
+sb = await Sandbox.create(
+    "isolated",
+    image="python",
+    network=Network.none(),
+)
+```
+
+```go Go
 sb, err := m.CreateSandbox(ctx, "isolated",
     m.WithImage("python"),
     m.WithNetwork(m.NetworkPolicy.None()),
 )
 ```
+</CodeGroup>
 
 ## Custom policies
 
@@ -43,12 +62,11 @@ rules           : [Rule, ...]      (first match wins)
 
 Each rule carries its own direction (`Egress`, `Ingress`, or `Any`), a destination, an optional protocol set, an optional port set, and an action.
 
-### CLI
-
 `--net-rule` takes a comma-separated list of tokens shaped as
 `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`. Direction defaults to `egress` when omitted. Repeating the flag concatenates tokens in argv order; first match wins.
 
-```bash
+<CodeGroup>
+```bash CLI
 # Public internet plus the host machine, deny everything else by default
 msb create python --name agent \
     --net-rule "allow@public,allow@host"
@@ -69,11 +87,7 @@ msb create python --name api \
     --net-rule "allow:ingress@private"
 ```
 
-`<target>` accepts `any`, a group keyword (`public`, `private`, `loopback`, `link-local`, `meta`, `multicast`, `host`), an IP, a CIDR, a domain (with at least one dot), `domain=<name>` for single-label hostnames, or `suffix=<domain>` for subdomain matches.
-
-### Rust
-
-```rust
+```rust Rust
 use microsandbox::{NetworkPolicy, Sandbox};
 
 let policy = NetworkPolicy::builder()
@@ -89,15 +103,7 @@ let sb = Sandbox::builder("secure-agent")
     .await?;
 ```
 
-`Group::Host` covers the sandbox gateway, which is where DNS is delivered — that's why DNS rules typically target it under a deny-by-default policy. See the [DNS-as-egress](/networking/dns#dns-as-egress) breakdown for the full rule, including why other IP-based destinations can't grant DNS.
-
-The builder accepts string inputs (`.ip("10.0.0.5")`, `.cidr("10.0.0.0/24")`, `.domain("api.example.com")`, etc.) and parses them at `.build()` time, so the chain stays clean. See the [Rust reference](/sdk/rust/networking) for the full surface (per-category shortcuts, the explicit-rule sub-builder, shadow-rule warnings).
-
-### TypeScript / Python
-
-Both SDKs accept policies as plain config objects matching the wire format. Direction strings are `"egress"`, `"ingress"`, or `"any"`. Group keywords match the CLI grammar.
-
-```typescript
+```typescript TypeScript
 import { Destination, PortRange, Sandbox } from "microsandbox";
 
 await using sb = await Sandbox.builder("secure-agent")
@@ -125,7 +131,7 @@ await using sb = await Sandbox.builder("secure-agent")
     .create();
 ```
 
-```python
+```python Python
 from microsandbox import Sandbox
 
 sb = await Sandbox.create(
@@ -144,7 +150,7 @@ sb = await Sandbox.create(
 )
 ```
 
-```go
+```go Go
 sb, err := m.CreateSandbox(ctx, "secure-agent",
     m.WithImage("alpine"),
     m.WithNetwork(&m.NetworkConfig{
@@ -169,6 +175,13 @@ sb, err := m.CreateSandbox(ctx, "secure-agent",
     }),
 )
 ```
+</CodeGroup>
+
+`<target>` accepts `any`, a group keyword (`public`, `private`, `loopback`, `link-local`, `meta`, `multicast`, `host`), an IP, a CIDR, a domain (with at least one dot), `domain=<name>` for single-label hostnames, or `suffix=<domain>` for subdomain matches.
+
+`Group::Host` covers the sandbox gateway, which is where DNS is delivered — that's why DNS rules typically target it under a deny-by-default policy. See the [DNS-as-egress](/networking/dns#dns-as-egress) breakdown for the full rule, including why other IP-based destinations can't grant DNS.
+
+The Rust builder accepts string inputs (`.ip("10.0.0.5")`, `.cidr("10.0.0.0/24")`, `.domain("api.example.com")`, etc.) and parses them at `.build()` time, so the chain stays clean. TypeScript, Python, and Go accept policy objects matching the wire format. Direction strings are `"egress"`, `"ingress"`, or `"any"`, and group keywords match the CLI grammar. See the [Rust reference](/sdk/rust/networking) for the full Rust surface.
 
 Domain rules match flows where the guest resolved the name through the sandbox's DNS interceptor. See [DNS](/networking/dns) for how the resolved-hostname cache works.
 
@@ -229,19 +242,20 @@ The name is wired through `/etc/hosts` and the DNS interceptor, so both standard
 
 The default policy denies host access — the sandbox gateway sits in a private range, same as any other local destination. Add the `host` group to open it:
 
-```bash
+<CodeGroup>
+```bash CLI
 msb create python --name dev-agent \
     --net-rule "allow@public,allow@host"
 ```
 
-```rust
+```rust Rust
 NetworkPolicy::builder()
     .default_deny()
     .egress(|e| e.allow_public().allow_host())
     .build()?
 ```
 
-```go
+```go Go
 sb, err := m.CreateSandbox(ctx, "dev-agent",
     m.WithImage("python"),
     m.WithNetwork(&m.NetworkConfig{
@@ -253,6 +267,7 @@ sb, err := m.CreateSandbox(ctx, "dev-agent",
     }),
 )
 ```
+</CodeGroup>
 
 ### Loopback vs host: a common trap
 
