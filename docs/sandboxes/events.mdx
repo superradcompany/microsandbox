@@ -54,6 +54,15 @@ sub = sb.on_event("task.progress", lambda event: (
 ))
 ```
 
+```go Go
+// Events are coming soon for Go.
+// Planned shape:
+//
+// sub, err := sb.OnEvent("task.progress", func(event microsandbox.EventData) {
+//     fmt.Println(event.Data)
+// })
+```
+
 </CodeGroup>
 
 ## Send events to guest
@@ -86,6 +95,16 @@ await sb.emit("task.start", {
     "input_file": "/data/input.txt",
     "output_dir": "/data/output",
 })
+```
+
+```go Go
+// Events are coming soon for Go.
+// Planned shape:
+//
+// err := sb.Emit(ctx, "task.start", map[string]any{
+//     "input_file": "/data/input.txt",
+//     "output_dir": "/data/output",
+// })
 ```
 
 </CodeGroup>

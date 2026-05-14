@@ -152,6 +152,13 @@ async def main():
 
 asyncio.run(main())
 ```
+
+```go Go
+// Sandbox log reads are coming soon for Go.
+// Use the CLI for now:
+//
+//   msb logs web
+```
 </CodeGroup>
 
 ### Filtering at read time
@@ -192,6 +199,13 @@ recent = await handle.logs(
     since_ms=(time.time() - 3600) * 1000,
     sources=["stdout", "stderr", "output", "system"],
 )
+```
+
+```go Go
+// Sandbox log filters are coming soon for Go.
+// Use the CLI for now:
+//
+//   msb logs web --tail 50 --since 1h
 ```
 </CodeGroup>
 

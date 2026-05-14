@@ -75,6 +75,18 @@ sb = await Sandbox.create("custom-vm", image="./ubuntu-22.04.qcow2", cpus=2, mem
 # Explicit filesystem type
 sb2 = await Sandbox.create("custom-vm", image=Image.disk("./alpine.raw", fstype="ext4"), cpus=1, memory=512)
 ```
+
+```go Go
+// Auto-detect format from the file extension
+sb, err := microsandbox.CreateSandbox(ctx, "custom-vm",
+    microsandbox.WithImage("./ubuntu-22.04.qcow2"),
+    microsandbox.WithCPUs(2),
+    microsandbox.WithMemory(2048),
+)
+
+// Explicit root disk image filesystem selection is coming soon for Go.
+// Additional disk-image mounts are available via Mount.Disk.
+```
 </CodeGroup>
 
 <Note>

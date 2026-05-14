@@ -33,6 +33,13 @@ print(output.success)         # True
 print(output.exit_code)       # 0
 ```
 
+```go Go
+output, err := sb.Exec(ctx, "python", []string{"-c", "print('hello')"})
+fmt.Print(output.Stdout())     // "hello\n"
+fmt.Println(output.Success())  // true
+fmt.Println(output.ExitCode()) // 0
+```
+
 ```bash CLI
 msb exec worker -- python -c "print('hello')"
 ```
@@ -76,6 +83,14 @@ output = await sb.exec("python", ExecOptions(
 ))
 ```
 
+```go Go
+output, err := sb.Exec(ctx, "python", []string{"compute.py"},
+    microsandbox.WithExecCwd("/app"),
+    microsandbox.WithExecEnv(map[string]string{"PYTHONPATH": "/app/lib"}),
+    microsandbox.WithExecTimeout(30*time.Second),
+)
+```
+
 ```bash CLI
 msb exec worker \
   -w /app \
@@ -102,6 +117,10 @@ const output = await sb.shell("ls -la /app && echo done")
 
 ```python Python
 output = await sb.shell("ls -la /app && echo done")
+```
+
+```go Go
+output, err := sb.Shell(ctx, "ls -la /app && echo done")
 ```
 
 ```bash CLI
@@ -148,6 +167,26 @@ async for event in handle:
         case "stdout": print(event.data.decode(), end="")
         case "stderr": print(event.data.decode(), end="", file=sys.stderr)
         case "exited": print(f"Exited: {event.code}")
+```
+
+```go Go
+handle, err := sb.ExecStream(ctx, "tail", []string{"-f", "/var/log/app.log"})
+for {
+    event, err := handle.Recv(ctx)
+    if err != nil {
+        return err
+    }
+    switch event.Kind {
+    case microsandbox.ExecEventStdout:
+        os.Stdout.Write(event.Data)
+    case microsandbox.ExecEventStderr:
+        os.Stderr.Write(event.Data)
+    case microsandbox.ExecEventExited:
+        fmt.Printf("Exited: %d\n", event.ExitCode)
+    case microsandbox.ExecEventDone:
+        return nil
+    }
+}
 ```
 
 </CodeGroup>
@@ -199,6 +238,11 @@ msb exec -t worker
 msb exec -t worker -e DEBUG=1 -w /app -- python
 ```
 
+```go Go
+// Interactive attach is coming soon for Go.
+// Use ExecStream for programmatic streaming today.
+```
+
 </CodeGroup>
 
 <Tip>
@@ -236,6 +280,15 @@ await stdin.write(b"print('hello')\n")
 await stdin.write(b"exit()\n")
 await stdin.close()
 await handle.wait()
+```
+
+```go Go
+handle, err := sb.ExecStream(ctx, "python", nil, microsandbox.WithExecStdinPipe())
+stdin := handle.TakeStdin()
+_, _ = stdin.Write([]byte("print('hello')\n"))
+_, _ = stdin.Write([]byte("exit()\n"))
+_ = stdin.Close()
+_, err = handle.Wait(ctx)
 ```
 
 </CodeGroup>
@@ -279,6 +332,13 @@ sessions = await sb.sessions()
 
 # Reattach to a session by ID
 reattached = await sb.session(session_id)
+```
+
+```go Go
+// Session listing and reattach are coming soon for Go.
+// ExecStream exposes the session ID today:
+handle, err := sb.ExecStream(ctx, "python", []string{"server.py"})
+sessionID, err := handle.ID()
 ```
 
 </CodeGroup>

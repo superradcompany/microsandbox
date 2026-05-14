@@ -24,6 +24,13 @@ let sb = Sandbox::builder("isolated")
     .await?;
 ```
 
+```go
+sb, err := microsandbox.CreateSandbox(ctx, "isolated",
+    microsandbox.WithImage("python"),
+    microsandbox.WithNetwork(microsandbox.NetworkPolicy.None()),
+)
+```
+
 ## Custom policies
 
 A policy is a list of rules plus two direction-specific defaults:
@@ -137,6 +144,32 @@ sb = await Sandbox.create(
 )
 ```
 
+```go
+sb, err := microsandbox.CreateSandbox(ctx, "secure-agent",
+    microsandbox.WithImage("alpine"),
+    microsandbox.WithNetwork(&microsandbox.NetworkConfig{
+        DefaultEgress:  microsandbox.PolicyActionDeny,
+        DefaultIngress: microsandbox.PolicyActionAllow,
+        Rules: []microsandbox.PolicyRule{
+            {
+                Action:      microsandbox.PolicyActionAllow,
+                Direction:   microsandbox.PolicyDirectionEgress,
+                Destination: "*",
+                Protocol:    microsandbox.PolicyProtocolTCP,
+                Port:        "443",
+            },
+            {
+                Action:      microsandbox.PolicyActionAllow,
+                Direction:   microsandbox.PolicyDirectionEgress,
+                Destination: "*",
+                Protocol:    microsandbox.PolicyProtocolUDP,
+                Port:        "53",
+            },
+        },
+    }),
+)
+```
+
 Domain rules match flows where the guest resolved the name through the sandbox's DNS interceptor. See [DNS](/networking/dns) for how the resolved-hostname cache works.
 
 ## Port mapping
@@ -169,6 +202,14 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+sb, err := microsandbox.CreateSandbox(ctx, "api",
+    microsandbox.WithImage("python"),
+    microsandbox.WithPorts(map[uint16]uint16{8080: 80}),
+    microsandbox.WithPortsUDP(map[uint16]uint16{5353: 5353}),
+)
+```
+
 ```bash CLI
 msb create python --name api -p 8080:80
 ```
@@ -198,6 +239,19 @@ NetworkPolicy::builder()
     .default_deny()
     .egress(|e| e.allow_public().allow_host())
     .build()?
+```
+
+```go
+sb, err := microsandbox.CreateSandbox(ctx, "dev-agent",
+    microsandbox.WithImage("python"),
+    microsandbox.WithNetwork(&microsandbox.NetworkConfig{
+        DefaultEgress: microsandbox.PolicyActionDeny,
+        Rules: []microsandbox.PolicyRule{
+            {Action: microsandbox.PolicyActionAllow, Direction: microsandbox.PolicyDirectionEgress, Destination: "public"},
+            {Action: microsandbox.PolicyActionAllow, Direction: microsandbox.PolicyDirectionEgress, Destination: "host"},
+        },
+    }),
+)
 ```
 
 ### Loopback vs host: a common trap

@@ -62,6 +62,20 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+sb, err := microsandbox.CreateSandbox(ctx, "sandbox",
+    microsandbox.WithImage("python"),
+    microsandbox.WithMemory(512),
+    microsandbox.WithCPUs(2),
+    microsandbox.WithSecrets(
+        microsandbox.Secret.Env("OPENAI_API_KEY", os.Getenv("OPENAI_API_KEY"),
+            microsandbox.SecretEnvOptions{AllowHosts: []string{"api.openai.com"}},
+        ),
+    ),
+    microsandbox.WithNetwork(microsandbox.NetworkPolicy.PublicOnly()),
+)
+```
+
 </CodeGroup>
 
 <Callout icon="bolt" color="#7C3AED">
@@ -74,7 +88,7 @@ sb = await Sandbox.create(
 - **No daemon.** The runtime spawns directly as a child process of whatever application creates the sandbox. No root, no server, no background service.
 - **Any OCI image.** Docker Hub, GHCR, ECR, GCR, or any OCI-compatible registry. Shared layers are deduplicated and only stored once.
 - **Cross-platform.** Native on macOS (Apple Silicon) and Linux (KVM). Same CLI, same SDKs.
-- **Multi-language SDKs.** Rust, TypeScript, and Python, all with consistent APIs.
+- **Multi-language SDKs.** Rust, TypeScript, Python, and Go, all with consistent APIs.
 - **Programmable.** Network policies, filesystem hooks, secret bindings, and TLS interception are all configured from the host side through the SDK.
 
 ## What makes it different
@@ -114,6 +128,17 @@ sb = await Sandbox.create(
             allow_hosts=["api.openai.com"],
         ),
     ],
+)
+```
+
+```go Go
+sb, err := microsandbox.CreateSandbox(ctx, "sandbox",
+    microsandbox.WithImage("python"),
+    microsandbox.WithSecrets(
+        microsandbox.Secret.Env("OPENAI_API_KEY", os.Getenv("OPENAI_API_KEY"),
+            microsandbox.SecretEnvOptions{AllowHosts: []string{"api.openai.com"}},
+        ),
+    ),
 )
 ```
 
@@ -168,6 +193,19 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+sb, err := microsandbox.CreateSandbox(ctx, "sandbox",
+    microsandbox.WithImage("python"),
+    microsandbox.WithNetwork(&microsandbox.NetworkConfig{
+        DefaultEgress: microsandbox.PolicyActionDeny,
+        Rules: []microsandbox.PolicyRule{
+            {Action: microsandbox.PolicyActionAllow, Direction: microsandbox.PolicyDirectionEgress, Destination: "api.openai.com"},
+            {Action: microsandbox.PolicyActionAllow, Direction: microsandbox.PolicyDirectionEgress, Destination: "pypi.org"},
+        },
+    }),
+)
+```
+
 </CodeGroup>
 
 ### Extensible filesystem backends <sup><sup>coming soon</sup></sup>
@@ -209,6 +247,17 @@ sb = await Sandbox.create(
             on_write=lambda path, data: encrypt(data, key),
         ),
     },
+)
+```
+
+```go Go
+// Filesystem hooks are coming soon for Go. For now, mount the host
+// directory directly:
+sb, err := microsandbox.CreateSandbox(ctx, "encrypted",
+    microsandbox.WithImage("python"),
+    microsandbox.WithMounts(map[string]microsandbox.MountConfig{
+        "/secrets": microsandbox.Mount.Bind("/data/secrets", microsandbox.MountOptions{}),
+    }),
 )
 ```
 
@@ -292,6 +341,25 @@ workers = await asyncio.gather(
 )
 ```
 
+```go Go
+sb, err := microsandbox.CreateSandbox(ctx, "baseline", microsandbox.WithImage("python"))
+_, err = sb.Exec(ctx, "pip", []string{"install", "-r", "requirements.txt"})
+_, err = sb.StopAndWait(ctx)
+_ = sb.Close()
+
+h, err := microsandbox.GetSandbox(ctx, "baseline")
+_, err = h.Snapshot(ctx, "after-pip-install")
+
+// Boot 10 workers from the same snapshot
+workers := make([]*microsandbox.Sandbox, 10)
+for i := range workers {
+    workers[i], err = microsandbox.CreateSandbox(ctx,
+        fmt.Sprintf("worker-%d", i),
+        microsandbox.WithSnapshot("after-pip-install"),
+    )
+}
+```
+
 </CodeGroup>
 
 ### Spawn sandboxes from sandboxes <sup><sup>coming soon</sup></sup>
@@ -345,6 +413,19 @@ await sb.emit("task.start", {
     "input_file": "/data/input.txt",
     "output_dir": "/data/output",
 })
+```
+
+```go Go
+// Events are coming soon for Go.
+// Planned shape:
+//
+// sub, err := sb.OnEvent("task.progress", func(event microsandbox.EventData) {
+//     fmt.Println(event.Data)
+// })
+// err = sb.Emit(ctx, "task.start", map[string]any{
+//     "input_file": "/data/input.txt",
+//     "output_dir": "/data/output",
+// })
 ```
 
 </CodeGroup>

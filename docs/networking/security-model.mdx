@@ -54,6 +54,13 @@ Rebind protection catches this at the response level: when the DNS interceptor s
 network=Network(dns=DnsConfig(rebind_protection=False))
 ```
 
+```go Go
+rebindProtection := false
+network := &microsandbox.NetworkConfig{
+    DNS: &microsandbox.DNSConfig{RebindProtection: &rebindProtection},
+}
+```
+
 ```bash CLI
 msb create python --name dev --no-dns-rebind-protection
 ```

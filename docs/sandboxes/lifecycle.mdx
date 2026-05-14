@@ -63,6 +63,17 @@ sb = await Sandbox.create("worker", image="python")
 sb = await Sandbox.create("worker", image="python", detached=True)
 ```
 
+```go Go
+// Attached: sandbox stops when your process exits
+sb, err := microsandbox.CreateSandbox(ctx, "worker", microsandbox.WithImage("python"))
+
+// Detached: sandbox survives after your process exits
+detached, err := microsandbox.CreateSandbox(ctx, "worker",
+    microsandbox.WithImage("python"),
+    microsandbox.WithDetached(),
+)
+```
+
 ```bash CLI
 # Attached
 msb create python --name worker
@@ -98,6 +109,13 @@ await sb.stop()
 sb = await Sandbox.start("worker")
 ```
 
+```go Go
+_ = sb.Stop(ctx)
+
+// Later, resume where you left off
+sb, err := microsandbox.StartSandbox(ctx, "worker")
+```
+
 ```bash CLI
 msb stop worker
 
@@ -122,6 +140,10 @@ await sb.kill()
 
 ```python Python
 await sb.kill()
+```
+
+```go Go
+err := sb.Kill(ctx)
 ```
 
 ```bash CLI
@@ -150,6 +172,10 @@ await sb.pause()
 await sb.resume()
 ```
 
+```go Go
+// Pause and resume are coming soon for Go.
+```
+
 </CodeGroup>
 
 ## Detach
@@ -167,6 +193,10 @@ await sb.detach()
 
 ```python Python
 await sb.detach()
+```
+
+```go Go
+err := sb.Detach(ctx)
 ```
 
 </CodeGroup>
@@ -192,6 +222,10 @@ await sb.drain()
 await sb.drain()
 ```
 
+```go Go
+err := sb.Drain(ctx)
+```
+
 </CodeGroup>
 
 ## Wait
@@ -211,6 +245,10 @@ const exitStatus = await sb.wait()
 code, success = await sb.wait()
 ```
 
+```go Go
+code, err := sb.Wait(ctx)
+```
+
 </CodeGroup>
 
 ## Remove
@@ -228,6 +266,10 @@ await Sandbox.remove("worker")
 
 ```python Python
 await Sandbox.remove("worker")
+```
+
+```go Go
+err := microsandbox.RemoveSandbox(ctx, "worker")
 ```
 
 ```bash CLI
@@ -261,6 +303,16 @@ for handle in await Sandbox.list():
 
 handle = await Sandbox.get("worker")
 print(handle.status)  # "running" | "stopped" | ...
+```
+
+```go Go
+handles, err := microsandbox.ListSandboxes(ctx)
+for _, handle := range handles {
+    fmt.Printf("%s: %s\n", handle.Name(), handle.Status())
+}
+
+handle, err := microsandbox.GetSandbox(ctx, "worker")
+fmt.Println(handle.Status()) // "running" | "stopped" | ...
 ```
 
 ```bash CLI
@@ -365,6 +417,16 @@ except asyncio.TimeoutError:
     await sb.kill()
 ```
 
+```go Go
+handle, err := microsandbox.GetSandbox(ctx, "worker")
+sb, err := handle.Connect(ctx)
+stopCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+defer cancel()
+if err := sb.Stop(stopCtx); err != nil {
+    _ = sb.Kill(ctx)
+}
+```
+
 </CodeGroup>
 
 ## Sandbox process policies
@@ -395,6 +457,14 @@ sb = await Sandbox.create(
     image="python",
     max_duration=3600,
     idle_timeout=300,
+)
+```
+
+```go Go
+sb, err := microsandbox.CreateSandbox(ctx, "worker",
+    microsandbox.WithImage("python"),
+    microsandbox.WithMaxDuration(time.Hour),
+    microsandbox.WithIdleTimeout(5*time.Minute),
 )
 ```
 

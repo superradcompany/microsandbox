@@ -30,6 +30,12 @@ await using sb = await Sandbox.builder("worker")
 sb = await Sandbox.create("worker", image="python")
 ```
 
+```go Go
+sb, err := microsandbox.CreateSandbox(ctx, "worker",
+    microsandbox.WithImage("python"),
+)
+```
+
 ```bash CLI
 msb create python --name worker
 ```
@@ -86,6 +92,23 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+sb, err := microsandbox.CreateSandbox(ctx, "worker",
+    microsandbox.WithImage("python"),
+    microsandbox.WithMemory(1024),
+    microsandbox.WithCPUs(2),
+    microsandbox.WithEnv(map[string]string{
+        "DEBUG": "true",
+        "API_PORT": "8000",
+    }),
+    microsandbox.WithMounts(map[string]microsandbox.MountConfig{
+        "/app/src":     microsandbox.Mount.Bind("./src", microsandbox.MountOptions{Readonly: true}),
+        "/data":        microsandbox.Mount.Named("my-data", microsandbox.MountOptions{}),
+        "/tmp/scratch": microsandbox.Mount.Tmpfs(microsandbox.TmpfsOptions{SizeMiB: 100}),
+    }),
+)
+```
+
 ```bash CLI
 msb create python --name worker \
   -c 2 \
@@ -136,6 +159,12 @@ await Sandbox.builder("worker").image("python").create();
 await Sandbox.create("worker", image="python")
 ```
 
+```go Go
+_, err := microsandbox.CreateSandbox(ctx, "worker",
+    microsandbox.WithImage("python"),
+)
+```
+
 ```bash CLI
 msb create python --name worker
 ```
@@ -157,6 +186,12 @@ await Sandbox.builder("worker").image("./my-rootfs").create();
 
 ```python Python
 await Sandbox.create("worker", image="./my-rootfs")
+```
+
+```go Go
+_, err := microsandbox.CreateSandbox(ctx, "worker",
+    microsandbox.WithImage("./my-rootfs"),
+)
 ```
 
 ```bash CLI
@@ -205,6 +240,16 @@ await Sandbox.create("worker", image="./ubuntu-22.04.qcow2")
 await Sandbox.create("worker", image=Image.disk("./alpine.raw", fstype="ext4"))
 ```
 
+```go Go
+// Auto-detect the disk image format from the file extension.
+_, err := microsandbox.CreateSandbox(ctx, "worker",
+    microsandbox.WithImage("./alpine.qcow2"),
+)
+
+// Explicit root disk image filesystem selection is coming soon for Go.
+// Additional disk-image mounts are available via Mount.Disk.
+```
+
 ```bash CLI
 msb create ./alpine.qcow2 --name worker
 ```
@@ -239,6 +284,13 @@ await using sb = await Sandbox.builder("worker")
 sb = await Sandbox.create("worker", image="python", replace=True)
 ```
 
+```go Go
+sb, err := microsandbox.CreateSandbox(ctx, "worker",
+    microsandbox.WithImage("python"),
+    microsandbox.WithReplace(),
+)
+```
+
 ```bash CLI
 msb create --replace python --name worker
 ```
@@ -269,6 +321,13 @@ await using sb = await Sandbox.builder("worker")
 
 ```python Python
 sb = await Sandbox.create("worker", image="python", replace_with_grace=30)  # seconds
+```
+
+```go Go
+sb, err := microsandbox.CreateSandbox(ctx, "worker",
+    microsandbox.WithImage("python"),
+    microsandbox.WithReplaceWithGrace(30*time.Second),
+)
 ```
 
 ```bash CLI
@@ -325,6 +384,17 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+sb, err := microsandbox.CreateSandbox(ctx, "worker",
+    microsandbox.WithImage("private.registry.io/org/app:v1"),
+    microsandbox.WithRegistryAuth(microsandbox.RegistryAuth{
+        Username: "deploy",
+        Password: os.Getenv("REGISTRY_PASSWORD"),
+    }),
+    microsandbox.WithPullPolicy(microsandbox.PullPolicyAlways),
+)
+```
+
 ```bash CLI
 msb registry login private.registry.io -u deploy
 msb create private.registry.io/org/app:v1 \
@@ -378,6 +448,15 @@ config = Sandbox.build_config(
 
 print(json.dumps(config, indent=2))
 sb = await Sandbox.create(config)
+```
+
+```go Go
+// Config inspection is coming soon for Go.
+// Create sandboxes directly for now:
+sb, err := microsandbox.CreateSandbox(ctx, "preview",
+    microsandbox.WithImage("python"),
+    microsandbox.WithMemory(1024),
+)
 ```
 
 </CodeGroup>
