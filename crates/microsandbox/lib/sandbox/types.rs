@@ -254,18 +254,6 @@ pub struct PatchBuilder {
     patches: Vec<Patch>,
 }
 
-/// Secrets configuration for a sandbox.
-///
-/// Fully implemented in Phase 11 (Secrets).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SecretsConfig {}
-
-/// SSH configuration for a sandbox.
-///
-/// Fully implemented in Phase 14 (Polish).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SshConfig {}
-
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------

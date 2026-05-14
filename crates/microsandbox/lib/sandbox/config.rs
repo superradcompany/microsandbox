@@ -12,7 +12,7 @@ use microsandbox_image::{ImageConfig, PullPolicy, RegistryAuth};
 use super::{
     exec::Rlimit,
     init::HandoffInit,
-    types::{Patch, RootfsSource, SecretsConfig, SshConfig, VolumeMount},
+    types::{Patch, RootfsSource, VolumeMount},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -128,14 +128,6 @@ pub struct SandboxConfig {
     #[cfg(feature = "net")]
     #[serde(default)]
     pub network: microsandbox_network::config::NetworkConfig,
-
-    /// Secrets configuration.
-    #[serde(default)]
-    pub secrets: SecretsConfig,
-
-    /// SSH configuration.
-    #[serde(default)]
-    pub ssh: SshConfig,
 
     /// Image entrypoint (inherited from image config, overridable).
     #[serde(default)]
@@ -384,8 +376,6 @@ impl Default for SandboxConfig {
             patches: Vec::new(),
             #[cfg(feature = "net")]
             network: microsandbox_network::config::NetworkConfig::default(),
-            secrets: SecretsConfig::default(),
-            ssh: SshConfig::default(),
             hostname: None,
             entrypoint: None,
             cmd: None,
