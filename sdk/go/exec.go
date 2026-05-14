@@ -94,6 +94,9 @@ const (
 	// missing, permission denied, etc.). Distinct from Exited — Failure is
 	// populated and ExitCode is not meaningful.
 	ExecEventFailed ExecEventKind = ffi.ExecEventFailed
+	// ExecEventStdinError is sent when writing to stdin failed. Failure is
+	// populated. The event is non-terminal; the process may still exit normally.
+	ExecEventStdinError ExecEventKind = ffi.ExecEventStdinError
 	// ExecEventDone signals that all events have been consumed.
 	ExecEventDone ExecEventKind = ffi.ExecEventDone
 )
@@ -116,7 +119,8 @@ type ExecEvent struct {
 	// ExitCode is the process exit code. Populated on ExecEventExited.
 	ExitCode int
 
-	// Failure carries the failure detail. Populated on ExecEventFailed.
+	// Failure carries the failure detail. Populated on ExecEventFailed and
+	// ExecEventStdinError.
 	Failure *ExecFailure
 }
 

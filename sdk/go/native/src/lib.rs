@@ -2559,6 +2559,12 @@ pub unsafe extern "C" fn msb_exec_recv(
                             });
                             serde_json::json!({"event":"failed","error":payload}).to_string()
                         }
+                        Some(ExecEvent::StdinError(error)) => {
+                            let payload = serde_json::to_value(&error).unwrap_or_else(|_| {
+                                serde_json::json!({"message": error.message})
+                            });
+                            serde_json::json!({"event":"stdin_error","error":payload}).to_string()
+                        }
                     };
                     Ok::<_, FfiError>(json)
                 }

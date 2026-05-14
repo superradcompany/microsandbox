@@ -780,34 +780,34 @@ func releaseHandle(handle uint64) {
 // CreateOptions matches the JSON payload shape expected by msb_sandbox_create.
 // Zero-valued fields are omitted; the Rust side applies defaults.
 type CreateOptions struct {
-	Image           string               `json:"image,omitempty"`
-	MemoryMiB       uint32               `json:"memory_mib,omitempty"`
-	CPUs            uint8                `json:"cpus,omitempty"`
-	Workdir         string               `json:"workdir,omitempty"`
-	Shell           string               `json:"shell,omitempty"`
-	Hostname        string               `json:"hostname,omitempty"`
-	User            string               `json:"user,omitempty"`
-	Replace            bool    `json:"replace,omitempty"`
-	ReplaceWithGraceMs *uint64 `json:"replace_with_grace_ms,omitempty"`
-	Env                map[string]string `json:"env,omitempty"`
-	Detached        bool                 `json:"detached,omitempty"`
-	Entrypoint      []string             `json:"entrypoint,omitempty"`
-	Init            *InitOptions         `json:"init,omitempty"`
-	LogLevel        string               `json:"log_level,omitempty"`
-	QuietLogs       bool                 `json:"quiet_logs,omitempty"`
-	Scripts         map[string]string    `json:"scripts,omitempty"`
-	PullPolicy      string               `json:"pull_policy,omitempty"`
-	MaxDurationSecs uint64               `json:"max_duration_secs,omitempty"`
-	IdleTimeoutSecs uint64               `json:"idle_timeout_secs,omitempty"`
-	StopSignal      string               `json:"stop_signal,omitempty"`
-	Labels          map[string]string    `json:"labels,omitempty"`
-	RegistryAuth    *RegistryAuthOptions `json:"registry_auth,omitempty"`
-	Ports           map[uint16]uint16    `json:"ports,omitempty"`
-	PortsUDP        map[uint16]uint16    `json:"ports_udp,omitempty"`
-	Network         *NetworkOptions      `json:"network,omitempty"`
-	Secrets         []SecretOptions      `json:"secrets,omitempty"`
-	Patches         []PatchOptions       `json:"patches,omitempty"`
-	Volumes         map[string]MountSpec `json:"volumes,omitempty"`
+	Image              string               `json:"image,omitempty"`
+	MemoryMiB          uint32               `json:"memory_mib,omitempty"`
+	CPUs               uint8                `json:"cpus,omitempty"`
+	Workdir            string               `json:"workdir,omitempty"`
+	Shell              string               `json:"shell,omitempty"`
+	Hostname           string               `json:"hostname,omitempty"`
+	User               string               `json:"user,omitempty"`
+	Replace            bool                 `json:"replace,omitempty"`
+	ReplaceWithGraceMs *uint64              `json:"replace_with_grace_ms,omitempty"`
+	Env                map[string]string    `json:"env,omitempty"`
+	Detached           bool                 `json:"detached,omitempty"`
+	Entrypoint         []string             `json:"entrypoint,omitempty"`
+	Init               *InitOptions         `json:"init,omitempty"`
+	LogLevel           string               `json:"log_level,omitempty"`
+	QuietLogs          bool                 `json:"quiet_logs,omitempty"`
+	Scripts            map[string]string    `json:"scripts,omitempty"`
+	PullPolicy         string               `json:"pull_policy,omitempty"`
+	MaxDurationSecs    uint64               `json:"max_duration_secs,omitempty"`
+	IdleTimeoutSecs    uint64               `json:"idle_timeout_secs,omitempty"`
+	StopSignal         string               `json:"stop_signal,omitempty"`
+	Labels             map[string]string    `json:"labels,omitempty"`
+	RegistryAuth       *RegistryAuthOptions `json:"registry_auth,omitempty"`
+	Ports              map[uint16]uint16    `json:"ports,omitempty"`
+	PortsUDP           map[uint16]uint16    `json:"ports_udp,omitempty"`
+	Network            *NetworkOptions      `json:"network,omitempty"`
+	Secrets            []SecretOptions      `json:"secrets,omitempty"`
+	Patches            []PatchOptions       `json:"patches,omitempty"`
+	Volumes            map[string]MountSpec `json:"volumes,omitempty"`
 }
 
 // InitOptions describes a guest PID-1 init handoff.
@@ -1337,6 +1337,7 @@ const (
 	ExecEventStderr
 	ExecEventExited
 	ExecEventFailed
+	ExecEventStdinError
 	ExecEventDone // all events consumed; no further Recv calls needed
 )
 
@@ -1357,7 +1358,7 @@ type ExecStreamEvent struct {
 	PID      uint32       // ExecEventStarted
 	Data     []byte       // ExecEventStdout / ExecEventStderr
 	ExitCode int          // ExecEventExited
-	Failure  *ExecFailure // ExecEventFailed
+	Failure  *ExecFailure // ExecEventFailed / ExecEventStdinError
 }
 
 // ExecSink is a write-only sink for sending data to a running process's stdin.
@@ -1505,6 +1506,15 @@ func (h *ExecStreamHandle) Recv(ctx context.Context) (*ExecStreamEvent, error) {
 			// Best-effort decode. If the wire format ever diverges from the
 			// ExecFailure shape, surface the raw text as Message rather than
 			// failing the whole stream.
+			if jerr := json.Unmarshal(raw.Error, &f); jerr != nil {
+				f = ExecFailure{Message: string(raw.Error)}
+			}
+		}
+		ev.Failure = &f
+	case "stdin_error":
+		ev.Kind = ExecEventStdinError
+		var f ExecFailure
+		if len(raw.Error) > 0 {
 			if jerr := json.Unmarshal(raw.Error, &f); jerr != nil {
 				f = ExecFailure{Message: string(raw.Error)}
 			}
