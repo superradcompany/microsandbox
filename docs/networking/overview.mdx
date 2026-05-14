@@ -177,13 +177,9 @@ sb, err := m.CreateSandbox(ctx, "secure-agent",
 ```
 </CodeGroup>
 
-`<target>` accepts `any`, a group keyword (`public`, `private`, `loopback`, `link-local`, `meta`, `multicast`, `host`), an IP, a CIDR, a domain (with at least one dot), `domain=<name>` for single-label hostnames, or `suffix=<domain>` for subdomain matches.
+Rules can target groups like `public`, `private`, and `host`, or specific IPs, CIDRs, domains, and port ranges. The full grammar lives in the [CLI reference](/cli/sandbox-commands#network-policy-flags), and SDK-specific shapes live in each networking reference.
 
-`Group::Host` covers the sandbox gateway, which is where DNS is delivered — that's why DNS rules typically target it under a deny-by-default policy. See the [DNS-as-egress](/networking/dns#dns-as-egress) breakdown for the full rule, including why other IP-based destinations can't grant DNS.
-
-The Rust builder accepts string inputs (`.ip("10.0.0.5")`, `.cidr("10.0.0.0/24")`, `.domain("api.example.com")`, etc.) and parses them at `.build()` time, so the chain stays clean. TypeScript, Python, and Go accept policy objects matching the wire format. Direction strings are `"egress"`, `"ingress"`, or `"any"`, and group keywords match the CLI grammar. See the [Rust reference](/sdk/rust/networking) for the full Rust surface.
-
-Domain rules match flows where the guest resolved the name through the sandbox's DNS interceptor. See [DNS](/networking/dns) for how the resolved-hostname cache works.
+For deny-by-default policies, remember that DNS is delivered through the sandbox gateway. The `host` group is usually the right target for DNS egress; see [DNS-as-egress](/networking/dns#dns-as-egress) for the full breakdown.
 
 ## Port mapping
 
