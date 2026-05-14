@@ -761,7 +761,7 @@ Create the sandbox in detached mode. The VM continues running after the Go proce
 func WithEntrypoint(cmd ...string) SandboxOption
 ```
 
-Override the user-workload entrypoint baked into the image. Note: this is the user workload, not PID 1 — for that, use [`WithInit`](#withinit).
+Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution against this sandbox), **not** by [`Sandbox.Exec`](#exec) / [`Sandbox.Shell`](#shell) — those pass `cmd` literally to the guest agent. Use this when configuring sandboxes via the SDK for later CLI attachment. For PID 1 handoff, use [`WithInit`](#withinit) instead.
 
 ---
 

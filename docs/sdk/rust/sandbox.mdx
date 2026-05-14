@@ -388,6 +388,22 @@ Builder for configuring a sandbox before creation. Obtained via [`Sandbox::build
 
 ---
 
+#### build()
+
+```rust
+async fn build(self) -> MicrosandboxResult<SandboxConfig>
+```
+
+Materialize the [`SandboxConfig`](#sandboxconfig) without booting the sandbox. Validates the configuration and, if [`from_snapshot`](#from_snapshot) was called, opens the snapshot manifest to pin its image reference and upper-layer source. For booting, use [`create`](#create) or [`create_detached`](#create_detached) instead — they call `build` internally.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxConfig`](#sandboxconfig) | Validated, ready-to-boot configuration |
+
+---
+
 #### cpus()
 
 ```rust
@@ -452,7 +468,7 @@ Fully disable networking. No network interface is created.
 fn entrypoint(self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self
 ```
 
-Override the OCI image's entrypoint.
+Override the OCI image's stored ENTRYPOINT. The value is consulted by command-resolution paths that follow OCI semantics — specifically `msb exec` / `msb run` against this sandbox from the terminal. [`Sandbox::exec`](#exec) and [`Sandbox::shell`](#shell) do **not** consult it; they pass `cmd` literally to the guest agent. Use this when configuring a sandbox via the SDK for later CLI attachment.
 
 **Parameters**
 

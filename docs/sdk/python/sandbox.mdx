@@ -31,7 +31,7 @@ Create and boot a sandbox. The first argument is either a name (`str`) or a full
 | shell | `str` | Shell for `shell()` calls (default `"/bin/sh"`) |
 | hostname | `str` | Guest hostname |
 | user | `str` | Default guest user |
-| entrypoint | `list[str]` | Override image entrypoint |
+| entrypoint | `list[str]` | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sb.exec` / `sb.shell` — those pass `cmd` literally |
 | init | `str \| dict \|` [`InitConfig`](#initconfig) | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/customize#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
 | replace | `bool` | Replace existing sandbox with same name (10s SIGTERM grace, then SIGKILL) |
 | replace_with_grace | `float` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (default `10`; `0` skips `SIGTERM`). Implies `replace=True` |
@@ -800,7 +800,7 @@ The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`San
 | shell | `str` | `"/bin/sh"` | Shell for `shell()` calls |
 | hostname | `str` | - | Guest hostname |
 | user | `str` | - | Default guest user |
-| entrypoint | `list[str]` | - | Override image entrypoint |
+| entrypoint | `list[str]` | - | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sb.exec` / `sb.shell` — those pass `cmd` literally |
 | init | `str \| dict \|` [`InitConfig`](#initconfig) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/customize#custom-init-system) |
 | replace | `bool` | `False` | Replace existing sandbox with same name |
 | max_duration | `float` | - | Maximum sandbox lifetime in seconds |
