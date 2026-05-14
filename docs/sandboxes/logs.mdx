@@ -154,10 +154,31 @@ asyncio.run(main())
 ```
 
 ```go Go
-// Sandbox log reads are coming soon for Go.
-// Use the CLI for now:
-//
-//   msb logs web
+handle, err := m.GetSandbox(ctx, "web")
+if err != nil {
+    return err
+}
+
+entries, err := handle.Logs(ctx, m.LogOptions{})
+if err != nil {
+    return err
+}
+
+for _, entry := range entries {
+    source := map[m.LogSource]string{
+        m.LogSourceStdout: "OUT",
+        m.LogSourceStderr: "ERR",
+        m.LogSourceOutput: "PTY",
+        m.LogSourceSystem: "SYS",
+    }[entry.Source]
+
+    fmt.Printf("[%s] %s %v: %s\n",
+        entry.Timestamp.Format(time.RFC3339),
+        source,
+        entry.SessionID,
+        strings.TrimRight(entry.Text(), "\n"),
+    )
+}
 ```
 </CodeGroup>
 
@@ -202,10 +223,16 @@ recent = await handle.logs(
 ```
 
 ```go Go
-// Sandbox log filters are coming soon for Go.
-// Use the CLI for now:
-//
-//   msb logs web --tail 50 --since 1h
+recent, err := handle.Logs(ctx, m.LogOptions{
+    Tail:  50,
+    Since: time.Now().Add(-1 * time.Hour),
+    Sources: []m.LogSource{
+        m.LogSourceStdout,
+        m.LogSourceStderr,
+        m.LogSourceOutput,
+        m.LogSourceSystem,
+    },
+})
 ```
 </CodeGroup>
 

@@ -55,12 +55,7 @@ sub = sb.on_event("task.progress", lambda event: (
 ```
 
 ```go Go
-// Events are coming soon for Go.
-// Planned shape:
-//
-// sub, err := sb.OnEvent("task.progress", func(event m.EventData) {
-//     fmt.Println(event.Data)
-// })
+// Bidirectional events are not available in the current SDKs yet.
 ```
 
 </CodeGroup>
@@ -98,13 +93,7 @@ await sb.emit("task.start", {
 ```
 
 ```go Go
-// Events are coming soon for Go.
-// Planned shape:
-//
-// err := sb.Emit(ctx, "task.start", map[string]any{
-//     "input_file": "/data/input.txt",
-//     "output_dir": "/data/output",
-// })
+// Bidirectional events are not available in the current SDKs yet.
 ```
 
 </CodeGroup>

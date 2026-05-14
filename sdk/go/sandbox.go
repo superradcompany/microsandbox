@@ -28,6 +28,7 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 
 	ffiOpts := ffi.CreateOptions{
 		Image:           o.Image,
+		ImageFstype:     o.ImageFstype,
 		Snapshot:        o.Snapshot,
 		MemoryMiB:       o.MemoryMiB,
 		CPUs:            o.CPUs,

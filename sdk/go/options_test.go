@@ -14,6 +14,17 @@ func TestWithImage(t *testing.T) {
 	}
 }
 
+func TestWithImageDisk(t *testing.T) {
+	o := SandboxConfig{}
+	WithImageDisk("./alpine.raw", "ext4")(&o)
+	if o.Image != "./alpine.raw" {
+		t.Errorf("Image = %q, want %q", o.Image, "./alpine.raw")
+	}
+	if o.ImageFstype != "ext4" {
+		t.Errorf("ImageFstype = %q, want %q", o.ImageFstype, "ext4")
+	}
+}
+
 func TestWithSnapshot(t *testing.T) {
 	o := SandboxConfig{}
 	WithSnapshot("after-pip-install")(&o)

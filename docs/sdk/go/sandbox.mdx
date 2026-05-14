@@ -175,7 +175,7 @@ Boot a stopped sandbox in detached mode.
 func GetSandbox(ctx context.Context, name string) (*SandboxHandle, error)
 ```
 
-Look up a sandbox by name and return a metadata handle without connecting to it. Returns `ErrSandboxNotFound` if no such sandbox exists. The returned [`*SandboxHandle`](#sandboxhandle) exposes `Connect`, `Start`, `Stop`, `Kill`, `Remove`, `Metrics`.
+Look up a sandbox by name and return a metadata handle without connecting to it. Returns `ErrSandboxNotFound` if no such sandbox exists. The returned [`*SandboxHandle`](#sandboxhandle) exposes `Connect`, `Start`, `Stop`, `Kill`, `Remove`, `Metrics`, and `Logs`.
 
 ---
 
@@ -456,6 +456,22 @@ fmt.Printf("CPU: %.1f%% Mem: %d bytes Uptime: %s\n",
 
 ---
 
+#### Logs()
+
+```go
+func (s *Sandbox) Logs(ctx context.Context, opts LogOptions) ([]LogEntry, error)
+```
+
+Read persisted sandbox output. Works for running and stopped sandboxes.
+
+```go
+entries, err := sb.Logs(ctx, m.LogOptions{
+    Sources: []m.LogSource{m.LogSourceStdout, m.LogSourceStderr},
+})
+```
+
+---
+
 #### MetricsStream()
 
 ```go
@@ -615,7 +631,17 @@ Functional options for [`CreateSandbox`](#createsandbox). Most options merge acr
 func WithImage(image string) SandboxOption
 ```
 
-OCI image, local path, or disk image (e.g. `"python:3.12"`, `"docker.io/library/alpine"`). Required unless [`WithSnapshot`](#withsnapshot) is used.
+OCI image, local path, or disk image (e.g. `"python:3.12"`, `"docker.io/library/alpine"`). Use [`WithImageDisk`](#withimagedisk) when a disk-image root needs an explicit filesystem type. Required unless [`WithSnapshot`](#withsnapshot) is used.
+
+---
+
+#### WithImageDisk()
+
+```go
+func WithImageDisk(path string, fstype string) SandboxOption
+```
+
+Use a disk image as the root filesystem and optionally provide the inner filesystem type, for example `"ext4"`. The disk format is inferred from the path extension (`.qcow2`, `.raw`, or `.vmdk`).
 
 ---
 
@@ -911,6 +937,7 @@ A lightweight metadata reference to a sandbox returned by [`GetSandbox`](#getsan
 | `CreatedAt()` | `time.Time` | Creation time, zero value if unknown |
 | `UpdatedAt()` | `time.Time` | Last-update time, zero value if unknown |
 | `Metrics(ctx)` | `(*Metrics, error)` | Point-in-time resource metrics |
+| `Logs(ctx, opts)` | `([]LogEntry, error)` | Persisted sandbox logs |
 | `Connect(ctx)` | `(*Sandbox, error)` | Reattach to the running sandbox |
 | `Start(ctx)` | `(*Sandbox, error)` | Boot a stopped sandbox in attached mode |
 | `StartDetached(ctx)` | `(*Sandbox, error)` | Boot a stopped sandbox in detached mode |
@@ -931,6 +958,7 @@ The config struct populated by [`SandboxOption`](#sandboxoption) functions. Most
 | Field | Type | Description |
 |-------|------|-------------|
 | Image | `string` | OCI image, local path, or disk image |
+| ImageFstype | `string` | Optional inner filesystem type for disk-image roots |
 | Snapshot | `string` | Snapshot artifact path or bare name; mutually exclusive with `Image` |
 | MemoryMiB | `uint32` | Guest memory in MiB |
 | CPUs | `uint8` | Virtual CPUs |
@@ -1051,6 +1079,45 @@ Controls when the SDK fetches an OCI image from the registry.
 | `PullPolicyAlways` | `"always"` | Pull every time, even if cached locally |
 | `PullPolicyIfMissing` | `"if-missing"` | Pull only if not already cached |
 | `PullPolicyNever` | `"never"` | Never pull; fail if missing |
+
+### LogOptions
+
+Filters for [`Logs`](#logs).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Tail | `uint64` | Keep only the last N matching entries |
+| Since | `time.Time` | Inclusive lower timestamp bound |
+| Until | `time.Time` | Exclusive upper timestamp bound |
+| Sources | `[]LogSource` | Sources to include; empty uses the runtime default |
+
+### LogEntry
+
+One persisted log entry.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Source | [`LogSource`](#logsource) | Origin of the captured data |
+| SessionID | `*uint64` | Relay session ID, nil for system entries |
+| Timestamp | `time.Time` | Capture timestamp |
+| Data | `[]byte` | Captured bytes |
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Text()` | `string` | Captured bytes as a string |
+
+### LogSource
+
+```go
+type LogSource string
+```
+
+| Constant | Value |
+|----------|-------|
+| `LogSourceStdout` | `"stdout"` |
+| `LogSourceStderr` | `"stderr"` |
+| `LogSourceOutput` | `"output"` |
+| `LogSourceSystem` | `"system"` |
 
 ### LogLevel
 

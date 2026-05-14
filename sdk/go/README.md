@@ -523,6 +523,7 @@ sb, err := h.Connect(ctx)
 | `FS()` | Return a `*SandboxFs` for guest filesystem access |
 | `Metrics(ctx)` | Return current resource metrics |
 | `MetricsStream(ctx, interval)` | Live metrics subscription; returns `*MetricsStreamHandle` |
+| `Logs(ctx, opts)` | Read persisted sandbox logs |
 | `Attach(ctx, cmd, args...)` | Interactive PTY session; blocks until exit |
 | `AttachShell(ctx)` | Interactive PTY session in the default shell |
 | `Drain(ctx)` | Send graceful drain signal (SIGUSR1) |
@@ -541,6 +542,7 @@ sb, err := h.Connect(ctx)
 | Option | Description |
 |--------|-------------|
 | `WithImage(image)` | OCI image to run (e.g. `"python:3.12"`) |
+| `WithImageDisk(path, fstype)` | Disk-image rootfs with optional filesystem hint |
 | `WithMemory(mib)` | Memory limit in MiB |
 | `WithCPUs(n)` | CPU core limit |
 | `WithWorkdir(path)` | Default working directory inside the sandbox |

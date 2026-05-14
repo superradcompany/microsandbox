@@ -156,27 +156,7 @@ msb stop --force worker
 
 Freeze all guest processes without shutting down. The VM uses zero CPU while paused, and resume is instant. The guest continues exactly where it left off with no boot time and no re-init.
 
-<CodeGroup>
-```rust Rust
-sb.pause().await?;
-sb.resume().await?;
-```
-
-```typescript TypeScript
-await sb.pause()
-await sb.resume()
-```
-
-```python Python
-await sb.pause()
-await sb.resume()
-```
-
-```go Go
-// Pause and resume are coming soon for Go.
-```
-
-</CodeGroup>
+The SDK and CLI pause/resume APIs are not available yet.
 
 ## Detach
 

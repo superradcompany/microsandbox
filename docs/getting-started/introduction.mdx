@@ -251,8 +251,7 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-// Filesystem hooks are coming soon for Go. For now, mount the host
-// directory directly:
+// Mount the host directory directly.
 sb, err := m.CreateSandbox(ctx, "encrypted",
     m.WithImage("python"),
     m.WithMounts(map[string]m.MountConfig{
@@ -416,16 +415,7 @@ await sb.emit("task.start", {
 ```
 
 ```go Go
-// Events are coming soon for Go.
-// Planned shape:
-//
-// sub, err := sb.OnEvent("task.progress", func(event m.EventData) {
-//     fmt.Println(event.Data)
-// })
-// err = sb.Emit(ctx, "task.start", map[string]any{
-//     "input_file": "/data/input.txt",
-//     "output_dir": "/data/output",
-// })
+// Bidirectional events are not available in the current SDKs yet.
 ```
 
 </CodeGroup>

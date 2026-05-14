@@ -304,51 +304,31 @@ _, err = handle.Wait(ctx)
 
 </CodeGroup>
 
-## Sessions <sup><sup>coming soon</sup></sup>
+## Session IDs
 
-Each streaming exec or attach creates a session. You can list active sessions and reattach to them by ID. Up to 16 simultaneous client connections are supported, so multiple sessions can run concurrently without interfering with each other.
+Each streaming exec creates a session ID that you can use to correlate stream events and persisted log entries. Session listing and reattach are coming soon.
 
 <CodeGroup>
 ```rust Rust
-// Start a background process and capture its session ID
 let handle = sb.exec_stream("python", ["server.py"]).await?;
 let session_id = handle.id().to_string();
-
-// List active sessions
-let sessions = sb.sessions().await?;
-
-// Reattach to a session by ID
-let mut handle = sb.session(&session_id).await?;
 ```
 
 ```typescript TypeScript
-// Start a background process and capture its session ID
 const handle = await sb.execStream("python", ["server.py"])
 const sessionId = handle.id
-
-// List active sessions
-const sessions = await sb.sessions()
-
-// Reattach to a session by ID
-const reattached = await sb.session(sessionId)
 ```
 
 ```python Python
-# Start a background process and capture its session ID
 handle = await sb.exec_stream("python", ["server.py"])
 session_id = handle.id
-
-# List active sessions
-sessions = await sb.sessions()
-
-# Reattach to a session by ID
-reattached = await sb.session(session_id)
 ```
 
 ```go Go
-// Session listing and reattach are coming soon for Go.
-// ExecStream exposes the session ID today:
 handle, err := sb.ExecStream(ctx, "python", []string{"server.py"})
+if err != nil {
+    return err
+}
 sessionID, err := handle.ID()
 ```
 

@@ -84,8 +84,12 @@ sb, err := m.CreateSandbox(ctx, "custom-vm",
     m.WithMemory(2048),
 )
 
-// Explicit root disk image filesystem selection is coming soon for Go.
-// Additional disk-image mounts are available via Mount.Disk.
+// Explicit filesystem type
+sb2, err := m.CreateSandbox(ctx, "custom-vm-2",
+    m.WithImageDisk("./alpine.raw", "ext4"),
+    m.WithCPUs(1),
+    m.WithMemory(512),
+)
 ```
 </CodeGroup>
 

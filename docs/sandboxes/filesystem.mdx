@@ -209,8 +209,7 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-// Filesystem hooks are coming soon for Go. For now, mount the host
-// directory directly:
+// Mount the host directory directly.
 sb, err := m.CreateSandbox(ctx, "encrypted",
     m.WithImage("python"),
     m.WithMounts(map[string]m.MountConfig{
@@ -282,8 +281,8 @@ sb = await Sandbox.create(
 ```
 
 ```go Go
-// Custom filesystem backends are coming soon for Go.
-// For now, use bind mounts, named volumes, or tmpfs mounts.
+// Custom filesystem backends are not available in the current SDKs yet.
+// Use bind mounts, named volumes, or tmpfs mounts.
 ```
 
 </CodeGroup>

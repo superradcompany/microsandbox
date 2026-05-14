@@ -51,9 +51,10 @@ use base64::Engine;
 use microsandbox::{
     LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
     sandbox::{
-        FsEntryKind, PullPolicy, all_sandbox_metrics,
+        FsEntryKind, LogOptions, LogSource, PullPolicy, all_sandbox_metrics,
         exec::{ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
+        logs,
     },
     snapshot::{ExportOpts, SnapshotDestination, SnapshotFormat},
     volume::{Volume, VolumeBuilder, VolumeHandle},
@@ -665,6 +666,7 @@ struct RegistryAuthOpts {
 #[derive(serde::Deserialize)]
 struct SandboxCreateOpts {
     image: Option<String>,
+    image_fstype: Option<String>,
     snapshot: Option<String>,
     memory_mib: Option<u32>,
     cpus: Option<u8>,
@@ -722,6 +724,15 @@ struct SandboxCreateOpts {
     /// Volume mounts: guest_path → MountSpec.
     #[serde(default)]
     volumes: HashMap<String, MountSpec>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct LogReadOpts {
+    tail: Option<usize>,
+    since_ms: Option<i64>,
+    until_ms: Option<i64>,
+    #[serde(default)]
+    sources: Vec<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1353,7 +1364,11 @@ pub unsafe extern "C" fn msb_sandbox_create(
                 ));
             }
             if let Some(img) = opts.image {
-                builder = builder.image(img.as_str());
+                if let Some(fstype) = opts.image_fstype {
+                    builder = builder.image_with(|i| i.disk(img).fstype(fstype));
+                } else {
+                    builder = builder.image(img.as_str());
+                }
             }
             if let Some(snapshot) = opts.snapshot {
                 builder = builder.from_snapshot(snapshot);
@@ -1839,6 +1854,113 @@ fn sandbox_handle_json(h: &microsandbox::sandbox::SandboxHandle) -> String {
         status = sandbox_status_str(h.status()),
         config = cfg_json,
     )
+}
+
+fn parse_log_source(s: &str) -> Result<LogSource, FfiError> {
+    match s {
+        "stdout" => Ok(LogSource::Stdout),
+        "stderr" => Ok(LogSource::Stderr),
+        "output" => Ok(LogSource::Output),
+        "system" => Ok(LogSource::System),
+        other => Err(FfiError::invalid_argument(format!(
+            "invalid log source: {other}"
+        ))),
+    }
+}
+
+fn log_source_str(source: LogSource) -> &'static str {
+    match source {
+        LogSource::Stdout => "stdout",
+        LogSource::Stderr => "stderr",
+        LogSource::Output => "output",
+        LogSource::System => "system",
+    }
+}
+
+fn parse_log_options(opts_json: *const c_char) -> Result<LogOptions, FfiError> {
+    let raw = if opts_json.is_null() {
+        "{}".to_string()
+    } else {
+        unsafe { cstr(opts_json) }?.to_string()
+    };
+    let opts: LogReadOpts = serde_json::from_str(&raw)
+        .map_err(|e| FfiError::invalid_argument(format!("invalid log opts JSON: {e}")))?;
+    let since = opts
+        .since_ms
+        .map(|ms| {
+            chrono::DateTime::from_timestamp_millis(ms).ok_or_else(|| {
+                FfiError::invalid_argument(format!("invalid since_ms timestamp: {ms}"))
+            })
+        })
+        .transpose()?;
+    let until = opts
+        .until_ms
+        .map(|ms| {
+            chrono::DateTime::from_timestamp_millis(ms).ok_or_else(|| {
+                FfiError::invalid_argument(format!("invalid until_ms timestamp: {ms}"))
+            })
+        })
+        .transpose()?;
+    let sources = opts
+        .sources
+        .iter()
+        .map(|s| parse_log_source(s))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(LogOptions {
+        tail: opts.tail,
+        since,
+        until,
+        sources,
+    })
+}
+
+fn log_entries_json(entries: Vec<microsandbox::sandbox::LogEntry>) -> Result<String, FfiError> {
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        out.push(serde_json::json!({
+            "source": log_source_str(entry.source),
+            "session_id": entry.session_id,
+            "timestamp_ms": entry.timestamp.timestamp_millis(),
+            "data_b64": base64::engine::general_purpose::STANDARD.encode(entry.data),
+        }));
+    }
+    serde_json::to_string(&out).map_err(|e| FfiError::internal(format!("serialise logs: {e}")))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_logs(
+    cancel_id: u64,
+    handle: Handle,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let opts = parse_log_options(opts_json)?;
+        Ok(Box::pin(async move {
+            let sb = get(handle)?;
+            let entries = sb.logs(&opts).map_err(FfiError::from)?;
+            log_entries_json(entries)
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_logs(
+    cancel_id: u64,
+    name: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?.to_owned();
+        let opts = parse_log_options(opts_json)?;
+        Ok(Box::pin(async move {
+            let entries = logs::read_logs(&name, &opts).map_err(FfiError::from)?;
+            log_entries_json(entries)
+        }))
+    })
 }
 
 // ---------------------------------------------------------------------------

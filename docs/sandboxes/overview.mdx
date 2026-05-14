@@ -246,8 +246,10 @@ _, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("./alpine.qcow2"),
 )
 
-// Explicit root disk image filesystem selection is coming soon for Go.
-// Additional disk-image mounts are available via Mount.Disk.
+// Explicit filesystem type.
+_, err = m.CreateSandbox(ctx, "worker-ext4",
+    m.WithImageDisk("./alpine.raw", "ext4"),
+)
 ```
 
 ```bash CLI
@@ -413,9 +415,9 @@ msb create private.registry.io/org/app:v1 \
   Once an OCI image is resolved, microsandbox pins the exact layers. A `python` reference is resolved to an immutable set of layers at first pull. Subsequent `start()` calls use the pinned layers without re-resolving the mutable tag, so your sandbox is reproducible even if the upstream tag is updated.
 </Tip>
 
-## Config inspection <sup><sup>coming soon</sup></sup>
+## Config inspection
 
-Build a sandbox configuration without booting the VM. Useful for serializing, storing, validating, or modifying configs before creation.
+Build or inspect a sandbox configuration. Rust, TypeScript, and Python can build a config before boot; Go exposes the persisted config after creation through `SandboxHandle.ConfigJSON()`.
 
 <CodeGroup>
 ```rust Rust
@@ -451,12 +453,20 @@ sb = await Sandbox.create(config)
 ```
 
 ```go Go
-// Config inspection is coming soon for Go.
-// Create sandboxes directly for now:
 sb, err := m.CreateSandbox(ctx, "preview",
     m.WithImage("python"),
     m.WithMemory(1024),
 )
+if err != nil {
+    return err
+}
+
+handle, err := m.GetSandbox(ctx, "preview")
+if err != nil {
+    return err
+}
+
+fmt.Println(handle.ConfigJSON())
 ```
 
 </CodeGroup>

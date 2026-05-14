@@ -113,6 +113,8 @@ typedef char *(*msb_sandbox_attach_shell_fn)(uint64_t cancel_id, uint64_t handle
 typedef char *(*msb_sandbox_remove_persisted_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_all_sandbox_metrics_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_metrics_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_logs_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_logs_fn)(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_volume_create_fn)(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_volume_remove_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
@@ -202,6 +204,8 @@ static msb_sandbox_attach_shell_fn ptr_msb_sandbox_attach_shell = NULL;
 static msb_sandbox_remove_persisted_fn ptr_msb_sandbox_remove_persisted = NULL;
 static msb_all_sandbox_metrics_fn  ptr_msb_all_sandbox_metrics  = NULL;
 static msb_sandbox_handle_metrics_fn ptr_msb_sandbox_handle_metrics = NULL;
+static msb_sandbox_logs_fn          ptr_msb_sandbox_logs          = NULL;
+static msb_sandbox_handle_logs_fn   ptr_msb_sandbox_handle_logs   = NULL;
 static msb_volume_create_fn       ptr_msb_volume_create       = NULL;
 static msb_volume_remove_fn       ptr_msb_volume_remove       = NULL;
 static msb_volume_list_fn         ptr_msb_volume_list         = NULL;
@@ -316,6 +320,8 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_remove_persisted);
 	RESOLVE(msb_all_sandbox_metrics);
 	RESOLVE(msb_sandbox_handle_metrics);
+	RESOLVE(msb_sandbox_logs);
+	RESOLVE(msb_sandbox_handle_logs);
 	RESOLVE(msb_volume_create);
 	RESOLVE(msb_volume_remove);
 	RESOLVE(msb_volume_list);
@@ -514,6 +520,12 @@ char *call_msb_all_sandbox_metrics(uint64_t cancel_id, uint8_t *buf, size_t buf_
 char *call_msb_sandbox_handle_metrics(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_handle_metrics ? ptr_msb_sandbox_handle_metrics(cancel_id, name, buf, buf_len) : NULL;
 }
+char *call_msb_sandbox_logs(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_logs ? ptr_msb_sandbox_logs(cancel_id, handle, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_logs(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_logs ? ptr_msb_sandbox_handle_logs(cancel_id, name, opts_json, buf, buf_len) : NULL;
+}
 char *call_msb_volume_create(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_volume_create ? ptr_msb_volume_create(cancel_id, name, opts_json, buf, buf_len) : NULL;
 }
@@ -706,6 +718,10 @@ const defaultBufSize = 1 << 20
 // don't grow this until the FFI also buffers across calls.
 const fsStreamBufSize = 6 << 20
 
+// logsBufSize covers the runtime's bounded log history (10 MiB rotated x3)
+// after base64 inflation and JSON framing.
+const logsBufSize = 48 << 20
+
 // Error is the typed error surfaced across the FFI boundary. The Rust side
 // serialises {kind, message} JSON; this type unmarshals it. The public SDK
 // maps Kind back into microsandbox.ErrorKind.
@@ -859,6 +875,7 @@ func releaseHandle(handle uint64) {
 // Zero-valued fields are omitted; the Rust side applies defaults.
 type CreateOptions struct {
 	Image              string               `json:"image,omitempty"`
+	ImageFstype        string               `json:"image_fstype,omitempty"`
 	Snapshot           string               `json:"snapshot,omitempty"`
 	MemoryMiB          uint32               `json:"memory_mib,omitempty"`
 	CPUs               uint8                `json:"cpus,omitempty"`
@@ -1069,6 +1086,78 @@ type SandboxHandleInfo struct {
 	ConfigJSON    string `json:"config_json"`
 	CreatedAtUnix *int64 `json:"created_at_unix"`
 	UpdatedAtUnix *int64 `json:"updated_at_unix"`
+}
+
+// LogOptions filters persisted sandbox logs.
+type LogOptions struct {
+	Tail    uint64   `json:"tail,omitempty"`
+	SinceMs *int64   `json:"since_ms,omitempty"`
+	UntilMs *int64   `json:"until_ms,omitempty"`
+	Sources []string `json:"sources,omitempty"`
+}
+
+// LogEntry is one persisted sandbox log entry.
+type LogEntry struct {
+	Source      string  `json:"source"`
+	SessionID   *uint64 `json:"session_id"`
+	TimestampMs int64   `json:"timestamp_ms"`
+	DataB64     string  `json:"data_b64"`
+}
+
+func logsOptionsJSON(opts LogOptions) (*C.char, error) {
+	b, err := json.Marshal(opts)
+	if err != nil {
+		return nil, fmt.Errorf("marshal log opts: %w", err)
+	}
+	return C.CString(string(b)), nil
+}
+
+func parseLogEntries(out string) ([]LogEntry, error) {
+	var entries []LogEntry
+	if err := json.Unmarshal([]byte(out), &entries); err != nil {
+		return nil, fmt.Errorf("parse logs response: %w", err)
+	}
+	return entries, nil
+}
+
+// SandboxLogs reads persisted logs for a live sandbox handle.
+func (s *Sandbox) SandboxLogs(ctx context.Context, opts LogOptions) ([]LogEntry, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cOpts, err := logsOptionsJSON(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer C.free(unsafe.Pointer(cOpts))
+	out, err := callBuf(ctx, logsBufSize, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_logs(cancelID, s.h(), cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return parseLogEntries(out)
+}
+
+// SandboxHandleLogs reads persisted logs for a sandbox by name.
+func SandboxHandleLogs(ctx context.Context, name string, opts LogOptions) ([]LogEntry, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	cOpts, err := logsOptionsJSON(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer C.free(unsafe.Pointer(cOpts))
+	out, err := callBuf(ctx, logsBufSize, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_logs(cancelID, cName, cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return parseLogEntries(out)
 }
 
 // LookupSandbox fetches the persisted metadata for a sandbox by name without
