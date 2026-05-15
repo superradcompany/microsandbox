@@ -6,27 +6,7 @@ icon: "cube"
 
 See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-The Go SDK uses **functional options** rather than a fluent builder — pass `WithImage(...)`, `WithMemory(...)`, etc. as variadic arguments to [`CreateSandbox`](#createsandbox). Every operation takes a `context.Context` for cancellation and deadline propagation. The package is imported as:
-
-```go
-import m "github.com/superradcompany/microsandbox/sdk/go"
-```
-
 ## Setup
-
-Call [`Init`](#init) once at program startup before any other SDK function. The FFI library ships embedded in the SDK and extracts to `~/.microsandbox/` on first run; msb + libkrunfw download from the matching GitHub release if not already present. Idempotent.
-
-```go
-ctx := context.Background()
-if err := m.EnsureInstalled(ctx); err != nil {
-    log.Fatalf("microsandbox setup: %v", err)
-}
-```
-
-Configure via setup options:
-
-- [`WithInstallDir(dir)`](#withinstalldir) — extract to a path other than `~/.microsandbox/`
-- [`WithSkipDownload()`](#withskipdownload) — refuse to fetch msb + libkrunfw (require them to be pre-installed)
 
 ---
 
