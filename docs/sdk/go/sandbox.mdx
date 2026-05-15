@@ -10,10 +10,10 @@ See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/
 
 ---
 
-#### Init()
+#### EnsureInstalled()
 
 ```go
-func Init(ctx context.Context, opts ...SetupOption) error
+func EnsureInstalled(ctx context.Context, opts ...SetupOption) error
 ```
 
 Prepare the SDK for use: extract the embedded FFI library, ensure msb + libkrunfw are present, dlopen the FFI library. Idempotent — subsequent calls are no-ops. Options apply only to the first call.
@@ -43,7 +43,7 @@ Override the on-disk install location (default: `~/.microsandbox/`).
 func WithSkipDownload() SetupOption
 ```
 
-Prevent `Init` from fetching the msb + libkrunfw bundle from GitHub. Use when the runtime is already on disk at the install path (e.g. air-gapped CI). The embedded FFI library is unaffected — it ships with the SDK.
+Prevent `EnsureInstalled` from fetching the msb + libkrunfw bundle from GitHub. Use when the runtime is already on disk at the install path (e.g. air-gapped CI). The embedded FFI library is unaffected — it ships with the SDK.
 
 ---
 
@@ -73,7 +73,7 @@ Return the microsandbox release version this SDK was compiled against.
 func RuntimeVersion() (string, error)
 ```
 
-Return the version reported by the loaded library. Returns `ErrLibraryNotLoaded` if `Init` was not called.
+Return the version reported by the loaded library. Returns `ErrLibraryNotLoaded` if `EnsureInstalled` was not called.
 
 ---
 
