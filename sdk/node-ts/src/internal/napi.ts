@@ -1,10 +1,11 @@
 import { createRequire } from "node:module";
 import { msbPath } from "./resolve-binary.js";
 
-// Resolve the runtime binary once. User-provided MSB_PATH still wins, but the
-// SDK passes the resolved path to native code explicitly instead of relying on
-// JS-side process.env mutations being visible to Rust.
-const resolvedMsbPath = process.env.MSB_PATH || msbPath();
+// Resolve the bundled runtime binary once and push it into the Rust
+// resolver's SDK tier. User-provided MSB_PATH still wins — Rust reads it
+// natively as its highest-precedence tier — so we don't duplicate the
+// env-var read here.
+const resolvedMsbPath = msbPath();
 
 const require = createRequire(import.meta.url);
 // eslint-disable-next-line @typescript-eslint/no-require-imports
