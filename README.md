@@ -156,6 +156,44 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > ```
 >
 > </details>
+>
+> <details>
+> <summary><b>&nbsp;Go Example →</b></summary>
+>
+> ```go
+> package main
+>
+> import (
+>     "context"
+>     "fmt"
+>     "log"
+>
+>     microsandbox "github.com/superradcompany/microsandbox/sdk/go"
+> )
+>
+> func main() {
+>     ctx := context.Background()
+>
+>     sandbox, err := microsandbox.CreateSandbox(ctx, "my-sandbox",
+>         microsandbox.WithImage("python"),
+>         microsandbox.WithCPUs(1),
+>         microsandbox.WithMemory(512),
+>     )
+>     if err != nil {
+>         log.Fatal(err)
+>     }
+>     defer sandbox.StopAndWait(ctx)
+>
+>     output, err := sandbox.Exec(ctx, "python", []string{"-c", "print('Hello from a microVM!')"})
+>     if err != nil {
+>         log.Fatal(err)
+>     }
+>
+>     fmt.Println(output.Stdout())
+> }
+> ```
+>
+> </details>
 
 
 > The first call to `create()` pulls the image if it isn't cached locally, so it may take longer depending on your connection. Subsequent runs reuse the cache.
