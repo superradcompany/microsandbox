@@ -306,6 +306,15 @@ jobs:
           tar -czf artifacts/microsandbox-${{ matrix.target }}.tar.gz \
             -C build msb ${{ matrix.libkrunfw_file }} $go_ffi_file
 
+          # Standalone Go FFI cdylib named to match sdk/go/internal/bundle/
+          # bundles/ so the go-sdk-tag job can drop it in directly.
+          case "${{ matrix.target }}" in
+            linux-x86_64)   bundle_name=libmicrosandbox_go_ffi-linux-amd64.so ;;
+            linux-aarch64)  bundle_name=libmicrosandbox_go_ffi-linux-arm64.so ;;
+            darwin-aarch64) bundle_name=libmicrosandbox_go_ffi-darwin-arm64.dylib ;;
+          esac
+          cp "build/$go_ffi_file" "artifacts/$bundle_name"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -559,15 +568,18 @@ jobs:
         run: uv publish dist/*.whl
 
   # ---------------------------------------------------------------------------
-  # Publish Go SDK by creating the subdirectory module tag
+  # Publish Go SDK by populating embedded bundles and creating the
+  # subdirectory module tag.
   #
-  # Go modules in subdirectories of a repo use prefixed tags
-  # (`sdk/go/vX.Y.Z`) so `go get .../sdk/go@vX.Y.Z` resolves. proxy.golang.org
-  # picks up the tag automatically; there's nothing to upload.
+  # Go modules in subdirectories use prefixed tags (`sdk/go/vX.Y.Z`) so
+  # `go get .../sdk/go@vX.Y.Z` resolves. proxy.golang.org fetches the
+  # tagged commit's source tree, so the per-platform FFI .so/.dylib must
+  # be committed under sdk/go/internal/bundle/bundles/ on that commit.
   #
-  # Runs after `assemble` so the GitHub release (carrying
-  # libmicrosandbox_go_ffi.{dylib,so} that EnsureInstalled downloads) exists
-  # by the time the module tag is resolvable.
+  # main keeps 0-byte sentinel bundles; this job lays a one-off release
+  # commit on top of GITHUB_SHA with the real binaries, tags it, and
+  # pushes only the tag. The release commit is reachable solely via the
+  # tag, never via a branch (wasmtime-go's distribution pattern).
   # ---------------------------------------------------------------------------
   go-sdk-tag:
     name: Tag Go SDK module
@@ -580,7 +592,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Tag sdk/go at the same commit
+      - name: Download per-platform release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-dl
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Populate embedded bundles and tag
         run: |
           set -euo pipefail
           ROOT_TAG="${GITHUB_REF_NAME}"          # e.g. v0.4.6
@@ -589,9 +608,21 @@ jobs:
             echo "tag ${GO_TAG} already exists — skipping"
             exit 0
           fi
+
+          # Drop the platform binaries into the embed dir, replacing the
+          # 0-byte sentinels committed on main.
+          install -m644 release-dl/libmicrosandbox_go_ffi-linux-amd64.so \
+            sdk/go/internal/bundle/bundles/libmicrosandbox_go_ffi-linux-amd64.so
+          install -m644 release-dl/libmicrosandbox_go_ffi-linux-arm64.so \
+            sdk/go/internal/bundle/bundles/libmicrosandbox_go_ffi-linux-arm64.so
+          install -m644 release-dl/libmicrosandbox_go_ffi-darwin-arm64.dylib \
+            sdk/go/internal/bundle/bundles/libmicrosandbox_go_ffi-darwin-arm64.dylib
+
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${GO_TAG}" -m "Go SDK ${ROOT_TAG}" "${GITHUB_SHA}"
+          git add sdk/go/internal/bundle/bundles/
+          git commit -m "release: Go SDK ${ROOT_TAG} (populate embedded FFI bundles)"
+          git tag -a "${GO_TAG}" -m "Go SDK ${ROOT_TAG}" HEAD
           git push origin "${GO_TAG}"
 
   # ---------------------------------------------------------------------------
