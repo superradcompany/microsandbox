@@ -262,14 +262,6 @@ Pass extra argv and env to the init:
 Argv defaults to `[<cmd>]` when none is given; env is merged on top of the inherited environment.
 
 <CodeGroup>
-```bash CLI
-msb run ghcr.io/superradcompany/debian-systemd:12 \
-  --init /lib/systemd/systemd \
-  --init-arg --unit=multi-user.target \
-  --init-env container=microsandbox \
-  -- bash
-```
-
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("ghcr.io/superradcompany/debian-systemd:12")
@@ -313,6 +305,14 @@ sb, err := m.CreateSandbox(ctx, "worker",
         },
     )),
 )
+```
+
+```bash CLI
+msb run ghcr.io/superradcompany/debian-systemd:12 \
+  --init /lib/systemd/systemd \
+  --init-arg --unit=multi-user.target \
+  --init-env container=microsandbox \
+  -- bash
 ```
 </CodeGroup>
 

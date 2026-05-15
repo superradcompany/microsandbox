@@ -13,10 +13,6 @@ Without any policy flags, sandboxes get **public-internet egress only**: routabl
 To turn off networking entirely:
 
 <CodeGroup>
-```bash CLI
-msb create python --name isolated --no-net
-```
-
 ```rust Rust
 let sb = Sandbox::builder("isolated")
     .image("python")
@@ -48,6 +44,10 @@ sb, err := m.CreateSandbox(ctx, "isolated",
     m.WithNetwork(m.NetworkPolicy.None()),
 )
 ```
+
+```bash CLI
+msb create python --name isolated --no-net
+```
 </CodeGroup>
 
 ## Custom policies
@@ -66,27 +66,6 @@ Each rule carries its own direction (`Egress`, `Ingress`, or `Any`), a destinati
 `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`. Direction defaults to `egress` when omitted. Repeating the flag concatenates tokens in argv order; first match wins.
 
 <CodeGroup>
-```bash CLI
-# Public internet plus the host machine, deny everything else by default
-msb create python --name agent \
-    --net-rule "allow@public,allow@host"
-
-# Allow public internet plus a specific private host on tcp/443
-msb create alpine --name secure-agent \
-    --net-rule "allow@10.0.5.10:tcp:443,allow@public" \
-    --net-default-egress deny
-
-# Block tcp/445 to private IPs while keeping everything else open
-msb create alpine --name smb-blocked \
-    --net-default-egress allow \
-    --net-rule "deny@private:tcp:445"
-
-# Publish a port and only accept ingress from RFC1918 sources
-msb create python --name api \
-    --port 8080:8080 \
-    --net-rule "allow:ingress@private"
-```
-
 ```rust Rust
 use microsandbox::{NetworkPolicy, Sandbox};
 
@@ -175,6 +154,27 @@ sb, err := m.CreateSandbox(ctx, "secure-agent",
     }),
 )
 ```
+
+```bash CLI
+# Public internet plus the host machine, deny everything else by default
+msb create python --name agent \
+    --net-rule "allow@public,allow@host"
+
+# Allow public internet plus a specific private host on tcp/443
+msb create alpine --name secure-agent \
+    --net-rule "allow@10.0.5.10:tcp:443,allow@public" \
+    --net-default-egress deny
+
+# Block tcp/445 to private IPs while keeping everything else open
+msb create alpine --name smb-blocked \
+    --net-default-egress allow \
+    --net-rule "deny@private:tcp:445"
+
+# Publish a port and only accept ingress from RFC1918 sources
+msb create python --name api \
+    --port 8080:8080 \
+    --net-rule "allow:ingress@private"
+```
 </CodeGroup>
 
 Rules can target groups like `public`, `private`, and `host`, or specific IPs, CIDRs, domains, and port ranges. The full grammar lives in the [CLI reference](/cli/sandbox-commands#network-policy-flags), and SDK-specific shapes live in each networking reference.
@@ -239,11 +239,6 @@ The name is wired through `/etc/hosts` and the DNS interceptor, so both standard
 The default policy denies host access — the sandbox gateway sits in a private range, same as any other local destination. Add the `host` group to open it:
 
 <CodeGroup>
-```bash CLI
-msb create python --name dev-agent \
-    --net-rule "allow@public,allow@host"
-```
-
 ```rust Rust
 NetworkPolicy::builder()
     .default_deny()
@@ -262,6 +257,11 @@ sb, err := m.CreateSandbox(ctx, "dev-agent",
         },
     }),
 )
+```
+
+```bash CLI
+msb create python --name dev-agent \
+    --net-rule "allow@public,allow@host"
 ```
 </CodeGroup>
 

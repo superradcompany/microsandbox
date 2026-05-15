@@ -230,14 +230,6 @@ exit_code = await sb.attach("python", AttachOptions(
 ))
 ```
 
-```bash CLI
-# Attach to the default shell
-msb exec -t worker
-
-# Attach to a specific command
-msb exec -t worker -e DEBUG=1 -w /app -- python
-```
-
 ```go Go
 // Attach to the default shell.
 exitCode, err := sb.AttachShell(ctx)
@@ -252,6 +244,14 @@ if err != nil {
     return err
 }
 fmt.Println("python exited with", exitCode)
+```
+
+```bash CLI
+# Attach to the default shell
+msb exec -t worker
+
+# Attach to a specific command
+msb exec -t worker -e DEBUG=1 -w /app -- python
 ```
 
 </CodeGroup>

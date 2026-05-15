@@ -292,19 +292,6 @@ let workers: Vec<Sandbox> = futures::future::try_join_all(
 ).await?;
 ```
 
-```bash CLI
-msb run --name baseline --detach python -- sleep 3600
-msb exec baseline -- pip install -r requirements.txt
-msb stop baseline
-
-msb snapshot create after-pip-install --from baseline
-
-# Boot 10 workers from the snapshot
-for i in $(seq 1 10); do
-    msb run --name worker-$i --detach --snapshot after-pip-install -- sleep 3600
-done
-```
-
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
@@ -357,6 +344,19 @@ for i := range workers {
         m.WithSnapshot("after-pip-install"),
     )
 }
+```
+
+```bash CLI
+msb run --name baseline --detach python -- sleep 3600
+msb exec baseline -- pip install -r requirements.txt
+msb stop baseline
+
+msb snapshot create after-pip-install --from baseline
+
+# Boot 10 workers from the snapshot
+for i in $(seq 1 10); do
+    msb run --name worker-$i --detach --snapshot after-pip-install -- sleep 3600
+done
 ```
 
 </CodeGroup>
