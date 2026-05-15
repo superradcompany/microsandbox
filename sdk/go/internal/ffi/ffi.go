@@ -4,9 +4,9 @@
 // # Architecture
 //
 // The library is loaded at runtime via dlopen/dlsym rather than linked at
-// build time. This means `go build` succeeds with no Rust toolchain or
-// pre-built library on disk — the library is downloaded on first use by
-// microsandbox.EnsureInstalled.
+// build time. This means `go build` succeeds with no Rust toolchain on the
+// host — the library bytes are embedded in the SDK (see internal/bundle)
+// and extracted to disk by microsandbox.EnsureInstalled before dlopen.
 //
 // Layout of this file:
 //   - C preamble: typedefs, function-pointer globals, load_microsandbox(),
@@ -621,9 +621,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -638,41 +635,16 @@ import (
 // the library has been loaded. The public SDK surfaces this as ErrLibraryNotLoaded.
 const KindLibraryNotLoaded = "library_not_loaded"
 
-// libraryPathEnv overrides the default library path. Set it to a local
-// target/debug build path for development without running EnsureInstalled.
-const libraryPathEnv = "MICROSANDBOX_LIB_PATH"
-
 var (
-	loadOnce    sync.Once
-	loadErr     error
-	libraryPath string
+	loadOnce sync.Once
+	loadErr  error
 )
 
-func init() {
-	if envPath := os.Getenv(libraryPathEnv); envPath != "" {
-		libraryPath = envPath
-	} else {
-		if home, err := os.UserHomeDir(); err == nil {
-			libraryPath = filepath.Join(home, ".microsandbox", "lib", defaultLibName())
-		}
-	}
-}
-
-// defaultLibName returns the platform-specific filename of the Go FFI cdylib.
-func defaultLibName() string {
-	if runtime.GOOS == "darwin" {
-		return "libmicrosandbox_go_ffi.dylib"
-	}
-	return "libmicrosandbox_go_ffi.so"
-}
-
-// Load opens the shared library at path (or the default ~/.microsandbox/lib/
-// location when path is empty) and resolves every msb_* symbol. Safe to call
-// multiple times — only the first call does work.
+// Load opens the shared library at path and resolves every msb_* symbol.
+// Safe to call multiple times — only the first call does work. The path
+// is supplied by setup.materializeFFI after extracting the embedded
+// library; callers should not invoke Load directly.
 func Load(path string) error {
-	if path == "" {
-		path = libraryPath
-	}
 	loadOnce.Do(func() {
 		cPath := C.CString(path)
 		defer C.free(unsafe.Pointer(cPath))

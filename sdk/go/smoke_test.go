@@ -1,7 +1,17 @@
-//go:build smoke
+//go:build smoke && microsandbox_ffi_path
 
-// FFI smoke tests: load the cdylib and exercise non-VM operations.
-// Run with: MICROSANDBOX_LIB_PATH=... go test -tags smoke ./...
+// FFI smoke tests: load the path-tagged FFI binding and exercise
+// non-VM operations.
+//
+// Run with:
+//
+//	MICROSANDBOX_FFI_PATH=/path/to/libmicrosandbox_go_ffi.{so,dylib} \
+//	    go test -tags "smoke microsandbox_ffi_path" -count=1 ./...
+//
+// The microsandbox_ffi_path build tag swaps the embedded FFI for a
+// reader of the env var (see internal/bundle/bundle_path.go), so the
+// test always uses the freshly-built local library rather than the
+// (sentinel/release-pinned) embed.
 
 package microsandbox
 
@@ -13,12 +23,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/superradcompany/microsandbox/sdk/go/internal/bundle"
 )
 
 func smokeSetup(t *testing.T) context.Context {
 	t.Helper()
-	if os.Getenv("MICROSANDBOX_LIB_PATH") == "" {
-		t.Skip("MICROSANDBOX_LIB_PATH not set; skipping FFI smoke test")
+	if os.Getenv(bundle.FFIPathEnv) == "" {
+		t.Skipf("%s not set; skipping FFI smoke test", bundle.FFIPathEnv)
 	}
 
 	// Anchor under /tmp so sandbox socket paths fit under sun_path (108 bytes).

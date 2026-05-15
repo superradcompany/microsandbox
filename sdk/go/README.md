@@ -623,17 +623,20 @@ Each example is a self-contained `main.go` under `sdk/go/examples/`. Run any of 
 
 ## Development
 
-To use a locally-built FFI library instead of downloading a release:
+The SDK embeds the FFI library at build time, so a normal `go build` /
+`go test` needs no Rust toolchain. To iterate on the FFI shim itself,
+build the library locally and point the SDK at it via the
+`microsandbox_ffi_path` build tag:
 
 ```bash
 # Build the FFI crate from the repo root.
 cargo build -p microsandbox-go
 
-# Point the SDK at it.
-export MICROSANDBOX_LIB_PATH=$PWD/target/debug/libmicrosandbox_go_ffi.dylib  # macOS
-export MICROSANDBOX_LIB_PATH=$PWD/target/debug/libmicrosandbox_go_ffi.so     # Linux
+# Run against the freshly-built .so instead of the embed.
+export MICROSANDBOX_FFI_PATH=$PWD/target/debug/libmicrosandbox_go_ffi.dylib  # macOS
+export MICROSANDBOX_FFI_PATH=$PWD/target/debug/libmicrosandbox_go_ffi.so     # Linux
 
-go run ./examples/basic
+go run -tags microsandbox_ffi_path ./examples/basic
 ```
 
 Run the unit tests (no FFI library required):
@@ -642,10 +645,11 @@ Run the unit tests (no FFI library required):
 go test ./...
 ```
 
-Run the full integration suite under `sdk/go/integration/` (requires a built FFI library and a live microsandbox runtime):
+Run the full integration suite under `sdk/go/integration/` (requires a
+built FFI library and a live microsandbox runtime):
 
 ```bash
-go test -tags=integration -v -count=1 ./integration/...
+go test -tags "integration microsandbox_ffi_path" -v -count=1 ./integration/...
 ```
 
 The integration package is a black-box test suite organised by feature

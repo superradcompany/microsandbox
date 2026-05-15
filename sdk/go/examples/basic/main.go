@@ -6,7 +6,6 @@
 // Build: from sdk/go, run
 //
 //	go run ./examples/basic
-//
 package main
 
 import (

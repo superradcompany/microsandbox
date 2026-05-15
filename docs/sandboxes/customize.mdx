@@ -18,21 +18,22 @@ use indoc::indoc;
 use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("worker")
-    .image("ubuntu")
-    .script("setup", indoc! {"
-        #!/bin/bash
-        apt-get update && apt-get install -y python3 curl
-    "})
-    .script("start", indoc! {"
-        #!/bin/bash
-        exec python3 /app/main.py
-    "})
-    .create()
-    .await?;
+.image("ubuntu")
+.script("setup", indoc! {"
+#!/bin/bash
+apt-get update && apt-get install -y python3 curl
+"})
+.script("start", indoc! {"
+#!/bin/bash
+exec python3 /app/main.py
+"})
+.create()
+.await?;
 
 sb.shell("setup").await?;
 let output = sb.shell("start").await?;
-```
+
+````
 
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
@@ -45,7 +46,7 @@ await using sb = await Sandbox.builder("worker")
 
 await sb.shell("setup");
 const output = await sb.shell("run");
-```
+````
 
 ```python Python
 from microsandbox import Sandbox
@@ -85,7 +86,9 @@ Patches modify the rootfs **before the VM boots**. Write config files, copy dire
 Patches are applied in order and work with OCI images and bind-mounted rootfs. They're not supported with disk image roots (QCOW2, Raw).
 
 <Tip>
-  By default, patching a path that already exists in the image will error. Pass `replace: true` on the operation to allow it. `Mkdir` and `Remove` are idempotent and won't error either way.
+  By default, patching a path that already exists in the image will error. Pass
+  `replace: true` on the operation to allow it. `Mkdir` and `Remove` are
+  idempotent and won't error either way.
 </Tip>
 
 <CodeGroup>
@@ -93,18 +96,19 @@ Patches are applied in order and work with OCI images and bind-mounted rootfs. T
 use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("worker")
-    .image("alpine")
-    .patch(|p| p
-        .text("/etc/greeting.txt", "Hello from a patched rootfs!\n", None, false)
-        .text("/etc/motd", "Custom message of the day.\n", None, true) // replace existing
-        .mkdir("/app", Some(0o755))
-        .text("/app/config.json", r#"{"debug": true}"#, Some(0o644), false)
-        .copy_file("./cert.pem", "/etc/ssl/cert.pem", None, false)
-        .append("/etc/hosts", "127.0.0.1 myapp.local\n")
-    )
-    .create()
-    .await?;
-```
+.image("alpine")
+.patch(|p| p
+.text("/etc/greeting.txt", "Hello from a patched rootfs!\n", None, false)
+.text("/etc/motd", "Custom message of the day.\n", None, true) // replace existing
+.mkdir("/app", Some(0o755))
+.text("/app/config.json", r#"{"debug": true}"#, Some(0o644), false)
+.copy_file("./cert.pem", "/etc/ssl/cert.pem", None, false)
+.append("/etc/hosts", "127.0.0.1 myapp.local\n")
+)
+.create()
+.await?;
+
+````
 
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
@@ -120,7 +124,7 @@ await using sb = await Sandbox.builder("worker")
         .append("/etc/hosts", "127.0.0.1 myapp.local\n"),
     )
     .create();
-```
+````
 
 ```python Python
 from microsandbox import Patch, Sandbox
@@ -194,13 +198,14 @@ Pass an absolute path instead when you need pinning (e.g. for reproducible CI).
 use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("worker")
-    .image("ghcr.io/superradcompany/debian-systemd:12")
-    .memory(1024)
-    .cpus(2)
-    .init("auto")
-    .create()
-    .await?;
-```
+.image("ghcr.io/superradcompany/debian-systemd:12")
+.memory(1024)
+.cpus(2)
+.init("auto")
+.create()
+.await?;
+
+````
 
 ```typescript TypeScript
 import { MiB, Sandbox } from "microsandbox";
@@ -211,7 +216,7 @@ await using sb = await Sandbox.builder("worker")
     .cpus(2)
     .init("auto")
     .create();
-```
+````
 
 ```python Python
 from microsandbox import Sandbox
@@ -240,6 +245,7 @@ msb run ghcr.io/superradcompany/debian-systemd:12 \
   --init auto \
   -- bash
 ```
+
 </CodeGroup>
 
 To verify the handoff worked, check `/proc/1/comm` inside the sandbox. It should print the init's name (`systemd`, `init`, etc.):
@@ -282,11 +288,11 @@ let sb = Sandbox::builder("worker")
 
 ```typescript TypeScript
 await using sb = await Sandbox.builder("worker")
-    .image("ghcr.io/superradcompany/debian-systemd:12")
-    .initWith("/lib/systemd/systemd", (i) => i
-        .args(["--unit=multi-user.target"])
-        .env("container", "microsandbox"))
-    .create();
+  .image("ghcr.io/superradcompany/debian-systemd:12")
+  .initWith("/lib/systemd/systemd", (i) =>
+    i.args(["--unit=multi-user.target"]).env("container", "microsandbox"),
+  )
+  .create();
 ```
 
 ```python Python
@@ -314,6 +320,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
     )),
 )
 ```
+
 </CodeGroup>
 
 ### Picking an image
@@ -334,6 +341,7 @@ Three ways to get an image with an init:
     | Alpine + OpenRC | `ghcr.io/superradcompany/alpine-openrc:3.20` |
 
     Multi-arch (`linux/amd64` + `linux/arm64`), rebuilt weekly so they pick up upstream security patches, smoke-tested on every rebuild. Each image's GHCR page documents its specific tag aliases and contents.
+
   </Accordion>
   <Accordion title="Build a small custom image">
     ```dockerfile
@@ -348,6 +356,7 @@ Three ways to get an image with an init:
     docker buildx build -t local-systemd:debian -f Dockerfile.systemd .
     msb run local-systemd:debian --init /lib/systemd/systemd -- bash
     ```
+
   </Accordion>
   <Accordion title="Use a community-built systemd image">
     Examples: `jrei/systemd-debian:12`, `jrei/systemd-ubuntu:22.04`. These work out of the box but are published by community maintainers, not the distros themselves. Vet them like any other third-party image before running real workloads.
@@ -372,11 +381,11 @@ With `--init`, the agent isn't PID 1 anymore, so it asks your init to shut down:
 
 Your init then runs its own teardown (stop services, unmount, halt), which is slower:
 
-| Init | Typical shutdown |
-|------|------------------|
-| BusyBox / s6 / runit | &lt;100 ms |
-| OpenRC | 50-500 ms |
-| systemd | 1-5 s |
+| Init                 | Typical shutdown |
+| -------------------- | ---------------- |
+| BusyBox / s6 / runit | &lt;100 ms       |
+| OpenRC               | 50-500 ms        |
+| systemd              | 1-5 s            |
 
 This is the price of a real init. If your test harness measures end-to-end sandbox lifecycle and you're comparing to a no-handoff baseline, account for this.
 
