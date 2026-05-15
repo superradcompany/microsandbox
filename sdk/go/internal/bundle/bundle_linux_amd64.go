@@ -14,13 +14,7 @@ var ffiBytes []byte
 // this SDK release.
 func Bytes() ([]byte, error) {
 	if len(ffiBytes) == 0 {
-		return nil, errors.New(
-			"microsandbox: bundled FFI library is empty; this build is " +
-				"from a source tree without populated bundles (e.g. the main " +
-				"branch). Tagged releases ship real binaries; for SDK " +
-				"contributors, build with -tags microsandbox_ffi_path and set " +
-				FFIPathEnv,
-		)
+		return nil, errors.New(errEmptyBundleMsg)
 	}
 	return ffiBytes, nil
 }

@@ -25,3 +25,14 @@ package bundle
 // libmicrosandbox_go_ffi.{so,dylib}. The variable is undocumented in
 // user-facing docs because it has no effect on default builds.
 const FFIPathEnv = "MICROSANDBOX_FFI_PATH"
+
+// errEmptyBundleMsg is the error message returned by the per-platform
+// Bytes() implementations when the embedded bundle is the 0-byte sentinel
+// committed on main. Tagged releases populate the real bytes via the
+// release pipeline. The wording lives here so all three platform files
+// stay in lockstep when it's edited.
+var errEmptyBundleMsg = "microsandbox: bundled FFI library is empty; " +
+	"this build is from a source tree without populated bundles (e.g. " +
+	"the main branch). Tagged releases ship real binaries; for SDK " +
+	"contributors, build with -tags microsandbox_ffi_path and set " +
+	FFIPathEnv
