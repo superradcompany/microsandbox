@@ -66,11 +66,11 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
 });
 
 describe("Node.js SDK Pull Progress", () => {
-	const NAME_ITER = "sdk-smoke-progress-iter";
-	const NAME_RECV = "sdk-smoke-progress-recv";
-	const NAME_DETACHED = "sdk-smoke-progress-detached";
-	const NAME_ERROR = "sdk-smoke-progress-error";
-	const NAME_DOUBLE = "sdk-smoke-progress-double";
+	const NAME_ITER = "sdk-pp-i";
+	const NAME_RECV = "sdk-pp-r";
+	const NAME_DETACHED = "sdk-pp-d";
+	const NAME_ERROR = "sdk-pp-e";
+	const NAME_DOUBLE = "sdk-pp-x";
 
 	afterAll(async () => {
 		for (const n of [NAME_ITER, NAME_RECV, NAME_DETACHED, NAME_ERROR, NAME_DOUBLE]) {
@@ -189,7 +189,7 @@ describe("Node.js SDK Pull Progress", () => {
 		await expect(session.awaitSandbox()).rejects.toThrow(/not.*cache|cached|not found/i);
 	}, 60_000);
 
-	it("awaitSandbox() throws 'already consumed' on the second call", async () => {
+	it("awaitSandbox() rejects on the second call", async () => {
 		const session = await Sandbox.builder(NAME_DOUBLE)
 			.image("mirror.gcr.io/library/alpine")
 			.cpus(1)
@@ -201,7 +201,7 @@ describe("Node.js SDK Pull Progress", () => {
 
 		const sb = await session.awaitSandbox();
 		expect(sb.name).toBe(NAME_DOUBLE);
-		await expect(session.awaitSandbox()).rejects.toThrow(/already consumed/);
+		await expect(session.awaitSandbox()).rejects.toThrow(/already (called|consumed)/);
 
 		await sb.stopAndWait();
 	}, 120_000);
