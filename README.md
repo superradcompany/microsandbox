@@ -174,6 +174,7 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > func main() {
 >     ctx := context.Background()
 >
+>     // Downloads the microsandbox runtime to ~/.microsandbox/ on first run.
 >     if err := microsandbox.EnsureInstalled(ctx); err != nil {
 >         log.Fatal(err)
 >     }
