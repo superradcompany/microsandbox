@@ -482,6 +482,30 @@ pub unsafe extern "C" fn msb_free_string(ptr: *mut c_char) {
 }
 
 // ---------------------------------------------------------------------------
+// msb_set_sdk_msb_path
+// ---------------------------------------------------------------------------
+
+/// Push the SDK-resolved msb binary path into the Rust resolver's tier 2.
+/// Called once from setup.EnsureInstalled after the install dir is known.
+/// Set-once: subsequent calls are ignored (matches the OnceLock in
+/// microsandbox::config). Null or invalid-UTF-8 paths are silently ignored
+/// since the resolver's lower tiers (~/.microsandbox/bin/msb, PATH) still
+/// work as fallbacks.
+///
+/// # Safety
+/// `path` must be either null or a valid null-terminated UTF-8 C string
+/// owned by the caller for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_set_sdk_msb_path(path: *const c_char) {
+    if path.is_null() {
+        return;
+    }
+    if let Ok(s) = unsafe { CStr::from_ptr(path) }.to_str() {
+        microsandbox::config::set_sdk_msb_path(s);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cancellation entry points
 //
 // Usage from Go (in call()):

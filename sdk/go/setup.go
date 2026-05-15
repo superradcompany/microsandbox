@@ -126,6 +126,11 @@ func doInit(ctx context.Context, cfg setupConfig) error {
 		return wrapDlopenErr(err, ffiPath)
 	}
 
+	// Tell the Rust resolver where we install msb so a custom
+	// WithInstallDir is honoured (tier 2 of resolve_msb_path). The
+	// user's MSB_PATH env var still wins as tier 1.
+	ffi.SetSdkMsbPath(filepath.Join(installDir, "bin", "msb"))
+
 	// msb + libkrunfw: check the cache; download the GitHub release
 	// tarball if anything is missing. This is the part we'll replace
 	// later when those binaries also move into embedded bundles.

@@ -55,6 +55,7 @@ package ffi
 // Keep in sync with sdk/go/native/src/lib.rs and microsandbox_go_ffi.h.
 // ---------------------------------------------------------------------------
 typedef void     (*msb_free_string_fn)(char *ptr);
+typedef void     (*msb_set_sdk_msb_path_fn)(const char *path);
 typedef uint64_t (*msb_cancel_alloc_fn)(void);
 typedef void     (*msb_cancel_trigger_fn)(uint64_t id);
 typedef void     (*msb_cancel_unregister_fn)(uint64_t id);
@@ -153,6 +154,7 @@ typedef char *(*msb_fs_write_stream_close_fn)(uint64_t cancel_id, uint64_t strea
 // Function pointer globals — NULL until load_microsandbox() succeeds.
 // ---------------------------------------------------------------------------
 static msb_free_string_fn        ptr_msb_free_string        = NULL;
+static msb_set_sdk_msb_path_fn   ptr_msb_set_sdk_msb_path   = NULL;
 static msb_cancel_alloc_fn       ptr_msb_cancel_alloc       = NULL;
 static msb_cancel_trigger_fn     ptr_msb_cancel_trigger     = NULL;
 static msb_cancel_unregister_fn  ptr_msb_cancel_unregister  = NULL;
@@ -269,6 +271,7 @@ const char *load_microsandbox(const char *path) {
 		return load_error;
 	}
 	RESOLVE(msb_free_string);
+	RESOLVE(msb_set_sdk_msb_path);
 	RESOLVE(msb_cancel_alloc);
 	RESOLVE(msb_cancel_trigger);
 	RESOLVE(msb_cancel_unregister);
@@ -366,6 +369,9 @@ int is_microsandbox_loaded() {
 // ---------------------------------------------------------------------------
 void call_msb_free_string(char *ptr) {
 	if (ptr_msb_free_string) ptr_msb_free_string(ptr);
+}
+void call_msb_set_sdk_msb_path(const char *path) {
+	if (ptr_msb_set_sdk_msb_path) ptr_msb_set_sdk_msb_path(path);
 }
 uint64_t call_msb_cancel_alloc(void) {
 	return ptr_msb_cancel_alloc ? ptr_msb_cancel_alloc() : 0;
@@ -658,6 +664,19 @@ func Load(path string) error {
 // IsLoaded reports whether the library has been successfully loaded.
 func IsLoaded() bool {
 	return C.is_microsandbox_loaded() == 1
+}
+
+// SetSdkMsbPath pushes the SDK-resolved msb binary path into the Rust
+// resolver's tier 2 (see crates/microsandbox/lib/config/mod.rs:
+// resolve_msb_path). Set-once on the Rust side: subsequent calls are
+// ignored. The user's MSB_PATH env var still wins as tier 1.
+func SetSdkMsbPath(path string) {
+	if path == "" {
+		return
+	}
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	C.call_msb_set_sdk_msb_path(cPath)
 }
 
 // ensureLoaded is called at the top of every exported FFI function. It returns
