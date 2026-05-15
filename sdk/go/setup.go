@@ -48,48 +48,85 @@ const httpTimeout = 5 * time.Minute
 type SetupOption func(*setupConfig)
 
 type setupConfig struct {
-	installDir   string
 	skipDownload bool
 }
 
-// WithInstallDir overrides the on-disk location where the runtime is
-// extracted (default: ~/.microsandbox).
-func WithInstallDir(dir string) SetupOption {
-	return func(c *setupConfig) { c.installDir = dir }
-}
-
-// WithSkipDownload prevents EnsureInstalled from fetching the msb + libkrunfw bundle
-// from GitHub releases. Use when the runtime is already on disk at the
-// install path (e.g. air-gapped CI, vendored fixtures). The embedded FFI
-// library extracts regardless — it ships with the SDK.
+// WithSkipDownload prevents EnsureInstalled from fetching the msb +
+// libkrunfw bundle from GitHub releases. Use when the runtime is
+// already on disk at the install path (e.g. air-gapped CI, vendored
+// fixtures). The embedded FFI library is unaffected — it ships with
+// the SDK and is materialized automatically on first use.
 func WithSkipDownload() SetupOption {
 	return func(c *setupConfig) { c.skipDownload = true }
 }
 
+// init wires the FFI auto-loader so the first SDK call (e.g.
+// CreateSandbox) transparently extracts + dlopens the embedded
+// library. No explicit EnsureInstalled call is needed for FFI
+// bootstrap.
+func init() {
+	ffi.SetAutoLoader(autoLoadFFI)
+}
+
 var (
-	initMu   sync.Mutex
-	initDone bool
+	autoLoadOnce sync.Once
+	autoLoadErr  error
 )
 
-// EnsureInstalled prepares the SDK for use: extracts the embedded FFI
-// library to the install directory, ensures msb + libkrunfw are present
-// (downloading from the matching GitHub release if needed), and loads
-// the FFI library into the current process.
+// autoLoadFFI extracts the embedded FFI library into the install
+// directory and dlopens it. Registered with the internal/ffi package
+// via SetAutoLoader so ensureLoaded() drives it lazily on first use.
+// sync.Once-guarded; safe to call from concurrent SDK goroutines.
 //
-// Call once at program startup; safe to omit, in which case the first
-// SDK function transparently invokes EnsureInstalled with defaults.
+// This handles ONLY the FFI plumbing — msb + libkrunfw downloading
+// is the explicit job of EnsureInstalled.
+func autoLoadFFI() error {
+	autoLoadOnce.Do(func() {
+		dir, err := installDir()
+		if err != nil {
+			autoLoadErr = err
+			return
+		}
+		ffiPath, err := materializeFFI(dir)
+		if err != nil {
+			autoLoadErr = err
+			return
+		}
+		if err := ffi.Load(ffiPath); err != nil {
+			autoLoadErr = wrapDlopenErr(err, ffiPath)
+			return
+		}
+		// Pin the resolver's SDK-tier msb path to our install dir.
+		ffi.SetSdkMsbPath(filepath.Join(dir, "bin", "msb"))
+	})
+	return autoLoadErr
+}
+
+var (
+	installMu   sync.Mutex
+	installDone bool
+)
+
+// EnsureInstalled ensures the msb + libkrunfw runtime is present at
+// ~/.microsandbox/ and downloads it from the matching GitHub release
+// if not. It is OPTIONAL: the SDK's FFI library is embedded in the
+// Go binary and loads automatically on first use, so EnsureInstalled
+// only governs the optional msb runtime download.
+//
+// Call it explicitly at startup if you want to surface install errors
+// up front rather than at first sandbox-spawn time:
 //
 //	if err := microsandbox.EnsureInstalled(ctx); err != nil {
 //	    log.Fatal(err)
 //	}
 //
-// EnsureInstalled is idempotent. Options are only honoured on the first
-// call; subsequent calls are no-ops.
+// Idempotent — subsequent calls are no-ops. Options apply only to
+// the first call.
 func EnsureInstalled(ctx context.Context, opts ...SetupOption) error {
-	initMu.Lock()
-	defer initMu.Unlock()
+	installMu.Lock()
+	defer installMu.Unlock()
 
-	if initDone {
+	if installDone {
 		return nil
 	}
 
@@ -98,43 +135,13 @@ func EnsureInstalled(ctx context.Context, opts ...SetupOption) error {
 		opt(&cfg)
 	}
 
-	if err := doInit(ctx, cfg); err != nil {
-		return err
-	}
-	initDone = true
-	return nil
-}
-
-func doInit(ctx context.Context, cfg setupConfig) error {
-	if ffi.IsLoaded() {
-		return nil
-	}
-
-	installDir, err := resolveInstallDir(cfg.installDir)
+	dir, err := installDir()
 	if err != nil {
 		return err
 	}
 
-	// FFI library: extract from the SDK-embedded bundle into a
-	// version-scoped subdir, then dlopen it. The bundle is pinned to
-	// the SDK release, so no version negotiation is needed.
-	ffiPath, err := materializeFFI(installDir)
-	if err != nil {
-		return err
-	}
-	if err := ffi.Load(ffiPath); err != nil {
-		return wrapDlopenErr(err, ffiPath)
-	}
-
-	// Tell the Rust resolver where we install msb so a custom
-	// WithInstallDir is honoured (tier 2 of resolve_msb_path). The
-	// user's MSB_PATH env var still wins as tier 1.
-	ffi.SetSdkMsbPath(filepath.Join(installDir, "bin", "msb"))
-
-	// msb + libkrunfw: check the cache; download the GitHub release
-	// tarball if anything is missing. This is the part we'll replace
-	// later when those binaries also move into embedded bundles.
-	if msbAndKrunfwInstalled(installDir) {
+	if msbAndKrunfwInstalled(dir) {
+		installDone = true
 		return nil
 	}
 	if cfg.skipDownload {
@@ -143,24 +150,25 @@ func doInit(ctx context.Context, cfg setupConfig) error {
 			Message: fmt.Sprintf(
 				"microsandbox: msb/libkrunfw not present under %s and "+
 					"WithSkipDownload() was set; install them manually",
-				installDir),
+				dir),
 		}
 	}
-	if err := downloadMsbAndKrunfw(ctx, installDir); err != nil {
+	if err := downloadMsbAndKrunfw(ctx, dir); err != nil {
 		return &Error{
 			Kind:    ErrLibraryNotLoaded,
 			Message: fmt.Sprintf("microsandbox: download msb+libkrunfw: %v", err),
 			Cause:   err,
 		}
 	}
+	installDone = true
 	return nil
 }
 
-// IsInstalled reports whether msb + libkrunfw are present under the
-// default install directory at the SDK's pinned version. It does NOT
-// dlopen the FFI library (which ships embedded in the SDK).
+// IsInstalled reports whether msb + libkrunfw are present at
+// ~/.microsandbox/ at the SDK's pinned version. It does NOT touch
+// the FFI library (which ships embedded in the SDK).
 func IsInstalled() bool {
-	dir, err := resolveInstallDir("")
+	dir, err := installDir()
 	if err != nil {
 		return false
 	}
@@ -171,19 +179,18 @@ func IsInstalled() bool {
 // compiled against.
 func SDKVersion() string { return sdkVersion }
 
-// RuntimeVersion returns the version reported by the loaded FFI library.
-// Returns ErrLibraryNotLoaded if EnsureInstalled has not been called.
+// RuntimeVersion returns the version reported by the loaded FFI
+// library. Triggers FFI auto-load if needed; returns an FFI error if
+// the library couldn't be loaded.
 func RuntimeVersion() (string, error) {
 	v, err := ffi.Version()
 	return v, wrapFFI(err)
 }
 
-// resolveInstallDir returns the user-supplied install dir, or
-// ~/.microsandbox by default.
-func resolveInstallDir(override string) (string, error) {
-	if override != "" {
-		return override, nil
-	}
+// installDir returns the fixed on-disk location ~/.microsandbox/.
+// Not user-overridable — every Go binary that links this SDK shares
+// this cache so msb + libkrunfw aren't redownloaded per consumer.
+func installDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
@@ -192,15 +199,15 @@ func resolveInstallDir(override string) (string, error) {
 }
 
 // materializeFFI extracts the embedded FFI library into a per-version
-// subdir under <installDir>/lib/ and returns the on-disk path. The
+// subdir under <dir>/lib/ and returns the on-disk path. The
 // per-version subdir lets multiple SDK versions coexist without
 // clobbering each other.
-func materializeFFI(installDir string) (string, error) {
+func materializeFFI(dir string) (string, error) {
 	ffiBytes, err := bundle.Bytes()
 	if err != nil {
 		return "", &Error{Kind: ErrLibraryNotLoaded, Message: err.Error(), Cause: err}
 	}
-	libDir := filepath.Join(installDir, "lib", "v"+sdkVersion)
+	libDir := filepath.Join(dir, "lib", "v"+sdkVersion)
 	if err := os.MkdirAll(libDir, 0o755); err != nil {
 		return "", fmt.Errorf("create %s: %w", libDir, err)
 	}

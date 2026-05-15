@@ -40,7 +40,9 @@ The `microsandbox` Go module provides native bindings to the [microsandbox](http
 go get github.com/superradcompany/microsandbox/sdk/go
 ```
 
-At program startup, call `EnsureInstalled` once before any other SDK function. It downloads the `msb` binary, `libkrunfw`, and the native FFI library to `~/.microsandbox/` the first time it runs; subsequent calls are no-ops.
+The SDK works out of the box — the FFI library is embedded in the Go binary and loads on first use. The first sandbox call also downloads `msb` + `libkrunfw` to `~/.microsandbox/` if they aren't already there.
+
+For long-lived processes, you can call `EnsureInstalled` explicitly at startup to surface any install errors up front instead of at first sandbox-spawn time. It's optional and idempotent:
 
 ```go
 import microsandbox "github.com/superradcompany/microsandbox/sdk/go"
@@ -475,7 +477,7 @@ sb, err := h.Connect(ctx)
 
 | Function | Description |
 |----------|-------------|
-| `EnsureInstalled(ctx)` | Download runtime dependencies to `~/.microsandbox/` (idempotent) |
+| `EnsureInstalled(ctx, opts...)` | Optional — download msb + libkrunfw to `~/.microsandbox/` up front (idempotent) |
 | `CreateSandbox(ctx, name, ...opts)` | Create and start a sandbox |
 | `CreateSandboxDetached(ctx, name, ...opts)` | Create a sandbox in detached mode |
 | `StartSandbox(ctx, name)` | Boot a stopped sandbox by name |
@@ -510,7 +512,7 @@ sb, err := h.Connect(ctx)
 | `Metrics` | Resource metrics (CPU %, memory bytes, disk I/O, network I/O, uptime) |
 | `SandboxConfig` / `NetworkConfig` / `TlsConfig` / `ExecConfig` / `VolumeConfig` | Configuration structs |
 | `SecretEntry`, `PolicyRule`, `PatchConfig`, `MountConfig` | Value types for secrets, network rules, rootfs patches, and volume mounts |
-| `Patch`, `Secret`, `NetworkPolicy`, `Mount` | Factory namespaces (`Patch.Text`, `Secret.Env`, `NetworkPolicy.None`, `Mount.Named`, …) |
+| `Patch`, `Secret`, `NetworkPolicy`, `Mount` | Helper namespaces — `Patch.Text`, `Secret.Env`, `NetworkPolicy.None`, `Mount.Named`, etc. |
 
 ### Sandbox Methods
 
@@ -593,7 +595,7 @@ sb, err := h.Connect(ctx)
 | `ErrInvalidHandle` | Handle is stale, closed, or was never valid |
 | `ErrBufferTooSmall` | Response exceeded the fixed output buffer (stream instead) |
 | `ErrCancelled` | Operation cancelled via the caller's context |
-| `ErrLibraryNotLoaded` | `EnsureInstalled` was not called before using the SDK |
+| `ErrLibraryNotLoaded` | FFI library failed to load (e.g. unsupported platform or GLIBC too old) |
 | `ErrInternal` | Catch-all for unrecognised runtime errors |
 
 Additional kinds declared for forward compatibility with the Node/Python SDKs — currently surface as `ErrInternal` / `ErrInvalidConfig` / `ErrFilesystem` / `ErrImageNotFound`: `ErrSandboxNotRunning`, `ErrExecFailed`, `ErrPathNotFound`, `ErrImagePullFailed`, `ErrNetworkPolicy`, `ErrSecretViolation`, `ErrTLS`.

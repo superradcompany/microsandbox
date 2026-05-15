@@ -679,17 +679,40 @@ func SetSdkMsbPath(path string) {
 	C.call_msb_set_sdk_msb_path(cPath)
 }
 
-// ensureLoaded is called at the top of every exported FFI function. It returns
-// a typed error when the library has not been loaded, so the caller gets a
-// clear message rather than a nil-pointer crash.
+// autoLoader is set by the parent SDK package's init() to a function
+// that materializes the embedded FFI library to disk and dlopens it.
+// Decoupling lets ensureLoaded trigger the load lazily without an
+// import cycle.
+var autoLoader func() error
+
+// SetAutoLoader registers a hook that ensureLoaded invokes the first
+// time a wrapped FFI call hits an unloaded library. Idempotent on the
+// caller's side (the hook should sync.Once-guard its work).
+func SetAutoLoader(fn func() error) {
+	autoLoader = fn
+}
+
+// ensureLoaded is called at the top of every exported FFI function. If
+// the library isn't loaded yet, it invokes the registered auto-loader
+// (set by sdk/go's init()) which extracts the embedded FFI to disk and
+// dlopens it. Falls back to a clear typed error if no loader is set or
+// loading failed.
 func ensureLoaded() error {
-	if !IsLoaded() {
-		return &Error{
-			Kind:    KindLibraryNotLoaded,
-			Message: "microsandbox library not loaded; call microsandbox.EnsureInstalled() first",
+	if IsLoaded() {
+		return nil
+	}
+	if autoLoader != nil {
+		if err := autoLoader(); err != nil {
+			return err
+		}
+		if IsLoaded() {
+			return nil
 		}
 	}
-	return nil
+	return &Error{
+		Kind:    KindLibraryNotLoaded,
+		Message: "microsandbox library failed to load",
+	}
 }
 
 // =============================================================================

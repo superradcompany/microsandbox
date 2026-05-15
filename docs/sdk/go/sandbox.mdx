@@ -16,34 +16,14 @@ See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/
 func EnsureInstalled(ctx context.Context, opts ...SetupOption) error
 ```
 
-Prepare the SDK for use: extract the embedded FFI library, ensure msb + libkrunfw are present, dlopen the FFI library. Idempotent — subsequent calls are no-ops. Options apply only to the first call.
+Optional. Ensure msb + libkrunfw are present at `~/.microsandbox/`, downloading them from the matching GitHub release if not. Call at startup to surface install errors up front; otherwise the first sandbox call handles it. The FFI library is embedded in the Go binary and loads automatically — `EnsureInstalled` does not govern it. Idempotent.
 
 **Parameters**
 
-| Name | Type              | Description                                                                         |
-| ---- | ----------------- | ----------------------------------------------------------------------------------- |
-| ctx  | `context.Context` | Cancels the msb + libkrunfw download (no effect once the library is loaded)         |
-| opts | `...SetupOption`  | See [`WithInstallDir`](#withinstalldir) and [`WithSkipDownload`](#withskipdownload) |
-
----
-
-#### WithInstallDir()
-
-```go
-func WithInstallDir(dir string) SetupOption
-```
-
-Override the on-disk install location (default: `~/.microsandbox/`).
-
----
-
-#### WithSkipDownload()
-
-```go
-func WithSkipDownload() SetupOption
-```
-
-Prevent `EnsureInstalled` from fetching the msb + libkrunfw bundle from GitHub. Use when the runtime is already on disk at the install path (e.g. air-gapped CI). The embedded FFI library is unaffected — it ships with the SDK.
+| Name | Type              | Description                                              |
+| ---- | ----------------- | -------------------------------------------------------- |
+| ctx  | `context.Context` | Cancels an in-flight msb + libkrunfw download            |
+| opts | `...SetupOption`  | See [`SetupOption`](#setupoption) for the available knobs |
 
 ---
 
@@ -73,7 +53,27 @@ Return the microsandbox release version this SDK was compiled against.
 func RuntimeVersion() (string, error)
 ```
 
-Return the version reported by the loaded library. Returns `ErrLibraryNotLoaded` if `EnsureInstalled` was not called.
+Return the version reported by the loaded FFI library. Auto-loads the library on first use; returns `ErrLibraryNotLoaded` only if loading fails (e.g. unsupported platform or GLIBC mismatch).
+
+---
+
+## SetupOption
+
+Configures [`EnsureInstalled`](#ensureinstalled). Pass any of the options below as variadic arguments. Options apply only to the first call; subsequent calls are no-ops.
+
+| Option | Effect |
+|--------|--------|
+| [`WithSkipDownload()`](#withskipdownload) | Refuse to download msb + libkrunfw — require them to be pre-installed |
+
+---
+
+#### WithSkipDownload()
+
+```go
+func WithSkipDownload() SetupOption
+```
+
+Prevent `EnsureInstalled` from fetching the msb + libkrunfw bundle from GitHub. Use when the runtime is already on disk at the install path (e.g. air-gapped CI). The embedded FFI library is unaffected — it ships with the SDK.
 
 ---
 
@@ -507,7 +507,7 @@ for {
 
 ## Patch
 
-Factory namespace for rootfs patches passed via [`WithPatches`](#withpatches). Invoke through the package-level `Patch` value. Each method returns a [`PatchConfig`](#patchconfig). `Mkdir` and `Remove` are idempotent; other operations error at boot when targeting a path already present in the image unless `Replace: true` is passed in [`PatchOptions`](#patchoptions).
+Helpers that construct rootfs patches for [`WithPatches`](#withpatches). Access via the package-level `Patch` value. Each method returns a [`PatchConfig`](#patchconfig). `Mkdir` and `Remove` are idempotent; other operations error at boot when targeting a path already present in the image unless `Replace: true` is passed in [`PatchOptions`](#patchoptions).
 
 See [Patches](/sandboxes/customize#patches) for conceptual context.
 
@@ -585,7 +585,7 @@ Recursively copy a host directory at `src` into the guest rootfs at `dst`. Only 
 
 ## Init
 
-Factory namespace for [`InitConfig`](#initconfig) values used with [`WithInit`](#withinit) to hand off PID 1 inside the guest after agentd setup. See [Custom init system](/sandboxes/customize#custom-init-system) for image picks and shutdown semantics.
+Helpers that construct [`InitConfig`](#initconfig) values for [`WithInit`](#withinit) to hand off PID 1 inside the guest after agentd setup. Access via the package-level `Init` value. See [Custom init system](/sandboxes/customize#custom-init-system) for image picks and shutdown semantics.
 
 ---
 
@@ -775,7 +775,7 @@ Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI
 func WithInit(cfg InitConfig) SandboxOption
 ```
 
-Hand off PID 1 to a guest init binary. Construct `cfg` via the [`Init`](#init) factory.
+Hand off PID 1 to a guest init binary. Construct `cfg` via [`Init`](#init).
 
 ---
 
@@ -895,7 +895,7 @@ Append credential secrets to the sandbox. Secrets never enter the VM; the networ
 func WithPatches(patches ...PatchConfig) SandboxOption
 ```
 
-Append rootfs patches applied before the VM boots. Patches are only compatible with OverlayFS rootfs (not disk images). Construct via the [`Patch`](#patch) factory.
+Append rootfs patches applied before the VM boots. Patches are only compatible with OverlayFS rootfs (not disk images). Construct via [`Patch`](#patch).
 
 ---
 
@@ -1008,7 +1008,7 @@ Private registry credentials.
 
 ### PatchConfig
 
-A single rootfs patch produced by the [`Patch`](#patch) factory.
+A single rootfs patch produced by [`Patch`](#patch).
 
 | Field   | Type                      | Description                                                 |
 | ------- | ------------------------- | ----------------------------------------------------------- |
@@ -1024,7 +1024,7 @@ A single rootfs patch produced by the [`Patch`](#patch) factory.
 
 ### PatchOptions
 
-Tuning struct for the `Patch` factory.
+Tuning struct passed to [`Patch`](#patch) methods.
 
 | Field   | Type      | Description                |
 | ------- | --------- | -------------------------- |

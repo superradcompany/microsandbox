@@ -6,7 +6,7 @@ icon: "network-wired"
 
 See [Networking](/networking/overview) for the conceptual overview and [TLS Interception](/networking/tls) for TLS proxy details.
 
-The Go SDK's network surface is a single [`NetworkConfig`](#networkconfig) struct passed via [`WithNetwork`](/sdk/go/sandbox#withnetwork). Common shapes come from the [`NetworkPolicy`](#networkpolicy) factory; custom rule sets are built by populating `NetworkConfig.Rules` directly.
+The Go SDK's network surface is a single [`NetworkConfig`](#networkconfig) struct passed via [`WithNetwork`](/sdk/go/sandbox#withnetwork). Common shapes come from [`NetworkPolicy`](#networkpolicy); custom rule sets are built by populating `NetworkConfig.Rules` directly.
 
 ```go
 sb, err := m.CreateSandbox(ctx, "worker",
@@ -17,7 +17,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 ## NetworkPolicy
 
-The factory namespace returning common preset [`*NetworkConfig`](#networkconfig) values. Invoke through the package-level `NetworkPolicy` value.
+Helpers that return common preset [`*NetworkConfig`](#networkconfig) values. Access via the package-level `NetworkPolicy` value.
 
 ---
 
@@ -114,7 +114,7 @@ The configuration struct passed via [`WithNetwork`](/sdk/go/sandbox#withnetwork)
 
 | Field | Type | Description |
 |-------|------|-------------|
-| Policy | [`NetworkPolicyPreset`](#networkpolicypreset) | Preset name. Mutually exclusive with `Rules` for canned configurations; set by the [`NetworkPolicy`](#networkpolicy) factory |
+| Policy | [`NetworkPolicyPreset`](#networkpolicypreset) | Preset name. Mutually exclusive with `Rules` for canned configurations; set via [`NetworkPolicy`](#networkpolicy) |
 | Rules | `[]`[`PolicyRule`](#policyrule) | Ordered custom rules (first match wins) |
 | DefaultEgress | [`PolicyAction`](#policyaction) | Fall-through action for outbound when no rule matches. Defaults to `"deny"` |
 | DefaultIngress | [`PolicyAction`](#policyaction) | Fall-through action for inbound when no rule matches. Defaults to `"allow"` |
@@ -242,7 +242,7 @@ type PolicyProtocol string
 type NetworkPolicyPreset string
 ```
 
-Preset names accepted by [`NetworkConfig.Policy`](#networkconfig). Prefer the [`NetworkPolicy`](#networkpolicy) factory which returns a preconfigured `*NetworkConfig`.
+Preset names accepted by [`NetworkConfig.Policy`](#networkconfig). Prefer [`NetworkPolicy`](#networkpolicy), which returns a preconfigured `*NetworkConfig`.
 
 | Constant | Value | Description |
 |----------|-------|-------------|

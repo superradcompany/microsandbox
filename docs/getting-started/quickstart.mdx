@@ -112,6 +112,9 @@ icon: "bolt"
 
     func main() {
         ctx := context.Background()
+        // Optional: download msb + libkrunfw to ~/.microsandbox/ if not
+        // already there. The first SDK call does this for you, but
+        // calling it explicitly surfaces install errors up front.
         if err := m.EnsureInstalled(ctx); err != nil {
             log.Fatal(err)
         }

@@ -278,7 +278,7 @@ sb, err := m.CreateSandbox(ctx, "worker",
 )
 ```
 
-Each `Mount.X(...)` factory returns a [`MountConfig`](#mountconfig). The `kind` discriminator is set internally; callers should always use the factory rather than constructing the struct manually.
+Each `Mount.X(...)` helper returns a [`MountConfig`](#mountconfig). The `kind` discriminator is set internally; callers should always use these helpers rather than constructing the struct manually.
 
 ---
 
@@ -353,7 +353,7 @@ Tuning struct for `Mount.Disk`.
 
 ### MountConfig
 
-Discriminated mount configuration produced by the `Mount` factory. Inspect the kind via `Kind()`.
+Discriminated mount configuration produced by `Mount` helpers. Inspect the kind via `Kind()`.
 
 | Field | Type | Description |
 |-------|------|-------------|
