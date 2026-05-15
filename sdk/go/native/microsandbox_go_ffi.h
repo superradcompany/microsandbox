@@ -8,4 +8,536 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+typedef uint64_t Handle;
+
+/**
+ * Free a C string previously returned as an error from any `msb_*` function.
+ * Safe to call with a null pointer (no-op).
+ *
+ * # Safety
+ * `ptr` must be either null or a pointer returned by this library's
+ * `CString::into_raw` — callers from Go produce this via error returns only.
+ */
+void msb_free_string(char *ptr);
+
+/**
+ * Push the SDK-resolved msb binary path into the Rust resolver's tier 2.
+ * Called once from setup.EnsureInstalled after the install dir is known.
+ * Set-once: subsequent calls are ignored (matches the OnceLock in
+ * microsandbox::config). Null or invalid-UTF-8 paths are silently ignored
+ * since the resolver's lower tiers (~/.microsandbox/bin/msb, PATH) still
+ * work as fallbacks.
+ *
+ * # Safety
+ * `path` must be either null or a valid null-terminated UTF-8 C string
+ * owned by the caller for the duration of this call.
+ */
+void msb_set_sdk_msb_path(const char *path);
+
+/**
+ * Allocate and register a new CancellationToken. Returns the opaque id that
+ * must be passed to the corresponding blocking msb_* call and later freed
+ * with msb_cancel_unregister.
+ */
+uint64_t msb_cancel_alloc(void);
+
+/**
+ * Trigger cancellation for the given id. Safe to call multiple times or
+ * after msb_cancel_unregister (no-op in those cases).
+ */
+void msb_cancel_trigger(uint64_t id);
+
+/**
+ * Remove the token for `id`. Called by Go after the blocking goroutine
+ * returns, regardless of whether cancellation was triggered.
+ */
+void msb_cancel_unregister(uint64_t id);
+
+char *msb_sandbox_create(uint64_t cancel_id,
+                         const char *name,
+                         const char *opts_json,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+char *msb_sandbox_lookup(uint64_t cancel_id,
+                         const char *name,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+char *msb_sandbox_connect(uint64_t cancel_id,
+                          const char *name,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+char *msb_sandbox_start(uint64_t cancel_id,
+                        const char *name,
+                        bool detached,
+                        unsigned char *buf,
+                        uintptr_t buf_len);
+
+char *msb_sandbox_handle_stop(uint64_t cancel_id,
+                              const char *name,
+                              unsigned char *buf,
+                              uintptr_t buf_len);
+
+char *msb_sandbox_handle_kill(uint64_t cancel_id,
+                              const char *name,
+                              unsigned char *buf,
+                              uintptr_t buf_len);
+
+char *msb_sandbox_close(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
+
+char *msb_sandbox_detach(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
+
+char *msb_sandbox_stop(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Stop and wait for full shutdown. Returns `{"exit_code": <int|null>}`.
+ */
+char *msb_sandbox_stop_and_wait(uint64_t cancel_id,
+                                Handle handle,
+                                unsigned char *buf,
+                                uintptr_t buf_len);
+
+/**
+ * Kill the sandbox immediately (SIGKILL on the VM process).
+ */
+char *msb_sandbox_kill(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Trigger graceful drain (SIGUSR1). Returns `{"ok":true}`.
+ */
+char *msb_sandbox_drain(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Wait for the sandbox process to exit. Returns `{"exit_code": <int|null>}`.
+ */
+char *msb_sandbox_wait(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Reports whether this handle owns the sandbox lifecycle (synchronous).
+ * Returns `{"owns":true}` or `{"owns":false}`.
+ */
+char *msb_sandbox_owns_lifecycle(Handle handle, unsigned char *buf, uintptr_t buf_len);
+
+char *msb_sandbox_list(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+
+char *msb_sandbox_logs(uint64_t cancel_id,
+                       Handle handle,
+                       const char *opts_json,
+                       unsigned char *buf,
+                       uintptr_t buf_len);
+
+char *msb_sandbox_handle_logs(uint64_t cancel_id,
+                              const char *name,
+                              const char *opts_json,
+                              unsigned char *buf,
+                              uintptr_t buf_len);
+
+char *msb_sandbox_remove(uint64_t cancel_id,
+                         const char *name,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+char *msb_sandbox_exec(uint64_t cancel_id,
+                       Handle handle,
+                       const char *cmd,
+                       const char *exec_opts_json,
+                       unsigned char *buf,
+                       uintptr_t buf_len);
+
+char *msb_sandbox_metrics(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
+
+char *msb_fs_read(uint64_t cancel_id,
+                  Handle handle,
+                  const char *path,
+                  unsigned char *buf,
+                  uintptr_t buf_len);
+
+char *msb_fs_write(uint64_t cancel_id,
+                   Handle handle,
+                   const char *path,
+                   const char *data_b64,
+                   unsigned char *buf,
+                   uintptr_t buf_len);
+
+char *msb_fs_list(uint64_t cancel_id,
+                  Handle handle,
+                  const char *path,
+                  unsigned char *buf,
+                  uintptr_t buf_len);
+
+char *msb_fs_stat(uint64_t cancel_id,
+                  Handle handle,
+                  const char *path,
+                  unsigned char *buf,
+                  uintptr_t buf_len);
+
+char *msb_fs_copy_from_host(uint64_t cancel_id,
+                            Handle handle,
+                            const char *host_path,
+                            const char *guest_path,
+                            unsigned char *buf,
+                            uintptr_t buf_len);
+
+char *msb_fs_copy_to_host(uint64_t cancel_id,
+                          Handle handle,
+                          const char *guest_path,
+                          const char *host_path,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+char *msb_fs_mkdir(uint64_t cancel_id,
+                   Handle handle,
+                   const char *path,
+                   unsigned char *buf,
+                   uintptr_t buf_len);
+
+char *msb_fs_remove(uint64_t cancel_id,
+                    Handle handle,
+                    const char *path,
+                    unsigned char *buf,
+                    uintptr_t buf_len);
+
+char *msb_fs_remove_dir(uint64_t cancel_id,
+                        Handle handle,
+                        const char *path,
+                        unsigned char *buf,
+                        uintptr_t buf_len);
+
+char *msb_fs_copy(uint64_t cancel_id,
+                  Handle handle,
+                  const char *src,
+                  const char *dst,
+                  unsigned char *buf,
+                  uintptr_t buf_len);
+
+char *msb_fs_rename(uint64_t cancel_id,
+                    Handle handle,
+                    const char *src,
+                    const char *dst,
+                    unsigned char *buf,
+                    uintptr_t buf_len);
+
+char *msb_fs_exists(uint64_t cancel_id,
+                    Handle handle,
+                    const char *path,
+                    unsigned char *buf,
+                    uintptr_t buf_len);
+
+char *msb_volume_create(uint64_t cancel_id,
+                        const char *name,
+                        const char *opts_json,
+                        unsigned char *buf,
+                        uintptr_t buf_len);
+
+char *msb_volume_remove(uint64_t cancel_id,
+                        const char *name,
+                        unsigned char *buf,
+                        uintptr_t buf_len);
+
+char *msb_volume_list(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Start a metrics stream. Returns `{"stream_handle":<u64>}`.
+ * interval_ms: polling interval in milliseconds (0 → 1 ms minimum).
+ */
+char *msb_sandbox_metrics_stream(uint64_t cancel_id,
+                                 Handle handle,
+                                 uint64_t interval_ms,
+                                 unsigned char *buf,
+                                 uintptr_t buf_len);
+
+/**
+ * Poll for the next metrics snapshot. Blocks until the next interval fires.
+ * Returns a JSON metrics object, or `{"done":true}` if the stream ended.
+ */
+char *msb_metrics_recv(uint64_t cancel_id,
+                       Handle stream_handle,
+                       unsigned char *buf,
+                       uintptr_t buf_len);
+
+/**
+ * Close (drop) a metrics stream. The background driver task exits when the
+ * channel receiver is dropped.
+ */
+char *msb_metrics_close(Handle stream_handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Start a streaming exec session. Returns `{"exec_handle":<u64>}`.
+ * The exec handle MUST be released with msb_exec_close when done.
+ *
+ * exec_opts_json: same schema as msb_sandbox_exec (args, cwd, timeout_secs).
+ */
+char *msb_sandbox_exec_stream(uint64_t cancel_id,
+                              Handle handle,
+                              const char *cmd,
+                              const char *exec_opts_json,
+                              unsigned char *buf,
+                              uintptr_t buf_len);
+
+/**
+ * Receive the next event from a streaming exec session.
+ * Blocks until an event is available or the stream ends.
+ * Returns {"event":"done"} when all events have been consumed.
+ * The exec handle remains valid after "done" until msb_exec_close is called.
+ */
+char *msb_exec_recv(uint64_t cancel_id, Handle exec_handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Release the exec handle. Does not kill the running process; use
+ * msb_sandbox_exec_stream then msb_exec_close after the process exits,
+ * or msb_exec_signal/kill to terminate it first.
+ */
+char *msb_exec_close(uint64_t cancel_id, Handle exec_handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Return the internal protocol ID for an exec session. Synchronous.
+ * Returns `{"id":"<string>"}`.
+ */
+char *msb_exec_id(Handle exec_handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Send a Unix signal to the running process.
+ * signal: standard Unix signal number (e.g. 15 = SIGTERM, 9 = SIGKILL).
+ */
+char *msb_exec_signal(uint64_t cancel_id,
+                      Handle exec_handle,
+                      int32_t signal,
+                      unsigned char *buf,
+                      uintptr_t buf_len);
+
+/**
+ * Write data to the stdin pipe of a running exec session.
+ * data_b64 is standard base64. Returns `{"ok":true}` on success.
+ */
+char *msb_exec_stdin_write(uint64_t cancel_id,
+                           Handle exec_handle,
+                           const char *data_b64,
+                           unsigned char *buf,
+                           uintptr_t buf_len);
+
+/**
+ * Close the stdin pipe of a running exec session. Returns `{"ok":true}` on success.
+ */
+char *msb_exec_stdin_close(uint64_t cancel_id,
+                           Handle exec_handle,
+                           unsigned char *buf,
+                           uintptr_t buf_len);
+
+/**
+ * Collect all remaining stdout/stderr from a streaming exec and return ExecOutput.
+ * Returns `{"stdout_b64":"...","stderr_b64":"...","exit_code":<int>}`.
+ */
+char *msb_exec_collect(uint64_t cancel_id,
+                       Handle exec_handle,
+                       unsigned char *buf,
+                       uintptr_t buf_len);
+
+/**
+ * Wait for the exec session to exit. Returns `{"exit_code":<int>}`.
+ */
+char *msb_exec_wait(uint64_t cancel_id, Handle exec_handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Send SIGKILL to the running exec process. Returns `{"ok":true}`.
+ */
+char *msb_exec_kill(uint64_t cancel_id, Handle exec_handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Return metrics for all running sandboxes.
+ * Returns `{"sandboxes":{"<name>":{...metrics...},...}}`.
+ */
+char *msb_all_sandbox_metrics(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Return metrics for a specific sandbox by name.
+ * Returns the same metrics JSON shape as msb_sandbox_metrics.
+ */
+char *msb_sandbox_handle_metrics(uint64_t cancel_id,
+                                 const char *name,
+                                 unsigned char *buf,
+                                 uintptr_t buf_len);
+
+/**
+ * Remove the sandbox's persisted filesystem + database state.
+ * The sandbox must be stopped. Consumes the live handle.
+ * Returns `{"ok":true}`.
+ */
+char *msb_sandbox_remove_persisted(uint64_t cancel_id,
+                                   Handle handle,
+                                   unsigned char *buf,
+                                   uintptr_t buf_len);
+
+/**
+ * Look up a volume by name and return its metadata.
+ * Returns `{"name":"...","quota_mib":<int|null>,"used_bytes":<int>,
+ *           "labels":{"k":"v",...},"created_at_unix":<int|null>}`.
+ */
+char *msb_volume_get(uint64_t cancel_id, const char *name, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Returns the upstream `microsandbox` crate version this FFI was built against.
+ * Synchronous; no Rust-side state is touched. The Go SDK exposes this so callers
+ * can verify the loaded library matches the expected runtime.
+ */
+char *msb_version(unsigned char *buf, uintptr_t buf_len);
+
+char *msb_image_get(uint64_t cancel_id,
+                    const char *reference,
+                    unsigned char *buf,
+                    uintptr_t buf_len);
+
+char *msb_image_list(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+
+char *msb_image_inspect(uint64_t cancel_id,
+                        const char *reference,
+                        unsigned char *buf,
+                        uintptr_t buf_len);
+
+char *msb_image_remove(uint64_t cancel_id,
+                       const char *reference,
+                       bool force,
+                       unsigned char *buf,
+                       uintptr_t buf_len);
+
+char *msb_image_gc_layers(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+
+char *msb_image_gc(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+
+char *msb_sandbox_handle_snapshot(uint64_t cancel_id,
+                                  const char *sandbox_name,
+                                  const char *snapshot_name,
+                                  unsigned char *buf,
+                                  uintptr_t buf_len);
+
+char *msb_sandbox_handle_snapshot_to(uint64_t cancel_id,
+                                     const char *sandbox_name,
+                                     const char *path,
+                                     unsigned char *buf,
+                                     uintptr_t buf_len);
+
+char *msb_snapshot_create(uint64_t cancel_id,
+                          const char *source_sandbox,
+                          const char *opts_json,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+char *msb_snapshot_open(uint64_t cancel_id,
+                        const char *path_or_name,
+                        unsigned char *buf,
+                        uintptr_t buf_len);
+
+char *msb_snapshot_verify(uint64_t cancel_id,
+                          const char *path_or_name,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+char *msb_snapshot_get(uint64_t cancel_id,
+                       const char *name_or_digest,
+                       unsigned char *buf,
+                       uintptr_t buf_len);
+
+char *msb_snapshot_list(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+
+char *msb_snapshot_list_dir(uint64_t cancel_id,
+                            const char *dir,
+                            unsigned char *buf,
+                            uintptr_t buf_len);
+
+char *msb_snapshot_remove(uint64_t cancel_id,
+                          const char *path_or_name,
+                          bool force,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+char *msb_snapshot_reindex(uint64_t cancel_id,
+                           const char *dir,
+                           unsigned char *buf,
+                           uintptr_t buf_len);
+
+char *msb_snapshot_export(uint64_t cancel_id,
+                          const char *name_or_path,
+                          const char *out,
+                          const char *opts_json,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+char *msb_snapshot_import(uint64_t cancel_id,
+                          const char *archive,
+                          const char *dest,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+/**
+ * Open a streaming read from a guest file.
+ * Returns `{"stream_handle":<u64>}`.
+ */
+char *msb_fs_read_stream(uint64_t cancel_id,
+                         Handle handle,
+                         const char *path,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+/**
+ * Receive the next chunk from a read stream.
+ * Returns `{"done":true}` at EOF, or `{"chunk_b64":"..."}` with data.
+ */
+char *msb_fs_read_stream_recv(uint64_t cancel_id,
+                              Handle stream_handle,
+                              unsigned char *buf,
+                              uintptr_t buf_len);
+
+/**
+ * Close (drop) a read stream. Synchronous. Returns `{"ok":true}`.
+ */
+char *msb_fs_read_stream_close(Handle stream_handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Open a streaming write to a guest file.
+ * Returns `{"stream_handle":<u64>}`.
+ */
+char *msb_fs_write_stream(uint64_t cancel_id,
+                          Handle handle,
+                          const char *path,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+/**
+ * Write a base64-encoded chunk to a write stream. Returns `{"ok":true}`.
+ */
+char *msb_fs_write_stream_write(uint64_t cancel_id,
+                                Handle stream_handle,
+                                const char *data_b64,
+                                unsigned char *buf,
+                                uintptr_t buf_len);
+
+/**
+ * Close a write stream (sends EOF, waits for confirmation). Returns `{"ok":true}`.
+ */
+char *msb_fs_write_stream_close(uint64_t cancel_id,
+                                Handle stream_handle,
+                                unsigned char *buf,
+                                uintptr_t buf_len);
+
+/**
+ * Attach to a sandbox with an interactive PTY session.
+ * Returns `{"exit_code":<int>}` when the process exits.
+ */
+char *msb_sandbox_attach(uint64_t cancel_id,
+                         Handle handle,
+                         const char *cmd,
+                         const char *opts_json,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+/**
+ * Attach to the sandbox's default shell.
+ * Returns `{"exit_code":<int>}` when the shell exits.
+ */
+char *msb_sandbox_attach_shell(uint64_t cancel_id,
+                               Handle handle,
+                               unsigned char *buf,
+                               uintptr_t buf_len);
+
 #endif  /* MICROSANDBOX_GO_FFI_H */
