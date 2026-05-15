@@ -5,6 +5,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use ipnetwork::Ipv4Network;
 use serde::{Deserialize, Serialize};
 
 use crate::dns::Nameserver;
@@ -80,9 +81,13 @@ pub struct InterfaceOverrides {
     #[serde(default)]
     pub mtu: Option<u16>,
 
-    /// Guest IPv4 address. Default: derived from slot (100.96.0.0/11 pool).
+    /// Guest IPv4 address. Default: derived from slot within `ipv4_pool`.
     #[serde(default)]
     pub ipv4_address: Option<Ipv4Addr>,
+
+    /// Guest IPv4 pool. Default: derived from slot (198.18.0.0/15 pool).
+    #[serde(default)]
+    pub ipv4_pool: Option<Ipv4Network>,
 
     /// Guest IPv6 address. Default: derived from slot (fd42:6d73:62::/48 pool).
     #[serde(default)]

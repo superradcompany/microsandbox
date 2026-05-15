@@ -56,5 +56,12 @@ export interface NetworkConfig {
   readonly secrets: readonly SecretEntry[];
   readonly secretViolation: ViolationAction | null;
   readonly maxConnections: number | null;
+  readonly interface?: {
+    readonly ipv4Pool?: string | null;
+    readonly ipv4Address?: string | null;
+    readonly ipv6Address?: string | null;
+    readonly mac?: readonly number[] | null;
+    readonly mtu?: number | null;
+  };
   readonly trustHostCAs: boolean;
 }

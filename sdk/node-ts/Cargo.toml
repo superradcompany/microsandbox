@@ -13,6 +13,7 @@ path = "native/lib.rs"
 [dependencies]
 microsandbox = { version = "0.4.6", path = "../../crates/microsandbox" }
 microsandbox-network = { version = "0.4.6", path = "../../crates/network" }
+ipnetwork = { workspace = true }
 napi = { version = "3", default-features = false, features = [
     "async",
     "tokio_rt",

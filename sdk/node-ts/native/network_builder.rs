@@ -1,5 +1,6 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use std::str::FromStr;
 
 use microsandbox_network::builder::NetworkBuilder as RustNetworkBuilder;
 use microsandbox_network::policy::NetworkPolicy as RustNetworkPolicy;
@@ -203,6 +204,16 @@ impl JsNetworkBuilder {
         let prev = self.take_inner();
         self.inner = Some(prev.max_connections(max as usize));
         self
+    }
+
+    /// Set the IPv4 pool used for per-sandbox /30 guest subnets.
+    #[napi(js_name = "ipv4Pool")]
+    pub fn ipv4_pool(&mut self, pool: String) -> Result<&Self> {
+        let parsed = ipnetwork::Ipv4Network::from_str(&pool)
+            .map_err(|e| napi::Error::from_reason(format!("invalid IPv4 pool `{pool}`: {e}")))?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.ipv4_pool(parsed));
+        Ok(self)
     }
 
     /// Trust the host's root CAs inside the guest. Default: false.

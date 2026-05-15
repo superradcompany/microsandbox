@@ -215,7 +215,7 @@ describe("InterfaceOverridesBuilder", () => {
   it("constructs cleanly and accepts MTU + IPv4 + IPv6 + MAC", () => {
     const b = new InterfaceOverridesBuilder()
       .mtu(9000)
-      .ipv4("100.96.0.5")
+      .ipv4("198.18.0.5")
       .ipv6("fd42:6d73:62::5")
       .mac("aa:bb:cc:dd:ee:ff");
     expect(b).toBeInstanceOf(InterfaceOverridesBuilder);
@@ -239,10 +239,12 @@ describe("InterfaceOverridesBuilder", () => {
 
   it("valid overrides flow through NetworkBuilder.build()", () => {
     const cfg = new NetworkBuilder()
-      .interface((io) => io.mtu(9000).ipv4("100.96.0.5"))
-      .build() as { interface: { mtu: number; ipv4Address: string } };
+      .interface((io) => io.mtu(9000).ipv4("198.18.0.5"))
+      .ipv4Pool("172.31.240.0/24")
+      .build() as { interface: { mtu: number; ipv4Address: string; ipv4Pool: string } };
     expect(cfg.interface.mtu).toBe(9000);
-    expect(cfg.interface.ipv4Address).toBe("100.96.0.5");
+    expect(cfg.interface.ipv4Address).toBe("198.18.0.5");
+    expect(cfg.interface.ipv4Pool).toBe("172.31.240.0/24");
   });
 });
 

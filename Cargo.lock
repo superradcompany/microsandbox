@@ -2766,6 +2766,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "ipnetwork",
  "microsandbox",
  "microsandbox-network",
  "napi",
