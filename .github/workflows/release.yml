@@ -625,6 +625,18 @@ jobs:
           git tag -a "${GO_TAG}" -m "Go SDK ${ROOT_TAG}" HEAD
           git push origin "${GO_TAG}"
 
+      - name: Warm Go module proxy
+        # Force proxy.golang.org and sum.golang.org to ingest the new
+        # tag now instead of waiting for their scheduled discovery, which
+        # can take 10-60 minutes and leaves `go get @<new-version>`
+        # returning 404 for users on default GOPROXY in the meantime.
+        run: |
+          ROOT_TAG="${GITHUB_REF_NAME}"
+          MODULE="github.com/superradcompany/microsandbox/sdk/go"
+          curl -sSf "https://proxy.golang.org/${MODULE}/@v/${ROOT_TAG}.info" >/dev/null || true
+          curl -sSf "https://proxy.golang.org/${MODULE}/@v/${ROOT_TAG}.mod"  >/dev/null || true
+          curl -sSf "https://sum.golang.org/lookup/${MODULE}@${ROOT_TAG}"    >/dev/null || true
+
   # ---------------------------------------------------------------------------
   # Publish Docker image to GHCR
   # ---------------------------------------------------------------------------
