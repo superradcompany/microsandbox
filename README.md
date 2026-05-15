@@ -45,13 +45,16 @@
 #### <img height="14" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;Install the SDK
 
 > ```sh
-> cargo add microsandbox    # 🦀 Rust
+> cargo add microsandbox                                   # 🦀 Rust
 > ```
 > ```sh
-> uv add microsandbox       # 🐍 Python
+> uv add microsandbox                                      # 🐍 Python
 > ```
 > ```sh
-> npm i microsandbox        # 🟦 TypeScript
+> npm i microsandbox                                       # 🟦 TypeScript
+> ```
+> ```sh
+> go get github.com/superradcompany/microsandbox/sdk/go    # 🐹 Go
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI **(Optional)**
