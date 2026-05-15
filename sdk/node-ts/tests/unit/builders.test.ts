@@ -143,17 +143,17 @@ describe("PatchBuilder", () => {
 });
 
 describe("SandboxBuilder.build", () => {
-  it("requires .image()", () => {
-    expect(() => Sandbox.builder("x").build()).toThrow(InvalidConfigError);
+  it("requires .image()", async () => {
+    await expect(Sandbox.builder("x").build()).rejects.toThrow(InvalidConfigError);
   });
 
-  it("renders branded sizes back to plain numbers", () => {
-    const cfg = Sandbox.builder("x").image("alpine").memory(GiB(2)).build();
+  it("renders branded sizes back to plain numbers", async () => {
+    const cfg = await Sandbox.builder("x").image("alpine").memory(GiB(2)).build();
     expect(cfg.memoryMib).toBe(2048);
   });
 
-  it("collects volumes through the MountBuilder callback", () => {
-    const cfg = Sandbox.builder("x")
+  it("collects volumes through the MountBuilder callback", async () => {
+    const cfg = await Sandbox.builder("x")
       .image("alpine")
       .volume("/data", (m) => m.named("v1").readonly())
       .volume("/tmp", (m) => m.tmpfs().size(MiB(64)))
@@ -172,36 +172,36 @@ describe("SandboxBuilder.build", () => {
     });
   });
 
-  it("invalid volume invocations defer to .build() / .create()", () => {
+  it("invalid volume invocations defer to .build() / .create()", async () => {
     const builder = Sandbox.builder("x")
       .image("alpine")
       .volume("/bad", (m) => m.bind("/host").size(MiB(1)));
-    expect(() => builder.build()).toThrow(InvalidConfigError);
+    await expect(builder.build()).rejects.toThrow(InvalidConfigError);
   });
 
-  it("defaults metricsSampleIntervalMs to 1000", () => {
-    const cfg = Sandbox.builder("x").image("alpine").build();
+  it("defaults metricsSampleIntervalMs to 1000", async () => {
+    const cfg = await Sandbox.builder("x").image("alpine").build();
     expect(cfg.metricsSampleIntervalMs).toBe(1000);
   });
 
-  it("metricsSampleIntervalMs sets the persisted value", () => {
-    const cfg = Sandbox.builder("x")
+  it("metricsSampleIntervalMs sets the persisted value", async () => {
+    const cfg = await Sandbox.builder("x")
       .image("alpine")
       .metricsSampleIntervalMs(5000)
       .build();
     expect(cfg.metricsSampleIntervalMs).toBe(5000);
   });
 
-  it("metricsSampleIntervalMs(0) disables sampling", () => {
-    const cfg = Sandbox.builder("x")
+  it("metricsSampleIntervalMs(0) disables sampling", async () => {
+    const cfg = await Sandbox.builder("x")
       .image("alpine")
       .metricsSampleIntervalMs(0)
       .build();
     expect(cfg.metricsSampleIntervalMs).toBe(0);
   });
 
-  it("disableMetricsSample overrides metricsSampleIntervalMs", () => {
-    const cfg = Sandbox.builder("x")
+  it("disableMetricsSample overrides metricsSampleIntervalMs", async () => {
+    const cfg = await Sandbox.builder("x")
       .image("alpine")
       .metricsSampleIntervalMs(5000)
       .disableMetricsSample()

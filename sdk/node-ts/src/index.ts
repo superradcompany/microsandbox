@@ -142,10 +142,10 @@ wrapMethodWithErrorMap(napi.VolumeBuilder, "create");
       }
       return v;
     };
-    proto.build = function () {
+    proto.build = async function () {
       let json: string;
       try {
-        json = origBuild.apply(this);
+        json = await origBuild.apply(this);
       } catch (e) {
         throw mapNapiError(e);
       }
