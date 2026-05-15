@@ -246,9 +246,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::byte_char_slices)] // intentional: comparing to a single-byte slice
     fn test_detach_keys_single_char() {
         let keys = DetachKeys::parse("q").unwrap();
-        assert_eq!(keys.sequence(), &[b'q']);
+        assert_eq!(keys.sequence(), b"q");
     }
 
     #[test]

@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   LIBKRUNFW_VERSION: "5.2.1"
@@ -13,10 +20,31 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Detect whether the diff touches anything outside docs/. When it doesn't,
+  # every downstream job is gated off and posts as "skipped", which satisfies
+  # the required status checks on main without burning CI minutes.
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '!docs/**'
+
+  # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
   # ---------------------------------------------------------------------------
   build-kernel:
     name: Build kernel.c (aarch64)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +79,8 @@ jobs:
   # ---------------------------------------------------------------------------
   build-agentd-aarch64:
     name: Build agentd (aarch64-linux-musl)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -60,6 +90,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Install agentd build deps
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -82,8 +114,8 @@ jobs:
   # ---------------------------------------------------------------------------
   check:
     name: Check (${{ matrix.target }})
-    needs: [build-kernel, build-agentd-aarch64]
-    if: always()
+    needs: [build-kernel, build-agentd-aarch64, changes]
+    if: always() && needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -117,6 +149,8 @@ jobs:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       # -- Linux build deps --
       - name: Install build deps (Linux)
@@ -216,7 +250,7 @@ jobs:
 
       - name: Build Node SDK
         working-directory: sdk/node-ts
-        run: npm install && npm run build
+        run: npm ci && npm run build
 
       # -- Checks (Python SDK) --
       - uses: astral-sh/setup-uv@v3
@@ -246,6 +280,10 @@ jobs:
         working-directory: sdk/python
         run: uv run maturin develop --release
 
+      - name: Test Python SDK
+        working-directory: sdk/python
+        run: uv run pytest
+
       - name: Lint Python SDK (ruff)
         working-directory: sdk/python
         run: uv run ruff check .
@@ -253,6 +291,37 @@ jobs:
       - name: Sanity wheel build (Python SDK)
         working-directory: sdk/python
         run: uv build --wheel
+
+      # -- Checks (Go SDK) --
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          # No cache-dependency-path: sdk/go has zero external deps,
+          # nothing to cache.
+          cache: false
+
+      - name: Build Go SDK
+        working-directory: sdk/go
+        run: go build ./...
+
+      - name: Vet Go SDK
+        working-directory: sdk/go
+        run: go vet ./...
+
+      - name: Unit-test Go SDK
+        working-directory: sdk/go
+        # Unit tests don't dlopen the FFI lib, so no MICROSANDBOX_LIB_PATH
+        # needed. Integration tests live under ./integration with the
+        # `integration` build tag and run in the go-sdk-test job below.
+        run: go test -count=1 .
+
+      # -- Build Go FFI cdylib (linux-x86_64 only, for the integration job) --
+      - name: Build microsandbox-go cdylib
+        if: matrix.target == 'linux-x86_64'
+        run: |
+          cargo build -p microsandbox-go
+          mkdir -p build
+          cp target/debug/libmicrosandbox_go_ffi.so build/
 
       # -- Upload artifacts (linux-x86_64 only, for SDK smoke tests) --
       - name: Upload build artifacts
@@ -268,15 +337,14 @@ jobs:
         with:
           name: node-sdk-linux-x86_64
           path: |
-            sdk/node-ts/index.cjs
-            sdk/node-ts/index.mjs
-            sdk/node-ts/index.d.cts
-            sdk/node-ts/index.d.ts
-            sdk/node-ts/postinstall.js
-            sdk/node-ts/microsandbox.*.node
+            sdk/node-ts/native/index.cjs
+            sdk/node-ts/native/index.d.ts
+            sdk/node-ts/native/microsandbox.*.node
+            sdk/node-ts/dist/
             sdk/node-ts/package.json
             sdk/node-ts/package-lock.json
             sdk/node-ts/tests/
+            sdk/node-ts/tsconfig.json
             sdk/node-ts/vitest.config.ts
 
       # -- Checks (MCP server) --
@@ -293,11 +361,87 @@ jobs:
           npm run build
 
   # ---------------------------------------------------------------------------
+  # Integration tests (requires KVM)
+  # ---------------------------------------------------------------------------
+  integration-test:
+    name: Integration Tests
+    needs: [check, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: self-hosted-ubuntu-2404-x64
+    steps:
+      - name: Clean workspace
+        run: rm -rf "${{ github.workspace }}"/{build}
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      # -- Download pre-built artifacts --
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
+      # -- Install msb + libkrunfw --
+      - name: Install msb
+        run: |
+          chmod +x build/msb
+          mkdir -p ~/.microsandbox/bin ~/.microsandbox/lib
+          install -m755 build/msb ~/.microsandbox/bin/msb
+          install -m644 build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
+          ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
+
+      # -- Build deps (mirrors the Linux install in the check job) --
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+
+      - name: Build agentd
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
+          cp crates/agentd/target/x86_64-unknown-linux-musl/release/agentd build/agentd
+
+      # -- Run integration tests --
+      # MSB_TEST_ISOLATE_HOME=1 turns on per-test ~/.microsandbox isolation
+      # (see crates/test-utils), so nextest can run tests in parallel without
+      # sqlite/image-cache contention.
+      - name: Run integration tests
+        env:
+          MSB_TEST_ISOLATE_HOME: "1"
+        run: |
+          export PATH="$HOME/.microsandbox/bin:$PATH"
+          export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
+          cargo nextest run -p microsandbox --tests --run-ignored=only
+
+  # ---------------------------------------------------------------------------
   # Node.js SDK smoke tests (requires KVM)
+  #
+  # Runs the smoke suite under both Node and Bun. The two are sequential
+  # in one job so they don't fight over the workspace on the self-hosted
+  # runner.
+  #
+  # No `~/.microsandbox` install: the SDK uses its bundled platform-pkg
+  # binaries. We patch in the freshly-built msb + libkrunfw so the test
+  # exercises current code, not the lagged published binary. With no home
+  # fallback, the bridge is the only path msb can reach native — under Bun
+  # pre-fix, sandbox creation fails clean instead of being silently masked.
   # ---------------------------------------------------------------------------
   node-sdk-test:
     name: Node.js SDK Tests
-    needs: check
+    needs: [check, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: self-hosted-ubuntu-2404-x64
     steps:
       - name: Clean workspace
@@ -309,7 +453,6 @@ jobs:
         with:
           node-version: 22
 
-      # -- Download pre-built artifacts --
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -322,10 +465,77 @@ jobs:
           name: node-sdk-linux-x86_64
           path: sdk/node-ts/
 
+      - name: Install Node.js dependencies
+        working-directory: sdk/node-ts
+        run: npm ci --ignore-scripts
+
+      # The published platform-pkg msb may lag the SDK; replace it with the
+      # freshly-built binaries so the smoke test runs against current code.
+      - name: Use fresh runtime binaries in platform package
+        working-directory: sdk/node-ts
+        run: |
+          PKG=node_modules/@superradcompany/microsandbox-linux-x64-gnu
+          chmod +x ${{ github.workspace }}/build/msb
+          install -m755 ${{ github.workspace }}/build/msb $PKG/bin/msb
+          rm -f $PKG/lib/libkrunfw*
+          cp -P ${{ github.workspace }}/build/libkrunfw.so* $PKG/lib/
+
+      - name: Run SDK tests (Node)
+        working-directory: sdk/node-ts
+        env:
+          MSB_HOME: ${{ runner.temp }}/msb-home-${{ github.run_id }}-node
+        run: npm test
+
+      # setup-bun downloads a zipped release; unzip isn't preinstalled on
+      # the self-hosted runner.
+      - name: Install unzip
+        run: sudo apt-get update && sudo apt-get install -y unzip
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Run SDK tests (Bun)
+        working-directory: sdk/node-ts
+        env:
+          MSB_HOME: ${{ runner.temp }}/msb-home-${{ github.run_id }}-bun
+        run: bunx --bun vitest run
+
+  # ---------------------------------------------------------------------------
+  # Go SDK integration tests (requires KVM)
+  #
+  # Downloads the pre-built msb + libkrunfw + libmicrosandbox_go_ffi.so from
+  # the `check` job, then runs `go test -tags integration ./integration/...`.
+  # Mirrors the node-sdk-test pattern.
+  # ---------------------------------------------------------------------------
+  go-sdk-test:
+    name: Go SDK Tests
+    needs: [check, changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: self-hosted-ubuntu-2404-x64
+    steps:
+      - name: Clean workspace
+        run: |
+          rm -rf "${{ github.workspace }}"/build
+          rm -rf ~/.microsandbox
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          # No cache-dependency-path: sdk/go has zero external deps,
+          # nothing to cache.
+          cache: false
+
+      # -- Download pre-built artifacts (msb + libkrunfw + cdylib all in build/) --
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: msb-linux-x86_64
+          path: build/
+
       # -- Install msb + libkrunfw --
       - name: Install msb
         run: |
-          rm -f ~/.microsandbox/db/microsandbox.db
           chmod +x build/msb
           mkdir -p ~/.microsandbox/bin ~/.microsandbox/lib
           install -m755 build/msb ~/.microsandbox/bin/msb
@@ -333,14 +543,56 @@ jobs:
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_VERSION }} ~/.microsandbox/lib/libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
 
-      # -- Install deps & run tests --
-      - name: Install Node.js dependencies
-        working-directory: sdk/node-ts
-        run: npm install --ignore-scripts
-
-      - name: Run SDK smoke tests
-        working-directory: sdk/node-ts
+      # -- Run integration tests --
+      - name: Run Go integration tests
+        working-directory: sdk/go
+        env:
+          # Bypass EnsureInstalled's download; load the just-built cdylib.
+          MICROSANDBOX_LIB_PATH: ${{ github.workspace }}/build/libmicrosandbox_go_ffi.so
+          # Force the SDK to spawn the freshly-built msb (mirrors node-sdk-test
+          # reasoning: avoid running against a stale bundled binary).
+          MSB_PATH: ${{ github.workspace }}/build/msb
         run: |
+          # Linux's sockaddr_un.sun_path is 108 bytes. The Go integration
+          # tests derive sandbox names from test function names — some run
+          # 57+ chars — and the agent socket lives at
+          # ${MSB_HOME}/sandboxes/<name>/runtime/agent.sock. The runner's
+          # default $_TEMP is too deep (~32 chars) and the path blows the
+          # limit. Anchor MSB_HOME under /tmp with a short, unique suffix.
+          # Use the shortest possible template that mktemp accepts (XXX)
+          # so paths like /tmp/aBc (8 chars) leave ~100 bytes of headroom
+          # for the sandbox name + /sandboxes/<name>/runtime/agent.sock.
+          MSB_HOME=$(mktemp -d -p /tmp XXX)
+          trap "rm -rf '$MSB_HOME'" EXIT
+          export MSB_HOME
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
-          npm test
+          go test -tags integration -count=1 -timeout 20m ./integration/...
+
+  # ---------------------------------------------------------------------------
+  # Aggregator: a single status check that always reports, regardless of
+  # whether the matrix jobs ran. Branch protection requires only this job,
+  # so docs-only PRs (where the matrix is skipped) still satisfy the gate.
+  # ---------------------------------------------------------------------------
+  summary:
+    name: Check Summary
+    if: always()
+    needs:
+      - changes
+      - build-kernel
+      - build-agentd-aarch64
+      - check
+      - integration-test
+      - node-sdk-test
+      - go-sdk-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate results
+        run: |
+          results='${{ toJson(needs.*.result) }}'
+          echo "needs results: $results"
+          if echo "$results" | grep -qE '"failure"|"cancelled"'; then
+            echo "::error::A required job failed or was cancelled"
+            exit 1
+          fi
+          echo "All required jobs passed or were skipped"

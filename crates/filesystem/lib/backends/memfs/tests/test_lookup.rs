@@ -124,7 +124,7 @@ fn test_lookup_slash_in_name() {
 #[test]
 fn test_lookup_empty_name() {
     let sb = MemFsTestSandbox::new();
-    let name = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(b"\0") };
+    let name = c"";
     let result = sb.fs.lookup(MemFsTestSandbox::ctx(), ROOT_INODE, name);
     MemFsTestSandbox::assert_errno(result, LINUX_EINVAL);
 }

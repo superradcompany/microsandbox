@@ -85,6 +85,14 @@ impl SandboxHandle {
         self.updated_at
     }
 
+    /// Read captured output from `exec.log` for this sandbox.
+    ///
+    /// Same backing data as [`Sandbox::logs`](super::Sandbox::logs).
+    /// Works without starting the sandbox.
+    pub fn logs(&self, opts: &super::LogOptions) -> MicrosandboxResult<Vec<super::LogEntry>> {
+        super::logs::read_logs(&self.name, opts)
+    }
+
     /// Get the latest metrics snapshot for this sandbox.
     pub async fn metrics(&self) -> MicrosandboxResult<super::SandboxMetrics> {
         if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
@@ -94,12 +102,16 @@ impl SandboxHandle {
             )));
         }
 
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let config = self.config()?;
+        if config.effective_metrics_interval().is_none() {
+            return Err(crate::MicrosandboxError::MetricsDisabled(self.name.clone()));
+        }
+
+        let db = crate::db::init_global().await?.read();
         super::metrics::metrics_for_sandbox(
             db,
             self.db_id,
-            u64::from(self.config()?.memory_mib) * 1024 * 1024,
+            u64::from(config.memory_mib) * 1024 * 1024,
         )
         .await
     }
@@ -139,7 +151,12 @@ impl SandboxHandle {
             .join("runtime")
             .join("agent.sock");
 
-        let client = AgentClient::connect(&sock_path).await?;
+        // Bound the handshake reads. The relay is supposed to be running
+        // already for a sandbox in Running/Draining state; if it doesn't
+        // respond within 10s, something is wedged and the caller should
+        // see a timeout instead of hanging forever.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let client = AgentClient::connect(&sock_path, deadline).await?;
         let config: SandboxConfig = serde_json::from_str(&self.config_json)?;
 
         Ok(Sandbox {
@@ -148,6 +165,41 @@ impl SandboxHandle {
             handle: None,
             client: Arc::new(client),
         })
+    }
+
+    /// Snapshot this sandbox to a bare name under the default snapshots
+    /// directory (`~/.microsandbox/snapshots/<name>/`).
+    ///
+    /// The sandbox must be stopped (or crashed); running sandboxes are
+    /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. For
+    /// an explicit filesystem destination, see
+    /// [`snapshot_to`](Self::snapshot_to).
+    pub async fn snapshot(
+        &self,
+        name: &str,
+    ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
+        use super::super::snapshot::{Snapshot, SnapshotDestination};
+        Snapshot::builder(&self.name)
+            .destination(SnapshotDestination::Name(name.to_string()))
+            .create()
+            .await
+    }
+
+    /// Snapshot this sandbox to an explicit filesystem path.
+    ///
+    /// The sandbox must be stopped (or crashed); running sandboxes are
+    /// rejected with `MicrosandboxError::SnapshotSandboxRunning`. For
+    /// the common case of writing under the default snapshots
+    /// directory, see [`snapshot`](Self::snapshot).
+    pub async fn snapshot_to(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
+        use super::super::snapshot::{Snapshot, SnapshotDestination};
+        Snapshot::builder(&self.name)
+            .destination(SnapshotDestination::Path(path.as_ref().to_path_buf()))
+            .create()
+            .await
     }
 
     /// Stop the sandbox gracefully (SIGTERM).
@@ -179,8 +231,7 @@ impl SandboxHandle {
         let all_dead = pids.is_empty() || pids.iter().all(|pid| !super::pid_is_alive(*pid));
 
         if all_dead {
-            let db = crate::db::init_global(Some(crate::config::config().database.max_connections))
-                .await?;
+            let db = crate::db::init_global().await?.write();
             if let Err(e) =
                 super::update_sandbox_status(db, self.db_id, SandboxStatus::Stopped).await
             {
@@ -204,12 +255,11 @@ impl SandboxHandle {
             )));
         }
 
-        let db =
-            crate::db::init_global(Some(crate::config::config().database.max_connections)).await?;
+        let pools = crate::db::init_global().await?;
 
         super::remove_dir_if_exists(&crate::config::config().sandboxes_dir().join(&self.name))?;
         sandbox_entity::Entity::delete_by_id(self.db_id)
-            .exec(db)
+            .exec(pools.write())
             .await?;
 
         Ok(())

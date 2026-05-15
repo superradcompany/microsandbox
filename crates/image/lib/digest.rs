@@ -44,7 +44,11 @@ impl Digest {
     ///
     /// Replaces `:` with `_` (e.g., `sha256_abc123...`).
     pub fn to_path_safe(&self) -> String {
-        format!("{}_{}", self.algorithm, self.hex)
+        format!(
+            "{}_{}",
+            path_safe_component(&self.algorithm),
+            path_safe_component(&self.hex)
+        )
     }
 }
 
@@ -66,11 +70,61 @@ impl FromStr for Digest {
             )));
         }
 
+        if !is_valid_algorithm(algo) {
+            return Err(ImageError::ManifestParse(format!(
+                "invalid digest algorithm: {s}"
+            )));
+        }
+
+        if !is_valid_encoded(hex) {
+            return Err(ImageError::ManifestParse(format!(
+                "invalid digest encoded value: {s}"
+            )));
+        }
+
         Ok(Self {
             algorithm: algo.to_string(),
             hex: hex.to_string(),
         })
     }
+}
+
+fn is_valid_algorithm(algo: &str) -> bool {
+    let mut previous_was_separator = false;
+
+    for b in algo.bytes() {
+        if b.is_ascii_lowercase() || b.is_ascii_digit() {
+            previous_was_separator = false;
+        } else if matches!(b, b'+' | b'.' | b'_' | b'-') {
+            if previous_was_separator {
+                return false;
+            }
+            previous_was_separator = true;
+        } else {
+            return false;
+        }
+    }
+
+    !previous_was_separator
+}
+
+fn is_valid_encoded(encoded: &str) -> bool {
+    encoded
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'=' | b'_' | b'-'))
+}
+
+fn path_safe_component(component: &str) -> String {
+    component
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'=' | b'_' | b'-') {
+                b as char
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 impl fmt::Display for Digest {
@@ -107,6 +161,12 @@ mod tests {
     }
 
     #[test]
+    fn test_path_safe_sanitizes_constructed_digest() {
+        let d = Digest::new("sha/256", "../../escape");
+        assert_eq!(d.to_path_safe(), "sha_256_.._.._escape");
+    }
+
+    #[test]
     fn test_parse_missing_colon() {
         assert!("sha256abc123".parse::<Digest>().is_err());
     }
@@ -115,5 +175,27 @@ mod tests {
     fn test_parse_empty_components() {
         assert!(":abc123".parse::<Digest>().is_err());
         assert!("sha256:".parse::<Digest>().is_err());
+    }
+
+    #[test]
+    fn test_parse_rejects_invalid_algorithm() {
+        assert!("SHA256:abc123".parse::<Digest>().is_err());
+        assert!("sha256.:abc123".parse::<Digest>().is_err());
+        assert!("sha256..v2:abc123".parse::<Digest>().is_err());
+    }
+
+    #[test]
+    fn test_parse_allows_valid_extension_digest() {
+        let d: Digest = "sha256+b64u:LCa0a2j_xo_5m0U8HTBBNBNCLXBkg7-g-YpeiGJm564"
+            .parse()
+            .unwrap();
+        assert_eq!(d.algorithm(), "sha256+b64u");
+        assert_eq!(d.hex(), "LCa0a2j_xo_5m0U8HTBBNBNCLXBkg7-g-YpeiGJm564");
+    }
+
+    #[test]
+    fn test_parse_rejects_invalid_encoded_digest() {
+        assert!("sha256:has.dot".parse::<Digest>().is_err());
+        assert!("sha256:../../escape".parse::<Digest>().is_err());
     }
 }

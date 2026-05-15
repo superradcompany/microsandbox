@@ -1,5 +1,7 @@
 //! Fluent builder for [`SandboxConfig`].
 
+use std::path::PathBuf;
+
 use microsandbox_image::{PullPolicy, PullProgressHandle, RegistryAuth};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
@@ -11,9 +13,13 @@ use std::net::{IpAddr, Ipv4Addr};
 use super::{
     config::SandboxConfig,
     exec::{Rlimit, RlimitResource},
-    types::{ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource},
+    init::{HandoffInit, InitOptionsBuilder},
+    types::{
+        ImageBuilder, IntoImage, MountBuilder, Patch, PatchBuilder, RootfsSource, VolumeMount,
+    },
 };
-use crate::{LogLevel, MicrosandboxResult, size::Mebibytes};
+use crate::{LogLevel, MicrosandboxError, MicrosandboxResult, size::Mebibytes};
+use std::time::Duration;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -23,6 +29,9 @@ use crate::{LogLevel, MicrosandboxResult, size::Mebibytes};
 pub struct SandboxBuilder {
     config: SandboxConfig,
     build_error: Option<crate::MicrosandboxError>,
+    /// Pending snapshot reference (path or bare name) supplied via
+    /// [`from_snapshot`]. Resolved during async `create()`.
+    pending_snapshot: Option<String>,
 }
 
 /// Sub-builder for registry connection settings.
@@ -67,6 +76,7 @@ impl SandboxBuilder {
                 ..Default::default()
             },
             build_error: None,
+            pending_snapshot: None,
         }
     }
 
@@ -146,6 +156,27 @@ impl SandboxBuilder {
         self
     }
 
+    /// Force-disable metrics sampling regardless of `metrics_sample_interval`.
+    pub fn disable_metrics_sample(mut self) -> Self {
+        self.config.disable_metrics_sample = true;
+        self
+    }
+
+    /// Override the metrics sampling interval; pass `Duration::ZERO` to disable.
+    pub fn metrics_sample_interval(mut self, interval: Duration) -> Self {
+        let ms = interval.as_millis();
+        if ms > u128::from(u64::MAX) {
+            if self.build_error.is_none() {
+                self.build_error = Some(MicrosandboxError::InvalidConfig(format!(
+                    "metrics sample interval {interval:?} overflows u64 milliseconds"
+                )));
+            }
+            return self;
+        }
+        self.config.metrics_sample_interval_ms = std::num::NonZero::new(ms as u64);
+        self
+    }
+
     /// Default working directory for commands executed in this sandbox
     /// (e.g., `/app`). Used by [`exec`](super::Sandbox::exec),
     /// [`shell`](super::Sandbox::shell), and [`attach`](super::Sandbox::attach)
@@ -195,10 +226,32 @@ impl SandboxBuilder {
 
     /// Replace an existing sandbox with the same name during create.
     ///
-    /// If the existing sandbox is still active, microsandbox stops it and
-    /// waits for it to exit before recreating it.
+    /// If a sandbox with this name is already active, microsandbox stops
+    /// the prior instance before recreating it: SIGTERM, wait up to ten
+    /// seconds for a graceful exit, then SIGKILL. When the prior sandbox
+    /// is owned by an in-process `Sandbox` handle, the handle's
+    /// underlying child is signalled and reaped directly.
+    ///
+    /// To override the ten-second grace, use [`replace_with_grace`]; pass
+    /// `Duration::ZERO` to skip SIGTERM and SIGKILL immediately.
+    ///
+    /// [`replace_with_grace`]: Self::replace_with_grace
     pub fn replace(mut self) -> Self {
         self.config.replace_existing = true;
+        self
+    }
+
+    /// Replace an existing sandbox, overriding the SIGTERM-to-SIGKILL
+    /// grace. Implies [`replace`](Self::replace) — calling this alone is
+    /// enough.
+    ///
+    /// - `grace > 0`: SIGTERM, wait up to `grace`, then SIGKILL.
+    /// - `grace == Duration::ZERO`: SIGKILL immediately (skip SIGTERM).
+    ///
+    /// The default grace used by [`replace`](Self::replace) is ten seconds.
+    pub fn replace_with_grace(mut self, grace: std::time::Duration) -> Self {
+        self.config.replace_existing = true;
+        self.config.replace_with_grace = grace;
         self
     }
 
@@ -208,9 +261,76 @@ impl SandboxBuilder {
         self
     }
 
+    /// Hand off PID 1 to a guest init binary after agentd's setup.
+    ///
+    /// `cmd` is either an absolute path inside the guest rootfs or
+    /// the literal `"auto"` (probes `/sbin/init`,
+    /// `/lib/systemd/systemd`, `/usr/lib/systemd/systemd`).
+    ///
+    /// ```ignore
+    /// .init("auto")
+    /// .init("/lib/systemd/systemd")
+    /// ```
+    ///
+    /// For init binaries that take argv or extra env (rare in
+    /// practice), use [`init_with`](Self::init_with).
+    ///
+    /// `init` and `entrypoint` are orthogonal: `init` is the guest's
+    /// PID 1; `entrypoint` is the user workload that agentd exec's
+    /// per request. They can be combined freely.
+    pub fn init(mut self, cmd: impl Into<PathBuf>) -> Self {
+        self.config.init = Some(HandoffInit {
+            cmd: cmd.into(),
+            args: Vec::new(),
+            env: Vec::new(),
+        });
+        self
+    }
+
+    /// Hand off PID 1 with a closure-builder for argv and env. Use this
+    /// when the init binary takes flags (e.g. systemd's
+    /// `--unit=multi-user.target`) or needs extra env vars.
+    ///
+    /// ```ignore
+    /// .init_with("/lib/systemd/systemd", |i| {
+    ///     i.args(["--unit=multi-user.target"])
+    ///      .env("container", "microsandbox")
+    /// })
+    /// ```
+    ///
+    /// Calling `.init` or `.init_with` more than once overwrites
+    /// (different from `.env`, which appends). The init is
+    /// pre-boot and one-shot.
+    pub fn init_with(
+        mut self,
+        cmd: impl Into<PathBuf>,
+        f: impl FnOnce(InitOptionsBuilder) -> InitOptionsBuilder,
+    ) -> Self {
+        let (args, env) = f(InitOptionsBuilder::default()).build();
+        self.config.init = Some(HandoffInit {
+            cmd: cmd.into(),
+            args,
+            env,
+        });
+        self
+    }
+
     /// Set the guest hostname. Defaults to the sandbox name.
     pub fn hostname(mut self, hostname: impl Into<String>) -> Self {
         self.config.hostname = Some(hostname.into());
+        self
+    }
+
+    /// Override the libkrunfw shared library for this sandbox.
+    ///
+    /// By default, microsandbox resolves libkrunfw via the global config or
+    /// finds it next to the `msb` binary. Use this to point at a specific
+    /// libkrunfw build — for example, an unreleased firmware during
+    /// development.
+    ///
+    /// The path is validated at [`build`](Self::build) time.
+    pub fn libkrunfw_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.libkrunfw_path = Some(path.into());
         self
     }
 
@@ -248,14 +368,20 @@ impl SandboxBuilder {
     /// .network(|n| n
     ///     .port(8080, 80)
     ///     .policy(NetworkPolicy::public_only())
-    ///     .dns(|d| d.block_domain("evil.com"))
     ///     .tls(|t| t.bypass("*.internal.com"))
     /// )
     /// ```
     #[cfg(feature = "net")]
     pub fn network(mut self, f: impl FnOnce(NetworkBuilder) -> NetworkBuilder) -> Self {
         let network = std::mem::take(&mut self.config.network);
-        self.config.network = f(NetworkBuilder::from_config(network)).build();
+        match f(NetworkBuilder::from_config(network)).build() {
+            Ok(net) => self.config.network = net,
+            Err(err) => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(err.into());
+                }
+            }
+        }
         self
     }
 
@@ -466,20 +592,102 @@ impl SandboxBuilder {
         self
     }
 
+    /// Boot a fresh sandbox from a snapshot artifact.
+    ///
+    /// The snapshot already pins the image reference and digest, so
+    /// this method is mutually exclusive with [`image`](Self::image)
+    /// and [`image_with`](Self::image_with). The snapshot is opened
+    /// (and its integrity verified) at `create()` time, not here.
+    ///
+    /// `path_or_name` accepts either a path to a snapshot artifact
+    /// directory (or a bare name resolved under the default snapshots
+    /// directory).
+    pub fn from_snapshot(mut self, path_or_name: impl Into<String>) -> Self {
+        self.pending_snapshot = Some(path_or_name.into());
+        self
+    }
+
+    /// Pre-populate the snapshot resolution for callers that opened
+    /// the artifact synchronously and don't want the async
+    /// [`resolve_pending`](Self::resolve_pending) step.
+    ///
+    /// Used by the Python SDK helpers, where kwargs-style config
+    /// construction has to stay synchronous. Callers that take this
+    /// route are expected to also call [`image`](Self::image) with
+    /// the snapshot's pinned image reference.
+    pub fn snapshot_resolved(
+        mut self,
+        image_manifest_digest: impl Into<String>,
+        upper_source: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.config.manifest_digest = Some(image_manifest_digest.into());
+        self.config.snapshot_upper_source = Some(upper_source.into());
+        self
+    }
+
     /// Build the configuration without creating the sandbox.
+    ///
+    /// **Caller responsibility**: if the builder was configured via
+    /// [`from_snapshot`](Self::from_snapshot), call
+    /// [`resolve_pending`](Self::resolve_pending) first. The async
+    /// `create*` methods do this automatically.
     pub fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
         self.validate()?;
         Ok(self.config)
     }
 
+    /// Resolve any pending snapshot reference, mutating the builder
+    /// to set `image` and a transient `snapshot_upper_source`.
+    ///
+    /// Called automatically by the async `create*` methods. Public
+    /// for callers that want to drive the builder manually (e.g. the
+    /// `msb run --snapshot` path that uses
+    /// [`create_with_pull_progress`](Self::create_with_pull_progress)).
+    ///
+    /// If the user has already called [`image`](Self::image), the
+    /// pre-set image must match the snapshot's pinned image
+    /// reference; otherwise the call errors.
+    pub async fn resolve_pending(&mut self) -> MicrosandboxResult<()> {
+        let Some(snapshot_ref) = self.pending_snapshot.take() else {
+            return Ok(());
+        };
+
+        let snap = crate::snapshot::Snapshot::open(&snapshot_ref).await?;
+        let snap_ref = snap.manifest().image.reference.clone();
+
+        let user_image = match &self.config.image {
+            RootfsSource::Oci(s) if !s.is_empty() => Some(s.clone()),
+            RootfsSource::Bind(p) if !p.as_os_str().is_empty() => {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "from_snapshot is mutually exclusive with bind/disk image".into(),
+                ));
+            }
+            _ => None,
+        };
+        if let Some(img) = user_image
+            && img != snap_ref
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "from_snapshot pins image '{snap_ref}', but builder was set to '{img}'"
+            )));
+        }
+
+        self.config.image = RootfsSource::Oci(snap_ref);
+        self.config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
+        self.config.snapshot_upper_source = Some(snap.path().join(&snap.manifest().upper.file));
+        Ok(())
+    }
+
     /// Create the sandbox. Boots the VM with agentd ready.
-    pub async fn create(self) -> MicrosandboxResult<super::Sandbox> {
+    pub async fn create(mut self) -> MicrosandboxResult<super::Sandbox> {
+        self.resolve_pending().await?;
         let config = self.build()?;
         super::Sandbox::create(config).await
     }
 
     /// Create the sandbox for detached/background use.
-    pub async fn create_detached(self) -> MicrosandboxResult<super::Sandbox> {
+    pub async fn create_detached(mut self) -> MicrosandboxResult<super::Sandbox> {
+        self.resolve_pending().await?;
         let config = self.build()?;
         super::Sandbox::create_detached(config).await
     }
@@ -489,28 +697,63 @@ impl SandboxBuilder {
     /// Returns a progress handle for per-layer pull events and a task handle
     /// for the sandbox creation result. Useful for CLI commands that want to
     /// display per-layer download/materialization progress during sandbox creation.
+    ///
+    /// If the builder was configured via
+    /// [`from_snapshot`](Self::from_snapshot), snapshot resolution
+    /// happens inside the spawned task so this entry point stays
+    /// synchronous.
     pub fn create_with_pull_progress(
-        self,
+        mut self,
     ) -> crate::MicrosandboxResult<(
         PullProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
     )> {
-        let config = self.build()?;
-        Ok(super::Sandbox::create_with_pull_progress(config))
+        let pending = self.pending_snapshot.is_some();
+        if !pending {
+            let config = self.build()?;
+            return Ok(super::Sandbox::create_with_pull_progress(config));
+        }
+
+        let (handle, sender) = microsandbox_image::progress_channel();
+        let task = tokio::spawn(async move {
+            self.resolve_pending().await?;
+            let config = self.build()?;
+            super::Sandbox::create_with_mode(
+                config,
+                crate::runtime::SpawnMode::Attached,
+                Some(sender),
+            )
+            .await
+        });
+        Ok((handle, task))
     }
 
-    /// Create a detached sandbox with pull progress reporting.
-    ///
     /// Like `create_with_pull_progress` but spawns the sandbox process in detached
     /// mode so the sandbox survives after the creating process exits.
     pub fn create_detached_with_pull_progress(
-        self,
+        mut self,
     ) -> crate::MicrosandboxResult<(
         PullProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
     )> {
-        let config = self.build()?;
-        Ok(super::Sandbox::create_detached_with_pull_progress(config))
+        let pending = self.pending_snapshot.is_some();
+        if !pending {
+            let config = self.build()?;
+            return Ok(super::Sandbox::create_detached_with_pull_progress(config));
+        }
+
+        let (handle, sender) = microsandbox_image::progress_channel();
+        let task = tokio::spawn(async move {
+            self.resolve_pending().await?;
+            let config = self.build()?;
+            super::Sandbox::create_with_mode(
+                config,
+                crate::runtime::SpawnMode::Detached,
+                Some(sender),
+            )
+            .await
+        });
+        Ok((handle, task))
     }
 }
 
@@ -542,6 +785,15 @@ impl SandboxBuilder {
             _ => {}
         }
 
+        if let Some(path) = &self.config.libkrunfw_path
+            && !path.is_file()
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "libkrunfw_path does not exist: {}",
+                path.display()
+            )));
+        }
+
         for rlimit in &self.config.rlimits {
             if rlimit.soft > rlimit.hard {
                 return Err(crate::MicrosandboxError::InvalidConfig(format!(
@@ -550,6 +802,37 @@ impl SandboxBuilder {
                     rlimit.soft,
                     rlimit.hard
                 )));
+            }
+        }
+
+        if let Some(spec) = &self.config.init {
+            super::init::validate(spec)?;
+        }
+
+        // Reject any two DiskImage mounts pointing at the same host file.
+        // Each virtio-blk device caches independently on the host, so any
+        // mix of writable+writable, writable+read-only, or even two
+        // read-only mounts of the same image will diverge from the
+        // kernel's view (RW invalidates the RO cache; RO+RO doubles the
+        // page-cache footprint with no benefit). Compare against the
+        // canonical path so symlinks and `./` prefixes don't bypass the
+        // check.
+        let mut seen: Vec<PathBuf> = Vec::new();
+        for mount in &self.config.mounts {
+            if let VolumeMount::DiskImage { host, .. } = mount {
+                let canonical = std::fs::canonicalize(host).map_err(|e| {
+                    crate::MicrosandboxError::InvalidConfig(format!(
+                        "disk image host path does not exist: {} ({e})",
+                        host.display()
+                    ))
+                })?;
+                if seen.contains(&canonical) {
+                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                        "disk-image volumes cannot share the same host path: {}",
+                        canonical.display()
+                    )));
+                }
+                seen.push(canonical);
             }
         }
 
@@ -566,6 +849,7 @@ impl From<SandboxConfig> for SandboxBuilder {
         Self {
             config,
             build_error: None,
+            pending_snapshot: None,
         }
     }
 }
@@ -603,6 +887,49 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.log_level, None);
+    }
+
+    #[test]
+    fn test_builder_metrics_sample_interval_sets_ms() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .metrics_sample_interval(std::time::Duration::from_millis(750))
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            config.metrics_sample_interval_ms,
+            std::num::NonZero::new(750)
+        );
+    }
+
+    #[test]
+    fn test_builder_metrics_sample_interval_zero_is_disabled() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .metrics_sample_interval(std::time::Duration::ZERO)
+            .build()
+            .unwrap();
+
+        assert!(config.metrics_sample_interval_ms.is_none());
+        assert!(config.effective_metrics_interval().is_none());
+    }
+
+    #[test]
+    fn test_builder_disable_metrics_sample_overrides_interval() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .metrics_sample_interval(std::time::Duration::from_millis(5000))
+            .disable_metrics_sample()
+            .build()
+            .unwrap();
+
+        assert!(config.disable_metrics_sample);
+        assert_eq!(
+            config.metrics_sample_interval_ms,
+            std::num::NonZero::new(5000)
+        );
+        assert!(config.effective_metrics_interval().is_none());
     }
 
     #[test]
@@ -665,7 +992,10 @@ mod tests {
             .unwrap();
 
         assert!(!config.network.enabled);
-        assert_eq!(config.network.policy.default_action, Action::Deny);
+        // `disable_network()` uses `NetworkPolicy::none()` which is deny-all
+        // in both directions with no rules.
+        assert_eq!(config.network.policy.default_egress, Action::Deny);
+        assert_eq!(config.network.policy.default_ingress, Action::Deny);
         assert!(config.network.policy.rules.is_empty());
     }
 
@@ -686,5 +1016,114 @@ mod tests {
         assert_eq!(config.network.ports[0].protocol, PortProtocol::Tcp);
         assert_eq!(config.network.secrets.secrets.len(), 1);
         assert_eq!(config.network.max_connections, Some(128));
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // DiskImage host-path validation
+    //----------------------------------------------------------------------------------------------
+
+    /// Helper: stage two files in a tempdir, return absolute paths.
+    fn two_disk_files() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.qcow2");
+        let b = dir.path().join("b.qcow2");
+        std::fs::write(&a, []).unwrap();
+        std::fs::write(&b, []).unwrap();
+        (dir, a, b)
+    }
+
+    #[test]
+    fn test_builder_rejects_two_writable_same_host() {
+        let (_dir, a, _) = two_disk_files();
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .volume("/x", |v| v.disk(a.clone()))
+            .volume("/y", |v| v.disk(a.clone()))
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("disk-image volumes cannot share the same host path")
+        );
+    }
+
+    #[test]
+    fn test_builder_rejects_writable_plus_readonly_same_host() {
+        // Mixed writable+readonly still corrupts because the writable side's
+        // host page cache invalidates the readonly side's view.
+        let (_dir, a, _) = two_disk_files();
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .volume("/x", |v| v.disk(a.clone()))
+            .volume("/y", |v| v.disk(a.clone()).readonly())
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("disk-image volumes cannot share the same host path")
+        );
+    }
+
+    #[test]
+    fn test_builder_rejects_two_readonly_same_host() {
+        let (_dir, a, _) = two_disk_files();
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .volume("/x", |v| v.disk(a.clone()).readonly())
+            .volume("/y", |v| v.disk(a.clone()).readonly())
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("disk-image volumes cannot share the same host path")
+        );
+    }
+
+    #[test]
+    fn test_builder_accepts_two_writable_different_hosts() {
+        let (_dir, a, b) = two_disk_files();
+        SandboxBuilder::new("test")
+            .image("alpine")
+            .volume("/x", |v| v.disk(a))
+            .volume("/y", |v| v.disk(b))
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn test_builder_canonicalizes_host_paths() {
+        // /foo/./bar resolves to the same canonical as /foo/bar; the check
+        // must catch this even though the byte strings differ.
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.qcow2");
+        std::fs::write(&a, []).unwrap();
+        let parent = a.parent().unwrap();
+        let dotted = parent.join(".").join("a.qcow2");
+
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .volume("/x", |v| v.disk(a))
+            .volume("/y", |v| v.disk(dotted))
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("disk-image volumes cannot share the same host path")
+        );
+    }
+
+    #[test]
+    fn test_builder_rejects_missing_disk_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let nonexistent = dir.path().join("nope.qcow2");
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .volume("/x", |v| v.disk(nonexistent))
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("disk image host path does not exist")
+        );
     }
 }

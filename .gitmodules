@@ -26,3 +26,12 @@
 [submodule "examples/python/root-block/qcow2-alpine"]
 	path = examples/python/root-block/qcow2-alpine
 	url = https://github.com/superradcompany/qcow2-alpine
+[submodule "examples/rust/volume-disk/sample-images"]
+	path = examples/rust/volume-disk/sample-images
+	url = https://github.com/superradcompany/sample-images
+[submodule "examples/python/volume-disk/sample-images"]
+	path = examples/python/volume-disk/sample-images
+	url = https://github.com/superradcompany/sample-images
+[submodule "examples/typescript/volume-disk/sample-images"]
+	path = examples/typescript/volume-disk/sample-images
+	url = https://github.com/superradcompany/sample-images

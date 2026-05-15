@@ -28,7 +28,6 @@ const BRAILLE_TICKS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦"
 pub struct Spinner {
     pb: Option<ProgressBar>,
     start: Instant,
-    label: String,
     target: String,
     quiet: bool,
     _echo_guard: Option<EchoGuard>,
@@ -76,7 +75,6 @@ impl Spinner {
         Self {
             pb,
             start: Instant::now(),
-            label: label.to_string(),
             target: target.to_string(),
             quiet: false,
             _echo_guard: echo_guard,
@@ -88,7 +86,6 @@ impl Spinner {
         Self {
             pb: None,
             start: Instant::now(),
-            label: String::new(),
             target: String::new(),
             quiet: true,
             _echo_guard: None,
@@ -120,20 +117,13 @@ impl Spinner {
     }
 
     /// Finish and clear entirely — no output remains on screen.
-    /// Use before handing the terminal to guest output.
+    ///
+    /// Used on both success and failure paths: errors are presented by
+    /// the top-level error renderer, so the spinner has no failure
+    /// state of its own.
     pub fn finish_clear(self) {
         if let Some(pb) = self.pb {
             pb.finish_and_clear();
-        }
-    }
-
-    /// Finish with error. Shows `✗ <label> <target>`.
-    pub fn finish_error(self) {
-        if let Some(pb) = self.pb {
-            pb.finish_and_clear();
-        }
-        if !self.quiet {
-            eprintln!("   {} {:<12} {}", style("✗").red(), self.label, self.target);
         }
     }
 }
@@ -279,6 +269,41 @@ pub fn error_context(msg: &str, context: &[&str]) {
     eprintln!("{} {msg}", style("error:").red().bold());
     for line in context {
         eprintln!("  {} {}", style("→").dim(), style(line).dim());
+    }
+}
+
+/// One context line in a styled error block.
+///
+/// Both `Cause` and `Hint` lines render with plain (uncolored) text
+/// to keep the error block calm and readable; only the leading `→`
+/// arrow bullet is dim. The variant is still kept so callers can
+/// signal *intent* (cause vs. suggestion) without imposing color —
+/// useful if we ever want to add per-line decorations like a screen
+/// reader hint or an indent shift.
+#[derive(Debug, Clone, Copy)]
+pub enum ErrorLine<'a> {
+    /// A line describing the cause of the error.
+    Cause(&'a str),
+
+    /// A line offering an actionable suggestion.
+    Hint(&'a str),
+}
+
+/// Print an error message with `→`-prefixed context lines.
+///
+/// The `error:` label is bold red; the message and all `→` body
+/// text render uncolored. Only the arrow bullet is dim. This
+/// keeps the error block readable across terminal themes (cyan
+/// renders inconsistently as teal/green-ish on Solarized,
+/// macOS Terminal default, etc., which previously made hints
+/// look like success messages).
+pub fn error_with_lines(msg: &str, lines: &[ErrorLine<'_>]) {
+    eprintln!("{} {msg}", style("error:").red().bold());
+    for line in lines {
+        let text = match line {
+            ErrorLine::Cause(t) | ErrorLine::Hint(t) => t,
+        };
+        eprintln!("  {} {}", style("→").dim(), text);
     }
 }
 

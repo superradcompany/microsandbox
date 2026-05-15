@@ -123,7 +123,7 @@ mod tests {
         let extensions_len = sni_ext_len;
 
         // ClientHello body.
-        let hello_len = 2 + 32 + 1 + 0 + 2 + 2 + 1 + 1 + 2 + extensions_len;
+        let hello_len = (2 + 32 + 1) + 2 + 2 + 1 + 1 + 2 + extensions_len;
 
         // Handshake.
         let hs_len = 4 + hello_len;

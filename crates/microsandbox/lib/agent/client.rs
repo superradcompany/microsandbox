@@ -57,7 +57,14 @@ impl AgentClient {
     ///
     /// Performs the relay handshake to receive the assigned ID offset and
     /// the cached `core.ready` payload, then spawns a background reader task.
-    pub async fn connect(sock_path: &Path) -> MicrosandboxResult<Self> {
+    ///
+    /// `deadline` bounds both handshake reads. Without it, an accepted
+    /// connection that stalls (e.g. a sandbox alive but wedged before
+    /// writing the handshake bytes) would block this call indefinitely.
+    pub async fn connect(
+        sock_path: &Path,
+        deadline: tokio::time::Instant,
+    ) -> MicrosandboxResult<Self> {
         let stream = UnixStream::connect(sock_path).await.map_err(|e| {
             crate::MicrosandboxError::Runtime(format!(
                 "failed to connect to agent relay at {}: {e}",
@@ -69,15 +76,29 @@ impl AgentClient {
 
         // Read the handshake: [id_offset: u32 BE][ready_frame_bytes...]
         let mut offset_buf = [0u8; 4];
-        reader.read_exact(&mut offset_buf).await.map_err(|e| {
-            crate::MicrosandboxError::Runtime(format!("handshake read id_offset: {e}"))
-        })?;
+        tokio::time::timeout_at(deadline, reader.read_exact(&mut offset_buf))
+            .await
+            .map_err(|_| {
+                crate::MicrosandboxError::Runtime(
+                    "handshake read id_offset: timed out before relay sent bytes".into(),
+                )
+            })?
+            .map_err(|e| {
+                crate::MicrosandboxError::Runtime(format!("handshake read id_offset: {e}"))
+            })?;
         let id_offset = u32::from_be_bytes(offset_buf);
 
         // Read the ready frame using the protocol codec directly.
-        let ready_msg = codec::read_message(&mut reader).await.map_err(|e| {
-            crate::MicrosandboxError::Runtime(format!("handshake read ready frame: {e}"))
-        })?;
+        let ready_msg = tokio::time::timeout_at(deadline, codec::read_message(&mut reader))
+            .await
+            .map_err(|_| {
+                crate::MicrosandboxError::Runtime(
+                    "handshake read ready frame: timed out before relay sent frame".into(),
+                )
+            })?
+            .map_err(|e| {
+                crate::MicrosandboxError::Runtime(format!("handshake read ready frame: {e}"))
+            })?;
 
         let ready: Ready = ready_msg
             .payload()

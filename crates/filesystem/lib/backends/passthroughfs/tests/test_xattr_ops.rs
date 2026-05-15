@@ -108,7 +108,7 @@ fn test_listxattr_hides_override() {
                 names.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
             let override_key = OVERRIDE_XATTR_KEY.to_bytes();
             assert!(
-                !name_list.iter().any(|n| *n == override_key),
+                !name_list.contains(&override_key),
                 "override xattr should be hidden from listing"
             );
         }
@@ -157,7 +157,7 @@ fn test_listxattr_size_query_hides_override() {
     let override_key = OVERRIDE_XATTR_KEY.to_bytes();
     let name_list: Vec<&[u8]> = names.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
     assert!(
-        !name_list.iter().any(|n| *n == override_key),
+        !name_list.contains(&override_key),
         "override xattr must not appear in filtered names"
     );
 

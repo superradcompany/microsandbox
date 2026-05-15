@@ -1,6 +1,8 @@
 //! Sandbox configuration.
 
 use std::collections::{HashMap, HashSet};
+use std::num::NonZero;
+use std::path::PathBuf;
 
 use microsandbox_runtime::{logging::LogLevel, policy::SandboxPolicy};
 use serde::{Deserialize, Serialize};
@@ -9,6 +11,7 @@ use microsandbox_image::{ImageConfig, PullPolicy, RegistryAuth};
 
 use super::{
     exec::Rlimit,
+    init::HandoffInit,
     types::{Patch, RootfsSource, SecretsConfig, SshConfig, VolumeMount},
 };
 
@@ -30,6 +33,18 @@ fn default_memory_mib() -> u32 {
 
 fn default_log_level() -> Option<LogLevel> {
     crate::config::config().log_level
+}
+
+fn default_metrics_sample_interval_ms() -> Option<NonZero<u64>> {
+    crate::config::config()
+        .sandbox_defaults
+        .metrics_sample_interval_ms
+}
+
+fn default_disable_metrics_sample() -> bool {
+    crate::config::config()
+        .sandbox_defaults
+        .disable_metrics_sample
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -62,6 +77,17 @@ pub struct SandboxConfig {
     /// `None` means the sandbox process stays silent.
     #[serde(default = "default_log_level")]
     pub log_level: Option<LogLevel>,
+
+    /// Metrics sampling interval in milliseconds; `0` disables sampling.
+    #[serde(
+        default = "default_metrics_sample_interval_ms",
+        with = "crate::config::metrics_interval_serde"
+    )]
+    pub metrics_sample_interval_ms: Option<NonZero<u64>>,
+
+    /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
+    #[serde(default = "default_disable_metrics_sample")]
+    pub disable_metrics_sample: bool,
 
     /// Working directory inside the sandbox.
     #[serde(default)]
@@ -135,6 +161,19 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub stop_signal: Option<String>,
 
+    /// Hand off PID 1 to a guest init binary after agentd's setup.
+    ///
+    /// When set, agentd performs initial setup (mounts, runtime
+    /// directories), then forks. The parent execs the configured init
+    /// (typically `systemd`, but any init works) and becomes PID 1.
+    /// The child stays alive as a normal grandchild, serving host
+    /// requests over virtio-serial.
+    ///
+    /// `None` (the default) means agentd remains PID 1 — the existing
+    /// minimal-init behaviour.
+    #[serde(default)]
+    pub init: Option<HandoffInit>,
+
     /// Pull policy for OCI images. Default: `IfMissing`.
     #[serde(default)]
     pub pull_policy: PullPolicy,
@@ -149,6 +188,15 @@ pub struct SandboxConfig {
     /// are only needed during the pull.
     #[serde(default, skip_serializing)]
     pub registry_auth: Option<RegistryAuth>,
+
+    /// Override the libkrunfw shared library path for this sandbox.
+    ///
+    /// When `None`, resolution falls back to the global config path, a sibling
+    /// of the `msb` binary, or `~/.microsandbox/lib/` (in that order).
+    ///
+    /// Not persisted — libkrunfw is a host-side resource, not sandbox state.
+    #[serde(skip)]
+    pub libkrunfw_path: Option<PathBuf>,
 
     /// Access the registry over plain HTTP (SDK override).
     #[serde(skip)]
@@ -167,12 +215,34 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub replace_existing: bool,
 
+    /// How long to wait after SIGTERM for the existing sandbox process to
+    /// exit gracefully before escalating to SIGKILL during a replace.
+    ///
+    /// Only consulted when `replace_existing` is true. A zero duration
+    /// skips SIGTERM entirely and goes straight to SIGKILL. Default is
+    /// ten seconds, which gives the exit observer plenty of headroom
+    /// to flush logs and clean up the agent socket on a healthy
+    /// sandbox before we escalate.
+    ///
+    /// This is an operation flag, not persisted sandbox state.
+    #[serde(skip)]
+    pub replace_with_grace: std::time::Duration,
+
     /// Manifest digest for the resolved OCI image.
     ///
     /// Set at create time. Used by spawn to derive VMDK and fsmeta paths
     /// from the global cache. `None` for non-OCI rootfs sources.
     #[serde(default)]
     pub(crate) manifest_digest: Option<String>,
+
+    /// Path to a snapshot's `upper.ext4` file to copy into the new
+    /// sandbox's upper layer at create time, replacing the fresh-format
+    /// step.
+    ///
+    /// Transient: set by `SandboxBuilder::from_snapshot` and consumed
+    /// during `create_with_mode`. Never persisted.
+    #[serde(skip)]
+    pub(crate) snapshot_upper_source: Option<PathBuf>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -180,6 +250,15 @@ pub struct SandboxConfig {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxConfig {
+    /// Resolve the effective metrics sampling interval, accounting for the disable override.
+    pub fn effective_metrics_interval(&self) -> Option<NonZero<u64>> {
+        if self.disable_metrics_sample {
+            None
+        } else {
+            self.metrics_sample_interval_ms
+        }
+    }
+
     /// Apply OCI image config as defaults. User-provided values take precedence.
     ///
     /// - `env`: image env vars form the base; user env vars override by key, otherwise append.
@@ -239,6 +318,7 @@ impl SandboxConfig {
         self.mounts.push(VolumeMount::Tmpfs {
             guest: DEFAULT_OCI_TMPFS_PATH.to_string(),
             size_mib: Some(default_oci_tmpfs_size_mib(self.memory_mib)),
+            readonly: false,
         });
     }
 }
@@ -289,7 +369,8 @@ fn guest_mount_is(mount: &VolumeMount, path: &str) -> bool {
     match mount {
         VolumeMount::Bind { guest, .. }
         | VolumeMount::Named { guest, .. }
-        | VolumeMount::Tmpfs { guest, .. } => {
+        | VolumeMount::Tmpfs { guest, .. }
+        | VolumeMount::DiskImage { guest, .. } => {
             normalized_guest_path(guest) == normalized_guest_path(path)
         }
     }
@@ -312,6 +393,8 @@ impl Default for SandboxConfig {
             cpus: default_cpus(),
             memory_mib: default_memory_mib(),
             log_level: default_log_level(),
+            metrics_sample_interval_ms: default_metrics_sample_interval_ms(),
+            disable_metrics_sample: default_disable_metrics_sample(),
             workdir: None,
             shell: None,
             scripts: HashMap::new(),
@@ -329,13 +412,17 @@ impl Default for SandboxConfig {
             user: None,
             labels: HashMap::new(),
             stop_signal: None,
+            init: None,
             pull_policy: PullPolicy::default(),
             policy: SandboxPolicy::default(),
             registry_auth: None,
+            libkrunfw_path: None,
             insecure: false,
             ca_certs: Vec::new(),
             replace_existing: false,
+            replace_with_grace: std::time::Duration::from_secs(10),
             manifest_digest: None,
+            snapshot_upper_source: None,
         }
     }
 }
@@ -530,9 +617,14 @@ mod tests {
 
         assert_eq!(config.mounts.len(), 1);
         match &config.mounts[0] {
-            VolumeMount::Tmpfs { guest, size_mib } => {
+            VolumeMount::Tmpfs {
+                guest,
+                size_mib,
+                readonly,
+            } => {
                 assert_eq!(guest, "/tmp");
                 assert_eq!(*size_mib, Some(512));
+                assert!(!*readonly);
             }
             mount => panic!("expected tmpfs mount, got {mount:?}"),
         }
@@ -563,6 +655,27 @@ mod tests {
     fn test_apply_runtime_defaults_skips_non_oci_roots() {
         let mut config = SandboxConfig {
             image: RootfsSource::Bind("/tmp/rootfs".into()),
+            ..Default::default()
+        };
+
+        config.apply_runtime_defaults();
+
+        assert!(config.mounts.is_empty());
+    }
+
+    #[test]
+    fn test_apply_runtime_defaults_skips_disk_image_roots() {
+        // Disk-image rootfses bring their own /tmp (it's part of the
+        // shipped filesystem), so we don't synthesise an implicit tmpfs
+        // for them. This test pins the policy so a future change has to
+        // be deliberate.
+        use crate::sandbox::DiskImageFormat;
+        let mut config = SandboxConfig {
+            image: RootfsSource::DiskImage {
+                path: "/tmp/disk.qcow2".into(),
+                format: DiskImageFormat::Qcow2,
+                fstype: None,
+            },
             ..Default::default()
         };
 

@@ -30,7 +30,7 @@ Lightweight VM sandboxes for running AI agents and untrusted code with hardware-
 
 ```toml
 [dependencies]
-microsandbox = "0.3"
+microsandbox = "0.4"
 ```
 
 ### Cargo Features
@@ -44,7 +44,7 @@ To disable networking:
 
 ```toml
 [dependencies]
-microsandbox = { version = "0.3", default-features = false, features = ["prebuilt"] }
+microsandbox = { version = "0.4", default-features = false, features = ["prebuilt"] }
 ```
 
 ## Quick Start
@@ -161,14 +161,19 @@ let sandbox = Sandbox::builder("isolated")
     .create()
     .await?;
 
-// DNS filtering.
+// Domain blocking via policy rules (refused at DNS and at TCP egress).
+use microsandbox_network::policy::{Destination, Rule};
+
+let mut policy = NetworkPolicy::default();
+policy.rules.push(Rule::deny_egress(Destination::Domain(
+    "blocked.example.com".parse()?,
+)));
+policy.rules.push(Rule::deny_egress(Destination::DomainSuffix(
+    ".evil.com".parse()?,
+)));
 let sandbox = Sandbox::builder("filtered")
     .image("alpine")
-    .network(|n| {
-        n.dns(|d| d
-            .block_domain("blocked.example.com")
-            .block_domain_suffix(".evil.com"))
-    })
+    .network(|n| n.policy(policy))
     .create()
     .await?;
 ```

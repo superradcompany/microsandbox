@@ -46,6 +46,12 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub replace: bool,
 
+    /// Grace period the existing sandbox gets after SIGTERM before it
+    /// is SIGKILLed during a replace. Accepts `0`, `500ms`, `5s`, `2m`.
+    /// Implies `--replace`. Default 10s when `--replace` is set on its own.
+    #[arg(long, value_name = "DURATION")]
+    pub replace_with_grace: Option<String>,
+
     /// Suppress progress output.
     #[arg(short, long)]
     pub quiet: bool,
@@ -55,14 +61,46 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub tmpfs: Vec<String>,
 
-    /// Mount a host file as a named script inside the sandbox (NAME:PATH).
-    #[arg(long)]
+    /// Register an inline script in the sandbox (NAME=BODY). The body is
+    /// taken literally as the script content. Available at `/.msb/scripts/<name>`
+    /// and on `PATH`.
+    #[arg(long, value_name = "NAME=BODY")]
     pub script: Vec<String>,
+
+    /// Register a script from a host file (NAME:PATH). Same destination as
+    /// `--script`; the file's contents are read at launch time.
+    #[arg(long, value_name = "NAME:PATH")]
+    pub script_path: Vec<String>,
 
     // --- Image/Runtime overrides ---
     /// Override the image's default entrypoint command.
     #[arg(long)]
     pub entrypoint: Option<String>,
+
+    /// Hand off PID 1 to this init binary inside the guest after agentd
+    /// finishes setup. Use `auto` to probe `/sbin/init`,
+    /// `/lib/systemd/systemd`, `/usr/lib/systemd/systemd` (first hit
+    /// wins), or supply an explicit absolute path.
+    #[arg(long, value_name = "PATH|auto")]
+    pub init: Option<String>,
+
+    /// Append an argv entry to the handoff init. Repeatable. Defaults
+    /// to `[<--init>]` when empty.
+    ///
+    /// `allow_hyphen_values` lets values like `--unit=multi-user.target`
+    /// pass through without clap trying to interpret them as flags.
+    #[arg(
+        long = "init-arg",
+        value_name = "STR",
+        allow_hyphen_values = true,
+        requires = "init"
+    )]
+    pub init_arg: Vec<String>,
+
+    /// Set an env var for the handoff init (KEY=VALUE). Repeatable.
+    /// Merged on top of the inherited env.
+    #[arg(long = "init-env", value_name = "KEY=VALUE", requires = "init")]
+    pub init_env: Vec<String>,
 
     /// Set the guest hostname (defaults to sandbox name).
     #[arg(short = 'H', long)]
@@ -95,20 +133,24 @@ pub struct SandboxOpts {
     #[arg(short, long)]
     pub port: Vec<String>,
 
-    /// Disable all network access.
+    /// Disable all network access. Sugar for `--net-default-egress deny`
+    /// with no rules.
     #[cfg(feature = "net")]
-    #[arg(long)]
-    pub no_network: bool,
+    #[arg(long = "no-net")]
+    pub no_net: bool,
 
-    /// Block DNS lookups for a domain (returns NXDOMAIN).
+    /// Deny egress to a domain. Equivalent to a `deny Domain("...")`
+    /// policy rule appended after any `--net-rule` entries.
     #[cfg(feature = "net")]
-    #[arg(long)]
-    pub dns_block_domain: Vec<String>,
+    #[arg(long = "deny-domain", value_name = "NAME")]
+    pub deny_domain: Vec<String>,
 
-    /// Block DNS lookups for all subdomains of a suffix (e.g. .ads.com).
+    /// Deny egress to all subdomains of a suffix (e.g. `.ads.example`).
+    /// Equivalent to a `deny DomainSuffix("...")` rule appended after
+    /// any `--net-rule` entries.
     #[cfg(feature = "net")]
-    #[arg(long)]
-    pub dns_block_suffix: Vec<String>,
+    #[arg(long = "deny-domain-suffix", value_name = "SUFFIX")]
+    pub deny_domain_suffix: Vec<String>,
 
     /// Allow DNS responses pointing to private/internal IP addresses.
     #[cfg(feature = "net")]
@@ -127,16 +169,32 @@ pub struct SandboxOpts {
     #[arg(long, value_name = "MS")]
     pub dns_query_timeout_ms: Option<u64>,
 
-    /// Network policy controlling which destinations are reachable from the sandbox.
+    /// Network rule. Repeatable; each value is a comma-separated list of
+    /// rule tokens. Token grammar:
+    /// `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`.
     ///
-    /// Options:
-    ///   none        — no network access
-    ///   public-only — public internet only (default); blocks private, loopback, link-local
-    ///   nonlocal    — public + private/LAN; blocks loopback, link-local, and metadata
-    ///   allow-all   — unrestricted access to any destination
+    /// Examples:
+    ///   --net-rule "allow@public"
+    ///   --net-rule "deny@198.51.100.5,allow@public"
+    ///   --net-rule "allow:ingress@private"
+    ///   --net-rule "allow@example.com:tcp:443"
     #[cfg(feature = "net")]
-    #[arg(long, value_name = "POLICY")]
-    pub network_policy: Option<String>,
+    #[arg(long = "net-rule", value_name = "TOKENS")]
+    pub net_rule: Vec<String>,
+
+    /// Default action for egress traffic that doesn't match any
+    /// `--net-rule`. Default: deny (with an implicit allow@public rule
+    /// when no other rules are present).
+    #[cfg(feature = "net")]
+    #[arg(long = "net-default-egress", value_name = "ACTION")]
+    pub net_default_egress: Option<String>,
+
+    /// Default action for ingress traffic that doesn't match any
+    /// `--net-rule`. Default: allow (preserves today's unfiltered
+    /// published-port behavior when no ingress rules are set).
+    #[cfg(feature = "net")]
+    #[arg(long = "net-default-ingress", value_name = "ACTION")]
+    pub net_default_ingress: Option<String>,
 
     /// Limit the number of concurrent network connections.
     #[cfg(feature = "net")]
@@ -215,7 +273,11 @@ impl SandboxOpts {
             || !self.env.is_empty()
             || !self.tmpfs.is_empty()
             || !self.script.is_empty()
+            || !self.script_path.is_empty()
             || self.entrypoint.is_some()
+            || self.init.is_some()
+            || !self.init_arg.is_empty()
+            || !self.init_env.is_empty()
             || self.hostname.is_some()
             || self.user.is_some()
             || self.pull.is_some()
@@ -225,13 +287,15 @@ impl SandboxOpts {
 
         #[cfg(feature = "net")]
         let net = !self.port.is_empty()
-            || self.no_network
-            || !self.dns_block_domain.is_empty()
-            || !self.dns_block_suffix.is_empty()
+            || self.no_net
+            || !self.deny_domain.is_empty()
+            || !self.deny_domain_suffix.is_empty()
             || self.no_dns_rebind_protection
             || !self.dns_nameserver.is_empty()
             || self.dns_query_timeout_ms.is_some()
-            || self.network_policy.is_some()
+            || !self.net_rule.is_empty()
+            || self.net_default_egress.is_some()
+            || self.net_default_ingress.is_some()
             || self.max_connections.is_some()
             || self.trust_host_cas
             || self.tls_intercept
@@ -273,7 +337,10 @@ pub fn apply_sandbox_opts(
     if let Some(ref shell) = opts.shell {
         builder = builder.shell(shell);
     }
-    if opts.replace {
+    if let Some(ref grace) = opts.replace_with_grace {
+        let d = parse_duration(grace).map_err(|e| anyhow::anyhow!("--replace-with-grace: {e}"))?;
+        builder = builder.replace_with_grace(d);
+    } else if opts.replace {
         builder = builder.replace();
     }
 
@@ -299,8 +366,7 @@ pub fn apply_sandbox_opts(
     }
 
     // --- Scripts ---
-    for script_str in &opts.script {
-        let (name, content) = parse_script(script_str)?;
+    for (name, content) in collect_scripts(&opts.script, &opts.script_path)? {
         builder = builder.script(name, content);
     }
 
@@ -316,6 +382,31 @@ pub fn apply_sandbox_opts(
     }
     if let Some(ref pull) = opts.pull {
         builder = builder.pull_policy(parse_pull_policy(pull)?);
+    }
+
+    // --- Handoff init ---
+    // clap's `requires = "init"` already enforces that --init-arg /
+    // --init-env can't appear without --init, so we don't re-check here.
+    if let Some(ref init_path) = opts.init {
+        // `auto` is the magic sentinel that asks agentd to probe a
+        // candidate list inside the guest rootfs. Anything else must
+        // be an absolute path so the eventual execve can find it.
+        if init_path != microsandbox_protocol::HANDOFF_INIT_AUTO
+            && !std::path::Path::new(init_path).is_absolute()
+        {
+            anyhow::bail!("--init must be an absolute path or `auto`, got: {init_path}");
+        }
+        if opts.init_arg.is_empty() && opts.init_env.is_empty() {
+            builder = builder.init(init_path);
+        } else {
+            let mut init_envs = Vec::with_capacity(opts.init_env.len());
+            for entry in &opts.init_env {
+                let (k, v) = ui::parse_env(entry).map_err(anyhow::Error::msg)?;
+                init_envs.push((k, v));
+            }
+            let init_args = opts.init_arg.clone();
+            builder = builder.init_with(init_path, |i| i.args(init_args).envs(init_envs));
+        }
     }
 
     // --- Log level ---
@@ -371,8 +462,28 @@ fn apply_network_opts(
         };
     }
 
-    // Disable networking.
-    if opts.no_network {
+    // Disable networking. `--no-net` is mutually exclusive with the
+    // policy-shaping flags: it kills the guest's network interface
+    // entirely, so any rule or default action would be dead code and
+    // is almost certainly a user mistake. Reject the combination at
+    // parse time with a helpful migration hint.
+    if opts.no_net {
+        let mut conflicts: Vec<&'static str> = Vec::new();
+        if !opts.net_rule.is_empty() {
+            conflicts.push("--net-rule");
+        }
+        if opts.net_default_egress.is_some() {
+            conflicts.push("--net-default-egress");
+        }
+        if opts.net_default_ingress.is_some() {
+            conflicts.push("--net-default-ingress");
+        }
+        if !conflicts.is_empty() {
+            anyhow::bail!(
+                "--no-net cannot be combined with {}; --no-net disables the guest network entirely, so rules and defaults are dead code. Drop --no-net to apply rules, or drop the rule flags to keep the network off.",
+                conflicts.join(" / "),
+            );
+        }
         builder = builder.disable_network();
     }
 
@@ -383,12 +494,14 @@ fn apply_network_opts(
     }
 
     // DNS, TLS, and other network configuration.
-    let has_network_config = !opts.dns_block_domain.is_empty()
-        || !opts.dns_block_suffix.is_empty()
+    let has_network_config = !opts.deny_domain.is_empty()
+        || !opts.deny_domain_suffix.is_empty()
         || opts.no_dns_rebind_protection
         || !opts.dns_nameserver.is_empty()
         || opts.dns_query_timeout_ms.is_some()
-        || opts.network_policy.is_some()
+        || !opts.net_rule.is_empty()
+        || opts.net_default_egress.is_some()
+        || opts.net_default_ingress.is_some()
         || opts.max_connections.is_some()
         || opts.trust_host_cas
         || opts.tls_intercept
@@ -401,8 +514,6 @@ fn apply_network_opts(
         || opts.on_secret_violation.is_some();
 
     if has_network_config {
-        let dns_block_domain = opts.dns_block_domain.clone();
-        let dns_block_suffix = opts.dns_block_suffix.clone();
         let no_dns_rebind = opts.no_dns_rebind_protection;
         let dns_nameservers = opts
             .dns_nameserver
@@ -410,7 +521,13 @@ fn apply_network_opts(
             .map(|s| s.parse::<Nameserver>().map_err(anyhow::Error::from))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let dns_query_timeout_ms = opts.dns_query_timeout_ms;
-        let network_policy = parse_network_policy(opts.network_policy.as_deref())?;
+        let network_policy = build_network_policy(
+            &opts.net_rule,
+            opts.net_default_egress.as_deref(),
+            opts.net_default_ingress.as_deref(),
+            &opts.deny_domain,
+            &opts.deny_domain_suffix,
+        )?;
         let max_conn = opts.max_connections;
         let trust_host_cas = opts.trust_host_cas;
         let tls_intercept = opts.tls_intercept;
@@ -423,31 +540,18 @@ fn apply_network_opts(
         let violation_action = parse_violation_action(&opts.on_secret_violation)?;
 
         builder = builder.network(move |mut n| {
-            let has_dns = !dns_block_domain.is_empty()
-                || !dns_block_suffix.is_empty()
-                || no_dns_rebind
-                || !dns_nameservers.is_empty()
-                || dns_query_timeout_ms.is_some();
-            if has_dns {
-                n = n.dns(move |mut d| {
-                    for domain in &dns_block_domain {
-                        d = d.block_domain(domain);
-                    }
-                    for suffix in &dns_block_suffix {
-                        d = d.block_domain_suffix(suffix);
-                    }
-                    if no_dns_rebind {
-                        d = d.rebind_protection(false);
-                    }
-                    if !dns_nameservers.is_empty() {
-                        d = d.nameservers(dns_nameservers);
-                    }
-                    if let Some(ms) = dns_query_timeout_ms {
-                        d = d.query_timeout_ms(ms);
-                    }
-                    d
-                });
-            }
+            n = n.dns(move |mut d| {
+                if no_dns_rebind {
+                    d = d.rebind_protection(false);
+                }
+                if !dns_nameservers.is_empty() {
+                    d = d.nameservers(dns_nameservers);
+                }
+                if let Some(ms) = dns_query_timeout_ms {
+                    d = d.query_timeout_ms(ms);
+                }
+                d
+            });
             if let Some(policy) = network_policy {
                 n = n.policy(policy);
             }
@@ -522,23 +626,102 @@ pub fn parse_duration_secs(s: &str) -> anyhow::Result<u64> {
     }
 }
 
-/// Parse a `--network-policy` value into a [`NetworkPolicy`], or `None` to leave the default.
-#[cfg(feature = "net")]
-fn parse_network_policy(
-    s: Option<&str>,
-) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
-    use microsandbox_network::policy::NetworkPolicy;
-    match s {
-        None => Ok(None),
-        Some("none") => Ok(Some(NetworkPolicy::none())),
-        Some("public-only") => Ok(Some(NetworkPolicy::public_only())),
-        Some("nonlocal") => Ok(Some(NetworkPolicy::non_local())),
-        Some("allow-all") => Ok(Some(NetworkPolicy::allow_all())),
-        Some(other) => anyhow::bail!(
-            "unknown network policy {:?}; valid values are: none, public-only, nonlocal, allow-all",
-            other
-        ),
+/// Parse a duration string with sub-second granularity. Accepts `0`,
+/// `500ms`, `5s`, `2m`, `1h`. Bare numbers are treated as seconds for
+/// consistency with [`parse_duration_secs`].
+pub fn parse_duration(s: &str) -> anyhow::Result<std::time::Duration> {
+    let s = s.trim();
+    if let Some(n) = s.strip_suffix("ms") {
+        Ok(std::time::Duration::from_millis(n.trim().parse::<u64>()?))
+    } else if let Some(n) = s.strip_suffix('s') {
+        Ok(std::time::Duration::from_secs(n.trim().parse::<u64>()?))
+    } else if let Some(n) = s.strip_suffix('m') {
+        Ok(std::time::Duration::from_secs(
+            n.trim().parse::<u64>()? * 60,
+        ))
+    } else if let Some(n) = s.strip_suffix('h') {
+        Ok(std::time::Duration::from_secs(
+            n.trim().parse::<u64>()? * 3600,
+        ))
+    } else {
+        Ok(std::time::Duration::from_secs(s.parse::<u64>()?))
     }
+}
+
+/// Assemble a [`NetworkPolicy`] from `--net-rule` / `--net-default-*`
+/// and the bulk-deny flags. Returns `None` when no flag is set.
+/// Multiple `--net-rule` invocations concatenate in argv order.
+#[cfg(feature = "net")]
+fn build_network_policy(
+    rule_args: &[String],
+    default_egress: Option<&str>,
+    default_ingress: Option<&str>,
+    deny_domains: &[String],
+    deny_domain_suffixes: &[String],
+) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
+    use anyhow::Context;
+    use microsandbox_network::policy::{Action, Destination, DomainName, NetworkPolicy, Rule};
+
+    use crate::net_rule::parse_rule_list;
+
+    let no_rule_flags =
+        rule_args.is_empty() && default_egress.is_none() && default_ingress.is_none();
+    let no_block_flags = deny_domains.is_empty() && deny_domain_suffixes.is_empty();
+    if no_rule_flags && no_block_flags {
+        return Ok(None);
+    }
+
+    let mut rules = Vec::new();
+
+    // Prepend bulk-deny flags so they outrank later allow rules.
+    for d in deny_domains {
+        let domain: DomainName = d.parse().with_context(|| format!("--deny-domain {d:?}"))?;
+        rules.push(Rule::deny_egress(Destination::Domain(domain)));
+    }
+    for s in deny_domain_suffixes {
+        let suffix: DomainName = s
+            .parse()
+            .with_context(|| format!("--deny-domain-suffix {s:?}"))?;
+        rules.push(Rule::deny_egress(Destination::DomainSuffix(suffix)));
+    }
+
+    for arg in rule_args {
+        let parsed = parse_rule_list(arg).map_err(anyhow::Error::from)?;
+        rules.extend(parsed);
+    }
+
+    let parse_action = |label: &str, raw: &str| -> anyhow::Result<Action> {
+        match raw {
+            "allow" => Ok(Action::Allow),
+            "deny" => Ok(Action::Deny),
+            other => anyhow::bail!("unknown {label} value {other:?}; expected `allow` or `deny`"),
+        }
+    };
+
+    // When the user sets no defaults explicitly, fall through to
+    // NetworkPolicy::public_only's defaults so behaviour stays in sync
+    // with the preset.
+    //
+    // Exception: if only --deny-domain / --deny-domain-suffix were set
+    // (no --net-rule, no --net-default-*), default egress flips to
+    // Allow so the rest of the network keeps working — these flags
+    // add deny entries on top of permissive defaults.
+    let preset = NetworkPolicy::public_only();
+    let default_egress = match default_egress {
+        Some(raw) => parse_action("--net-default-egress", raw)?,
+        None if no_rule_flags => Action::Allow,
+        None => preset.default_egress,
+    };
+    let default_ingress = match default_ingress {
+        Some(raw) => parse_action("--net-default-ingress", raw)?,
+        None => preset.default_ingress,
+    };
+
+    Ok(Some(NetworkPolicy {
+        default_egress,
+        default_ingress,
+        rules,
+    }))
 }
 
 /// Parse a port spec: `HOST:GUEST` or `HOST:GUEST/udp` or `HOST:GUEST/tcp`.
@@ -617,11 +800,53 @@ fn parse_tmpfs(spec: &str) -> anyhow::Result<(String, Option<u32>)> {
     }
 }
 
-/// Parse a script spec: `NAME:PATH` and read file content.
-fn parse_script(spec: &str) -> anyhow::Result<(String, String)> {
+/// Resolve `--script` / `--script-path` specs into a deduped list of
+/// `(name, content)` pairs preserving argv order. Inline entries are
+/// processed first, then path entries; duplicate names across either
+/// flag are rejected.
+fn collect_scripts(inline: &[String], paths: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    use std::collections::HashSet;
+
+    let mut out = Vec::with_capacity(inline.len() + paths.len());
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for spec in inline {
+        let (name, content) = parse_script_inline(spec)?;
+        if !seen.insert(name.clone()) {
+            anyhow::bail!("script name '{name}' specified more than once");
+        }
+        out.push((name, content));
+    }
+    for spec in paths {
+        let (name, content) = parse_script_path(spec)?;
+        if !seen.insert(name.clone()) {
+            anyhow::bail!("script name '{name}' specified more than once");
+        }
+        out.push((name, content));
+    }
+    Ok(out)
+}
+
+/// Parse an inline script spec: `NAME=BODY`. Splits on the first `=` so
+/// bodies may freely contain `=`.
+fn parse_script_inline(spec: &str) -> anyhow::Result<(String, String)> {
+    let (name, body) = spec
+        .split_once('=')
+        .ok_or_else(|| anyhow::anyhow!("script must be in format NAME=BODY"))?;
+    if name.is_empty() {
+        anyhow::bail!("script name must not be empty (NAME=BODY)");
+    }
+    Ok((name.to_string(), body.to_string()))
+}
+
+/// Parse a script-from-file spec: `NAME:PATH` and read file content.
+fn parse_script_path(spec: &str) -> anyhow::Result<(String, String)> {
     let (name, path) = spec
         .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("script must be in format NAME:PATH"))?;
+        .ok_or_else(|| anyhow::anyhow!("script-path must be in format NAME:PATH"))?;
+    if name.is_empty() {
+        anyhow::bail!("script name must not be empty (NAME:PATH)");
+    }
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("failed to read script file '{path}': {e}"))?;
     Ok((name.to_string(), content))
@@ -742,4 +967,166 @@ pub fn parse_rlimit(
         RlimitResource::try_from(rlimit.resource.as_str()).map_err(anyhow::Error::msg)?;
 
     Ok((resource, rlimit.soft, rlimit.hard))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    /// Write a temp file with unique name, return its path.
+    fn write_temp(content: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("msb-script-test-{}-{}.sh", std::process::id(), n));
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        path
+    }
+
+    // --- parse_script_inline ---
+
+    #[test]
+    fn inline_basic() {
+        let (name, body) = parse_script_inline("greet=echo hi").unwrap();
+        assert_eq!(name, "greet");
+        assert_eq!(body, "echo hi");
+    }
+
+    #[test]
+    fn inline_body_may_contain_equals() {
+        let (name, body) = parse_script_inline("kv=K=V test: a=b=c").unwrap();
+        assert_eq!(name, "kv");
+        assert_eq!(body, "K=V test: a=b=c");
+    }
+
+    #[test]
+    fn inline_empty_body_is_allowed() {
+        let (name, body) = parse_script_inline("noop=").unwrap();
+        assert_eq!(name, "noop");
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn inline_missing_equals_errors() {
+        let err = parse_script_inline("noequals").unwrap_err();
+        assert!(err.to_string().contains("NAME=BODY"), "got: {err}");
+    }
+
+    #[test]
+    fn inline_empty_name_errors() {
+        let err = parse_script_inline("=echo hi").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "got: {err}");
+    }
+
+    // --- parse_script_path ---
+
+    #[test]
+    fn path_basic() {
+        let p = write_temp("#!/bin/sh\necho hi\n");
+        let spec = format!("hello:{}", p.display());
+        let (name, body) = parse_script_path(&spec).unwrap();
+        assert_eq!(name, "hello");
+        assert_eq!(body, "#!/bin/sh\necho hi\n");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn path_missing_colon_errors() {
+        let err = parse_script_path("nocolons").unwrap_err();
+        assert!(err.to_string().contains("NAME:PATH"), "got: {err}");
+    }
+
+    #[test]
+    fn path_empty_name_errors() {
+        let err = parse_script_path(":/tmp/whatever").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn path_missing_file_errors() {
+        let err = parse_script_path("foo:/no/such/file-msb.sh").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("failed to read script file"), "got: {msg}");
+        assert!(msg.contains("/no/such/file-msb.sh"), "got: {msg}");
+    }
+
+    // --- collect_scripts (duplicate logic) ---
+
+    #[test]
+    fn collect_inline_only_preserves_order() {
+        let inline = vec!["a=echo a".to_string(), "b=echo b".to_string()];
+        let out = collect_scripts(&inline, &[]).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                ("a".to_string(), "echo a".to_string()),
+                ("b".to_string(), "echo b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_combines_inline_then_paths() {
+        let p = write_temp("from-file");
+        let inline = vec!["a=echo a".to_string()];
+        let paths = vec![format!("b:{}", p.display())];
+        let out = collect_scripts(&inline, &paths).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], ("a".to_string(), "echo a".to_string()));
+        assert_eq!(out[1], ("b".to_string(), "from-file".to_string()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn collect_rejects_duplicate_within_inline() {
+        let inline = vec!["foo=echo a".to_string(), "foo=echo b".to_string()];
+        let err = collect_scripts(&inline, &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("'foo' specified more than once"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn collect_rejects_duplicate_within_path() {
+        let p = write_temp("x");
+        let paths = vec![
+            format!("foo:{}", p.display()),
+            format!("foo:{}", p.display()),
+        ];
+        let err = collect_scripts(&[], &paths).unwrap_err();
+        assert!(
+            err.to_string().contains("'foo' specified more than once"),
+            "got: {err}"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn collect_rejects_duplicate_across_flags() {
+        let p = write_temp("x");
+        let inline = vec!["foo=echo a".to_string()];
+        let paths = vec![format!("foo:{}", p.display())];
+        let err = collect_scripts(&inline, &paths).unwrap_err();
+        assert!(
+            err.to_string().contains("'foo' specified more than once"),
+            "got: {err}"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn collect_empty_inputs_ok() {
+        let out = collect_scripts(&[], &[]).unwrap();
+        assert!(out.is_empty());
+    }
 }

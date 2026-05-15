@@ -19,16 +19,9 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-//--------------------------------------------------------------------------------------------------
-// Constants
-//--------------------------------------------------------------------------------------------------
-
-const PREBUILT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const LIBKRUNFW_ABI: &str = "5";
-const LIBKRUNFW_VERSION: &str = "5.2.1";
-const GITHUB_ORG: &str = "superradcompany";
-const REPO: &str = "microsandbox";
-const MSB_BINARY: &str = "msb";
+use microsandbox_utils::{
+    LIBKRUNFW_ABI, MSB_BINARY, PREBUILT_VERSION, bundle_download_url, libkrunfw_filename,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -141,8 +134,8 @@ fn install_runtime(bin_dir: &Path, lib_dir: &Path) -> Result<(), String> {
     fs::create_dir_all(bin_dir).map_err(|e| format!("mkdir {}: {e}", bin_dir.display()))?;
     fs::create_dir_all(lib_dir).map_err(|e| format!("mkdir {}: {e}", lib_dir.display()))?;
 
-    let target_os = if cfg!(target_os = "macos") {
-        "darwin"
+    let os = if cfg!(target_os = "macos") {
+        "macos"
     } else if cfg!(target_os = "linux") {
         "linux"
     } else {
@@ -155,16 +148,8 @@ fn install_runtime(bin_dir: &Path, lib_dir: &Path) -> Result<(), String> {
         other => return Err(format!("unsupported architecture: {other}")),
     };
 
-    let libkrunfw_name = if target_os == "darwin" {
-        format!("libkrunfw.{LIBKRUNFW_ABI}.dylib")
-    } else {
-        format!("libkrunfw.so.{LIBKRUNFW_VERSION}")
-    };
-
-    let url = format!(
-        "https://github.com/{GITHUB_ORG}/{REPO}/releases/download/v{PREBUILT_VERSION}/\
-         {REPO}-{target_os}-{arch}.tar.gz"
-    );
+    let libkrunfw_name = libkrunfw_filename(os);
+    let url = bundle_download_url(PREBUILT_VERSION, arch, os);
 
     let tmp_dir = env::temp_dir().join(format!(
         "microsandbox-install-{}-{}",
@@ -231,7 +216,7 @@ fn install_runtime(bin_dir: &Path, lib_dir: &Path) -> Result<(), String> {
     // libkrunfw symlinks.
     #[cfg(unix)]
     {
-        let symlinks: Vec<(String, String)> = if target_os == "darwin" {
+        let symlinks: Vec<(String, String)> = if os == "macos" {
             vec![("libkrunfw.dylib".into(), libkrunfw_name.clone())]
         } else {
             let soname = format!("libkrunfw.so.{LIBKRUNFW_ABI}");

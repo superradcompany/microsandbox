@@ -1609,7 +1609,6 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
-                ..Default::default()
             },
         )
         .unwrap()
@@ -1645,7 +1644,6 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::Never,
                 force: false,
-                ..Default::default()
             },
         )
         .unwrap();
@@ -1667,7 +1665,6 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
-                ..Default::default()
             },
         )
         .unwrap()
@@ -1694,7 +1691,6 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::Never,
                 force: false,
-                ..Default::default()
             },
         )
         .unwrap();
@@ -1707,7 +1703,6 @@ mod tests {
                 &PullOptions {
                     pull_policy: PullPolicy::Never,
                     force: false,
-                    ..Default::default()
                 },
             )
             .await;
@@ -1729,7 +1724,6 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
-                ..Default::default()
             },
         )
         .unwrap();
@@ -1750,7 +1744,6 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: true,
-                ..Default::default()
             },
         )
         .unwrap();
@@ -1762,7 +1755,6 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::Always,
                 force: false,
-                ..Default::default()
             },
         )
         .unwrap();
@@ -1784,7 +1776,6 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
-                ..Default::default()
             },
         )
         .unwrap();
@@ -1838,7 +1829,6 @@ mod tests {
                 &PullOptions {
                     pull_policy: PullPolicy::Never,
                     force: false,
-                    ..Default::default()
                 },
             )
             .await;
@@ -1859,7 +1849,6 @@ mod tests {
             &PullOptions {
                 pull_policy: PullPolicy::IfMissing,
                 force: false,
-                ..Default::default()
             },
         );
 

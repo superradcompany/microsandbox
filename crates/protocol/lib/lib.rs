@@ -35,16 +35,19 @@ pub const SCRIPTS_PATH: &str = "/.msb/scripts";
 /// - `path` — guest mount path (required, always the first element)
 /// - `size=N` — size limit in MiB (optional)
 /// - `noexec` — mount with noexec flag (optional)
+/// - `ro` — mount read-only (optional)
 /// - `mode=N` — permission mode as octal integer (optional, e.g. `mode=1777`)
 ///
 /// Entries are separated by `;`. Within an entry, the path comes first
-/// followed by comma-separated options.
+/// followed by comma-separated options. Options compose order-independently
+/// (e.g. `,ro,noexec` and `,noexec,ro` are equivalent).
 ///
 /// Examples:
 /// - `MSB_TMPFS=/tmp,size=256` — 256 MiB tmpfs at `/tmp`
 /// - `MSB_TMPFS=/tmp,size=256;/var/tmp,size=128` — two tmpfs mounts
 /// - `MSB_TMPFS=/tmp` — tmpfs at `/tmp` with defaults
 /// - `MSB_TMPFS=/tmp,size=256,noexec` — with noexec flag
+/// - `MSB_TMPFS=/seed,size=64,ro` — read-only tmpfs
 pub const ENV_TMPFS: &str = "MSB_TMPFS";
 
 /// Environment variable specifying how agentd assembles the root filesystem.
@@ -134,6 +137,33 @@ pub const ENV_DIR_MOUNTS: &str = "MSB_DIR_MOUNTS";
 /// - `MSB_FILE_MOUNTS=fm_a:a.sh:/usr/bin/a.sh;fm_b:b.sh:/usr/bin/b.sh`
 pub const ENV_FILE_MOUNTS: &str = "MSB_FILE_MOUNTS";
 
+/// Environment variable carrying disk-image volume mount specs for guest init.
+///
+/// Each spec describes one virtio-blk device attached for the sole purpose
+/// of being mounted at a guest path by agentd (distinct from the rootfs
+/// block device, which is described by [`ENV_BLOCK_ROOT`]).
+///
+/// Format: `id:guest_path[:fstype][:ro][;id:guest_path[:fstype][:ro];...]`
+///
+/// - `id` — the `virtio_blk_config.serial` value set by the VMM. Agentd
+///   resolves it to a device node via `/dev/disk/by-id/virtio-<id>`, or
+///   by scanning `/sys/block/*/serial` as a fallback.
+/// - `guest_path` — absolute mount path in the guest (required).
+/// - `fstype` — inner filesystem type (optional). When empty or absent,
+///   agentd probes `/proc/filesystems` to find a type that mounts cleanly.
+/// - `ro` — optional flag: mount read-only.
+///
+/// Entries are separated by `;`. The `fstype` slot is positional, not
+/// keyed. To express "no fstype + ro" the slot must be empty:
+/// `id:/path::ro`. The form `id:/path:ro` would parse as `fstype=ro`,
+/// not the readonly flag.
+///
+/// Examples:
+/// - `MSB_DISK_MOUNTS=data_12ab:/data:ext4` — ext4 disk at `/data`
+/// - `MSB_DISK_MOUNTS=seed_7f:/seed::ro` — autodetect fstype, read-only
+/// - `MSB_DISK_MOUNTS=a_1:/a:ext4;b_2:/b::ro` — two disks
+pub const ENV_DISK_MOUNTS: &str = "MSB_DISK_MOUNTS";
+
 /// Environment variable carrying the default guest user for agentd execs.
 ///
 /// Format: `USER[:GROUP]` or `UID[:GID]`
@@ -161,6 +191,16 @@ pub const ENV_USER: &str = "MSB_USER";
 /// Defaults to the sandbox name when not explicitly set.
 pub const ENV_HOSTNAME: &str = "MSB_HOSTNAME";
 
+/// Environment variable carrying the DNS name the guest uses to reach
+/// the sandbox host (Docker's `host.docker.internal` equivalent).
+///
+/// The host-side network stack emits this value via its
+/// `guest_env_vars()` method; agentd reads it into
+/// [`crate::exec`]-adjacent boot params and writes the mapping into
+/// `/etc/hosts`. The value the network stack emits is a fixed
+/// protocol constant — today always `host.microsandbox.internal`.
+pub const ENV_HOST_ALIAS: &str = "MSB_HOST_ALIAS";
+
 /// Environment variable carrying sandbox-wide resource limits.
 ///
 /// Format: `resource=limit[:hard][;resource=limit[:hard];...]`
@@ -176,6 +216,78 @@ pub const ENV_HOSTNAME: &str = "MSB_HOSTNAME";
 /// agentd applies these during PID 1 startup so every later guest process
 /// inherits the raised baseline instead of having to opt into per-exec rlimits.
 pub const ENV_RLIMITS: &str = "MSB_RLIMITS";
+
+/// Separator byte for argv/env entries in handoff-init env vars.
+///
+/// ASCII Unit Separator (`0x1F`). Argv entries and `KEY=VAL` env pairs
+/// are arbitrary user strings, so the `;` separator other MSB_* vars use
+/// is unsafe — they collide with realistic shell input. `0x1F` is
+/// purpose-built for this and absent from any printable string.
+pub const HANDOFF_INIT_SEP: char = '\x1f';
+
+/// String form of [`HANDOFF_INIT_SEP`] for use with `&str`-friendly
+/// APIs like `[T]::join`. Avoids per-call `char.to_string()` allocations
+/// on the host's encoder side.
+pub const HANDOFF_INIT_SEP_STR: &str = "\x1f";
+
+/// Environment variable selecting a guest init binary for PID 1 handoff.
+///
+/// When set, agentd performs initial setup (mounts, runtime dirs), then
+/// forks. The parent execs the binary at this path, becoming the new
+/// PID 1. The child stays alive as a normal grandchild process serving
+/// host requests over virtio-serial.
+///
+/// Format: bare absolute path inside the guest rootfs, or the literal
+/// sentinel [`HANDOFF_INIT_AUTO`] which triggers a candidate probe in
+/// agentd (see [`HANDOFF_INIT_AUTO_CANDIDATES`]).
+///
+/// Examples:
+/// - `MSB_HANDOFF_INIT=/lib/systemd/systemd`
+/// - `MSB_HANDOFF_INIT=auto`
+pub const ENV_HANDOFF_INIT: &str = "MSB_HANDOFF_INIT";
+
+/// Sentinel value for [`ENV_HANDOFF_INIT`] requesting auto-detection.
+///
+/// When the env var matches this exact string, agentd probes
+/// [`HANDOFF_INIT_AUTO_CANDIDATES`] in order and uses the first path
+/// that exists and is executable. If none match, boot fails with a
+/// clear error in `kernel.log` listing the paths it checked.
+pub const HANDOFF_INIT_AUTO: &str = "auto";
+
+/// Ordered list of init-binary paths agentd probes when
+/// [`ENV_HANDOFF_INIT`] is set to [`HANDOFF_INIT_AUTO`].
+///
+/// Order matters: the first match wins. The list covers the three
+/// well-known locations across major distros:
+/// - `/sbin/init` — BusyBox (Alpine), sysvinit, OpenRC's wrapper.
+///   Usually a symlink to the actual init on systemd distros, so it
+///   resolves naturally on Debian/Ubuntu too.
+/// - `/lib/systemd/systemd` — Debian, Ubuntu, derivatives.
+/// - `/usr/lib/systemd/systemd` — Fedora, RHEL, modern Debian.
+pub const HANDOFF_INIT_AUTO_CANDIDATES: &[&str] = &[
+    "/sbin/init",
+    "/lib/systemd/systemd",
+    "/usr/lib/systemd/systemd",
+];
+
+/// Argv list for the handoff init binary.
+///
+/// Format: entries separated by [`HANDOFF_INIT_SEP`] (ASCII `0x1F`).
+/// Empty or unset means the init is exec'd with `argv = [program]`.
+///
+/// Example:
+/// - `MSB_HANDOFF_INIT_ARGS=--unit=multi-user.target\x1f--log-level=warning`
+pub const ENV_HANDOFF_INIT_ARGS: &str = "MSB_HANDOFF_INIT_ARGS";
+
+/// Extra environment variables for the handoff init binary.
+///
+/// Format: `KEY=VAL` pairs separated by [`HANDOFF_INIT_SEP`]
+/// (ASCII `0x1F`). Each entry must contain at least one `=`. Merged on
+/// top of the inherited env.
+///
+/// Example:
+/// - `MSB_HANDOFF_INIT_ENV=container=microsandbox\x1fLANG=C.UTF-8`
+pub const ENV_HANDOFF_INIT_ENV: &str = "MSB_HANDOFF_INIT_ENV";
 
 /// Guest-side path to the CA certificate for TLS interception.
 ///

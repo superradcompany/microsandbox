@@ -16,7 +16,7 @@ sb.fs().write("/app/config.json", r#"{"debug": true}"#).await?;
 ```
 
 ```typescript TypeScript
-await sb.fs().write("/app/config.json", '{"debug": true}')
+await sb.fs().write("/app/config.json", '{"debug": true}');
 ```
 
 ```python Python
@@ -33,7 +33,7 @@ let content = sb.fs().read_to_string("/app/config.json").await?;
 ```
 
 ```typescript TypeScript
-const content = await sb.fs().readString("/app/config.json")
+const content = await sb.fs().readToString("/app/config.json");
 ```
 
 ```python Python
@@ -53,9 +53,9 @@ for entry in entries {
 ```
 
 ```typescript TypeScript
-const entries = await sb.fs().list("/app")
+const entries = await sb.fs().list("/app");
 for (const entry of entries) {
-    console.log(`${entry.path}: ${entry.kind}`)
+    console.log(`${entry.path}: ${entry.kind}`);
 }
 ```
 
@@ -80,9 +80,9 @@ while let Some(chunk) = stream.recv().await? {
 ```
 
 ```typescript TypeScript
-const stream = await sb.fs().readStream("/app/data.bin")
+const stream = await sb.fs().readStream("/app/data.bin");
 for await (const chunk of stream) {
-    processChunk(chunk)
+    processChunk(chunk); // chunk is a Uint8Array
 }
 ```
 
@@ -104,7 +104,7 @@ sb.fs().copy_from_host("./local-file.txt", "/app/remote-file.txt").await?;
 ```
 
 ```typescript TypeScript
-await sb.fs().copyFromHost("./local-file.txt", "/app/remote-file.txt")
+await sb.fs().copyFromHost("./local-file.txt", "/app/remote-file.txt");
 ```
 
 ```python Python
@@ -141,20 +141,22 @@ let sb = Sandbox::builder("encrypted")
 ```
 
 ```typescript TypeScript
-import { Mount, Sandbox } from 'microsandbox'
+import { Sandbox } from "microsandbox";
 
-const sb = await Sandbox.create({
-    name: "encrypted",
-    image: "python",
-    volumes: {
-        "/secrets": Mount.bind("/data/secrets", {
-            hooks: {
-                onRead: (path, data) => decrypt(data, key),
-                onWrite: (path, data) => encrypt(data, key),
-            },
-        }),
-    },
-})
+// Hooks are coming soon. The planned shape will sit alongside the regular
+// mount methods on the volume builder, e.g.:
+//
+//   .volume("/secrets", (m) => m
+//       .bind("/data/secrets")
+//       .onRead((path, data) => decrypt(data, key))
+//       .onWrite((path, data) => encrypt(data, key)),
+//   )
+//
+// For now the closest equivalent is a plain bind:
+await using sb = await Sandbox.builder("encrypted")
+    .image("python")
+    .volume("/secrets", (m) => m.bind("/data/secrets"))
+    .create();
 ```
 
 ```python Python
@@ -207,19 +209,16 @@ let sb = Sandbox::builder("custom")
 ```
 
 ```typescript TypeScript
-import { FsBackend, Mount, Sandbox } from 'microsandbox'
-
-// Implement the FsBackend interface
-class EncryptedFs implements FsBackend {
-    // ... implement read, write, and other required methods
-}
-
-const sb = await Sandbox.create({
-    name: "custom",
-    volumes: {
-        "/secrets": Mount.backend(new EncryptedFs(key, "/data")),
-    },
-})
+// FsBackend is coming soon. The planned API will let you plug a custom
+// backend into a volume:
+//
+//   class EncryptedFs implements FsBackend {
+//     // ... implement read, write, and other required methods
+//   }
+//
+//   const sb = await Sandbox.builder("custom")
+//     .volume("/secrets", (m) => m.backend(new EncryptedFs(key, "/data")))
+//     .create();
 ```
 
 ```python Python

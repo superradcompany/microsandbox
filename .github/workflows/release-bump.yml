@@ -1,0 +1,79 @@
+name: Release version bump
+
+# Self-service version bump: dispatch with a target version and the
+# workflow runs scripts/bump-version.sh, regenerates lockfiles, and opens
+# a PR titled `chore: release vX.Y.Z`. After the PR merges, push the
+# `vX.Y.Z` tag manually to trigger release.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "new version (e.g. 0.4.6 or 0.4.6-rc.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    name: Bump and open release PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate semver
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::version must be semver (X.Y.Z or X.Y.Z-prerelease), got: $VERSION"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install build deps for cargo check
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+
+      - name: Bump manifests
+        run: ./scripts/bump-version.sh "${{ inputs.version }}"
+
+      - name: Refresh Cargo.lock
+        run: cargo check --workspace
+
+      - name: Refresh npm lockfile
+        working-directory: sdk/node-ts
+        run: npm install --package-lock-only --ignore-scripts
+
+      - name: Open release PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          title: "chore: release v${{ inputs.version }}"
+          body: |
+            release preparation for `v${{ inputs.version }}`.
+
+            bumped by `scripts/bump-version.sh`:
+            - `Cargo.toml` workspace + path-dep versions
+            - `sdk/node-ts/package.json` and per-platform sub-packages
+            - `sdk/go/setup.go` `sdkVersion` (if present)
+
+            regenerated:
+            - `Cargo.lock`
+            - `sdk/node-ts/package-lock.json`
+
+            after this PR merges:
+            1. `git tag v${{ inputs.version }} <merge-commit>`
+            2. `git push --tags`
+            3. `release.yml` runs and publishes to crates.io, npm, pypi, ghcr, and tags `sdk/go/v${{ inputs.version }}`.
+          branch: release/v${{ inputs.version }}
+          commit-message: "chore: bump to v${{ inputs.version }}"
+          base: main
+          delete-branch: true

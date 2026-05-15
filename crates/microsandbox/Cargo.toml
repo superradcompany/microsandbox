@@ -16,37 +16,45 @@ name = "microsandbox"
 path = "bin/main.rs"
 
 [features]
-default = ["prebuilt", "net", "keyring"]
-keyring = ["dep:keyring", "dep:dbus"]
-prebuilt = ["microsandbox-filesystem/prebuilt", "microsandbox-runtime/prebuilt"]
+default = ["keyring", "net", "prebuilt"]
+keyring = ["dep:dbus", "dep:keyring"]
+prebuilt = [
+    "microsandbox-filesystem/prebuilt",
+    "microsandbox-runtime/prebuilt",
+    "microsandbox-utils/http-client",
+]
 net = ["dep:microsandbox-network", "microsandbox-runtime/net"]
 
 [dependencies]
+astral-tokio-tar.workspace = true
+async-compression = { workspace = true, features = ["tokio", "zstd", "gzip"] }
 bytes.workspace = true
 chrono.workspace = true
 crossterm.workspace = true
-docker_credential = "1.3.2"
 dirs.workspace = true
+docker_credential = "1.3.2"
 flate2.workspace = true
 futures.workspace = true
+hex.workspace = true
 libc.workspace = true
-microsandbox-db = { version = "0.3.14", path = "../db" }
-microsandbox-filesystem = { version = "0.3.14", path = "../filesystem", default-features = false }
-microsandbox-image = { version = "0.3.14", path = "../image" }
-microsandbox-migration = { version = "0.3.14", path = "../migration" }
-microsandbox-network = { version = "0.3.14", path = "../network", optional = true }
-microsandbox-protocol = { version = "0.3.14", path = "../protocol" }
-microsandbox-runtime = { version = "0.3.14", path = "../runtime", default-features = false }
-microsandbox-utils = { version = "0.3.14", path = "../utils" }
+microsandbox-db = { version = "0.4.6", path = "../db" }
+microsandbox-filesystem = { version = "0.4.6", path = "../filesystem", default-features = false }
+microsandbox-image = { version = "0.4.6", path = "../image" }
+microsandbox-migration = { version = "0.4.6", path = "../migration" }
+microsandbox-network = { version = "0.4.6", path = "../network", optional = true }
+microsandbox-protocol = { version = "0.4.6", path = "../protocol" }
+microsandbox-runtime = { version = "0.4.6", path = "../runtime", default-features = false }
+microsandbox-utils = { version = "0.4.6", path = "../utils" }
 nix = { workspace = true, features = ["process", "signal"] }
 rand.workspace = true
 reqwest.workspace = true
 scopeguard.workspace = true
-tar.workspace = true
-tempfile.workspace = true
 sea-orm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -55,11 +63,15 @@ which.workspace = true
 
 [build-dependencies]
 flate2.workspace = true
+microsandbox-utils = { version = "0.4.6", path = "../utils" }
 tar.workspace = true
-ureq.workspace = true
 
 [dev-dependencies]
+ipnetwork.workspace = true
+microsandbox-network = { path = "../network" }
 tempfile.workspace = true
+test-utils = { path = "../test-utils" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6.3", features = ["apple-native"], optional = true }
@@ -71,4 +83,7 @@ keyring = { version = "3.6.3", features = ["windows-native"], optional = true }
 # Transitive dep via keyring's Secret Service backend; declared here only to force the `vendored` feature
 # so libdbus is built from source and statically linked (avoids needing libdbus-1-dev at build time).
 dbus = { version = "0.9.10", features = ["vendored"], optional = true }
-keyring = { version = "3.6.3", features = ["linux-native-sync-persistent", "crypto-rust"], optional = true }
+keyring = { version = "3.6.3", features = [
+    "crypto-rust",
+    "linux-native-sync-persistent",
+], optional = true }

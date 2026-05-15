@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
   LIBKRUNFW_VERSION: "5.2.1"
@@ -13,10 +20,31 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Detect whether the diff touches anything outside docs/. When it doesn't,
+  # every downstream job is gated off and posts as "skipped", which satisfies
+  # the required status checks on main without burning CI minutes.
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '!docs/**'
+
+  # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
   # ---------------------------------------------------------------------------
   build-kernel:
     name: Build kernel.c (aarch64)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +79,8 @@ jobs:
   # ---------------------------------------------------------------------------
   build-agentd-aarch64:
     name: Build agentd (aarch64-linux-musl)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -60,6 +90,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Install agentd build deps
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -82,8 +114,8 @@ jobs:
   # ---------------------------------------------------------------------------
   test:
     name: Test (${{ matrix.target }})
-    needs: [build-kernel, build-agentd-aarch64]
-    if: always()
+    needs: [build-kernel, build-agentd-aarch64, changes]
+    if: always() && needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -112,6 +144,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       # -- Linux build deps --
       - name: Install build deps (Linux)
@@ -191,3 +225,28 @@ jobs:
       - name: Test agentd
         if: matrix.os == 'linux'
         run: cargo test --manifest-path crates/agentd/Cargo.toml --target ${{ matrix.agentd_target }}
+
+  # ---------------------------------------------------------------------------
+  # Aggregator: a single status check that always reports, regardless of
+  # whether the matrix jobs ran. Branch protection requires only this job,
+  # so docs-only PRs (where the matrix is skipped) still satisfy the gate.
+  # ---------------------------------------------------------------------------
+  summary:
+    name: Test Summary
+    if: always()
+    needs:
+      - changes
+      - build-kernel
+      - build-agentd-aarch64
+      - test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate results
+        run: |
+          results='${{ toJson(needs.*.result) }}'
+          echo "needs results: $results"
+          if echo "$results" | grep -qE '"failure"|"cancelled"'; then
+            echo "::error::A required job failed or was cancelled"
+            exit 1
+          fi
+          echo "All required jobs passed or were skipped"

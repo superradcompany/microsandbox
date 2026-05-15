@@ -44,20 +44,25 @@ msb run -d --name worker python -- python worker.py
 | `--rlimit` | Set a POSIX resource limit (e.g. `nofile=1024`, `nproc=64`, `as=1073741824`) |
 | `--detach-keys` | Key sequence to detach from interactive session (default: `ctrl-]`) |
 | `--replace` | Replace an existing sandbox with the same name |
+| `--replace-with-grace` | How long to wait after `SIGTERM` before `SIGKILL` during a replace (`0`, `500ms`, `5s`, `2m`). Implies `--replace`. Default `10s` when `--replace` is set alone |
 | `-q`, `--quiet` | Suppress progress output |
 | `--entrypoint` | Override the image's default entrypoint command |
+| `--init` | Hand off PID 1 to this init binary (absolute path) inside the guest after agentd's setup. See [Custom init system](/sandboxes/customize#custom-init-system) |
+| `--init-arg` | Argv entry appended to the handoff init. Repeatable. Defaults to `[<--init>]` when empty |
+| `--init-env` | Env var passed to the handoff init only (`KEY=VALUE`). Repeatable; merged on top of the inherited env |
 | `-H`, `--hostname` | Set the guest hostname (defaults to sandbox name) |
 | `-u`, `--user` | Run commands as the specified user (e.g. `nobody`, `1000`, `1000:1000`) |
 | `--pull` | When to pull the image: `always`, `if-missing` (default), `never` |
 | `--log-level` | Log verbosity for the sandbox runtime (`error`, `warn`, `info`, `debug`, `trace`) |
 | `--tmpfs` | Mount a temporary in-memory filesystem (`PATH` or `PATH:SIZE`) |
-| `--script` | Mount a host file as a named script (`NAME:PATH`) |
+| `--script` | Register an inline script (`NAME=BODY`). Available at `/.msb/scripts/<name>` and on `PATH` |
+| `--script-path` | Register a script from a host file (`NAME:PATH`). Same destination as `--script` |
 | `--max-duration` | Kill the entire sandbox after this duration (e.g. `30s`, `5m`, `1h`). Sandbox-level lifetime limit |
 | `--idle-timeout` | Stop the sandbox after this period of inactivity (e.g. `30s`, `5m`, `1h`) |
 | `--no-network` | Disable all network access |
 | `--network-policy` | Control which destinations are reachable from the sandbox. Accepted values: `none` (no network), `public-only` (default — public internet only), `nonlocal` (public + private/LAN; blocks loopback, link-local, and metadata), `allow-all` (unrestricted) |
-| `--dns-block-domain` | Block DNS lookups for a domain (returns REFUSED) |
-| `--dns-block-suffix` | Block DNS lookups for all subdomains of a suffix (e.g. `.ads.com`) |
+| `--deny-domain` | Deny egress to a domain. Repeatable. Adds a `deny Domain("...")` policy rule that fires at DNS resolution (REFUSED), TLS first-flight (SNI), and TCP egress (cache fallback) |
+| `--deny-domain-suffix` | Deny egress to all subdomains of a suffix (e.g. `.ads.com`). Repeatable. Adds a `deny DomainSuffix("...")` policy rule |
 | `--no-dns-rebind-protection` | Allow DNS responses pointing to private/internal IP addresses |
 | `--dns-nameserver` | Nameserver to forward DNS queries to (repeatable; `IP` or `IP:PORT`). Overrides the host's `/etc/resolv.conf` |
 | `--dns-query-timeout-ms` | Per-DNS-query timeout in milliseconds (default: 5000) |
@@ -81,7 +86,9 @@ Create and boot a sandbox without running a command. Takes the same flags as `ms
 
 ```bash
 msb create python --name worker -c 2 -m 1G
-msb create --replace python --name worker   # Replace existing
+msb create --replace python --name worker            # Replace existing
+msb create --replace-with-grace 30s python --name worker  # Give the old one 30s to exit
+msb create --replace-with-grace 0 python --name worker    # SIGKILL immediately
 ```
 
 ## msb start
@@ -131,6 +138,62 @@ msb exec devbox -- ls -la /app
 
 <Tip>
   The CLI auto-detects whether stdin is a terminal. When interactive, `msb exec` uses `attach` mode (TTY, line editing). When piped, it captures output. No `-i` flag is needed.
+</Tip>
+
+## msb logs
+
+Read captured output from a sandbox. Each sandbox stores its captured stdio under `<sandbox-dir>/logs/exec.log` as JSON Lines, plus runtime/kernel diagnostics in `runtime.log`/`kernel.log`. The command works on running and stopped sandboxes alike — there is no protocol traffic, just a file read.
+
+```bash
+# Captured user-program output (default sources: stdout + stderr + output)
+msb logs devbox
+
+# Tail and follow
+msb logs devbox --tail 100
+msb logs devbox -f --grep ERROR
+
+# Time-bounded
+msb logs devbox --since 5m
+msb logs devbox --since 2026-04-30T20:00:00Z --until 5m
+
+# JSON Lines passthrough — feed to jq, vector, etc.
+msb logs devbox --json | jq 'select(.s == "stderr")'
+
+# Multi-session view: prefix each line with [id:N] so you can tell sessions apart
+msb logs devbox --show-id
+
+# Color each session's output a distinct color (implies --show-id)
+msb logs devbox --color-sessions
+
+# Include runtime/kernel diagnostics
+msb logs devbox --source system
+msb logs devbox --source all                # everything, chronologically merged
+```
+
+| Flag | Description |
+|------|-------------|
+| `--tail` | Show only the last N entries |
+| `--since` | Show entries at or after this time (RFC 3339 or relative `5m`/`2h`/`1d`) |
+| `--until` | Show entries strictly before this time (same formats) |
+| `-f`, `--follow` | Follow in real time (200 ms polling, rotation-aware) |
+| `--timestamps` | Prefix each line with the entry timestamp |
+| `--source` | Sources to include: `stdout`, `stderr`, `output`, `system`, `all`. Repeat or comma-separate. Default: `stdout,stderr,output` |
+| `--grep` | Client-side regex filter on the entry body |
+| `--json` | Emit raw JSON Lines without decoding (one entry per line) |
+| `--raw` | Opt into base64 encoding for non-UTF-8 bytes |
+| `--show-id` | Prefix each line with `[id:N]` (the session correlation id) |
+| `--color-sessions` | Color each session's lines a distinct color (implies `--show-id`) |
+| `--color` | ANSI handling: `auto` (default), `always`, `never` |
+| `--no-color` | Alias for `--color=never` |
+
+**Source tags** (the `s` field in `--json` output):
+
+- `stdout` / `stderr` — captured from the session's pipes when running in **pipe mode** (streams stay separated end to end).
+- `output` — captured from the session in **pty mode**. pty allocation merges stdout and stderr at the kernel level inside the guest, so they arrive as a single stream — tagged `output` rather than mislabelled as `stdout`.
+- `system` — synthetic lifecycle markers (`--- sandbox started ---` / `--- sandbox stopped ---`) plus diagnostic lines from `runtime.log`/`kernel.log` when `--source system` is requested.
+
+<Tip>
+  If a sandbox failed to start, `msb logs` prepends a styled error block reconstructed from `boot-error.json`. The block tells you the failure stage, errno, and a hint — even though no user-program output was ever captured.
 </Tip>
 
 ## msb ls

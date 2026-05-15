@@ -32,6 +32,12 @@ Sandboxfile*
 node_modules/
 dist/
 
+# Platform-package payloads — populated by sdk/node-ts/scripts/prepare-platform-package.mjs.
+# The committed package.json stays; binaries are produced per-target in CI.
+sdk/node-ts/npm/*/bin/
+sdk/node-ts/npm/*/lib/
+sdk/node-ts/npm/*/*.node
+
 # Python
 __pycache__/
 *.pyc

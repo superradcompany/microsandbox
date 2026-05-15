@@ -136,6 +136,34 @@ impl PyVolume {
         dict.set_item("readonly", readonly)?;
         Ok(dict.into())
     }
+
+    /// Create a disk-image volume mount config.
+    ///
+    /// `format` is the disk image format (`"qcow2"` / `"raw"` / `"vmdk"`).
+    /// When omitted it is inferred from the file extension. `fstype`
+    /// (e.g. `"ext4"`) is the inner filesystem agentd will mount; if
+    /// omitted, agentd probes `/proc/filesystems` to find a type that
+    /// mounts cleanly.
+    #[staticmethod]
+    #[pyo3(signature = (path, *, format = None, fstype = None, readonly = false))]
+    fn disk(
+        py: Python<'_>,
+        path: String,
+        format: Option<String>,
+        fstype: Option<String>,
+        readonly: bool,
+    ) -> PyResult<PyObject> {
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("disk", path)?;
+        if let Some(format) = format {
+            dict.set_item("format", format)?;
+        }
+        if let Some(fstype) = fstype {
+            dict.set_item("fstype", fstype)?;
+        }
+        dict.set_item("readonly", readonly)?;
+        Ok(dict.into())
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

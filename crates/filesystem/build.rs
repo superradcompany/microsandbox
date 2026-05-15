@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 use microsandbox_utils::AGENTD_BINARY;
 #[cfg(feature = "prebuilt")]
-use microsandbox_utils::{PREBUILT_VERSION, agentd_download_url};
+use microsandbox_utils::{PREBUILT_VERSION, agentd_download_url, http_client};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -129,7 +129,7 @@ fn download_to(url: &str, dest: &Path) {
         PathBuf::from(s)
     };
 
-    let response = ureq::get(url).call().unwrap_or_else(|e| {
+    let response = http_client().get(url).call().unwrap_or_else(|e| {
         panic!("failed to download {url}: {e}");
     });
 

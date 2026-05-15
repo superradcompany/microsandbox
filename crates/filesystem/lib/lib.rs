@@ -2,6 +2,14 @@
 //! including the embedded agentd binary and the passthrough filesystem backend.
 
 #![warn(missing_docs)]
+// New lints introduced in rustc 1.95 fire on a few test fixtures;
+// cleanup tracked separately.
+#![allow(
+    clippy::useless_conversion,
+    clippy::needless_update,
+    clippy::manual_c_str_literals,
+    clippy::manual_contains
+)]
 
 //--------------------------------------------------------------------------------------------------
 // Exports

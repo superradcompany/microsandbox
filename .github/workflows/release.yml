@@ -4,6 +4,10 @@ on:
   push:
     tags: ["v*"]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   LIBKRUNFW_VERSION: "5.2.1"
@@ -62,6 +66,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Install agentd build deps
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -130,6 +136,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       # -- Linux build deps --
       - name: Install build deps (Linux)
@@ -198,6 +206,17 @@ jobs:
           mkdir -p build
           cp target/release/msb build/msb
 
+      # -- Go FFI cdylib --
+      - name: Build microsandbox-go
+        run: |
+          cargo build --release -p microsandbox-go
+          mkdir -p build
+          if [ "${{ matrix.os }}" = "darwin" ]; then
+            cp target/release/libmicrosandbox_go_ffi.dylib build/
+          else
+            cp target/release/libmicrosandbox_go_ffi.so build/
+          fi
+
       # -- macOS codesign --
       - name: Codesign msb
         if: matrix.os == 'darwin'
@@ -211,17 +230,25 @@ jobs:
       - name: Build Node SDK
         working-directory: sdk/node-ts
         run: |
-          npm install
-          npm run build -- --target ${{ matrix.napi_target }}
+          npm ci
+          npm run build:native -- --target ${{ matrix.napi_target }}
+          npm run build:ts
+
+      - name: Prepare Node platform package
+        working-directory: sdk/node-ts
+        run: node scripts/prepare-platform-package.mjs ${{ matrix.npm_dir }}
 
       - name: Upload Node SDK artifacts
         uses: actions/upload-artifact@v4
         with:
           name: node-sdk-${{ matrix.npm_dir }}
           path: |
-            sdk/node-ts/${{ matrix.node_file }}
-            sdk/node-ts/index.cjs
-            sdk/node-ts/index.d.cts
+            sdk/node-ts/native/${{ matrix.node_file }}
+            sdk/node-ts/native/index.cjs
+            sdk/node-ts/native/index.d.ts
+            sdk/node-ts/npm/${{ matrix.npm_dir }}/${{ matrix.node_file }}
+            sdk/node-ts/npm/${{ matrix.npm_dir }}/bin/msb
+            sdk/node-ts/npm/${{ matrix.npm_dir }}/lib/*
 
       # -- Python SDK --
       - uses: astral-sh/setup-uv@v3
@@ -230,18 +257,14 @@ jobs:
           cache-dependency-glob: "sdk/python/uv.lock"
 
       - name: Stage runtime bundle (Python SDK)
+        # Ship only the canonical libkrunfw filename — _runtime.py resolves
+        # to that exact name. Maturin would dereference symlinks and bloat
+        # the wheel by ~40MB on Linux / ~20MB on macOS for no benefit.
         run: |
           mkdir -p sdk/python/microsandbox/_bundled/bin
           mkdir -p sdk/python/microsandbox/_bundled/lib
           cp build/msb sdk/python/microsandbox/_bundled/bin/
           cp build/${{ matrix.libkrunfw_file }} sdk/python/microsandbox/_bundled/lib/
-          cd sdk/python/microsandbox/_bundled/lib
-          if [ "${{ matrix.os }}" = "darwin" ]; then
-            ln -sf ${{ matrix.libkrunfw_file }} libkrunfw.dylib
-          else
-            ln -sf ${{ matrix.libkrunfw_file }} libkrunfw.so.${{ env.LIBKRUNFW_ABI }}
-            ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} libkrunfw.so
-          fi
 
       - name: Build Python wheel
         uses: PyO3/maturin-action@v1
@@ -274,9 +297,14 @@ jobs:
             cp build/agentd artifacts/agentd-${{ matrix.arch }}
           fi
 
-          # Bundle: msb + libkrunfw
+          # Bundle: msb + libkrunfw + Go FFI cdylib
+          if [ "${{ matrix.os }}" = "darwin" ]; then
+            go_ffi_file=libmicrosandbox_go_ffi.dylib
+          else
+            go_ffi_file=libmicrosandbox_go_ffi.so
+          fi
           tar -czf artifacts/microsandbox-${{ matrix.target }}.tar.gz \
-            -C build msb ${{ matrix.libkrunfw_file }}
+            -C build msb ${{ matrix.libkrunfw_file }} $go_ffi_file
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -356,15 +384,29 @@ jobs:
 
       - name: Place binaries and update generated files
         run: |
-          # Copy .node binaries into platform packages.
-          cp node-artifacts/node-sdk-darwin-arm64/microsandbox.darwin-arm64.node sdk/node-ts/npm/darwin-arm64/
-          cp node-artifacts/node-sdk-linux-x64-gnu/microsandbox.linux-x64-gnu.node sdk/node-ts/npm/linux-x64-gnu/
-          cp node-artifacts/node-sdk-linux-arm64-gnu/microsandbox.linux-arm64-gnu.node sdk/node-ts/npm/linux-arm64-gnu/
+          # Copy prepared platform package payloads.
+          for dir in darwin-arm64 linux-x64-gnu linux-arm64-gnu; do
+            mkdir -p "sdk/node-ts/npm/$dir/bin" "sdk/node-ts/npm/$dir/lib"
+            cp "node-artifacts/node-sdk-$dir/npm/$dir"/microsandbox.*.node "sdk/node-ts/npm/$dir/"
+            cp "node-artifacts/node-sdk-$dir/npm/$dir/bin/msb" "sdk/node-ts/npm/$dir/bin/"
+            cp "node-artifacts/node-sdk-$dir/npm/$dir/lib/"* "sdk/node-ts/npm/$dir/lib/"
+            # GitHub Actions artifacts strip Unix exec bits; restore before publish
+            # so the published tarball carries 0755 on the binary.
+            chmod +x "sdk/node-ts/npm/$dir/bin/msb"
+          done
 
-          # Copy build-generated index.cjs and index.d.cts into root package
-          # (use darwin-arm64 — all platforms produce identical JS/types).
-          cp node-artifacts/node-sdk-darwin-arm64/index.cjs sdk/node-ts/index.cjs
-          cp node-artifacts/node-sdk-darwin-arm64/index.d.cts sdk/node-ts/index.d.cts
+          # Copy napi-generated bindings into the root package's native/ dir
+          # (use darwin-arm64; all platforms emit identical JS and types).
+          # napi build emits index.d.ts; rename to index.d.cts so nodenext
+          # resolution finds it next to the .cjs binding.
+          cp node-artifacts/node-sdk-darwin-arm64/native/index.cjs sdk/node-ts/native/index.cjs
+          cp node-artifacts/node-sdk-darwin-arm64/native/index.d.ts sdk/node-ts/native/index.d.cts
+
+      - name: Build TypeScript output (root package dist/)
+        working-directory: sdk/node-ts
+        run: |
+          npm ci
+          npm run build:ts
 
       - name: Publish platform packages
         env:
@@ -385,6 +427,45 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: sdk/node-ts
         run: npm publish --access public
+
+  # ---------------------------------------------------------------------------
+  # Refresh sdk/node-ts/package-lock.json against the just-published platform
+  # packages, so main always has lockfile integrity hashes that satisfy
+  # `npm ci`. Opens a PR that the maintainer merges manually.
+  # ---------------------------------------------------------------------------
+  refresh-lockfile:
+    name: Refresh npm lockfile
+    needs: npm-publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Wait for npm to index platform packages
+        run: sleep 60
+
+      - name: Regenerate lockfile
+        working-directory: sdk/node-ts
+        run: npm install --package-lock-only --ignore-scripts
+
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          title: "chore: refresh npm lockfile after ${{ github.ref_name }}"
+          body: |
+            Regenerates `sdk/node-ts/package-lock.json` against the platform packages published for ${{ github.ref_name }}, so `npm ci` keeps working on main.
+          branch: refresh-lockfile-${{ github.ref_name }}
+          commit-message: "chore: refresh npm lockfile after ${{ github.ref_name }}"
+          base: main
+          add-paths: sdk/node-ts/package-lock.json
+          delete-branch: true
 
   # ---------------------------------------------------------------------------
   # Publish MCP server to npm
@@ -408,7 +489,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: mcp
         run: |
-          rm package-lock.json
+          rm -f package-lock.json
           npm install
           npm run build
           npm publish --access public
@@ -476,6 +557,42 @@ jobs:
 
       - name: Publish to PyPI
         run: uv publish dist/*.whl
+
+  # ---------------------------------------------------------------------------
+  # Publish Go SDK by creating the subdirectory module tag
+  #
+  # Go modules in subdirectories of a repo use prefixed tags
+  # (`sdk/go/vX.Y.Z`) so `go get .../sdk/go@vX.Y.Z` resolves. proxy.golang.org
+  # picks up the tag automatically; there's nothing to upload.
+  #
+  # Runs after `assemble` so the GitHub release (carrying
+  # libmicrosandbox_go_ffi.{dylib,so} that EnsureInstalled downloads) exists
+  # by the time the module tag is resolvable.
+  # ---------------------------------------------------------------------------
+  go-sdk-tag:
+    name: Tag Go SDK module
+    needs: assemble
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag sdk/go at the same commit
+        run: |
+          set -euo pipefail
+          ROOT_TAG="${GITHUB_REF_NAME}"          # e.g. v0.4.6
+          GO_TAG="sdk/go/${ROOT_TAG}"
+          if git rev-parse "refs/tags/${GO_TAG}" >/dev/null 2>&1; then
+            echo "tag ${GO_TAG} already exists — skipping"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${GO_TAG}" -m "Go SDK ${ROOT_TAG}" "${GITHUB_SHA}"
+          git push origin "${GO_TAG}"
 
   # ---------------------------------------------------------------------------
   # Publish Docker image to GHCR

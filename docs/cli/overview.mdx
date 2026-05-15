@@ -39,6 +39,8 @@ msb ls                   # List all sandboxes
 msb ps                   # Running sandboxes only
 msb metrics              # Live CPU/memory/network stats
 msb inspect devbox       # Detailed info
+msb logs devbox          # Captured stdout/stderr (works on stopped sandboxes too)
+msb logs devbox -f       # Follow live
 msb stop devbox          # Graceful shutdown
 msb rm devbox            # Remove stopped sandbox
 

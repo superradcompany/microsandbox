@@ -151,7 +151,7 @@ impl IcmpRelay {
 
         // Gateway echo is already handled upstream — skip.
         let dst_ip: Ipv4Addr = ipv4.dst_addr();
-        if dst_ip == config.gateway_ipv4 {
+        if config.gateway.ipv4 == Some(dst_ip) {
             return false;
         }
 
@@ -169,7 +169,7 @@ impl IcmpRelay {
 
         // Policy check.
         if policy
-            .evaluate_egress_ip(IpAddr::V4(dst_ip), Protocol::Icmpv4)
+            .evaluate_egress_ip(IpAddr::V4(dst_ip), Protocol::Icmpv4, &self.shared)
             .is_deny()
         {
             tracing::debug!(dst = %dst_ip, "ICMP echo denied by policy");
@@ -222,7 +222,7 @@ impl IcmpRelay {
 
         // Gateway echo is already handled upstream — skip.
         let dst_ip: Ipv6Addr = ipv6.dst_addr();
-        if dst_ip == config.gateway_ipv6 {
+        if config.gateway.ipv6 == Some(dst_ip) {
             return false;
         }
 
@@ -245,7 +245,7 @@ impl IcmpRelay {
 
         // Policy check.
         if policy
-            .evaluate_egress_ip(IpAddr::V6(dst_ip), Protocol::Icmpv6)
+            .evaluate_egress_ip(IpAddr::V6(dst_ip), Protocol::Icmpv6, &self.shared)
             .is_deny()
         {
             tracing::debug!(dst = %dst_ip, "ICMPv6 echo denied by policy");
@@ -649,7 +649,7 @@ fn extract_ipv4_icmp_payload(buf: &[u8]) -> std::io::Result<&[u8]> {
             "host ICMPv4 reply did not contain a usable IPv4 header",
         ));
     }
-    if buf[9] != IpProtocol::Icmp.into() {
+    if buf[9] != u8::from(IpProtocol::Icmp) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "host ICMPv4 reply did not contain an ICMP payload",
@@ -675,7 +675,7 @@ fn extract_ipv6_icmp_payload(buf: &[u8]) -> std::io::Result<&[u8]> {
             "host ICMPv6 reply did not contain a usable IPv6 header",
         ));
     }
-    if buf[6] != IpProtocol::Icmpv6.into() {
+    if buf[6] != u8::from(IpProtocol::Icmpv6) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "host ICMPv6 reply did not contain an ICMPv6 payload",
@@ -818,11 +818,8 @@ mod tests {
         );
 
         let ipv4 = Ipv4Packet::new_checked(eth.payload()).unwrap();
-        assert_eq!(Ipv4Addr::from(ipv4.src_addr()), Ipv4Addr::new(8, 8, 8, 8));
-        assert_eq!(
-            Ipv4Addr::from(ipv4.dst_addr()),
-            Ipv4Addr::new(100, 96, 0, 2)
-        );
+        assert_eq!(ipv4.src_addr(), Ipv4Addr::new(8, 8, 8, 8));
+        assert_eq!(ipv4.dst_addr(), Ipv4Addr::new(100, 96, 0, 2));
         assert_eq!(ipv4.next_header(), IpProtocol::Icmp);
 
         let icmp = Icmpv4Packet::new_checked(ipv4.payload()).unwrap();
@@ -858,13 +855,7 @@ mod tests {
         assert_eq!(ipv6.next_header(), IpProtocol::Icmpv6);
 
         let icmp = Icmpv6Packet::new_checked(ipv6.payload()).unwrap();
-        let repr = Icmpv6Repr::parse(
-            &src.into(),
-            &dst.into(),
-            &icmp,
-            &ChecksumCapabilities::default(),
-        )
-        .unwrap();
+        let repr = Icmpv6Repr::parse(&src, &dst, &icmp, &ChecksumCapabilities::default()).unwrap();
         assert_eq!(
             repr,
             Icmpv6Repr::EchoReply {
@@ -877,10 +868,7 @@ mod tests {
         // Verify ICMPv6 checksum is non-zero (mandatory per RFC 8200).
         assert_ne!(icmp.checksum(), 0, "ICMPv6 checksum must not be zero");
         assert!(
-            icmp.verify_checksum(
-                &smoltcp::wire::Ipv6Address::from(src),
-                &smoltcp::wire::Ipv6Address::from(dst),
-            ),
+            icmp.verify_checksum(&src, &dst,),
             "ICMPv6 checksum must be valid"
         );
     }
@@ -928,13 +916,7 @@ mod tests {
         let eth = EthernetFrame::new_checked(&frame).unwrap();
         let ipv6 = Ipv6Packet::new_checked(eth.payload()).unwrap();
         let icmp = Icmpv6Packet::new_checked(ipv6.payload()).unwrap();
-        let repr = Icmpv6Repr::parse(
-            &src.into(),
-            &dst.into(),
-            &icmp,
-            &ChecksumCapabilities::default(),
-        )
-        .unwrap();
+        let repr = Icmpv6Repr::parse(&src, &dst, &icmp, &ChecksumCapabilities::default()).unwrap();
         assert_eq!(
             repr,
             Icmpv6Repr::EchoReply {
@@ -1012,8 +994,8 @@ mod tests {
         };
         let mut buf = vec![0u8; icmp_repr.buffer_len()];
         icmp_repr.emit(
-            &src.into(),
-            &dst.into(),
+            &src,
+            &dst,
             &mut Icmpv6Packet::new_unchecked(&mut buf),
             &ChecksumCapabilities::default(),
         );

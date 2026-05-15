@@ -114,6 +114,27 @@ pub enum VolumeMount {
         guest: String,
         /// Size limit in MiB.
         size_mib: Option<u32>,
+        /// Whether the mount is read-only.
+        readonly: bool,
+    },
+
+    /// Mount a disk image file as a virtio-blk device at a guest path.
+    ///
+    /// The guest OS owns the inner filesystem; microsandbox just attaches
+    /// the image and agentd mounts it. Use this for persistent state that
+    /// should be isolated from the host filesystem, for distributing
+    /// pre-built ext4/squashfs datasets, or for read-only seed volumes.
+    DiskImage {
+        /// Host path to the disk image file.
+        host: PathBuf,
+        /// Guest mount path.
+        guest: String,
+        /// Disk image format (qcow2 / raw / vmdk).
+        format: DiskImageFormat,
+        /// Inner filesystem type. When `None`, agentd probes `/proc/filesystems`.
+        fstype: Option<String>,
+        /// Whether the mount is read-only.
+        readonly: bool,
     },
 }
 
@@ -123,6 +144,9 @@ pub struct MountBuilder {
     mount: MountKind,
     readonly: bool,
     size_mib: Option<u32>,
+    disk_format: Option<DiskImageFormat>,
+    disk_fstype: Option<String>,
+    error: Option<crate::MicrosandboxError>,
 }
 
 /// Internal kind for the mount builder.
@@ -130,6 +154,7 @@ enum MountKind {
     Bind(PathBuf),
     Named(String),
     Tmpfs,
+    Disk(PathBuf),
     Unset,
 }
 
@@ -253,6 +278,9 @@ impl MountBuilder {
             mount: MountKind::Unset,
             readonly: false,
             size_mib: None,
+            disk_format: None,
+            disk_fstype: None,
+            error: None,
         }
     }
 
@@ -272,6 +300,46 @@ impl MountBuilder {
     /// Use tmpfs (memory-backed).
     pub fn tmpfs(mut self) -> Self {
         self.mount = MountKind::Tmpfs;
+        self
+    }
+
+    /// Mount a disk image file as a virtio-blk device at the guest path.
+    ///
+    /// Format defaults to the extension of `host` (`.qcow2` → Qcow2, `.vmdk`
+    /// → Vmdk, anything else → Raw). Use [`Self::format`] to override.
+    pub fn disk(mut self, host: impl Into<PathBuf>) -> Self {
+        self.mount = MountKind::Disk(host.into());
+        self
+    }
+
+    /// Override the disk image format for the current `disk()` mount.
+    ///
+    /// Only valid alongside [`Self::disk`]. Calling on bind / named / tmpfs
+    /// mounts produces an error when the surrounding `SandboxBuilder` is
+    /// finalized so the option does not silently get dropped.
+    pub fn format(mut self, format: DiskImageFormat) -> Self {
+        self.disk_format = Some(format);
+        self
+    }
+
+    /// Set the inner filesystem type for the current `disk()` mount. When
+    /// unset, agentd probes `/proc/filesystems` to find a type that mounts
+    /// cleanly.
+    pub fn fstype(mut self, fstype: impl Into<String>) -> Self {
+        let fstype = fstype.into();
+        if fstype.contains(',')
+            || fstype.contains(';')
+            || fstype.contains(':')
+            || fstype.contains('=')
+        {
+            self.error.get_or_insert_with(|| {
+                crate::MicrosandboxError::InvalidConfig(format!(
+                    "fstype must not contain ',', ';', ':', or '=': {fstype}"
+                ))
+            });
+            return self;
+        }
+        self.disk_fstype = Some(fstype);
         self
     }
 
@@ -296,7 +364,11 @@ impl MountBuilder {
     }
 
     /// Build the volume mount.
-    pub(crate) fn build(self) -> crate::MicrosandboxResult<VolumeMount> {
+    pub fn build(self) -> crate::MicrosandboxResult<VolumeMount> {
+        if let Some(err) = self.error {
+            return Err(err);
+        }
+
         // Validate guest path.
         if !self.guest.starts_with('/') {
             return Err(crate::MicrosandboxError::InvalidConfig(format!(
@@ -316,6 +388,25 @@ impl MountBuilder {
             )));
         }
 
+        // Reject options set on the wrong kind.
+        let is_tmpfs = matches!(self.mount, MountKind::Tmpfs);
+        let is_disk = matches!(self.mount, MountKind::Disk(_));
+        if self.size_mib.is_some() && !is_tmpfs {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                ".size() is only valid for tmpfs mounts".into(),
+            ));
+        }
+        if self.disk_format.is_some() && !is_disk {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                ".format() is only valid for disk image mounts".into(),
+            ));
+        }
+        if self.disk_fstype.is_some() && !is_disk {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                ".fstype() is only valid for disk image mounts".into(),
+            ));
+        }
+
         match self.mount {
             MountKind::Bind(host) => Ok(VolumeMount::Bind {
                 host,
@@ -330,9 +421,26 @@ impl MountBuilder {
             MountKind::Tmpfs => Ok(VolumeMount::Tmpfs {
                 guest: self.guest,
                 size_mib: self.size_mib,
+                readonly: self.readonly,
             }),
+            MountKind::Disk(host) => {
+                let format = self.disk_format.unwrap_or_else(|| {
+                    host.extension()
+                        .and_then(|e| e.to_str())
+                        .and_then(DiskImageFormat::from_extension)
+                        .unwrap_or(DiskImageFormat::Raw)
+                });
+                Ok(VolumeMount::DiskImage {
+                    host,
+                    guest: self.guest,
+                    format,
+                    fstype: self.disk_fstype,
+                    readonly: self.readonly,
+                })
+            }
             MountKind::Unset => Err(crate::MicrosandboxError::InvalidConfig(
-                "MountBuilder: no mount type set (call .bind(), .named(), or .tmpfs())".into(),
+                "MountBuilder: no mount type set (call .bind(), .named(), .tmpfs(), or .disk())"
+                    .into(),
             )),
         }
     }
@@ -467,9 +575,10 @@ impl VolumeMount {
     /// The absolute path where this mount appears inside the guest.
     pub fn guest(&self) -> &str {
         match self {
-            Self::Bind { guest, .. } | Self::Named { guest, .. } | Self::Tmpfs { guest, .. } => {
-                guest
-            }
+            Self::Bind { guest, .. }
+            | Self::Named { guest, .. }
+            | Self::Tmpfs { guest, .. }
+            | Self::DiskImage { guest, .. } => guest,
         }
     }
 }
@@ -584,9 +693,13 @@ impl ImageBuilder {
     /// ```
     pub fn fstype(mut self, fstype: impl Into<String>) -> Self {
         let fstype = fstype.into();
-        if fstype.contains(',') || fstype.contains('=') {
+        if fstype.contains(',')
+            || fstype.contains(';')
+            || fstype.contains(':')
+            || fstype.contains('=')
+        {
             self.error = Some(crate::MicrosandboxError::InvalidConfig(format!(
-                "fstype must not contain ',' or '=': {fstype}"
+                "fstype must not contain ',', ';', ':', or '=': {fstype}"
             )));
             return self;
         }
@@ -606,7 +719,7 @@ impl ImageBuilder {
     }
 
     /// Consume the builder and return the resolved [`RootfsSource`].
-    pub(crate) fn build(self) -> crate::MicrosandboxResult<RootfsSource> {
+    pub fn build(self) -> crate::MicrosandboxResult<RootfsSource> {
         if let Some(e) = self.error {
             return Err(e);
         }
@@ -687,8 +800,7 @@ impl From<PathBuf> for ImageSource {
     }
 }
 
-/// Custom serialization — only serializable variants are written.
-/// Custom serialization for `VolumeMount`.
+/// Custom serialization for `VolumeMount` covering all four variants.
 impl Serialize for VolumeMount {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
@@ -718,18 +830,39 @@ impl Serialize for VolumeMount {
                 map.serialize_entry("readonly", readonly)?;
                 map.end()
             }
-            Self::Tmpfs { guest, size_mib } => {
-                let mut map = serializer.serialize_map(Some(3))?;
+            Self::Tmpfs {
+                guest,
+                size_mib,
+                readonly,
+            } => {
+                let mut map = serializer.serialize_map(Some(4))?;
                 map.serialize_entry("type", "Tmpfs")?;
                 map.serialize_entry("guest", guest)?;
                 map.serialize_entry("size_mib", size_mib)?;
+                map.serialize_entry("readonly", readonly)?;
+                map.end()
+            }
+            Self::DiskImage {
+                host,
+                guest,
+                format,
+                fstype,
+                readonly,
+            } => {
+                let mut map = serializer.serialize_map(Some(6))?;
+                map.serialize_entry("type", "DiskImage")?;
+                map.serialize_entry("host", host)?;
+                map.serialize_entry("guest", guest)?;
+                map.serialize_entry("format", format)?;
+                map.serialize_entry("fstype", fstype)?;
+                map.serialize_entry("readonly", readonly)?;
                 map.end()
             }
         }
     }
 }
 
-/// Custom deserialization — only Bind, Named, Tmpfs are expected.
+/// Custom deserialization for `VolumeMount` covering all four variants.
 impl<'de> Deserialize<'de> for VolumeMount {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         /// Helper for tagged deserialization.
@@ -752,6 +885,17 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 guest: String,
                 #[serde(default)]
                 size_mib: Option<u32>,
+                #[serde(default)]
+                readonly: bool,
+            },
+            DiskImage {
+                host: PathBuf,
+                guest: String,
+                format: DiskImageFormat,
+                #[serde(default)]
+                fstype: Option<String>,
+                #[serde(default)]
+                readonly: bool,
             },
         }
 
@@ -775,7 +919,28 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 guest,
                 readonly,
             },
-            VolumeMountHelper::Tmpfs { guest, size_mib } => Self::Tmpfs { guest, size_mib },
+            VolumeMountHelper::Tmpfs {
+                guest,
+                size_mib,
+                readonly,
+            } => Self::Tmpfs {
+                guest,
+                size_mib,
+                readonly,
+            },
+            VolumeMountHelper::DiskImage {
+                host,
+                guest,
+                format,
+                fstype,
+                readonly,
+            } => Self::DiskImage {
+                host,
+                guest,
+                format,
+                fstype,
+                readonly,
+            },
         })
     }
 }
@@ -803,10 +968,29 @@ impl std::fmt::Debug for VolumeMount {
                 .field("guest", guest)
                 .field("readonly", readonly)
                 .finish(),
-            Self::Tmpfs { guest, size_mib } => f
+            Self::Tmpfs {
+                guest,
+                size_mib,
+                readonly,
+            } => f
                 .debug_struct("Tmpfs")
                 .field("guest", guest)
                 .field("size_mib", size_mib)
+                .field("readonly", readonly)
+                .finish(),
+            Self::DiskImage {
+                host,
+                guest,
+                format,
+                fstype,
+                readonly,
+            } => f
+                .debug_struct("DiskImage")
+                .field("host", host)
+                .field("guest", guest)
+                .field("format", format)
+                .field("fstype", fstype)
+                .field("readonly", readonly)
                 .finish(),
         }
     }
@@ -854,6 +1038,101 @@ mod tests {
     #[test]
     fn test_disk_image_format_from_str_unknown() {
         assert!("ext4".parse::<DiskImageFormat>().is_err());
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // MountBuilder validation
+    //----------------------------------------------------------------------------------------------
+
+    #[test]
+    fn test_mount_builder_size_rejected_on_disk() {
+        let err = MountBuilder::new("/data")
+            .disk("/host/data.qcow2")
+            .size(64u32)
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains(".size() is only valid for tmpfs"));
+    }
+
+    #[test]
+    fn test_mount_builder_size_rejected_on_bind() {
+        let err = MountBuilder::new("/data")
+            .bind("/host/data")
+            .size(64u32)
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains(".size() is only valid for tmpfs"));
+    }
+
+    #[test]
+    fn test_mount_builder_format_rejected_on_non_disk() {
+        let err = MountBuilder::new("/data")
+            .bind("/host/data")
+            .format(DiskImageFormat::Qcow2)
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(".format() is only valid for disk image mounts")
+        );
+    }
+
+    #[test]
+    fn test_mount_builder_fstype_rejected_on_non_disk() {
+        let err = MountBuilder::new("/data")
+            .tmpfs()
+            .fstype("ext4")
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(".fstype() is only valid for disk image mounts")
+        );
+    }
+
+    #[test]
+    fn test_mount_builder_disk_then_format_overrides_inference() {
+        // .disk(qcow2 path) would infer Qcow2; .format(Raw) afterwards must win.
+        let mount = MountBuilder::new("/data")
+            .disk("/host/data.qcow2")
+            .format(DiskImageFormat::Raw)
+            .build()
+            .unwrap();
+        match mount {
+            VolumeMount::DiskImage { format, .. } => assert_eq!(format, DiskImageFormat::Raw),
+            other => panic!("expected DiskImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mount_builder_format_before_disk_still_overrides() {
+        // Builder methods are call-order independent on the disk path.
+        let mount = MountBuilder::new("/data")
+            .format(DiskImageFormat::Vmdk)
+            .disk("/host/data.qcow2")
+            .build()
+            .unwrap();
+        match mount {
+            VolumeMount::DiskImage { format, .. } => assert_eq!(format, DiskImageFormat::Vmdk),
+            other => panic!("expected DiskImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mount_builder_disk_extension_inference() {
+        // No explicit format → infer from extension.
+        for (path, expected) in [
+            ("/host/data.qcow2", DiskImageFormat::Qcow2),
+            ("/host/data.vmdk", DiskImageFormat::Vmdk),
+            ("/host/data.raw", DiskImageFormat::Raw),
+            ("/host/data.img", DiskImageFormat::Raw), // unknown → Raw fallback
+        ] {
+            let mount = MountBuilder::new("/data").disk(path).build().unwrap();
+            match mount {
+                VolumeMount::DiskImage { format, .. } => assert_eq!(format, expected, "{path}"),
+                other => panic!("expected DiskImage for {path}, got {other:?}"),
+            }
+        }
     }
 
     #[test]

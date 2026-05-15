@@ -124,6 +124,16 @@ pub enum ExecEvent {
         /// Exit code.
         code: i32,
     },
+
+    /// Process failed to spawn (binary not found, permission
+    /// denied, etc.). Distinct from `Exited` — `Failed` means the
+    /// user code never ran. Terminal: no further events follow.
+    Failed(microsandbox_protocol::exec::ExecFailed),
+
+    /// A stdin write to the child failed (e.g. broken pipe). Non-terminal:
+    /// the session keeps running and may still emit further output and
+    /// an `Exited` event.
+    StdinError(microsandbox_protocol::exec::ExecStdinError),
 }
 
 /// Sink for writing to a running process's stdin.
@@ -333,11 +343,17 @@ impl ExecHandle {
     /// Wait for the command to complete and return the exit status.
     pub async fn wait(&mut self) -> MicrosandboxResult<ExitStatus> {
         while let Some(event) = self.events.recv().await {
-            if let ExecEvent::Exited { code } = event {
-                return Ok(ExitStatus {
-                    code,
-                    success: code == 0,
-                });
+            match event {
+                ExecEvent::Exited { code } => {
+                    return Ok(ExitStatus {
+                        code,
+                        success: code == 0,
+                    });
+                }
+                ExecEvent::Failed(payload) => {
+                    return Err(crate::MicrosandboxError::ExecFailed(payload));
+                }
+                _ => {}
             }
         }
 
@@ -365,6 +381,10 @@ impl ExecHandle {
                     exit_code = Some(code);
                     break;
                 }
+                ExecEvent::Failed(payload) => {
+                    return Err(crate::MicrosandboxError::ExecFailed(payload));
+                }
+                ExecEvent::StdinError(_) => {}
             }
         }
 

@@ -243,6 +243,23 @@ fn convert_exec_event(event: microsandbox::ExecEvent) -> PyExecEvent {
             data: None,
             code: Some(code),
         },
+        // Spawn-time failure: surface as a synthetic event for users
+        // iterating events. The canonical surface is the typed
+        // `ExecFailedError` exception raised by `exec()`/`shell()`.
+        microsandbox::ExecEvent::Failed(payload) => PyExecEvent {
+            event_type: "failed",
+            pid: None,
+            data: Some(payload.message.into_bytes()),
+            code: payload.errno,
+        },
+        // Stdin write failure (e.g. broken pipe). Non-terminal: the
+        // session continues and an `exited` event will follow.
+        microsandbox::ExecEvent::StdinError(payload) => PyExecEvent {
+            event_type: "stdin_error",
+            pid: None,
+            data: Some(payload.message.into_bytes()),
+            code: payload.errno,
+        },
     }
 }
 

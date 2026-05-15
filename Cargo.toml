@@ -10,8 +10,13 @@ members = [
     "crates/migration",
     "crates/protocol",
     "crates/runtime",
+    "crates/test-init",
+    "crates/test-macros",
+    "crates/test-utils",
     "crates/utils",
     "examples/rust/fs-read-stream",
+    "examples/rust/init-handoff",
+    "examples/rust/logs-read",
     "examples/rust/metrics-stream",
     "examples/rust/net-basic",
     "examples/rust/net-dns",
@@ -25,15 +30,18 @@ members = [
     "examples/rust/root-oci",
     "examples/rust/rootfs-patch",
     "examples/rust/shell-attach",
+    "examples/rust/snapshot-fork",
+    "examples/rust/volume-disk",
     "examples/rust/volume-named",
     "sdk/node-ts",
     "sdk/python",
+    "sdk/go/native",
 ]
 
 [workspace.package]
 authors = ["Super Rad Company <development@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.3.14"
+version = "0.4.6"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -46,6 +54,7 @@ panic = "abort"
 [workspace.dependencies]
 anyhow = "1.0"
 astral-tokio-tar = "0.6"
+base64 = "0.22"
 async-compression = "0.4"
 bytes = "1.9"
 chrono = { version = "0.4", features = ["serde"] }
@@ -59,9 +68,9 @@ etherparse = "0.19"
 flate2 = "1.0"
 futures = "0.3"
 hex = "0.4"
-hickory-client = "0.25"
-hickory-proto = "0.25"
-hickory-resolver = "0.25"
+hickory-client = "0.26.0-alpha.1"
+hickory-proto = "0.26.0-alpha.1"
+hickory-resolver = "0.26.0-alpha.1"
 indicatif = "0.18"
 ipnetwork = { version = "0.21.0", features = ["serde"] }
 libc = "0.2"
@@ -69,6 +78,7 @@ nix = "0.30"
 oci-client = "0.16"
 oci-spec = "0.9.0"
 rand = "0.10.1"
+reflink-copy = "0.1"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 resolv-conf = "0.7"
 scopeguard = "1.2"
@@ -98,7 +108,11 @@ sea-orm-migration = { version = "1.1", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlx-sqlite",
 ] }
-ureq = "3"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+] }
+ureq = { version = "3", features = ["platform-verifier"] }
 rustls = { version = "0.23", default-features = false, features = [
     "logging",
     "ring",
@@ -110,4 +124,5 @@ rustls-pemfile = "2"
 rustls-native-certs = "0.8"
 rcgen = { version = "0.13", features = ["x509-parser"] }
 lru = "0.16.3"
+parking_lot = "0.12"
 rpassword = "7"

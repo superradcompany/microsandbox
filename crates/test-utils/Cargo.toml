@@ -1,0 +1,16 @@
+[package]
+name = "test-utils"
+description = "Internal test helpers and the #[msb_test] attribute for microsandbox integration tests."
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+test-macros = { path = "../test-macros" }
+tempfile.workspace = true

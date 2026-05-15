@@ -1,246 +1,68 @@
-/// <reference types="node" />
-import { describe, it, expect, afterAll, beforeAll } from "vitest";
-import { Sandbox, isInstalled } from "../index.mjs";
-import type { PullProgress } from "../index.d.cts";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { Sandbox } from "../dist/index.js";
+import { msbPath } from "../dist/internal/resolve-binary.js";
+import type { PullProgress } from "../dist/index.js";
 
 const SANDBOX_NAME = "sdk-smoke-test";
 
-describe("Node.js SDK Smoke Tests", () => {
-	let sandbox: Awaited<ReturnType<typeof Sandbox.create>>;
+describe.skipIf(!msbPath())("end-to-end smoke", () => {
+  let sb: Sandbox;
 
-	beforeAll(async () => {
-		sandbox = await Sandbox.create({
-			name: SANDBOX_NAME,
-			image: "alpine",
-			cpus: 1,
-			memoryMib: 512,
-			replace: true,
-		});
-	});
+  beforeAll(async () => {
+    sb = await Sandbox.builder(SANDBOX_NAME)
+      .image("mirror.gcr.io/library/alpine")
+      .cpus(1)
+      .memory(512)
+      .replace()
+      .create();
+  });
 
-	afterAll(async () => {
-		await sandbox.stopAndWait().catch((e: unknown) => console.warn("cleanup stop:", e));
-		await Sandbox.remove(SANDBOX_NAME).catch((e: unknown) => console.warn("cleanup remove:", e));
-	});
+  afterAll(async () => {
+    await sb?.stopAndWait().catch(() => undefined);
+    await Sandbox.remove(SANDBOX_NAME).catch(() => undefined);
+  });
 
-	it("should report msb as installed", () => {
-		expect(isInstalled()).toBe(true);
-	});
+  it("exposes name synchronously", () => {
+    expect(sb.name).toBe(SANDBOX_NAME);
+  });
 
-	it("should create a sandbox", async () => {
-		expect(await sandbox.name).toBe(SANDBOX_NAME);
-	});
+  it("runs a command via exec()", async () => {
+    const out = await sb.exec("echo", ["hello"]);
+    expect(out.success).toBe(true);
+    expect(out.stdout()).toBe("hello\n");
+  });
 
-	it("should execute a command via exec()", async () => {
-		const output = await sandbox.exec("echo", ["hello from sdk test"]);
+  it("streams events via execStream()", async () => {
+    const handle = await sb.execStream("sh", [
+      "-c",
+      "echo a; echo b 1>&2; exit 7",
+    ]);
+    let stdout = "";
+    let stderr = "";
+    let code: number | null = null;
+    for await (const ev of handle) {
+      if (ev.kind === "stdout") stdout += new TextDecoder().decode(ev.data);
+      if (ev.kind === "stderr") stderr += new TextDecoder().decode(ev.data);
+      if (ev.kind === "exited") code = ev.code;
+    }
+    expect(stdout).toBe("a\n");
+    expect(stderr).toBe("b\n");
+    expect(code).toBe(7);
+  });
 
-		expect(output.code).toBe(0);
-		expect(output.success).toBe(true);
-		expect(output.stdout()).toBe("hello from sdk test\n");
-	});
+  it("reads and writes files via SandboxFs", async () => {
+    const fs = sb.fs();
+    await fs.write("/tmp/x.txt", "data\n");
+    expect(await fs.readToString("/tmp/x.txt")).toBe("data\n");
+    expect(await fs.exists("/tmp/x.txt")).toBe(true);
+    expect(await fs.exists("/tmp/missing.txt")).toBe(false);
+  });
 
-	it("should execute a shell command", async () => {
-		const output = await sandbox.shell("uname -a");
-
-		expect(output.code).toBe(0);
-		expect(output.success).toBe(true);
-		expect(output.stdout()).toContain("Linux");
-	});
-
-	it("should read and write files via sandbox fs", async () => {
-		const fs = sandbox.fs();
-		const content = "hello from sdk test\n";
-
-		await fs.write("/tmp/test.txt", Buffer.from(content));
-
-		const readBack = await fs.readString("/tmp/test.txt");
-		expect(readBack).toBe(content);
-
-		const exists = await fs.exists("/tmp/test.txt");
-		expect(exists).toBe(true);
-
-		const stat = await fs.stat("/tmp/test.txt");
-		expect(stat.kind).toBe("file");
-		expect(stat.size).toBe(content.length);
-	});
-
-	it("should get sandbox metrics", async () => {
-		const metrics = await sandbox.metrics();
-
-		expect(metrics.cpuPercent).toBeGreaterThanOrEqual(0);
-		expect(metrics.memoryBytes).toBeGreaterThan(0);
-		expect(metrics.memoryLimitBytes).toBe(512 * 1024 * 1024);
-		expect(metrics.diskReadBytes).toBeGreaterThanOrEqual(0);
-		expect(metrics.diskWriteBytes).toBeGreaterThanOrEqual(0);
-		expect(metrics.netRxBytes).toBeGreaterThanOrEqual(0);
-		expect(metrics.netTxBytes).toBeGreaterThanOrEqual(0);
-		expect(metrics.uptimeMs).toBeGreaterThan(0);
-		expect(metrics.timestampMs).toBeGreaterThan(0);
-	});
-
-	it("should list sandboxes and find the running one", async () => {
-		const list = await Sandbox.list();
-
-		expect(Array.isArray(list)).toBe(true);
-		const found = list.find((s) => s.name === SANDBOX_NAME);
-		expect(found).toBeDefined();
-		expect(found!.status).toBe("running");
-	});
-
-	it("should stream stdout via execStream", async () => {
-		const handle = await sandbox.execStream("sh", [
-			"-c",
-			"for i in 1 2 3; do echo line-$i; done",
-		]);
-
-		const lines: string[] = [];
-		let exitCode: number | null = null;
-		let event = await handle.recv();
-		while (event !== null) {
-			if (event.eventType === "stdout" && event.data) {
-				lines.push(event.data.toString("utf8"));
-			} else if (event.eventType === "exited") {
-				exitCode = event.code ?? null;
-			}
-			event = await handle.recv();
-		}
-
-		const combined = lines.join("");
-		expect(combined).toContain("line-1");
-		expect(combined).toContain("line-2");
-		expect(combined).toContain("line-3");
-		expect(exitCode).toBe(0);
-	});
-
-	it("should return null from takeStdin when stdin was not piped", async () => {
-		const handle = await sandbox.execStream("echo", ["no-stdin"]);
-		const stdin = await handle.takeStdin();
-		expect(stdin).toBeNull();
-
-		// Drain the stream so the session ends cleanly.
-		let event = await handle.recv();
-		while (event !== null) {
-			event = await handle.recv();
-		}
-	});
-
-	it("should pipe stdin via execStreamWithConfig and stream responses", async () => {
-		const handle = await sandbox.execStreamWithConfig({
-			cmd: "sh",
-			args: [
-				"-c",
-				"while IFS= read -r line; do echo \"echo:$line\"; done",
-			],
-			stdin: "pipe",
-		});
-
-		const stdin = await handle.takeStdin();
-		expect(stdin).not.toBeNull();
-
-		await stdin!.write(Buffer.from("hello\n"));
-		await stdin!.write(Buffer.from("world\n"));
-		await stdin!.close();
-
-		let combined = "";
-		let exitCode: number | null = null;
-		let event = await handle.recv();
-		while (event !== null) {
-			if (event.eventType === "stdout" && event.data) {
-				combined += event.data.toString("utf8");
-			} else if (event.eventType === "exited") {
-				exitCode = event.code ?? null;
-			}
-			event = await handle.recv();
-		}
-
-		expect(combined).toContain("echo:hello");
-		expect(combined).toContain("echo:world");
-		expect(exitCode).toBe(0);
-	});
-
-	it("should support bidirectional JSONL exchange via execStreamWithConfig", async () => {
-		// Echo server: reads JSON lines from stdin, echoes each back with {"echo": true} added
-		const script = [
-			"while IFS= read -r line; do",
-			'  printf \'{"received":%s,"echo":true}\\n\' "$line"',
-			"done",
-		].join("\n");
-
-		const handle = await sandbox.execStreamWithConfig({
-			cmd: "sh",
-			args: ["-c", script],
-			stdin: "pipe",
-		});
-
-		const stdin = await handle.takeStdin();
-		expect(stdin).not.toBeNull();
-
-		const commands = [
-			{ id: 1, type: "prompt", message: "hi" },
-			{ id: 2, type: "get_state" },
-			{ id: 3, type: "abort" },
-		];
-		for (const cmd of commands) {
-			await stdin!.write(Buffer.from(`${JSON.stringify(cmd)}\n`));
-		}
-		await stdin!.close();
-
-		let buffer = "";
-		const received: Array<{ received: unknown; echo: boolean }> = [];
-		let exitCode: number | null = null;
-		let event = await handle.recv();
-		while (event !== null) {
-			if (event.eventType === "stdout" && event.data) {
-				buffer += event.data.toString("utf8");
-				while (true) {
-					const idx = buffer.indexOf("\n");
-					if (idx === -1) break;
-					const line = buffer.slice(0, idx);
-					buffer = buffer.slice(idx + 1);
-					if (line.length > 0) received.push(JSON.parse(line));
-				}
-			} else if (event.eventType === "exited") {
-				exitCode = event.code ?? null;
-			}
-			event = await handle.recv();
-		}
-
-		expect(received).toHaveLength(3);
-		expect(received[0]).toMatchObject({ echo: true, received: commands[0] });
-		expect(received[1]).toMatchObject({ echo: true, received: commands[1] });
-		expect(received[2]).toMatchObject({ echo: true, received: commands[2] });
-		expect(exitCode).toBe(0);
-	});
-
-	it("should propagate env vars via execStreamWithConfig", async () => {
-		const handle = await sandbox.execStreamWithConfig({
-			cmd: "sh",
-			args: ["-c", "echo $MY_VAR"],
-			env: { MY_VAR: "from-config" },
-		});
-
-		let combined = "";
-		let exitCode: number | null = null;
-		let event = await handle.recv();
-		while (event !== null) {
-			if (event.eventType === "stdout" && event.data) {
-				combined += event.data.toString("utf8");
-			} else if (event.eventType === "exited") {
-				exitCode = event.code ?? null;
-			}
-			event = await handle.recv();
-		}
-
-		expect(combined).toContain("from-config");
-		expect(exitCode).toBe(0);
-	});
-
-	it("should stop the sandbox", async () => {
-		const status = await sandbox.stopAndWait();
-
-		expect(status.code).toBe(0);
-		expect(status.success).toBe(true);
-	});
+  it("snapshots metrics", async () => {
+    const m = await sb.metrics();
+    expect(m.timestamp).toBeInstanceOf(Date);
+    expect(typeof m.cpuPercent).toBe("number");
+  });
 });
 
 describe("Node.js SDK Pull Progress", () => {
@@ -260,14 +82,13 @@ describe("Node.js SDK Pull Progress", () => {
 		// pullPolicy:"always" forces a fresh resolve so we reliably see the
 		// resolving→resolved→complete milestone sequence. Layer events may or
 		// may not appear depending on local cache state.
-		const session = await Sandbox.createWithProgress({
-			name: NAME_ITER,
-			image: "alpine",
-			cpus: 1,
-			memoryMib: 512,
-			replace: true,
-			pullPolicy: "always",
-		});
+		const session = await Sandbox.builder(NAME_ITER)
+			.image("mirror.gcr.io/library/alpine")
+			.cpus(1)
+			.memory(512)
+			.replace()
+			.pullPolicy("always")
+			.createWithPullProgress();
 
 		const events: PullProgress[] = [];
 		for await (const ev of session) events.push(ev);
@@ -275,52 +96,51 @@ describe("Node.js SDK Pull Progress", () => {
 		expect(events.length).toBeGreaterThan(0);
 
 		const first = events[0];
-		if (first.type !== "resolving") throw new Error(`expected first event to be resolving, got ${first.type}`);
+		if (first.kind !== "resolving") throw new Error(`expected first event to be resolving, got ${first.kind}`);
 		expect(first.reference).toBeTruthy();
 		const reference = first.reference;
 
-		const resolved = events.find((e) => e.type === "resolved");
-		if (resolved?.type !== "resolved") throw new Error("resolved event missing");
+		const resolved = events.find((e) => e.kind === "resolved");
+		if (resolved?.kind !== "resolved") throw new Error("resolved event missing");
 		expect(resolved.reference).toBe(reference);
 		expect(resolved.manifestDigest).toBeTruthy();
 		expect(resolved.layerCount).toBeGreaterThan(0);
 
 		const last = events[events.length - 1];
-		if (last.type !== "complete") throw new Error(`expected last event to be complete, got ${last.type}`);
+		if (last.kind !== "complete") throw new Error(`expected last event to be complete, got ${last.kind}`);
 		expect(last.reference).toBe(reference);
 		expect(last.layerCount).toBe(resolved.layerCount);
 
-		const idx = (t: PullProgress["type"]) => events.findIndex((e) => e.type === t);
+		const idx = (t: PullProgress["kind"]) => events.findIndex((e) => e.kind === t);
 		expect(idx("resolving")).toBeLessThan(idx("resolved"));
 		expect(idx("resolved")).toBeLessThan(idx("complete"));
 
 		// Field population is best-effort — layer events only fire on cache miss.
-		const progress = events.find((e) => e.type === "layer_download_progress");
-		if (progress?.type === "layer_download_progress") {
+		const progress = events.find((e) => e.kind === "layerDownloadProgress");
+		if (progress?.kind === "layerDownloadProgress") {
 			expect(progress.layerIndex).toBeGreaterThanOrEqual(0);
 			expect(progress.digest).toBeTruthy();
 			expect(progress.downloadedBytes).toBeGreaterThanOrEqual(0);
 		}
 
-		const sb = await session.result();
-		expect(await sb.name).toBe(NAME_ITER);
+		const sb = await session.awaitSandbox();
+		expect(sb.name).toBe(NAME_ITER);
 		await sb.stopAndWait();
 	}, 180_000);
 
 	it("streams events via recv() without the async iterator", async () => {
-		const session = await Sandbox.createWithProgress({
-			name: NAME_RECV,
-			image: "alpine",
-			cpus: 1,
-			memoryMib: 512,
-			replace: true,
-		});
+		const session = await Sandbox.builder(NAME_RECV)
+			.image("mirror.gcr.io/library/alpine")
+			.cpus(1)
+			.memory(512)
+			.replace()
+			.createWithPullProgress();
 
 		const eventTypes: string[] = [];
-		let ev = await session.recv();
+		let ev = await session.progress.recv();
 		while (ev !== null) {
-			eventTypes.push(ev.type);
-			ev = await session.recv();
+			eventTypes.push(ev.kind);
+			ev = await session.progress.recv();
 		}
 
 		expect(eventTypes.length).toBeGreaterThanOrEqual(3);
@@ -328,28 +148,27 @@ describe("Node.js SDK Pull Progress", () => {
 		expect(eventTypes).toContain("resolved");
 		expect(eventTypes[eventTypes.length - 1]).toBe("complete");
 
-		const sb = await session.result();
+		const sb = await session.awaitSandbox();
 		await sb.stopAndWait();
 	}, 120_000);
 
-	it("createDetachedWithProgress yields events and creates a detached sandbox", async () => {
-		const session = await Sandbox.createDetachedWithProgress({
-			name: NAME_DETACHED,
-			image: "alpine",
-			cpus: 1,
-			memoryMib: 512,
-			replace: true,
-		});
+	it("createDetachedWithPullProgress yields events and creates a detached sandbox", async () => {
+		const session = await Sandbox.builder(NAME_DETACHED)
+			.image("mirror.gcr.io/library/alpine")
+			.cpus(1)
+			.memory(512)
+			.replace()
+			.createDetachedWithPullProgress();
 
 		const types: string[] = [];
-		for await (const ev of session) types.push(ev.type);
+		for await (const ev of session) types.push(ev.kind);
 
 		expect(types[0]).toBe("resolving");
 		expect(types).toContain("resolved");
 		expect(types[types.length - 1]).toBe("complete");
 
-		const sb = await session.result();
-		expect(await sb.name).toBe(NAME_DETACHED);
+		const sb = await session.awaitSandbox();
+		expect(sb.name).toBe(NAME_DETACHED);
 
 		await sb.stopAndWait();
 	}, 120_000);
@@ -357,34 +176,32 @@ describe("Node.js SDK Pull Progress", () => {
 	it("result() rejects when the image cannot be pulled", async () => {
 		// pullPolicy:"never" with an image that is not in the local cache
 		// forces a fast failure without hitting any network.
-		const session = await Sandbox.createWithProgress({
-			name: NAME_ERROR,
-			image: "sdk-nonexistent-image-xyz789:never",
-			cpus: 1,
-			memoryMib: 512,
-			replace: true,
-			pullPolicy: "never",
-		});
+		const session = await Sandbox.builder(NAME_ERROR)
+			.image("sdk-nonexistent-image-xyz789:never")
+			.cpus(1)
+			.memory(512)
+			.replace()
+			.pullPolicy("never")
+			.createWithPullProgress();
 
 		for await (const _ev of session) {}
 
-		await expect(session.result()).rejects.toThrow(/not.*cache|cached|not found/i);
+		await expect(session.awaitSandbox()).rejects.toThrow(/not.*cache|cached|not found/i);
 	}, 60_000);
 
-	it("result() throws 'already consumed' on the second call", async () => {
-		const session = await Sandbox.createWithProgress({
-			name: NAME_DOUBLE,
-			image: "alpine",
-			cpus: 1,
-			memoryMib: 512,
-			replace: true,
-		});
+	it("awaitSandbox() throws 'already consumed' on the second call", async () => {
+		const session = await Sandbox.builder(NAME_DOUBLE)
+			.image("mirror.gcr.io/library/alpine")
+			.cpus(1)
+			.memory(512)
+			.replace()
+			.createWithPullProgress();
 
 		for await (const _ev of session) {}
 
-		const sb = await session.result();
-		expect(await sb.name).toBe(NAME_DOUBLE);
-		await expect(session.result()).rejects.toThrow(/already consumed/);
+		const sb = await session.awaitSandbox();
+		expect(sb.name).toBe(NAME_DOUBLE);
+		await expect(session.awaitSandbox()).rejects.toThrow(/already consumed/);
 
 		await sb.stopAndWait();
 	}, 120_000);

@@ -1,37 +1,28 @@
 import { Sandbox, Volume } from "microsandbox";
 
-async function main() {
-  // Create a named volume.
-  const data = await Volume.create({ name: "my-data", quotaMib: 100 });
+const data = await Volume.builder("my-data").quota(100).create();
 
-  // Sandbox A writes to the volume.
-  const writer = await Sandbox.create({
-    name: "writer",
-    image: "alpine",
-    volumes: { "/data": { named: data.name } },
-    replace: true,
-  });
-
+// Sandbox A writes to the volume.
+{
+  await using writer = await Sandbox.builder("writer")
+    .image("alpine")
+    .volume("/data", (m) => m.named(data.name))
+    .replace()
+    .create();
   await writer.shell("echo 'hello from sandbox A' > /data/message.txt");
-  await writer.stopAndWait();
-
-  // Sandbox B reads from the same volume.
-  const reader = await Sandbox.create({
-    name: "reader",
-    image: "alpine",
-    volumes: { "/data": { named: data.name, readonly: true } },
-    replace: true,
-  });
-
-  const output = await reader.shell("cat /data/message.txt");
-  console.log(output.stdout());
-
-  await reader.stopAndWait();
-
-  // Clean up.
-  await Sandbox.remove("writer");
-  await Sandbox.remove("reader");
-  await Volume.remove("my-data");
 }
 
-main();
+// Sandbox B reads the same volume read-only.
+{
+  await using reader = await Sandbox.builder("reader")
+    .image("alpine")
+    .volume("/data", (m) => m.named(data.name).readonly())
+    .replace()
+    .create();
+  console.log((await reader.shell("cat /data/message.txt")).stdout());
+}
+
+// Cleanup.
+await Sandbox.remove("writer");
+await Sandbox.remove("reader");
+await Volume.remove("my-data");

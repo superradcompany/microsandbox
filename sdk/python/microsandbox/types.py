@@ -5,6 +5,7 @@ from __future__ import annotations
 import enum
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Literal, TypeAlias
 
 #--------------------------------------------------------------------------------------------------
 # Constants
@@ -43,6 +44,7 @@ class Action(enum.StrEnum):
 class Direction(enum.StrEnum):
     EGRESS = "egress"
     INGRESS = "ingress"
+    ANY = "any"
 
 class Protocol(enum.StrEnum):
     TCP = "tcp"
@@ -60,6 +62,7 @@ class DestGroup(enum.StrEnum):
     LINK_LOCAL = "link-local"
     METADATA = "metadata"
     MULTICAST = "multicast"
+    HOST = "host"
 
 class ViolationAction(enum.StrEnum):
     BLOCK = "block"
@@ -70,6 +73,7 @@ class MountKind(enum.StrEnum):
     BIND = "bind"
     NAMED = "named"
     TMPFS = "tmpfs"
+    DISK = "disk"
 
 class FsEntryKind(enum.StrEnum):
     FILE = "file"
@@ -99,6 +103,9 @@ class RlimitResource(enum.StrEnum):
     NICE = "nice"
     RTPRIO = "rtprio"
     RTTIME = "rttime"
+
+LogSource: TypeAlias = Literal["stdout", "stderr", "output", "system"]
+LogReadSource: TypeAlias = Literal["stdout", "stderr", "output", "system", "all"]
 
 #--------------------------------------------------------------------------------------------------
 # Types: Size
@@ -232,6 +239,34 @@ class ExecOptions:
         return d
 
 #--------------------------------------------------------------------------------------------------
+# Types: Init Handoff
+#--------------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class InitConfig:
+    """Guest init-handoff configuration.
+
+    Pass to ``Sandbox.create(init=...)`` when the init binary takes
+    argv or extra env vars. For the simple case, just pass the cmd
+    as a bare string: ``init="auto"``.
+
+    ``cmd`` is either an absolute path inside the guest rootfs or the
+    literal ``"auto"`` (probes /sbin/init, /lib/systemd/systemd,
+    /usr/lib/systemd/systemd).
+    """
+    cmd: str
+    args: tuple[str, ...] = ()
+    env: Mapping[str, str] = field(default_factory=dict)
+
+    def _to_dict(self) -> dict:
+        d: dict = {"cmd": self.cmd}
+        if self.args:
+            d["args"] = list(self.args)
+        if self.env:
+            d["env"] = dict(self.env)
+        return d
+
+#--------------------------------------------------------------------------------------------------
 # Types: Attach
 #--------------------------------------------------------------------------------------------------
 
@@ -268,18 +303,37 @@ class MountConfig:
     named: str | None = None
     size_mib: int | None = None
     readonly: bool = False
+    disk: str | None = None
+    format: DiskImageFormat | None = None
+    fstype: str | None = None
 
     def _to_dict(self) -> dict:
-        d: dict = {}
-        if self.bind is not None:
+        # Drive emission off `kind` exclusively so a `MountConfig` with
+        # contradictory fields (e.g. kind=DISK + bind=...) raises here
+        # rather than silently letting the wrong arm of `apply_mount` win.
+        d: dict = {"readonly": self.readonly}
+        if self.kind == MountKind.BIND:
+            if self.bind is None:
+                raise ValueError("MountConfig kind=BIND requires bind=...")
             d["bind"] = self.bind
-        if self.named is not None:
+        elif self.kind == MountKind.NAMED:
+            if self.named is None:
+                raise ValueError("MountConfig kind=NAMED requires named=...")
             d["named"] = self.named
-        if self.kind == MountKind.TMPFS:
+        elif self.kind == MountKind.TMPFS:
             d["tmpfs"] = True
-        if self.size_mib is not None:
-            d["size_mib"] = self.size_mib
-        d["readonly"] = self.readonly
+            if self.size_mib is not None:
+                d["size_mib"] = self.size_mib
+        elif self.kind == MountKind.DISK:
+            if self.disk is None:
+                raise ValueError("MountConfig kind=DISK requires disk=...")
+            d["disk"] = self.disk
+            if self.format is not None:
+                d["format"] = self.format.value
+            if self.fstype is not None:
+                d["fstype"] = self.fstype
+        else:  # pragma: no cover - StrEnum exhaustive above
+            raise ValueError(f"unknown MountKind: {self.kind!r}")
         return d
 
 #--------------------------------------------------------------------------------------------------
@@ -396,6 +450,26 @@ class Patch:
 #--------------------------------------------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
+class SecretInjection:
+    """Where in the HTTP request the secret value can be substituted."""
+    headers: bool = True
+    basic_auth: bool = True
+    query_params: bool = False
+    body: bool = False
+
+    def _to_dict(self) -> dict:
+        d: dict = {}
+        if not self.headers:
+            d["headers"] = False
+        if not self.basic_auth:
+            d["basic_auth"] = False
+        if self.query_params:
+            d["query_params"] = True
+        if self.body:
+            d["body"] = True
+        return d
+
+@dataclass(frozen=True, slots=True)
 class SecretEntry:
     """A secret entry for the secrets array."""
     env_var: str
@@ -405,6 +479,7 @@ class SecretEntry:
     placeholder: str | None = None
     require_tls: bool = True
     on_violation: ViolationAction = ViolationAction.BLOCK_AND_LOG
+    injection: SecretInjection = field(default_factory=SecretInjection)
 
     def _to_dict(self) -> dict:
         d: dict = {"env_var": self.env_var, "value": self.value}
@@ -418,6 +493,9 @@ class SecretEntry:
             d["require_tls"] = False
         if self.on_violation != ViolationAction.BLOCK_AND_LOG:
             d["on_violation"] = str(self.on_violation)
+        injection = self.injection._to_dict()
+        if injection:
+            d["injection"] = injection
         return d
 
 class Secret:
@@ -433,6 +511,7 @@ class Secret:
         placeholder: str | None = None,
         require_tls: bool = True,
         on_violation: ViolationAction = ViolationAction.BLOCK_AND_LOG,
+        injection: SecretInjection | None = None,
     ) -> SecretEntry:
         return SecretEntry(
             env_var=env_var,
@@ -442,6 +521,7 @@ class Secret:
             placeholder=placeholder,
             require_tls=require_tls,
             on_violation=on_violation,
+            injection=injection if injection is not None else SecretInjection(),
         )
 
 #--------------------------------------------------------------------------------------------------
@@ -467,14 +547,44 @@ class Rule:
              port: int | str | None = None, destination: str | None = None) -> Rule:
         return cls(Action.DENY, direction, destination, protocol, port)
 
+    @classmethod
+    def allow_dns(cls) -> tuple[Rule, Rule]:
+        """Allow plain DNS (UDP/53 and TCP/53) to the sandbox gateway.
+
+        Returns the pair `(udp_rule, tcp_rule)` since this SDK's
+        `Rule` shape is single-protocol. Splat into `NetworkPolicy.rules`
+        to open DNS under a deny-by-default policy:
+
+            NetworkPolicy(rules=(*Rule.allow_dns(), ...))
+
+        DoT (TCP/853) is intentionally not included; add an explicit
+        `destination="host"`, `protocol=Protocol.TCP`, `port=853` rule
+        if needed (and pair with TLS interception).
+        """
+        return (
+            cls(Action.ALLOW, Direction.EGRESS, "host", Protocol.UDP, 53),
+            cls(Action.ALLOW, Direction.EGRESS, "host", Protocol.TCP, 53),
+        )
+
 @dataclass(frozen=True, slots=True)
 class NetworkPolicy:
-    """Custom network policy with rules. Mirrors Rust's NetworkPolicy { default_action, rules }."""
-    default_action: Action = Action.ALLOW
+    """Custom network policy with rules.
+
+    Mirrors Rust's `NetworkPolicy { default_egress, default_ingress, rules }`.
+    The defaults are asymmetric to preserve today's behavior:
+    egress falls through to deny (today's `public_only` reachability when
+    paired with the implicit allow-public rule); ingress falls through
+    to allow (today's unfiltered published-port behavior).
+    """
+    default_egress: Action = Action.DENY
+    default_ingress: Action = Action.ALLOW
     rules: tuple[Rule, ...] = ()
 
     def _to_dict(self) -> dict:
-        d: dict = {"default_action": str(self.default_action)}
+        d: dict = {
+            "default_egress": str(self.default_egress),
+            "default_ingress": str(self.default_ingress),
+        }
         if self.rules:
             d["rules"] = [
                 {
@@ -520,10 +630,6 @@ class TlsConfig:
 @dataclass(frozen=True, slots=True)
 class DnsConfig:
     """DNS interception configuration."""
-    block_domains: tuple[str, ...] = ()
-    """Block DNS lookups for exact domains (returns REFUSED)."""
-    block_domain_suffixes: tuple[str, ...] = ()
-    """Block DNS lookups for all subdomains of a suffix."""
     rebind_protection: bool = True
     """Block DNS responses resolving to private IPs. Default: True."""
     nameservers: tuple[str, ...] = ()
@@ -534,10 +640,6 @@ class DnsConfig:
 
     def _to_dict(self) -> dict:
         d: dict = {}
-        if self.block_domains:
-            d["blocked_domains"] = list(self.block_domains)
-        if self.block_domain_suffixes:
-            d["blocked_suffixes"] = list(self.block_domain_suffixes)
         if not self.rebind_protection:
             d["rebind_protection"] = False
         if self.nameservers:
@@ -552,6 +654,15 @@ class Network:
     """Network configuration for a sandbox."""
     policy: str | NetworkPolicy | None = None
     ports: Mapping[int, int] = field(default_factory=dict)
+    deny_domains: tuple[str, ...] = ()
+    """Deny egress to these exact domains. Each entry adds a
+    `deny Domain("...")` policy rule that fires at DNS resolution
+    (REFUSED), TLS first-flight (SNI), and TCP egress (cache fallback).
+    Prepended onto the policy so it takes precedence over later allow
+    rules."""
+    deny_domain_suffixes: tuple[str, ...] = ()
+    """Deny egress to all subdomains of these suffixes. Same enforcement
+    layers as `deny_domains`."""
     dns: DnsConfig | None = None
     tls: TlsConfig | None = None
     max_connections: int | None = None
@@ -577,6 +688,10 @@ class Network:
             d["custom_policy"] = self.policy._to_dict()
         if self.ports:
             d["ports"] = dict(self.ports)
+        if self.deny_domains:
+            d["deny_domains"] = list(self.deny_domains)
+        if self.deny_domain_suffixes:
+            d["deny_domain_suffixes"] = list(self.deny_domain_suffixes)
         if self.dns is not None:
             dns_dict = self.dns._to_dict()
             if dns_dict:

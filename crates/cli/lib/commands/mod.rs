@@ -15,6 +15,7 @@ pub mod image;
 pub mod inspect;
 pub mod install;
 pub mod list;
+pub mod logs;
 pub mod metrics;
 pub mod ps;
 pub mod pull;
@@ -22,6 +23,7 @@ pub mod registry;
 pub mod remove;
 pub mod run;
 pub mod self_cmd;
+pub mod snapshot;
 pub mod start;
 pub mod stop;
 pub mod uninstall;
@@ -76,7 +78,7 @@ pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbo
                     Ok(s)
                 }
                 Err(e) => {
-                    spinner.finish_error();
+                    spinner.finish_clear();
                     Err(e.into())
                 }
             }

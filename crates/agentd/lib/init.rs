@@ -26,7 +26,13 @@ pub fn init(params: BootParams) -> AgentdResult<()> {
     }
     linux::apply_dir_mounts(&params.dir_mounts)?;
     linux::apply_file_mounts(&params.file_mounts)?;
-    network::apply_hostname(params.hostname.as_deref())?;
+    linux::apply_disk_mounts(&params.disk_mounts)?;
+    network::apply_hostname(
+        params.hostname.as_deref(),
+        params.host_alias.as_deref(),
+        params.net_ipv4.as_ref().map(|v4| v4.gateway),
+        params.net_ipv6.as_ref().map(|v6| v6.gateway),
+    )?;
     linux::apply_tmpfs_mounts(&params.tmpfs)?;
     linux::ensure_standard_tmp_permissions()?;
     network::apply_network_config(params.network())?;
@@ -67,7 +73,7 @@ mod linux {
     use nix::sys::stat::Mode;
     use nix::unistd;
 
-    use crate::config::{BlockRootSpec, DirMountSpec, FileMountSpec, TmpfsSpec};
+    use crate::config::{BlockRootSpec, DirMountSpec, DiskMountSpec, FileMountSpec, TmpfsSpec};
     use crate::error::{AgentdError, AgentdResult};
 
     /// Mounts essential Linux filesystems.
@@ -199,7 +205,8 @@ mod linux {
                 ))
             })?;
         } else {
-            try_mount(device, "/newroot")?;
+            let fstypes = read_proc_filesystems()?;
+            try_mount_any(device, "/newroot", MsFlags::empty(), &fstypes)?;
         }
         Ok(())
     }
@@ -287,27 +294,43 @@ mod linux {
         Ok(())
     }
 
-    /// Tries every filesystem type listed in `/proc/filesystems` until one succeeds.
-    fn try_mount(device: &str, target: &str) -> AgentdResult<()> {
+    /// Read native filesystem types from `/proc/filesystems`, skipping
+    /// `nodev` entries (virtual filesystems that can't back a real device).
+    fn read_proc_filesystems() -> AgentdResult<Vec<String>> {
         let content = fs::read_to_string("/proc/filesystems")
             .map_err(|e| AgentdError::Init(format!("failed to read /proc/filesystems: {e}")))?;
+        Ok(content
+            .lines()
+            .filter_map(|line| {
+                if line.starts_with("nodev") {
+                    return None;
+                }
+                let fstype = line.trim();
+                if fstype.is_empty() {
+                    None
+                } else {
+                    Some(fstype.to_string())
+                }
+            })
+            .collect())
+    }
 
-        for line in content.lines() {
-            // Skip virtual filesystems marked with "nodev".
-            if line.starts_with("nodev") {
-                continue;
-            }
-
-            let fstype = line.trim();
-            if fstype.is_empty() {
-                continue;
-            }
-
+    /// Try mounting `device` at `target` with `flags`, walking the supplied
+    /// candidate filesystem list until one succeeds. Use
+    /// `read_proc_filesystems` to build the candidate list (typically once
+    /// per init phase) and reuse it across multiple mount attempts.
+    fn try_mount_any(
+        device: &str,
+        target: &str,
+        flags: MsFlags,
+        fstypes: &[String],
+    ) -> AgentdResult<()> {
+        for fstype in fstypes {
             if mount::mount(
                 Some(device),
                 target,
-                Some(fstype),
-                MsFlags::empty(),
+                Some(fstype.as_str()),
+                flags,
                 None::<&str>,
             )
             .is_ok()
@@ -315,7 +338,6 @@ mod linux {
                 return Ok(());
             }
         }
-
         Err(AgentdError::Init(format!(
             "failed to mount {device} at {target}: no supported filesystem found"
         )))
@@ -479,6 +501,106 @@ mod linux {
         Ok(())
     }
 
+    /// Mounts each disk-image volume at its guest path.
+    pub fn apply_disk_mounts(specs: &[DiskMountSpec]) -> AgentdResult<()> {
+        if specs.is_empty() {
+            return Ok(());
+        }
+        // Read /proc/filesystems once and reuse the candidate list across
+        // all autodetect mounts in this batch.
+        let fstypes = read_proc_filesystems()?;
+        for spec in specs {
+            mount_disk(spec, &fstypes)?;
+        }
+        Ok(())
+    }
+
+    /// Resolve the block device for a disk-image mount id.
+    ///
+    /// Primary path: `/dev/disk/by-id/virtio-<id>`, which udev/kernel
+    /// create when the VMM sets `virtio_blk_config.serial`.
+    /// Fallback: scan `/sys/block/*/serial` for a match, which works
+    /// even when udev is unavailable or has not yet populated the
+    /// symlink.
+    fn resolve_disk_device(id: &str) -> AgentdResult<String> {
+        use std::{thread::sleep, time::Duration};
+        const RETRIES: u32 = 20;
+        const INTERVAL: Duration = Duration::from_millis(10);
+
+        let by_id = format!("/dev/disk/by-id/virtio-{id}");
+        for attempt in 0..RETRIES {
+            if Path::new(&by_id).exists() {
+                return Ok(by_id);
+            }
+            if let Some(dev) = scan_block_serial(id) {
+                return Ok(dev);
+            }
+            // Skip the sleep after the last check so the failure path
+            // doesn't pay 10ms it can't use.
+            if attempt + 1 < RETRIES {
+                sleep(INTERVAL);
+            }
+        }
+        Err(AgentdError::Init(format!(
+            "disk mount: no block device found for id '{id}' \
+             (checked /dev/disk/by-id/virtio-{id} and /sys/block/*/serial)"
+        )))
+    }
+
+    /// Walk `/sys/block/*` for an entry whose `serial` file matches `id`.
+    fn scan_block_serial(id: &str) -> Option<String> {
+        let entries = fs::read_dir("/sys/block").ok()?;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name_str) = name.to_str() else {
+                continue;
+            };
+            if !name_str.starts_with("vd") {
+                continue;
+            }
+            let serial_path = entry.path().join("serial");
+            let Ok(serial) = fs::read_to_string(&serial_path) else {
+                continue;
+            };
+            if serial.trim() == id {
+                return Some(format!("/dev/{name_str}"));
+            }
+        }
+        None
+    }
+
+    fn mount_disk(spec: &DiskMountSpec, fstypes: &[String]) -> AgentdResult<()> {
+        let path = spec.guest_path.as_str();
+        fs::create_dir_all(path)
+            .map_err(|e| AgentdError::Init(format!("disk mount: create dir {path}: {e}")))?;
+
+        let device = resolve_disk_device(&spec.id)?;
+
+        let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RELATIME;
+        if spec.readonly {
+            flags |= MsFlags::MS_RDONLY;
+        }
+
+        if let Some(fstype) = spec.fstype.as_deref() {
+            mount::mount(
+                Some(device.as_str()),
+                path,
+                Some(fstype),
+                flags,
+                None::<&str>,
+            )
+            .map_err(|e| {
+                AgentdError::Init(format!(
+                    "disk mount: failed to mount {device} at {path} as {fstype}: {e}"
+                ))
+            })?;
+        } else {
+            try_mount_any(&device, path, flags, fstypes)?;
+        }
+
+        Ok(())
+    }
+
     /// Mounts each tmpfs from the parsed specs.
     pub fn apply_tmpfs_mounts(specs: &[TmpfsSpec]) -> AgentdResult<()> {
         for spec in specs {
@@ -516,6 +638,9 @@ mod linux {
         if spec.noexec {
             flags |= MsFlags::MS_NOEXEC;
         }
+        if spec.readonly {
+            flags |= MsFlags::MS_RDONLY;
+        }
 
         // Mount data: size and mode options.
         let mut data = String::new();
@@ -539,9 +664,15 @@ mod linux {
         Ok(())
     }
 
-    /// Creates the `/run` directory.
+    /// Creates `/run` and `/run/microsandbox` directories.
+    ///
+    /// `/run/microsandbox` is the canonical directory for agentd-owned
+    /// runtime files (e.g. the post-handoff stderr log). Creating it
+    /// here keeps the ownership in `init::init` regardless of whether
+    /// handoff is configured.
     pub fn create_run_dir() -> AgentdResult<()> {
         mkdir_ignore_exists("/run")?;
+        mkdir_ignore_exists("/run/microsandbox")?;
         Ok(())
     }
 

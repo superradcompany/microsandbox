@@ -6,7 +6,7 @@
 //! socket that connects to the guest, and a relay task bridges the host
 //! socket to the smoltcp socket via channels.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 
@@ -51,8 +51,11 @@ pub struct PortPublisher {
     _inbound_tx: mpsc::Sender<InboundConnection>,
     /// Tracked inbound connections (smoltcp socket → relay state).
     connections: Vec<InboundRelay>,
-    /// Guest IPv4 address (for smoltcp connect target).
-    guest_ipv4: Ipv4Addr,
+    /// Guest IP that inbound connections are dialed to. Prefers IPv4 (the
+    /// common case — most services bind `0.0.0.0` or dual-stack `::`, both
+    /// of which accept v4) and falls back to IPv6 for v6-only sandboxes.
+    /// `None` when neither family is active; listeners are not spawned.
+    guest_ip: Option<IpAddr>,
     /// Ephemeral port counter.
     ephemeral_port: Arc<AtomicU16>,
     /// Maximum inbound connections (prevents resource exhaustion from host-side floods).
@@ -90,37 +93,35 @@ struct InboundRelay {
 
 impl PortPublisher {
     /// Create a new publisher and spawn listeners for all published ports.
+    ///
+    /// Listeners are only spawned when at least one of `guest_ipv4` /
+    /// `guest_ipv6` is `Some`; published ports need a smoltcp dial target.
     pub fn new(
         ports: &[PublishedPort],
-        guest_ipv4: Ipv4Addr,
+        guest_ipv4: Option<Ipv4Addr>,
+        guest_ipv6: Option<Ipv6Addr>,
         tokio_handle: &tokio::runtime::Handle,
     ) -> Self {
         let (inbound_tx, inbound_rx) = mpsc::channel(64);
 
-        // Spawn a listener for each published TCP port.
-        for port in ports {
-            if port.protocol == PortProtocol::Tcp {
-                let tx = inbound_tx.clone();
-                let bind_addr = SocketAddr::new(port.host_bind, port.host_port);
-                let guest_port = port.guest_port;
-                tokio_handle.spawn(async move {
-                    if let Err(e) = tcp_listener_task(bind_addr, guest_port, tx).await {
-                        tracing::error!(
-                            bind = %bind_addr,
-                            error = %e,
-                            "published port listener failed",
-                        );
-                    }
-                });
-            }
-            // TODO: UDP published ports.
+        let guest_ip = guest_ipv4
+            .map(IpAddr::V4)
+            .or_else(|| guest_ipv6.map(IpAddr::V6));
+
+        if guest_ip.is_some() {
+            Self::spawn_listeners(ports, &inbound_tx, tokio_handle);
+        } else if !ports.is_empty() {
+            tracing::warn!(
+                count = ports.len(),
+                "skipping published port listeners: guest has no IPv4 or IPv6 address",
+            );
         }
 
         Self {
             inbound_rx,
             _inbound_tx: inbound_tx,
             connections: Vec::new(),
-            guest_ipv4,
+            guest_ip,
             ephemeral_port: Arc::new(AtomicU16::new(49152)),
             max_inbound: 256,
         }
@@ -137,6 +138,12 @@ impl PortPublisher {
         shared: &Arc<SharedState>,
         tokio_handle: &tokio::runtime::Handle,
     ) {
+        // No guest IP means listeners weren't spawned; the channel is empty
+        // and there's nothing to do.
+        let Some(guest_ip) = self.guest_ip else {
+            return;
+        };
+
         while let Ok(conn) = self.inbound_rx.try_recv() {
             if self.connections.len() >= self.max_inbound {
                 tracing::debug!("published port: max inbound connections reached, rejecting");
@@ -148,7 +155,7 @@ impl PortPublisher {
             let mut socket = tcp::Socket::new(rx_buf, tx_buf);
 
             // Connect to the guest.
-            let remote = IpEndpoint::new(IpAddr::V4(self.guest_ipv4).into(), conn.guest_port);
+            let remote = IpEndpoint::new(guest_ip.into(), conn.guest_port);
             let local_port = self.alloc_ephemeral_port();
 
             if socket.connect(iface.context(), remote, local_port).is_err() {
@@ -237,9 +244,32 @@ impl PortPublisher {
             !closed
         });
     }
-}
 
-impl PortPublisher {
+    /// Spawn one tokio listener task per TCP published port.
+    fn spawn_listeners(
+        ports: &[PublishedPort],
+        inbound_tx: &mpsc::Sender<InboundConnection>,
+        tokio_handle: &tokio::runtime::Handle,
+    ) {
+        for port in ports {
+            if port.protocol == PortProtocol::Tcp {
+                let tx = inbound_tx.clone();
+                let bind_addr = SocketAddr::new(port.host_bind, port.host_port);
+                let guest_port = port.guest_port;
+                tokio_handle.spawn(async move {
+                    if let Err(e) = tcp_listener_task(bind_addr, guest_port, tx).await {
+                        tracing::error!(
+                            bind = %bind_addr,
+                            error = %e,
+                            "published port listener failed",
+                        );
+                    }
+                });
+            }
+            // TODO: UDP published ports.
+        }
+    }
+
     fn alloc_ephemeral_port(&self) -> u16 {
         loop {
             let port = self.ephemeral_port.fetch_add(1, Ordering::Relaxed);

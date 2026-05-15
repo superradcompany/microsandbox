@@ -10,7 +10,9 @@ mod error;
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+pub mod boot_error;
 pub mod console;
+pub mod exec_log;
 pub mod heartbeat;
 pub mod logging;
 pub mod metrics;

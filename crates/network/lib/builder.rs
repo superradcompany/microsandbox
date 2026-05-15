@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use crate::config::{DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort};
 use crate::dns::Nameserver;
-use crate::policy::NetworkPolicy;
+use crate::policy::{BuildError, NetworkPolicy};
 use crate::secrets::config::{HostPattern, SecretEntry, SecretInjection, ViolationAction};
 use crate::tls::TlsConfig;
 
@@ -16,8 +16,10 @@ use crate::tls::TlsConfig;
 //--------------------------------------------------------------------------------------------------
 
 /// Fluent builder for [`NetworkConfig`].
+#[derive(Clone)]
 pub struct NetworkBuilder {
     config: NetworkConfig,
+    errors: Vec<BuildError>,
 }
 
 /// Fluent builder for [`DnsConfig`].
@@ -57,12 +59,16 @@ impl NetworkBuilder {
     pub fn new() -> Self {
         Self {
             config: NetworkConfig::default(),
+            errors: Vec::new(),
         }
     }
 
     /// Start building from an existing network configuration.
     pub fn from_config(config: NetworkConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            errors: Vec::new(),
+        }
     }
 
     /// Enable or disable networking.
@@ -101,9 +107,8 @@ impl NetworkBuilder {
     ///
     /// ```ignore
     /// .dns(|d| d
-    ///     .block_domain("malware.example.com")
-    ///     .block_domain_suffix(".tracking.com")
     ///     .nameservers(["1.1.1.1".parse::<Nameserver>()?])
+    ///     .rebind_protection(false)
     /// )
     /// ```
     pub fn dns(mut self, f: impl FnOnce(DnsBuilder) -> DnsBuilder) -> Self {
@@ -182,8 +187,15 @@ impl NetworkBuilder {
     }
 
     /// Consume the builder and return the configuration.
-    pub fn build(self) -> NetworkConfig {
-        self.config
+    ///
+    /// Surfaces the first [`BuildError`] accumulated by any nested
+    /// builder (currently [`DnsBuilder`]). Errors stored on the
+    /// network builder itself flow through here too.
+    pub fn build(mut self) -> Result<NetworkConfig, BuildError> {
+        if let Some(err) = self.errors.drain(..).next() {
+            return Err(err);
+        }
+        Ok(self.config)
     }
 }
 
@@ -193,18 +205,6 @@ impl DnsBuilder {
         Self {
             config: DnsConfig::default(),
         }
-    }
-
-    /// Block a specific domain via DNS interception (returns REFUSED).
-    pub fn block_domain(mut self, domain: impl Into<String>) -> Self {
-        self.config.blocked_domains.push(domain.into());
-        self
-    }
-
-    /// Block a domain suffix via DNS interception (returns REFUSED).
-    pub fn block_domain_suffix(mut self, suffix: impl Into<String>) -> Self {
-        self.config.blocked_suffixes.push(suffix.into());
-        self
     }
 
     /// Enable or disable DNS rebinding protection. Default: true.
@@ -433,5 +433,24 @@ impl Default for TlsBuilder {
 impl Default for SecretBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Network builder happy path returns the config unchanged.
+    #[test]
+    fn network_builder_happy_path_returns_config() {
+        let cfg = NetworkBuilder::new()
+            .dns(|d| d.rebind_protection(false))
+            .build()
+            .unwrap();
+        assert!(!cfg.dns.rebind_protection);
     }
 }

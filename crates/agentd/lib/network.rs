@@ -3,6 +3,8 @@
 //! Configures the guest network interface using ioctls and netlink, following
 //! the parameters from host.
 
+use std::net::{Ipv4Addr, Ipv6Addr};
+
 use crate::config::NetConfig;
 use crate::error::AgentdResult;
 
@@ -10,12 +12,31 @@ use crate::error::AgentdResult;
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Sets the guest hostname.
+/// Set the guest hostname and provision `/etc/hosts`. Each argument is
+/// optional; omitted pieces are skipped.
 ///
-/// Calls `sethostname()`, writes `/etc/hostname`, and provisions
-/// `/etc/hosts` with localhost aliases and the hostname entry.
-pub(crate) fn apply_hostname(hostname: Option<&str>) -> AgentdResult<()> {
-    linux::write_hosts_file(hostname)?;
+/// # Arguments
+///
+/// * `hostname` - Guest hostname. When set, calls `sethostname()` and writes
+///   `/etc/hostname`.
+/// * `host_alias` - DNS name the guest uses to reach the sandbox host
+///   (typically `host.microsandbox.internal`). Written to `/etc/hosts`
+///   alongside whichever gateway IPs are present.
+/// * `gateway_ipv4` - Gateway IPv4 the alias points at.
+/// * `gateway_ipv6` - Gateway IPv6 the alias points at.
+///
+/// # Errors
+///
+/// Returns [`AgentdError::Init`][crate::error::AgentdError::Init] when `/etc`
+/// cannot be created, `/etc/hosts` or `/etc/hostname` cannot be written, or
+/// `sethostname(2)` fails.
+pub(crate) fn apply_hostname(
+    hostname: Option<&str>,
+    host_alias: Option<&str>,
+    gateway_ipv4: Option<Ipv4Addr>,
+    gateway_ipv6: Option<Ipv6Addr>,
+) -> AgentdResult<()> {
+    linux::write_hosts_file(hostname, host_alias, gateway_ipv4, gateway_ipv6)?;
 
     if let Some(name) = hostname {
         linux::set_hostname(name)?;
@@ -24,10 +45,23 @@ pub(crate) fn apply_hostname(hostname: Option<&str>) -> AgentdResult<()> {
     Ok(())
 }
 
-/// Applies network configuration.
+/// Apply the guest-side network configuration.
 ///
-/// Always provisions loopback, even when no external network interface is
-/// requested. Missing `net` is not an error (no networking requested).
+/// Always provisions loopback first so the guest has a working `lo` interface
+/// even when the sandbox was booted with networking disabled. When `cfg.net`
+/// is `None`, nothing further is configured.
+///
+/// # Arguments
+///
+/// * `cfg` - Parsed `MSB_NET*` specs bundled by
+///   [`BootParams::network`][crate::config::BootParams::network]: interface
+///   name/MAC/MTU plus optional IPv4 and IPv6 addressing.
+///
+/// # Errors
+///
+/// Returns [`AgentdError::Init`][crate::error::AgentdError::Init] when bringing
+/// up `lo` fails, or any of the interface ioctls / netlink messages for the
+/// main interface fail.
 pub(crate) fn apply_network_config(cfg: NetConfig<'_>) -> AgentdResult<()> {
     linux::configure_loopback()?;
 
@@ -38,7 +72,24 @@ pub(crate) fn apply_network_config(cfg: NetConfig<'_>) -> AgentdResult<()> {
     linux::configure_interface(net, cfg.ipv4, cfg.ipv6)
 }
 
-fn hosts_file_contents(hostname: Option<&str>) -> String {
+/// Render the `/etc/hosts` contents.
+///
+/// # Arguments
+///
+/// * `hostname` - Guest hostname; when `Some`, appended as an alias on the
+///   `127.0.0.1` and `::1` lines.
+/// * `host_alias` - Name like `host.microsandbox.internal`; when `Some` and a
+///   gateway IP is set for the matching family, emits `<gw>\t<alias>` lines.
+/// * `gateway_ipv4` - IPv4 the alias resolves to. The IPv4 alias line is
+///   skipped when `None` (or when `host_alias` is `None`).
+/// * `gateway_ipv6` - IPv6 the alias resolves to. The IPv6 alias line is
+///   skipped when `None` (or when `host_alias` is `None`).
+fn hosts_file_contents(
+    hostname: Option<&str>,
+    host_alias: Option<&str>,
+    gateway_ipv4: Option<Ipv4Addr>,
+    gateway_ipv6: Option<Ipv6Addr>,
+) -> String {
     let mut s = String::new();
 
     // Localhost entries — always include hostname aliases when set.
@@ -50,6 +101,17 @@ fn hosts_file_contents(hostname: Option<&str>) -> String {
     } else {
         s.push_str("127.0.0.1\tlocalhost\n");
         s.push_str("::1\tlocalhost ip6-localhost ip6-loopback\n");
+    }
+
+    // `<host_alias>` → gateway IP mapping. Emits both address families
+    // so v4-only and v6-only resolvers find the alias.
+    if let Some(alias) = host_alias {
+        if let Some(gw_v4) = gateway_ipv4 {
+            s.push_str(&format!("{gw_v4}\t{alias}\n"));
+        }
+        if let Some(gw_v6) = gateway_ipv6 {
+            s.push_str(&format!("{gw_v6}\t{alias}\n"));
+        }
     }
 
     s.push_str("fe00::\tip6-localnet\n");
@@ -475,11 +537,19 @@ mod linux {
     }
 
     /// Writes `/etc/hosts` with localhost aliases and an optional hostname entry.
-    pub fn write_hosts_file(hostname: Option<&str>) -> AgentdResult<()> {
+    pub fn write_hosts_file(
+        hostname: Option<&str>,
+        host_alias: Option<&str>,
+        gateway_ipv4: Option<Ipv4Addr>,
+        gateway_ipv6: Option<Ipv6Addr>,
+    ) -> AgentdResult<()> {
         fs::create_dir_all("/etc")
             .map_err(|e| AgentdError::Init(format!("failed to create /etc: {e}")))?;
-        fs::write("/etc/hosts", super::hosts_file_contents(hostname))
-            .map_err(|e| AgentdError::Init(format!("failed to write /etc/hosts: {e}")))?;
+        fs::write(
+            "/etc/hosts",
+            super::hosts_file_contents(hostname, host_alias, gateway_ipv4, gateway_ipv6),
+        )
+        .map_err(|e| AgentdError::Init(format!("failed to write /etc/hosts: {e}")))?;
         Ok(())
     }
 
@@ -575,7 +645,7 @@ mod tests {
     #[test]
     fn test_hosts_file_without_hostname() {
         assert_eq!(
-            hosts_file_contents(None),
+            hosts_file_contents(None, None, None, None),
             concat!(
                 "127.0.0.1\tlocalhost\n",
                 "::1\tlocalhost ip6-localhost ip6-loopback\n",
@@ -590,7 +660,7 @@ mod tests {
     #[test]
     fn test_hosts_file_with_hostname() {
         assert_eq!(
-            hosts_file_contents(Some("worker-01")),
+            hosts_file_contents(Some("worker-01"), None, None, None),
             concat!(
                 "127.0.0.1\tlocalhost worker-01\n",
                 "::1\tlocalhost ip6-localhost ip6-loopback worker-01\n",
@@ -600,5 +670,52 @@ mod tests {
                 "ff02::2\tip6-allrouters\n",
             )
         );
+    }
+
+    #[test]
+    fn test_hosts_file_with_host_alias_both_families() {
+        assert_eq!(
+            hosts_file_contents(
+                Some("worker-01"),
+                Some("host.microsandbox.internal"),
+                Some(Ipv4Addr::new(100, 96, 0, 1)),
+                Some("fd42:6d73:62::1".parse().unwrap()),
+            ),
+            concat!(
+                "127.0.0.1\tlocalhost worker-01\n",
+                "::1\tlocalhost ip6-localhost ip6-loopback worker-01\n",
+                "100.96.0.1\thost.microsandbox.internal\n",
+                "fd42:6d73:62::1\thost.microsandbox.internal\n",
+                "fe00::\tip6-localnet\n",
+                "ff00::\tip6-mcastprefix\n",
+                "ff02::1\tip6-allnodes\n",
+                "ff02::2\tip6-allrouters\n",
+            )
+        );
+    }
+
+    #[test]
+    fn test_hosts_file_with_host_alias_v4_only() {
+        let out = hosts_file_contents(
+            None,
+            Some("host.microsandbox.internal"),
+            Some(Ipv4Addr::new(100, 96, 0, 1)),
+            None,
+        );
+        assert!(out.contains("100.96.0.1\thost.microsandbox.internal\n"));
+        assert!(!out.contains("fd42"));
+    }
+
+    #[test]
+    fn test_hosts_file_omits_alias_when_name_missing() {
+        let out = hosts_file_contents(
+            None,
+            None,
+            Some(Ipv4Addr::new(100, 96, 0, 1)),
+            Some("fd42:6d73:62::1".parse().unwrap()),
+        );
+        assert!(!out.contains("host.microsandbox.internal"));
+        assert!(!out.contains("100.96.0.1"));
+        assert!(!out.contains("fd42"));
     }
 }

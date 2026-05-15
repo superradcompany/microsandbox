@@ -92,14 +92,6 @@ pub struct InterfaceOverrides {
 /// DNS interception settings for the sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsConfig {
-    /// Exact domains to refuse locally.
-    #[serde(default)]
-    pub blocked_domains: Vec<String>,
-
-    /// Domain suffixes to refuse locally.
-    #[serde(default)]
-    pub blocked_suffixes: Vec<String>,
-
     /// Whether DNS rebinding protection is enabled.
     #[serde(default = "default_true")]
     pub rebind_protection: bool,
@@ -170,8 +162,6 @@ impl Default for NetworkConfig {
 impl Default for DnsConfig {
     fn default() -> Self {
         Self {
-            blocked_domains: Vec::new(),
-            blocked_suffixes: Vec::new(),
             rebind_protection: true,
             nameservers: Vec::new(),
             query_timeout_ms: default_query_timeout_ms(),

@@ -156,7 +156,7 @@ async fn run_update(args: SelfUpdateArgs) -> anyhow::Result<()> {
             done(&format!("Updated libkrunfw in {}/", lib_dir.display()));
         }
         Err(e) => {
-            spinner.finish_error();
+            spinner.finish_clear();
             anyhow::bail!("update failed: {e}");
         }
     }
@@ -403,9 +403,7 @@ async fn fetch_latest_version() -> anyhow::Result<String> {
 }
 
 fn resolve_base_dir() -> anyhow::Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(microsandbox_utils::BASE_DIR_NAME))
-        .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))
+    Ok(microsandbox_utils::resolve_home())
 }
 
 fn info(msg: &str) {

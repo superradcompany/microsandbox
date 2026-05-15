@@ -1,16 +1,10 @@
 //! Secret injection — placeholder substitution in TLS-intercepted requests.
-//!
-//! Demonstrates:
-//! 1. Secret env vars are auto-exposed with placeholder values.
-//! 2. HTTPS to the allowed host works (placeholder substituted transparently).
-//! 3. HTTPS to a disallowed host with the placeholder is BLOCKED (violation).
 
 use microsandbox::Sandbox;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Secret configured via shorthand. TLS interception auto-enabled.
-    // Placeholder auto-generated as $MSB_API_KEY.
+    // `secret_env` auto-enables TLS interception; placeholder is `$MSB_API_KEY`.
     let sandbox = Sandbox::builder("net-secrets")
         .image("alpine")
         .cpus(1)
@@ -20,12 +14,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create()
         .await?;
 
-    // 1. Env var auto-set — guest only sees the placeholder.
+    // Guest only sees the placeholder, never the real value.
     let output = sandbox.shell("echo $API_KEY").await?;
     let placeholder = output.stdout()?.trim().to_string();
     println!("Guest env: API_KEY={placeholder}");
 
-    // 2. HTTPS to allowed host — proxy substitutes secret, request succeeds.
+    // Allowed host: the TLS proxy substitutes the placeholder for the real
+    // secret in-flight, so the request goes through.
     let output = sandbox
         .shell("wget -q -O /dev/null --timeout=10 https://example.com && echo OK || echo FAIL")
         .await?;
@@ -34,7 +29,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         output.stdout()?.trim()
     );
 
-    // 3. HTTPS to disallowed host WITH placeholder in header — BLOCKED.
+    // Disallowed host: the placeholder leaving for the wrong destination
+    // is a violation, so the proxy blocks the request.
     let output = sandbox
         .shell(concat!(
             "wget -q -O /dev/null --timeout=5 ",

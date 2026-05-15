@@ -94,6 +94,8 @@ Defaults applied to every sandbox unless overridden per-sandbox.
 | `memory_mib` | `512` | Guest memory in MiB |
 | `shell` | `"/bin/sh"` | Shell for interactive sessions and scripts |
 | `workdir` | `null` | Working directory inside the sandbox |
+| `metrics_sample_interval_ms` | `1000` | Runtime metrics sampling interval in milliseconds. Set to `0` to disable sampling. |
+| `disable_metrics_sample` | `false` | Force-disable metrics sampling regardless of `metrics_sample_interval_ms`. |
 
 ## `registries`
 

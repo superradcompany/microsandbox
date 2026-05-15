@@ -14,11 +14,15 @@
 //! [`init::init`]: crate::init::init
 
 use std::env;
+use std::ffi::OsString;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::path::PathBuf;
 
 use microsandbox_protocol::{
-    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_FILE_MOUNTS, ENV_HOSTNAME, ENV_NET, ENV_NET_IPV4,
-    ENV_NET_IPV6, ENV_RLIMITS, ENV_TMPFS, ENV_USER, exec::ExecRlimit,
+    ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
+    ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOST_ALIAS, ENV_HOSTNAME, ENV_NET,
+    ENV_NET_IPV4, ENV_NET_IPV6, ENV_RLIMITS, ENV_TMPFS, ENV_USER, HANDOFF_INIT_AUTO,
+    HANDOFF_INIT_SEP, exec::ExecRlimit,
 };
 
 use crate::error::{AgentdError, AgentdResult};
@@ -46,11 +50,19 @@ pub struct BootParams {
     /// Parsed `MSB_FILE_MOUNTS` — virtiofs file mount specs (empty when unset).
     pub(crate) file_mounts: Vec<FileMountSpec>,
 
+    /// Parsed `MSB_DISK_MOUNTS` — disk-image mount specs (empty when unset).
+    pub(crate) disk_mounts: Vec<DiskMountSpec>,
+
     /// Parsed `MSB_TMPFS` — tmpfs mount specs (empty when unset).
     pub(crate) tmpfs: Vec<TmpfsSpec>,
 
     /// `MSB_HOSTNAME` — guest hostname.
     pub(crate) hostname: Option<String>,
+
+    /// `MSB_HOST_ALIAS` — DNS name (e.g. `host.microsandbox.internal`)
+    /// the guest uses to reach the sandbox host. Written into
+    /// `/etc/hosts` pointing at the gateway IPs.
+    pub(crate) host_alias: Option<String>,
 
     /// Parsed `MSB_NET` — network interface config.
     pub(crate) net: Option<NetSpec>,
@@ -64,6 +76,31 @@ pub struct BootParams {
     /// Parsed `MSB_RLIMITS` — sandbox-wide resource limits applied to PID 1
     /// so every guest process inherits the raised baseline (empty when unset).
     pub(crate) rlimits: Vec<ExecRlimit>,
+
+    /// Parsed `MSB_HANDOFF_INIT[_ARGS|_ENV]` — guest init binary to which
+    /// agentd hands off PID 1 after `init::init()`. `None` means agentd
+    /// remains PID 1 (the default).
+    pub(crate) handoff_init: Option<HandoffInit>,
+}
+
+/// Parsed handoff-init specification.
+///
+/// When present in [`BootParams`], agentd performs setup, forks, the
+/// parent execs `cmd` (becoming the new PID 1), and the child
+/// continues as the agent loop.
+#[derive(Debug)]
+pub struct HandoffInit {
+    /// Absolute path inside the guest rootfs, or the literal `"auto"`
+    /// (resolved via [`HANDOFF_INIT_AUTO_CANDIDATES`] in `do_handoff`).
+    pub(crate) cmd: PathBuf,
+
+    /// argv past `argv[0]` — i.e., the supplemental arguments. Empty
+    /// means the init is exec'd with `argv = [cmd]`.
+    pub(crate) argv: Vec<OsString>,
+
+    /// Extra env vars merged on top of the inherited env. Empty means
+    /// inherit-only.
+    pub(crate) env: Vec<(OsString, OsString)>,
 }
 
 /// Runtime configuration surviving past init; referenced by the agent loop.
@@ -85,6 +122,7 @@ pub(crate) struct TmpfsSpec {
     pub size_mib: Option<u32>,
     pub mode: Option<u32>,
     pub noexec: bool,
+    pub readonly: bool,
 }
 
 /// Parsed block-device root specification with kind-based dispatch.
@@ -117,6 +155,21 @@ pub(crate) struct FileMountSpec {
     pub tag: String,
     pub filename: String,
     pub guest_path: String,
+    pub readonly: bool,
+}
+
+/// Parsed disk-image volume mount specification.
+///
+/// Each entry corresponds to one extra virtio-blk device attached by the
+/// VMM. Agentd resolves the device node from `id` via
+/// `/dev/disk/by-id/virtio-<id>` and mounts it at `guest_path`.
+#[derive(Debug)]
+pub(crate) struct DiskMountSpec {
+    pub id: String,
+    pub guest_path: String,
+    /// Inner filesystem type. `None` triggers an autodetect walk over
+    /// `/proc/filesystems` in agentd's init path.
+    pub fstype: Option<String>,
     pub readonly: bool,
 }
 
@@ -178,11 +231,16 @@ impl BootParams {
                 .map(|v| parse_file_mounts(&v))
                 .transpose()?
                 .unwrap_or_default(),
+            disk_mounts: read_env(ENV_DISK_MOUNTS)
+                .map(|v| parse_disk_mounts(&v))
+                .transpose()?
+                .unwrap_or_default(),
             tmpfs: read_env(ENV_TMPFS)
                 .map(|v| parse_tmpfs_mounts(&v))
                 .transpose()?
                 .unwrap_or_default(),
             hostname: read_env(ENV_HOSTNAME),
+            host_alias: read_env(ENV_HOST_ALIAS),
             net: read_env(ENV_NET).map(|v| parse_net(&v)).transpose()?,
             net_ipv4: read_env(ENV_NET_IPV4)
                 .map(|v| parse_net_ipv4(&v))
@@ -194,7 +252,16 @@ impl BootParams {
                 .map(|v| parse_rlimits(&v))
                 .transpose()?
                 .unwrap_or_default(),
+            handoff_init: parse_handoff_init()?,
         })
+    }
+
+    /// Take the handoff-init spec out of the boot params.
+    ///
+    /// Used by `bin/main.rs` before `init::init` consumes `BootParams`
+    /// by value, since the handoff hook fires after init returns.
+    pub fn take_handoff_init(&mut self) -> Option<HandoffInit> {
+        self.handoff_init.take()
     }
 
     /// Borrows the three `MSB_NET*` specs as a single bundle.
@@ -388,6 +455,71 @@ fn parse_file_mount_entry(entry: &str) -> AgentdResult<FileMountSpec> {
     })
 }
 
+/// Parses semicolon-separated disk-image mount entries.
+fn parse_disk_mounts(val: &str) -> AgentdResult<Vec<DiskMountSpec>> {
+    val.split(';')
+        .filter(|e| !e.is_empty())
+        .map(parse_disk_mount_entry)
+        .collect()
+}
+
+/// Parses a single disk-image mount entry: `id:guest_path[:fstype][:ro]`.
+///
+/// `fstype` may be empty (treated as autodetect). `ro` is the optional
+/// final token.
+fn parse_disk_mount_entry(entry: &str) -> AgentdResult<DiskMountSpec> {
+    let parts: Vec<&str> = entry.split(':').collect();
+    if parts.len() < 2 {
+        return Err(AgentdError::Config(format!(
+            "MSB_DISK_MOUNTS entry must be id:guest_path[:fstype][:ro], got: {entry}"
+        )));
+    }
+
+    let id = parts[0];
+    let guest_path = parts[1];
+    let mut fstype: Option<String> = None;
+    let mut readonly = false;
+
+    if let Some(third) = parts.get(2)
+        && !third.is_empty()
+    {
+        fstype = Some((*third).to_string());
+    }
+    if let Some(fourth) = parts.get(3) {
+        match *fourth {
+            "ro" => readonly = true,
+            other => {
+                return Err(AgentdError::Config(format!(
+                    "MSB_DISK_MOUNTS unknown flag '{other}' (expected 'ro')"
+                )));
+            }
+        }
+    }
+    if parts.len() > 4 {
+        return Err(AgentdError::Config(format!(
+            "MSB_DISK_MOUNTS entry has too many parts: {entry}"
+        )));
+    }
+
+    if id.is_empty() {
+        return Err(AgentdError::Config(
+            "MSB_DISK_MOUNTS entry has empty id".into(),
+        ));
+    }
+    if guest_path.is_empty() || !guest_path.starts_with('/') {
+        return Err(AgentdError::Config(format!(
+            "MSB_DISK_MOUNTS guest path must be absolute: {guest_path}"
+        )));
+    }
+
+    Ok(DiskMountSpec {
+        id: id.to_string(),
+        guest_path: guest_path.to_string(),
+        fstype,
+        readonly,
+    })
+}
+
 /// Parses semicolon-separated tmpfs mount entries.
 fn parse_tmpfs_mounts(val: &str) -> AgentdResult<Vec<TmpfsSpec>> {
     val.split(';')
@@ -409,10 +541,13 @@ fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec> {
     let mut size_mib = None;
     let mut mode = None;
     let mut noexec = false;
+    let mut readonly = false;
 
     for opt in parts {
         if opt == "noexec" {
             noexec = true;
+        } else if opt == "ro" {
+            readonly = true;
         } else if let Some(val) = opt.strip_prefix("size=") {
             size_mib = Some(
                 val.parse::<u32>()
@@ -433,6 +568,7 @@ fn parse_tmpfs_entry(entry: &str) -> AgentdResult<TmpfsSpec> {
         size_mib,
         mode,
         noexec,
+        readonly,
     })
 }
 
@@ -646,6 +782,62 @@ fn parse_cidr_v6(s: &str) -> AgentdResult<(Ipv6Addr, u8)> {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Parse Functions: Handoff Init
+//--------------------------------------------------------------------------------------------------
+
+/// Reads `MSB_HANDOFF_INIT[_ARGS|_ENV]` and assembles a [`HandoffInit`].
+///
+/// Returns `Ok(None)` when `MSB_HANDOFF_INIT` is unset/empty (the
+/// default no-handoff path). Returns `Err` when the cmd path is
+/// not absolute, or when `MSB_HANDOFF_INIT_ENV` contains an entry
+/// without an `=`.
+fn parse_handoff_init() -> AgentdResult<Option<HandoffInit>> {
+    let Some(cmd_str) = read_env_raw(ENV_HANDOFF_INIT) else {
+        return Ok(None);
+    };
+    if cmd_str.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let cmd = PathBuf::from(&cmd_str);
+    // The sentinel `auto` is resolved lazily in `handoff::do_handoff`
+    // by probing `HANDOFF_INIT_AUTO_CANDIDATES`; everything else must
+    // be an absolute path.
+    if cmd_str != HANDOFF_INIT_AUTO && !cmd.is_absolute() {
+        return Err(AgentdError::Config(format!(
+            "{ENV_HANDOFF_INIT} must be an absolute path or `auto`, got: {cmd_str}"
+        )));
+    }
+
+    let argv = match read_env_raw(ENV_HANDOFF_INIT_ARGS) {
+        Some(val) if !val.is_empty() => val.split(HANDOFF_INIT_SEP).map(OsString::from).collect(),
+        _ => Vec::new(),
+    };
+
+    let env = match read_env_raw(ENV_HANDOFF_INIT_ENV) {
+        Some(val) if !val.is_empty() => val
+            .split(HANDOFF_INIT_SEP)
+            .map(|entry| {
+                let (k, v) = entry.split_once('=').ok_or_else(|| {
+                    AgentdError::Config(format!(
+                        "{ENV_HANDOFF_INIT_ENV} entry missing '=': {entry}"
+                    ))
+                })?;
+                if k.is_empty() {
+                    return Err(AgentdError::Config(format!(
+                        "{ENV_HANDOFF_INIT_ENV} entry has empty key: {entry}"
+                    )));
+                }
+                Ok((OsString::from(k), OsString::from(v)))
+            })
+            .collect::<AgentdResult<Vec<_>>>()?,
+        _ => Vec::new(),
+    };
+
+    Ok(Some(HandoffInit { cmd, argv, env }))
+}
+
+//--------------------------------------------------------------------------------------------------
 // Helper Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -655,6 +847,14 @@ fn read_env(key: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+}
+
+/// Reads a single environment variable without trimming whitespace.
+///
+/// Used for the handoff-init vars where the `\x1f` separator and argv
+/// content are sensitive to byte-exact preservation.
+fn read_env_raw(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|v| !v.is_empty())
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -805,6 +1005,83 @@ mod tests {
         let spec = parse_tmpfs_entry("/tmp,noexec").unwrap();
         assert_eq!(spec.path, "/tmp");
         assert!(spec.noexec);
+    }
+
+    // ── Disk Mounts ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_disk_mount_entry_basic() {
+        let spec = parse_disk_mount_entry("data_abc:/data:ext4").unwrap();
+        assert_eq!(spec.id, "data_abc");
+        assert_eq!(spec.guest_path, "/data");
+        assert_eq!(spec.fstype.as_deref(), Some("ext4"));
+        assert!(!spec.readonly);
+    }
+
+    #[test]
+    fn test_parse_disk_mount_entry_readonly() {
+        let spec = parse_disk_mount_entry("seed_7f:/seed:ext4:ro").unwrap();
+        assert!(spec.readonly);
+        assert_eq!(spec.fstype.as_deref(), Some("ext4"));
+    }
+
+    #[test]
+    fn test_parse_disk_mount_entry_empty_fstype_means_autodetect() {
+        let spec = parse_disk_mount_entry("probe_1:/data::ro").unwrap();
+        assert!(spec.fstype.is_none());
+        assert!(spec.readonly);
+    }
+
+    #[test]
+    fn test_parse_disk_mount_entry_autodetect_no_ro() {
+        let spec = parse_disk_mount_entry("probe_1:/data").unwrap();
+        assert!(spec.fstype.is_none());
+        assert!(!spec.readonly);
+    }
+
+    #[test]
+    fn test_parse_disk_mount_entry_rejects_unknown_flag() {
+        let err = parse_disk_mount_entry("id:/data:ext4:rw").unwrap_err();
+        assert!(err.to_string().contains("unknown flag"));
+    }
+
+    #[test]
+    fn test_parse_disk_mount_entry_rejects_relative_path() {
+        assert!(parse_disk_mount_entry("id:relative").is_err());
+    }
+
+    #[test]
+    fn test_parse_disk_mount_entry_rejects_empty_id() {
+        assert!(parse_disk_mount_entry(":/data:ext4").is_err());
+    }
+
+    #[test]
+    fn test_parse_disk_mount_entry_rejects_too_many_parts() {
+        assert!(parse_disk_mount_entry("id:/data:ext4:ro:extra").is_err());
+    }
+
+    #[test]
+    fn test_parse_disk_mounts_multiple_entries() {
+        let specs = parse_disk_mounts("data_1:/data:ext4;seed_2:/seed::ro;probe_3:/p").unwrap();
+        assert_eq!(specs.len(), 3);
+        assert_eq!(specs[0].guest_path, "/data");
+        assert!(specs[1].readonly);
+        assert!(specs[2].fstype.is_none());
+    }
+
+    #[test]
+    fn test_parse_with_ro() {
+        let spec = parse_tmpfs_entry("/seed,size=64,ro").unwrap();
+        assert_eq!(spec.path, "/seed");
+        assert_eq!(spec.size_mib, Some(64));
+        assert!(spec.readonly);
+        assert!(!spec.noexec);
+    }
+
+    #[test]
+    fn test_parse_ro_defaults_to_false_when_absent() {
+        let spec = parse_tmpfs_entry("/tmp,size=256").unwrap();
+        assert!(!spec.readonly);
     }
 
     #[test]
@@ -988,5 +1265,150 @@ mod tests {
         assert!(parse_rlimits("nofile").is_err());
         assert!(parse_rlimits("nofile=abc").is_err());
         assert!(parse_rlimits("nofile=65535:1024").is_err()); // soft > hard
+    }
+
+    // ── Handoff Init ──────────────────────────────────────────────────
+
+    /// Mutex serialising tests that touch `MSB_HANDOFF_INIT*` env vars,
+    /// since `parse_handoff_init` reads them from the process env.
+    static HANDOFF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_handoff_env<R>(
+        cmd: Option<&str>,
+        args: Option<&str>,
+        env_var: Option<&str>,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let _guard = HANDOFF_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            match cmd {
+                Some(v) => env::set_var(ENV_HANDOFF_INIT, v),
+                None => env::remove_var(ENV_HANDOFF_INIT),
+            }
+            match args {
+                Some(v) => env::set_var(ENV_HANDOFF_INIT_ARGS, v),
+                None => env::remove_var(ENV_HANDOFF_INIT_ARGS),
+            }
+            match env_var {
+                Some(v) => env::set_var(ENV_HANDOFF_INIT_ENV, v),
+                None => env::remove_var(ENV_HANDOFF_INIT_ENV),
+            }
+        }
+        let out = f();
+        unsafe {
+            env::remove_var(ENV_HANDOFF_INIT);
+            env::remove_var(ENV_HANDOFF_INIT_ARGS);
+            env::remove_var(ENV_HANDOFF_INIT_ENV);
+        }
+        out
+    }
+
+    #[test]
+    fn test_parse_handoff_init_unset_returns_none() {
+        let res = with_handoff_env(None, None, None, parse_handoff_init).unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn test_parse_handoff_init_empty_returns_none() {
+        let res = with_handoff_env(Some(""), None, None, parse_handoff_init).unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn test_parse_handoff_init_cmd_only() {
+        let res = with_handoff_env(Some("/lib/systemd/systemd"), None, None, parse_handoff_init)
+            .unwrap()
+            .unwrap();
+        assert_eq!(res.cmd, PathBuf::from("/lib/systemd/systemd"));
+        assert!(res.argv.is_empty());
+        assert!(res.env.is_empty());
+    }
+
+    #[test]
+    fn test_parse_handoff_init_with_argv() {
+        let argv = format!("--unit=multi-user.target{HANDOFF_INIT_SEP}--log-level=warning");
+        let res = with_handoff_env(
+            Some("/lib/systemd/systemd"),
+            Some(&argv),
+            None,
+            parse_handoff_init,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            res.argv,
+            vec![
+                OsString::from("--unit=multi-user.target"),
+                OsString::from("--log-level=warning"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_handoff_init_with_env() {
+        let envs = format!("container=microsandbox{HANDOFF_INIT_SEP}LANG=C.UTF-8");
+        let res = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            res.env,
+            vec![
+                (OsString::from("container"), OsString::from("microsandbox")),
+                (OsString::from("LANG"), OsString::from("C.UTF-8")),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_handoff_init_argv_with_spaces_preserved() {
+        // Argv entries can contain any characters except '\x1f' and NUL.
+        let argv = format!("--label=hello world{HANDOFF_INIT_SEP}--config=/etc/foo;bar");
+        let res = with_handoff_env(Some("/sbin/init"), Some(&argv), None, parse_handoff_init)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            res.argv,
+            vec![
+                OsString::from("--label=hello world"),
+                OsString::from("--config=/etc/foo;bar"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_handoff_init_rejects_relative_path() {
+        let err = with_handoff_env(Some("sbin/init"), None, None, parse_handoff_init).unwrap_err();
+        assert!(err.to_string().contains("absolute path"));
+    }
+
+    #[test]
+    fn test_parse_handoff_init_env_entry_missing_equals() {
+        let envs = format!("KEY=value{HANDOFF_INIT_SEP}NOEQUALS");
+        let err = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
+            .unwrap_err();
+        assert!(err.to_string().contains("missing '='"));
+    }
+
+    #[test]
+    fn test_parse_handoff_init_env_entry_empty_key_rejected() {
+        // `=value` (empty key) used to silently produce a nameless env entry.
+        let envs = "=value".to_string();
+        let err = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
+            .unwrap_err();
+        assert!(err.to_string().contains("empty key"));
+    }
+
+    #[test]
+    fn test_parse_handoff_init_env_value_with_equals_is_value() {
+        // Only the first '=' splits; the rest is part of the value.
+        let envs = "PATH=/a:/b=/c".to_string();
+        let res = with_handoff_env(Some("/sbin/init"), None, Some(&envs), parse_handoff_init)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            res.env,
+            vec![(OsString::from("PATH"), OsString::from("/a:/b=/c"))]
+        );
     }
 }

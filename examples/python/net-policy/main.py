@@ -6,7 +6,7 @@ from microsandbox import Network, Sandbox
 
 
 async def main():
-    # 1. Default (public-only) — public internet works.
+    # Default policy: public internet only.
     sb = await Sandbox.create(
         "net-policy-public",
         image="alpine",
@@ -18,7 +18,7 @@ async def main():
     print(f"Public HTTP: {output.stdout_text.strip()}")
     await sb.stop_and_wait()
 
-    # 2. Allow-all — everything reachable, including private networks.
+    # Allow-all: private networks reachable too.
     sb = await Sandbox.create(
         "net-policy-all",
         image="alpine",
@@ -31,7 +31,7 @@ async def main():
     print(f"Allow-all HTTP: {output.stdout_text.strip()}")
     await sb.stop_and_wait()
 
-    # 3. No network — all connections denied.
+    # No network: all connections denied.
     sb = await Sandbox.create(
         "net-policy-none",
         image="alpine",
@@ -44,7 +44,6 @@ async def main():
     print(f"No-network HTTP: {output.stdout_text.strip()}")
     await sb.stop_and_wait()
 
-    # Cleanup.
     await Sandbox.remove("net-policy-public")
     await Sandbox.remove("net-policy-all")
     await Sandbox.remove("net-policy-none")

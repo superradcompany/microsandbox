@@ -59,10 +59,6 @@ pub enum Relation {
     /// A sandbox has many metrics.
     #[sea_orm(has_many = "super::sandbox_metric::Entity")]
     SandboxMetric,
-
-    /// A sandbox has many snapshots.
-    #[sea_orm(has_many = "super::snapshot::Entity")]
-    Snapshot,
 }
 
 impl Related<super::run::Entity> for Entity {
@@ -74,12 +70,6 @@ impl Related<super::run::Entity> for Entity {
 impl Related<super::sandbox_metric::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::SandboxMetric.def()
-    }
-}
-
-impl Related<super::snapshot::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Snapshot.def()
     }
 }
 

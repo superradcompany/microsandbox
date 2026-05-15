@@ -32,3 +32,9 @@ pub enum RuntimeError {
     #[error("{0}")]
     Custom(String),
 }
+
+impl microsandbox_db::retry::IsSqliteBusy for RuntimeError {
+    fn is_sqlite_busy(&self) -> bool {
+        matches!(self, RuntimeError::Database(db_err) if microsandbox_db::retry::is_sqlite_busy(db_err))
+    }
+}

@@ -169,6 +169,26 @@ await Sandbox.remove("reader")
 await Volume.remove("my-data")
 ```
 
+### Disk Image Volumes
+
+```python
+from microsandbox import Sandbox, Volume, DiskImageFormat
+
+# Mount a host disk image at a guest path. Format is inferred from the
+# extension; pass `format=` to override. `fstype` is the inner FS agentd
+# will mount; omit to let agentd autodetect.
+sb = await Sandbox.create(
+    "worker",
+    image="alpine",
+    volumes={
+        "/data": Volume.disk("./data.qcow2", format=DiskImageFormat.QCOW2, fstype="ext4"),
+        "/seed": Volume.disk("./seed.raw", readonly=True),
+        "/scratch": Volume.tmpfs(size_mib=128, readonly=True),
+    },
+    replace=True,
+)
+```
+
 ### Network Policies
 
 ```python
@@ -196,8 +216,8 @@ sandbox = await Sandbox.create(
     "filtered",
     image="alpine",
     network=Network(
-        block_domains=("blocked.example.com",),
-        block_domain_suffixes=(".evil.com",),
+        deny_domains=("blocked.example.com",),
+        deny_domain_suffixes=(".evil.com",),
     ),
 )
 ```
@@ -282,6 +302,36 @@ async with await Sandbox.create("temp", image="alpine", replace=True) as sb:
 # Sandbox is automatically killed and removed on exit.
 ```
 
+### Replace Existing
+
+`replace=True` stops a sandbox with the same name (if any) and
+recreates it. By default the existing one gets 10 seconds to exit
+cleanly after `SIGTERM` before `SIGKILL`; pass `replace_with_grace` (in
+seconds, fractional allowed) to override. Setting `replace_with_grace`
+implies `replace=True`.
+
+```python
+# Default 10s SIGTERM grace.
+sb = await Sandbox.create("worker", image="alpine", replace=True)
+
+# Wait longer for a workload that needs more time to shut down.
+sb = await Sandbox.create("worker", image="alpine", replace_with_grace=30)
+
+# Skip SIGTERM entirely; SIGKILL immediately.
+sb = await Sandbox.create("worker", image="alpine", replace_with_grace=0)
+```
+
+If you'd rather handle the conflict yourself, catch the typed error:
+
+```python
+from microsandbox import SandboxAlreadyExistsError
+
+try:
+    sb = await Sandbox.create("worker", image="alpine")
+except SandboxAlreadyExistsError:
+    print("already exists; resume or pass replace=True")
+```
+
 ### TLS Interception
 
 ```python
@@ -355,7 +405,7 @@ if not is_installed():
 
 | Class | Description |
 |-------|-------------|
-| `Volume.bind()` / `.named()` / `.tmpfs()` | Volume mount configuration |
+| `Volume.bind()` / `.named()` / `.tmpfs()` / `.disk()` | Volume mount configuration |
 | `Network.none()` / `.public_only()` / `.allow_all()` | Network presets |
 | `Secret.env()` | Secret entry with host allowlist |
 | `Patch.text()` / `.mkdir()` / `.copy_file()` / `.append()` / ... | Pre-boot filesystem modifications |
