@@ -119,6 +119,16 @@ pub async fn spawn_sandbox(
     // Compute the agent relay socket path.
     let agent_sock_path = runtime_dir.join("agent.sock");
 
+    // Reject paths the kernel can't bind before we spawn anything: the
+    // agent relay is an AF_UNIX socket and `sockaddr_un.sun_path` is a
+    // fixed-size buffer (108 bytes on Linux, 104 on macOS/BSDs). Without
+    // this check, an over-long sandbox name surfaces at relay-connect
+    // time as `io error: path must be shorter than SUN_LEN`, which is
+    // accurate but gives no hint that the sandbox name (or a long
+    // `MSB_HOME` prefix) is the cause.
+    #[cfg(unix)]
+    validate_agent_sock_path(&config.name, &agent_sock_path)?;
+
     // Stage file bind mounts: each file gets its own isolated directory so
     // that virtio-fs (which requires directories) can share it without
     // exposing adjacent files on the host.
@@ -223,6 +233,31 @@ async fn terminate_startup_process(
 ) -> Option<std::process::ExitStatus> {
     let _ = child.start_kill();
     child.wait().await.ok()
+}
+
+/// Verify the agent relay's AF_UNIX socket path fits the platform's
+/// `sockaddr_un.sun_path` buffer (108 on Linux, 104 on macOS/BSDs).
+///
+/// We piggyback on `std::os::unix::net::SocketAddr::from_pathname` because
+/// it uses the correct platform-specific limit and also catches interior
+/// NUL bytes. When it rejects the path, we map the opaque error to an
+/// `InvalidConfig` that names the sandbox, shows the rendered path and
+/// its byte length, and points at the two knobs the caller can actually
+/// adjust (sandbox name, `MSB_HOME`).
+#[cfg(unix)]
+fn validate_agent_sock_path(sandbox_name: &str, agent_sock_path: &Path) -> MicrosandboxResult<()> {
+    if let Err(err) = std::os::unix::net::SocketAddr::from_pathname(agent_sock_path) {
+        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            "sandbox name {:?} produces an agent socket path that the kernel \
+             cannot bind: {} ({}, {} bytes). Shorten the sandbox name or set \
+             MSB_HOME to a shorter base directory.",
+            sandbox_name,
+            err,
+            agent_sock_path.display(),
+            agent_sock_path.as_os_str().len(),
+        )));
+    }
+    Ok(())
 }
 
 /// Scan `config.mounts` for file bind mounts and stage each file in its own
@@ -1453,5 +1488,46 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err}").contains("must not contain '='"));
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Functions: validate_agent_sock_path
+    //----------------------------------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_agent_sock_path_accepts_short_path() {
+        super::validate_agent_sock_path(
+            "test",
+            Path::new("/tmp/msb/sandboxes/test/runtime/agent.sock"),
+        )
+        .expect("short paths must pass");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_agent_sock_path_rejects_overlong_with_actionable_message() {
+        // 220-byte path: comfortably exceeds both Linux (108) and
+        // macOS/BSD (104) `sun_path` buffers.
+        let name = "a".repeat(120);
+        let path_str = format!("/tmp/msb/sandboxes/{name}/runtime/agent.sock");
+        let path = PathBuf::from(&path_str);
+
+        let err = super::validate_agent_sock_path(&name, &path)
+            .expect_err("overlong paths must be rejected");
+        let msg = format!("{err}");
+
+        // Names the sandbox so the caller knows which knob to turn.
+        assert!(msg.contains(&name), "error should name the sandbox: {msg}");
+        // Suggests the actual fixes.
+        assert!(
+            msg.contains("MSB_HOME") && msg.contains("Shorten the sandbox name"),
+            "error should suggest both knobs: {msg}"
+        );
+        // Surfaces the rendered path + its length so the gap is obvious.
+        assert!(
+            msg.contains(&path_str) && msg.contains(&path_str.len().to_string()),
+            "error should include the rendered path and byte length: {msg}"
+        );
     }
 }
