@@ -10,7 +10,7 @@ microsandbox's networking defaults are shaped around giving an AI agent, a scrap
 
 The largest class of real damage comes from workloads reaching things that live *inside* your network: the host machine itself, a local database, another VM on the same subnet. The default policy addresses this by denying egress to anything outside `Group::Public` (the complement of the named local categories), which covers:
 
-- `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (RFC1918 + CGN private ranges)
+- `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7` (RFC1918 + CGN + ULA private ranges)
 - `127.0.0.0/8`, `::1` (loopback)
 - `169.254.0.0/16`, `fe80::/10` (link-local)
 - `169.254.169.254` (cloud metadata, takes precedence over link-local)

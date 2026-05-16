@@ -180,8 +180,7 @@ impl NetworkBuilder {
 
     /// Set the IPv4 pool used to derive per-sandbox `/30` guest subnets.
     ///
-    /// The default is `172.16.0.0/12`, matching Firecracker's documented
-    /// host/guest example at slot 0. Pools must be at least `/30`.
+    /// The default is `172.16.0.0/12`. Pools must be at least `/30`.
     pub fn ipv4_pool(mut self, pool: Ipv4Network) -> Self {
         if pool.prefix() > 30 {
             self.errors.push(BuildError::InvalidIpv4Pool {

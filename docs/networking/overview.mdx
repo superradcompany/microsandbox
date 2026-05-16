@@ -8,7 +8,17 @@ All network traffic from a sandbox flows through a host-controlled networking st
 
 ## Defaults
 
-Without any policy flags, sandboxes get **public-internet egress only**: routable destinations work, but private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`), loopback (`127.0.0.0/8`), link-local (`169.254.0.0/16`), and the cloud metadata endpoint (`169.254.169.254`) are denied. Inbound traffic on published ports is unfiltered until you add an explicit ingress rule.
+Without any policy flags, sandboxes get **public-internet egress only**: routable destinations work, but private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7`), loopback (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`), and the cloud metadata endpoint (`169.254.169.254`) are denied. Inbound traffic on published ports is unfiltered until you add an explicit ingress rule.
+
+Sandbox addresses come from internal guest pools unless you provide your own. The default IPv4 pool is `172.16.0.0/12`; slot 0 gets `172.16.0.2` with gateway `172.16.0.1`. The default IPv6 pool is `fd42:6d73:62::/48`, a Unique Local Address (ULA) range; each sandbox gets one `/64` prefix with `::2` as the guest and `::1` as the gateway.
+
+If either pool overlaps your host, VPN, VPC, or lab network, set a custom pool:
+
+```bash
+msb create python --name custom-net \
+    --net-ipv4-pool 172.24.0.0/13 \
+    --net-ipv6-pool fd7a:115c:a1e0::/48
+```
 
 To turn off networking entirely:
 
