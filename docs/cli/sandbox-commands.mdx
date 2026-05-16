@@ -106,15 +106,20 @@ msb start devbox
 ## msb stop
 
 ```bash
-msb stop devbox                # Graceful shutdown
+msb stop devbox                # Graceful shutdown (10s grace)
 msb stop --force devbox        # Force kill immediately
-msb stop -t 10 devbox          # Wait 10s then force kill
+msb stop -t 30 devbox          # 30s grace before force kill
 ```
+
+Graceful shutdown gives the sandbox a chance to finish writing any
+pending data to disk before it exits, so files written inside the
+sandbox aren't lost across a later `msb start`. If the sandbox is
+still running after the timeout, it is force-killed.
 
 | Flag | Description |
 |------|-------------|
-| `-f`, `--force` | Immediately kill the sandbox without graceful shutdown |
-| `-t`, `--timeout` | Seconds to wait for graceful shutdown before force-killing |
+| `-f`, `--force` | Force terminate immediately. Pending writes may be lost |
+| `-t`, `--timeout` | Seconds to wait for graceful shutdown before force-killing. Defaults to 10 |
 | `-q`, `--quiet` | Suppress progress output |
 
 ## msb exec

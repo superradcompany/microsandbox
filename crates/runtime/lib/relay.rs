@@ -235,14 +235,7 @@ impl AgentRelay {
     /// console ring buffers, and handles client disconnects with session
     /// cleanup.
     ///
-    /// If a client sends a `core.shutdown` message (identified by
-    /// `FLAG_SHUTDOWN` in the frame header), the relay notifies the caller
-    /// via `drain_tx`.
-    pub async fn run(
-        self,
-        mut shutdown: watch::Receiver<bool>,
-        drain_tx: mpsc::Sender<()>,
-    ) -> RuntimeResult<()> {
+    pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> RuntimeResult<()> {
         let ready_frame = self.ready_frame.ok_or_else(|| {
             RuntimeError::Custom("agent relay: run() called before wait_ready()".into())
         })?;
@@ -366,7 +359,6 @@ impl AgentRelay {
                             let agent_tx_clone = agent_tx.clone();
                             let clients_clone = Arc::clone(&clients);
                             let used_slots_clone = Arc::clone(&used_slots);
-                            let drain_tx_clone = drain_tx.clone();
                             let registry_clone = Arc::clone(&session_registry);
                             let next_id_clone = Arc::clone(&next_session_id);
 
@@ -376,7 +368,6 @@ impl AgentRelay {
                                 agent_tx_clone,
                                 clients_clone,
                                 used_slots_clone,
-                                drain_tx_clone,
                                 registry_clone,
                                 next_id_clone,
                             ));
@@ -727,8 +718,8 @@ async fn read_raw_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> RuntimeResul
 ///
 /// The argument count is over the clippy default (7) because the task
 /// shares per-relay state across both tasks: client routing
-/// (`agent_tx`, `clients`, `used_slots`, `drain_tx`) plus the
-/// session registry / monotonic id atomic for the log capture path.
+/// (`agent_tx`, `clients`, `used_slots`) plus the session registry /
+/// monotonic id atomic for the log capture path.
 /// Bundling them into a struct would be more boilerplate than the
 /// lint guards against — there's a single call site.
 #[allow(clippy::too_many_arguments)]
@@ -738,7 +729,6 @@ async fn client_reader_task(
     agent_tx: mpsc::Sender<Vec<u8>>,
     clients: Arc<Mutex<HashMap<u32, ClientState>>>,
     used_slots: Arc<Mutex<HashSet<u32>>>,
-    drain_tx: mpsc::Sender<()>,
     session_registry: Arc<SessionRegistry>,
     next_session_id: Arc<AtomicU64>,
 ) {
@@ -756,10 +746,11 @@ async fn client_reader_task(
         let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
         let is_shutdown = (frame.flags & FLAG_SHUTDOWN) != 0;
 
-        // Notify the caller to start drain escalation.
+        // Forward shutdown to agentd so the guest can sync filesystems and
+        // power off cleanly. Host-side kill remains the caller's timeout
+        // fallback; triggering VM exit here can race the guest flush.
         if is_shutdown {
-            tracing::info!("agent relay: client slot={slot} sent core.shutdown, notifying drain");
-            let _ = drain_tx.try_send(());
+            tracing::info!("agent relay: client slot={slot} sent core.shutdown");
         }
 
         // Register each ExecRequest in the session registry: assign a

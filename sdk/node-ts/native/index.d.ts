@@ -759,11 +759,12 @@ export declare class SandboxBuilder {
   /** Replace any existing sandbox with the same name. */
   replace(): this
   /**
-   * Grace period (in milliseconds) to wait for the existing sandbox
-   * to exit after SIGTERM before escalating to SIGKILL during a
-   * replace. Implies `replace`. Zero skips SIGTERM entirely.
+   * Timeout (in milliseconds) to wait for the existing sandbox to
+   * exit after SIGTERM before escalating to SIGKILL during a replace.
+   * Implies `replace`. Zero skips SIGTERM entirely. An expired
+   * timeout force-kills the prior sandbox; `create()` still proceeds.
    */
-  replaceWithGrace(graceMs: number): this
+  replaceWithTimeout(timeoutMs: number): this
   /** Override the image entrypoint. */
   entrypoint(cmd: Array<string>): this
   /**
@@ -930,9 +931,27 @@ export declare class SandboxHandle {
   startDetached(): Promise<Sandbox>
   /** Connect to an already-running sandbox (no lifecycle ownership). */
   connect(): Promise<Sandbox>
-  /** Stop the sandbox (SIGTERM). */
+  /**
+   * Connect with an explicit timeout (ms). Returns a typed error if
+   * the sandbox doesn't respond in this window. `connect()` uses
+   * 10_000 ms by default.
+   */
+  connectWithTimeout(timeoutMs: number): Promise<Sandbox>
+  /**
+   * Stop the sandbox gracefully. Lets it finish writing any pending
+   * data to disk before it exits, so files written inside the sandbox
+   * aren't lost across a later restart. Force-kills after 10_000 ms by
+   * default; override with `stopWithTimeout(timeoutMs)`.
+   */
   stop(): Promise<void>
-  /** Kill the sandbox (SIGKILL). */
+  /**
+   * Stop gracefully with an explicit timeout (ms). If the sandbox is
+   * still running after this window, it is force-killed. `0`
+   * force-kills immediately. Resolves successfully either way — does
+   * not throw on timeout expiry.
+   */
+  stopWithTimeout(timeoutMs: number): Promise<void>
+  /** Force terminate immediately. Pending writes may be lost. */
   kill(): Promise<void>
   /** Remove the sandbox from the database. */
   remove(): Promise<void>

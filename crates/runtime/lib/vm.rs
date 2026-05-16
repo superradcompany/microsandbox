@@ -458,7 +458,6 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
 
     // Spawn background tasks.
     let (_relay_shutdown_tx, relay_shutdown_rx) = tokio::sync::watch::channel(false);
-    let (relay_drain_tx, mut relay_drain_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     // Relay: spawn a blocking task for wait_ready, then run the accept loop.
     // wait_ready() must run AFTER enter() starts the VM (agentd sends core.ready),
@@ -469,7 +468,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
 
         match ready_result {
             Ok(Ok(relay)) => {
-                if let Err(e) = relay.run(relay_shutdown_rx, relay_drain_tx).await {
+                if let Err(e) = relay.run(relay_shutdown_rx).await {
                     tracing::error!("agent relay error: {e}");
                 }
             }
@@ -477,18 +476,6 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             Err(e) => tracing::error!("agent relay wait_ready task panicked: {e}"),
         }
     });
-
-    // Shutdown listener: when the relay receives core.shutdown from an SDK
-    // client (e.g. sandbox.stop()), trigger VM exit.
-    {
-        let shutdown_exit_handle = exit_handle.clone();
-        tokio_rt.spawn(async move {
-            if relay_drain_rx.recv().await.is_some() {
-                tracing::info!("core.shutdown received, triggering exit");
-                shutdown_exit_handle.trigger();
-            }
-        });
-    }
 
     // Heartbeat/idle timeout monitor.
     if let Some(idle_secs) = config.idle_timeout_secs {

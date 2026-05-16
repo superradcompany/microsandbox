@@ -346,7 +346,11 @@ Remove the sandbox and all its persisted state from disk.
 async fn stop(&self) -> MicrosandboxResult<()>
 ```
 
-Gracefully shut down the sandbox. Sends SIGTERM to all guest processes and waits for the VM to exit.
+Gracefully shut down the sandbox. Lets the sandbox finish writing
+any pending data to disk before it exits, so files written inside
+the sandbox aren't lost across a later restart. Waits up to ten
+seconds for a clean exit; if the sandbox is still running after
+that, it is force-killed.
 
 ---
 
@@ -1137,9 +1141,10 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 |-------------------|------|-------------|
 | config() | `Result<`[`SandboxConfig`](#sandboxconfig)`>` | Parsed configuration |
 | config_json() | `&str` | Raw JSON configuration |
-| connect() | `Result<`[`Sandbox`](#instance-methods)`>` | Connect to a running sandbox |
+| connect() | `Result<`[`Sandbox`](#instance-methods)`>` | Connect to a running sandbox; returns an error if it doesn't respond within ten seconds |
+| connect_with_timeout(timeout) | `Result<`[`Sandbox`](#instance-methods)`>` | Same as `connect()` with an explicit timeout |
 | created_at() | `Option<DateTime<Utc>>` | Creation timestamp |
-| kill() | `Result<()>` | Force terminate |
+| kill() | `Result<()>` | Force terminate immediately. Pending writes may be lost |
 | logs() | `Result<Vec<`[`LogEntry`](#logentry)`>>` | Read captured `exec.log` (works without starting) |
 | metrics() | `Result<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
 | name() | `&str` | Sandbox name |
@@ -1147,7 +1152,8 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 | start() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in attached mode |
 | start_detached() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in detached mode |
 | status() | [`SandboxStatus`](#sandboxstatus) | Current status |
-| stop() | `Result<()>` | Graceful shutdown |
+| stop() | `Result<()>` | Gracefully shut down. Waits up to ten seconds for pending writes to flush, then force-kills |
+| stop_with_timeout(timeout) | `Result<()>` | Same as `stop()` with an explicit timeout; `Duration::ZERO` force-kills immediately |
 | updated_at() | `Option<DateTime<Utc>>` | Last update timestamp |
 
 ### SandboxMetrics

@@ -134,6 +134,10 @@ impl PySandboxHandle {
     }
 
     /// Connect to an already-running sandbox (no lifecycle ownership).
+    ///
+    /// Returns a typed error if the sandbox doesn't respond within ten
+    /// seconds. Use [`connect_with_timeout`](Self::connect_with_timeout)
+    /// to override.
     fn connect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -143,12 +147,66 @@ impl PySandboxHandle {
         })
     }
 
-    /// Stop the sandbox (SIGTERM).
+    /// Connect with an explicit timeout in seconds.
+    ///
+    /// If the sandbox doesn't respond within `timeout` seconds, the
+    /// call returns a typed error instead of blocking.
+    fn connect_with_timeout<'py>(
+        &self,
+        py: Python<'py>,
+        timeout: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if timeout < 0.0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "timeout must be non-negative",
+            ));
+        }
+        let inner = self.inner.clone();
+        let timeout = std::time::Duration::from_secs_f64(timeout);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let sb = guard
+                .connect_with_timeout(timeout)
+                .await
+                .map_err(to_py_err)?;
+            Ok(PySandbox::from_rust(sb))
+        })
+    }
+
+    /// Stop the sandbox gracefully.
+    ///
+    /// Lets the sandbox finish writing any pending data to disk before
+    /// it exits, so files written inside the sandbox aren't lost across
+    /// a later restart. Waits up to ten seconds for a clean exit; if
+    /// the sandbox is still running after that, it is force-killed. Use
+    /// [`stop_with_timeout`](Self::stop_with_timeout) to override the
+    /// budget.
     fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.lock().await;
             guard.stop().await.map_err(to_py_err)?;
+            Ok(())
+        })
+    }
+
+    /// Stop gracefully with an explicit timeout in seconds.
+    ///
+    /// If the sandbox is still running after `timeout` seconds, it is
+    /// force-killed. `timeout=0` force-kills immediately. The call
+    /// returns successfully either way — it does not surface a timeout
+    /// error.
+    fn stop_with_timeout<'py>(&self, py: Python<'py>, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
+        if timeout < 0.0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "timeout must be non-negative",
+            ));
+        }
+        let inner = self.inner.clone();
+        let timeout = std::time::Duration::from_secs_f64(timeout);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            guard.stop_with_timeout(timeout).await.map_err(to_py_err)?;
             Ok(())
         })
     }

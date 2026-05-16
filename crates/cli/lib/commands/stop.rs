@@ -69,12 +69,9 @@ async fn stop_one(name: &str, force: bool, timeout_secs: Option<u64>) -> anyhow:
     let result = if force {
         handle.kill().await
     } else if let Some(timeout_secs) = timeout_secs {
-        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), handle.stop())
+        handle
+            .stop_with_timeout(std::time::Duration::from_secs(timeout_secs))
             .await
-        {
-            Ok(stop_result) => stop_result,
-            Err(_) => handle.kill().await,
-        }
     } else {
         handle.stop().await
     };

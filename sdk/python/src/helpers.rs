@@ -145,13 +145,13 @@ pub fn build_config_from_kwargs(
     {
         builder = builder.replace();
     }
-    if let Some(grace) = extract_opt::<f64>(kwargs, "replace_with_grace")? {
-        if grace < 0.0 {
+    if let Some(timeout) = extract_opt::<f64>(kwargs, "replace_with_timeout")? {
+        if timeout < 0.0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "replace_with_grace must be non-negative",
+                "replace_with_timeout must be non-negative",
             ));
         }
-        builder = builder.replace_with_grace(std::time::Duration::from_secs_f64(grace));
+        builder = builder.replace_with_timeout(std::time::Duration::from_secs_f64(timeout));
     }
     if let Some(max_duration) = extract_opt::<f64>(kwargs, "max_duration")? {
         if max_duration < 0.0 {

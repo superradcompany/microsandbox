@@ -196,9 +196,9 @@ impl JsSandboxBuilder {
     /// Replace any existing sandbox with the same name.
     ///
     /// SIGTERMs the prior instance, waits up to 10 seconds for a
-    /// graceful exit, then SIGKILLs. To override the grace, use
-    /// `replaceWithGrace(ms)`; `replaceWithGrace(0)` skips SIGTERM and
-    /// SIGKILLs immediately.
+    /// graceful exit, then SIGKILLs. To override the timeout, use
+    /// `replaceWithTimeout(ms)`; `replaceWithTimeout(0)` skips SIGTERM
+    /// and SIGKILLs immediately.
     #[napi]
     pub fn replace(&mut self) -> &Self {
         let prev = self.take_inner();
@@ -207,17 +207,18 @@ impl JsSandboxBuilder {
     }
 
     /// Replace any existing sandbox, overriding the SIGTERM-to-SIGKILL
-    /// grace. Implies `replace` — calling this alone is enough.
+    /// timeout. Implies `replace` — calling this alone is enough.
     ///
-    /// - `graceMs > 0`: SIGTERM, wait up to `graceMs`, then SIGKILL.
-    /// - `graceMs == 0`: SIGKILL immediately (skip SIGTERM).
+    /// - `timeoutMs > 0`: SIGTERM, wait up to `timeoutMs`, then SIGKILL.
+    /// - `timeoutMs == 0`: SIGKILL immediately (skip SIGTERM).
     ///
-    /// The default grace used by `replace` is 10_000 ms.
+    /// The default timeout used by `replace` is 10_000 ms. An expired
+    /// timeout force-kills the prior sandbox; `create()` still proceeds.
     #[napi]
-    pub fn replace_with_grace(&mut self, grace_ms: u32) -> &Self {
+    pub fn replace_with_timeout(&mut self, timeout_ms: u32) -> &Self {
         let prev = self.take_inner();
         self.inner =
-            Some(prev.replace_with_grace(std::time::Duration::from_millis(grace_ms.into())));
+            Some(prev.replace_with_timeout(std::time::Duration::from_millis(timeout_ms.into())));
         self
     }
 
