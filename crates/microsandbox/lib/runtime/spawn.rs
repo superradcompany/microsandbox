@@ -240,24 +240,30 @@ async fn terminate_startup_process(
 ///
 /// We piggyback on `std::os::unix::net::SocketAddr::from_pathname` because
 /// it uses the correct platform-specific limit and also catches interior
-/// NUL bytes. When it rejects the path, we map the opaque error to an
+/// NUL bytes. Both rejections surface as `io::ErrorKind::InvalidInput`,
+/// so we match that kind explicitly and translate it into an
 /// `InvalidConfig` that names the sandbox, shows the rendered path and
 /// its byte length, and points at the two knobs the caller can actually
-/// adjust (sandbox name, `MSB_HOME`).
+/// adjust (sandbox name, `MSB_HOME`). Any other I/O error kind is
+/// propagated unchanged rather than being mislabeled as a configuration
+/// problem.
 #[cfg(unix)]
 fn validate_agent_sock_path(sandbox_name: &str, agent_sock_path: &Path) -> MicrosandboxResult<()> {
-    if let Err(err) = std::os::unix::net::SocketAddr::from_pathname(agent_sock_path) {
-        return Err(crate::MicrosandboxError::InvalidConfig(format!(
-            "sandbox name {:?} produces an agent socket path that the kernel \
-             cannot bind: {} ({}, {} bytes). Shorten the sandbox name or set \
-             MSB_HOME to a shorter base directory.",
-            sandbox_name,
-            err,
-            agent_sock_path.display(),
-            agent_sock_path.as_os_str().len(),
-        )));
+    match std::os::unix::net::SocketAddr::from_pathname(agent_sock_path) {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::InvalidInput => {
+            Err(crate::MicrosandboxError::InvalidConfig(format!(
+                "sandbox name {:?} produces an agent socket path that the kernel \
+                 cannot bind: {} ({}, {} bytes). Shorten the sandbox name or set \
+                 MSB_HOME to a shorter base directory.",
+                sandbox_name,
+                err,
+                agent_sock_path.display(),
+                agent_sock_path.as_os_str().len(),
+            )))
+        }
+        Err(err) => Err(err.into()),
     }
-    Ok(())
 }
 
 /// Scan `config.mounts` for file bind mounts and stage each file in its own
