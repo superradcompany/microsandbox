@@ -9,7 +9,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use ipnetwork::Ipv4Network;
+use ipnetwork::{Ipv4Network, Ipv6Network};
 use microsandbox_protocol::{ENV_HOST_ALIAS, ENV_NET, ENV_NET_IPV4, ENV_NET_IPV6};
 use msb_krun::backends::net::NetBackend;
 
@@ -123,10 +123,17 @@ impl SmoltcpNetwork {
             })
         });
         let gateway_ipv4 = guest_ipv4.map(gateway_from_guest_ipv4);
-        let guest_ipv6 = config
-            .interface
-            .ipv6_address
-            .or_else(|| host_has_ipv6.then(|| derive_guest_ipv6(slot)));
+        let guest_ipv6 = config.interface.ipv6_address.or_else(|| {
+            host_has_ipv6.then(|| {
+                derive_guest_ipv6(
+                    config
+                        .interface
+                        .ipv6_pool
+                        .unwrap_or_else(default_guest_ipv6_pool),
+                    slot,
+                )
+            })
+        });
         let gateway_ipv6 = guest_ipv6.map(gateway_from_guest_ipv6);
 
         let queue_capacity = config
@@ -367,14 +374,32 @@ fn default_guest_ipv4_pool() -> Ipv4Network {
 ///
 /// Pool: `fd42:6d73:62::/48`. Each slot gets a `/64` prefix.
 /// Guest is `::2` in its prefix.
-fn derive_guest_ipv6(slot: u64) -> Ipv6Addr {
-    Ipv6Addr::new(0xfd42, 0x6d73, 0x0062, slot as u16, 0, 0, 0, 2)
+fn derive_guest_ipv6(pool: Ipv6Network, slot: u64) -> Ipv6Addr {
+    assert!(
+        pool.prefix() <= 64,
+        "IPv6 pool {pool} must be large enough to contain at least one /64 prefix"
+    );
+
+    let capacity = 1u128 << (64 - pool.prefix());
+    assert!(
+        (slot as u128) < capacity,
+        "sandbox slot {slot} exceeds IPv6 pool {pool} capacity ({capacity} /64 prefixes)"
+    );
+
+    let base = u128::from(pool.network());
+    let offset = (slot as u128) << 64;
+    Ipv6Addr::from(base + offset + 2)
 }
 
 /// Gateway IPv6 from guest IPv6: `::1` in the same prefix.
 fn gateway_from_guest_ipv6(guest: Ipv6Addr) -> Ipv6Addr {
     let segs = guest.segments();
     Ipv6Addr::new(segs[0], segs[1], segs[2], segs[3], 0, 0, 0, 1)
+}
+
+fn default_guest_ipv6_pool() -> Ipv6Network {
+    Ipv6Network::new(Ipv6Addr::new(0xfd42, 0x6d73, 0x0062, 0, 0, 0, 0, 0), 48)
+        .expect("default IPv6 pool must be a valid network")
 }
 
 /// Format a MAC address as `xx:xx:xx:xx:xx:xx`.
@@ -452,12 +477,25 @@ mod tests {
     #[test]
     fn derive_ipv6_slot_0() {
         assert_eq!(
-            derive_guest_ipv6(0),
+            derive_guest_ipv6(default_guest_ipv6_pool(), 0),
             "fd42:6d73:62:0::2".parse::<Ipv6Addr>().unwrap()
         );
         assert_eq!(
-            gateway_from_guest_ipv6(derive_guest_ipv6(0)),
+            gateway_from_guest_ipv6(derive_guest_ipv6(default_guest_ipv6_pool(), 0)),
             "fd42:6d73:62:0::1".parse::<Ipv6Addr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn derive_addresses_custom_ipv6_pool() {
+        let pool = "fd7a:115c:a1e0:100::/56".parse::<Ipv6Network>().unwrap();
+        assert_eq!(
+            derive_guest_ipv6(pool, 0),
+            "fd7a:115c:a1e0:100::2".parse::<Ipv6Addr>().unwrap()
+        );
+        assert_eq!(
+            derive_guest_ipv6(pool, 3),
+            "fd7a:115c:a1e0:103::2".parse::<Ipv6Addr>().unwrap()
         );
     }
 

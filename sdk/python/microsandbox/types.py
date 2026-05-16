@@ -668,6 +668,9 @@ class Network:
     ipv4_pool: str | None = None
     """IPv4 pool used to derive per-sandbox /30 guest subnets. Defaults
     to ``198.18.0.0/15``."""
+    ipv6_pool: str | None = None
+    """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
+    to ``fd42:6d73:62::/48``."""
     max_connections: int | None = None
 
     @classmethod
@@ -703,6 +706,8 @@ class Network:
             d["tls"] = self.tls._to_dict()
         if self.ipv4_pool is not None:
             d["ipv4_pool"] = self.ipv4_pool
+        if self.ipv6_pool is not None:
+            d["ipv6_pool"] = self.ipv6_pool
         if self.max_connections is not None:
             d["max_connections"] = self.max_connections
         return d

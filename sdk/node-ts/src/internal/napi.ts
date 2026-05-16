@@ -634,6 +634,7 @@ export interface NapiNetworkBuilder {
   onSecretViolation(action: string): this;
   maxConnections(max: number): this;
   ipv4Pool(pool: string): this;
+  ipv6Pool(pool: string): this;
   trustHostCAs(enabled: boolean): this;
 }
 

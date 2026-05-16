@@ -360,6 +360,8 @@ export declare class NetworkBuilder {
   maxConnections(max: number): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
   ipv4Pool(pool: string): this
+  /** Set the IPv6 pool used for per-sandbox /64 guest prefixes. */
+  ipv6Pool(pool: string): this
   /** Trust the host's root CAs inside the guest. Default: false. */
   trustHostCAs(enabled: boolean): this
   /**

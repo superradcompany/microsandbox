@@ -5,7 +5,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use ipnetwork::Ipv4Network;
+use ipnetwork::{Ipv4Network, Ipv6Network};
 use serde::{Deserialize, Serialize};
 
 use crate::dns::Nameserver;
@@ -89,9 +89,13 @@ pub struct InterfaceOverrides {
     #[serde(default)]
     pub ipv4_pool: Option<Ipv4Network>,
 
-    /// Guest IPv6 address. Default: derived from slot (fd42:6d73:62::/48 pool).
+    /// Guest IPv6 address. Default: derived from slot within `ipv6_pool`.
     #[serde(default)]
     pub ipv6_address: Option<Ipv6Addr>,
+
+    /// Guest IPv6 pool. Default: derived from slot (fd42:6d73:62::/48 pool).
+    #[serde(default)]
+    pub ipv6_pool: Option<Ipv6Network>,
 }
 
 /// DNS interception settings for the sandbox.

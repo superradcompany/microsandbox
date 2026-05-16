@@ -125,6 +125,7 @@ The configuration struct passed via [`WithNetwork`](/sdk/go/sandbox#withnetwork)
 | TLS | [`*TLSConfig`](#tlsconfig) | TLS interception settings |
 | Ports | `map[uint16]uint16` | Host→guest TCP port mappings |
 | IPv4Pool | `string` | IPv4 pool used for per-sandbox `/30` guest subnets. Defaults to `198.18.0.0/15` |
+| IPv6Pool | `string` | IPv6 pool used for per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
 | MaxConnections | `*uint` | Cap concurrent network connections from the sandbox |
 | OnSecretViolation | [`ViolationAction`](/sdk/go/secrets#violationaction) | Sandbox-wide action when a secret is sent to a disallowed host |
 | TrustHostCAs | `*bool` | Ship the host's trusted root CAs into the guest at boot. Opt-in for corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, ...) whose gateway CA is unknown to the guest's stock Mozilla bundle |

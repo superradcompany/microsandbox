@@ -216,6 +216,16 @@ impl JsNetworkBuilder {
         Ok(self)
     }
 
+    /// Set the IPv6 pool used for per-sandbox /64 guest prefixes.
+    #[napi(js_name = "ipv6Pool")]
+    pub fn ipv6_pool(&mut self, pool: String) -> Result<&Self> {
+        let parsed = ipnetwork::Ipv6Network::from_str(&pool)
+            .map_err(|e| napi::Error::from_reason(format!("invalid IPv6 pool `{pool}`: {e}")))?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.ipv6_pool(parsed));
+        Ok(self)
+    }
+
     /// Trust the host's root CAs inside the guest. Default: false.
     #[napi(js_name = "trustHostCAs")]
     pub fn trust_host_cas(&mut self, enabled: bool) -> &Self {

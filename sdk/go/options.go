@@ -336,6 +336,10 @@ type NetworkConfig struct {
 	// Defaults to "198.18.0.0/15".
 	IPv4Pool string
 
+	// IPv6Pool is used to derive per-sandbox /64 guest prefixes.
+	// Defaults to "fd42:6d73:62::/48".
+	IPv6Pool string
+
 	// MaxConnections caps concurrent network connections from the sandbox.
 	MaxConnections *uint
 

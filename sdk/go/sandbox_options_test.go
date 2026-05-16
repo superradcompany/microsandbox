@@ -297,6 +297,7 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 				Nameservers: []string{"1.1.1.1:53"},
 			},
 			IPv4Pool: "172.31.240.0/24",
+			IPv6Pool: "fd7a:115c:a1e0:100::/56",
 		}),
 	)
 	net := mustField(t, got, "network").(map[string]any)
@@ -321,6 +322,9 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	}
 	if net["ipv4_pool"] != "172.31.240.0/24" {
 		t.Fatalf("ipv4_pool = %v", net["ipv4_pool"])
+	}
+	if net["ipv6_pool"] != "fd7a:115c:a1e0:100::/56" {
+		t.Fatalf("ipv6_pool = %v", net["ipv6_pool"])
 	}
 	dns := net["dns"].(map[string]any)
 	ns := dns["nameservers"].([]any)

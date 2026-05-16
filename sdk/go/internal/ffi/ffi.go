@@ -954,6 +954,7 @@ type NetworkOptions struct {
 	TLS                 *TLSOptions          `json:"tls,omitempty"`
 	Ports               map[uint16]uint16    `json:"ports,omitempty"`
 	IPv4Pool            string               `json:"ipv4_pool,omitempty"`
+	IPv6Pool            string               `json:"ipv6_pool,omitempty"`
 	MaxConnections      *uint                `json:"max_connections,omitempty"`
 	OnSecretViolation   string               `json:"on_secret_violation,omitempty"`
 	TrustHostCAs        *bool                `json:"trust_host_cas,omitempty"`

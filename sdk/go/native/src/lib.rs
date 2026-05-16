@@ -634,6 +634,8 @@ struct NetworkOpts {
     ports: HashMap<u16, u16>,
     /// IPv4 pool used to derive per-sandbox /30 guest subnets.
     ipv4_pool: Option<String>,
+    /// IPv6 pool used to derive per-sandbox /64 guest prefixes.
+    ipv6_pool: Option<String>,
     max_connections: Option<usize>,
     /// Sandbox-wide secret violation action: "block", "block-and-log",
     /// "block-and-terminate".
@@ -905,6 +907,12 @@ fn apply_network(
             .parse()
             .map_err(|e| FfiError::invalid_argument(format!("ipv4_pool {raw:?}: {e}")))?;
         builder = builder.network(|n| n.ipv4_pool(pool));
+    }
+    if let Some(ref raw) = net.ipv6_pool {
+        let pool: ipnetwork::Ipv6Network = raw
+            .parse()
+            .map_err(|e| FfiError::invalid_argument(format!("ipv6_pool {raw:?}: {e}")))?;
+        builder = builder.network(|n| n.ipv6_pool(pool));
     }
 
     // DNS configuration. Either nested `dns: {...}` or the legacy flat

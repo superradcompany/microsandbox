@@ -65,7 +65,11 @@ describe("MountBuilder", () => {
   });
 
   it("builds a tmpfs mount with size and uniform readonly", () => {
-    const m = new MountBuilder("/scratch").tmpfs().size(MiB(64)).readonly().build();
+    const m = new MountBuilder("/scratch")
+      .tmpfs()
+      .size(MiB(64))
+      .readonly()
+      .build();
     expect(m).toEqual({
       kind: "tmpfs",
       guest: "/scratch",
@@ -95,16 +99,12 @@ describe("MountBuilder", () => {
   });
 
   it("rejects .format() on a non-disk mount", () => {
-    const builder = new MountBuilder("/data")
-      .bind("/host")
-      .format("qcow2");
+    const builder = new MountBuilder("/data").bind("/host").format("qcow2");
     expect(() => builder.build()).toThrow(InvalidConfigError);
   });
 
   it("rejects .fstype() on a non-disk mount", () => {
-    const builder = new MountBuilder("/data")
-      .bind("/host")
-      .fstype("ext4");
+    const builder = new MountBuilder("/data").bind("/host").fstype("ext4");
     expect(() => builder.build()).toThrow(InvalidConfigError);
   });
 
@@ -113,7 +113,9 @@ describe("MountBuilder", () => {
   });
 
   it("rejects fstypes containing forbidden separators", () => {
-    const builder = new MountBuilder("/data").disk("./d.raw").fstype("ext4,foo");
+    const builder = new MountBuilder("/data")
+      .disk("./d.raw")
+      .fstype("ext4,foo");
     expect(() => builder.build()).toThrow(InvalidConfigError);
   });
 
@@ -144,11 +146,16 @@ describe("PatchBuilder", () => {
 
 describe("SandboxBuilder.build", () => {
   it("requires .image()", async () => {
-    await expect(Sandbox.builder("x").build()).rejects.toThrow(InvalidConfigError);
+    await expect(Sandbox.builder("x").build()).rejects.toThrow(
+      InvalidConfigError,
+    );
   });
 
   it("renders branded sizes back to plain numbers", async () => {
-    const cfg = await Sandbox.builder("x").image("alpine").memory(GiB(2)).build();
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .memory(GiB(2))
+      .build();
     expect(cfg.memoryMib).toBe(2048);
   });
 
@@ -241,10 +248,19 @@ describe("InterfaceOverridesBuilder", () => {
     const cfg = new NetworkBuilder()
       .interface((io) => io.mtu(9000).ipv4("198.18.0.5"))
       .ipv4Pool("172.31.240.0/24")
-      .build() as { interface: { mtu: number; ipv4Address: string; ipv4Pool: string } };
+      .ipv6Pool("fd7a:115c:a1e0:100::/56")
+      .build() as {
+      interface: {
+        mtu: number;
+        ipv4Address: string;
+        ipv4Pool: string;
+        ipv6Pool: string;
+      };
+    };
     expect(cfg.interface.mtu).toBe(9000);
     expect(cfg.interface.ipv4Address).toBe("198.18.0.5");
     expect(cfg.interface.ipv4Pool).toBe("172.31.240.0/24");
+    expect(cfg.interface.ipv6Pool).toBe("fd7a:115c:a1e0:100::/56");
   });
 });
 
@@ -253,8 +269,10 @@ describe("NetworkBuilder.secretEnvSimple (3-arg shorthand)", () => {
     const cfg = new NetworkBuilder()
       .secretEnvSimple("API_KEY", "sk-abc", "api.example.com")
       .build() as {
-        secrets: { secrets: ReadonlyArray<{ envVar: string; placeholder: string }> };
+      secrets: {
+        secrets: ReadonlyArray<{ envVar: string; placeholder: string }>;
       };
+    };
     expect(cfg.secrets.secrets).toHaveLength(1);
     expect(cfg.secrets.secrets[0].envVar).toBe("API_KEY");
     // Placeholder defaults to the value when omitted.
