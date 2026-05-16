@@ -1521,7 +1521,13 @@ mod tests {
 
         let err = super::validate_agent_sock_path(&name, &path)
             .expect_err("overlong paths must be rejected");
-        let msg = format!("{err}");
+
+        // Must be `InvalidConfig` so callers can pattern-match on the
+        // variant rather than scraping the Display string.
+        let msg = match err {
+            crate::MicrosandboxError::InvalidConfig(m) => m,
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        };
 
         // Names the sandbox so the caller knows which knob to turn.
         assert!(msg.contains(&name), "error should name the sandbox: {msg}");
