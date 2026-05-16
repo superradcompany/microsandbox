@@ -54,7 +54,7 @@ See the [systemd services recipe](/recipes/systemd-services).
 
 **Exec logs and structured boot errors**
 
-Each sandbox now writes a per-session `exec.log` (JSON Lines) capturing stdout, stderr, and PTY output, readable via the new `msb logs` command and `logs()` SDK methods. Sandboxes that fail before the agent is ready now emit a structured `boot-error.json` that the CLI renders as a typed error block instead of a generic "process exited" message. Spawn-time exec failures are now reported through a typed `ExecFailed` message with kinds such as `NotFound`, `PermissionDenied`, `NotExecutable`, and `OutOfMemory`, and the CLI exits 127, 126, or 1 per POSIX convention.
+Each sandbox now writes a per-session `exec.log` (JSON Lines) capturing stdout, stderr, and PTY output, readable via the new `msb logs` command and `logs()` SDK methods. Sandboxes that fail before the agent is ready now emit a structured `boot-error.json` that the CLI renders as a typed error block instead of a generic "process exited" message. Spawn-time exec failures are now reported through a typed `ExecFailed` message with kinds such as `NotFound`, `PermissionDenied`, `NotExecutable`, and `OutOfMemory`. The CLI exits 127, 126, or 1 per POSIX convention.
 
 See [Sandbox logs](/sandboxes/logs).
 
