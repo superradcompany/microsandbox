@@ -856,6 +856,17 @@ func WithPorts(ports map[uint16]uint16) SandboxOption
 ```
 
 Publish host TCP ports into the sandbox (map key = host port, value = guest port).
+The default host bind address is `127.0.0.1`.
+
+---
+
+#### WithPortBindings()
+
+```go
+func WithPortBindings(bindings ...PortBinding) SandboxOption
+```
+
+Publish host ports on explicit host bind addresses, such as `0.0.0.0`. See [`PortBinding`](/sdk/go/networking#portbinding) for the type definition and UDP examples.
 
 ---
 
@@ -865,7 +876,7 @@ Publish host TCP ports into the sandbox (map key = host port, value = guest port
 func WithPortsUDP(ports map[uint16]uint16) SandboxOption
 ```
 
-Publish host UDP ports into the sandbox.
+Publish host UDP ports into the sandbox. The default host bind address is `127.0.0.1`.
 
 ---
 
@@ -965,6 +976,7 @@ The config struct populated by [`SandboxOption`](#sandboxoption) functions. Most
 | RegistryAuth     | [`*RegistryAuth`](#registryauth)                     | Private registry credentials                                         |
 | Ports            | `map[uint16]uint16`                                  | Host→guest TCP port mappings                                         |
 | PortsUDP         | `map[uint16]uint16`                                  | Host→guest UDP port mappings                                         |
+| PortBindings     | [`[]PortBinding`](/sdk/go/networking#portbinding)    | Host→guest port mappings with explicit bind addresses                |
 | Network          | [`*NetworkConfig`](/sdk/go/networking#networkconfig) | Network policy and configuration                                     |
 | Secrets          | [`[]SecretEntry`](/sdk/go/secrets#secretentry)       | Secret injection entries                                             |
 | Patches          | [`[]PatchConfig`](#patchconfig)                      | Rootfs modifications applied before boot                             |

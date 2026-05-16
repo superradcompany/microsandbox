@@ -26,6 +26,9 @@ msb run --name api \
 
 # Detached (runs in background)
 msb run -d --name worker python -- python worker.py
+
+# Publish on all IPv4 host interfaces instead of the default 127.0.0.1
+msb run --name public-api -p 0.0.0.0:8000:8000 python
 ```
 
 | Flag | Description |
@@ -34,7 +37,7 @@ msb run -d --name worker python -- python worker.py
 | `-c`, `--cpus` | Number of virtual CPUs to allocate |
 | `-m`, `--memory` | Amount of memory (e.g. `512M`, `1G`) |
 | `-v`, `--volume` | Mount a host path or named volume (`SOURCE:DEST`) |
-| `-p`, `--port` | Forward a host port to the sandbox (`HOST:GUEST` or `HOST:GUEST/udp`) |
+| `-p`, `--port` | Forward a host port to the sandbox (`HOST:GUEST`, `BIND_ADDR:HOST:GUEST`, and `/udp` variants) |
 | `-e`, `--env` | Set an environment variable (`KEY=VALUE`) |
 | `-w`, `--workdir` | Working directory inside the sandbox |
 | `--shell` | Default shell for interactive sessions |

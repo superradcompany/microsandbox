@@ -312,8 +312,12 @@ export declare class NetworkBuilder {
   enabled(enabled: boolean): this
   /** Publish a TCP port. */
   port(hostPort: number, guestPort: number): this
+  /** Publish a TCP port on a specific host bind address. */
+  portBind(bind: string, hostPort: number, guestPort: number): this
   /** Publish a UDP port. */
   portUdp(hostPort: number, guestPort: number): this
+  /** Publish a UDP port on a specific host bind address. */
+  portUdpBind(bind: string, hostPort: number, guestPort: number): this
   /**
    * Set a policy. Construct via the JS-side `NetworkPolicy.publicOnly()`
    * / `.allowAll()` / `.none()` / `.nonLocal()` factories or build a
@@ -799,8 +803,12 @@ export declare class SandboxBuilder {
   network(configure: (arg: NetworkBuilder) => NetworkBuilder): this
   /** Publish a TCP port from host -> guest. */
   port(hostPort: number, guestPort: number): this
+  /** Publish a TCP port from host -> guest on a specific host bind address. */
+  portBind(bind: string, hostPort: number, guestPort: number): this
   /** Publish a UDP port from host -> guest. */
   portUdp(hostPort: number, guestPort: number): this
+  /** Publish a UDP port from host -> guest on a specific host bind address. */
+  portUdpBind(bind: string, hostPort: number, guestPort: number): this
   /** Add a secret via a callback. */
   secret(configure: (arg: JsSecretBuilder) => JsSecretBuilder): this
   /**

@@ -123,12 +123,54 @@ The configuration struct passed via [`WithNetwork`](/sdk/go/sandbox#withnetwork)
 | DNS | [`*DNSConfig`](#dnsconfig) | DNS interception settings |
 | DNSRebindProtection | `*bool` | Legacy convenience for `DNS.RebindProtection`. When `DNS` is also set, the nested value wins |
 | TLS | [`*TLSConfig`](#tlsconfig) | TLS interception settings |
-| Ports | `map[uint16]uint16` | Host→guest TCP port mappings |
+| Ports | `map[uint16]uint16` | Host→guest TCP port mappings bound to `127.0.0.1` |
+| PortBindings | `[]`[`PortBinding`](#portbinding) | Host→guest port mappings with explicit bind addresses |
 | IPv4Pool | `string` | IPv4 pool used for per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |
 | IPv6Pool | `string` | IPv6 pool used for per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
 | MaxConnections | `*uint` | Cap concurrent network connections from the sandbox |
 | OnSecretViolation | [`ViolationAction`](/sdk/go/secrets#violationaction) | Sandbox-wide action when a secret is sent to a disallowed host |
 | TrustHostCAs | `*bool` | Ship the host's trusted root CAs into the guest at boot. Opt-in for corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, ...) whose gateway CA is unknown to the guest's stock Mozilla bundle |
+
+### PortBinding
+
+```go
+type PortBinding struct {
+    Bind      string
+    HostPort  uint16
+    GuestPort uint16
+    Protocol  PortProtocol
+}
+```
+
+A host-to-guest port mapping with an explicit host bind address. Use it with [`WithPortBindings`](/sdk/go/sandbox#withportbindings) or `NetworkConfig.PortBindings` when the default `127.0.0.1` bind is too restrictive.
+
+```go
+sb, err := m.CreateSandbox(ctx, "api",
+    m.WithImage("python:3.12"),
+    m.WithPortBindings(
+        m.PortBinding{Bind: "0.0.0.0", HostPort: 8001, GuestPort: 8001},
+        m.PortBinding{Bind: "127.0.0.1", HostPort: 5353, GuestPort: 53, Protocol: m.PortProtocolUDP},
+    ),
+)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Bind | `string` | Host IP address to bind, such as `127.0.0.1`, `0.0.0.0`, or `::` |
+| HostPort | `uint16` | Port on the host |
+| GuestPort | `uint16` | Port inside the sandbox |
+| Protocol | [`PortProtocol`](#portprotocol) | `PortProtocolTCP` or `PortProtocolUDP`. Empty defaults to TCP |
+
+### PortProtocol
+
+```go
+type PortProtocol string
+```
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `PortProtocolTCP` | `"tcp"` | TCP port mapping |
+| `PortProtocolUDP` | `"udp"` | UDP port mapping |
 
 ### PolicyRule
 

@@ -38,6 +38,7 @@
 use std::{
     collections::HashMap,
     ffi::{CStr, CString},
+    net::IpAddr,
     os::raw::{c_char, c_uchar},
     path::PathBuf,
     sync::{
@@ -580,6 +581,14 @@ fn default_egress() -> String {
     "egress".into()
 }
 
+fn default_host_bind() -> String {
+    "127.0.0.1".into()
+}
+
+fn default_port_protocol() -> String {
+    "tcp".into()
+}
+
 /// Custom policy. Parity-aligned with Node/Python: `default_egress` and
 /// `default_ingress` are the asymmetric default actions. Empty defaults to
 /// deny egress / allow ingress (matching upstream `public_only`).
@@ -632,6 +641,9 @@ struct NetworkOpts {
     /// Ports nested inside network: {host_port: guest_port}.
     #[serde(default)]
     ports: HashMap<u16, u16>,
+    /// Ports nested inside network with explicit bind addresses.
+    #[serde(default)]
+    port_bindings: Vec<PortBindingOpts>,
     /// IPv4 pool used to derive per-sandbox /30 guest subnets.
     ipv4_pool: Option<String>,
     /// IPv6 pool used to derive per-sandbox /64 guest prefixes.
@@ -739,6 +751,9 @@ struct SandboxCreateOpts {
     /// Top-level UDP ports shorthand: {host_port: guest_port}.
     #[serde(default)]
     ports_udp: HashMap<u16, u16>,
+    /// Top-level port bindings with explicit bind addresses.
+    #[serde(default)]
+    port_bindings: Vec<PortBindingOpts>,
     #[serde(default)]
     secrets: Vec<SecretOpts>,
     #[serde(default)]
@@ -746,6 +761,16 @@ struct SandboxCreateOpts {
     /// Volume mounts: guest_path → MountSpec.
     #[serde(default)]
     volumes: HashMap<String, MountSpec>,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct PortBindingOpts {
+    #[serde(default = "default_host_bind")]
+    bind: String,
+    host_port: u16,
+    guest_port: u16,
+    #[serde(default = "default_port_protocol")]
+    protocol: String,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1009,8 +1034,34 @@ fn apply_network(
     for (host, guest) in &net.ports {
         builder = builder.port(*host, *guest);
     }
+    for port in &net.port_bindings {
+        builder = apply_port_binding(builder, port)?;
+    }
 
     Ok(builder)
+}
+
+fn apply_port_binding(
+    builder: microsandbox::sandbox::SandboxBuilder,
+    port: &PortBindingOpts,
+) -> Result<microsandbox::sandbox::SandboxBuilder, FfiError> {
+    let bind = port.bind.parse::<IpAddr>().map_err(|_| {
+        FfiError::new(
+            error_kind::INVALID_CONFIG,
+            format!("invalid bind address: {}", port.bind),
+        )
+    })?;
+
+    Ok(match port.protocol.as_str() {
+        "" | "tcp" => builder.port_bind(bind, port.host_port, port.guest_port),
+        "udp" => builder.port_udp_bind(bind, port.host_port, port.guest_port),
+        other => {
+            return Err(FfiError::new(
+                error_kind::INVALID_CONFIG,
+                format!("invalid port protocol: {other}"),
+            ));
+        }
+    })
 }
 
 /// Resolve a JSON destination string into the typed enum. Supports the
@@ -1478,6 +1529,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             for (host, guest) in &opts.ports_udp {
                 builder = builder.port_udp(*host, *guest);
+            }
+            for port in &opts.port_bindings {
+                builder = apply_port_binding(builder, port)?;
             }
             // Network (policy, DNS, TLS, ports-in-network).
             if let Some(ref net) = opts.network {

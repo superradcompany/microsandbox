@@ -6,6 +6,7 @@ export interface PublishedPort {
   readonly hostPort: number;
   readonly guestPort: number;
   readonly protocol: "tcp" | "udp";
+  readonly hostBind: string;
 }
 
 /** DNS interception configuration. */

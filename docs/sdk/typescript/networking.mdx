@@ -148,7 +148,7 @@ const policy = NetworkPolicy.builder()
 any(configure: (r: RuleBuilder) => RuleBuilder): this
 ```
 
-Sugar for [`rule()`](#rule-2) with direction pre-set to `Any`. Rules committed inside apply in both directions.
+Sugar for [`rule()`](#rule) with direction pre-set to `Any`. Rules committed inside apply in both directions.
 
 ---
 
@@ -158,7 +158,7 @@ Sugar for [`rule()`](#rule-2) with direction pre-set to `Any`. Rules committed i
 build(): NetworkPolicy
 ```
 
-Materialize the accumulated state into a [`NetworkPolicy`](#networkpolicy-1). Lazily parses every recorded `.ip()` / `.cidr()` / `.domain()` / `.domainSuffix()` input, validates direction-set and ICMP-egress-only invariants, and emits a host-side warning for each shadowed rule pair.
+Materialize the accumulated state into a [`NetworkPolicy`](#networkpolicy). Lazily parses every recorded `.ip()` / `.cidr()` / `.domain()` / `.domainSuffix()` input, validates direction-set and ICMP-egress-only invariants, and emits a host-side warning for each shadowed rule pair.
 
 ---
 
@@ -220,7 +220,7 @@ Per-direction override for the ingress default action.
 egress(configure: (r: RuleBuilder) => RuleBuilder): this
 ```
 
-Sugar for [`rule()`](#rule-2) with direction pre-set to `Egress`.
+Sugar for [`rule()`](#rule) with direction pre-set to `Egress`.
 
 ---
 
@@ -230,7 +230,7 @@ Sugar for [`rule()`](#rule-2) with direction pre-set to `Egress`.
 ingress(configure: (r: RuleBuilder) => RuleBuilder): this
 ```
 
-Sugar for [`rule()`](#rule-2) with direction pre-set to `Ingress`.
+Sugar for [`rule()`](#rule) with direction pre-set to `Ingress`.
 
 ---
 
@@ -375,7 +375,7 @@ Add an inclusive port range. `lo > hi` records an error surfaced at `.build()` t
 ports(ports: number[]): this
 ```
 
-Add multiple single ports. Equivalent to calling [`port()`](#port-1) once per element.
+Add multiple single ports. Equivalent to calling [`port()`](#port-setters) once per element.
 
 ---
 
@@ -696,7 +696,7 @@ Begin an explicit-destination rule with action `Deny`.
 
 ## Rule
 
-Factory for individual policy rules. Each method returns a single [`Rule`](#rule-1) value.
+Factory for individual policy rules. Each method returns a single [`Rule`](#rule) value.
 
 ---
 
@@ -712,7 +712,7 @@ Allow rule with direction `any` (matches in either direction).
 
 | Name | Type | Description |
 |------|------|-------------|
-| destination | [`Destination`](#destination-1) | Target filter |
+| destination | [`Destination`](#destination) | Target filter |
 
 ---
 
@@ -728,7 +728,7 @@ Allow rule with direction `egress`.
 
 | Name | Type | Description |
 |------|------|-------------|
-| destination | [`Destination`](#destination-1) | Target filter |
+| destination | [`Destination`](#destination) | Target filter |
 
 ---
 
@@ -744,7 +744,7 @@ Allow rule with direction `ingress`.
 
 | Name | Type | Description |
 |------|------|-------------|
-| destination | [`Destination`](#destination-1) | Target filter |
+| destination | [`Destination`](#destination) | Target filter |
 
 ---
 
@@ -760,7 +760,7 @@ Deny rule with direction `any` (matches in either direction).
 
 | Name | Type | Description |
 |------|------|-------------|
-| destination | [`Destination`](#destination-1) | Target filter |
+| destination | [`Destination`](#destination) | Target filter |
 
 ---
 
@@ -776,7 +776,7 @@ Deny rule with direction `egress`.
 
 | Name | Type | Description |
 |------|------|-------------|
-| destination | [`Destination`](#destination-1) | Target filter |
+| destination | [`Destination`](#destination) | Target filter |
 
 ---
 
@@ -792,7 +792,7 @@ Deny rule with direction `ingress`.
 
 | Name | Type | Description |
 |------|------|-------------|
-| destination | [`Destination`](#destination-1) | Target filter |
+| destination | [`Destination`](#destination) | Target filter |
 
 ---
 
@@ -1047,7 +1047,7 @@ Set the policy. Use a [`NetworkPolicy`](#networkpolicy) factory or a literal.
 port(host: number, guest: number): this
 ```
 
-Publish a TCP port from the guest to the host.
+Publish a TCP port from the guest to the host. The default host bind address is `127.0.0.1`.
 
 **Parameters**
 
@@ -1058,13 +1058,23 @@ Publish a TCP port from the guest to the host.
 
 ---
 
+#### portBind()
+
+```typescript
+portBind(bind: string, host: number, guest: number): this
+```
+
+Publish a TCP port on a specific host bind address, such as `0.0.0.0`.
+
+---
+
 #### portUdp()
 
 ```typescript
 portUdp(host: number, guest: number): this
 ```
 
-Publish a UDP port from the guest to the host.
+Publish a UDP port from the guest to the host. The default host bind address is `127.0.0.1`.
 
 **Parameters**
 
@@ -1072,6 +1082,16 @@ Publish a UDP port from the guest to the host.
 |------|------|-------------|
 | host | `number` | Port on the host |
 | guest | `number` | Port inside the sandbox |
+
+---
+
+#### portUdpBind()
+
+```typescript
+portUdpBind(bind: string, host: number, guest: number): this
+```
+
+Publish a UDP port on a specific host bind address.
 
 ---
 
@@ -1258,7 +1278,7 @@ Built network configuration produced by `NetworkBuilder.build()`.
 |-------|------|-------------|
 | enabled | `boolean` | Master enable flag |
 | ports | `readonly PublishedPort[]` | Port publishings |
-| policy | [`NetworkPolicy`](#networkpolicy-1) ` \| null` | Active policy |
+| policy | [`NetworkPolicy`](#networkpolicy) ` \| null` | Active policy |
 | dns | [`DnsConfig`](#dnsconfig) ` \| null` | DNS interception |
 | tls | [`TlsConfig`](#tlsconfig) ` \| null` | TLS interception |
 | secrets | `readonly SecretEntry[]` | Secret entries |
@@ -1389,5 +1409,6 @@ interface PublishedPort {
   readonly hostPort: number;
   readonly guestPort: number;
   readonly protocol: "tcp" | "udp";
+  readonly hostBind: string;
 }
 ```

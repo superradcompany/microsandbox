@@ -37,6 +37,7 @@ type SandboxConfig struct {
 	RegistryAuth     *RegistryAuth
 	Ports            map[uint16]uint16 // host port → guest port (TCP)
 	PortsUDP         map[uint16]uint16 // host port → guest port (UDP)
+	PortBindings     []PortBinding     // explicit bind address host→guest ports
 	Network          *NetworkConfig
 	Secrets          []SecretEntry
 	Patches          []PatchConfig
@@ -229,6 +230,31 @@ func WithPortsUDP(ports map[uint16]uint16) SandboxOption {
 	}
 }
 
+// PortBinding publishes a host port on a specific host bind address.
+// Protocol defaults to TCP when empty. Use Bind "0.0.0.0" to expose the
+// published port on all IPv4 interfaces.
+type PortBinding struct {
+	Bind      string
+	HostPort  uint16
+	GuestPort uint16
+	Protocol  PortProtocol
+}
+
+// PortProtocol identifies the protocol for a published port binding.
+type PortProtocol string
+
+const (
+	PortProtocolTCP PortProtocol = "tcp"
+	PortProtocolUDP PortProtocol = "udp"
+)
+
+// WithPortBindings publishes explicit bind-address host ports into the sandbox.
+func WithPortBindings(bindings ...PortBinding) SandboxOption {
+	return func(o *SandboxConfig) {
+		o.PortBindings = append(o.PortBindings, bindings...)
+	}
+}
+
 // WithNetwork sets the network configuration for the sandbox.
 func WithNetwork(net *NetworkConfig) SandboxOption {
 	return func(o *SandboxConfig) { o.Network = net }
@@ -331,6 +357,9 @@ type NetworkConfig struct {
 
 	// Ports publishes host TCP ports into the sandbox (host→guest).
 	Ports map[uint16]uint16
+
+	// PortBindings publishes host ports on explicit host bind addresses.
+	PortBindings []PortBinding
 
 	// IPv4Pool is used to derive per-sandbox /30 guest subnets.
 	// Defaults to "172.16.0.0/12".

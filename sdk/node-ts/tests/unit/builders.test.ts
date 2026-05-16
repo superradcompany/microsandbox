@@ -280,6 +280,42 @@ describe("NetworkBuilder.secretEnvSimple (3-arg shorthand)", () => {
   });
 });
 
+describe("NetworkBuilder ports", () => {
+  it("keeps loopback default and supports explicit bind addresses", () => {
+    const cfg = new NetworkBuilder()
+      .port(8080, 80)
+      .portBind("0.0.0.0", 8081, 81)
+      .portUdpBind("::", 5353, 53)
+      .build() as {
+        ports: ReadonlyArray<{
+          hostBind: string;
+          hostPort: number;
+          guestPort: number;
+          protocol: "tcp" | "udp";
+        }>;
+      };
+
+    expect(cfg.ports[0]).toMatchObject({
+      hostBind: "127.0.0.1",
+      hostPort: 8080,
+      guestPort: 80,
+      protocol: "tcp",
+    });
+    expect(cfg.ports[1]).toMatchObject({
+      hostBind: "0.0.0.0",
+      hostPort: 8081,
+      guestPort: 81,
+      protocol: "tcp",
+    });
+    expect(cfg.ports[2]).toMatchObject({
+      hostBind: "::",
+      hostPort: 5353,
+      guestPort: 53,
+      protocol: "udp",
+    });
+  });
+});
+
 describe("Stdin factory", () => {
   it("emits the right discriminants", () => {
     expect(Stdin.null()).toEqual({ kind: "null" });

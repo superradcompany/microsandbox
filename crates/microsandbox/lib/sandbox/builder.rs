@@ -395,13 +395,40 @@ impl SandboxBuilder {
     /// ```
     #[cfg(feature = "net")]
     pub fn port(mut self, host_port: u16, guest_port: u16) -> Self {
+        self.push_port(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            host_port,
+            guest_port,
+            PortProtocol::Tcp,
+        );
+        self
+    }
+
+    /// Publish a TCP port on a specific host bind address.
+    ///
+    /// ```ignore
+    /// .port_bind("0.0.0.0".parse().unwrap(), 8080, 80)
+    /// ```
+    #[cfg(feature = "net")]
+    pub fn port_bind(mut self, host_bind: IpAddr, host_port: u16, guest_port: u16) -> Self {
+        self.push_port(host_bind, host_port, guest_port, PortProtocol::Tcp);
+        self
+    }
+
+    #[cfg(feature = "net")]
+    fn push_port(
+        &mut self,
+        host_bind: IpAddr,
+        host_port: u16,
+        guest_port: u16,
+        protocol: PortProtocol,
+    ) {
         self.config.network.ports.push(PublishedPort {
             host_port,
             guest_port,
-            protocol: PortProtocol::Tcp,
-            host_bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            protocol,
+            host_bind,
         });
-        self
     }
 
     /// Publish a UDP port directly on the sandbox builder.
@@ -414,12 +441,19 @@ impl SandboxBuilder {
     /// ```
     #[cfg(feature = "net")]
     pub fn port_udp(mut self, host_port: u16, guest_port: u16) -> Self {
-        self.config.network.ports.push(PublishedPort {
+        self.push_port(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
             host_port,
             guest_port,
-            protocol: PortProtocol::Udp,
-            host_bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
-        });
+            PortProtocol::Udp,
+        );
+        self
+    }
+
+    /// Publish a UDP port on a specific host bind address.
+    #[cfg(feature = "net")]
+    pub fn port_udp_bind(mut self, host_bind: IpAddr, host_port: u16, guest_port: u16) -> Self {
+        self.push_port(host_bind, host_port, guest_port, PortProtocol::Udp);
         self
     }
 
@@ -841,6 +875,8 @@ mod tests {
     use crate::sandbox::RlimitResource;
     #[cfg(feature = "net")]
     use microsandbox_network::config::PortProtocol;
+    #[cfg(feature = "net")]
+    use std::net::{IpAddr, Ipv4Addr};
 
     #[tokio::test]
     async fn test_builder_sets_runtime_log_level() {
@@ -943,25 +979,40 @@ mod tests {
     #[cfg(feature = "net")]
     #[tokio::test]
     async fn test_builder_ports_are_repeatable() {
+        let bind = "0.0.0.0".parse().unwrap();
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .port(8080, 80)
             .port(3000, 3000)
             .port_udp(5353, 53)
+            .port_bind(bind, 8081, 81)
+            .port_udp_bind(bind, 5354, 54)
             .build()
             .await
             .unwrap();
 
-        assert_eq!(config.network.ports.len(), 3);
+        assert_eq!(config.network.ports.len(), 5);
         assert_eq!(config.network.ports[0].host_port, 8080);
         assert_eq!(config.network.ports[0].guest_port, 80);
         assert_eq!(config.network.ports[0].protocol, PortProtocol::Tcp);
+        assert_eq!(
+            config.network.ports[0].host_bind,
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
         assert_eq!(config.network.ports[1].host_port, 3000);
         assert_eq!(config.network.ports[1].guest_port, 3000);
         assert_eq!(config.network.ports[1].protocol, PortProtocol::Tcp);
         assert_eq!(config.network.ports[2].host_port, 5353);
         assert_eq!(config.network.ports[2].guest_port, 53);
         assert_eq!(config.network.ports[2].protocol, PortProtocol::Udp);
+        assert_eq!(config.network.ports[3].host_bind, bind);
+        assert_eq!(config.network.ports[3].host_port, 8081);
+        assert_eq!(config.network.ports[3].guest_port, 81);
+        assert_eq!(config.network.ports[3].protocol, PortProtocol::Tcp);
+        assert_eq!(config.network.ports[4].host_bind, bind);
+        assert_eq!(config.network.ports[4].host_port, 5354);
+        assert_eq!(config.network.ports[4].guest_port, 54);
+        assert_eq!(config.network.ports[4].protocol, PortProtocol::Udp);
     }
 
     #[cfg(feature = "net")]

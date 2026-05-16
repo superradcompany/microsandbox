@@ -60,6 +60,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		IdleTimeoutSecs: durationSecsCeil(o.IdleTimeout),
 		Ports:           o.Ports,
 		PortsUDP:        o.PortsUDP,
+		PortBindings:    buildFFIPortBindings(o.PortBindings),
 	}
 	if o.ReplaceWithGrace != nil {
 		var ms uint64
@@ -159,6 +160,7 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		DenyDomains:         n.DenyDomains,
 		DenyDomainSuffixes:  n.DenyDomainSuffixes,
 		Ports:               n.Ports,
+		PortBindings:        buildFFIPortBindings(n.PortBindings),
 		IPv4Pool:            n.IPv4Pool,
 		IPv6Pool:            n.IPv6Pool,
 		MaxConnections:      n.MaxConnections,
@@ -208,6 +210,19 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		}
 	}
 
+	return out
+}
+
+func buildFFIPortBindings(bindings []PortBinding) []ffi.PortBindingOptions {
+	out := make([]ffi.PortBindingOptions, 0, len(bindings))
+	for _, b := range bindings {
+		out = append(out, ffi.PortBindingOptions{
+			Bind:      b.Bind,
+			HostPort:  b.HostPort,
+			GuestPort: b.GuestPort,
+			Protocol:  string(b.Protocol),
+		})
+	}
 	return out
 }
 

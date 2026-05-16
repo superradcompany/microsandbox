@@ -173,6 +173,24 @@ func TestWithPortsNilInitial(t *testing.T) {
 	}
 }
 
+func TestWithPortBindings(t *testing.T) {
+	o := SandboxConfig{}
+	WithPortBindings(
+		PortBinding{Bind: "0.0.0.0", HostPort: 8080, GuestPort: 80},
+		PortBinding{Bind: "::", HostPort: 5353, GuestPort: 53, Protocol: PortProtocolUDP},
+	)(&o)
+
+	if len(o.PortBindings) != 2 {
+		t.Fatalf("PortBindings len = %d, want 2", len(o.PortBindings))
+	}
+	if o.PortBindings[0].Bind != "0.0.0.0" || o.PortBindings[0].HostPort != 8080 || o.PortBindings[0].GuestPort != 80 {
+		t.Fatalf("PortBindings[0] = %#v", o.PortBindings[0])
+	}
+	if o.PortBindings[1].Protocol != PortProtocolUDP {
+		t.Fatalf("PortBindings[1].Protocol = %q, want udp", o.PortBindings[1].Protocol)
+	}
+}
+
 func TestWithNetwork(t *testing.T) {
 	o := SandboxConfig{}
 	net := &NetworkConfig{Policy: NetworkPolicyPresetPublicOnly}

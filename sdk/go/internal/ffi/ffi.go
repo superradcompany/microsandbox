@@ -912,6 +912,7 @@ type CreateOptions struct {
 	RegistryAuth       *RegistryAuthOptions `json:"registry_auth,omitempty"`
 	Ports              map[uint16]uint16    `json:"ports,omitempty"`
 	PortsUDP           map[uint16]uint16    `json:"ports_udp,omitempty"`
+	PortBindings       []PortBindingOptions `json:"port_bindings,omitempty"`
 	Network            *NetworkOptions      `json:"network,omitempty"`
 	Secrets            []SecretOptions      `json:"secrets,omitempty"`
 	Patches            []PatchOptions       `json:"patches,omitempty"`
@@ -953,11 +954,20 @@ type NetworkOptions struct {
 	DenyDomainSuffixes  []string             `json:"deny_domain_suffixes,omitempty"`
 	TLS                 *TLSOptions          `json:"tls,omitempty"`
 	Ports               map[uint16]uint16    `json:"ports,omitempty"`
+	PortBindings        []PortBindingOptions `json:"port_bindings,omitempty"`
 	IPv4Pool            string               `json:"ipv4_pool,omitempty"`
 	IPv6Pool            string               `json:"ipv6_pool,omitempty"`
 	MaxConnections      *uint                `json:"max_connections,omitempty"`
 	OnSecretViolation   string               `json:"on_secret_violation,omitempty"`
 	TrustHostCAs        *bool                `json:"trust_host_cas,omitempty"`
+}
+
+// PortBindingOptions publishes a host port on a specific host bind address.
+type PortBindingOptions struct {
+	Bind      string `json:"bind,omitempty"`
+	HostPort  uint16 `json:"host_port"`
+	GuestPort uint16 `json:"guest_port"`
+	Protocol  string `json:"protocol,omitempty"`
 }
 
 // DNSOptions configures the in-VM DNS proxy.

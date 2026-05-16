@@ -144,6 +144,7 @@ func TestFFIWireShape_Ports(t *testing.T) {
 		WithImage("alpine"),
 		WithPorts(map[uint16]uint16{8080: 80}),
 		WithPortsUDP(map[uint16]uint16{5353: 53}),
+		WithPortBindings(PortBinding{Bind: "0.0.0.0", HostPort: 8081, GuestPort: 81}),
 	)
 	ports := mustField(t, got, "ports").(map[string]any)
 	if ports["8080"] != float64(80) {
@@ -152,6 +153,11 @@ func TestFFIWireShape_Ports(t *testing.T) {
 	portsUDP := mustField(t, got, "ports_udp").(map[string]any)
 	if portsUDP["5353"] != float64(53) {
 		t.Fatalf("ports_udp = %v", portsUDP)
+	}
+	bindings := mustField(t, got, "port_bindings").([]any)
+	first := bindings[0].(map[string]any)
+	if first["bind"] != "0.0.0.0" || first["host_port"] != float64(8081) || first["guest_port"] != float64(81) {
+		t.Fatalf("port_bindings = %v", bindings)
 	}
 }
 

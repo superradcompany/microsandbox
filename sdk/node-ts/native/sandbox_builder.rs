@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -343,6 +344,19 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
+    /// Publish a TCP port from host -> guest on a specific host bind address.
+    #[napi(js_name = "portBind")]
+    pub fn port_bind(&mut self, bind: String, host_port: u32, guest_port: u32) -> Result<&Self> {
+        let bind = parse_bind_addr(&bind)?;
+        let h = u16::try_from(host_port)
+            .map_err(|_| napi::Error::from_reason("host port out of range"))?;
+        let g = u16::try_from(guest_port)
+            .map_err(|_| napi::Error::from_reason("guest port out of range"))?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.port_bind(bind, h, g));
+        Ok(self)
+    }
+
     /// Publish a UDP port from host -> guest.
     #[napi(js_name = "portUdp")]
     pub fn port_udp(&mut self, host_port: u32, guest_port: u32) -> Result<&Self> {
@@ -352,6 +366,24 @@ impl JsSandboxBuilder {
             .map_err(|_| napi::Error::from_reason("guest port out of range"))?;
         let prev = self.take_inner();
         self.inner = Some(prev.port_udp(h, g));
+        Ok(self)
+    }
+
+    /// Publish a UDP port from host -> guest on a specific host bind address.
+    #[napi(js_name = "portUdpBind")]
+    pub fn port_udp_bind(
+        &mut self,
+        bind: String,
+        host_port: u32,
+        guest_port: u32,
+    ) -> Result<&Self> {
+        let bind = parse_bind_addr(&bind)?;
+        let h = u16::try_from(host_port)
+            .map_err(|_| napi::Error::from_reason("host port out of range"))?;
+        let g = u16::try_from(guest_port)
+            .map_err(|_| napi::Error::from_reason("guest port out of range"))?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.port_udp_bind(bind, h, g));
         Ok(self)
     }
 
@@ -582,6 +614,11 @@ impl JsSandboxBuilder {
             task: std::sync::Arc::new(tokio::sync::Mutex::new(Some(task))),
         })
     }
+}
+
+fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
+    bind.parse::<IpAddr>()
+        .map_err(|_| napi::Error::from_reason(format!("invalid bind address: {bind}")))
 }
 
 /// Pair returned by `createWithPullProgress`: the progress event stream

@@ -44,7 +44,7 @@ Create and boot a sandbox. The first argument is either a name (`str`) or a full
 | registry_auth | [`RegistryAuth`](#registryauth) | Private registry credentials |
 | volumes | `dict[str, dict]` | Volume mounts. See [Volumes](/sdk/python/volumes). |
 | patches | `list[PatchConfig]` | Rootfs modifications applied before boot |
-| ports | `dict[int, int]` | Port mappings (`host_port: guest_port`) |
+| ports | `dict[int, int] \| Sequence[PortBinding]` | Port mappings. Dict form is TCP and binds to `127.0.0.1`; use [`PortBinding`](/sdk/python/networking#portbinding) for explicit bind addresses or UDP |
 | network | [`Network`](/sdk/python/networking#network) | Network policy and configuration |
 | secrets | `list[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | Secret injection |
 | detached | `bool` | If `True`, sandbox survives after your process exits |
@@ -844,7 +844,7 @@ The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`San
 | registry_auth | [`RegistryAuth`](#registryauth) | - | Private registry credentials |
 | volumes | `dict[str, dict]` | `{}` | Volume mounts. See [Volumes](/sdk/python/volumes). |
 | patches | `list[PatchConfig]` | `[]` | Rootfs modifications applied before boot |
-| ports | `dict[int, int]` | `{}` | Port mappings (`host_port: guest_port`) |
+| ports | `dict[int, int] \| Sequence[PortBinding]` | `{}` | Port mappings. Dict form is TCP and binds to `127.0.0.1`; use [`PortBinding`](/sdk/python/networking#portbinding) for explicit bind addresses or UDP |
 | network | [`Network`](/sdk/python/networking#network) | `public_only` | Network policy and configuration |
 | secrets | `list[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
 | detached | `bool` | `False` | If `True`, sandbox survives after your process exits |

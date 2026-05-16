@@ -81,20 +81,44 @@ impl NetworkBuilder {
 
     /// Publish a TCP port: `host_port` on the host maps to `guest_port` in the guest.
     pub fn port(self, host_port: u16, guest_port: u16) -> Self {
-        self.add_port(host_port, guest_port, PortProtocol::Tcp)
+        self.port_bind(
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            host_port,
+            guest_port,
+        )
     }
 
     /// Publish a UDP port.
     pub fn port_udp(self, host_port: u16, guest_port: u16) -> Self {
-        self.add_port(host_port, guest_port, PortProtocol::Udp)
+        self.port_udp_bind(
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            host_port,
+            guest_port,
+        )
     }
 
-    fn add_port(mut self, host_port: u16, guest_port: u16, protocol: PortProtocol) -> Self {
+    /// Publish a TCP port on a specific host bind address.
+    pub fn port_bind(self, host_bind: IpAddr, host_port: u16, guest_port: u16) -> Self {
+        self.add_port(host_bind, host_port, guest_port, PortProtocol::Tcp)
+    }
+
+    /// Publish a UDP port on a specific host bind address.
+    pub fn port_udp_bind(self, host_bind: IpAddr, host_port: u16, guest_port: u16) -> Self {
+        self.add_port(host_bind, host_port, guest_port, PortProtocol::Udp)
+    }
+
+    fn add_port(
+        mut self,
+        host_bind: IpAddr,
+        host_port: u16,
+        guest_port: u16,
+        protocol: PortProtocol,
+    ) -> Self {
         self.config.ports.push(PublishedPort {
             host_port,
             guest_port,
             protocol,
-            host_bind: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            host_bind,
         });
         self
     }
@@ -482,5 +506,22 @@ mod tests {
             .build()
             .unwrap();
         assert!(!cfg.dns.rebind_protection);
+    }
+
+    #[test]
+    fn port_bind_sets_host_bind() {
+        let bind = "0.0.0.0".parse().unwrap();
+        let cfg = NetworkBuilder::new()
+            .port_bind(bind, 8080, 80)
+            .port_udp_bind(bind, 5353, 53)
+            .build()
+            .unwrap();
+
+        assert_eq!(cfg.ports[0].host_bind, bind);
+        assert_eq!(cfg.ports[0].host_port, 8080);
+        assert_eq!(cfg.ports[0].guest_port, 80);
+        assert_eq!(cfg.ports[0].protocol, PortProtocol::Tcp);
+        assert_eq!(cfg.ports[1].host_bind, bind);
+        assert_eq!(cfg.ports[1].protocol, PortProtocol::Udp);
     }
 }

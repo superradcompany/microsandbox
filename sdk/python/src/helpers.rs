@@ -266,12 +266,7 @@ pub fn sandbox_builder_from_args(
 
     // Ports.
     if let Some(ports) = kwargs.get_item("ports")? {
-        let ports_dict: &Bound<'_, PyDict> = ports.downcast()?;
-        for (host_obj, guest_obj) in ports_dict.iter() {
-            let host_port: u16 = host_obj.extract()?;
-            let guest_port: u16 = guest_obj.extract()?;
-            builder = builder.port(host_port, guest_port);
-        }
+        builder = apply_ports(builder, &ports)?;
     }
 
     // Network.
@@ -833,12 +828,50 @@ fn apply_network(
     if let Some(ports) = net.get_item("ports")?
         && !ports.is_none()
     {
-        let ports_dict: &Bound<'_, PyDict> = ports.downcast()?;
+        builder = apply_ports(builder, &ports)?;
+    }
+
+    Ok(builder)
+}
+
+fn apply_ports(
+    mut builder: microsandbox::sandbox::SandboxBuilder,
+    ports: &Bound<'_, PyAny>,
+) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+    if let Ok(ports_dict) = ports.downcast::<PyDict>() {
         for (host_obj, guest_obj) in ports_dict.iter() {
             let host_port: u16 = host_obj.extract()?;
             let guest_port: u16 = guest_obj.extract()?;
             builder = builder.port(host_port, guest_port);
         }
+        return Ok(builder);
+    }
+
+    let iter = ports.try_iter().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "ports must be a mapping of host_port to guest_port or a sequence of PortBinding values",
+        )
+    })?;
+
+    for item in iter {
+        let item = item?;
+        let port = as_dict(&item)?;
+        let host_port: u16 = extract_required(&port, "host_port")?;
+        let guest_port: u16 = extract_required(&port, "guest_port")?;
+        let bind: String = extract_opt(&port, "bind")?.unwrap_or_else(|| "127.0.0.1".to_string());
+        let bind = bind.parse::<std::net::IpAddr>().map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid bind address: {bind}"))
+        })?;
+        let protocol: Option<String> = extract_opt(&port, "protocol")?;
+        builder = match protocol.as_deref().unwrap_or("tcp") {
+            "tcp" => builder.port_bind(bind, host_port, guest_port),
+            "udp" => builder.port_udp_bind(bind, host_port, guest_port),
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid port protocol: {other}"
+                )));
+            }
+        };
     }
 
     Ok(builder)

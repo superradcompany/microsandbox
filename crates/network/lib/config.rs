@@ -142,9 +142,11 @@ pub struct PublishedPort {
 pub enum PortProtocol {
     /// TCP (default).
     #[default]
+    #[serde(rename = "tcp", alias = "Tcp")]
     Tcp,
 
     /// UDP.
+    #[serde(rename = "udp", alias = "Udp")]
     Udp,
 }
 
@@ -192,4 +194,29 @@ fn default_host_bind() -> IpAddr {
 
 fn default_query_timeout_ms() -> u64 {
     5000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PortProtocol;
+
+    #[test]
+    fn port_protocol_serializes_lowercase_and_accepts_legacy_case() {
+        assert_eq!(
+            serde_json::to_string(&PortProtocol::Tcp).unwrap(),
+            "\"tcp\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PortProtocol::Udp).unwrap(),
+            "\"udp\""
+        );
+        assert_eq!(
+            serde_json::from_str::<PortProtocol>("\"Tcp\"").unwrap(),
+            PortProtocol::Tcp
+        );
+        assert_eq!(
+            serde_json::from_str::<PortProtocol>("\"Udp\"").unwrap(),
+            PortProtocol::Udp
+        );
+    }
 }

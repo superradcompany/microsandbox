@@ -650,10 +650,35 @@ class DnsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PortBinding:
+    """Published host-to-guest port with an optional host bind address."""
+    host_port: int
+    guest_port: int
+    bind: str = "127.0.0.1"
+    protocol: PortProtocol = PortProtocol.TCP
+
+    @classmethod
+    def tcp(cls, host_port: int, guest_port: int, *, bind: str = "127.0.0.1") -> PortBinding:
+        return cls(host_port=host_port, guest_port=guest_port, bind=bind, protocol=PortProtocol.TCP)
+
+    @classmethod
+    def udp(cls, host_port: int, guest_port: int, *, bind: str = "127.0.0.1") -> PortBinding:
+        return cls(host_port=host_port, guest_port=guest_port, bind=bind, protocol=PortProtocol.UDP)
+
+    def _to_dict(self) -> dict:
+        return {
+            "host_port": self.host_port,
+            "guest_port": self.guest_port,
+            "bind": self.bind,
+            "protocol": self.protocol.value,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Network:
     """Network configuration for a sandbox."""
     policy: str | NetworkPolicy | None = None
-    ports: Mapping[int, int] = field(default_factory=dict)
+    ports: Mapping[int, int] | Sequence[PortBinding] = field(default_factory=dict)
     deny_domains: tuple[str, ...] = ()
     """Deny egress to these exact domains. Each entry adds a
     `deny Domain("...")` policy rule that fires at DNS resolution
@@ -693,7 +718,10 @@ class Network:
         elif isinstance(self.policy, NetworkPolicy):
             d["custom_policy"] = self.policy._to_dict()
         if self.ports:
-            d["ports"] = dict(self.ports)
+            if isinstance(self.ports, Mapping):
+                d["ports"] = dict(self.ports)
+            else:
+                d["ports"] = [p._to_dict() for p in self.ports]
         if self.deny_domains:
             d["deny_domains"] = list(self.deny_domains)
         if self.deny_domain_suffixes:

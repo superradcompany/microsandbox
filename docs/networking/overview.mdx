@@ -194,12 +194,14 @@ For deny-by-default policies, remember that DNS is delivered through the sandbox
 ## Port mapping
 
 Expose ports from the sandbox to the host so services running inside the VM are reachable from your machine.
+Published ports bind to `127.0.0.1` by default. Specify a bind address, such as `0.0.0.0`, when you intentionally want a wider listener.
 
 <CodeGroup>
 ```rust Rust
 let sb = Sandbox::builder("api")
     .image("python")
     .port(8080, 80)
+    .port_bind("0.0.0.0".parse()?, 8001, 8001)
     .port_udp(5353, 5353)
     .create()
     .await?;
@@ -209,15 +211,18 @@ let sb = Sandbox::builder("api")
 await using sb = await Sandbox.builder("api")
     .image("python")
     .port(8080, 80)
+    .portBind("0.0.0.0", 8001, 8001)
     .portUdp(5353, 5353)
     .create();
 ```
 
 ```python Python
+from microsandbox import PortBinding
+
 sb = await Sandbox.create(
     "api",
     image="python",
-    ports={8080: 80},
+    ports=[PortBinding.tcp(8001, 8001, bind="0.0.0.0")],
 )
 ```
 
@@ -225,12 +230,14 @@ sb = await Sandbox.create(
 sb, err := m.CreateSandbox(ctx, "api",
     m.WithImage("python"),
     m.WithPorts(map[uint16]uint16{8080: 80}),
+    m.WithPortBindings(m.PortBinding{Bind: "0.0.0.0", HostPort: 8001, GuestPort: 8001}),
     m.WithPortsUDP(map[uint16]uint16{5353: 5353}),
 )
 ```
 
 ```bash CLI
 msb create python --name api -p 8080:80
+msb create python --name api-public -p 0.0.0.0:8001:8001
 ```
 
 </CodeGroup>

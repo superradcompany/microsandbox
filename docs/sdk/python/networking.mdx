@@ -13,7 +13,7 @@ Frozen dataclass for sandbox network configuration. Use a class-method preset fo
 ```python
 Network(
     policy: str | NetworkPolicy | None = None,
-    ports: Mapping[int, int] = {},
+    ports: Mapping[int, int] | Sequence[PortBinding] = {},
     deny_domains: tuple[str, ...] = (),
     deny_domain_suffixes: tuple[str, ...] = (),
     dns: DnsConfig | None = None,
@@ -27,8 +27,8 @@ Network(
 
 | Field | Type | Description |
 |-------|------|-------------|
-| policy | `str \| NetworkPolicy \| None` | Preset name (`"none"`, `"public_only"`, `"allow_all"`) or custom [`NetworkPolicy`](#networkpolicy-1) |
-| ports | `Mapping[int, int]` | Port mappings from host to guest |
+| policy | `str \| NetworkPolicy \| None` | Preset name (`"none"`, `"public_only"`, `"allow_all"`) or custom [`NetworkPolicy`](#networkpolicy) |
+| ports | `Mapping[int, int] \| Sequence[PortBinding]` | Port mappings from host to guest. Mapping form binds to `127.0.0.1`; `PortBinding` can set an explicit bind address |
 | deny_domains | `tuple[str, ...]` | Deny egress to these exact domains. Each entry adds a `deny Domain("...")` policy rule that fires at DNS resolution (REFUSED), TLS first-flight (SNI), and TCP egress (cache fallback). Prepended onto the policy so it takes precedence over later allow rules |
 | deny_domain_suffixes | `tuple[str, ...]` | Deny egress to all subdomains of these suffixes. Adds `deny DomainSuffix("...")` rules; same enforcement layers as `deny_domains` |
 | dns | [`DnsConfig`](#dnsconfig) ` \| None` | DNS interception configuration |
@@ -88,6 +88,37 @@ Block private address ranges and cloud metadata endpoints. Allow everything else
 | Type | Description |
 |------|-------------|
 | [`Network`](#network) | Public-only network configuration |
+
+---
+
+## PortBinding
+
+Frozen dataclass for published ports that need an explicit host bind address or UDP.
+
+```python
+PortBinding(
+    host_port: int,
+    guest_port: int,
+    bind: str = "127.0.0.1",
+    protocol: PortProtocol = PortProtocol.TCP,
+)
+```
+
+Prefer the protocol-specific constructors:
+
+```python
+PortBinding.tcp(8001, 8001, bind="0.0.0.0")
+PortBinding.udp(5353, 5353, bind="0.0.0.0")
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| host_port | `int` | Port on the host |
+| guest_port | `int` | Port inside the sandbox |
+| bind | `str` | Host address to bind. Defaults to `127.0.0.1`; use `0.0.0.0` for all IPv4 interfaces |
+| protocol | [`PortProtocol`](#portprotocol) | Published port protocol |
+
+`PortBinding.tcp()` maps to the Rust `port_bind(...)` path; `PortBinding.udp()` maps to `port_udp_bind(...)`.
 
 ---
 

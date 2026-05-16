@@ -81,7 +81,7 @@ where
     F: for<'a> FnOnce(&'a mut RuleBuilder) -> &'a mut RuleBuilder
 ```
 
-Sugar for [`rule()`](#rule-1) with direction pre-set to `Any`. Rules committed inside apply in both directions.
+Sugar for [`rule()`](#rule) with direction pre-set to `Any`. Rules committed inside apply in both directions.
 
 ---
 
@@ -155,7 +155,7 @@ where
     F: for<'a> FnOnce(&'a mut RuleBuilder) -> &'a mut RuleBuilder
 ```
 
-Sugar for [`rule()`](#rule-1) with direction pre-set to `Egress`.
+Sugar for [`rule()`](#rule) with direction pre-set to `Egress`.
 
 ---
 
@@ -167,7 +167,7 @@ where
     F: for<'a> FnOnce(&'a mut RuleBuilder) -> &'a mut RuleBuilder
 ```
 
-Sugar for [`rule()`](#rule-1) with direction pre-set to `Ingress`.
+Sugar for [`rule()`](#rule) with direction pre-set to `Ingress`.
 
 ---
 
@@ -314,7 +314,7 @@ Add an inclusive port range.
 fn ports<I: IntoIterator<Item = u16>>(&mut self, ports: I) -> &mut Self
 ```
 
-Add multiple single ports. Equivalent to calling [`port()`](#port-1) once per element.
+Add multiple single ports. Equivalent to calling [`port()`](#port-setters) once per element.
 
 ---
 

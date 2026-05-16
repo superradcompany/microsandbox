@@ -128,7 +128,7 @@ pub struct SandboxOpts {
     pub idle_timeout: Option<String>,
 
     // --- Networking (requires "net" feature) ---
-    /// Forward a host port to the sandbox (HOST:GUEST or HOST:GUEST/udp).
+    /// Forward a host port to the sandbox (HOST:GUEST, BIND_ADDR:HOST:GUEST, and /udp variants).
     #[cfg(feature = "net")]
     #[arg(short, long)]
     pub port: Vec<String>,
@@ -464,11 +464,11 @@ fn apply_network_opts(
 
     // Port mappings.
     for port_str in &opts.port {
-        let (host, guest, udp) = parse_port(port_str)?;
+        let (bind, host, guest, udp) = parse_port_mapping(port_str)?;
         builder = if udp {
-            builder.port_udp(host, guest)
+            builder.port_udp_bind(bind, host, guest)
         } else {
-            builder.port(host, guest)
+            builder.port_bind(bind, host, guest)
         };
     }
 
@@ -766,9 +766,17 @@ fn build_network_policy(
     }))
 }
 
-/// Parse a port spec: `HOST:GUEST` or `HOST:GUEST/udp` or `HOST:GUEST/tcp`.
+/// Parse a port spec:
+/// - `HOST:GUEST`
+/// - `BIND_ADDR:HOST:GUEST`
+/// - `HOST:GUEST/udp`
+/// - `BIND_ADDR:HOST:GUEST/udp`
+///
+/// IPv6 bind addresses must be bracketed, e.g. `[::]:8080:80`.
 #[cfg(feature = "net")]
-fn parse_port(spec: &str) -> anyhow::Result<(u16, u16, bool)> {
+fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16, bool)> {
+    use std::net::{IpAddr, Ipv4Addr};
+
     let (port_part, udp) = if let Some(p) = spec.strip_suffix("/udp") {
         (p, true)
     } else if let Some(p) = spec.strip_suffix("/tcp") {
@@ -777,9 +785,34 @@ fn parse_port(spec: &str) -> anyhow::Result<(u16, u16, bool)> {
         (spec, false)
     };
 
-    let (host_str, guest_str) = port_part
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("port must be in format HOST:GUEST[/udp]"))?;
+    let (bind, host_str, guest_str) = if let Some(rest) = port_part.strip_prefix('[') {
+        let (bind_str, after_bracket) = rest.split_once("]:").ok_or_else(|| {
+            anyhow::anyhow!("IPv6 port bind must be in format [ADDR]:HOST:GUEST[/udp]")
+        })?;
+        let (host_str, guest_str) = after_bracket
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("port must be in format [ADDR]:HOST:GUEST[/udp]"))?;
+        let bind = bind_str
+            .parse::<IpAddr>()
+            .map_err(|_| anyhow::anyhow!("invalid bind address: {bind_str}"))?;
+        (bind, host_str, guest_str)
+    } else {
+        let parts: Vec<_> = port_part.split(':').collect();
+        match parts.as_slice() {
+            [host_str, guest_str] => (IpAddr::V4(Ipv4Addr::LOCALHOST), *host_str, *guest_str),
+            [bind_str, host_str, guest_str] => {
+                let bind = bind_str
+                    .parse::<IpAddr>()
+                    .map_err(|_| anyhow::anyhow!("invalid bind address: {bind_str}"))?;
+                (bind, *host_str, *guest_str)
+            }
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "port must be in format HOST:GUEST[/udp] or BIND_ADDR:HOST:GUEST[/udp]"
+                ));
+            }
+        }
+    };
 
     let host: u16 = host_str
         .trim()
@@ -790,7 +823,7 @@ fn parse_port(spec: &str) -> anyhow::Result<(u16, u16, bool)> {
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid guest port: {guest_str}"))?;
 
-    Ok((host, guest, udp))
+    Ok((bind, host, guest, udp))
 }
 
 /// Parse a secret spec: `ENV=VALUE@HOST`.
@@ -1067,6 +1100,38 @@ mod tests {
     fn inline_empty_name_errors() {
         let err = parse_script_inline("=echo hi").unwrap_err();
         assert!(err.to_string().contains("must not be empty"), "got: {err}");
+    }
+
+    // --- parse_port_mapping ---
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_without_bind_defaults_to_loopback() {
+        let (bind, host, guest, udp) = parse_port_mapping("8080:80").unwrap();
+        assert_eq!(bind, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        assert_eq!(host, 8080);
+        assert_eq!(guest, 80);
+        assert!(!udp);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_with_ipv4_bind() {
+        let (bind, host, guest, udp) = parse_port_mapping("0.0.0.0:8080:80/udp").unwrap();
+        assert_eq!(bind, "0.0.0.0".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(host, 8080);
+        assert_eq!(guest, 80);
+        assert!(udp);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_with_bracketed_ipv6_bind() {
+        let (bind, host, guest, udp) = parse_port_mapping("[::]:8080:80/tcp").unwrap();
+        assert_eq!(bind, "::".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(host, 8080);
+        assert_eq!(guest, 80);
+        assert!(!udp);
     }
 
     // --- parse_script_path ---
