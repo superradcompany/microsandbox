@@ -24,7 +24,7 @@ use crate::tls::state::TlsState;
 //--------------------------------------------------------------------------------------------------
 
 /// Maximum sandbox slot value. Limited by MAC/IPv6 encoding (16 bits = 65535).
-/// The default IPv4 pool (198.18.0.0/15 with /30 blocks) supports 131072 slots,
+/// The default IPv4 pool (172.16.0.0/12 with /30 blocks) supports 262144 slots,
 /// but MAC and IPv6 derivation only encode the low 16 bits, so 65535 is the
 /// effective maximum.
 const MAX_SLOT: u64 = u16::MAX as u64;
@@ -341,7 +341,7 @@ fn derive_gateway_mac(slot: u64) -> [u8; 6] {
 
 /// Derive a guest IPv4 address from the sandbox slot.
 ///
-/// Pool: `198.18.0.0/15` by default. Each slot gets a `/30` block (4 IPs).
+/// Pool: `172.16.0.0/12` by default. Each slot gets a `/30` block (4 IPs).
 /// Guest is at offset +2 in the block.
 fn derive_guest_ipv4(pool: Ipv4Network, slot: u64) -> Ipv4Addr {
     assert!(
@@ -366,7 +366,7 @@ fn gateway_from_guest_ipv4(guest: Ipv4Addr) -> Ipv4Addr {
 }
 
 fn default_guest_ipv4_pool() -> Ipv4Network {
-    Ipv4Network::new(Ipv4Addr::new(198, 18, 0, 0), 15)
+    Ipv4Network::new(Ipv4Addr::new(172, 16, 0, 0), 12)
         .expect("default IPv4 pool must be a valid network")
 }
 
@@ -444,11 +444,11 @@ mod tests {
         assert_eq!(derive_gateway_mac(0), [0x02, 0x6d, 0x73, 0x00, 0x00, 0x01]);
         assert_eq!(
             derive_guest_ipv4(default_guest_ipv4_pool(), 0),
-            Ipv4Addr::new(198, 18, 0, 2)
+            Ipv4Addr::new(172, 16, 0, 2)
         );
         assert_eq!(
-            gateway_from_guest_ipv4(Ipv4Addr::new(198, 18, 0, 2)),
-            Ipv4Addr::new(198, 18, 0, 1)
+            gateway_from_guest_ipv4(Ipv4Addr::new(172, 16, 0, 2)),
+            Ipv4Addr::new(172, 16, 0, 1)
         );
     }
 
@@ -456,11 +456,11 @@ mod tests {
     fn derive_addresses_slot_1() {
         assert_eq!(
             derive_guest_ipv4(default_guest_ipv4_pool(), 1),
-            Ipv4Addr::new(198, 18, 0, 6)
+            Ipv4Addr::new(172, 16, 0, 6)
         );
         assert_eq!(
-            gateway_from_guest_ipv4(Ipv4Addr::new(198, 18, 0, 6)),
-            Ipv4Addr::new(198, 18, 0, 5)
+            gateway_from_guest_ipv4(Ipv4Addr::new(172, 16, 0, 6)),
+            Ipv4Addr::new(172, 16, 0, 5)
         );
     }
 

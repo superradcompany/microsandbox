@@ -169,7 +169,7 @@ pub struct SandboxOpts {
     #[arg(long, value_name = "MS")]
     pub dns_query_timeout_ms: Option<u64>,
 
-    /// IPv4 pool used for per-sandbox /30 guest subnets. Default: 198.18.0.0/15.
+    /// IPv4 pool used for per-sandbox /30 guest subnets. Default: 172.16.0.0/12.
     #[cfg(feature = "net")]
     #[arg(long = "net-ipv4-pool", value_name = "CIDR")]
     pub net_ipv4_pool: Option<String>,

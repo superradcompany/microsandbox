@@ -333,7 +333,7 @@ type NetworkConfig struct {
 	Ports map[uint16]uint16
 
 	// IPv4Pool is used to derive per-sandbox /30 guest subnets.
-	// Defaults to "198.18.0.0/15".
+	// Defaults to "172.16.0.0/12".
 	IPv4Pool string
 
 	// IPv6Pool is used to derive per-sandbox /64 guest prefixes.

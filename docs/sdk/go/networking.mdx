@@ -124,7 +124,7 @@ The configuration struct passed via [`WithNetwork`](/sdk/go/sandbox#withnetwork)
 | DNSRebindProtection | `*bool` | Legacy convenience for `DNS.RebindProtection`. When `DNS` is also set, the nested value wins |
 | TLS | [`*TLSConfig`](#tlsconfig) | TLS interception settings |
 | Ports | `map[uint16]uint16` | Host→guest TCP port mappings |
-| IPv4Pool | `string` | IPv4 pool used for per-sandbox `/30` guest subnets. Defaults to `198.18.0.0/15` |
+| IPv4Pool | `string` | IPv4 pool used for per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |
 | IPv6Pool | `string` | IPv6 pool used for per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
 | MaxConnections | `*uint` | Cap concurrent network connections from the sandbox |
 | OnSecretViolation | [`ViolationAction`](/sdk/go/secrets#violationaction) | Sandbox-wide action when a secret is sent to a disallowed host |

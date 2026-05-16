@@ -85,7 +85,7 @@ pub struct InterfaceOverrides {
     #[serde(default)]
     pub ipv4_address: Option<Ipv4Addr>,
 
-    /// Guest IPv4 pool. Default: derived from slot (198.18.0.0/15 pool).
+    /// Guest IPv4 pool. Default: derived from slot (172.16.0.0/12 pool).
     #[serde(default)]
     pub ipv4_pool: Option<Ipv4Network>,
 

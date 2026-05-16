@@ -667,7 +667,7 @@ class Network:
     tls: TlsConfig | None = None
     ipv4_pool: str | None = None
     """IPv4 pool used to derive per-sandbox /30 guest subnets. Defaults
-    to ``198.18.0.0/15``."""
+    to ``172.16.0.0/12``."""
     ipv6_pool: str | None = None
     """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
     to ``fd42:6d73:62::/48``."""
