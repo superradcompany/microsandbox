@@ -1,0 +1,398 @@
+---
+title: Execution
+description: Go SDK - Command execution API reference
+icon: "terminal"
+---
+
+See [Commands](/sandboxes/commands) for usage examples.
+
+The Go SDK's exec API mirrors `os/exec` conventions: a **non-zero exit code is not a Go error**. Transport, timeout, and spawn-failure paths return an `error`; a program that ran and exited non-zero is a normal `*ExecOutput` result — inspect [`Success()`](#success) or [`ExitCode()`](#exitcode).
+
+```go
+out, err := sb.Exec(ctx, "python3", []string{"-c", "print(1+1)"})
+if err != nil {
+    return err // transport / timeout / spawn failure
+}
+if !out.Success() {
+    log.Printf("program exited %d: %s", out.ExitCode(), out.Stderr())
+}
+```
+
+## Sandbox methods
+
+The exec surface lives on [`*Sandbox`](/sdk/go/sandbox#instance-methods):
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Exec(ctx, cmd, args, opts...)` | `(*ExecOutput, error)` | Run a command and collect output |
+| `ExecStream(ctx, cmd, args, opts...)` | `(*ExecHandle, error)` | Run a command with streaming events |
+| `Shell(ctx, command, opts...)` | `(*ExecOutput, error)` | Run via `/bin/sh -c` |
+| `ShellStream(ctx, command, opts...)` | `(*ExecHandle, error)` | Streaming shell |
+| `Attach(ctx, cmd, args...)` | `(int, error)` | Interactive PTY session |
+| `AttachShell(ctx)` | `(int, error)` | Interactive PTY session in the default shell |
+
+---
+
+## Types
+
+### ExecOutput
+
+The result of a completed command execution.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Stdout()` | `string` | Collected stdout decoded as UTF-8 |
+| `Stderr()` | `string` | Collected stderr decoded as UTF-8 |
+| `StdoutBytes()` | `[]byte` | Raw stdout bytes |
+| `StderrBytes()` | `[]byte` | Raw stderr bytes |
+| `ExitCode()` | `int` | Exit code, or `-1` if the guest did not report one (e.g. killed by signal) |
+| `Success()` | `bool` | `true` if `ExitCode()` is `0` |
+
+#### Stdout()
+
+```go
+func (e *ExecOutput) Stdout() string
+```
+
+Captured standard output as a UTF-8 string.
+
+---
+
+#### Stderr()
+
+```go
+func (e *ExecOutput) Stderr() string
+```
+
+Captured standard error as a UTF-8 string.
+
+---
+
+#### StdoutBytes()
+
+```go
+func (e *ExecOutput) StdoutBytes() []byte
+```
+
+Raw stdout bytes — use when the output may not be valid UTF-8.
+
+---
+
+#### StderrBytes()
+
+```go
+func (e *ExecOutput) StderrBytes() []byte
+```
+
+Raw stderr bytes.
+
+---
+
+#### ExitCode()
+
+```go
+func (e *ExecOutput) ExitCode() int
+```
+
+The process's exit code, or `-1` if the guest did not report one (e.g. the process was killed by a signal).
+
+---
+
+#### Success()
+
+```go
+func (e *ExecOutput) Success() bool
+```
+
+`true` if the process exited with code `0`.
+
+---
+
+### ExecHandle
+
+A live streaming exec session returned by [`ExecStream`](/sdk/go/sandbox#execstream) and [`ShellStream`](/sdk/go/sandbox#shellstream). The handle MUST be closed with `Close` when done. **Not safe for concurrent use from multiple goroutines.**
+
+```go
+h, err := sb.ShellStream(ctx, "tail -f /var/log/app.log")
+if err != nil {
+    return err
+}
+defer h.Close()
+
+for {
+    ev, err := h.Recv(ctx)
+    if err != nil {
+        return err
+    }
+    switch ev.Kind {
+    case m.ExecEventStarted:
+        fmt.Printf("started pid=%d\n", ev.PID)
+    case m.ExecEventStdout:
+        os.Stdout.Write(ev.Data)
+    case m.ExecEventStderr:
+        os.Stderr.Write(ev.Data)
+    case m.ExecEventExited:
+        fmt.Printf("exited code=%d\n", ev.ExitCode)
+    case m.ExecEventStdinError:
+        fmt.Printf("stdin error: %s\n", ev.Failure.Message)
+    case m.ExecEventDone:
+        return nil
+    }
+}
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `ID()` | `(string, error)` | Correlation ID assigned by the guest agent |
+| `Recv(ctx)` | `(*ExecEvent, error)` | Block until the next event arrives |
+| `TakeStdin()` | `*ExecSink` | Take the stdin writer (single-take; only with [`WithExecStdinPipe`](#withexecstdinpipe)) |
+| `Collect(ctx)` | `(*ExecOutput, error)` | Drain remaining output and assemble into an `ExecOutput` |
+| `Wait(ctx)` | `(int, error)` | Wait for exit, discarding output; returns the exit code |
+| `Kill(ctx)` | `error` | Send SIGKILL |
+| `Signal(ctx, sig)` | `error` | Send a Unix signal (e.g. `syscall.SIGTERM`) |
+| `Close()` | `error` | Release the Rust-side handle |
+
+#### ID()
+
+```go
+func (h *ExecHandle) ID() (string, error)
+```
+
+Return the unique identifier for this exec session, assigned by the guest agent. Useful for correlating log entries.
+
+---
+
+#### Recv()
+
+```go
+func (h *ExecHandle) Recv(ctx context.Context) (*ExecEvent, error)
+```
+
+Block until the next event arrives or the stream ends. Returns an event with `Kind == ExecEventDone` when all events have been consumed.
+
+`ctx` controls the wait; cancellation causes `Recv` to return `ctx.Err()` immediately. The underlying Rust call may continue to completion in the background.
+
+---
+
+#### TakeStdin()
+
+```go
+func (h *ExecHandle) TakeStdin() *ExecSink
+```
+
+Return the stdin writer for this exec session. Returns `nil` if:
+
+- the session was not started with [`WithExecStdinPipe`](#withexecstdinpipe), or
+- `TakeStdin` has already been called on this handle (single-take semantics, matching Node and Python).
+
+The caller is responsible for closing the sink when done writing. Closing the sink without closing the exec handle is fine — they own different Rust-side resources.
+
+---
+
+#### Collect()
+
+```go
+func (h *ExecHandle) Collect(ctx context.Context) (*ExecOutput, error)
+```
+
+Drain the stream, accumulate all output, and return it as an [`*ExecOutput`](#execoutput). Equivalent to calling `Recv` in a loop and assembling the result.
+
+---
+
+#### Wait()
+
+```go
+func (h *ExecHandle) Wait(ctx context.Context) (int, error)
+```
+
+Block until the process exits and return its exit code. Unlike `Collect`, stdout and stderr are discarded.
+
+---
+
+#### Kill()
+
+```go
+func (h *ExecHandle) Kill(ctx context.Context) error
+```
+
+Send SIGKILL to the running process.
+
+---
+
+#### Signal()
+
+```go
+func (h *ExecHandle) Signal(ctx context.Context, signal int) error
+```
+
+Send a Unix signal to the running process. Pass values from `syscall` (e.g. `int(syscall.SIGTERM)`).
+
+---
+
+#### Close()
+
+```go
+func (h *ExecHandle) Close() error
+```
+
+Release the Rust-side exec handle. Does not kill the running process; call `Signal(ctx, 9)` or `Kill` first if you need to terminate it. Safe to call after `ExecEventDone` has been received.
+
+---
+
+### ExecSink
+
+A write-only pipe to a running process's stdin, obtained from [`ExecHandle.TakeStdin`](#takestdin). Implements `io.WriteCloser`.
+
+```go
+h, err := sb.ExecStream(ctx, "cat", nil, m.WithExecStdinPipe())
+if err != nil {
+    return err
+}
+defer h.Close()
+
+sink := h.TakeStdin()
+sink.Write([]byte("hello\n"))
+sink.Close()
+
+out, _ := h.Collect(ctx)
+fmt.Println(out.Stdout()) // "hello\n"
+```
+
+`Write` and `Close` use `context.Background()` under the hood. For caller-controlled cancellation use `WriteCtx`, or tear the session down via `ExecHandle.Kill` / `Close`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Write(p []byte)` | `(int, error)` | Implements `io.Writer` |
+| `WriteCtx(ctx, data)` | `error` | Write with explicit context |
+| `Close()` | `error` | Send EOF and finalise |
+
+---
+
+### ExecEvent
+
+One event emitted by [`ExecHandle.Recv`](#recv).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Kind | [`ExecEventKind`](#execeventkind) | Identifies which fields are populated |
+| PID | `uint32` | Guest process ID — set on `ExecEventStarted` |
+| Data | `[]byte` | Chunk of stdout or stderr — set on `ExecEventStdout` / `ExecEventStderr` |
+| ExitCode | `int` | Process exit code — set on `ExecEventExited` |
+| Failure | [`*ExecFailure`](#execfailure) | Structured spawn-failure detail — set on `ExecEventFailed` |
+
+---
+
+### ExecEventKind
+
+```go
+type ExecEventKind = ffi.ExecEventKind
+```
+
+| Constant | Description |
+|----------|-------------|
+| `ExecEventStarted` | Sent once when the guest process starts; `PID` is valid |
+| `ExecEventStdout` | A chunk of stdout; `Data` is valid |
+| `ExecEventStderr` | A chunk of stderr; `Data` is valid |
+| `ExecEventExited` | The process exited; `ExitCode` is valid |
+| `ExecEventFailed` | The user program never started (binary missing, permission denied, ...); `Failure` is valid |
+| `ExecEventStdinError` | A stdin write failed; `Failure` is valid. Non-terminal: the process may still emit output and exit normally |
+| `ExecEventDone` | All events have been consumed |
+
+---
+
+### ExecFailure
+
+```go
+type ExecFailure = ffi.ExecFailure
+```
+
+Structured detail about a failed-to-start exec. Populated on `ExecEventFailed`. See [Error Handling](/sdk/errors#spawn-time-exec-failures) for the kinds it carries (`not_found`, `permission_denied`, etc.) and how to branch on them.
+
+---
+
+### ExecConfig
+
+The config struct populated by [`ExecOption`](#execoption) functions. Most callers go through `Exec(ctx, cmd, args, ...opts)`; `ExecConfig` is exported for callers that prefer to construct one directly.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Cwd | `string` | Working directory inside the guest |
+| Timeout | `time.Duration` | Kill the process after this duration. Sub-second precision is rounded up |
+| StdinPipe | `bool` | Enable a stdin pipe; required for [`TakeStdin`](#takestdin) |
+| User | `string` | Guest user (UID or name) |
+| Env | `map[string]string` | Per-command environment variables |
+
+---
+
+### ExecOption
+
+```go
+type ExecOption func(*ExecConfig)
+```
+
+A functional option for [`Exec`](/sdk/go/sandbox#exec), [`Shell`](/sdk/go/sandbox#shell), [`ExecStream`](/sdk/go/sandbox#execstream), and [`ShellStream`](/sdk/go/sandbox#shellstream).
+
+---
+
+#### WithExecCwd()
+
+```go
+func WithExecCwd(path string) ExecOption
+```
+
+Working directory for a single command.
+
+---
+
+#### WithExecTimeout()
+
+```go
+func WithExecTimeout(d time.Duration) ExecOption
+```
+
+Per-command timeout. When exceeded, the guest terminates the process and the call returns an error with `Kind == ErrExecTimeout`. Sub-second precision rounds up to whole seconds; pass at least 1 second.
+
+```go
+out, err := sb.Shell(ctx, "long-running-task",
+    m.WithExecTimeout(30*time.Second))
+if m.IsKind(err, m.ErrExecTimeout) {
+    log.Println("timed out")
+}
+```
+
+---
+
+#### WithExecStdinPipe()
+
+```go
+func WithExecStdinPipe() ExecOption
+```
+
+Enable a stdin pipe for the exec session, allowing data to be written via [`ExecHandle.TakeStdin`](#takestdin).
+
+---
+
+#### WithExecUser()
+
+```go
+func WithExecUser(user string) ExecOption
+```
+
+Run the command as the given guest user (UID or name).
+
+---
+
+#### WithExecEnv()
+
+```go
+func WithExecEnv(env map[string]string) ExecOption
+```
+
+Per-command environment variables. Called repeatedly, maps merge; later keys overwrite earlier ones.
+
+```go
+out, err := sb.Exec(ctx, "make", []string{"build"},
+    m.WithExecCwd("/app"),
+    m.WithExecEnv(map[string]string{"DEBUG": "1"}),
+)
+```

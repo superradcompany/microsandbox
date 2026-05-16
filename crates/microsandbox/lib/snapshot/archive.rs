@@ -147,11 +147,10 @@ pub(super) async fn import_snapshot(
     tokio::fs::create_dir_all(&snapshots_dir).await?;
     let cache_dir = crate::config::config().cache_dir();
 
-    // Detect compression from the magic bytes. `tar_ingest.rs:34-37`
-    // does the same dance — keep our copy minimal here.
-    let bytes = tokio::fs::read(archive).await?;
-    let cursor = std::io::Cursor::new(bytes);
-    let buf = BufReader::new(cursor);
+    // Stream rather than slurp — archives carry the full upper layer and are
+    // routinely multi-GB.
+    let file = tokio::fs::File::open(archive).await?;
+    let buf = BufReader::new(file);
 
     let head_dir = if archive
         .extension()

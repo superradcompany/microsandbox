@@ -35,12 +35,13 @@ members = [
     "examples/rust/volume-named",
     "sdk/node-ts",
     "sdk/python",
+    "sdk/go/native",
 ]
 
 [workspace.package]
 authors = ["Super Rad Company <development@superrad.company>"]
 repository = "https://github.com/superradcompany/microsandbox"
-version = "0.4.5"
+version = "0.4.6"
 license = "Apache-2.0"
 edition = "2024"
 
@@ -53,6 +54,7 @@ panic = "abort"
 [workspace.dependencies]
 anyhow = "1.0"
 astral-tokio-tar = "0.6"
+base64 = "0.22"
 async-compression = "0.4"
 bytes = "1.9"
 chrono = { version = "0.4", features = ["serde"] }

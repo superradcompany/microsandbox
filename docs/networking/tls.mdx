@@ -58,6 +58,17 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+sb, err := m.CreateSandbox(ctx, "agent",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
+        TLS: &m.TLSConfig{
+            Bypass: []string{"pinned-api.example.com", "*.gov"},
+        },
+    }),
+)
+```
+
 ```bash CLI
 msb create python --name agent \
   --tls-intercept \
@@ -116,6 +127,16 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+trustHostCAs := true
+sb, err := m.CreateSandbox(ctx, "agent",
+    m.WithImage("alpine"),
+    m.WithNetwork(&m.NetworkConfig{
+        TrustHostCAs: &trustHostCAs,
+    }),
+)
+```
+
 ```bash CLI
 msb run alpine --trust-host-cas -- apk update
 ```
@@ -126,7 +147,7 @@ msb run alpine --trust-host-cas -- apk update
 
 TLS interception also covers the corporate-proxy case, but only on the ports it's configured for (default `[443]`), and only for non-bypassed domains. It doesn't touch QUIC / HTTP/3 flows. Everything outside that scope (gRPC, Postgres / Redis / Mongo TLS, custom 8443, non-intercepted ports, bypassed domains) goes over raw TLS from the guest, where host-CA trust is what makes certificate validation succeed.
 
-The two features compose. Turn on [`trust_host_cas`](/sdk/rust/networking#trust_host_cas) alongside TLS interception when you need both: interception provides richer inspection on the ports it covers, host-CA trust covers everything else. Leave it off to keep the guest's TLS stack validating strictly against its stock Mozilla bundle.
+The two features compose. Turn on host-CA trust alongside TLS interception when you need both: interception provides richer inspection on the ports it covers, host-CA trust covers everything else. Leave it off to keep the guest's TLS stack validating strictly against its stock Mozilla bundle.
 
 ## See also
 

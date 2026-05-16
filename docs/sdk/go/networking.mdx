@@ -1,0 +1,270 @@
+---
+title: Networking
+description: Go SDK - Network API reference
+icon: "network-wired"
+---
+
+See [Networking](/networking/overview) for the conceptual overview and [TLS Interception](/networking/tls) for TLS proxy details.
+
+The Go SDK's network surface is a single [`NetworkConfig`](#networkconfig) struct passed via [`WithNetwork`](/sdk/go/sandbox#withnetwork). Common shapes come from [`NetworkPolicy`](#networkpolicy); custom rule sets are built by populating `NetworkConfig.Rules` directly.
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("alpine"),
+    m.WithNetwork(m.NetworkPolicy.PublicOnly()),
+)
+```
+
+## NetworkPolicy
+
+Helpers that return common preset [`*NetworkConfig`](#networkconfig) values. Access via the package-level `NetworkPolicy` value.
+
+---
+
+#### NetworkPolicy.PublicOnly()
+
+```go
+func (networkPolicyFactory) PublicOnly() *NetworkConfig
+```
+
+Block private address ranges and cloud metadata endpoints. Allow everything else. This is the **default** when no network configuration is supplied.
+
+---
+
+#### NetworkPolicy.None()
+
+```go
+func (networkPolicyFactory) None() *NetworkConfig
+```
+
+Deny all traffic. No network interface is created; the guest is fully offline. `Exec` and `FS` still work — they use the host-guest channel, not the network.
+
+---
+
+#### NetworkPolicy.AllowAll()
+
+```go
+func (networkPolicyFactory) AllowAll() *NetworkConfig
+```
+
+Unrestricted network access, including private addresses and the host machine.
+
+---
+
+#### NetworkPolicy.NonLocal()
+
+```go
+func (networkPolicyFactory) NonLocal() *NetworkConfig
+```
+
+Allow public + private (LAN) destinations; ingress allowed by default. Blocks loopback, link-local, and metadata.
+
+---
+
+## Custom rules
+
+Build a custom firewall by populating [`NetworkConfig.Rules`](#networkconfig). Rules are evaluated **first-match-wins** per direction. `DefaultEgress` and `DefaultIngress` set the fall-through action.
+
+```go
+sb, err := m.CreateSandbox(ctx, "agent",
+    m.WithImage("python:3.12"),
+    m.WithNetwork(&m.NetworkConfig{
+        DefaultEgress:  m.PolicyActionDeny,
+        DefaultIngress: m.PolicyActionAllow,
+        Rules: []m.PolicyRule{
+            {
+                Action:      m.PolicyActionAllow,
+                Direction:   m.PolicyDirectionEgress,
+                Destination: "api.openai.com",
+                Protocol:    m.PolicyProtocolTCP,
+                Port:        "443",
+            },
+            {
+                Action:      m.PolicyActionAllow,
+                Direction:   m.PolicyDirectionEgress,
+                Destination: ".internal",
+                Protocols:   []m.PolicyProtocol{m.PolicyProtocolTCP},
+                Ports:       []string{"8000-9000"},
+            },
+        },
+    }),
+)
+```
+
+### Rule order matters
+
+The first matching rule wins, so a broad rule placed before a narrow one swallows it:
+
+```go
+Rules: []m.PolicyRule{
+    {Action: m.PolicyActionAllow, Destination: "10.0.0.0/8"},  // matches everything in 10.x
+    {Action: m.PolicyActionDeny,  Destination: "10.0.0.5"},    // never reached
+},
+```
+
+Put specific rules before general ones.
+
+---
+
+## Types
+
+### NetworkConfig
+
+The configuration struct passed via [`WithNetwork`](/sdk/go/sandbox#withnetwork).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Policy | [`NetworkPolicyPreset`](#networkpolicypreset) | Preset name. Mutually exclusive with `Rules` for canned configurations; set via [`NetworkPolicy`](#networkpolicy) |
+| Rules | `[]`[`PolicyRule`](#policyrule) | Ordered custom rules (first match wins) |
+| DefaultEgress | [`PolicyAction`](#policyaction) | Fall-through action for outbound when no rule matches. Defaults to `"deny"` |
+| DefaultIngress | [`PolicyAction`](#policyaction) | Fall-through action for inbound when no rule matches. Defaults to `"allow"` |
+| DenyDomains | `[]string` | Exact-match domains to refuse DNS resolution for. Adds high-priority `deny Domain("...")` policy rules that fire at DNS (REFUSED), TLS first-flight (SNI), and TCP egress (cache fallback) |
+| DenyDomainSuffixes | `[]string` | Domain suffixes (e.g. `.ads`) — denies the apex and any subdomain |
+| DNS | [`*DNSConfig`](#dnsconfig) | DNS interception settings |
+| DNSRebindProtection | `*bool` | Legacy convenience for `DNS.RebindProtection`. When `DNS` is also set, the nested value wins |
+| TLS | [`*TLSConfig`](#tlsconfig) | TLS interception settings |
+| Ports | `map[uint16]uint16` | Host→guest TCP port mappings |
+| IPv4Pool | `string` | IPv4 pool used for per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |
+| IPv6Pool | `string` | IPv6 pool used for per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
+| MaxConnections | `*uint` | Cap concurrent network connections from the sandbox |
+| OnSecretViolation | [`ViolationAction`](/sdk/go/secrets#violationaction) | Sandbox-wide action when a secret is sent to a disallowed host |
+| TrustHostCAs | `*bool` | Ship the host's trusted root CAs into the guest at boot. Opt-in for corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, ...) whose gateway CA is unknown to the guest's stock Mozilla bundle |
+
+### PolicyRule
+
+A single firewall rule.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Action | [`PolicyAction`](#policyaction) | `allow` or `deny` |
+| Direction | [`PolicyDirection`](#policydirection) | Direction this rule considers. `PolicyDirectionAny` matches in either |
+| Destination | `string` | Target filter: a [destination group](#destgroups), domain, domain suffix (prefixed with `.`), CIDR (`10.0.0.0/8`), exact IP, or `"*"`. Domain and suffix strings are validated at sandbox creation |
+| Protocol | [`PolicyProtocol`](#policyprotocol) | Legacy single-protocol field. Prefer `Protocols` when matching multiple |
+| Protocols | `[]`[`PolicyProtocol`](#policyprotocol) | Protocol set. Empty means any |
+| Port | `string` | Single port (`"443"`) or range (`"8000-9000"`) |
+| Ports | `[]string` | Multiple port values at once |
+
+Ingress rules carrying ICMP protocols are rejected at sandbox creation — the host has no inbound ICMP path. Use `PolicyDirectionEgress` for ICMP allow/deny.
+
+### DNSConfig
+
+```go
+type DNSConfig struct {
+    RebindProtection *bool
+    Nameservers      []string
+    QueryTimeoutMs   *uint64
+}
+```
+
+In-VM DNS proxy configuration.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| RebindProtection | `*bool` | Block DNS responses resolving to private IPs. Default `true` when unset |
+| Nameservers | `[]string` | Upstream resolvers. Each entry is `IP`, `IP:PORT`, `HOST`, or `HOST:PORT`. Replaces `/etc/resolv.conf` when non-empty |
+| QueryTimeoutMs | `*uint64` | Per-DNS-query timeout in milliseconds |
+
+### TLSConfig
+
+```go
+type TLSConfig struct {
+    Bypass           []string
+    VerifyUpstream   *bool
+    InterceptedPorts []uint16
+    BlockQUIC        *bool
+    CACert           string
+    CAKey            string
+    UpstreamCACerts  []string
+}
+```
+
+Transparent HTTPS inspection proxy configuration.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Bypass | `[]string` | Domains to skip interception (supports `*.suffix` globs). Use for domains with certificate pinning |
+| VerifyUpstream | `*bool` | Verify upstream server certificates. Default `true`. Set `false` only for self-signed servers |
+| InterceptedPorts | `[]uint16` | TCP ports where TLS interception is active. Default `[443]` |
+| BlockQUIC | `*bool` | Block QUIC/HTTP3 (UDP) on intercepted ports, forcing TCP/TLS fallback |
+| CACert | `string` | Path to a custom interception CA certificate PEM file |
+| CAKey | `string` | Path to a custom interception CA private key PEM file |
+| UpstreamCACerts | `[]string` | Paths to additional CA bundles trusted for upstream verification |
+
+```go
+sb, err := m.CreateSandbox(ctx, "inspect",
+    m.WithImage("python:3.12"),
+    m.WithNetwork(&m.NetworkConfig{
+        TLS: &m.TLSConfig{
+            Bypass:           []string{"*.googleapis.com"},
+            InterceptedPorts: []uint16{443},
+        },
+    }),
+)
+```
+
+### PolicyAction
+
+```go
+type PolicyAction string
+```
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `PolicyActionAllow` | `"allow"` | Permit the traffic |
+| `PolicyActionDeny` | `"deny"` | Drop the traffic silently |
+
+### PolicyDirection
+
+```go
+type PolicyDirection string
+```
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `PolicyDirectionEgress` | `"egress"` | Traffic leaving the sandbox |
+| `PolicyDirectionIngress` | `"ingress"` | Traffic entering the sandbox |
+| `PolicyDirectionAny` | `"any"` | Rule applies in either direction |
+
+### PolicyProtocol
+
+```go
+type PolicyProtocol string
+```
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `PolicyProtocolTCP` | `"tcp"` | TCP traffic |
+| `PolicyProtocolUDP` | `"udp"` | UDP traffic |
+| `PolicyProtocolICMPv4` | `"icmpv4"` | ICMPv4 traffic (egress only) |
+| `PolicyProtocolICMPv6` | `"icmpv6"` | ICMPv6 traffic (egress only) |
+
+### NetworkPolicyPreset
+
+```go
+type NetworkPolicyPreset string
+```
+
+Preset names accepted by [`NetworkConfig.Policy`](#networkconfig). Prefer [`NetworkPolicy`](#networkpolicy), which returns a preconfigured `*NetworkConfig`.
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `NetworkPolicyPresetNone` | `"none"` | Fully airgapped |
+| `NetworkPolicyPresetPublicOnly` | `"public-only"` | Block private + metadata; allow everything else |
+| `NetworkPolicyPresetAllowAll` | `"allow-all"` | Unrestricted |
+| `NetworkPolicyPresetNonLocal` | `"non-local"` | Public + private/LAN egress; block loopback / link-local / metadata |
+
+### Destination groups
+
+The `Destination` field on [`PolicyRule`](#policyrule) accepts these well-known group names alongside literal CIDRs and domains:
+
+| Value | Description |
+|-------|-------------|
+| `"public"` | Complement of the named categories: every address not in any other group |
+| `"private"` | Private/RFC 1918 addresses + ULA + CGN (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7`) |
+| `"loopback"` | Loopback addresses (`127.0.0.0/8`, `::1`); the **guest's own** loopback, not the host. See the [loopback-vs-host watch-out](/networking/overview#loopback-vs-host-a-common-trap) |
+| `"link-local"` | Link-local addresses (`169.254.0.0/16`, `fe80::/10`) excluding metadata |
+| `"metadata"` | Cloud metadata endpoints (`169.254.169.254`) |
+| `"multicast"` | Multicast addresses (`224.0.0.0/4`, `ff00::/8`) |
+| `"host"` | The host machine, reached via `host.microsandbox.internal`. The right group for "let the sandbox reach my host's localhost", not `"loopback"` |
+
+A domain prefixed with `.` becomes a suffix match: `.example.com` matches `api.example.com` but not `example.com`.

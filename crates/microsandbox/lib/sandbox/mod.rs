@@ -76,7 +76,7 @@ pub use microsandbox_network::policy::NetworkPolicy;
 pub use microsandbox_runtime::logging::LogLevel;
 pub use types::{
     DiskImageFormat, ImageBuilder, ImageSource, IntoImage, MountBuilder, Patch, PatchBuilder,
-    RootfsSource, SecretsConfig, SshConfig, VolumeMount,
+    RootfsSource, VolumeMount,
 };
 
 //--------------------------------------------------------------------------------------------------

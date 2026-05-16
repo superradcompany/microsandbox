@@ -26,6 +26,11 @@ m = await sb.metrics()
 print(f"CPU: {m.cpu_percent:.1f}%, Mem: {m.memory_bytes // 1024 // 1024} MB")
 ```
 
+```go Go
+metrics, err := sb.Metrics(ctx)
+fmt.Printf("CPU: %.1f%%, Mem: %d MB\n", metrics.CPUPercent, metrics.MemoryBytes/1024/1024)
+```
+
 </CodeGroup>
 
 ## Streaming
@@ -55,6 +60,21 @@ async for m in await sb.metrics_stream(interval=1.0):
     print(f"[{m.timestamp_ms}] CPU: {m.cpu_percent:.1f}%")
 ```
 
+```go Go
+stream, err := sb.MetricsStream(ctx, time.Second)
+defer stream.Close()
+for {
+    metrics, err := stream.Recv(ctx)
+    if err != nil {
+        return err
+    }
+    if metrics == nil {
+        break
+    }
+    fmt.Printf("CPU: %.1f%%\n", metrics.CPUPercent)
+}
+```
+
 </CodeGroup>
 
 ## Fleet-wide metrics
@@ -78,6 +98,10 @@ const all = await allSandboxMetrics();
 from microsandbox import all_sandbox_metrics
 
 all_metrics = await all_sandbox_metrics()
+```
+
+```go Go
+all, err := m.AllSandboxMetrics(ctx)
 ```
 
 </CodeGroup>

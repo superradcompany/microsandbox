@@ -5,6 +5,8 @@
 use std::net::IpAddr;
 use std::path::PathBuf;
 
+use ipnetwork::{Ipv4Network, Ipv6Network};
+
 use crate::config::{DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort};
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
@@ -173,6 +175,34 @@ impl NetworkBuilder {
     /// Set guest interface overrides.
     pub fn interface(mut self, overrides: InterfaceOverrides) -> Self {
         self.config.interface = overrides;
+        self
+    }
+
+    /// Set the IPv4 pool used to derive per-sandbox `/30` guest subnets.
+    ///
+    /// The default is `172.16.0.0/12`. Pools must be at least `/30`.
+    pub fn ipv4_pool(mut self, pool: Ipv4Network) -> Self {
+        if pool.prefix() > 30 {
+            self.errors.push(BuildError::InvalidIpv4Pool {
+                raw: pool.to_string(),
+            });
+        } else {
+            self.config.interface.ipv4_pool = Some(pool);
+        }
+        self
+    }
+
+    /// Set the IPv6 pool used to derive per-sandbox `/64` guest prefixes.
+    ///
+    /// The default is `fd42:6d73:62::/48`. Pools must be at least `/64`.
+    pub fn ipv6_pool(mut self, pool: Ipv6Network) -> Self {
+        if pool.prefix() > 64 {
+            self.errors.push(BuildError::InvalidIpv6Pool {
+                raw: pool.to_string(),
+            });
+        } else {
+            self.config.interface.ipv6_pool = Some(pool);
+        }
         self
     }
 

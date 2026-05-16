@@ -59,10 +59,13 @@ function resolveBinDir(): string {
   return cachedBinDir;
 }
 
-/** Path to the bundled `msb` binary, or null if not yet installed. */
+/** Path to the bundled `msb` binary, or null if not yet installed.
+ *
+ * No MSB_PATH env-var read here on purpose — the Rust resolver honours
+ * MSB_PATH natively as its highest-precedence tier, so duplicating the
+ * read at the JS layer just adds an alternate code path for the same
+ * outcome. */
 export function msbPath(): string | null {
-  const explicit = process.env.MSB_PATH;
-  if (explicit) return existsSync(explicit) ? explicit : null;
   const p = join(resolveBinDir(), "msb");
   return existsSync(p) ? p : null;
 }

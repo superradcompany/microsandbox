@@ -75,6 +75,14 @@ pub enum BuildError {
     #[error("rule #{rule_index}: invalid CIDR `{raw}`")]
     InvalidCidr { rule_index: usize, raw: String },
 
+    /// The configured guest IPv4 pool cannot hold a `/30` sandbox subnet.
+    #[error("invalid IPv4 pool `{raw}`: prefix must be /30 or shorter")]
+    InvalidIpv4Pool { raw: String },
+
+    /// The configured guest IPv6 pool cannot hold a `/64` sandbox prefix.
+    #[error("invalid IPv6 pool `{raw}`: prefix must be /64 or shorter")]
+    InvalidIpv6Pool { raw: String },
+
     /// `.domain(&str)` or `.domain_suffix(&str)` received a value that
     /// doesn't parse as a [`DomainName`].
     #[error("rule #{rule_index}: invalid domain `{raw}`: {source}")]

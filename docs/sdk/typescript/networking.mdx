@@ -1001,6 +1001,26 @@ Limit the maximum number of concurrent network connections from the sandbox.
 
 ---
 
+#### ipv4Pool()
+
+```typescript
+ipv4Pool(pool: string): this
+```
+
+Set the IPv4 pool used to derive per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12`.
+
+---
+
+#### ipv6Pool()
+
+```typescript
+ipv6Pool(pool: string): this
+```
+
+Set the IPv6 pool used to derive per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48`.
+
+---
+
 #### onSecretViolation()
 
 ```typescript

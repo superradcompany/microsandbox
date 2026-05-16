@@ -1,4 +1,3 @@
-mod config;
 mod error;
 mod exec;
 mod fs;

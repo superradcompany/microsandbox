@@ -1,0 +1,1157 @@
+---
+title: Sandbox
+description: Go SDK - Sandbox API reference
+icon: "cube"
+---
+
+See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
+
+## Setup
+
+---
+
+#### EnsureInstalled()
+
+```go
+func EnsureInstalled(ctx context.Context, opts ...SetupOption) error
+```
+
+Optional. Ensure msb + libkrunfw are present at `~/.microsandbox/`, downloading them from the matching GitHub release if not. Call at startup to surface install errors up front; otherwise the first sandbox call handles it. The FFI library is embedded in the Go binary and loads automatically — `EnsureInstalled` does not govern it. Idempotent.
+
+**Parameters**
+
+| Name | Type              | Description                                              |
+| ---- | ----------------- | -------------------------------------------------------- |
+| ctx  | `context.Context` | Cancels an in-flight msb + libkrunfw download            |
+| opts | `...SetupOption`  | See [`SetupOption`](#setupoption) for the available knobs |
+
+---
+
+#### IsInstalled()
+
+```go
+func IsInstalled() bool
+```
+
+Report whether msb + libkrunfw are present on disk at the SDK's pinned version. Does **not** dlopen the FFI library (which ships embedded).
+
+---
+
+#### SDKVersion()
+
+```go
+func SDKVersion() string
+```
+
+Return the microsandbox release version this SDK was compiled against.
+
+---
+
+#### RuntimeVersion()
+
+```go
+func RuntimeVersion() (string, error)
+```
+
+Return the version reported by the loaded FFI library. Auto-loads the library on first use; returns `ErrLibraryNotLoaded` only if loading fails (e.g. unsupported platform or GLIBC mismatch).
+
+---
+
+## SetupOption
+
+Configures [`EnsureInstalled`](#ensureinstalled). Pass any of the options below as variadic arguments. Options apply only to the first call; subsequent calls are no-ops.
+
+| Option | Effect |
+|--------|--------|
+| [`WithSkipDownload()`](#withskipdownload) | Refuse to download msb + libkrunfw — require them to be pre-installed |
+
+---
+
+#### WithSkipDownload()
+
+```go
+func WithSkipDownload() SetupOption
+```
+
+Prevent `EnsureInstalled` from fetching the msb + libkrunfw bundle from GitHub. Use when the runtime is already on disk at the install path (e.g. air-gapped CI). The embedded FFI library is unaffected — it ships with the SDK.
+
+---
+
+## Top-level functions
+
+---
+
+#### CreateSandbox()
+
+```go
+func CreateSandbox(
+    ctx context.Context,
+    name string,
+    opts ...SandboxOption,
+) (*Sandbox, error)
+```
+
+Create and boot a new sandbox. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. The returned [`*Sandbox`](#instance-methods) owns the VM process — call `Close` (or `StopAndWait` + `Close`) when done.
+
+**Parameters**
+
+| Name | Type               | Description                                                                                             |
+| ---- | ------------------ | ------------------------------------------------------------------------------------------------------- |
+| ctx  | `context.Context`  | Cancels the boot operation. Cancelling after this function returns has no effect on the running sandbox |
+| name | `string`           | Sandbox name                                                                                            |
+| opts | `...SandboxOption` | Functional options — see [Options](#options)                                                            |
+
+**Returns**
+
+| Type                            | Description                                        |
+| ------------------------------- | -------------------------------------------------- |
+| [`*Sandbox`](#instance-methods) | Running sandbox                                    |
+| `error`                         | Typed `*Error` — see [Error Handling](/sdk/errors) |
+
+```go
+sb, err := m.CreateSandbox(ctx, "my-sandbox",
+    m.WithImage("python:3.12"),
+    m.WithMemory(512),
+    m.WithCPUs(2),
+    m.WithEnv(map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}),
+)
+if err != nil {
+    return err
+}
+defer func() {
+    _, _ = sb.StopAndWait(context.Background())
+    _ = sb.Close()
+}()
+```
+
+---
+
+#### CreateSandboxDetached()
+
+```go
+func CreateSandboxDetached(
+    ctx context.Context,
+    name string,
+    opts ...SandboxOption,
+) (*Sandbox, error)
+```
+
+Same as [`CreateSandbox`](#createsandbox) with [`WithDetached`](#withdetached) automatically applied. The VM continues running after the returned handle is released or the Go process exits. Reattach via [`GetSandbox`](#getsandbox).
+
+---
+
+#### StartSandbox()
+
+```go
+func StartSandbox(ctx context.Context, name string) (*Sandbox, error)
+```
+
+Restart a previously stopped sandbox. The VM reboots using the persisted configuration.
+
+**Parameters**
+
+| Name | Type              | Description                |
+| ---- | ----------------- | -------------------------- |
+| ctx  | `context.Context` | Cancels the boot operation |
+| name | `string`          | Name of a stopped sandbox  |
+
+**Returns**
+
+| Type                            | Description     |
+| ------------------------------- | --------------- |
+| [`*Sandbox`](#instance-methods) | Running sandbox |
+
+---
+
+#### StartSandboxDetached()
+
+```go
+func StartSandboxDetached(ctx context.Context, name string) (*Sandbox, error)
+```
+
+Boot a stopped sandbox in detached mode.
+
+---
+
+#### GetSandbox()
+
+```go
+func GetSandbox(ctx context.Context, name string) (*SandboxHandle, error)
+```
+
+Look up a sandbox by name and return a metadata handle without connecting to it. Returns `ErrSandboxNotFound` if no such sandbox exists. The returned [`*SandboxHandle`](#sandboxhandle) exposes `Connect`, `Start`, `Stop`, `Kill`, `Remove`, `Metrics`, and `Logs`.
+
+---
+
+#### ListSandboxes()
+
+```go
+func ListSandboxes(ctx context.Context) ([]*SandboxHandle, error)
+```
+
+Return metadata for every known sandbox (running, stopped, draining, crashed) ordered by creation time, newest first.
+
+---
+
+#### RemoveSandbox()
+
+```go
+func RemoveSandbox(ctx context.Context, name string) error
+```
+
+Delete a stopped sandbox and all its persisted state from disk. Fails with `ErrSandboxStillRunning` if the sandbox is still running.
+
+---
+
+#### AllSandboxMetrics()
+
+```go
+func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error)
+```
+
+Return a point-in-time metrics snapshot for every running sandbox, keyed by sandbox name. Only running and draining sandboxes appear.
+
+---
+
+## Instance methods
+
+The `*Sandbox` returned by [`CreateSandbox`](#createsandbox) and friends has the following methods. `*Sandbox` is **safe for concurrent use** from multiple goroutines.
+
+---
+
+#### Name()
+
+```go
+func (s *Sandbox) Name() string
+```
+
+Return the sandbox's name.
+
+---
+
+#### FS()
+
+```go
+func (s *Sandbox) FS() *SandboxFs
+```
+
+Return a filesystem accessor for reading and writing files inside the running sandbox. See [Filesystem](/sdk/go/filesystem) for the full API.
+
+---
+
+#### Exec()
+
+```go
+func (s *Sandbox) Exec(
+    ctx context.Context,
+    cmd string,
+    args []string,
+    opts ...ExecOption,
+) (*ExecOutput, error)
+```
+
+Run a command inside the sandbox and wait for it to complete. Collects all stdout and stderr into memory and returns them along with the exit code. For long-running processes or large output, use [`ExecStream`](#execstream).
+
+A **non-zero exit code is not a Go error** — inspect [`ExecOutput.Success`](/sdk/go/execution#success) or [`ExecOutput.ExitCode`](/sdk/go/execution#exitcode) instead. Transport, timeout, and spawn failures are returned as errors.
+
+```go
+out, err := sb.Exec(ctx, "python3", []string{"-c", "print(1 + 1)"})
+if err != nil {
+    return err
+}
+fmt.Println(out.Stdout())    // "2\n"
+fmt.Println(out.ExitCode())  // 0
+```
+
+See [Execution](/sdk/go/execution) for `ExecOption` details.
+
+---
+
+#### ExecStream()
+
+```go
+func (s *Sandbox) ExecStream(
+    ctx context.Context,
+    cmd string,
+    args []string,
+    opts ...ExecOption,
+) (*ExecHandle, error)
+```
+
+Run a command with streaming output. Returns a handle that emits `Started`, `Stdout`, `Stderr`, `Exited`, and `Done` events as they happen. The handle MUST be closed with `Close` when done.
+
+See [`ExecHandle`](/sdk/go/execution#exechandle) for the event loop.
+
+---
+
+#### Shell()
+
+```go
+func (s *Sandbox) Shell(
+    ctx context.Context,
+    command string,
+    opts ...ExecOption,
+) (*ExecOutput, error)
+```
+
+Run a command through `/bin/sh -c`. Shell syntax like pipes, redirects, and `&&` chains works.
+
+```go
+out, err := sb.Shell(ctx, "ls -la /app && echo done")
+```
+
+---
+
+#### ShellStream()
+
+```go
+func (s *Sandbox) ShellStream(
+    ctx context.Context,
+    command string,
+    opts ...ExecOption,
+) (*ExecHandle, error)
+```
+
+Shell command with streaming output.
+
+---
+
+#### Attach()
+
+```go
+func (s *Sandbox) Attach(ctx context.Context, cmd string, args ...string) (int, error)
+```
+
+Bridge the caller's terminal directly to a process inside the sandbox for a fully interactive PTY session. The caller's terminal must be a real TTY; primarily useful for CLI tools, not library code.
+
+**Returns**
+
+| Type  | Description              |
+| ----- | ------------------------ |
+| `int` | Exit code of the process |
+
+---
+
+#### AttachShell()
+
+```go
+func (s *Sandbox) AttachShell(ctx context.Context) (int, error)
+```
+
+Attach to the sandbox's default shell (configured via [`WithShell`](#withshell), defaults to `/bin/sh`).
+
+---
+
+#### Drain()
+
+```go
+func (s *Sandbox) Drain(ctx context.Context) error
+```
+
+Send a graceful drain signal (SIGUSR1) to the sandbox. Existing commands run to completion, new `exec` calls are rejected. Errors if this handle does not own the lifecycle.
+
+---
+
+#### Stop()
+
+```go
+func (s *Sandbox) Stop(ctx context.Context) error
+```
+
+Gracefully shut down the sandbox (SIGTERM). Does **not** wait for the VM process to exit — use [`StopAndWait`](#stopandwait) for that.
+
+---
+
+#### StopAndWait()
+
+```go
+func (s *Sandbox) StopAndWait(ctx context.Context) (int, error)
+```
+
+Stop the sandbox and wait for the VM process to exit. Returns the guest exit code, or `-1` if the guest did not report one.
+
+---
+
+#### Kill()
+
+```go
+func (s *Sandbox) Kill(ctx context.Context) error
+```
+
+Force-terminate the sandbox immediately (SIGKILL). No graceful shutdown.
+
+---
+
+#### Wait()
+
+```go
+func (s *Sandbox) Wait(ctx context.Context) (int, error)
+```
+
+Block until the sandbox process exits on its own and return the exit code (`-1` if the guest did not report one). Errors if this handle does not own the lifecycle.
+
+---
+
+#### Detach()
+
+```go
+func (s *Sandbox) Detach(ctx context.Context) error
+```
+
+Release the Rust-side handle **without** stopping the VM. Use on sandboxes created with [`WithDetached`](#withdetached) once the caller is done with the handle but the sandbox should keep running. After `Detach`, the handle is invalid; a subsequent `Close` returns `ErrInvalidHandle`.
+
+---
+
+#### Close()
+
+```go
+func (s *Sandbox) Close() error
+```
+
+Release the Rust-side handle. Safe to call multiple times; the second call returns `ErrInvalidHandle`.
+
+For a sandbox created with `WithDetached`, `Close` will stop the VM — use [`Detach`](#detach) instead if the intent is to leave it running.
+
+---
+
+#### OwnsLifecycle()
+
+```go
+func (s *Sandbox) OwnsLifecycle() (bool, error)
+```
+
+Report whether this handle owns the VM process. When `true`, closing or stopping the handle terminates the sandbox; when `false` the sandbox is detached.
+
+---
+
+#### OwnsLifecycleOrFalse()
+
+```go
+func (s *Sandbox) OwnsLifecycleOrFalse() bool
+```
+
+Convenience that swallows the error and returns `false` on any failure. Suitable for log lines and best-effort branching.
+
+---
+
+#### RemovePersisted()
+
+```go
+func (s *Sandbox) RemovePersisted(ctx context.Context) error
+```
+
+Remove the sandbox's persisted state (filesystem and database record). The sandbox must already be stopped. This handle becomes invalid after the call.
+
+---
+
+#### Metrics()
+
+```go
+func (s *Sandbox) Metrics(ctx context.Context) (*Metrics, error)
+```
+
+Get a point-in-time snapshot of the sandbox's resource usage.
+
+```go
+metrics, err := sb.Metrics(ctx)
+fmt.Printf("CPU: %.1f%% Mem: %d bytes Uptime: %s\n",
+    metrics.CPUPercent, metrics.MemoryBytes, metrics.Uptime)
+```
+
+---
+
+#### Logs()
+
+```go
+func (s *Sandbox) Logs(ctx context.Context, opts LogOptions) ([]LogEntry, error)
+```
+
+Read persisted sandbox output. Works for running and stopped sandboxes.
+
+```go
+entries, err := sb.Logs(ctx, m.LogOptions{
+    Sources: []m.LogSource{m.LogSourceStdout, m.LogSourceStderr},
+})
+```
+
+---
+
+#### MetricsStream()
+
+```go
+func (s *Sandbox) MetricsStream(
+    ctx context.Context,
+    interval time.Duration,
+) (*MetricsStreamHandle, error)
+```
+
+Start a streaming metrics subscription that delivers a snapshot every `interval`. Sub-millisecond precision is rounded up. Close the returned handle when done.
+
+```go
+stream, err := sb.MetricsStream(ctx, 500*time.Millisecond)
+if err != nil {
+    return err
+}
+defer stream.Close()
+
+for {
+    metrics, err := stream.Recv(ctx)
+    if err != nil || metrics == nil {
+        break
+    }
+    fmt.Printf("CPU: %.1f%%  Mem: %d bytes\n", metrics.CPUPercent, metrics.MemoryBytes)
+}
+```
+
+---
+
+## Patch
+
+Helpers that construct rootfs patches for [`WithPatches`](#withpatches). Access via the package-level `Patch` value. Each method returns a [`PatchConfig`](#patchconfig). `Mkdir` and `Remove` are idempotent; other operations error at boot when targeting a path already present in the image unless `Replace: true` is passed in [`PatchOptions`](#patchoptions).
+
+See [Patches](/sandboxes/customize#patches) for conceptual context.
+
+---
+
+#### Patch.Text()
+
+```go
+func (patchFactory) Text(path, content string, opts PatchOptions) PatchConfig
+```
+
+Write UTF-8 text content at `path`.
+
+---
+
+#### Patch.Append()
+
+```go
+func (patchFactory) Append(path, content string) PatchConfig
+```
+
+Append `content` to an existing file at `path`. If the file lives in a lower image layer, it is copied up first.
+
+---
+
+#### Patch.Mkdir()
+
+```go
+func (patchFactory) Mkdir(path string, opts PatchOptions) PatchConfig
+```
+
+Create a directory. Only `opts.Mode` is honoured; `Replace` is ignored (the operation is idempotent).
+
+---
+
+#### Patch.Remove()
+
+```go
+func (patchFactory) Remove(path string) PatchConfig
+```
+
+Delete a file or directory. Idempotent.
+
+---
+
+#### Patch.Symlink()
+
+```go
+func (patchFactory) Symlink(target, link string, opts PatchOptions) PatchConfig
+```
+
+Create a symlink at `link` pointing to `target`. Only `opts.Replace` is honoured.
+
+---
+
+#### Patch.CopyFile()
+
+```go
+func (patchFactory) CopyFile(src, dst string, opts PatchOptions) PatchConfig
+```
+
+Copy a single host file at `src` into the guest rootfs at `dst`.
+
+---
+
+#### Patch.CopyDir()
+
+```go
+func (patchFactory) CopyDir(src, dst string, opts PatchOptions) PatchConfig
+```
+
+Recursively copy a host directory at `src` into the guest rootfs at `dst`. Only `opts.Replace` is honoured.
+
+---
+
+## Init
+
+Helpers that construct [`InitConfig`](#initconfig) values for [`WithInit`](#withinit) to hand off PID 1 inside the guest after agentd setup. Access via the package-level `Init` value. See [Custom init system](/sandboxes/customize#custom-init-system) for image picks and shutdown semantics.
+
+---
+
+#### Init.Auto()
+
+```go
+func (initFactory) Auto() InitConfig
+```
+
+Probe common init paths inside the guest (`/sbin/init`, `/lib/systemd/systemd`, ...).
+
+```go
+m.WithInit(m.Init.Auto())
+```
+
+---
+
+#### Init.Cmd()
+
+```go
+func (initFactory) Cmd(cmd string, opts InitOptions) InitConfig
+```
+
+Specify the init binary explicitly with optional argv/env. `cmd` must be an absolute path inside the guest rootfs.
+
+```go
+m.WithInit(m.Init.Cmd(
+    "/lib/systemd/systemd",
+    m.InitOptions{
+        Args: []string{"--unit=multi-user.target"},
+        Env:  map[string]string{"container": "microsandbox"},
+    },
+))
+```
+
+---
+
+## Options
+
+Functional options for [`CreateSandbox`](#createsandbox). Most options merge across repeated calls; `WithImage` and similar single-value setters replace.
+
+---
+
+#### WithImage()
+
+```go
+func WithImage(image string) SandboxOption
+```
+
+OCI image, local path, or disk image (e.g. `"python:3.12"`, `"docker.io/library/alpine"`). Use [`WithImageDisk`](#withimagedisk) when a disk-image root needs an explicit filesystem type. Required unless [`WithSnapshot`](#withsnapshot) is used.
+
+---
+
+#### WithImageDisk()
+
+```go
+func WithImageDisk(path string, fstype string) SandboxOption
+```
+
+Use a disk image as the root filesystem and optionally provide the inner filesystem type, for example `"ext4"`. The disk format is inferred from the path extension (`.qcow2`, `.raw`, or `.vmdk`).
+
+---
+
+#### WithSnapshot()
+
+```go
+func WithSnapshot(pathOrName string) SandboxOption
+```
+
+Boot from a snapshot artifact by bare name or filesystem path. Mutually exclusive with [`WithImage`](#withimage). See [Snapshots](/sdk/go/snapshots).
+
+---
+
+#### WithMemory()
+
+```go
+func WithMemory(mebibytes uint32) SandboxOption
+```
+
+Guest memory in MiB. This is a limit, not a reservation.
+
+---
+
+#### WithCPUs()
+
+```go
+func WithCPUs(cpus uint8) SandboxOption
+```
+
+Virtual CPUs.
+
+---
+
+#### WithWorkdir()
+
+```go
+func WithWorkdir(path string) SandboxOption
+```
+
+Default working directory for commands.
+
+---
+
+#### WithShell()
+
+```go
+func WithShell(shell string) SandboxOption
+```
+
+Shell binary used by [`Sandbox.Shell`](#shell) and [`Sandbox.AttachShell`](#attachshell). Defaults to `/bin/sh` on most images.
+
+---
+
+#### WithEnv()
+
+```go
+func WithEnv(env map[string]string) SandboxOption
+```
+
+Environment variables visible to all commands. Called repeatedly, the maps merge; later keys overwrite earlier ones.
+
+---
+
+#### WithHostname()
+
+```go
+func WithHostname(hostname string) SandboxOption
+```
+
+Guest hostname.
+
+---
+
+#### WithUser()
+
+```go
+func WithUser(user string) SandboxOption
+```
+
+Default user (UID or name) to run sandbox commands as.
+
+---
+
+#### WithReplace()
+
+```go
+func WithReplace() SandboxOption
+```
+
+Replace any existing sandbox with the same name. Sends SIGTERM, waits up to 10s for graceful exit, then escalates to SIGKILL.
+
+---
+
+#### WithReplaceWithGrace()
+
+```go
+func WithReplaceWithGrace(grace time.Duration) SandboxOption
+```
+
+Like [`WithReplace`](#withreplace) but with a caller-specified grace period between SIGTERM and SIGKILL. Implies `WithReplace`. A zero duration skips SIGTERM and SIGKILLs immediately.
+
+---
+
+#### WithDetached()
+
+```go
+func WithDetached() SandboxOption
+```
+
+Create the sandbox in detached mode. The VM continues running after the Go process exits.
+
+---
+
+#### WithEntrypoint()
+
+```go
+func WithEntrypoint(cmd ...string) SandboxOption
+```
+
+Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution against this sandbox), **not** by [`Sandbox.Exec`](#exec) / [`Sandbox.Shell`](#shell) — those pass `cmd` literally to the guest agent. Use this when configuring sandboxes via the SDK for later CLI attachment. For PID 1 handoff, use [`WithInit`](#withinit) instead.
+
+---
+
+#### WithInit()
+
+```go
+func WithInit(cfg InitConfig) SandboxOption
+```
+
+Hand off PID 1 to a guest init binary. Construct `cfg` via [`Init`](#init).
+
+---
+
+#### WithLogLevel()
+
+```go
+func WithLogLevel(level LogLevel) SandboxOption
+```
+
+Override the sandbox process log verbosity. See [`LogLevel`](#loglevel).
+
+---
+
+#### WithQuietLogs()
+
+```go
+func WithQuietLogs() SandboxOption
+```
+
+Suppress sandbox-level log output entirely.
+
+---
+
+#### WithScripts()
+
+```go
+func WithScripts(scripts map[string]string) SandboxOption
+```
+
+Named scripts mounted at `/.msb/scripts/<name>`. Called repeatedly, entries merge.
+
+---
+
+#### WithPullPolicy()
+
+```go
+func WithPullPolicy(p PullPolicy) SandboxOption
+```
+
+Image pull behaviour. See [`PullPolicy`](#pullpolicy).
+
+---
+
+#### WithMaxDuration()
+
+```go
+func WithMaxDuration(d time.Duration) SandboxOption
+```
+
+Maximum sandbox lifetime. Zero means unlimited. Sub-second precision is rounded up to whole seconds.
+
+---
+
+#### WithIdleTimeout()
+
+```go
+func WithIdleTimeout(d time.Duration) SandboxOption
+```
+
+Stop the sandbox after this much wall-clock time without exec activity. Zero means unlimited.
+
+---
+
+#### WithRegistryAuth()
+
+```go
+func WithRegistryAuth(auth RegistryAuth) SandboxOption
+```
+
+Credentials for pulling from a private OCI registry. See [`RegistryAuth`](#registryauth).
+
+---
+
+#### WithPorts()
+
+```go
+func WithPorts(ports map[uint16]uint16) SandboxOption
+```
+
+Publish host TCP ports into the sandbox (map key = host port, value = guest port).
+
+---
+
+#### WithPortsUDP()
+
+```go
+func WithPortsUDP(ports map[uint16]uint16) SandboxOption
+```
+
+Publish host UDP ports into the sandbox.
+
+---
+
+#### WithNetwork()
+
+```go
+func WithNetwork(net *NetworkConfig) SandboxOption
+```
+
+Configure the network stack — preset, custom rules, DNS, TLS interception. See [Networking](/sdk/go/networking).
+
+---
+
+#### WithSecrets()
+
+```go
+func WithSecrets(secrets ...SecretEntry) SandboxOption
+```
+
+Append credential secrets to the sandbox. Secrets never enter the VM; the network proxy substitutes them at the transport layer. See [Secrets](/sdk/go/secrets).
+
+---
+
+#### WithPatches()
+
+```go
+func WithPatches(patches ...PatchConfig) SandboxOption
+```
+
+Append rootfs patches applied before the VM boots. Patches are only compatible with OverlayFS rootfs (not disk images). Construct via [`Patch`](#patch).
+
+---
+
+#### WithMounts()
+
+```go
+func WithMounts(mounts map[string]MountConfig) SandboxOption
+```
+
+Volume mount configurations keyed by guest path. See [Volumes](/sdk/go/volumes).
+
+---
+
+## SandboxHandle
+
+A lightweight metadata reference to a sandbox returned by [`GetSandbox`](#getsandbox) and [`ListSandboxes`](#listsandboxes). Holds last-known name, status, config JSON, and timestamps; offers lifecycle methods that operate on the sandbox without an active connection. Call [`Connect`](#sandboxhandle-connect) or [`Start`](#sandboxhandle-start) to upgrade to a full `*Sandbox`.
+
+| Method                  | Returns                           | Description                                       |
+| ----------------------- | --------------------------------- | ------------------------------------------------- |
+| `Name()`                | `string`                          | Sandbox name                                      |
+| `Status()`              | [`SandboxStatus`](#sandboxstatus) | Last-known lifecycle status                       |
+| `ConfigJSON()`          | `string`                          | Raw JSON configuration                            |
+| `CreatedAt()`           | `time.Time`                       | Creation time, zero value if unknown              |
+| `UpdatedAt()`           | `time.Time`                       | Last-update time, zero value if unknown           |
+| `Metrics(ctx)`          | `(*Metrics, error)`               | Point-in-time resource metrics                    |
+| `Logs(ctx, opts)`       | `([]LogEntry, error)`             | Persisted sandbox logs                            |
+| `Connect(ctx)`          | `(*Sandbox, error)`               | Reattach to the running sandbox                   |
+| `Start(ctx)`            | `(*Sandbox, error)`               | Boot a stopped sandbox in attached mode           |
+| `StartDetached(ctx)`    | `(*Sandbox, error)`               | Boot a stopped sandbox in detached mode           |
+| `Stop(ctx)`             | `error`                           | Graceful shutdown                                 |
+| `Kill(ctx)`             | `error`                           | Force terminate                                   |
+| `Remove(ctx)`           | `error`                           | Delete sandbox and persisted state                |
+| `Snapshot(ctx, name)`   | `(*SnapshotArtifact, error)`      | Snapshot this stopped sandbox under a bare name   |
+| `SnapshotTo(ctx, path)` | `(*SnapshotArtifact, error)`      | Snapshot this stopped sandbox to an explicit path |
+
+---
+
+## Types
+
+### SandboxConfig
+
+The config struct populated by [`SandboxOption`](#sandboxoption) functions. Most callers build a sandbox via `CreateSandbox(ctx, name, ...opts)`; `SandboxConfig` is exported for callers that prefer to construct a value directly and pass its fields explicitly.
+
+| Field            | Type                                                 | Description                                                          |
+| ---------------- | ---------------------------------------------------- | -------------------------------------------------------------------- |
+| Image            | `string`                                             | OCI image, local path, or disk image                                 |
+| ImageFstype      | `string`                                             | Optional inner filesystem type for disk-image roots                  |
+| Snapshot         | `string`                                             | Snapshot artifact path or bare name; mutually exclusive with `Image` |
+| MemoryMiB        | `uint32`                                             | Guest memory in MiB                                                  |
+| CPUs             | `uint8`                                              | Virtual CPUs                                                         |
+| Workdir          | `string`                                             | Default working directory                                            |
+| Shell            | `string`                                             | Shell binary used by `Shell` calls                                   |
+| Hostname         | `string`                                             | Guest hostname                                                       |
+| User             | `string`                                             | Default guest user                                                   |
+| Replace          | `bool`                                               | Replace existing sandbox with same name                              |
+| ReplaceWithGrace | `*time.Duration`                                     | Grace period between SIGTERM and SIGKILL (implies `Replace`)         |
+| Env              | `map[string]string`                                  | Environment variables                                                |
+| Detached         | `bool`                                               | If `true`, sandbox survives after process exits                      |
+| Entrypoint       | `[]string`                                           | Override image entrypoint                                            |
+| Init             | [`*InitConfig`](#initconfig)                         | Hand PID 1 off to a guest init binary                                |
+| LogLevel         | [`LogLevel`](#loglevel)                              | Sandbox log verbosity override                                       |
+| QuietLogs        | `bool`                                               | Suppress sandbox-level log output                                    |
+| Scripts          | `map[string]string`                                  | Named scripts mounted at `/.msb/scripts/`                            |
+| PullPolicy       | [`PullPolicy`](#pullpolicy)                          | Image pull behaviour                                                 |
+| MaxDuration      | `time.Duration`                                      | Maximum sandbox lifetime                                             |
+| IdleTimeout      | `time.Duration`                                      | Idle timeout                                                         |
+| RegistryAuth     | [`*RegistryAuth`](#registryauth)                     | Private registry credentials                                         |
+| Ports            | `map[uint16]uint16`                                  | Host→guest TCP port mappings                                         |
+| PortsUDP         | `map[uint16]uint16`                                  | Host→guest UDP port mappings                                         |
+| Network          | [`*NetworkConfig`](/sdk/go/networking#networkconfig) | Network policy and configuration                                     |
+| Secrets          | [`[]SecretEntry`](/sdk/go/secrets#secretentry)       | Secret injection entries                                             |
+| Patches          | [`[]PatchConfig`](#patchconfig)                      | Rootfs modifications applied before boot                             |
+| Volumes          | `map[string]MountConfig`                             | Volume mounts keyed by guest path                                    |
+
+### SandboxOption
+
+```go
+type SandboxOption func(*SandboxConfig)
+```
+
+A functional option for [`CreateSandbox`](#createsandbox). All `WithX` helpers listed above return a `SandboxOption`.
+
+### InitConfig
+
+Custom init specification.
+
+| Field | Type                | Description                                                          |
+| ----- | ------------------- | -------------------------------------------------------------------- |
+| Cmd   | `string`            | Absolute path or `"auto"` to the init binary inside the guest rootfs |
+| Args  | `[]string`          | Supplemental argv (`argv[0]` is implicitly `Cmd`)                    |
+| Env   | `map[string]string` | Extra env vars merged on top of the inherited env                    |
+
+### InitOptions
+
+Tuning struct for [`Init.Cmd`](#initcmd).
+
+| Field | Type                | Description       |
+| ----- | ------------------- | ----------------- |
+| Args  | `[]string`          | Supplemental argv |
+| Env   | `map[string]string` | Extra env vars    |
+
+### RegistryAuth
+
+Private registry credentials.
+
+| Field    | Type     | Description       |
+| -------- | -------- | ----------------- |
+| Username | `string` | Registry username |
+| Password | `string` | Registry password |
+
+### PatchConfig
+
+A single rootfs patch produced by [`Patch`](#patch).
+
+| Field   | Type                      | Description                                                 |
+| ------- | ------------------------- | ----------------------------------------------------------- |
+| Kind    | [`PatchKind`](#patchkind) | Patch flavour                                               |
+| Path    | `string`                  | Absolute guest path (text / file / mkdir / remove / append) |
+| Content | `string`                  | Text content (text / append)                                |
+| Mode    | `*uint32`                 | File or directory mode, e.g. `0o644`                        |
+| Replace | `bool`                    | When `true`, overwrite an existing path at the destination  |
+| Src     | `string`                  | Host source path (copy_file / copy_dir)                     |
+| Dst     | `string`                  | Guest destination path (copy_file / copy_dir)               |
+| Target  | `string`                  | Symlink target                                              |
+| Link    | `string`                  | Symlink path                                                |
+
+### PatchOptions
+
+Tuning struct passed to [`Patch`](#patch) methods.
+
+| Field   | Type      | Description                |
+| ------- | --------- | -------------------------- |
+| Mode    | `*uint32` | File or directory mode     |
+| Replace | `bool`    | Overwrite an existing path |
+
+### PatchKind
+
+```go
+type PatchKind string
+```
+
+| Constant            | Value         |
+| ------------------- | ------------- |
+| `PatchKindText`     | `"text"`      |
+| `PatchKindAppend`   | `"append"`    |
+| `PatchKindMkdir`    | `"mkdir"`     |
+| `PatchKindRemove`   | `"remove"`    |
+| `PatchKindSymlink`  | `"symlink"`   |
+| `PatchKindCopyFile` | `"copy_file"` |
+| `PatchKindCopyDir`  | `"copy_dir"`  |
+
+### PullPolicy
+
+```go
+type PullPolicy string
+```
+
+Controls when the SDK fetches an OCI image from the registry.
+
+| Constant              | Value          | Description                                       |
+| --------------------- | -------------- | ------------------------------------------------- |
+| `PullPolicyDefault`   | `""`           | Runtime default (currently `PullPolicyIfMissing`) |
+| `PullPolicyAlways`    | `"always"`     | Pull every time, even if cached locally           |
+| `PullPolicyIfMissing` | `"if-missing"` | Pull only if not already cached                   |
+| `PullPolicyNever`     | `"never"`      | Never pull; fail if missing                       |
+
+### LogOptions
+
+Filters for [`Logs`](#logs).
+
+| Field   | Type          | Description                                        |
+| ------- | ------------- | -------------------------------------------------- |
+| Tail    | `uint64`      | Keep only the last N matching entries              |
+| Since   | `time.Time`   | Inclusive lower timestamp bound                    |
+| Until   | `time.Time`   | Exclusive upper timestamp bound                    |
+| Sources | `[]LogSource` | Sources to include; empty uses the runtime default |
+
+### LogEntry
+
+One persisted log entry.
+
+| Field     | Type                      | Description                              |
+| --------- | ------------------------- | ---------------------------------------- |
+| Source    | [`LogSource`](#logsource) | Origin of the captured data              |
+| SessionID | `*uint64`                 | Relay session ID, nil for system entries |
+| Timestamp | `time.Time`               | Capture timestamp                        |
+| Data      | `[]byte`                  | Captured bytes                           |
+
+| Method   | Returns  | Description                |
+| -------- | -------- | -------------------------- |
+| `Text()` | `string` | Captured bytes as a string |
+
+### LogSource
+
+```go
+type LogSource string
+```
+
+| Constant          | Value      |
+| ----------------- | ---------- |
+| `LogSourceStdout` | `"stdout"` |
+| `LogSourceStderr` | `"stderr"` |
+| `LogSourceOutput` | `"output"` |
+| `LogSourceSystem` | `"system"` |
+
+### LogLevel
+
+```go
+type LogLevel string
+```
+
+Sandbox process log verbosity.
+
+| Constant          | Value     | Description                          |
+| ----------------- | --------- | ------------------------------------ |
+| `LogLevelDefault` | `""`      | Runtime default                      |
+| `LogLevelTrace`   | `"trace"` | Most verbose — all diagnostic output |
+| `LogLevelDebug`   | `"debug"` | Debug and higher                     |
+| `LogLevelInfo`    | `"info"`  | Info and higher                      |
+| `LogLevelWarn`    | `"warn"`  | Warnings and errors only             |
+| `LogLevelError`   | `"error"` | Errors only                          |
+
+### SandboxStatus
+
+```go
+type SandboxStatus string
+```
+
+| Constant                | Value        | Description                    |
+| ----------------------- | ------------ | ------------------------------ |
+| `SandboxStatusRunning`  | `"running"`  | Guest agent is ready           |
+| `SandboxStatusStopped`  | `"stopped"`  | VM shut down; can be restarted |
+| `SandboxStatusCrashed`  | `"crashed"`  | VM exited unexpectedly         |
+| `SandboxStatusDraining` | `"draining"` | Graceful shutdown in progress  |
+| `SandboxStatusPaused`   | `"paused"`   | VM is paused                   |
+
+### Metrics
+
+Point-in-time resource usage snapshot returned by [`Metrics`](#metrics).
+
+| Field            | Type            | Description                                      |
+| ---------------- | --------------- | ------------------------------------------------ |
+| CPUPercent       | `float64`       | CPU usage as a percentage                        |
+| MemoryBytes      | `uint64`        | Current memory usage in bytes                    |
+| MemoryLimitBytes | `uint64`        | Memory limit in bytes                            |
+| DiskReadBytes    | `uint64`        | Total bytes read from disk since boot            |
+| DiskWriteBytes   | `uint64`        | Total bytes written to disk since boot           |
+| NetRxBytes       | `uint64`        | Total bytes received over the network since boot |
+| NetTxBytes       | `uint64`        | Total bytes sent over the network since boot     |
+| Uptime           | `time.Duration` | Time since the sandbox was created               |
+
+### MetricsStreamHandle
+
+Live metrics subscription returned by [`MetricsStream`](#metricsstream).
+
+| Method      | Returns             | Description                                                                      |
+| ----------- | ------------------- | -------------------------------------------------------------------------------- |
+| `Recv(ctx)` | `(*Metrics, error)` | Block until the next snapshot arrives. Returns `(nil, nil)` when the stream ends |
+| `Close()`   | `error`             | Stop the stream and release Rust-side resources                                  |

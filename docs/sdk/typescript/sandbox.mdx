@@ -42,8 +42,6 @@ Begin building a new sandbox. Configure it with chainable setters, then call `.c
 |------|-------------|
 | [`SandboxBuilder`](#sandboxbuilder) | Fluent builder |
 
----
-
 #### Sandbox.get()
 
 ```typescript
@@ -560,7 +558,7 @@ Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter r
 | `quietLogs()` | Suppress log output |
 | `workdir(path)` | Default working directory for commands |
 | `shell(shell)` | Shell binary used by `sandbox.shell(...)` |
-| `entrypoint(iter)` | Override the image entrypoint |
+| `entrypoint(iter)` | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sandbox.exec` / `sandbox.shell` — those pass `cmd` literally |
 | `init(cmd, args?)` | Hand off PID 1 to `cmd` (absolute path or `"auto"`) after agentd setup. See [Custom init system](/sandboxes/customize#custom-init-system) |
 | `initWith(cmd, i => ...)` | Like `init` but with a closure-builder for argv and env (`.arg`, `.args`, `.env`, `.envs`) |
 | `hostname(name)` | Guest hostname |
@@ -585,9 +583,11 @@ Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter r
 | `network(n => ...)` | Configure DNS / TLS / policy / secrets — see [Networking](/sdk/typescript/networking) |
 | `secret(s => ...)` | Add a secret via [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder) |
 | `secretEnv(envVar, value, allowedHost)` | Auto-placeholder shorthand. Generates `$MSB_<ENV_VAR>`. |
-| `build(): SandboxConfig` | Materialize without booting |
+| `build(): Promise<SandboxConfig>` | Materialize without booting |
 | `create(): Promise<Sandbox>` | Build and boot in attached mode |
 | `createDetached(): Promise<Sandbox>` | Build and boot in detached mode |
+| `createWithPullProgress(): Promise<PullProgressCreate>` | Build and boot in attached mode while streaming image pull progress |
+| `createDetachedWithPullProgress(): Promise<PullProgressCreate>` | Build and boot in detached mode while streaming image pull progress |
 
 ### LogLevel
 
@@ -658,6 +658,53 @@ Controls when the SDK fetches an OCI image from the registry.
 | `'always'` | Pull the image every time, even if cached locally |
 | `'if-missing'` | Pull only if the image is not already cached. This is the default. |
 | `'never'` | Never pull; fail if the image is not cached locally |
+
+### PullProgress
+
+Image pull and materialize progress event emitted by [`PullProgressCreate`](#pullprogresscreate). A discriminated union. Narrow on `kind` to access variant-specific fields:
+
+```typescript
+const creation = await Sandbox.builder("demo")
+  .image("alpine")
+  .createWithPullProgress();
+
+for await (const ev of creation) {
+  if (ev.kind === "layerDownloadProgress") {
+    console.log(`${ev.layerIndex}: ${ev.downloadedBytes}/${ev.totalBytes}`);
+  }
+}
+
+const sandbox = await creation.awaitSandbox();
+```
+
+| `kind` value | Additional fields |
+|--------------|-------------------|
+| `'resolving'` | `reference: string` |
+| `'resolved'` | `reference: string`, `manifestDigest: string`, `layerCount: number`, `totalDownloadBytes?: number` |
+| `'layerDownloadProgress'` | `layerIndex: number`, `digest: string`, `downloadedBytes: number`, `totalBytes?: number` |
+| `'layerDownloadComplete'` | `layerIndex: number`, `digest: string`, `downloadedBytes: number` |
+| `'layerDownloadVerifying'` | `layerIndex: number`, `digest: string` |
+| `'layerMaterializeStarted'` | `layerIndex: number`, `diffId: string` |
+| `'layerMaterializeProgress'` | `layerIndex: number`, `bytesRead: number`, `totalBytes: number` |
+| `'layerMaterializeWriting'` | `layerIndex: number` |
+| `'layerMaterializeComplete'` | `layerIndex: number`, `diffId: string` |
+| `'stitchMergingTrees'` | `layerCount: number` |
+| `'stitchWritingFsmeta'` | (none) |
+| `'stitchWritingVmdk'` | (none) |
+| `'stitchComplete'` | (none) |
+| `'complete'` | `reference: string`, `layerCount: number` |
+
+`totalDownloadBytes` and `totalBytes` on the `'resolved'` / `'layerDownloadProgress'` variants may be absent if the manifest omits sizes.
+
+### PullProgressCreate
+
+Async iterable creation handle returned by `Sandbox.builder(name).createWithPullProgress()` and `Sandbox.builder(name).createDetachedWithPullProgress()`. Yields [`PullProgress`](#pullprogress) events as the image is resolved, downloaded, and materialized. Call `awaitSandbox()` after iteration to obtain the live sandbox.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| [Symbol.asyncIterator] | `AsyncGenerator<`[`PullProgress`](#pullprogress)`>` | Use with `for await...of` |
+| progress.recv() | `Promise<`[`PullProgress`](#pullprogress)` \| null>` | Receive next event. Returns `null` when the stream ends. |
+| awaitSandbox() | `Promise<`[`Sandbox`](#instance-methods)`>` | Resolve the underlying creation task and return the running sandbox. Single-shot: a second call throws an already-consumed error. |
 
 ### SandboxConfig
 

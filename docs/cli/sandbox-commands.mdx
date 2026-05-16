@@ -66,6 +66,8 @@ msb run -d --name worker python -- python worker.py
 | `--no-dns-rebind-protection` | Allow DNS responses pointing to private/internal IP addresses |
 | `--dns-nameserver` | Nameserver to forward DNS queries to (repeatable; `IP` or `IP:PORT`). Overrides the host's `/etc/resolv.conf` |
 | `--dns-query-timeout-ms` | Per-DNS-query timeout in milliseconds (default: 5000) |
+| `--net-ipv4-pool` | IPv4 pool used for per-sandbox `/30` guest subnets (default: `172.16.0.0/12`) |
+| `--net-ipv6-pool` | IPv6 pool used for per-sandbox `/64` guest prefixes (default: `fd42:6d73:62::/48`) |
 | `--max-connections` | Limit the number of concurrent network connections |
 | `--trust-host-cas` | Ship the host's trusted root CAs into the guest so outbound TLS works behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, etc.) whose gateway CA is installed on the host but unknown to the guest's stock bundle. Opt-in; by default the guest validates against its stock Mozilla bundle only |
 | `--secret` | Inject a secret that is only sent to an allowed host (`ENV=VALUE@HOST`) |

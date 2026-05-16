@@ -202,6 +202,20 @@ describe("NetworkPolicyBuilder", () => {
     nb.policy(npb);
   });
 
+  it("NetworkBuilder.policy() accepts a link-local group destination", async () => {
+    const { NetworkBuilder } = await import("../../dist/index.js");
+    const nb = new NetworkBuilder();
+    // Plain object → policyJson → Rust serde (snake_case). Without
+    // kebab→snake, `"link-local"` would be rejected.
+    const policy = NetworkPolicy.builder()
+      .defaultDeny()
+      .egress((e) => e.allowLocal())
+      .build();
+    expect(policy.rules.some((r) => r.destination.kind === "group" &&
+      r.destination.group === "link-local")).toBe(true);
+    expect(() => nb.policy(policy)).not.toThrow();
+  });
+
   it("instanceof NetworkPolicyBuilder", () => {
     const npb = NetworkPolicy.builder();
     expect(npb).toBeInstanceOf(NetworkPolicyBuilder);

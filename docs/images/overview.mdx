@@ -41,6 +41,13 @@ from microsandbox import PullPolicy, Sandbox
 
 sb = await Sandbox.create("worker", image="python", pull_policy=PullPolicy.ALWAYS)
 ```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithPullPolicy(m.PullPolicyAlways),
+)
+```
 </CodeGroup>
 
 <Tip>
@@ -85,6 +92,17 @@ sb = await Sandbox.create(
     image="registry.corp.io/team/app:latest",
     registry_auth=RegistryAuth.basic("deploy", os.environ["REGISTRY_PASSWORD"]),
     pull_policy=PullPolicy.ALWAYS,
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("registry.corp.io/team/app:latest"),
+    m.WithRegistryAuth(m.RegistryAuth{
+        Username: "deploy",
+        Password: os.Getenv("REGISTRY_PASSWORD"),
+    }),
+    m.WithPullPolicy(m.PullPolicyAlways),
 )
 ```
 </CodeGroup>
@@ -158,6 +176,13 @@ await using sb = await Sandbox.builder("worker")
     .image("localhost:5050/my-app:latest")
     .registry((r) => r.insecure())
     .create();
+```
+
+```go Go
+// Per-registry TLS configuration is read from ~/.microsandbox/config.json.
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("localhost:5050/my-app:latest"),
+)
 ```
 </CodeGroup>
 

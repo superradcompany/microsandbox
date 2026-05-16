@@ -829,12 +829,13 @@ mod tests {
         .collect()
     }
 
-    #[test]
-    fn test_sandbox_cli_args_include_selected_log_level() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_include_selected_log_level() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .log_level(LogLevel::Debug)
             .build()
+            .await
             .unwrap();
 
         let args = render_args(&config);
@@ -842,11 +843,12 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--debug"));
     }
 
-    #[test]
-    fn test_sandbox_cli_args_are_silent_by_default() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_are_silent_by_default() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
+            .await
             .unwrap();
 
         let args = render_args(&config);
@@ -859,11 +861,12 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn test_sandbox_cli_args_include_agent_sock_path() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_include_agent_sock_path() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
+            .await
             .unwrap();
 
         let rendered = render_args(&config);
@@ -875,12 +878,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_sandbox_cli_args_include_rlimits_env() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_include_rlimits_env() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .rlimit(RlimitResource::Nofile, 65_535)
             .build()
+            .await
             .unwrap();
 
         let args = sandbox_cli_args(
@@ -906,8 +910,8 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn test_encode_rlimits_round_trips_through_protocol_parser() {
+    #[tokio::test]
+    async fn test_encode_rlimits_round_trips_through_protocol_parser() {
         use microsandbox_protocol::exec::ExecRlimit;
 
         let rlimits = vec![
@@ -938,12 +942,13 @@ mod tests {
         assert_eq!(parsed[1].hard, 1024);
     }
 
-    #[test]
-    fn test_sandbox_cli_args_emit_metrics_interval_flag() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_emit_metrics_interval_flag() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .metrics_sample_interval(std::time::Duration::from_millis(1000))
             .build()
+            .await
             .unwrap();
 
         let rendered = render_args(&config);
@@ -956,12 +961,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_sandbox_cli_args_include_custom_metrics_sample_interval() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_include_custom_metrics_sample_interval() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .metrics_sample_interval(std::time::Duration::from_millis(2500))
             .build()
+            .await
             .unwrap();
 
         let rendered = render_args(&config);
@@ -974,12 +980,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_sandbox_cli_args_disabled_metrics_emit_disable_flag() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_disabled_metrics_emit_disable_flag() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .metrics_sample_interval(std::time::Duration::ZERO)
             .build()
+            .await
             .unwrap();
 
         let rendered = render_args(&config);
@@ -996,13 +1003,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_sandbox_cli_args_disable_overrides_positive_interval() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_disable_overrides_positive_interval() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .metrics_sample_interval(std::time::Duration::from_millis(2500))
             .disable_metrics_sample()
             .build()
+            .await
             .unwrap();
 
         let rendered = render_args(&config);
@@ -1019,11 +1027,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_sandbox_cli_args_include_db_connect_timeout() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_include_db_connect_timeout() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
+            .await
             .unwrap();
 
         let rendered = render_args(&config);
@@ -1035,11 +1044,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_sandbox_cli_args_use_passthrough_for_bind_rootfs() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_use_passthrough_for_bind_rootfs() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
+            .await
             .unwrap();
 
         let rendered = render_args(&config);
@@ -1050,9 +1060,13 @@ mod tests {
         assert!(!rendered.contains(&"--rootfs-staging".to_string()));
     }
 
-    #[test]
-    fn test_sandbox_cli_args_oci_without_manifest_digest_emits_no_block_root() {
-        let config = SandboxBuilder::new("test").image("alpine").build().unwrap();
+    #[tokio::test]
+    async fn test_sandbox_cli_args_oci_without_manifest_digest_emits_no_block_root() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .build()
+            .await
+            .unwrap();
         assert!(matches!(config.image, RootfsSource::Oci(_)));
 
         let rendered = render_args(&config);
@@ -1062,13 +1076,14 @@ mod tests {
         assert!(!rendered.iter().any(|a| a.starts_with("MSB_BLOCK_ROOT=")));
     }
 
-    #[test]
-    fn test_sandbox_cli_args_inject_tmpfs_env_var() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_inject_tmpfs_env_var() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/tmp", |m| m.tmpfs().size(256u32))
             .volume("/var/tmp", |m| m.tmpfs())
             .build()
+            .await
             .unwrap();
 
         let rendered = render_args(&config);
@@ -1076,12 +1091,13 @@ mod tests {
         assert!(rendered.contains(&"MSB_TMPFS=/tmp,size=256;/var/tmp".to_string()));
     }
 
-    #[test]
-    fn test_sandbox_cli_args_tmpfs_readonly_appends_ro() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_tmpfs_readonly_appends_ro() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/seed", |m| m.tmpfs().size(64u32).readonly())
             .build()
+            .await
             .unwrap();
 
         let rendered = render_args(&config);
@@ -1089,8 +1105,8 @@ mod tests {
         assert!(rendered.contains(&"MSB_TMPFS=/seed,size=64,ro".to_string()));
     }
 
-    #[test]
-    fn test_sandbox_cli_args_apply_default_oci_tmpfs() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_apply_default_oci_tmpfs() {
         let mut config = SandboxConfig {
             name: "test".into(),
             image: RootfsSource::Oci("alpine".into()),
@@ -1107,11 +1123,12 @@ mod tests {
         assert!(rendered.contains(&"MSB_TMPFS=/tmp,size=256".to_string()));
     }
 
-    #[test]
-    fn test_sandbox_cli_args_omit_tmpfs_env_var_when_no_tmpfs() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_omit_tmpfs_env_var_when_no_tmpfs() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
+            .await
             .unwrap();
 
         let rendered = render_args(&config);
@@ -1119,11 +1136,12 @@ mod tests {
         assert!(!rendered.iter().any(|a| a.starts_with("MSB_TMPFS=")));
     }
 
-    #[test]
-    fn test_sandbox_cli_args_disk_image_with_fstype() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_disk_image_with_fstype() {
         let config = SandboxBuilder::new("test")
             .image_with(|i| i.disk("/tmp/ubuntu.qcow2").fstype("ext4"))
             .build()
+            .await
             .unwrap();
 
         assert!(matches!(config.image, RootfsSource::DiskImage { .. }));
@@ -1147,11 +1165,12 @@ mod tests {
         assert!(!rendered.contains(&"--rootfs-staging".to_string()));
     }
 
-    #[test]
-    fn test_sandbox_cli_args_disk_image_without_fstype() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_disk_image_without_fstype() {
         let config = SandboxBuilder::new("test")
             .image_with(|i| i.disk("/tmp/alpine.raw"))
             .build()
+            .await
             .unwrap();
 
         assert!(matches!(config.image, RootfsSource::DiskImage { .. }));
@@ -1169,12 +1188,13 @@ mod tests {
         assert!(!rendered.contains(&"--rootfs-lower".to_string()));
     }
 
-    #[test]
-    fn test_sandbox_cli_args_file_mount_generates_correct_args() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_file_mount_generates_correct_args() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/guest/config.txt", |m| m.bind("/host/config.txt"))
             .build()
+            .await
             .unwrap();
 
         let mut staged_file_mounts = HashMap::new();
@@ -1205,13 +1225,14 @@ mod tests {
         assert!(!rendered.iter().any(|a| a.starts_with("MSB_DIR_MOUNTS=")));
     }
 
-    #[test]
-    fn test_sandbox_cli_args_mixed_file_and_dir_mounts() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_mixed_file_and_dir_mounts() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .volume("/data", |m| m.bind("/host/data"))
             .volume("/guest/file.txt", |m| m.bind("/host/file.txt"))
             .build()
+            .await
             .unwrap();
 
         let mut staged_file_mounts = HashMap::new();
@@ -1235,8 +1256,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_sandbox_cli_args_disk_image_volume() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_disk_image_volume() {
         // SandboxBuilder::validate canonicalizes disk hosts, so the file
         // must exist. Stage one in a tempdir.
         let dir = tempfile::tempdir().unwrap();
@@ -1252,6 +1273,7 @@ mod tests {
                     .fstype("ext4")
             })
             .build()
+            .await
             .unwrap();
 
         let rendered = render_args(&config);
@@ -1271,8 +1293,8 @@ mod tests {
         assert!(rendered.contains(&expected_env));
     }
 
-    #[test]
-    fn test_sandbox_cli_args_disk_image_readonly() {
+    #[tokio::test]
+    async fn test_sandbox_cli_args_disk_image_readonly() {
         let dir = tempfile::tempdir().unwrap();
         let host = dir.path().join("seed.raw");
         std::fs::write(&host, []).unwrap();
@@ -1282,6 +1304,7 @@ mod tests {
             .image("/tmp/rootfs")
             .volume("/seed", |m| m.disk(host_clone).readonly())
             .build()
+            .await
             .unwrap();
 
         let rendered = render_args(&config);
@@ -1294,15 +1317,15 @@ mod tests {
         assert!(rendered.contains(&format!("MSB_DISK_MOUNTS={tag}:/seed::ro")));
     }
 
-    #[test]
-    fn test_guest_mount_tag_is_deterministic() {
+    #[tokio::test]
+    async fn test_guest_mount_tag_is_deterministic() {
         let a = super::guest_mount_tag("/data");
         let b = super::guest_mount_tag("/data");
         assert_eq!(a, b);
     }
 
-    #[test]
-    fn test_guest_mount_tag_disambiguates_colliding_paths() {
+    #[tokio::test]
+    async fn test_guest_mount_tag_disambiguates_colliding_paths() {
         // The naive `/` → `_` mangling treats these as identical. The
         // slug+hash form must not.
         let a = super::guest_mount_tag("/var/log");
@@ -1312,16 +1335,16 @@ mod tests {
         assert!(b.starts_with("var_log_"));
     }
 
-    #[test]
-    fn test_guest_mount_tag_fits_virtio_blk_serial_limit() {
+    #[tokio::test]
+    async fn test_guest_mount_tag_fits_virtio_blk_serial_limit() {
         // virtio-blk serial is capped at 20 bytes. Long guest paths must still fit.
         let long = "/a/very/deeply/nested/guest/mount/point/that/exceeds/the/slug/cap";
         let tag = super::guest_mount_tag(long);
         assert!(tag.len() <= 20, "tag {tag:?} exceeds 20 bytes");
     }
 
-    #[test]
-    fn test_guest_mount_tag_slug_prefix_is_readable() {
+    #[tokio::test]
+    async fn test_guest_mount_tag_slug_prefix_is_readable() {
         assert!(super::guest_mount_tag("/data").starts_with("data_"));
         assert!(super::guest_mount_tag("/var/log").starts_with("var_log_"));
     }
@@ -1342,12 +1365,13 @@ mod tests {
         })
     }
 
-    #[test]
-    fn test_handoff_init_emits_only_cmd_when_args_and_env_empty() {
+    #[tokio::test]
+    async fn test_handoff_init_emits_only_cmd_when_args_and_env_empty() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .init("/lib/systemd/systemd")
             .build()
+            .await
             .unwrap();
 
         let args = render_args(&config);
@@ -1360,14 +1384,15 @@ mod tests {
         assert!(find_env(&args, "MSB_HANDOFF_INIT_ENV").is_none());
     }
 
-    #[test]
-    fn test_handoff_init_joins_argv_with_unit_separator() {
+    #[tokio::test]
+    async fn test_handoff_init_joins_argv_with_unit_separator() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .init_with("/lib/systemd/systemd", |i| {
                 i.args(["--unit=multi-user.target", "--log-level=warning"])
             })
             .build()
+            .await
             .unwrap();
 
         let args = render_args(&config);
@@ -1376,14 +1401,15 @@ mod tests {
         assert_eq!(argv, "--unit=multi-user.target\x1f--log-level=warning");
     }
 
-    #[test]
-    fn test_handoff_init_emits_env_pairs_separated_by_unit_separator() {
+    #[tokio::test]
+    async fn test_handoff_init_emits_env_pairs_separated_by_unit_separator() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .init_with("/sbin/init", |i| {
                 i.env("container", "microsandbox").env("LANG", "C.UTF-8")
             })
             .build()
+            .await
             .unwrap();
 
         let args = render_args(&config);
@@ -1392,11 +1418,12 @@ mod tests {
         assert_eq!(env_val, "container=microsandbox\x1fLANG=C.UTF-8");
     }
 
-    #[test]
-    fn test_handoff_init_omitted_when_unset() {
+    #[tokio::test]
+    async fn test_handoff_init_omitted_when_unset() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .build()
+            .await
             .unwrap();
 
         let args = render_args(&config);
@@ -1406,22 +1433,24 @@ mod tests {
         assert!(find_env(&args, "MSB_HANDOFF_INIT_ENV").is_none());
     }
 
-    #[test]
-    fn test_handoff_init_separator_in_arg_rejected_at_build_time() {
+    #[tokio::test]
+    async fn test_handoff_init_separator_in_arg_rejected_at_build_time() {
         let err = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .init_with("/sbin/init", |i| i.args(["foo\x1fbar"]))
             .build()
+            .await
             .unwrap_err();
         assert!(format!("{err}").contains("0x1F"));
     }
 
-    #[test]
-    fn test_handoff_init_equals_in_env_key_rejected_at_build_time() {
+    #[tokio::test]
+    async fn test_handoff_init_equals_in_env_key_rejected_at_build_time() {
         let err = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
             .init_with("/sbin/init", |i| i.env("BAD=KEY", "v"))
             .build()
+            .await
             .unwrap_err();
         assert!(format!("{err}").contains("must not contain '='"));
     }

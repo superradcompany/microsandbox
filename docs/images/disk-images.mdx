@@ -75,6 +75,22 @@ sb = await Sandbox.create("custom-vm", image="./ubuntu-22.04.qcow2", cpus=2, mem
 # Explicit filesystem type
 sb2 = await Sandbox.create("custom-vm", image=Image.disk("./alpine.raw", fstype="ext4"), cpus=1, memory=512)
 ```
+
+```go Go
+// Auto-detect format from the file extension
+sb, err := m.CreateSandbox(ctx, "custom-vm",
+    m.WithImage("./ubuntu-22.04.qcow2"),
+    m.WithCPUs(2),
+    m.WithMemory(2048),
+)
+
+// Explicit filesystem type
+sb2, err := m.CreateSandbox(ctx, "custom-vm-2",
+    m.WithImageDisk("./alpine.raw", "ext4"),
+    m.WithCPUs(1),
+    m.WithMemory(512),
+)
+```
 </CodeGroup>
 
 <Note>

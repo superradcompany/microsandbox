@@ -147,7 +147,7 @@ mod tests {
     fn with_gateway() -> SharedState {
         let s = SharedState::new(4);
         s.set_gateway_ips(
-            Some(Ipv4Addr::new(100, 96, 0, 1)),
+            Some(Ipv4Addr::new(198, 18, 0, 1)),
             Some("fd42:6d73:62::1".parse().unwrap()),
         );
         s
@@ -341,21 +341,18 @@ mod tests {
     }
 
     /// `Host` takes precedence over the static categories that would
-    /// otherwise claim the gateway IPs (CGNAT for IPv4, ULA for IPv6).
-    /// This means an `allow Public` rule won't accidentally allow host
-    /// traffic, and a `deny Private` rule won't accidentally cover the
-    /// host gateway either.
+    /// otherwise claim the gateway IPs (public fallback for IPv4, ULA
+    /// for IPv6).
     #[test]
-    fn host_takes_precedence_over_private() {
+    fn host_takes_precedence_over_static_groups() {
         let s = with_gateway();
-        let v4 = IpAddr::V4(Ipv4Addr::new(100, 96, 0, 1));
+        let v4 = IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1));
         let v6 = IpAddr::V6("fd42:6d73:62::1".parse().unwrap());
 
         assert!(matches_group(DestinationGroup::Host, v4, &s));
         assert!(matches_group(DestinationGroup::Host, v6, &s));
-        assert!(!matches_group(DestinationGroup::Private, v4, &s));
-        assert!(!matches_group(DestinationGroup::Private, v6, &s));
         assert!(!matches_group(DestinationGroup::Public, v4, &s));
+        assert!(!matches_group(DestinationGroup::Private, v6, &s));
         assert!(!matches_group(DestinationGroup::Public, v6, &s));
     }
 
@@ -389,7 +386,7 @@ mod tests {
                 DestinationGroup::Multicast,
             ),
             (
-                IpAddr::V4(Ipv4Addr::new(100, 96, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1)),
                 DestinationGroup::Host,
             ),
         ];

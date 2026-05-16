@@ -610,8 +610,8 @@ impl SandboxBuilder {
     }
 
     /// Pre-populate the snapshot resolution for callers that opened
-    /// the artifact synchronously and don't want the async
-    /// [`resolve_pending`](Self::resolve_pending) step.
+    /// the artifact synchronously and don't want the async manifest
+    /// read that [`build`](Self::build) would otherwise perform.
     ///
     /// Used by the Python SDK helpers, where kwargs-style config
     /// construction has to stay synchronous. Callers that take this
@@ -629,27 +629,19 @@ impl SandboxBuilder {
 
     /// Build the configuration without creating the sandbox.
     ///
-    /// **Caller responsibility**: if the builder was configured via
-    /// [`from_snapshot`](Self::from_snapshot), call
-    /// [`resolve_pending`](Self::resolve_pending) first. The async
-    /// `create*` methods do this automatically.
-    pub fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
+    /// If [`from_snapshot`](Self::from_snapshot) was called, the snapshot
+    /// manifest is opened here and its pinned image reference, manifest
+    /// digest, and upper-layer source path are populated onto the config.
+    pub async fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
+        self.resolve_pending().await?;
         self.validate()?;
         Ok(self.config)
     }
 
-    /// Resolve any pending snapshot reference, mutating the builder
-    /// to set `image` and a transient `snapshot_upper_source`.
-    ///
-    /// Called automatically by the async `create*` methods. Public
-    /// for callers that want to drive the builder manually (e.g. the
-    /// `msb run --snapshot` path that uses
-    /// [`create_with_pull_progress`](Self::create_with_pull_progress)).
-    ///
-    /// If the user has already called [`image`](Self::image), the
-    /// pre-set image must match the snapshot's pinned image
-    /// reference; otherwise the call errors.
-    pub async fn resolve_pending(&mut self) -> MicrosandboxResult<()> {
+    /// Open the deferred snapshot artifact and copy its pinned image
+    /// reference, manifest digest, and upper-layer source path into the
+    /// config. Internal — driven by [`build`](Self::build).
+    async fn resolve_pending(&mut self) -> MicrosandboxResult<()> {
         let Some(snapshot_ref) = self.pending_snapshot.take() else {
             return Ok(());
         };
@@ -681,16 +673,14 @@ impl SandboxBuilder {
     }
 
     /// Create the sandbox. Boots the VM with agentd ready.
-    pub async fn create(mut self) -> MicrosandboxResult<super::Sandbox> {
-        self.resolve_pending().await?;
-        let config = self.build()?;
+    pub async fn create(self) -> MicrosandboxResult<super::Sandbox> {
+        let config = self.build().await?;
         super::Sandbox::create(config).await
     }
 
     /// Create the sandbox for detached/background use.
-    pub async fn create_detached(mut self) -> MicrosandboxResult<super::Sandbox> {
-        self.resolve_pending().await?;
-        let config = self.build()?;
+    pub async fn create_detached(self) -> MicrosandboxResult<super::Sandbox> {
+        let config = self.build().await?;
         super::Sandbox::create_detached(config).await
     }
 
@@ -705,21 +695,14 @@ impl SandboxBuilder {
     /// happens inside the spawned task so this entry point stays
     /// synchronous.
     pub fn create_with_pull_progress(
-        mut self,
+        self,
     ) -> crate::MicrosandboxResult<(
         PullProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
     )> {
-        let pending = self.pending_snapshot.is_some();
-        if !pending {
-            let config = self.build()?;
-            return Ok(super::Sandbox::create_with_pull_progress(config));
-        }
-
         let (handle, sender) = microsandbox_image::progress_channel();
         let task = tokio::spawn(async move {
-            self.resolve_pending().await?;
-            let config = self.build()?;
+            let config = self.build().await?;
             super::Sandbox::create_with_mode(
                 config,
                 crate::runtime::SpawnMode::Attached,
@@ -733,21 +716,14 @@ impl SandboxBuilder {
     /// Like `create_with_pull_progress` but spawns the sandbox process in detached
     /// mode so the sandbox survives after the creating process exits.
     pub fn create_detached_with_pull_progress(
-        mut self,
+        self,
     ) -> crate::MicrosandboxResult<(
         PullProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
     )> {
-        let pending = self.pending_snapshot.is_some();
-        if !pending {
-            let config = self.build()?;
-            return Ok(super::Sandbox::create_detached_with_pull_progress(config));
-        }
-
         let (handle, sender) = microsandbox_image::progress_channel();
         let task = tokio::spawn(async move {
-            self.resolve_pending().await?;
-            let config = self.build()?;
+            let config = self.build().await?;
             super::Sandbox::create_with_mode(
                 config,
                 crate::runtime::SpawnMode::Detached,
@@ -868,35 +844,38 @@ mod tests {
     #[cfg(feature = "net")]
     use microsandbox_network::config::PortProtocol;
 
-    #[test]
-    fn test_builder_sets_runtime_log_level() {
+    #[tokio::test]
+    async fn test_builder_sets_runtime_log_level() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .log_level(LogLevel::Debug)
             .build()
+            .await
             .unwrap();
 
         assert_eq!(config.log_level, Some(LogLevel::Debug));
     }
 
-    #[test]
-    fn test_builder_quiet_logs_clears_runtime_log_level() {
+    #[tokio::test]
+    async fn test_builder_quiet_logs_clears_runtime_log_level() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .log_level(LogLevel::Trace)
             .quiet_logs()
             .build()
+            .await
             .unwrap();
 
         assert_eq!(config.log_level, None);
     }
 
-    #[test]
-    fn test_builder_metrics_sample_interval_sets_ms() {
+    #[tokio::test]
+    async fn test_builder_metrics_sample_interval_sets_ms() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .metrics_sample_interval(std::time::Duration::from_millis(750))
             .build()
+            .await
             .unwrap();
 
         assert_eq!(
@@ -905,25 +884,27 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_builder_metrics_sample_interval_zero_is_disabled() {
+    #[tokio::test]
+    async fn test_builder_metrics_sample_interval_zero_is_disabled() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .metrics_sample_interval(std::time::Duration::ZERO)
             .build()
+            .await
             .unwrap();
 
         assert!(config.metrics_sample_interval_ms.is_none());
         assert!(config.effective_metrics_interval().is_none());
     }
 
-    #[test]
-    fn test_builder_disable_metrics_sample_overrides_interval() {
+    #[tokio::test]
+    async fn test_builder_disable_metrics_sample_overrides_interval() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .metrics_sample_interval(std::time::Duration::from_millis(5000))
             .disable_metrics_sample()
             .build()
+            .await
             .unwrap();
 
         assert!(config.disable_metrics_sample);
@@ -934,23 +915,25 @@ mod tests {
         assert!(config.effective_metrics_interval().is_none());
     }
 
-    #[test]
-    fn test_builder_replace_sets_replace_existing() {
+    #[tokio::test]
+    async fn test_builder_replace_sets_replace_existing() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .replace()
             .build()
+            .await
             .unwrap();
 
         assert!(config.replace_existing);
     }
 
-    #[test]
-    fn test_builder_rlimit_sets_sandbox_wide_limit() {
+    #[tokio::test]
+    async fn test_builder_rlimit_sets_sandbox_wide_limit() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .rlimit(RlimitResource::Nofile, 65_535)
             .build()
+            .await
             .unwrap();
 
         assert_eq!(config.rlimits.len(), 1);
@@ -960,14 +943,15 @@ mod tests {
     }
 
     #[cfg(feature = "net")]
-    #[test]
-    fn test_builder_ports_are_repeatable() {
+    #[tokio::test]
+    async fn test_builder_ports_are_repeatable() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .port(8080, 80)
             .port(3000, 3000)
             .port_udp(5353, 53)
             .build()
+            .await
             .unwrap();
 
         assert_eq!(config.network.ports.len(), 3);
@@ -983,14 +967,15 @@ mod tests {
     }
 
     #[cfg(feature = "net")]
-    #[test]
-    fn test_builder_disable_network_denies_all() {
+    #[tokio::test]
+    async fn test_builder_disable_network_denies_all() {
         use microsandbox_network::policy::Action;
 
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .disable_network()
             .build()
+            .await
             .unwrap();
 
         assert!(!config.network.enabled);
@@ -1002,14 +987,15 @@ mod tests {
     }
 
     #[cfg(feature = "net")]
-    #[test]
-    fn test_builder_network_preserves_top_level_settings() {
+    #[tokio::test]
+    async fn test_builder_network_preserves_top_level_settings() {
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .port(8080, 80)
             .secret_env("OPENAI_API_KEY", "secret", "api.openai.com")
             .network(|n| n.max_connections(128))
             .build()
+            .await
             .unwrap();
 
         assert_eq!(config.network.ports.len(), 1);
@@ -1034,14 +1020,15 @@ mod tests {
         (dir, a, b)
     }
 
-    #[test]
-    fn test_builder_rejects_two_writable_same_host() {
+    #[tokio::test]
+    async fn test_builder_rejects_two_writable_same_host() {
         let (_dir, a, _) = two_disk_files();
         let err = SandboxBuilder::new("test")
             .image("alpine")
             .volume("/x", |v| v.disk(a.clone()))
             .volume("/y", |v| v.disk(a.clone()))
             .build()
+            .await
             .unwrap_err();
         assert!(
             err.to_string()
@@ -1049,8 +1036,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_builder_rejects_writable_plus_readonly_same_host() {
+    #[tokio::test]
+    async fn test_builder_rejects_writable_plus_readonly_same_host() {
         // Mixed writable+readonly still corrupts because the writable side's
         // host page cache invalidates the readonly side's view.
         let (_dir, a, _) = two_disk_files();
@@ -1059,6 +1046,7 @@ mod tests {
             .volume("/x", |v| v.disk(a.clone()))
             .volume("/y", |v| v.disk(a.clone()).readonly())
             .build()
+            .await
             .unwrap_err();
         assert!(
             err.to_string()
@@ -1066,14 +1054,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_builder_rejects_two_readonly_same_host() {
+    #[tokio::test]
+    async fn test_builder_rejects_two_readonly_same_host() {
         let (_dir, a, _) = two_disk_files();
         let err = SandboxBuilder::new("test")
             .image("alpine")
             .volume("/x", |v| v.disk(a.clone()).readonly())
             .volume("/y", |v| v.disk(a.clone()).readonly())
             .build()
+            .await
             .unwrap_err();
         assert!(
             err.to_string()
@@ -1081,19 +1070,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_builder_accepts_two_writable_different_hosts() {
+    #[tokio::test]
+    async fn test_builder_accepts_two_writable_different_hosts() {
         let (_dir, a, b) = two_disk_files();
         SandboxBuilder::new("test")
             .image("alpine")
             .volume("/x", |v| v.disk(a))
             .volume("/y", |v| v.disk(b))
             .build()
+            .await
             .unwrap();
     }
 
-    #[test]
-    fn test_builder_canonicalizes_host_paths() {
+    #[tokio::test]
+    async fn test_builder_canonicalizes_host_paths() {
         // /foo/./bar resolves to the same canonical as /foo/bar; the check
         // must catch this even though the byte strings differ.
         let dir = tempfile::tempdir().unwrap();
@@ -1107,6 +1097,7 @@ mod tests {
             .volume("/x", |v| v.disk(a))
             .volume("/y", |v| v.disk(dotted))
             .build()
+            .await
             .unwrap_err();
         assert!(
             err.to_string()
@@ -1114,14 +1105,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_builder_rejects_missing_disk_host() {
+    #[tokio::test]
+    async fn test_builder_rejects_missing_disk_host() {
         let dir = tempfile::tempdir().unwrap();
         let nonexistent = dir.path().join("nope.qcow2");
         let err = SandboxBuilder::new("test")
             .image("alpine")
             .volume("/x", |v| v.disk(nonexistent))
             .build()
+            .await
             .unwrap_err();
         assert!(
             err.to_string()

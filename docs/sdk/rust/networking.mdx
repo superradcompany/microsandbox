@@ -615,6 +615,26 @@ Limit the maximum number of concurrent network connections from the sandbox.
 
 ---
 
+#### ipv4_pool()
+
+```rust
+fn ipv4_pool(self, pool: Ipv4Network) -> Self
+```
+
+Set the IPv4 pool used to derive per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12`.
+
+---
+
+#### ipv6_pool()
+
+```rust
+fn ipv6_pool(self, pool: Ipv6Network) -> Self
+```
+
+Set the IPv6 pool used to derive per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48`.
+
+---
+
 #### on_secret_violation()
 
 ```rust

@@ -129,6 +129,21 @@
               "sdk/python/snapshots",
               "sdk/python/events"
             ]
+          },
+          {
+            "group": "Go SDK",
+            "icon": "golang",
+            "pages": [
+              "sdk/go/sandbox",
+              "sdk/go/execution",
+              "sdk/go/filesystem",
+              "sdk/go/volumes",
+              "sdk/go/images",
+              "sdk/go/networking",
+              "sdk/go/secrets",
+              "sdk/go/snapshots",
+              "sdk/go/events"
+            ]
           }
         ]
       },

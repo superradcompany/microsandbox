@@ -18,6 +18,8 @@ Network(
     deny_domain_suffixes: tuple[str, ...] = (),
     dns: DnsConfig | None = None,
     tls: TlsConfig | None = None,
+    ipv4_pool: str | None = None,
+    ipv6_pool: str | None = None,
     max_connections: int | None = None,
     trust_host_cas: bool | None = None,
 )
@@ -31,6 +33,8 @@ Network(
 | deny_domain_suffixes | `tuple[str, ...]` | Deny egress to all subdomains of these suffixes. Adds `deny DomainSuffix("...")` rules; same enforcement layers as `deny_domains` |
 | dns | [`DnsConfig`](#dnsconfig) ` \| None` | DNS interception configuration |
 | tls | [`TlsConfig`](#tlsconfig) ` \| None` | TLS interception configuration |
+| ipv4_pool | `str \| None` | IPv4 pool used for per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |
+| ipv6_pool | `str \| None` | IPv6 pool used for per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
 | max_connections | `int \| None` | Maximum concurrent connections |
 | trust_host_cas | `bool \| None` | Ship the host's trusted root CAs into the guest at boot so outbound TLS works behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.). These proxies install a gateway CA on the host that's unknown to the guest's stock Mozilla bundle. Opt-in |
 

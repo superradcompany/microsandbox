@@ -4,7 +4,7 @@ description: Typed errors and resource cleanup patterns
 icon: "triangle-exclamation"
 ---
 
-All SDKs surface typed errors so you can match on specific failure modes instead of parsing strings. Rust has an `Error` enum, TypeScript exposes a dedicated subclass per variant (use `instanceof`), and Python provides dedicated exception classes.
+All SDKs surface typed errors so you can match on specific failure modes instead of parsing strings. Rust has an `Error` enum, TypeScript exposes a dedicated subclass per variant (use `instanceof`), Python provides dedicated exception classes, and Go provides an `*Error` value with an `ErrorKind` discriminator matched via `m.IsKind(err, kind)` or `errors.As`.
 
 ## Matching errors
 
@@ -91,6 +91,42 @@ except ExecTimeoutError:
     print("Timed out")
 ```
 
+```go Go
+import (
+    "context"
+    "errors"
+    "log"
+
+    m "github.com/superradcompany/microsandbox/sdk/go"
+)
+
+func getOrCreate(ctx context.Context, name string) (*m.Sandbox, error) {
+    handle, err := m.GetSandbox(ctx, name)
+    if err != nil {
+        if m.IsKind(err, m.ErrSandboxNotFound) {
+            return m.CreateSandbox(ctx, name,
+                m.WithImage("python"))
+        }
+        return nil, err
+    }
+    return handle.Start(ctx)
+}
+
+out, err := sb.Exec(ctx, "python", []string{"script.py"})
+switch {
+case err == nil && !out.Success():
+    log.Printf("exit %d: %s", out.ExitCode(), out.Stderr())
+case m.IsKind(err, m.ErrExecTimeout):
+    log.Println("timed out")
+case err != nil:
+    // errors.As for deeper inspection.
+    var me *m.Error
+    if errors.As(err, &me) {
+        log.Printf("kind=%s message=%s", me.Kind, me.Message)
+    }
+}
+```
+
 </CodeGroup>
 
 ## Spawn-time exec failures
@@ -167,6 +203,39 @@ except ExecFailedError as e:
         print(f"Spawn failed ({e.kind}): {e.message}")
     # e.errno, e.errno_name, e.stage are also available
 ```
+
+```go Go
+// Streaming exec surfaces spawn-failure detail via ExecEventFailed.
+h, err := sb.ExecStream(ctx, "nonexistent", nil)
+if err != nil {
+    return err
+}
+defer h.Close()
+
+for {
+    ev, err := h.Recv(ctx)
+    if err != nil {
+        return err
+    }
+    switch ev.Kind {
+    case m.ExecEventExited:
+        // Program ran — inspect ev.ExitCode.
+    case m.ExecEventFailed:
+        f := ev.Failure // *m.ExecFailure
+        switch f.Kind {
+        case "not_found":
+            log.Printf("Binary not on PATH: %s", f.Message)
+        case "permission_denied":
+            log.Printf("Not executable (chmod +x?): %s", f.Message)
+        default:
+            log.Printf("Spawn failed (%s): %s", f.Kind, f.Message)
+        }
+        // f.Errno (*int), f.ErrnoName, f.Path are also available.
+    case m.ExecEventDone:
+        return nil
+    }
+}
+```
 </CodeGroup>
 
 The CLI maps these kinds to POSIX-style exit codes: `127` for `NotFound`, `126` for `PermissionDenied` and `NotExecutable`, `1` otherwise. SDK callers reading the error directly don't need to think about exit codes — branch on `kind` instead.
@@ -211,9 +280,17 @@ except SandboxAlreadyExistsError:
     print("sandbox already exists; resume or pass replace=True")
 ```
 
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("alpine"))
+if m.IsKind(err, m.ErrSandboxAlreadyExists) {
+    log.Println("sandbox already exists; resume or pass WithReplace()")
+}
+```
+
 </CodeGroup>
 
-Pass `replace()` / `replace=True` / `--replace` to stop the existing sandbox and recreate it. See [Replace existing](/sandboxes/overview#replace-existing) for the grace-period knob.
+Pass `replace()` / `replace=True` / `--replace` / `WithReplace()` to stop the existing sandbox and recreate it. See [Replace existing](/sandboxes/overview#replace-existing) for the grace-period knob.
 
 ## Sandbox start failures
 
@@ -263,13 +340,24 @@ except BootStartError as e:
     if e.stage == "mount":
         print("Hint: a host volume path may not exist.")
 ```
+
+```go Go
+// The Go SDK currently surfaces boot failures as a generic *m.Error
+// (typically Kind=ErrInternal or ErrInvalidConfig). A dedicated BootStart
+// kind with stage+errno detail lands in a future release.
+_, err := m.CreateSandbox(ctx, "svc", m.WithImage("alpine"))
+var me *m.Error
+if errors.As(err, &me) {
+    log.Printf("sandbox boot failed (kind=%s): %s", me.Kind, me.Message)
+}
+```
 </CodeGroup>
 
 The CLI prepends the same payload as a styled `error:` block before any captured log output, so you see "what went wrong + a hint" inline. SDK callers get the structured payload to make their own decisions.
 
 ## Resource cleanup
 
-Sandboxes hold compute resources, so release them when done. In Rust, `Drop` handles cleanup when the sandbox goes out of scope. In TypeScript, prefer `await using` (Node 22+) which calls `Sandbox.stop()` automatically when the binding leaves scope.
+Sandboxes hold compute resources, so release them when done. In Rust, `Drop` handles cleanup when the sandbox goes out of scope. In TypeScript, prefer `await using` (Node 22+) which calls `Sandbox.stop()` automatically when the binding leaves scope. In Go, pair every `CreateSandbox` with a `defer` that calls `StopAndWait` + `Close`.
 
 <CodeGroup>
 ```rust Rust
@@ -305,6 +393,25 @@ async function runTemporary(): Promise<string> {
 async with await Sandbox.create("temp", image="python") as sb:
     output = await sb.exec("python", ["-c", "print('hello')"])
     print(output.stdout_text)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "temp",
+    m.WithImage("python"),
+    m.WithReplace(),
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer func() {
+    stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+    _, _ = sb.StopAndWait(stopCtx)
+    _ = sb.Close()
+}()
+
+out, _ := sb.Exec(ctx, "python", []string{"-c", "print('hello')"})
+fmt.Println(out.Stdout())
 ```
 
 </CodeGroup>

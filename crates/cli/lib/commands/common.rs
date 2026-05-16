@@ -171,6 +171,16 @@ pub struct SandboxOpts {
     #[arg(long, value_name = "MS")]
     pub dns_query_timeout_ms: Option<u64>,
 
+    /// IPv4 pool used for per-sandbox /30 guest subnets. Default: 172.16.0.0/12.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-ipv4-pool", value_name = "CIDR")]
+    pub net_ipv4_pool: Option<String>,
+
+    /// IPv6 pool used for per-sandbox /64 guest prefixes. Default: fd42:6d73:62::/48.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-ipv6-pool", value_name = "CIDR")]
+    pub net_ipv6_pool: Option<String>,
+
     /// Network rule. Repeatable; each value is a comma-separated list of
     /// rule tokens. Token grammar:
     /// `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`.
@@ -481,6 +491,12 @@ fn apply_network_opts(
         if opts.net_default_ingress.is_some() {
             conflicts.push("--net-default-ingress");
         }
+        if opts.net_ipv4_pool.is_some() {
+            conflicts.push("--net-ipv4-pool");
+        }
+        if opts.net_ipv6_pool.is_some() {
+            conflicts.push("--net-ipv6-pool");
+        }
         if !conflicts.is_empty() {
             anyhow::bail!(
                 "--no-net cannot be combined with {}; --no-net disables the guest network entirely, so rules and defaults are dead code. Drop --no-net to apply rules, or drop the rule flags to keep the network off.",
@@ -505,6 +521,8 @@ fn apply_network_opts(
         || !opts.net_rule.is_empty()
         || opts.net_default_egress.is_some()
         || opts.net_default_ingress.is_some()
+        || opts.net_ipv4_pool.is_some()
+        || opts.net_ipv6_pool.is_some()
         || opts.max_connections.is_some()
         || opts.trust_host_cas
         || opts.tls_intercept
@@ -532,6 +550,22 @@ fn apply_network_opts(
             &opts.deny_domain_suffix,
         )?;
         let max_conn = opts.max_connections;
+        let ipv4_pool = opts
+            .net_ipv4_pool
+            .as_deref()
+            .map(|s| {
+                s.parse::<ipnetwork::Ipv4Network>()
+                    .map_err(anyhow::Error::from)
+            })
+            .transpose()?;
+        let ipv6_pool = opts
+            .net_ipv6_pool
+            .as_deref()
+            .map(|s| {
+                s.parse::<ipnetwork::Ipv6Network>()
+                    .map_err(anyhow::Error::from)
+            })
+            .transpose()?;
         let trust_host_cas = opts.trust_host_cas;
         let tls_intercept = opts.tls_intercept;
         let tls_ports = opts.tls_intercept_port.clone();
@@ -560,6 +594,12 @@ fn apply_network_opts(
             }
             if let Some(max) = max_conn {
                 n = n.max_connections(max);
+            }
+            if let Some(pool) = ipv4_pool {
+                n = n.ipv4_pool(pool);
+            }
+            if let Some(pool) = ipv6_pool {
+                n = n.ipv6_pool(pool);
             }
             if trust_host_cas {
                 n = n.trust_host_cas(true);

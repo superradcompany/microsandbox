@@ -45,13 +45,16 @@
 #### <img height="14" src="https://octicons-col.vercel.app/move-to-bottom/A770EF">&nbsp;&nbsp;Install the SDK
 
 > ```sh
-> cargo add microsandbox    # 🦀 Rust
+> cargo add microsandbox                                   # 🦀 Rust
 > ```
 > ```sh
-> uv add microsandbox       # 🐍 Python
+> uv add microsandbox                                      # 🐍 Python
 > ```
 > ```sh
-> npm i microsandbox        # 🟦 TypeScript
+> npm i microsandbox                                       # 🟦 TypeScript
+> ```
+> ```sh
+> go get github.com/superradcompany/microsandbox/sdk/go    # 🐹 Go
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install the CLI **(Optional)**
@@ -150,6 +153,49 @@ The SDK lets you create and control sandboxes directly from your application. `S
 > const output = await sandbox.exec("python", ["-c", "print('Hello from a microVM!')"]);
 >
 > console.log(output.stdout());
+> ```
+>
+> </details>
+>
+> <details>
+> <summary><b>&nbsp;Go Example →</b></summary>
+>
+> ```go
+> package main
+>
+> import (
+>     "context"
+>     "fmt"
+>     "log"
+>
+>     microsandbox "github.com/superradcompany/microsandbox/sdk/go"
+> )
+>
+> func main() {
+>     ctx := context.Background()
+>
+>     // Downloads the microsandbox runtime to ~/.microsandbox/ on first run.
+>     if err := microsandbox.EnsureInstalled(ctx); err != nil {
+>         log.Fatal(err)
+>     }
+>
+>     sandbox, err := microsandbox.CreateSandbox(ctx, "my-sandbox",
+>         microsandbox.WithImage("python"),
+>         microsandbox.WithCPUs(1),
+>         microsandbox.WithMemory(512),
+>     )
+>     if err != nil {
+>         log.Fatal(err)
+>     }
+>     defer sandbox.StopAndWait(ctx)
+>
+>     output, err := sandbox.Exec(ctx, "python", []string{"-c", "print('Hello from a microVM!')"})
+>     if err != nil {
+>         log.Fatal(err)
+>     }
+>
+>     fmt.Println(output.Stdout())
+> }
 > ```
 >
 > </details>

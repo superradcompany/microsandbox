@@ -238,7 +238,7 @@ export declare class InterfaceOverridesBuilder {
   mac(mac: string): this
   /** Set the interface MTU. Default: 1500. */
   mtu(mtu: number): this
-  /** Set the guest IPv4 address (e.g. `"100.96.0.5"`). */
+  /** Set the guest IPv4 address (e.g. `"172.16.0.5"`). */
   ipv4(address: string): this
   /** Set the guest IPv6 address (e.g. `"fd42:6d73:62::5"`). */
   ipv6(address: string): this
@@ -358,6 +358,10 @@ export declare class NetworkBuilder {
   onSecretViolation(action: string): this
   /** Set the maximum number of concurrent connections. */
   maxConnections(max: number): this
+  /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
+  ipv4Pool(pool: string): this
+  /** Set the IPv6 pool used for per-sandbox /64 guest prefixes. */
+  ipv6Pool(pool: string): this
   /** Trust the host's root CAs inside the guest. Default: false. */
   trustHostCAs(enabled: boolean): this
   /**
