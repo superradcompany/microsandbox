@@ -238,7 +238,7 @@ export declare class InterfaceOverridesBuilder {
   mac(mac: string): this
   /** Set the interface MTU. Default: 1500. */
   mtu(mtu: number): this
-  /** Set the guest IPv4 address (e.g. `"100.96.0.5"`). */
+  /** Set the guest IPv4 address (e.g. `"172.16.0.5"`). */
   ipv4(address: string): this
   /** Set the guest IPv6 address (e.g. `"fd42:6d73:62::5"`). */
   ipv6(address: string): this
@@ -312,8 +312,12 @@ export declare class NetworkBuilder {
   enabled(enabled: boolean): this
   /** Publish a TCP port. */
   port(hostPort: number, guestPort: number): this
+  /** Publish a TCP port on a specific host bind address. */
+  portBind(bind: string, hostPort: number, guestPort: number): this
   /** Publish a UDP port. */
   portUdp(hostPort: number, guestPort: number): this
+  /** Publish a UDP port on a specific host bind address. */
+  portUdpBind(bind: string, hostPort: number, guestPort: number): this
   /**
    * Set a policy. Construct via the JS-side `NetworkPolicy.publicOnly()`
    * / `.allowAll()` / `.none()` / `.nonLocal()` factories or build a
@@ -358,6 +362,10 @@ export declare class NetworkBuilder {
   onSecretViolation(action: string): this
   /** Set the maximum number of concurrent connections. */
   maxConnections(max: number): this
+  /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
+  ipv4Pool(pool: string): this
+  /** Set the IPv6 pool used for per-sandbox /64 guest prefixes. */
+  ipv6Pool(pool: string): this
   /** Trust the host's root CAs inside the guest. Default: false. */
   trustHostCAs(enabled: boolean): this
   /**
@@ -795,8 +803,12 @@ export declare class SandboxBuilder {
   network(configure: (arg: NetworkBuilder) => NetworkBuilder): this
   /** Publish a TCP port from host -> guest. */
   port(hostPort: number, guestPort: number): this
+  /** Publish a TCP port from host -> guest on a specific host bind address. */
+  portBind(bind: string, hostPort: number, guestPort: number): this
   /** Publish a UDP port from host -> guest. */
   portUdp(hostPort: number, guestPort: number): this
+  /** Publish a UDP port from host -> guest on a specific host bind address. */
+  portUdpBind(bind: string, hostPort: number, guestPort: number): this
   /** Add a secret via a callback. */
   secret(configure: (arg: JsSecretBuilder) => JsSecretBuilder): this
   /**

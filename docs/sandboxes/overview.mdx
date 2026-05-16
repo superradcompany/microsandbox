@@ -30,6 +30,12 @@ await using sb = await Sandbox.builder("worker")
 sb = await Sandbox.create("worker", image="python")
 ```
 
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+)
+```
+
 ```bash CLI
 msb create python --name worker
 ```
@@ -86,6 +92,23 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithMemory(1024),
+    m.WithCPUs(2),
+    m.WithEnv(map[string]string{
+        "DEBUG": "true",
+        "API_PORT": "8000",
+    }),
+    m.WithMounts(map[string]m.MountConfig{
+        "/app/src":     m.Mount.Bind("./src", m.MountOptions{Readonly: true}),
+        "/data":        m.Mount.Named("my-data", m.MountOptions{}),
+        "/tmp/scratch": m.Mount.Tmpfs(m.TmpfsOptions{SizeMiB: 100}),
+    }),
+)
+```
+
 ```bash CLI
 msb create python --name worker \
   -c 2 \
@@ -136,6 +159,12 @@ await Sandbox.builder("worker").image("python").create();
 await Sandbox.create("worker", image="python")
 ```
 
+```go Go
+_, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+)
+```
+
 ```bash CLI
 msb create python --name worker
 ```
@@ -157,6 +186,12 @@ await Sandbox.builder("worker").image("./my-rootfs").create();
 
 ```python Python
 await Sandbox.create("worker", image="./my-rootfs")
+```
+
+```go Go
+_, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("./my-rootfs"),
+)
 ```
 
 ```bash CLI
@@ -205,6 +240,18 @@ await Sandbox.create("worker", image="./ubuntu-22.04.qcow2")
 await Sandbox.create("worker", image=Image.disk("./alpine.raw", fstype="ext4"))
 ```
 
+```go Go
+// Auto-detect the disk image format from the file extension.
+_, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("./alpine.qcow2"),
+)
+
+// Explicit filesystem type.
+_, err = m.CreateSandbox(ctx, "worker-ext4",
+    m.WithImageDisk("./alpine.raw", "ext4"),
+)
+```
+
 ```bash CLI
 msb create ./alpine.qcow2 --name worker
 ```
@@ -239,6 +286,13 @@ await using sb = await Sandbox.builder("worker")
 sb = await Sandbox.create("worker", image="python", replace=True)
 ```
 
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithReplace(),
+)
+```
+
 ```bash CLI
 msb create --replace python --name worker
 ```
@@ -269,6 +323,13 @@ await using sb = await Sandbox.builder("worker")
 
 ```python Python
 sb = await Sandbox.create("worker", image="python", replace_with_grace=30)  # seconds
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithReplaceWithGrace(30*time.Second),
+)
 ```
 
 ```bash CLI
@@ -325,6 +386,17 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("private.registry.io/org/app:v1"),
+    m.WithRegistryAuth(m.RegistryAuth{
+        Username: "deploy",
+        Password: os.Getenv("REGISTRY_PASSWORD"),
+    }),
+    m.WithPullPolicy(m.PullPolicyAlways),
+)
+```
+
 ```bash CLI
 msb registry login private.registry.io -u deploy
 msb create private.registry.io/org/app:v1 \
@@ -343,9 +415,9 @@ msb create private.registry.io/org/app:v1 \
   Once an OCI image is resolved, microsandbox pins the exact layers. A `python` reference is resolved to an immutable set of layers at first pull. Subsequent `start()` calls use the pinned layers without re-resolving the mutable tag, so your sandbox is reproducible even if the upstream tag is updated.
 </Tip>
 
-## Config inspection <sup><sup>coming soon</sup></sup>
+## Config inspection
 
-Build a sandbox configuration without booting the VM. Useful for serializing, storing, validating, or modifying configs before creation.
+Build or inspect a sandbox configuration. Rust, TypeScript, and Python can build a config before boot; Go exposes the persisted config after creation through `SandboxHandle.ConfigJSON()`.
 
 <CodeGroup>
 ```rust Rust
@@ -378,6 +450,23 @@ config = Sandbox.build_config(
 
 print(json.dumps(config, indent=2))
 sb = await Sandbox.create(config)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "preview",
+    m.WithImage("python"),
+    m.WithMemory(1024),
+)
+if err != nil {
+    return err
+}
+
+handle, err := m.GetSandbox(ctx, "preview")
+if err != nil {
+    return err
+}
+
+fmt.Println(handle.ConfigJSON())
 ```
 
 </CodeGroup>

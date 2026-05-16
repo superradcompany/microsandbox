@@ -227,3 +227,26 @@ async fn manifest_digest_is_stable_across_processes() {
 
     assert_eq!(digest_a, digest_b);
 }
+
+// A slurp implementation would allocate 4 GiB and OOM the runner;
+// a streaming implementation reads a few tar blocks and errors fast.
+#[tokio::test]
+async fn import_streams_large_archive_without_buffering() {
+    let tmp = TempDir::new().unwrap();
+    let archive = tmp.path().join("sparse.tar");
+
+    let file = std::fs::File::create(&archive).unwrap();
+    file.set_len(4 * 1024 * 1024 * 1024).unwrap();
+    drop(file);
+
+    let dest = tmp.path().join("dest");
+    let err = Snapshot::import(&archive, Some(&dest))
+        .await
+        .expect_err("expected import of sparse archive to fail");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no snapshot manifest") || msg.contains("manifest"),
+        "got: {msg}"
+    );
+}

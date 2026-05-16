@@ -14,6 +14,25 @@ func TestWithImage(t *testing.T) {
 	}
 }
 
+func TestWithImageDisk(t *testing.T) {
+	o := SandboxConfig{}
+	WithImageDisk("./alpine.raw", "ext4")(&o)
+	if o.Image != "./alpine.raw" {
+		t.Errorf("Image = %q, want %q", o.Image, "./alpine.raw")
+	}
+	if o.ImageFstype != "ext4" {
+		t.Errorf("ImageFstype = %q, want %q", o.ImageFstype, "ext4")
+	}
+}
+
+func TestWithSnapshot(t *testing.T) {
+	o := SandboxConfig{}
+	WithSnapshot("after-pip-install")(&o)
+	if o.Snapshot != "after-pip-install" {
+		t.Errorf("got %q, want %q", o.Snapshot, "after-pip-install")
+	}
+}
+
 func TestWithMemory(t *testing.T) {
 	o := SandboxConfig{}
 	WithMemory(512)(&o)
@@ -151,6 +170,24 @@ func TestWithPortsNilInitial(t *testing.T) {
 	WithPorts(map[uint16]uint16{3000: 3000})(&o)
 	if o.Ports[3000] != 3000 {
 		t.Error("WithPorts should initialise map when Ports is nil")
+	}
+}
+
+func TestWithPortBindings(t *testing.T) {
+	o := SandboxConfig{}
+	WithPortBindings(
+		PortBinding{Bind: "0.0.0.0", HostPort: 8080, GuestPort: 80},
+		PortBinding{Bind: "::", HostPort: 5353, GuestPort: 53, Protocol: PortProtocolUDP},
+	)(&o)
+
+	if len(o.PortBindings) != 2 {
+		t.Fatalf("PortBindings len = %d, want 2", len(o.PortBindings))
+	}
+	if o.PortBindings[0].Bind != "0.0.0.0" || o.PortBindings[0].HostPort != 8080 || o.PortBindings[0].GuestPort != 80 {
+		t.Fatalf("PortBindings[0] = %#v", o.PortBindings[0])
+	}
+	if o.PortBindings[1].Protocol != PortProtocolUDP {
+		t.Fatalf("PortBindings[1].Protocol = %q, want udp", o.PortBindings[1].Protocol)
 	}
 }
 
@@ -474,24 +511,6 @@ func TestWithMaxDurationAndIdleTimeout(t *testing.T) {
 	}
 	if o.IdleTimeout != 30*time.Second {
 		t.Errorf("IdleTimeout: got %v", o.IdleTimeout)
-	}
-}
-
-func TestWithStopSignal(t *testing.T) {
-	o := SandboxConfig{}
-	WithStopSignal("SIGINT")(&o)
-	if o.StopSignal != "SIGINT" {
-		t.Errorf("StopSignal: got %q", o.StopSignal)
-	}
-}
-
-func TestWithLabelsMerge(t *testing.T) {
-	o := SandboxConfig{}
-	WithLabels(map[string]string{"team": "agents"})(&o)
-	WithLabels(map[string]string{"team": "platform", "tier": "prod"})(&o)
-	want := map[string]string{"team": "platform", "tier": "prod"}
-	if !reflect.DeepEqual(o.Labels, want) {
-		t.Errorf("Labels: got %v want %v", o.Labels, want)
 	}
 }
 

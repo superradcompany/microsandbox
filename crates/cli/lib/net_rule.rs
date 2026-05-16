@@ -48,7 +48,8 @@ use microsandbox_network::policy::{
 pub enum RuleParseError {
     /// The token is missing the mandatory `@` separator.
     #[error(
-        "rule token `{token}` is missing `@`; expected `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`"
+        "rule token `{token}` is missing `@`; \
+         expected `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`"
     )]
     MissingAt { token: String },
 
@@ -62,7 +63,8 @@ pub enum RuleParseError {
 
     /// The direction modifier is not `egress`, `ingress`, or `any`.
     #[error(
-        "`{raw}` is not a recognized direction. Expected `egress`, `ingress`, or `any`{suggestion}"
+        "`{raw}` is not a recognized direction. \
+         Expected `egress`, `ingress`, or `any`{suggestion}"
     )]
     InvalidDirection {
         raw: String,
@@ -71,7 +73,9 @@ pub enum RuleParseError {
 
     /// The target field is empty or doesn't match any recognized form.
     #[error(
-        "`{raw}` is not a valid target. Expected: any, a group name (public, private, loopback, link-local, meta, multicast, host), an IP, a CIDR, a domain (with dot), domain=<name>, or suffix=<domain>{suggestion}"
+        "`{raw}` is not a valid target. \
+         Expected: any, a group name (public, private, loopback, link-local, meta, multicast, host), \
+         an IP, a CIDR, a domain (with dot), domain=<name>, or suffix=<domain>{suggestion}"
     )]
     InvalidTarget {
         raw: String,
@@ -81,7 +85,8 @@ pub enum RuleParseError {
     /// A bare single-label token was provided. Use `domain=<name>`
     /// for single-label hostnames to disambiguate from group keywords.
     #[error(
-        "`{raw}` is ambiguous (looks like a single-label hostname or a typoed keyword). Use `domain={raw}` to target a literal hostname{suggestion}"
+        "`{raw}` is ambiguous (looks like a single-label hostname or a typoed keyword). \
+         Use `domain={raw}` to target a literal hostname{suggestion}"
     )]
     AmbiguousBareToken {
         raw: String,
@@ -106,7 +111,8 @@ pub enum RuleParseError {
 
     /// The protocol field is not `any`, `tcp`, `udp`, `icmpv4`, or `icmpv6`.
     #[error(
-        "`{raw}` is not a recognized protocol. Expected `any`, `tcp`, `udp`, `icmpv4`, or `icmpv6`{suggestion}"
+        "`{raw}` is not a recognized protocol. \
+         Expected `any`, `tcp`, `udp`, `icmpv4`, or `icmpv6`{suggestion}"
     )]
     InvalidProtocol {
         raw: String,
@@ -124,7 +130,8 @@ pub enum RuleParseError {
     /// ICMP protocol used with a direction that has an ingress side
     /// (Ingress or Any). `publisher.rs` has no inbound ICMP path.
     #[error(
-        "ingress and any-direction rules do not support ICMP; only TCP (and UDP when UDP publishing lands)"
+        "ingress and any-direction rules do not support ICMP; \
+         only TCP (and UDP when UDP publishing lands)"
     )]
     IngressDoesNotSupportIcmp,
 
@@ -132,7 +139,8 @@ pub enum RuleParseError {
     /// on the right of `@`). For IPv6 addresses, the canonical form is
     /// to wrap in `[...]`.
     #[error(
-        "rule token `{token}` has trailing fields after `<ports>`; if this is an IPv6 address, wrap it as `[<addr>]`"
+        "rule token `{token}` has trailing fields after `<ports>`; \
+         if this is an IPv6 address, wrap it as `[<addr>]`"
     )]
     TrailingJunk { token: String },
 
@@ -142,7 +150,8 @@ pub enum RuleParseError {
 
     /// Content followed `]` but didn't begin with `:`.
     #[error(
-        "rule token `{token}` has unexpected content after `]`; expected `:<proto>` or end of token"
+        "rule token `{token}` has unexpected content after `]`; \
+         expected `:<proto>` or end of token"
     )]
     UnexpectedAfterBracket { token: String },
 
@@ -156,7 +165,8 @@ pub enum RuleParseError {
     /// URL-style `host:port` but the grammar is
     /// `<target>:<proto>:<ports>`.
     #[error(
-        "`{value}` is a port, not a protocol; did you mean `{target}:tcp:{value}`? port numbers don't belong in the target"
+        "`{value}` is a port, not a protocol; did you mean `{target}:tcp:{value}`? \
+         port numbers don't belong in the target"
     )]
     PortInProtocolSlot { target: String, value: String },
 }

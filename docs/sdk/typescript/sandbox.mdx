@@ -554,7 +554,7 @@ Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter r
 | `quietLogs()` | Suppress log output |
 | `workdir(path)` | Default working directory for commands |
 | `shell(shell)` | Shell binary used by `sandbox.shell(...)` |
-| `entrypoint(iter)` | Override the image entrypoint |
+| `entrypoint(iter)` | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sandbox.exec` / `sandbox.shell` — those pass `cmd` literally |
 | `init(cmd, args?)` | Hand off PID 1 to `cmd` (absolute path or `"auto"`) after agentd setup. See [Custom init system](/sandboxes/customize#custom-init-system) |
 | `initWith(cmd, i => ...)` | Like `init` but with a closure-builder for argv and env (`.arg`, `.args`, `.env`, `.envs`) |
 | `hostname(name)` | Guest hostname |
@@ -579,7 +579,7 @@ Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter r
 | `network(n => ...)` | Configure DNS / TLS / policy / secrets — see [Networking](/sdk/typescript/networking) |
 | `secret(s => ...)` | Add a secret via [`SecretBuilder`](/sdk/typescript/secrets#secretbuilder) |
 | `secretEnv(envVar, value, allowedHost)` | Auto-placeholder shorthand. Generates `$MSB_<ENV_VAR>`. |
-| `build(): SandboxConfig` | Materialize without booting |
+| `build(): Promise<SandboxConfig>` | Materialize without booting |
 | `create(): Promise<Sandbox>` | Build and boot in attached mode |
 | `createDetached(): Promise<Sandbox>` | Build and boot in detached mode |
 | `createWithPullProgress(): Promise<PullProgressCreate>` | Build and boot in attached mode while streaming image pull progress |

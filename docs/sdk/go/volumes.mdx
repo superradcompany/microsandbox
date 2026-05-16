@@ -1,0 +1,403 @@
+---
+title: Volumes
+description: Go SDK - Volume API reference
+icon: "hard-drive"
+---
+
+See [Volumes](/sandboxes/volumes) for usage examples and patterns.
+
+## Volume
+
+Named volumes are managed by microsandbox and stored at `~/.microsandbox/volumes/<name>/`. They persist independently of any sandbox.
+
+```go
+vol, err := m.CreateVolume(ctx, "my-data",
+    m.WithVolumeQuota(100),
+    m.WithVolumeLabels(map[string]string{"env": "prod"}),
+)
+```
+
+There is no Rust-side resource to release — `Remove` deletes the on-disk state and the DB record.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Name()` | `string` | Volume name |
+| `Path()` | `string` | Host filesystem path of the volume's data directory |
+| `FS()` | [`*VolumeFs`](#volumefs) | Host-side filesystem accessor |
+| `Remove(ctx)` | `error` | Delete this volume (all sandboxes using it must be stopped) |
+
+---
+
+## Top-level functions
+
+---
+
+#### CreateVolume()
+
+```go
+func CreateVolume(
+    ctx context.Context,
+    name string,
+    opts ...VolumeOption,
+) (*Volume, error)
+```
+
+Create a named volume.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| ctx | `context.Context` | Cancels the create |
+| name | `string` | Volume name |
+| opts | `...VolumeOption` | Functional options — see [Options](#options) |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`*Volume`](#volume) | Newly created volume with `Name` and `Path` |
+
+Returns `ErrVolumeAlreadyExists` if a volume with the given name already exists.
+
+---
+
+#### GetVolume()
+
+```go
+func GetVolume(ctx context.Context, name string) (*VolumeHandle, error)
+```
+
+Look up a volume by name and return its metadata.
+
+Returns `ErrVolumeNotFound` if no such volume exists.
+
+---
+
+#### ListVolumes()
+
+```go
+func ListVolumes(ctx context.Context) ([]*VolumeHandle, error)
+```
+
+Return metadata for every named volume on the host.
+
+---
+
+#### RemoveVolume()
+
+```go
+func RemoveVolume(ctx context.Context, name string) error
+```
+
+Delete a volume by name. All sandboxes referencing the volume must be stopped.
+
+---
+
+## Options
+
+---
+
+#### WithVolumeQuota()
+
+```go
+func WithVolumeQuota(mebibytes uint32) VolumeOption
+```
+
+Set the volume's maximum storage size in MiB. Zero means unlimited.
+
+---
+
+#### WithVolumeLabels()
+
+```go
+func WithVolumeLabels(labels map[string]string) VolumeOption
+```
+
+Attach key-value labels to the volume. Called repeatedly, maps merge; later keys overwrite earlier ones.
+
+---
+
+## VolumeHandle
+
+Metadata reference returned by [`GetVolume`](#getvolume) and [`ListVolumes`](#listvolumes).
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Name()` | `string` | Volume name |
+| `Path()` | `string` | Host filesystem path of the volume's data directory |
+| `QuotaMiB()` | `*uint32` | Quota in MiB, or `nil` if unlimited |
+| `UsedBytes()` | `uint64` | Current disk usage in bytes |
+| `Labels()` | `map[string]string` | Metadata labels |
+| `CreatedAt()` | `time.Time` | Creation timestamp, zero value if unknown |
+| `FS()` | [`*VolumeFs`](#volumefs) | Host-side filesystem accessor |
+| `Remove(ctx)` | `error` | Delete this volume |
+
+---
+
+## VolumeFs
+
+Host-side filesystem operations on a named volume's data directory. Obtained via [`Volume.FS()`](#volume) or [`VolumeHandle.FS()`](#volumehandle). These operations run directly on the host filesystem — no running sandbox is required and no agent protocol is involved.
+
+All path arguments are **relative to the volume root**. Paths that would escape the root via `..`, absolute components, or stray symlink chains are rejected with [`ErrPathEscape`](#errpathescape).
+
+```go
+vfs := vol.FS()
+
+if err := vfs.WriteString("seed.txt", "hello"); err != nil {
+    return err
+}
+content, err := vfs.ReadString("seed.txt")
+```
+
+---
+
+#### Root()
+
+```go
+func (fs *VolumeFs) Root() string
+```
+
+Return the absolute host path of the volume's data directory.
+
+---
+
+#### Read()
+
+```go
+func (fs *VolumeFs) Read(relPath string) ([]byte, error)
+```
+
+Read the contents of a file relative to the volume root.
+
+---
+
+#### ReadString()
+
+```go
+func (fs *VolumeFs) ReadString(relPath string) (string, error)
+```
+
+Read a file and return its contents as a UTF-8 string.
+
+---
+
+#### Write()
+
+```go
+func (fs *VolumeFs) Write(relPath string, data []byte) error
+```
+
+Write data to a file, creating or truncating it. Created files use mode `0o644`.
+
+---
+
+#### WriteString()
+
+```go
+func (fs *VolumeFs) WriteString(relPath, content string) error
+```
+
+Write a string to a file.
+
+---
+
+#### Mkdir()
+
+```go
+func (fs *VolumeFs) Mkdir(relPath string) error
+```
+
+Create a directory and all missing parents (mode `0o755`).
+
+---
+
+#### Remove()
+
+```go
+func (fs *VolumeFs) Remove(relPath string) error
+```
+
+Delete a single file or empty directory.
+
+---
+
+#### RemoveAll()
+
+```go
+func (fs *VolumeFs) RemoveAll(relPath string) error
+```
+
+Delete a path and any children it contains (recursive).
+
+---
+
+#### Exists()
+
+```go
+func (fs *VolumeFs) Exists(relPath string) (bool, error)
+```
+
+Report whether a file or directory exists at the given path.
+
+---
+
+#### ErrPathEscape
+
+```go
+var ErrPathEscape = errors.New("microsandbox: path escapes volume root")
+```
+
+Returned by every `VolumeFs` method when `relPath` is absolute, contains a `..` sequence that resolves outside the volume root, or otherwise escapes the volume's directory after `filepath.Clean`.
+
+```go
+if _, err := vfs.Read("../etc/passwd"); errors.Is(err, m.ErrPathEscape) {
+    log.Println("nice try")
+}
+```
+
+---
+
+## Mounts
+
+Volume mounts attach a host directory, named volume, tmpfs, or disk image to a guest path. Configure them via [`WithMounts`](/sdk/go/sandbox#withmounts) on the sandbox:
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("alpine"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/host":    m.Mount.Bind("/var/data", m.MountOptions{}),
+        "/data":    m.Mount.Named("my-data", m.MountOptions{}),
+        "/scratch": m.Mount.Tmpfs(m.TmpfsOptions{SizeMiB: 128}),
+        "/img":     m.Mount.Disk("./data.qcow2", m.DiskOptions{
+            Format:   "qcow2",
+            Fstype:   "ext4",
+            Readonly: true,
+        }),
+    }),
+)
+```
+
+Each `Mount.X(...)` helper returns a [`MountConfig`](#mountconfig). The `kind` discriminator is set internally; callers should always use these helpers rather than constructing the struct manually.
+
+---
+
+#### Mount.Bind()
+
+```go
+func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig
+```
+
+Bind-mount a host directory into the sandbox. Changes in the guest are reflected on the host and vice versa.
+
+---
+
+#### Mount.Named()
+
+```go
+func (mountFactory) Named(name string, opts MountOptions) MountConfig
+```
+
+Mount a named persistent volume. The volume must already exist (create it with [`CreateVolume`](#createvolume)).
+
+---
+
+#### Mount.Tmpfs()
+
+```go
+func (mountFactory) Tmpfs(opts TmpfsOptions) MountConfig
+```
+
+Mount an ephemeral in-memory filesystem. Contents are discarded when the sandbox stops.
+
+---
+
+#### Mount.Disk()
+
+```go
+func (mountFactory) Disk(hostPath string, opts DiskOptions) MountConfig
+```
+
+Mount a host disk image as a virtio-blk device. Supports raw, qcow2, and vmdk formats.
+
+---
+
+## Mount option types
+
+### MountOptions
+
+Tuning struct for `Mount.Bind` and `Mount.Named`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Readonly | `bool` | Mount as read-only |
+
+### TmpfsOptions
+
+Tuning struct for `Mount.Tmpfs`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| SizeMiB | `uint32` | Maximum size in MiB |
+| Readonly | `bool` | Mount as read-only |
+
+### DiskOptions
+
+Tuning struct for `Mount.Disk`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Format | `string` | Format hint (`"raw"`, `"qcow2"`, `"vmdk"`). Optional — the runtime can usually probe |
+| Fstype | `string` | Inner filesystem type (e.g. `"ext4"`, `"xfs"`). Optional |
+| Readonly | `bool` | Mount as read-only |
+
+### MountConfig
+
+Discriminated mount configuration produced by `Mount` helpers. Inspect the kind via `Kind()`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Bind | `string` | Host path for bind mounts |
+| Named | `string` | Volume name for named mounts |
+| Tmpfs | `bool` | Set for tmpfs mounts |
+| Disk | `string` | Host path for disk images |
+| Format | `string` | Disk format |
+| Fstype | `string` | Inner filesystem type |
+| Readonly | `bool` | Whether the mount is read-only |
+| SizeMiB | `uint32` | Size limit for tmpfs mounts |
+
+### MountKind
+
+```go
+type MountKind uint8
+```
+
+| Constant | Description |
+|----------|-------------|
+| `MountKindBind` | Host bind mount |
+| `MountKindNamed` | Named persistent volume |
+| `MountKindTmpfs` | In-memory tmpfs |
+| `MountKindDisk` | Host disk image |
+
+Inspect via `mount.Kind()`.
+
+---
+
+## Types
+
+### VolumeConfig
+
+The config struct populated by [`VolumeOption`](#volumeoption) functions. Most callers go through `CreateVolume(ctx, name, ...opts)`; `VolumeConfig` is exported for callers that prefer to construct one directly.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| QuotaMiB | `uint32` | Maximum storage size in MiB (zero = unlimited) |
+| Labels | `map[string]string` | Metadata labels |
+
+### VolumeOption
+
+```go
+type VolumeOption func(*VolumeConfig)
+```
+
+A functional option for [`CreateVolume`](#createvolume).

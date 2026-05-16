@@ -1,0 +1,138 @@
+---
+title: Images
+description: Go SDK - Image cache API reference
+icon: "image"
+---
+
+The Go SDK exposes local OCI image-cache operations through the package-level `Image` value. These APIs inspect and prune images that have already been pulled by sandbox creation.
+
+```go
+import m "github.com/superradcompany/microsandbox/sdk/go"
+```
+
+## Image
+
+---
+
+#### Image.Get()
+
+```go
+func (imageFactory) Get(ctx context.Context, reference string) (*ImageHandle, error)
+```
+
+Fetch one cached image by reference. Returns `ErrImageNotFound` when the image is not present in the local cache.
+
+---
+
+#### Image.List()
+
+```go
+func (imageFactory) List(ctx context.Context) ([]*ImageHandle, error)
+```
+
+Return every cached image, ordered newest first.
+
+```go
+images, err := m.Image.List(ctx)
+if err != nil {
+    return err
+}
+for _, img := range images {
+    fmt.Println(img.Reference(), img.LayerCount())
+}
+```
+
+---
+
+#### Image.Inspect()
+
+```go
+func (imageFactory) Inspect(ctx context.Context, reference string) (*ImageDetail, error)
+```
+
+Return handle metadata plus parsed OCI config and layer details.
+
+---
+
+#### Image.Remove()
+
+```go
+func (imageFactory) Remove(ctx context.Context, reference string, force bool) error
+```
+
+Delete a cached image. When `force` is false, sandboxes still referencing the image cause `ErrImageInUse`.
+
+---
+
+#### Image.GCLayers()
+
+```go
+func (imageFactory) GCLayers(ctx context.Context) (uint32, error)
+```
+
+Garbage-collect orphaned layers and return the count reclaimed.
+
+---
+
+#### Image.GC()
+
+```go
+func (imageFactory) GC(ctx context.Context) (uint32, error)
+```
+
+Garbage-collect everything reclaimable from the image cache and return the count reclaimed.
+
+## ImageHandle
+
+Returned by `Image.Get` and `Image.List`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Reference()` | `string` | Image reference |
+| `ManifestDigest()` | `string` | Content-addressable manifest digest, or empty |
+| `Architecture()` | `string` | Resolved architecture, or empty |
+| `OS()` | `string` | Resolved operating system, or empty |
+| `LayerCount()` | `uint` | Number of layers |
+| `SizeBytes()` | `*int64` | Total size, or nil when unknown |
+| `CreatedAt()` | `time.Time` | First-pulled time, or zero |
+| `LastUsedAt()` | `time.Time` | Last referenced time, or zero |
+| `Remove(ctx, force)` | `error` | Delete this image |
+| `Inspect(ctx)` | `(*ImageDetail, error)` | Fetch full detail for this image |
+
+## ImageDetail
+
+```go
+type ImageDetail struct {
+    *ImageHandle
+    Config *ImageConfig
+    Layers []ImageLayer
+}
+```
+
+### ImageConfig
+
+Parsed OCI config block.
+
+| Field | Type |
+|-------|------|
+| Digest | `string` |
+| Env | `[]string` |
+| Cmd | `[]string` |
+| Entrypoint | `[]string` |
+| WorkingDir | `string` |
+| User | `string` |
+| Labels | `map[string]string` |
+| StopSignal | `string` |
+
+### ImageLayer
+
+One layer in the image manifest.
+
+| Field | Type |
+|-------|------|
+| DiffID | `string` |
+| BlobDigest | `string` |
+| MediaType | `string` |
+| CompressedSizeBytes | `*int64` |
+| ErofsSizeBytes | `*int64` |
+| Position | `int32` |

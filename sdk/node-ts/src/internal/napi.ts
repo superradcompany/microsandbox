@@ -109,7 +109,9 @@ export interface NapiSandboxBuilderSetters {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   network(configure: (b: any) => any): this;
   port(host: number, guest: number): this;
+  portBind(bind: string, host: number, guest: number): this;
   portUdp(host: number, guest: number): this;
+  portUdpBind(bind: string, host: number, guest: number): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   secret(configure: (b: any) => any): this;
   secretEnv(envVar: string, value: string, allowedHost: string): this;
@@ -125,7 +127,7 @@ export interface NapiSandboxBuilderSetters {
   volume(guest: string, configure: (b: any) => any): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   patch(configure: (b: any) => any): this;
-  build(): string;
+  build(): Promise<string>;
 }
 
 export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
@@ -620,7 +622,9 @@ export interface NapiSecretInjection {
 export interface NapiNetworkBuilder {
   enabled(enabled: boolean): this;
   port(host: number, guest: number): this;
+  portBind(bind: string, host: number, guest: number): this;
   portUdp(host: number, guest: number): this;
+  portUdpBind(bind: string, host: number, guest: number): this;
   policyJson(json: string): this;
   policyFromBuilder(builder: NapiNetworkPolicyBuilder): this;
   dns(configure: (b: NapiDnsBuilder) => NapiDnsBuilder): this;
@@ -633,6 +637,8 @@ export interface NapiNetworkBuilder {
   ): this;
   onSecretViolation(action: string): this;
   maxConnections(max: number): this;
+  ipv4Pool(pool: string): this;
+  ipv6Pool(pool: string): this;
   trustHostCAs(enabled: boolean): this;
 }
 

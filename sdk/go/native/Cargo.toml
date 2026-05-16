@@ -22,6 +22,7 @@ serde = { workspace = true }
 serde_json.workspace = true
 libc.workspace = true
 base64.workspace = true
+chrono.workspace = true
 
 [build-dependencies]
-cbindgen = "0.27"
+cbindgen = "0.29"

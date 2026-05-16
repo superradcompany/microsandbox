@@ -45,6 +45,16 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+sb, err := m.CreateSandbox(ctx, "dev",
+    m.WithImage("python"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/app/src":  m.Mount.Bind("./src", m.MountOptions{Readonly: true}),
+        "/app/data": m.Mount.Bind("./data", m.MountOptions{}),
+    }),
+)
+```
+
 ```bash CLI
 msb create python --name dev \
   -v ./src:/app/src:ro \
@@ -75,6 +85,12 @@ const cache = await Volume.builder("pip-cache").quota(1024).create();
 
 ```python Python
 cache = await Volume.create("pip-cache", quota_mib=1024)
+```
+
+```go Go
+cache, err := m.CreateVolume(ctx, "pip-cache",
+    m.WithVolumeQuota(1024),
+)
 ```
 
 ```bash CLI
@@ -108,6 +124,15 @@ sb = await Sandbox.create(
     volumes={
         "/root/.cache/pip": Volume.named(cache.name),
     },
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/root/.cache/pip": m.Mount.Named(cache.Name(), m.MountOptions{}),
+    }),
 )
 ```
 
@@ -178,6 +203,27 @@ output = await reader.exec("cat", ["/data/message.txt"])
 # => "hello"
 ```
 
+```go Go
+// Writer
+writer, err := m.CreateSandbox(ctx, "writer",
+    m.WithImage("alpine"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/data": m.Mount.Named("shared-data", m.MountOptions{}),
+    }),
+)
+_, err = writer.Shell(ctx, "echo 'hello' > /data/message.txt")
+
+// Reader (read-only)
+reader, err := m.CreateSandbox(ctx, "reader",
+    m.WithImage("alpine"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/data": m.Mount.Named("shared-data", m.MountOptions{Readonly: true}),
+    }),
+)
+output, err := reader.Exec(ctx, "cat", []string{"/data/message.txt"})
+// => "hello"
+```
+
 </CodeGroup>
 
 <Tip>
@@ -204,6 +250,11 @@ vol = await Volume.get("pip-cache")
 await vol.fs.write("/requirements.txt", b"requests==2.28.0")
 ```
 
+```go Go
+vol, err := m.GetVolume(ctx, "pip-cache")
+err = vol.FS().WriteString("requirements.txt", "requests==2.28.0")
+```
+
 </CodeGroup>
 
 ### Manage volumes
@@ -222,6 +273,11 @@ await Volume.remove("old-cache");
 ```python Python
 volumes = await Volume.list()
 await Volume.remove("old-cache")
+```
+
+```go Go
+volumes, err := m.ListVolumes(ctx)
+err = m.RemoveVolume(ctx, "old-cache")
 ```
 
 ```bash CLI
@@ -260,6 +316,15 @@ sb = await Sandbox.create(
     volumes={
         "/tmp/scratch": Volume.tmpfs(size_mib=100),
     },
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("alpine"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/tmp/scratch": m.Mount.Tmpfs(m.TmpfsOptions{SizeMiB: 100}),
+    }),
 )
 ```
 

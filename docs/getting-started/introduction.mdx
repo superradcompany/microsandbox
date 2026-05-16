@@ -62,6 +62,20 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+sb, err := m.CreateSandbox(ctx, "sandbox",
+    m.WithImage("python"),
+    m.WithMemory(512),
+    m.WithCPUs(2),
+    m.WithSecrets(
+        m.Secret.Env("OPENAI_API_KEY", os.Getenv("OPENAI_API_KEY"),
+            m.SecretEnvOptions{AllowHosts: []string{"api.openai.com"}},
+        ),
+    ),
+    m.WithNetwork(m.NetworkPolicy.PublicOnly()),
+)
+```
+
 </CodeGroup>
 
 <Callout icon="bolt" color="#7C3AED">
@@ -74,7 +88,7 @@ sb = await Sandbox.create(
 - **No daemon.** The runtime spawns directly as a child process of whatever application creates the sandbox. No root, no server, no background service.
 - **Any OCI image.** Docker Hub, GHCR, ECR, GCR, or any OCI-compatible registry. Shared layers are deduplicated and only stored once.
 - **Cross-platform.** Native on macOS (Apple Silicon) and Linux (KVM). Same CLI, same SDKs.
-- **Multi-language SDKs.** Rust, TypeScript, and Python, all with consistent APIs.
+- **Multi-language SDKs.** Rust, TypeScript, Python, and Go, all with consistent APIs.
 - **Programmable.** Network policies, filesystem hooks, secret bindings, and TLS interception are all configured from the host side through the SDK.
 
 ## What makes it different
@@ -114,6 +128,17 @@ sb = await Sandbox.create(
             allow_hosts=["api.openai.com"],
         ),
     ],
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "sandbox",
+    m.WithImage("python"),
+    m.WithSecrets(
+        m.Secret.Env("OPENAI_API_KEY", os.Getenv("OPENAI_API_KEY"),
+            m.SecretEnvOptions{AllowHosts: []string{"api.openai.com"}},
+        ),
+    ),
 )
 ```
 
@@ -168,6 +193,19 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+sb, err := m.CreateSandbox(ctx, "sandbox",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
+        DefaultEgress: m.PolicyActionDeny,
+        Rules: []m.PolicyRule{
+            {Action: m.PolicyActionAllow, Direction: m.PolicyDirectionEgress, Destination: "api.openai.com"},
+            {Action: m.PolicyActionAllow, Direction: m.PolicyDirectionEgress, Destination: "pypi.org"},
+        },
+    }),
+)
+```
+
 </CodeGroup>
 
 ### Extensible filesystem backends <sup><sup>coming soon</sup></sup>
@@ -212,6 +250,16 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+// Mount the host directory directly.
+sb, err := m.CreateSandbox(ctx, "encrypted",
+    m.WithImage("python"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/secrets": m.Mount.Bind("/data/secrets", m.MountOptions{}),
+    }),
+)
+```
+
 </CodeGroup>
 
 ### Snapshot and reuse setup state
@@ -242,19 +290,6 @@ let workers: Vec<Sandbox> = futures::future::try_join_all(
             .await
     })
 ).await?;
-```
-
-```bash CLI
-msb run --name baseline --detach python -- sleep 3600
-msb exec baseline -- pip install -r requirements.txt
-msb stop baseline
-
-msb snapshot create after-pip-install --from baseline
-
-# Boot 10 workers from the snapshot
-for i in $(seq 1 10); do
-    msb run --name worker-$i --detach --snapshot after-pip-install -- sleep 3600
-done
 ```
 
 ```typescript TypeScript
@@ -290,6 +325,38 @@ await h.snapshot("after-pip-install")
 workers = await asyncio.gather(
     *(Sandbox.create(f"worker-{i}", snapshot="after-pip-install") for i in range(10))
 )
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "baseline", m.WithImage("python"))
+_, err = sb.Exec(ctx, "pip", []string{"install", "-r", "requirements.txt"})
+_, err = sb.StopAndWait(ctx)
+_ = sb.Close()
+
+h, err := m.GetSandbox(ctx, "baseline")
+_, err = h.Snapshot(ctx, "after-pip-install")
+
+// Boot 10 workers from the same snapshot
+workers := make([]*m.Sandbox, 10)
+for i := range workers {
+    workers[i], err = m.CreateSandbox(ctx,
+        fmt.Sprintf("worker-%d", i),
+        m.WithSnapshot("after-pip-install"),
+    )
+}
+```
+
+```bash CLI
+msb run --name baseline --detach python -- sleep 3600
+msb exec baseline -- pip install -r requirements.txt
+msb stop baseline
+
+msb snapshot create after-pip-install --from baseline
+
+# Boot 10 workers from the snapshot
+for i in $(seq 1 10); do
+    msb run --name worker-$i --detach --snapshot after-pip-install -- sleep 3600
+done
 ```
 
 </CodeGroup>
@@ -345,6 +412,10 @@ await sb.emit("task.start", {
     "input_file": "/data/input.txt",
     "output_dir": "/data/output",
 })
+```
+
+```go Go
+// Bidirectional events are not available in the current SDKs yet.
 ```
 
 </CodeGroup>

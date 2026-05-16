@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && microsandbox_ffi_path
 
 package integration
 

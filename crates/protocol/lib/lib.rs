@@ -83,7 +83,7 @@ pub const ENV_NET: &str = "MSB_NET";
 /// - `dns=A.B.C.D` — DNS server (optional)
 ///
 /// Example:
-/// - `MSB_NET_IPV4=addr=100.96.1.2/30,gw=100.96.1.1,dns=100.96.1.1`
+/// - `MSB_NET_IPV4=addr=172.16.1.2/30,gw=172.16.1.1,dns=172.16.1.1`
 pub const ENV_NET_IPV4: &str = "MSB_NET_IPV4";
 
 /// Environment variable carrying the guest IPv6 network configuration.

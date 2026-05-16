@@ -20,6 +20,10 @@ npm install microsandbox
 ```bash Python
 pip install microsandbox
 ```
+
+```bash Go
+go get github.com/superradcompany/microsandbox/sdk/go
+```
 </CodeGroup>
 
 ## Quick start
@@ -91,6 +95,49 @@ async def main():
 asyncio.run(main())
 ```
 
+```go Go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    m "github.com/superradcompany/microsandbox/sdk/go"
+)
+
+func main() {
+    ctx := context.Background()
+    if err := m.EnsureInstalled(ctx); err != nil {
+        log.Fatal(err)
+    }
+
+    sb, err := m.CreateSandbox(ctx, "my-sandbox",
+        m.WithImage("python"),
+        m.WithMemory(512),
+        m.WithCPUs(2),
+        m.WithEnv(map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}),
+        m.WithMounts(map[string]m.MountConfig{
+            "/app/src": m.Mount.Bind("./src", m.MountOptions{Readonly: true}),
+        }),
+        m.WithNetwork(m.NetworkPolicy.PublicOnly()),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer func() {
+        _, _ = sb.StopAndWait(context.Background())
+        _ = sb.Close()
+    }()
+
+    out, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello, World!')"})
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println("Output:", out.Stdout())
+}
+```
+
 </CodeGroup>
 
-The SDK reference is split by language - choose [Rust SDK](/sdk/rust/sandbox), [TypeScript SDK](/sdk/typescript/sandbox), or [Python SDK](/sdk/python/sandbox) for the full API. See also [error handling](/sdk/errors).
+The SDK reference is split by language - choose [Rust SDK](/sdk/rust/sandbox), [TypeScript SDK](/sdk/typescript/sandbox), [Python SDK](/sdk/python/sandbox), or [Go SDK](/sdk/go/sandbox) for the full API. See also [error handling](/sdk/errors).

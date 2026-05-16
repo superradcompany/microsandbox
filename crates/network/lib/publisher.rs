@@ -9,6 +9,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::time::Duration;
 
 use bytes::Bytes;
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
@@ -19,7 +20,26 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use crate::config::{PortProtocol, PublishedPort};
+use crate::policy::{NetworkPolicy, Protocol};
 use crate::shared::SharedState;
+
+//--------------------------------------------------------------------------------------------------
+// Helpers
+//--------------------------------------------------------------------------------------------------
+
+/// Set zero-linger on a stream so the kernel sends a TCP RST instead of
+/// the default FIN close when the stream drops. Used for deliberate
+/// rejection paths (policy deny, max-inbound exhaustion,
+/// smoltcp-connect failure) so the peer sees `ECONNRESET` rather than
+/// a graceful close that looks like the server simply went away.
+///
+/// Goes through `socket2` rather than tokio's deprecated
+/// `TcpStream::set_linger` so the call site doesn't trip
+/// `#[deny(deprecated)]` in clippy. The cast to `SockRef` is
+/// zero-cost — it borrows the underlying fd.
+fn reject_with_rst(stream: &TcpStream) {
+    let _ = socket2::SockRef::from(stream).set_linger(Some(Duration::ZERO));
+}
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -96,10 +116,16 @@ impl PortPublisher {
     ///
     /// Listeners are only spawned when at least one of `guest_ipv4` /
     /// `guest_ipv6` is `Some`; published ports need a smoltcp dial target.
+    /// Each TCP listener task gates accepted connections through the
+    /// supplied [`NetworkPolicy`]'s `evaluate_ingress` before queuing
+    /// them; rejected connections drop with TCP RST (zero-linger) so
+    /// the peer observes `ECONNRESET`.
     pub fn new(
         ports: &[PublishedPort],
         guest_ipv4: Option<Ipv4Addr>,
         guest_ipv6: Option<Ipv6Addr>,
+        policy: Arc<NetworkPolicy>,
+        shared: Arc<SharedState>,
         tokio_handle: &tokio::runtime::Handle,
     ) -> Self {
         let (inbound_tx, inbound_rx) = mpsc::channel(64);
@@ -109,7 +135,7 @@ impl PortPublisher {
             .or_else(|| guest_ipv6.map(IpAddr::V6));
 
         if guest_ip.is_some() {
-            Self::spawn_listeners(ports, &inbound_tx, tokio_handle);
+            Self::spawn_listeners(ports, &inbound_tx, policy, shared, tokio_handle);
         } else if !ports.is_empty() {
             tracing::warn!(
                 count = ports.len(),
@@ -147,6 +173,7 @@ impl PortPublisher {
         while let Ok(conn) = self.inbound_rx.try_recv() {
             if self.connections.len() >= self.max_inbound {
                 tracing::debug!("published port: max inbound connections reached, rejecting");
+                reject_with_rst(&conn.stream);
                 continue;
             }
             // Create smoltcp TCP socket.
@@ -163,6 +190,7 @@ impl PortPublisher {
                     guest_port = conn.guest_port,
                     "failed to connect smoltcp socket to guest",
                 );
+                reject_with_rst(&conn.stream);
                 continue;
             }
 
@@ -249,6 +277,8 @@ impl PortPublisher {
     fn spawn_listeners(
         ports: &[PublishedPort],
         inbound_tx: &mpsc::Sender<InboundConnection>,
+        policy: Arc<NetworkPolicy>,
+        shared: Arc<SharedState>,
         tokio_handle: &tokio::runtime::Handle,
     ) {
         for port in ports {
@@ -256,8 +286,12 @@ impl PortPublisher {
                 let tx = inbound_tx.clone();
                 let bind_addr = SocketAddr::new(port.host_bind, port.host_port);
                 let guest_port = port.guest_port;
+                let policy = policy.clone();
+                let shared = shared.clone();
                 tokio_handle.spawn(async move {
-                    if let Err(e) = tcp_listener_task(bind_addr, guest_port, tx).await {
+                    if let Err(e) =
+                        tcp_listener_task(bind_addr, guest_port, tx, policy, shared).await
+                    {
                         tracing::error!(
                             bind = %bind_addr,
                             error = %e,
@@ -287,17 +321,37 @@ impl PortPublisher {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Listener task: accepts TCP connections on the host and queues them.
+/// Listener task: accepts TCP connections on the host, runs each
+/// through the network policy's ingress evaluator, and queues
+/// allowed connections for the publisher's accept loop. Denied
+/// connections are dropped with TCP RST (zero-linger) so the peer
+/// sees `ECONNRESET` rather than a graceful close.
 async fn tcp_listener_task(
     bind_addr: SocketAddr,
     guest_port: u16,
     inbound_tx: mpsc::Sender<InboundConnection>,
+    policy: Arc<NetworkPolicy>,
+    shared: Arc<SharedState>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind_addr).await?;
     tracing::debug!(bind = %bind_addr, guest_port, "published port listener started");
 
     loop {
-        let (stream, _peer) = listener.accept().await?;
+        let (stream, peer) = listener.accept().await?;
+
+        // Policy gate: peer source IP and the guest's listening port.
+        let action = policy.evaluate_ingress(peer, guest_port, Protocol::Tcp, &shared);
+        if action.is_deny() {
+            tracing::debug!(
+                peer = %peer,
+                guest_port,
+                "ingress denied by policy; sending RST",
+            );
+            reject_with_rst(&stream);
+            drop(stream);
+            continue;
+        }
+
         let conn = InboundConnection { stream, guest_port };
         if inbound_tx.send(conn).await.is_err() {
             break; // Publisher dropped.

@@ -650,10 +650,35 @@ class DnsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PortBinding:
+    """Published host-to-guest port with an optional host bind address."""
+    host_port: int
+    guest_port: int
+    bind: str = "127.0.0.1"
+    protocol: PortProtocol = PortProtocol.TCP
+
+    @classmethod
+    def tcp(cls, host_port: int, guest_port: int, *, bind: str = "127.0.0.1") -> PortBinding:
+        return cls(host_port=host_port, guest_port=guest_port, bind=bind, protocol=PortProtocol.TCP)
+
+    @classmethod
+    def udp(cls, host_port: int, guest_port: int, *, bind: str = "127.0.0.1") -> PortBinding:
+        return cls(host_port=host_port, guest_port=guest_port, bind=bind, protocol=PortProtocol.UDP)
+
+    def _to_dict(self) -> dict:
+        return {
+            "host_port": self.host_port,
+            "guest_port": self.guest_port,
+            "bind": self.bind,
+            "protocol": self.protocol.value,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Network:
     """Network configuration for a sandbox."""
     policy: str | NetworkPolicy | None = None
-    ports: Mapping[int, int] = field(default_factory=dict)
+    ports: Mapping[int, int] | Sequence[PortBinding] = field(default_factory=dict)
     deny_domains: tuple[str, ...] = ()
     """Deny egress to these exact domains. Each entry adds a
     `deny Domain("...")` policy rule that fires at DNS resolution
@@ -665,6 +690,12 @@ class Network:
     layers as `deny_domains`."""
     dns: DnsConfig | None = None
     tls: TlsConfig | None = None
+    ipv4_pool: str | None = None
+    """IPv4 pool used to derive per-sandbox /30 guest subnets. Defaults
+    to ``172.16.0.0/12``."""
+    ipv6_pool: str | None = None
+    """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
+    to ``fd42:6d73:62::/48``."""
     max_connections: int | None = None
 
     @classmethod
@@ -687,7 +718,10 @@ class Network:
         elif isinstance(self.policy, NetworkPolicy):
             d["custom_policy"] = self.policy._to_dict()
         if self.ports:
-            d["ports"] = dict(self.ports)
+            if isinstance(self.ports, Mapping):
+                d["ports"] = dict(self.ports)
+            else:
+                d["ports"] = [p._to_dict() for p in self.ports]
         if self.deny_domains:
             d["deny_domains"] = list(self.deny_domains)
         if self.deny_domain_suffixes:
@@ -698,6 +732,10 @@ class Network:
                 d["dns"] = dns_dict
         if self.tls is not None:
             d["tls"] = self.tls._to_dict()
+        if self.ipv4_pool is not None:
+            d["ipv4_pool"] = self.ipv4_pool
+        if self.ipv6_pool is not None:
+            d["ipv6_pool"] = self.ipv6_pool
         if self.max_connections is not None:
             d["max_connections"] = self.max_connections
         return d

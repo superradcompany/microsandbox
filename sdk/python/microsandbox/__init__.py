@@ -90,6 +90,7 @@ from microsandbox.types import (
     NetworkPolicy,
     Patch,
     PatchConfig,
+    PortBinding,
     PortProtocol,
     Protocol,
     PullPolicy,
@@ -171,6 +172,7 @@ __all__ = [
     "Action",
     "Direction",
     "Protocol",
+    "PortBinding",
     "PortProtocol",
     "DestGroup",
     # Secrets & TLS

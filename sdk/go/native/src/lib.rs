@@ -38,7 +38,9 @@
 use std::{
     collections::HashMap,
     ffi::{CStr, CString},
+    net::IpAddr,
     os::raw::{c_char, c_uchar},
+    path::PathBuf,
     sync::{
         OnceLock, RwLock,
         atomic::{AtomicU64, Ordering},
@@ -48,12 +50,14 @@ use std::{
 
 use base64::Engine;
 use microsandbox::{
-    LogLevel, MicrosandboxError, RegistryAuth, Sandbox,
+    LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
     sandbox::{
-        FsEntryKind, PullPolicy, all_sandbox_metrics,
+        FsEntryKind, LogOptions, LogSource, PullPolicy, all_sandbox_metrics,
         exec::{ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
+        logs,
     },
+    snapshot::{ExportOpts, SnapshotDestination, SnapshotFormat},
     volume::{Volume, VolumeBuilder, VolumeHandle},
 };
 use microsandbox_network::secrets::config::ViolationAction;
@@ -287,6 +291,11 @@ mod error_kind {
     pub const FILESYSTEM: &str = "filesystem";
     pub const IMAGE_NOT_FOUND: &str = "image_not_found";
     pub const IMAGE_IN_USE: &str = "image_in_use";
+    pub const SNAPSHOT_NOT_FOUND: &str = "snapshot_not_found";
+    pub const SNAPSHOT_ALREADY_EXISTS: &str = "snapshot_already_exists";
+    pub const SNAPSHOT_SANDBOX_RUNNING: &str = "snapshot_sandbox_running";
+    pub const SNAPSHOT_IMAGE_MISSING: &str = "snapshot_image_missing";
+    pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
     pub const PATCH_FAILED: &str = "patch_failed";
     pub const IO: &str = "io";
 }
@@ -339,6 +348,11 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SandboxFs(_) => error_kind::FILESYSTEM,
             MicrosandboxError::ImageNotFound(_) => error_kind::IMAGE_NOT_FOUND,
             MicrosandboxError::ImageInUse(_) => error_kind::IMAGE_IN_USE,
+            MicrosandboxError::SnapshotNotFound(_) => error_kind::SNAPSHOT_NOT_FOUND,
+            MicrosandboxError::SnapshotAlreadyExists(_) => error_kind::SNAPSHOT_ALREADY_EXISTS,
+            MicrosandboxError::SnapshotSandboxRunning(_) => error_kind::SNAPSHOT_SANDBOX_RUNNING,
+            MicrosandboxError::SnapshotImageMissing(_) => error_kind::SNAPSHOT_IMAGE_MISSING,
+            MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
             MicrosandboxError::Io(_) => error_kind::IO,
             _ => error_kind::INTERNAL,
@@ -469,6 +483,30 @@ pub unsafe extern "C" fn msb_free_string(ptr: *mut c_char) {
 }
 
 // ---------------------------------------------------------------------------
+// msb_set_sdk_msb_path
+// ---------------------------------------------------------------------------
+
+/// Push the SDK-resolved msb binary path into the Rust resolver's tier 2.
+/// Called once from setup.EnsureInstalled after the install dir is known.
+/// Set-once: subsequent calls are ignored (matches the OnceLock in
+/// microsandbox::config). Null or invalid-UTF-8 paths are silently ignored
+/// since the resolver's lower tiers (~/.microsandbox/bin/msb, PATH) still
+/// work as fallbacks.
+///
+/// # Safety
+/// `path` must be either null or a valid null-terminated UTF-8 C string
+/// owned by the caller for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_set_sdk_msb_path(path: *const c_char) {
+    if path.is_null() {
+        return;
+    }
+    if let Ok(s) = unsafe { CStr::from_ptr(path) }.to_str() {
+        microsandbox::config::set_sdk_msb_path(s);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cancellation entry points
 //
 // Usage from Go (in call()):
@@ -543,6 +581,14 @@ fn default_egress() -> String {
     "egress".into()
 }
 
+fn default_host_bind() -> String {
+    "127.0.0.1".into()
+}
+
+fn default_port_protocol() -> String {
+    "tcp".into()
+}
+
 /// Custom policy. Parity-aligned with Node/Python: `default_egress` and
 /// `default_ingress` are the asymmetric default actions. Empty defaults to
 /// deny egress / allow ingress (matching upstream `public_only`).
@@ -595,6 +641,13 @@ struct NetworkOpts {
     /// Ports nested inside network: {host_port: guest_port}.
     #[serde(default)]
     ports: HashMap<u16, u16>,
+    /// Ports nested inside network with explicit bind addresses.
+    #[serde(default)]
+    port_bindings: Vec<PortBindingOpts>,
+    /// IPv4 pool used to derive per-sandbox /30 guest subnets.
+    ipv4_pool: Option<String>,
+    /// IPv6 pool used to derive per-sandbox /64 guest prefixes.
+    ipv6_pool: Option<String>,
     max_connections: Option<usize>,
     /// Sandbox-wide secret violation action: "block", "block-and-log",
     /// "block-and-terminate".
@@ -653,6 +706,8 @@ struct RegistryAuthOpts {
 #[derive(serde::Deserialize)]
 struct SandboxCreateOpts {
     image: Option<String>,
+    image_fstype: Option<String>,
+    snapshot: Option<String>,
     memory_mib: Option<u32>,
     cpus: Option<u8>,
     workdir: Option<String>,
@@ -687,12 +742,6 @@ struct SandboxCreateOpts {
     max_duration_secs: Option<u64>,
     /// Idle timeout in seconds (0 = unlimited).
     idle_timeout_secs: Option<u64>,
-    /// Override the stop signal (default SIGTERM).
-    stop_signal: Option<String>,
-    /// Sandbox-level labels merged into SandboxConfig.labels post-build.
-    /// Image-level labels still merge in first; these override on conflict.
-    #[serde(default)]
-    labels: HashMap<String, String>,
     /// Registry credentials for pulling private images.
     registry_auth: Option<RegistryAuthOpts>,
     network: Option<NetworkOpts>,
@@ -702,6 +751,9 @@ struct SandboxCreateOpts {
     /// Top-level UDP ports shorthand: {host_port: guest_port}.
     #[serde(default)]
     ports_udp: HashMap<u16, u16>,
+    /// Top-level port bindings with explicit bind addresses.
+    #[serde(default)]
+    port_bindings: Vec<PortBindingOpts>,
     #[serde(default)]
     secrets: Vec<SecretOpts>,
     #[serde(default)]
@@ -709,6 +761,47 @@ struct SandboxCreateOpts {
     /// Volume mounts: guest_path → MountSpec.
     #[serde(default)]
     volumes: HashMap<String, MountSpec>,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct PortBindingOpts {
+    #[serde(default = "default_host_bind")]
+    bind: String,
+    host_port: u16,
+    guest_port: u16,
+    #[serde(default = "default_port_protocol")]
+    protocol: String,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct LogReadOpts {
+    tail: Option<usize>,
+    since_ms: Option<i64>,
+    until_ms: Option<i64>,
+    #[serde(default)]
+    sources: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SnapshotCreateOpts {
+    name: Option<String>,
+    path: Option<String>,
+    #[serde(default)]
+    labels: HashMap<String, String>,
+    #[serde(default)]
+    force: bool,
+    #[serde(default)]
+    record_integrity: bool,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SnapshotExportOpts {
+    #[serde(default)]
+    with_parents: bool,
+    #[serde(default)]
+    with_image: bool,
+    #[serde(default)]
+    plain_tar: bool,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -834,6 +927,19 @@ fn apply_network(
         builder = builder.network(|n| n.policy(policy));
     }
 
+    if let Some(ref raw) = net.ipv4_pool {
+        let pool: ipnetwork::Ipv4Network = raw
+            .parse()
+            .map_err(|e| FfiError::invalid_argument(format!("ipv4_pool {raw:?}: {e}")))?;
+        builder = builder.network(|n| n.ipv4_pool(pool));
+    }
+    if let Some(ref raw) = net.ipv6_pool {
+        let pool: ipnetwork::Ipv6Network = raw
+            .parse()
+            .map_err(|e| FfiError::invalid_argument(format!("ipv6_pool {raw:?}: {e}")))?;
+        builder = builder.network(|n| n.ipv6_pool(pool));
+    }
+
     // DNS configuration. Either nested `dns: {...}` or the legacy flat
     // `dns_rebind_protection` field. The nested form wins.
     let dns_rebind = net
@@ -928,8 +1034,34 @@ fn apply_network(
     for (host, guest) in &net.ports {
         builder = builder.port(*host, *guest);
     }
+    for port in &net.port_bindings {
+        builder = apply_port_binding(builder, port)?;
+    }
 
     Ok(builder)
+}
+
+fn apply_port_binding(
+    builder: microsandbox::sandbox::SandboxBuilder,
+    port: &PortBindingOpts,
+) -> Result<microsandbox::sandbox::SandboxBuilder, FfiError> {
+    let bind = port.bind.parse::<IpAddr>().map_err(|_| {
+        FfiError::new(
+            error_kind::INVALID_CONFIG,
+            format!("invalid bind address: {}", port.bind),
+        )
+    })?;
+
+    Ok(match port.protocol.as_str() {
+        "" | "tcp" => builder.port_bind(bind, port.host_port, port.guest_port),
+        "udp" => builder.port_udp_bind(bind, port.host_port, port.guest_port),
+        other => {
+            return Err(FfiError::new(
+                error_kind::INVALID_CONFIG,
+                format!("invalid port protocol: {other}"),
+            ));
+        }
+    })
 }
 
 /// Resolve a JSON destination string into the typed enum. Supports the
@@ -1312,8 +1444,20 @@ pub unsafe extern "C" fn msb_sandbox_create(
 
         Ok(Box::pin(async move {
             let mut builder = Sandbox::builder(&name);
+            if opts.image.is_some() && opts.snapshot.is_some() {
+                return Err(FfiError::invalid_argument(
+                    "image and snapshot are mutually exclusive",
+                ));
+            }
             if let Some(img) = opts.image {
-                builder = builder.image(img.as_str());
+                if let Some(fstype) = opts.image_fstype {
+                    builder = builder.image_with(|i| i.disk(img).fstype(fstype));
+                } else {
+                    builder = builder.image(img.as_str());
+                }
+            }
+            if let Some(snapshot) = opts.snapshot {
+                builder = builder.from_snapshot(snapshot);
             }
             if let Some(m) = opts.memory_mib {
                 builder = builder.memory(m);
@@ -1386,6 +1530,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             for (host, guest) in &opts.ports_udp {
                 builder = builder.port_udp(*host, *guest);
             }
+            for port in &opts.port_bindings {
+                builder = apply_port_binding(builder, port)?;
+            }
             // Network (policy, DNS, TLS, ports-in-network).
             if let Some(ref net) = opts.network {
                 builder = apply_network(builder, net)?;
@@ -1403,19 +1550,10 @@ pub unsafe extern "C" fn msb_sandbox_create(
                 builder = apply_volume(builder, guest_path, mount)?;
             }
 
-            let mut config = builder.build()?;
-            if let Some(sig) = opts.stop_signal {
-                config.stop_signal = Some(sig);
-            }
-            // Labels merge after build so image-config labels still come first
-            // and user labels override on conflict.
-            for (k, v) in opts.labels {
-                config.labels.insert(k, v);
-            }
             let sandbox = if opts.detached {
-                Sandbox::create_detached(config).await?
+                builder.create_detached().await?
             } else {
-                Sandbox::create(config).await?
+                builder.create().await?
             };
             let handle = register(sandbox)?;
             Ok(format!(r#"{{"handle":{handle}}}"#))
@@ -1796,6 +1934,113 @@ fn sandbox_handle_json(h: &microsandbox::sandbox::SandboxHandle) -> String {
         status = sandbox_status_str(h.status()),
         config = cfg_json,
     )
+}
+
+fn parse_log_source(s: &str) -> Result<LogSource, FfiError> {
+    match s {
+        "stdout" => Ok(LogSource::Stdout),
+        "stderr" => Ok(LogSource::Stderr),
+        "output" => Ok(LogSource::Output),
+        "system" => Ok(LogSource::System),
+        other => Err(FfiError::invalid_argument(format!(
+            "invalid log source: {other}"
+        ))),
+    }
+}
+
+fn log_source_str(source: LogSource) -> &'static str {
+    match source {
+        LogSource::Stdout => "stdout",
+        LogSource::Stderr => "stderr",
+        LogSource::Output => "output",
+        LogSource::System => "system",
+    }
+}
+
+fn parse_log_options(opts_json: *const c_char) -> Result<LogOptions, FfiError> {
+    let raw = if opts_json.is_null() {
+        "{}".to_string()
+    } else {
+        unsafe { cstr(opts_json) }?.to_string()
+    };
+    let opts: LogReadOpts = serde_json::from_str(&raw)
+        .map_err(|e| FfiError::invalid_argument(format!("invalid log opts JSON: {e}")))?;
+    let since = opts
+        .since_ms
+        .map(|ms| {
+            chrono::DateTime::from_timestamp_millis(ms).ok_or_else(|| {
+                FfiError::invalid_argument(format!("invalid since_ms timestamp: {ms}"))
+            })
+        })
+        .transpose()?;
+    let until = opts
+        .until_ms
+        .map(|ms| {
+            chrono::DateTime::from_timestamp_millis(ms).ok_or_else(|| {
+                FfiError::invalid_argument(format!("invalid until_ms timestamp: {ms}"))
+            })
+        })
+        .transpose()?;
+    let sources = opts
+        .sources
+        .iter()
+        .map(|s| parse_log_source(s))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(LogOptions {
+        tail: opts.tail,
+        since,
+        until,
+        sources,
+    })
+}
+
+fn log_entries_json(entries: Vec<microsandbox::sandbox::LogEntry>) -> Result<String, FfiError> {
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        out.push(serde_json::json!({
+            "source": log_source_str(entry.source),
+            "session_id": entry.session_id,
+            "timestamp_ms": entry.timestamp.timestamp_millis(),
+            "data_b64": base64::engine::general_purpose::STANDARD.encode(entry.data),
+        }));
+    }
+    serde_json::to_string(&out).map_err(|e| FfiError::internal(format!("serialise logs: {e}")))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_logs(
+    cancel_id: u64,
+    handle: Handle,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let opts = parse_log_options(opts_json)?;
+        Ok(Box::pin(async move {
+            let sb = get(handle)?;
+            let entries = sb.logs(&opts).map_err(FfiError::from)?;
+            log_entries_json(entries)
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_logs(
+    cancel_id: u64,
+    name: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?.to_owned();
+        let opts = parse_log_options(opts_json)?;
+        Ok(Box::pin(async move {
+            let entries = logs::read_logs(&name, &opts).map_err(FfiError::from)?;
+            log_entries_json(entries)
+        }))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3093,6 +3338,345 @@ pub unsafe extern "C" fn msb_image_gc(
                 .await
                 .map_err(FfiError::from)?;
             Ok(format!(r#"{{"removed":{removed}}}"#))
+        }))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Snapshots
+// ---------------------------------------------------------------------------
+
+fn snapshot_format_str(f: SnapshotFormat) -> &'static str {
+    match f {
+        SnapshotFormat::Raw => "raw",
+        SnapshotFormat::Qcow2 => "qcow2",
+    }
+}
+
+fn snapshot_json(s: &Snapshot) -> serde_json::Value {
+    let manifest = s.manifest();
+    let labels: HashMap<String, String> = manifest
+        .labels
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    serde_json::json!({
+        "path": s.path().display().to_string(),
+        "digest": s.digest(),
+        "size_bytes": s.size_bytes(),
+        "image_ref": manifest.image.reference,
+        "image_manifest_digest": manifest.image.manifest_digest,
+        "format": snapshot_format_str(manifest.format),
+        "fstype": manifest.fstype,
+        "parent": manifest.parent,
+        "created_at": manifest.created_at,
+        "labels": labels,
+        "source_sandbox": manifest.source_sandbox,
+    })
+}
+
+fn snapshot_handle_json(h: &microsandbox::SnapshotHandle) -> serde_json::Value {
+    serde_json::json!({
+        "digest": h.digest(),
+        "name": h.name(),
+        "parent_digest": h.parent_digest(),
+        "image_ref": h.image_ref(),
+        "format": snapshot_format_str(h.format()),
+        "size_bytes": h.size_bytes(),
+        "created_at_unix": h.created_at().and_utc().timestamp(),
+        "path": h.path().display().to_string(),
+    })
+}
+
+fn verify_report_json(report: microsandbox::snapshot::SnapshotVerifyReport) -> serde_json::Value {
+    let upper = match report.upper {
+        UpperVerifyStatus::NotRecorded => serde_json::json!({"kind":"not_recorded"}),
+        UpperVerifyStatus::Verified { algorithm, digest } => {
+            serde_json::json!({"kind":"verified","algorithm":algorithm,"digest":digest})
+        }
+    };
+    serde_json::json!({
+        "digest": report.digest,
+        "path": report.path.display().to_string(),
+        "upper": upper,
+    })
+}
+
+fn apply_snapshot_create_opts(
+    mut builder: microsandbox::SnapshotBuilder,
+    opts: SnapshotCreateOpts,
+) -> Result<microsandbox::SnapshotBuilder, FfiError> {
+    match (opts.name, opts.path) {
+        (Some(name), None) => {
+            builder = builder.destination(SnapshotDestination::Name(name));
+        }
+        (None, Some(path)) => {
+            builder = builder.destination(SnapshotDestination::Path(PathBuf::from(path)));
+        }
+        (Some(_), Some(_)) => {
+            return Err(FfiError::invalid_argument(
+                "snapshot create accepts either name or path, not both",
+            ));
+        }
+        (None, None) => {
+            return Err(FfiError::invalid_argument(
+                "snapshot create requires name or path",
+            ));
+        }
+    }
+    for (k, v) in opts.labels {
+        builder = builder.label(k, v);
+    }
+    if opts.force {
+        builder = builder.force();
+    }
+    if opts.record_integrity {
+        builder = builder.record_integrity();
+    }
+    Ok(builder)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_snapshot(
+    cancel_id: u64,
+    sandbox_name: *const c_char,
+    snapshot_name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sandbox_name = unsafe { cstr(sandbox_name) }?;
+        let snapshot_name = unsafe { cstr(snapshot_name) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&sandbox_name).await.map_err(FfiError::from)?;
+            let snap = h.snapshot(&snapshot_name).await.map_err(FfiError::from)?;
+            Ok(snapshot_json(&snap).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_snapshot_to(
+    cancel_id: u64,
+    sandbox_name: *const c_char,
+    path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sandbox_name = unsafe { cstr(sandbox_name) }?;
+        let path = unsafe { cstr(path) }?;
+        Ok(Box::pin(async move {
+            let h = Sandbox::get(&sandbox_name).await.map_err(FfiError::from)?;
+            let snap = h
+                .snapshot_to(PathBuf::from(path))
+                .await
+                .map_err(FfiError::from)?;
+            Ok(snapshot_json(&snap).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_create(
+    cancel_id: u64,
+    source_sandbox: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let source_sandbox = unsafe { cstr(source_sandbox) }?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SnapshotCreateOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid opts JSON: {e}")))?;
+        let builder = apply_snapshot_create_opts(Snapshot::builder(&source_sandbox), opts)?;
+        Ok(Box::pin(async move {
+            let snap = builder.create().await.map_err(FfiError::from)?;
+            Ok(snapshot_json(&snap).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_open(
+    cancel_id: u64,
+    path_or_name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let path_or_name = unsafe { cstr(path_or_name) }?;
+        Ok(Box::pin(async move {
+            let snap = Snapshot::open(&path_or_name)
+                .await
+                .map_err(FfiError::from)?;
+            Ok(snapshot_json(&snap).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_verify(
+    cancel_id: u64,
+    path_or_name: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let path_or_name = unsafe { cstr(path_or_name) }?;
+        Ok(Box::pin(async move {
+            let snap = Snapshot::open(&path_or_name)
+                .await
+                .map_err(FfiError::from)?;
+            let report = snap.verify().await.map_err(FfiError::from)?;
+            Ok(verify_report_json(report).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_get(
+    cancel_id: u64,
+    name_or_digest: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name_or_digest = unsafe { cstr(name_or_digest) }?;
+        Ok(Box::pin(async move {
+            let h = Snapshot::get(&name_or_digest)
+                .await
+                .map_err(FfiError::from)?;
+            Ok(snapshot_handle_json(&h).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_list(
+    cancel_id: u64,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        Ok(Box::pin(async move {
+            let handles = Snapshot::list().await.map_err(FfiError::from)?;
+            let arr: Vec<serde_json::Value> = handles.iter().map(snapshot_handle_json).collect();
+            Ok(serde_json::Value::Array(arr).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_list_dir(
+    cancel_id: u64,
+    dir: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let dir = unsafe { cstr(dir) }?;
+        Ok(Box::pin(async move {
+            let snaps = Snapshot::list_dir(PathBuf::from(dir))
+                .await
+                .map_err(FfiError::from)?;
+            let arr: Vec<serde_json::Value> = snaps.iter().map(snapshot_json).collect();
+            Ok(serde_json::Value::Array(arr).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_remove(
+    cancel_id: u64,
+    path_or_name: *const c_char,
+    force: bool,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let path_or_name = unsafe { cstr(path_or_name) }?;
+        Ok(Box::pin(async move {
+            Snapshot::remove(&path_or_name, force)
+                .await
+                .map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_reindex(
+    cancel_id: u64,
+    dir: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let dir = unsafe { cstr(dir) }?;
+        Ok(Box::pin(async move {
+            let indexed = Snapshot::reindex(PathBuf::from(dir))
+                .await
+                .map_err(FfiError::from)?;
+            Ok(format!(r#"{{"indexed":{indexed}}}"#))
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_export(
+    cancel_id: u64,
+    name_or_path: *const c_char,
+    out: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name_or_path = unsafe { cstr(name_or_path) }?;
+        let out = unsafe { cstr(out) }?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SnapshotExportOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid opts JSON: {e}")))?;
+        Ok(Box::pin(async move {
+            Snapshot::export(
+                &name_or_path,
+                &PathBuf::from(out),
+                ExportOpts {
+                    with_parents: opts.with_parents,
+                    with_image: opts.with_image,
+                    plain_tar: opts.plain_tar,
+                },
+            )
+            .await
+            .map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_snapshot_import(
+    cancel_id: u64,
+    archive: *const c_char,
+    dest: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let archive = unsafe { cstr(archive) }?;
+        let dest = unsafe { cstr(dest) }?;
+        let dest = if dest.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(dest))
+        };
+        Ok(Box::pin(async move {
+            let h = Snapshot::import(&PathBuf::from(archive), dest.as_deref())
+                .await
+                .map_err(FfiError::from)?;
+            Ok(snapshot_handle_json(&h).to_string())
         }))
     })
 }

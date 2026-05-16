@@ -310,7 +310,7 @@ jobs:
 
       - name: Unit-test Go SDK
         working-directory: sdk/go
-        # Unit tests don't dlopen the FFI lib, so no MICROSANDBOX_LIB_PATH
+        # Unit tests don't dlopen the FFI lib, so no MICROSANDBOX_FFI_PATH
         # needed. Integration tests live under ./integration with the
         # `integration` build tag and run in the go-sdk-test job below.
         run: go test -count=1 .
@@ -322,6 +322,17 @@ jobs:
           cargo build -p microsandbox-go
           mkdir -p build
           cp target/debug/libmicrosandbox_go_ffi.so build/
+
+      # -- Smoke-test the FFI boundary (no KVM needed) --
+      # Released SDK builds embed the FFI library; here we use the
+      # microsandbox_ffi_path build tag to swap the embed for the
+      # freshly-built local .so.
+      - name: Smoke-test Go SDK FFI
+        if: matrix.target == 'linux-x86_64'
+        working-directory: sdk/go
+        env:
+          MICROSANDBOX_FFI_PATH: ${{ github.workspace }}/build/libmicrosandbox_go_ffi.so
+        run: go test -tags "smoke microsandbox_ffi_path" -count=1 -timeout 2m .
 
       # -- Upload artifacts (linux-x86_64 only, for SDK smoke tests) --
       - name: Upload build artifacts
@@ -547,27 +558,22 @@ jobs:
       - name: Run Go integration tests
         working-directory: sdk/go
         env:
-          # Bypass EnsureInstalled's download; load the just-built cdylib.
-          MICROSANDBOX_LIB_PATH: ${{ github.workspace }}/build/libmicrosandbox_go_ffi.so
+          # SDK builds embed the FFI; the microsandbox_ffi_path build tag
+          # swaps the embed for a reader of this env var so we test
+          # against the freshly-built local .so.
+          MICROSANDBOX_FFI_PATH: ${{ github.workspace }}/build/libmicrosandbox_go_ffi.so
           # Force the SDK to spawn the freshly-built msb (mirrors node-sdk-test
           # reasoning: avoid running against a stale bundled binary).
           MSB_PATH: ${{ github.workspace }}/build/msb
+        # Linux unix-socket paths are 108 bytes — anchor MSB_HOME under
+        # /tmp/XXX so sandboxes/<long-name>/runtime/agent.sock fits.
         run: |
-          # Linux's sockaddr_un.sun_path is 108 bytes. The Go integration
-          # tests derive sandbox names from test function names — some run
-          # 57+ chars — and the agent socket lives at
-          # ${MSB_HOME}/sandboxes/<name>/runtime/agent.sock. The runner's
-          # default $_TEMP is too deep (~32 chars) and the path blows the
-          # limit. Anchor MSB_HOME under /tmp with a short, unique suffix.
-          # Use the shortest possible template that mktemp accepts (XXX)
-          # so paths like /tmp/aBc (8 chars) leave ~100 bytes of headroom
-          # for the sandbox name + /sandboxes/<name>/runtime/agent.sock.
           MSB_HOME=$(mktemp -d -p /tmp XXX)
           trap "rm -rf '$MSB_HOME'" EXIT
           export MSB_HOME
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
-          go test -tags integration -count=1 -timeout 20m ./integration/...
+          go test -tags "integration microsandbox_ffi_path" -count=1 -timeout 20m ./integration/...
 
   # ---------------------------------------------------------------------------
   # Aggregator: a single status check that always reports, regardless of

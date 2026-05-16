@@ -74,6 +74,24 @@ const (
 	// ErrImageNotFound.
 	ErrImagePullFailed
 
+	// ErrSnapshotNotFound indicates the requested snapshot artifact or index
+	// entry does not exist.
+	ErrSnapshotNotFound
+
+	// ErrSnapshotAlreadyExists indicates a snapshot destination already exists.
+	ErrSnapshotAlreadyExists
+
+	// ErrSnapshotSandboxRunning indicates snapshotting was requested for a
+	// sandbox that is still running.
+	ErrSnapshotSandboxRunning
+
+	// ErrSnapshotImageMissing indicates the image pinned by a snapshot is not
+	// present in the local cache.
+	ErrSnapshotImageMissing
+
+	// ErrSnapshotIntegrity indicates snapshot verification failed.
+	ErrSnapshotIntegrity
+
 	// ErrPatchFailed indicates a rootfs patch could not be applied before
 	// the VM booted.
 	ErrPatchFailed
@@ -150,6 +168,16 @@ func (k ErrorKind) String() string {
 		return "ImageInUse"
 	case ErrImagePullFailed:
 		return "ImagePullFailed"
+	case ErrSnapshotNotFound:
+		return "SnapshotNotFound"
+	case ErrSnapshotAlreadyExists:
+		return "SnapshotAlreadyExists"
+	case ErrSnapshotSandboxRunning:
+		return "SnapshotSandboxRunning"
+	case ErrSnapshotImageMissing:
+		return "SnapshotImageMissing"
+	case ErrSnapshotIntegrity:
+		return "SnapshotIntegrity"
 	case ErrPatchFailed:
 		return "PatchFailed"
 	case ErrNetworkPolicy:
@@ -259,6 +287,16 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrImageNotFound
 	case ffi.KindImageInUse:
 		return ErrImageInUse
+	case ffi.KindSnapshotNotFound:
+		return ErrSnapshotNotFound
+	case ffi.KindSnapshotAlreadyExists:
+		return ErrSnapshotAlreadyExists
+	case ffi.KindSnapshotSandboxRunning:
+		return ErrSnapshotSandboxRunning
+	case ffi.KindSnapshotImageMissing:
+		return ErrSnapshotImageMissing
+	case ffi.KindSnapshotIntegrity:
+		return ErrSnapshotIntegrity
 	case ffi.KindPatchFailed:
 		return ErrPatchFailed
 	case ffi.KindIO:

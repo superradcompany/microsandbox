@@ -1,5 +1,8 @@
+use std::net::IpAddr;
+
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use std::str::FromStr;
 
 use microsandbox_network::builder::NetworkBuilder as RustNetworkBuilder;
 use microsandbox_network::policy::NetworkPolicy as RustNetworkPolicy;
@@ -54,6 +57,19 @@ impl JsNetworkBuilder {
         Ok(self)
     }
 
+    /// Publish a TCP port on a specific host bind address.
+    #[napi(js_name = "portBind")]
+    pub fn port_bind(&mut self, bind: String, host_port: u32, guest_port: u32) -> Result<&Self> {
+        let bind = parse_bind_addr(&bind)?;
+        let h = u16::try_from(host_port)
+            .map_err(|_| napi::Error::from_reason("host port out of range"))?;
+        let g = u16::try_from(guest_port)
+            .map_err(|_| napi::Error::from_reason("guest port out of range"))?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.port_bind(bind, h, g));
+        Ok(self)
+    }
+
     /// Publish a UDP port.
     #[napi(js_name = "portUdp")]
     pub fn port_udp(&mut self, host_port: u32, guest_port: u32) -> Result<&Self> {
@@ -63,6 +79,24 @@ impl JsNetworkBuilder {
             .map_err(|_| napi::Error::from_reason("guest port out of range"))?;
         let prev = self.take_inner();
         self.inner = Some(prev.port_udp(h, g));
+        Ok(self)
+    }
+
+    /// Publish a UDP port on a specific host bind address.
+    #[napi(js_name = "portUdpBind")]
+    pub fn port_udp_bind(
+        &mut self,
+        bind: String,
+        host_port: u32,
+        guest_port: u32,
+    ) -> Result<&Self> {
+        let bind = parse_bind_addr(&bind)?;
+        let h = u16::try_from(host_port)
+            .map_err(|_| napi::Error::from_reason("host port out of range"))?;
+        let g = u16::try_from(guest_port)
+            .map_err(|_| napi::Error::from_reason("guest port out of range"))?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.port_udp_bind(bind, h, g));
         Ok(self)
     }
 
@@ -205,6 +239,26 @@ impl JsNetworkBuilder {
         self
     }
 
+    /// Set the IPv4 pool used for per-sandbox /30 guest subnets.
+    #[napi(js_name = "ipv4Pool")]
+    pub fn ipv4_pool(&mut self, pool: String) -> Result<&Self> {
+        let parsed = ipnetwork::Ipv4Network::from_str(&pool)
+            .map_err(|e| napi::Error::from_reason(format!("invalid IPv4 pool `{pool}`: {e}")))?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.ipv4_pool(parsed));
+        Ok(self)
+    }
+
+    /// Set the IPv6 pool used for per-sandbox /64 guest prefixes.
+    #[napi(js_name = "ipv6Pool")]
+    pub fn ipv6_pool(&mut self, pool: String) -> Result<&Self> {
+        let parsed = ipnetwork::Ipv6Network::from_str(&pool)
+            .map_err(|e| napi::Error::from_reason(format!("invalid IPv6 pool `{pool}`: {e}")))?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.ipv6_pool(parsed));
+        Ok(self)
+    }
+
     /// Trust the host's root CAs inside the guest. Default: false.
     #[napi(js_name = "trustHostCAs")]
     pub fn trust_host_cas(&mut self, enabled: bool) -> &Self {
@@ -229,6 +283,11 @@ impl JsNetworkBuilder {
         serde_json::to_string(&cfg)
             .map_err(|e| napi::Error::from_reason(format!("network config serialize: {e}")))
     }
+}
+
+fn parse_bind_addr(bind: &str) -> Result<IpAddr> {
+    bind.parse::<IpAddr>()
+        .map_err(|_| napi::Error::from_reason(format!("invalid bind address: {bind}")))
 }
 
 impl JsNetworkBuilder {

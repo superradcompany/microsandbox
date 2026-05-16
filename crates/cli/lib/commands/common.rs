@@ -128,7 +128,7 @@ pub struct SandboxOpts {
     pub idle_timeout: Option<String>,
 
     // --- Networking (requires "net" feature) ---
-    /// Forward a host port to the sandbox (HOST:GUEST or HOST:GUEST/udp).
+    /// Forward a host port to the sandbox (HOST:GUEST, BIND_ADDR:HOST:GUEST, and /udp variants).
     #[cfg(feature = "net")]
     #[arg(short, long)]
     pub port: Vec<String>,
@@ -168,6 +168,16 @@ pub struct SandboxOpts {
     #[cfg(feature = "net")]
     #[arg(long, value_name = "MS")]
     pub dns_query_timeout_ms: Option<u64>,
+
+    /// IPv4 pool used for per-sandbox /30 guest subnets. Default: 172.16.0.0/12.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-ipv4-pool", value_name = "CIDR")]
+    pub net_ipv4_pool: Option<String>,
+
+    /// IPv6 pool used for per-sandbox /64 guest prefixes. Default: fd42:6d73:62::/48.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-ipv6-pool", value_name = "CIDR")]
+    pub net_ipv6_pool: Option<String>,
 
     /// Network rule. Repeatable; each value is a comma-separated list of
     /// rule tokens. Token grammar:
@@ -454,11 +464,11 @@ fn apply_network_opts(
 
     // Port mappings.
     for port_str in &opts.port {
-        let (host, guest, udp) = parse_port(port_str)?;
+        let (bind, host, guest, udp) = parse_port_mapping(port_str)?;
         builder = if udp {
-            builder.port_udp(host, guest)
+            builder.port_udp_bind(bind, host, guest)
         } else {
-            builder.port(host, guest)
+            builder.port_bind(bind, host, guest)
         };
     }
 
@@ -478,9 +488,17 @@ fn apply_network_opts(
         if opts.net_default_ingress.is_some() {
             conflicts.push("--net-default-ingress");
         }
+        if opts.net_ipv4_pool.is_some() {
+            conflicts.push("--net-ipv4-pool");
+        }
+        if opts.net_ipv6_pool.is_some() {
+            conflicts.push("--net-ipv6-pool");
+        }
         if !conflicts.is_empty() {
             anyhow::bail!(
-                "--no-net cannot be combined with {}; --no-net disables the guest network entirely, so rules and defaults are dead code. Drop --no-net to apply rules, or drop the rule flags to keep the network off.",
+                "--no-net cannot be combined with {}; \
+                 --no-net disables the guest network entirely, so rules and defaults are dead code. \
+                 Drop --no-net to apply rules, or drop the rule flags to keep the network off.",
                 conflicts.join(" / "),
             );
         }
@@ -502,6 +520,8 @@ fn apply_network_opts(
         || !opts.net_rule.is_empty()
         || opts.net_default_egress.is_some()
         || opts.net_default_ingress.is_some()
+        || opts.net_ipv4_pool.is_some()
+        || opts.net_ipv6_pool.is_some()
         || opts.max_connections.is_some()
         || opts.trust_host_cas
         || opts.tls_intercept
@@ -529,6 +549,22 @@ fn apply_network_opts(
             &opts.deny_domain_suffix,
         )?;
         let max_conn = opts.max_connections;
+        let ipv4_pool = opts
+            .net_ipv4_pool
+            .as_deref()
+            .map(|s| {
+                s.parse::<ipnetwork::Ipv4Network>()
+                    .map_err(anyhow::Error::from)
+            })
+            .transpose()?;
+        let ipv6_pool = opts
+            .net_ipv6_pool
+            .as_deref()
+            .map(|s| {
+                s.parse::<ipnetwork::Ipv6Network>()
+                    .map_err(anyhow::Error::from)
+            })
+            .transpose()?;
         let trust_host_cas = opts.trust_host_cas;
         let tls_intercept = opts.tls_intercept;
         let tls_ports = opts.tls_intercept_port.clone();
@@ -557,6 +593,12 @@ fn apply_network_opts(
             }
             if let Some(max) = max_conn {
                 n = n.max_connections(max);
+            }
+            if let Some(pool) = ipv4_pool {
+                n = n.ipv4_pool(pool);
+            }
+            if let Some(pool) = ipv6_pool {
+                n = n.ipv6_pool(pool);
             }
             if trust_host_cas {
                 n = n.trust_host_cas(true);
@@ -724,9 +766,17 @@ fn build_network_policy(
     }))
 }
 
-/// Parse a port spec: `HOST:GUEST` or `HOST:GUEST/udp` or `HOST:GUEST/tcp`.
+/// Parse a port spec:
+/// - `HOST:GUEST`
+/// - `BIND_ADDR:HOST:GUEST`
+/// - `HOST:GUEST/udp`
+/// - `BIND_ADDR:HOST:GUEST/udp`
+///
+/// IPv6 bind addresses must be bracketed, e.g. `[::]:8080:80`.
 #[cfg(feature = "net")]
-fn parse_port(spec: &str) -> anyhow::Result<(u16, u16, bool)> {
+fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16, bool)> {
+    use std::net::{IpAddr, Ipv4Addr};
+
     let (port_part, udp) = if let Some(p) = spec.strip_suffix("/udp") {
         (p, true)
     } else if let Some(p) = spec.strip_suffix("/tcp") {
@@ -735,9 +785,34 @@ fn parse_port(spec: &str) -> anyhow::Result<(u16, u16, bool)> {
         (spec, false)
     };
 
-    let (host_str, guest_str) = port_part
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("port must be in format HOST:GUEST[/udp]"))?;
+    let (bind, host_str, guest_str) = if let Some(rest) = port_part.strip_prefix('[') {
+        let (bind_str, after_bracket) = rest.split_once("]:").ok_or_else(|| {
+            anyhow::anyhow!("IPv6 port bind must be in format [ADDR]:HOST:GUEST[/udp]")
+        })?;
+        let (host_str, guest_str) = after_bracket
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("port must be in format [ADDR]:HOST:GUEST[/udp]"))?;
+        let bind = bind_str
+            .parse::<IpAddr>()
+            .map_err(|_| anyhow::anyhow!("invalid bind address: {bind_str}"))?;
+        (bind, host_str, guest_str)
+    } else {
+        let parts: Vec<_> = port_part.split(':').collect();
+        match parts.as_slice() {
+            [host_str, guest_str] => (IpAddr::V4(Ipv4Addr::LOCALHOST), *host_str, *guest_str),
+            [bind_str, host_str, guest_str] => {
+                let bind = bind_str
+                    .parse::<IpAddr>()
+                    .map_err(|_| anyhow::anyhow!("invalid bind address: {bind_str}"))?;
+                (bind, *host_str, *guest_str)
+            }
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "port must be in format HOST:GUEST[/udp] or BIND_ADDR:HOST:GUEST[/udp]"
+                ));
+            }
+        }
+    };
 
     let host: u16 = host_str
         .trim()
@@ -748,7 +823,7 @@ fn parse_port(spec: &str) -> anyhow::Result<(u16, u16, bool)> {
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid guest port: {guest_str}"))?;
 
-    Ok((host, guest, udp))
+    Ok((bind, host, guest, udp))
 }
 
 /// Parse a secret spec: `ENV=VALUE@HOST`.
@@ -1025,6 +1100,38 @@ mod tests {
     fn inline_empty_name_errors() {
         let err = parse_script_inline("=echo hi").unwrap_err();
         assert!(err.to_string().contains("must not be empty"), "got: {err}");
+    }
+
+    // --- parse_port_mapping ---
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_without_bind_defaults_to_loopback() {
+        let (bind, host, guest, udp) = parse_port_mapping("8080:80").unwrap();
+        assert_eq!(bind, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        assert_eq!(host, 8080);
+        assert_eq!(guest, 80);
+        assert!(!udp);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_with_ipv4_bind() {
+        let (bind, host, guest, udp) = parse_port_mapping("0.0.0.0:8080:80/udp").unwrap();
+        assert_eq!(bind, "0.0.0.0".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(host, 8080);
+        assert_eq!(guest, 80);
+        assert!(udp);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_with_bracketed_ipv6_bind() {
+        let (bind, host, guest, udp) = parse_port_mapping("[::]:8080:80/tcp").unwrap();
+        assert_eq!(bind, "::".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(host, 8080);
+        assert_eq!(guest, 80);
+        assert!(!udp);
     }
 
     // --- parse_script_path ---

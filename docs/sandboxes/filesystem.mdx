@@ -23,6 +23,10 @@ await sb.fs().write("/app/config.json", '{"debug": true}');
 await sb.fs.write("/app/config.json", b'{"debug": true}')
 ```
 
+```go Go
+err := sb.FS().WriteString(ctx, "/app/config.json", `{"debug": true}`)
+```
+
 </CodeGroup>
 
 ## Read a file
@@ -38,6 +42,10 @@ const content = await sb.fs().readToString("/app/config.json");
 
 ```python Python
 content = await sb.fs.read_text("/app/config.json")
+```
+
+```go Go
+content, err := sb.FS().ReadString(ctx, "/app/config.json")
 ```
 
 </CodeGroup>
@@ -63,6 +71,13 @@ for (const entry of entries) {
 entries = await sb.fs.list("/app")
 for entry in entries:
     print(f"{entry.path}: {entry.kind}")
+```
+
+```go Go
+entries, err := sb.FS().List(ctx, "/app")
+for _, entry := range entries {
+    fmt.Printf("%s: %s\n", entry.Path, entry.Kind)
+}
 ```
 
 </CodeGroup>
@@ -92,6 +107,20 @@ async for chunk in stream:
     process(chunk)
 ```
 
+```go Go
+stream, err := sb.FS().ReadStream(ctx, "/app/data.bin")
+for {
+    chunk, err := stream.Recv(ctx)
+    if err != nil {
+        return err
+    }
+    if chunk == nil {
+        break
+    }
+    process(chunk)
+}
+```
+
 </CodeGroup>
 
 ## Copy from host
@@ -109,6 +138,10 @@ await sb.fs().copyFromHost("./local-file.txt", "/app/remote-file.txt");
 
 ```python Python
 await sb.fs.copy_from_host("./local-file.txt", "/app/remote-file.txt")
+```
+
+```go Go
+err := sb.FS().CopyFromHost(ctx, "./local-file.txt", "/app/remote-file.txt")
 ```
 
 </CodeGroup>
@@ -175,6 +208,16 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+// Mount the host directory directly.
+sb, err := m.CreateSandbox(ctx, "encrypted",
+    m.WithImage("python"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/secrets": m.Mount.Bind("/data/secrets", m.MountOptions{}),
+    }),
+)
+```
+
 </CodeGroup>
 
 ### Custom backend <sup><sup>coming soon</sup></sup>
@@ -235,6 +278,11 @@ sb = await Sandbox.create(
         "/secrets": Volume.backend(EncryptedFs(key, "/data")),
     },
 )
+```
+
+```go Go
+// Custom filesystem backends are not available in the current SDKs yet.
+// Use bind mounts, named volumes, or tmpfs mounts.
 ```
 
 </CodeGroup>

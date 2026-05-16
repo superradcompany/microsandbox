@@ -1,0 +1,258 @@
+---
+title: Snapshots
+description: Go SDK - Snapshot API reference
+icon: "code-branch"
+---
+
+Disk-only snapshots of a stopped sandbox. See [Snapshots](/sandboxes/snapshots) for concepts and walkthroughs; this page is the Go SDK reference.
+
+```go
+import m "github.com/superradcompany/microsandbox/sdk/go"
+```
+
+<Note>
+  Snapshots are **disk-only and stopped-only**. Live snapshots and qcow2 backing chains are tracked as future work.
+</Note>
+
+## Boot from snapshot
+
+Pass [`WithSnapshot`](#withsnapshot) to [`CreateSandbox`](/sdk/go/sandbox#createsandbox). It is mutually exclusive with [`WithImage`](/sdk/go/sandbox#withimage).
+
+```go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithSnapshot("after-pip-install"),
+)
+```
+
+---
+
+#### WithSnapshot()
+
+```go
+func WithSnapshot(pathOrName string) SandboxOption
+```
+
+Boot from a snapshot artifact by bare name (resolved under `~/.microsandbox/snapshots/`) or filesystem path.
+
+## SandboxHandle methods
+
+Snapshots are taken from a metadata handle, so stop the sandbox first and then call [`GetSandbox`](/sdk/go/sandbox#getsandbox).
+
+```go
+_ = sb.Stop(ctx)
+_ = sb.Close()
+
+h, err := m.GetSandbox(ctx, "baseline")
+if err != nil {
+    return err
+}
+snap, err := h.Snapshot(ctx, "after-pip-install")
+```
+
+---
+
+#### Snapshot()
+
+```go
+func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArtifact, error)
+```
+
+Snapshot this stopped sandbox under a bare name in the default snapshots directory.
+
+---
+
+#### SnapshotTo()
+
+```go
+func (h *SandboxHandle) SnapshotTo(ctx context.Context, path string) (*SnapshotArtifact, error)
+```
+
+Snapshot this stopped sandbox to an explicit artifact directory.
+
+## Snapshot
+
+Helpers for snapshot artifact operations. Access via the package-level `Snapshot` value.
+
+---
+
+#### Snapshot.Create()
+
+```go
+func (snapshotFactory) Create(
+    ctx context.Context,
+    sourceSandbox string,
+    opts SnapshotCreateOptions,
+) (*SnapshotArtifact, error)
+```
+
+Create a snapshot from a stopped sandbox. Set exactly one of `SnapshotCreateOptions.Name` or `SnapshotCreateOptions.Path`.
+
+```go
+snap, err := m.Snapshot.Create(ctx, "baseline",
+    m.SnapshotCreateOptions{
+        Name:            "after-pip-install",
+        Labels:          map[string]string{"stage": "post-deps"},
+        RecordIntegrity: true,
+    },
+)
+```
+
+---
+
+#### Snapshot.Open()
+
+```go
+func (snapshotFactory) Open(ctx context.Context, pathOrName string) (*SnapshotArtifact, error)
+```
+
+Open an existing artifact by bare name or path. This validates metadata only; call [`Verify`](#verify) for content checks.
+
+---
+
+#### Snapshot.Get()
+
+```go
+func (snapshotFactory) Get(ctx context.Context, nameOrDigest string) (*SnapshotHandle, error)
+```
+
+Look up a handle in the local index by name, digest, or path.
+
+---
+
+#### Snapshot.List()
+
+```go
+func (snapshotFactory) List(ctx context.Context) ([]*SnapshotHandle, error)
+```
+
+List indexed snapshots from the local DB cache.
+
+---
+
+#### Snapshot.ListDir()
+
+```go
+func (snapshotFactory) ListDir(ctx context.Context, dir string) ([]*SnapshotArtifact, error)
+```
+
+Walk a directory and parse each subdirectory's manifest without touching the index.
+
+---
+
+#### Snapshot.Remove()
+
+```go
+func (snapshotFactory) Remove(ctx context.Context, pathOrName string, force bool) error
+```
+
+Remove a snapshot artifact and its index row. Refuses indexed children unless `force` is true.
+
+---
+
+#### Snapshot.Reindex()
+
+```go
+func (snapshotFactory) Reindex(ctx context.Context, dir string) (uint32, error)
+```
+
+Walk `dir` and rebuild the local index. Returns the number of artifacts indexed.
+
+---
+
+#### Snapshot.Export()
+
+```go
+func (snapshotFactory) Export(
+    ctx context.Context,
+    nameOrPath string,
+    outPath string,
+    opts SnapshotExportOptions,
+) error
+```
+
+Bundle a snapshot into a `.tar.zst` archive. Set `PlainTar` to skip compression.
+
+---
+
+#### Snapshot.Import()
+
+```go
+func (snapshotFactory) Import(ctx context.Context, archive, dest string) (*SnapshotHandle, error)
+```
+
+Unpack a snapshot archive into the snapshots directory or an explicit `dest` directory. Pass `""` for the default destination.
+
+## SnapshotArtifact
+
+An artifact on disk, returned by `Snapshot.Create`, `Snapshot.Open`, `Snapshot.ListDir`, and `SandboxHandle.Snapshot`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Path()` | `string` | Artifact directory |
+| `Digest()` | `string` | Canonical manifest digest (`sha256:...`) |
+| `SizeBytes()` | `uint64` | Apparent upper-layer size |
+| `ImageRef()` | `string` | Image reference the snapshot was taken from |
+| `ImageManifestDigest()` | `string` | Pinned OCI manifest digest |
+| `Format()` | `string` | `"raw"` or `"qcow2"` |
+| `Fstype()` | `string` | Filesystem type inside the upper layer |
+| `Parent()` | `*string` | Parent digest, or nil |
+| `CreatedAt()` | `string` | RFC 3339 timestamp |
+| `Labels()` | `map[string]string` | User labels |
+| `SourceSandbox()` | `*string` | Best-effort source sandbox name |
+
+---
+
+#### Verify()
+
+```go
+func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, error)
+```
+
+Recompute recorded content integrity for this snapshot.
+
+## SnapshotHandle
+
+Lightweight handle backed by the local index. Returned by `Snapshot.Get`, `Snapshot.List`, and `Snapshot.Import`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Digest()` | `string` | Manifest digest |
+| `Name()` | `*string` | Bare-name alias, if indexed with one |
+| `ParentDigest()` | `*string` | Parent digest, or nil |
+| `ImageRef()` | `string` | Pinned image reference |
+| `Format()` | `string` | `"raw"` or `"qcow2"` |
+| `SizeBytes()` | `*uint64` | Apparent upper size at index time |
+| `CreatedAt()` | `time.Time` | Snapshot creation time |
+| `Path()` | `string` | Artifact directory |
+| `Open(ctx)` | `(*SnapshotArtifact, error)` | Open the artifact metadata |
+| `Remove(ctx, force)` | `error` | Remove this snapshot |
+
+## Types
+
+```go
+type SnapshotCreateOptions struct {
+    Name            string
+    Path            string
+    Labels          map[string]string
+    Force           bool
+    RecordIntegrity bool
+}
+
+type SnapshotExportOptions struct {
+    WithParents bool
+    WithImage   bool
+    PlainTar    bool
+}
+
+type SnapshotVerifyReport struct {
+    Digest string
+    Path   string
+    Upper  SnapshotUpperVerifyStatus
+}
+
+type SnapshotUpperVerifyStatus struct {
+    Kind      string
+    Algorithm string
+    Digest    string
+}
+```

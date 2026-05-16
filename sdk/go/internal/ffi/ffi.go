@@ -4,9 +4,9 @@
 // # Architecture
 //
 // The library is loaded at runtime via dlopen/dlsym rather than linked at
-// build time. This means `go build` succeeds with no Rust toolchain or
-// pre-built library on disk — the library is downloaded on first use by
-// microsandbox.EnsureInstalled.
+// build time. This means `go build` succeeds with no Rust toolchain on the
+// host — the library bytes are embedded in the SDK (see internal/bundle)
+// and extracted to disk by microsandbox.EnsureInstalled before dlopen.
 //
 // Layout of this file:
 //   - C preamble: typedefs, function-pointer globals, load_microsandbox(),
@@ -55,6 +55,7 @@ package ffi
 // Keep in sync with sdk/go/native/src/lib.rs and microsandbox_go_ffi.h.
 // ---------------------------------------------------------------------------
 typedef void     (*msb_free_string_fn)(char *ptr);
+typedef void     (*msb_set_sdk_msb_path_fn)(const char *path);
 typedef uint64_t (*msb_cancel_alloc_fn)(void);
 typedef void     (*msb_cancel_trigger_fn)(uint64_t id);
 typedef void     (*msb_cancel_unregister_fn)(uint64_t id);
@@ -113,6 +114,8 @@ typedef char *(*msb_sandbox_attach_shell_fn)(uint64_t cancel_id, uint64_t handle
 typedef char *(*msb_sandbox_remove_persisted_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_all_sandbox_metrics_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_metrics_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_logs_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_logs_fn)(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_volume_create_fn)(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_volume_remove_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
@@ -127,6 +130,19 @@ typedef char *(*msb_image_remove_fn)(uint64_t cancel_id, const char *reference, 
 typedef char *(*msb_image_gc_layers_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_gc_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 
+typedef char *(*msb_sandbox_handle_snapshot_fn)(uint64_t cancel_id, const char *sandbox_name, const char *snapshot_name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_snapshot_to_fn)(uint64_t cancel_id, const char *sandbox_name, const char *path, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_create_fn)(uint64_t cancel_id, const char *source_sandbox, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_open_fn)(uint64_t cancel_id, const char *path_or_name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_verify_fn)(uint64_t cancel_id, const char *path_or_name, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_get_fn)(uint64_t cancel_id, const char *name_or_digest, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_list_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_list_dir_fn)(uint64_t cancel_id, const char *dir, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_remove_fn)(uint64_t cancel_id, const char *path_or_name, bool force, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_reindex_fn)(uint64_t cancel_id, const char *dir, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_export_fn)(uint64_t cancel_id, const char *name_or_path, const char *out, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_import_fn)(uint64_t cancel_id, const char *archive, const char *dest, uint8_t *buf, size_t buf_len);
+
 typedef char *(*msb_fs_read_stream_fn)(uint64_t cancel_id, uint64_t handle, const char *path, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_fs_read_stream_recv_fn)(uint64_t cancel_id, uint64_t stream_handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_fs_read_stream_close_fn)(uint64_t stream_handle, uint8_t *buf, size_t buf_len);
@@ -138,6 +154,7 @@ typedef char *(*msb_fs_write_stream_close_fn)(uint64_t cancel_id, uint64_t strea
 // Function pointer globals — NULL until load_microsandbox() succeeds.
 // ---------------------------------------------------------------------------
 static msb_free_string_fn        ptr_msb_free_string        = NULL;
+static msb_set_sdk_msb_path_fn   ptr_msb_set_sdk_msb_path   = NULL;
 static msb_cancel_alloc_fn       ptr_msb_cancel_alloc       = NULL;
 static msb_cancel_trigger_fn     ptr_msb_cancel_trigger     = NULL;
 static msb_cancel_unregister_fn  ptr_msb_cancel_unregister  = NULL;
@@ -189,6 +206,8 @@ static msb_sandbox_attach_shell_fn ptr_msb_sandbox_attach_shell = NULL;
 static msb_sandbox_remove_persisted_fn ptr_msb_sandbox_remove_persisted = NULL;
 static msb_all_sandbox_metrics_fn  ptr_msb_all_sandbox_metrics  = NULL;
 static msb_sandbox_handle_metrics_fn ptr_msb_sandbox_handle_metrics = NULL;
+static msb_sandbox_logs_fn          ptr_msb_sandbox_logs          = NULL;
+static msb_sandbox_handle_logs_fn   ptr_msb_sandbox_handle_logs   = NULL;
 static msb_volume_create_fn       ptr_msb_volume_create       = NULL;
 static msb_volume_remove_fn       ptr_msb_volume_remove       = NULL;
 static msb_volume_list_fn         ptr_msb_volume_list         = NULL;
@@ -206,6 +225,18 @@ static msb_image_inspect_fn        ptr_msb_image_inspect        = NULL;
 static msb_image_remove_fn         ptr_msb_image_remove         = NULL;
 static msb_image_gc_layers_fn      ptr_msb_image_gc_layers      = NULL;
 static msb_image_gc_fn             ptr_msb_image_gc             = NULL;
+static msb_sandbox_handle_snapshot_fn ptr_msb_sandbox_handle_snapshot = NULL;
+static msb_sandbox_handle_snapshot_to_fn ptr_msb_sandbox_handle_snapshot_to = NULL;
+static msb_snapshot_create_fn      ptr_msb_snapshot_create      = NULL;
+static msb_snapshot_open_fn        ptr_msb_snapshot_open        = NULL;
+static msb_snapshot_verify_fn      ptr_msb_snapshot_verify      = NULL;
+static msb_snapshot_get_fn         ptr_msb_snapshot_get         = NULL;
+static msb_snapshot_list_fn        ptr_msb_snapshot_list        = NULL;
+static msb_snapshot_list_dir_fn    ptr_msb_snapshot_list_dir    = NULL;
+static msb_snapshot_remove_fn      ptr_msb_snapshot_remove      = NULL;
+static msb_snapshot_reindex_fn     ptr_msb_snapshot_reindex     = NULL;
+static msb_snapshot_export_fn      ptr_msb_snapshot_export      = NULL;
+static msb_snapshot_import_fn      ptr_msb_snapshot_import      = NULL;
 
 // dlopen handle — set once by load_microsandbox, never closed.
 static void *lib_handle = NULL;
@@ -240,6 +271,7 @@ const char *load_microsandbox(const char *path) {
 		return load_error;
 	}
 	RESOLVE(msb_free_string);
+	RESOLVE(msb_set_sdk_msb_path);
 	RESOLVE(msb_cancel_alloc);
 	RESOLVE(msb_cancel_trigger);
 	RESOLVE(msb_cancel_unregister);
@@ -291,6 +323,8 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_remove_persisted);
 	RESOLVE(msb_all_sandbox_metrics);
 	RESOLVE(msb_sandbox_handle_metrics);
+	RESOLVE(msb_sandbox_logs);
+	RESOLVE(msb_sandbox_handle_logs);
 	RESOLVE(msb_volume_create);
 	RESOLVE(msb_volume_remove);
 	RESOLVE(msb_volume_list);
@@ -308,6 +342,18 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_image_remove);
 	RESOLVE(msb_image_gc_layers);
 	RESOLVE(msb_image_gc);
+	RESOLVE(msb_sandbox_handle_snapshot);
+	RESOLVE(msb_sandbox_handle_snapshot_to);
+	RESOLVE(msb_snapshot_create);
+	RESOLVE(msb_snapshot_open);
+	RESOLVE(msb_snapshot_verify);
+	RESOLVE(msb_snapshot_get);
+	RESOLVE(msb_snapshot_list);
+	RESOLVE(msb_snapshot_list_dir);
+	RESOLVE(msb_snapshot_remove);
+	RESOLVE(msb_snapshot_reindex);
+	RESOLVE(msb_snapshot_export);
+	RESOLVE(msb_snapshot_import);
 	return NULL;
 }
 
@@ -323,6 +369,9 @@ int is_microsandbox_loaded() {
 // ---------------------------------------------------------------------------
 void call_msb_free_string(char *ptr) {
 	if (ptr_msb_free_string) ptr_msb_free_string(ptr);
+}
+void call_msb_set_sdk_msb_path(const char *path) {
+	if (ptr_msb_set_sdk_msb_path) ptr_msb_set_sdk_msb_path(path);
 }
 uint64_t call_msb_cancel_alloc(void) {
 	return ptr_msb_cancel_alloc ? ptr_msb_cancel_alloc() : 0;
@@ -477,6 +526,12 @@ char *call_msb_all_sandbox_metrics(uint64_t cancel_id, uint8_t *buf, size_t buf_
 char *call_msb_sandbox_handle_metrics(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_handle_metrics ? ptr_msb_sandbox_handle_metrics(cancel_id, name, buf, buf_len) : NULL;
 }
+char *call_msb_sandbox_logs(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_logs ? ptr_msb_sandbox_logs(cancel_id, handle, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_logs(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_logs ? ptr_msb_sandbox_handle_logs(cancel_id, name, opts_json, buf, buf_len) : NULL;
+}
 char *call_msb_volume_create(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_volume_create ? ptr_msb_volume_create(cancel_id, name, opts_json, buf, buf_len) : NULL;
 }
@@ -528,6 +583,42 @@ char *call_msb_image_gc_layers(uint64_t cancel_id, uint8_t *buf, size_t buf_len)
 char *call_msb_image_gc(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_image_gc ? ptr_msb_image_gc(cancel_id, buf, buf_len) : NULL;
 }
+char *call_msb_sandbox_handle_snapshot(uint64_t cancel_id, const char *sandbox_name, const char *snapshot_name, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_snapshot ? ptr_msb_sandbox_handle_snapshot(cancel_id, sandbox_name, snapshot_name, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_snapshot_to(uint64_t cancel_id, const char *sandbox_name, const char *path, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_snapshot_to ? ptr_msb_sandbox_handle_snapshot_to(cancel_id, sandbox_name, path, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_create(uint64_t cancel_id, const char *source_sandbox, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_create ? ptr_msb_snapshot_create(cancel_id, source_sandbox, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_open(uint64_t cancel_id, const char *path_or_name, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_open ? ptr_msb_snapshot_open(cancel_id, path_or_name, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_verify(uint64_t cancel_id, const char *path_or_name, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_verify ? ptr_msb_snapshot_verify(cancel_id, path_or_name, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_get(uint64_t cancel_id, const char *name_or_digest, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_get ? ptr_msb_snapshot_get(cancel_id, name_or_digest, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_list(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_list ? ptr_msb_snapshot_list(cancel_id, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_list_dir(uint64_t cancel_id, const char *dir, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_list_dir ? ptr_msb_snapshot_list_dir(cancel_id, dir, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_remove(uint64_t cancel_id, const char *path_or_name, bool force, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_remove ? ptr_msb_snapshot_remove(cancel_id, path_or_name, force, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_reindex(uint64_t cancel_id, const char *dir, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_reindex ? ptr_msb_snapshot_reindex(cancel_id, dir, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_export(uint64_t cancel_id, const char *name_or_path, const char *out, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_export ? ptr_msb_snapshot_export(cancel_id, name_or_path, out, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_snapshot_import(uint64_t cancel_id, const char *archive, const char *dest, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_snapshot_import ? ptr_msb_snapshot_import(cancel_id, archive, dest, buf, buf_len) : NULL;
+}
 */
 import "C"
 
@@ -536,9 +627,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -553,41 +641,16 @@ import (
 // the library has been loaded. The public SDK surfaces this as ErrLibraryNotLoaded.
 const KindLibraryNotLoaded = "library_not_loaded"
 
-// libraryPathEnv overrides the default library path. Set it to a local
-// target/debug build path for development without running EnsureInstalled.
-const libraryPathEnv = "MICROSANDBOX_LIB_PATH"
-
 var (
-	loadOnce    sync.Once
-	loadErr     error
-	libraryPath string
+	loadOnce sync.Once
+	loadErr  error
 )
 
-func init() {
-	if envPath := os.Getenv(libraryPathEnv); envPath != "" {
-		libraryPath = envPath
-	} else {
-		if home, err := os.UserHomeDir(); err == nil {
-			libraryPath = filepath.Join(home, ".microsandbox", "lib", defaultLibName())
-		}
-	}
-}
-
-// defaultLibName returns the platform-specific filename of the Go FFI cdylib.
-func defaultLibName() string {
-	if runtime.GOOS == "darwin" {
-		return "libmicrosandbox_go_ffi.dylib"
-	}
-	return "libmicrosandbox_go_ffi.so"
-}
-
-// Load opens the shared library at path (or the default ~/.microsandbox/lib/
-// location when path is empty) and resolves every msb_* symbol. Safe to call
-// multiple times — only the first call does work.
+// Load opens the shared library at path and resolves every msb_* symbol.
+// Safe to call multiple times — only the first call does work. The path
+// is supplied by setup.materializeFFI after extracting the embedded
+// library; callers should not invoke Load directly.
 func Load(path string) error {
-	if path == "" {
-		path = libraryPath
-	}
 	loadOnce.Do(func() {
 		cPath := C.CString(path)
 		defer C.free(unsafe.Pointer(cPath))
@@ -603,17 +666,53 @@ func IsLoaded() bool {
 	return C.is_microsandbox_loaded() == 1
 }
 
-// ensureLoaded is called at the top of every exported FFI function. It returns
-// a typed error when the library has not been loaded, so the caller gets a
-// clear message rather than a nil-pointer crash.
+// SetSdkMsbPath pushes the SDK-resolved msb binary path into the Rust
+// resolver's tier 2 (see crates/microsandbox/lib/config/mod.rs:
+// resolve_msb_path). Set-once on the Rust side: subsequent calls are
+// ignored. The user's MSB_PATH env var still wins as tier 1.
+func SetSdkMsbPath(path string) {
+	if path == "" {
+		return
+	}
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	C.call_msb_set_sdk_msb_path(cPath)
+}
+
+// autoLoader is set by the parent SDK package's init() to a function
+// that materializes the embedded FFI library to disk and dlopens it.
+// Decoupling lets ensureLoaded trigger the load lazily without an
+// import cycle.
+var autoLoader func() error
+
+// SetAutoLoader registers a hook that ensureLoaded invokes the first
+// time a wrapped FFI call hits an unloaded library. Idempotent on the
+// caller's side (the hook should sync.Once-guard its work).
+func SetAutoLoader(fn func() error) {
+	autoLoader = fn
+}
+
+// ensureLoaded is called at the top of every exported FFI function. If
+// the library isn't loaded yet, it invokes the registered auto-loader
+// (set by sdk/go's init()) which extracts the embedded FFI to disk and
+// dlopens it. Falls back to a clear typed error if no loader is set or
+// loading failed.
 func ensureLoaded() error {
-	if !IsLoaded() {
-		return &Error{
-			Kind:    KindLibraryNotLoaded,
-			Message: "microsandbox library not loaded; call microsandbox.EnsureInstalled() first",
+	if IsLoaded() {
+		return nil
+	}
+	if autoLoader != nil {
+		if err := autoLoader(); err != nil {
+			return err
+		}
+		if IsLoaded() {
+			return nil
 		}
 	}
-	return nil
+	return &Error{
+		Kind:    KindLibraryNotLoaded,
+		Message: "microsandbox library failed to load",
+	}
 }
 
 // =============================================================================
@@ -633,6 +732,10 @@ const defaultBufSize = 1 << 20
 // don't grow this until the FFI also buffers across calls.
 const fsStreamBufSize = 6 << 20
 
+// logsBufSize covers the runtime's bounded log history (10 MiB rotated x3)
+// after base64 inflation and JSON framing.
+const logsBufSize = 48 << 20
+
 // Error is the typed error surfaced across the FFI boundary. The Rust side
 // serialises {kind, message} JSON; this type unmarshals it. The public SDK
 // maps Kind back into microsandbox.ErrorKind.
@@ -645,23 +748,28 @@ func (e *Error) Error() string { return e.Message }
 
 // Error kind strings. Keep in sync with sdk/go/native/src/lib.rs FfiError::kind.
 const (
-	KindSandboxNotFound      = "sandbox_not_found"
-	KindSandboxAlreadyExists = "sandbox_already_exists"
-	KindSandboxStillRunning  = "sandbox_still_running"
-	KindVolumeNotFound       = "volume_not_found"
-	KindVolumeAlreadyExists  = "volume_already_exists"
-	KindExecTimeout          = "exec_timeout"
-	KindInvalidConfig        = "invalid_config"
-	KindInvalidArgument      = "invalid_argument"
-	KindInvalidHandle        = "invalid_handle"
-	KindBufferTooSmall       = "buffer_too_small"
-	KindCancelled            = "cancelled"
-	KindInternal             = "internal"
-	KindFilesystem           = "filesystem"
-	KindImageNotFound        = "image_not_found"
-	KindImageInUse           = "image_in_use"
-	KindPatchFailed          = "patch_failed"
-	KindIO                   = "io"
+	KindSandboxNotFound        = "sandbox_not_found"
+	KindSandboxAlreadyExists   = "sandbox_already_exists"
+	KindSandboxStillRunning    = "sandbox_still_running"
+	KindVolumeNotFound         = "volume_not_found"
+	KindVolumeAlreadyExists    = "volume_already_exists"
+	KindExecTimeout            = "exec_timeout"
+	KindInvalidConfig          = "invalid_config"
+	KindInvalidArgument        = "invalid_argument"
+	KindInvalidHandle          = "invalid_handle"
+	KindBufferTooSmall         = "buffer_too_small"
+	KindCancelled              = "cancelled"
+	KindInternal               = "internal"
+	KindFilesystem             = "filesystem"
+	KindImageNotFound          = "image_not_found"
+	KindImageInUse             = "image_in_use"
+	KindSnapshotNotFound       = "snapshot_not_found"
+	KindSnapshotAlreadyExists  = "snapshot_already_exists"
+	KindSnapshotSandboxRunning = "snapshot_sandbox_running"
+	KindSnapshotImageMissing   = "snapshot_image_missing"
+	KindSnapshotIntegrity      = "snapshot_integrity"
+	KindPatchFailed            = "patch_failed"
+	KindIO                     = "io"
 )
 
 // Sandbox is an opaque handle to a Rust-side sandbox. Call Close to release.
@@ -781,6 +889,8 @@ func releaseHandle(handle uint64) {
 // Zero-valued fields are omitted; the Rust side applies defaults.
 type CreateOptions struct {
 	Image              string               `json:"image,omitempty"`
+	ImageFstype        string               `json:"image_fstype,omitempty"`
+	Snapshot           string               `json:"snapshot,omitempty"`
 	MemoryMiB          uint32               `json:"memory_mib,omitempty"`
 	CPUs               uint8                `json:"cpus,omitempty"`
 	Workdir            string               `json:"workdir,omitempty"`
@@ -799,11 +909,10 @@ type CreateOptions struct {
 	PullPolicy         string               `json:"pull_policy,omitempty"`
 	MaxDurationSecs    uint64               `json:"max_duration_secs,omitempty"`
 	IdleTimeoutSecs    uint64               `json:"idle_timeout_secs,omitempty"`
-	StopSignal         string               `json:"stop_signal,omitempty"`
-	Labels             map[string]string    `json:"labels,omitempty"`
 	RegistryAuth       *RegistryAuthOptions `json:"registry_auth,omitempty"`
 	Ports              map[uint16]uint16    `json:"ports,omitempty"`
 	PortsUDP           map[uint16]uint16    `json:"ports_udp,omitempty"`
+	PortBindings       []PortBindingOptions `json:"port_bindings,omitempty"`
 	Network            *NetworkOptions      `json:"network,omitempty"`
 	Secrets            []SecretOptions      `json:"secrets,omitempty"`
 	Patches            []PatchOptions       `json:"patches,omitempty"`
@@ -845,9 +954,20 @@ type NetworkOptions struct {
 	DenyDomainSuffixes  []string             `json:"deny_domain_suffixes,omitempty"`
 	TLS                 *TLSOptions          `json:"tls,omitempty"`
 	Ports               map[uint16]uint16    `json:"ports,omitempty"`
+	PortBindings        []PortBindingOptions `json:"port_bindings,omitempty"`
+	IPv4Pool            string               `json:"ipv4_pool,omitempty"`
+	IPv6Pool            string               `json:"ipv6_pool,omitempty"`
 	MaxConnections      *uint                `json:"max_connections,omitempty"`
 	OnSecretViolation   string               `json:"on_secret_violation,omitempty"`
 	TrustHostCAs        *bool                `json:"trust_host_cas,omitempty"`
+}
+
+// PortBindingOptions publishes a host port on a specific host bind address.
+type PortBindingOptions struct {
+	Bind      string `json:"bind,omitempty"`
+	HostPort  uint16 `json:"host_port"`
+	GuestPort uint16 `json:"guest_port"`
+	Protocol  string `json:"protocol,omitempty"`
 }
 
 // DNSOptions configures the in-VM DNS proxy.
@@ -990,6 +1110,78 @@ type SandboxHandleInfo struct {
 	ConfigJSON    string `json:"config_json"`
 	CreatedAtUnix *int64 `json:"created_at_unix"`
 	UpdatedAtUnix *int64 `json:"updated_at_unix"`
+}
+
+// LogOptions filters persisted sandbox logs.
+type LogOptions struct {
+	Tail    uint64   `json:"tail,omitempty"`
+	SinceMs *int64   `json:"since_ms,omitempty"`
+	UntilMs *int64   `json:"until_ms,omitempty"`
+	Sources []string `json:"sources,omitempty"`
+}
+
+// LogEntry is one persisted sandbox log entry.
+type LogEntry struct {
+	Source      string  `json:"source"`
+	SessionID   *uint64 `json:"session_id"`
+	TimestampMs int64   `json:"timestamp_ms"`
+	DataB64     string  `json:"data_b64"`
+}
+
+func logsOptionsJSON(opts LogOptions) (*C.char, error) {
+	b, err := json.Marshal(opts)
+	if err != nil {
+		return nil, fmt.Errorf("marshal log opts: %w", err)
+	}
+	return C.CString(string(b)), nil
+}
+
+func parseLogEntries(out string) ([]LogEntry, error) {
+	var entries []LogEntry
+	if err := json.Unmarshal([]byte(out), &entries); err != nil {
+		return nil, fmt.Errorf("parse logs response: %w", err)
+	}
+	return entries, nil
+}
+
+// SandboxLogs reads persisted logs for a live sandbox handle.
+func (s *Sandbox) SandboxLogs(ctx context.Context, opts LogOptions) ([]LogEntry, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cOpts, err := logsOptionsJSON(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer C.free(unsafe.Pointer(cOpts))
+	out, err := callBuf(ctx, logsBufSize, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_logs(cancelID, s.h(), cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return parseLogEntries(out)
+}
+
+// SandboxHandleLogs reads persisted logs for a sandbox by name.
+func SandboxHandleLogs(ctx context.Context, name string, opts LogOptions) ([]LogEntry, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	cOpts, err := logsOptionsJSON(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer C.free(unsafe.Pointer(cOpts))
+	out, err := callBuf(ctx, logsBufSize, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_logs(cancelID, cName, cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return parseLogEntries(out)
 }
 
 // LookupSandbox fetches the persisted metadata for a sandbox by name without
@@ -2099,6 +2291,9 @@ func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error) {
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		return nil, fmt.Errorf("parse all_sandbox_metrics: %w", err)
 	}
+	for _, s := range resp.Sandboxes {
+		s.Uptime = time.Duration(s.UptimeSecs) * time.Second
+	}
 	return resp.Sandboxes, nil
 }
 
@@ -2592,4 +2787,291 @@ func ImageGC(ctx context.Context) (uint32, error) {
 		return 0, fmt.Errorf("parse image_gc: %w", err)
 	}
 	return resp.Removed, nil
+}
+
+// ---------------------------------------------------------------------------
+// Snapshots
+// ---------------------------------------------------------------------------
+
+type SnapshotInfo struct {
+	Path                string            `json:"path"`
+	Digest              string            `json:"digest"`
+	SizeBytes           uint64            `json:"size_bytes"`
+	ImageRef            string            `json:"image_ref"`
+	ImageManifestDigest string            `json:"image_manifest_digest"`
+	Format              string            `json:"format"`
+	Fstype              string            `json:"fstype"`
+	Parent              *string           `json:"parent"`
+	CreatedAt           string            `json:"created_at"`
+	Labels              map[string]string `json:"labels"`
+	SourceSandbox       *string           `json:"source_sandbox"`
+}
+
+type SnapshotHandleInfo struct {
+	Digest        string  `json:"digest"`
+	Name          *string `json:"name"`
+	ParentDigest  *string `json:"parent_digest"`
+	ImageRef      string  `json:"image_ref"`
+	Format        string  `json:"format"`
+	SizeBytes     *uint64 `json:"size_bytes"`
+	CreatedAtUnix int64   `json:"created_at_unix"`
+	Path          string  `json:"path"`
+}
+
+type SnapshotVerifyReport struct {
+	Digest string `json:"digest"`
+	Path   string `json:"path"`
+	Upper  struct {
+		Kind      string `json:"kind"`
+		Algorithm string `json:"algorithm,omitempty"`
+		Digest    string `json:"digest,omitempty"`
+	} `json:"upper"`
+}
+
+type SnapshotCreateOptions struct {
+	Name            string            `json:"name,omitempty"`
+	Path            string            `json:"path,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	Force           bool              `json:"force,omitempty"`
+	RecordIntegrity bool              `json:"record_integrity,omitempty"`
+}
+
+type SnapshotExportOptions struct {
+	WithParents bool `json:"with_parents,omitempty"`
+	WithImage   bool `json:"with_image,omitempty"`
+	PlainTar    bool `json:"plain_tar,omitempty"`
+}
+
+func SandboxHandleSnapshot(ctx context.Context, sandboxName, snapshotName string) (*SnapshotInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cSandbox := C.CString(sandboxName)
+	defer C.free(unsafe.Pointer(cSandbox))
+	cSnapshot := C.CString(snapshotName)
+	defer C.free(unsafe.Pointer(cSnapshot))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_snapshot(cancelID, cSandbox, cSnapshot, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var info SnapshotInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse snapshot: %w", err)
+	}
+	return &info, nil
+}
+
+func SandboxHandleSnapshotTo(ctx context.Context, sandboxName, path string) (*SnapshotInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cSandbox := C.CString(sandboxName)
+	defer C.free(unsafe.Pointer(cSandbox))
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_snapshot_to(cancelID, cSandbox, cPath, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var info SnapshotInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse snapshot: %w", err)
+	}
+	return &info, nil
+}
+
+func SnapshotCreate(ctx context.Context, sourceSandbox string, opts SnapshotCreateOptions) (*SnapshotInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(opts)
+	if err != nil {
+		return nil, err
+	}
+	cSource := C.CString(sourceSandbox)
+	defer C.free(unsafe.Pointer(cSource))
+	cOpts := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cOpts))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_create(cancelID, cSource, cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var info SnapshotInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse snapshot create: %w", err)
+	}
+	return &info, nil
+}
+
+func SnapshotOpen(ctx context.Context, pathOrName string) (*SnapshotInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cName := C.CString(pathOrName)
+	defer C.free(unsafe.Pointer(cName))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_open(cancelID, cName, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var info SnapshotInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse snapshot open: %w", err)
+	}
+	return &info, nil
+}
+
+func SnapshotVerify(ctx context.Context, pathOrName string) (*SnapshotVerifyReport, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cName := C.CString(pathOrName)
+	defer C.free(unsafe.Pointer(cName))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_verify(cancelID, cName, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var report SnapshotVerifyReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		return nil, fmt.Errorf("parse snapshot verify: %w", err)
+	}
+	return &report, nil
+}
+
+func SnapshotGet(ctx context.Context, nameOrDigest string) (*SnapshotHandleInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cName := C.CString(nameOrDigest)
+	defer C.free(unsafe.Pointer(cName))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_get(cancelID, cName, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var info SnapshotHandleInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse snapshot get: %w", err)
+	}
+	return &info, nil
+}
+
+func SnapshotList(ctx context.Context) ([]*SnapshotHandleInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_list(cancelID, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var infos []*SnapshotHandleInfo
+	if err := json.Unmarshal([]byte(out), &infos); err != nil {
+		return nil, fmt.Errorf("parse snapshot list: %w", err)
+	}
+	return infos, nil
+}
+
+func SnapshotListDir(ctx context.Context, dir string) ([]*SnapshotInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cDir := C.CString(dir)
+	defer C.free(unsafe.Pointer(cDir))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_list_dir(cancelID, cDir, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var infos []*SnapshotInfo
+	if err := json.Unmarshal([]byte(out), &infos); err != nil {
+		return nil, fmt.Errorf("parse snapshot list dir: %w", err)
+	}
+	return infos, nil
+}
+
+func SnapshotRemove(ctx context.Context, pathOrName string, force bool) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	cName := C.CString(pathOrName)
+	defer C.free(unsafe.Pointer(cName))
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_remove(cancelID, cName, C.bool(force), buf, bufLen)
+	})
+	return err
+}
+
+func SnapshotReindex(ctx context.Context, dir string) (uint32, error) {
+	if err := ensureLoaded(); err != nil {
+		return 0, err
+	}
+	cDir := C.CString(dir)
+	defer C.free(unsafe.Pointer(cDir))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_reindex(cancelID, cDir, buf, bufLen)
+	})
+	if err != nil {
+		return 0, err
+	}
+	var raw struct {
+		Indexed uint32 `json:"indexed"`
+	}
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		return 0, fmt.Errorf("parse snapshot reindex: %w", err)
+	}
+	return raw.Indexed, nil
+}
+
+func SnapshotExport(ctx context.Context, nameOrPath, outPath string, opts SnapshotExportOptions) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(opts)
+	if err != nil {
+		return err
+	}
+	cName := C.CString(nameOrPath)
+	defer C.free(unsafe.Pointer(cName))
+	cOut := C.CString(outPath)
+	defer C.free(unsafe.Pointer(cOut))
+	cOpts := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cOpts))
+	_, err = call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_export(cancelID, cName, cOut, cOpts, buf, bufLen)
+	})
+	return err
+}
+
+func SnapshotImport(ctx context.Context, archive, dest string) (*SnapshotHandleInfo, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cArchive := C.CString(archive)
+	defer C.free(unsafe.Pointer(cArchive))
+	cDest := C.CString(dest)
+	defer C.free(unsafe.Pointer(cDest))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_snapshot_import(cancelID, cArchive, cDest, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var info SnapshotHandleInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		return nil, fmt.Errorf("parse snapshot import: %w", err)
+	}
+	return &info, nil
 }

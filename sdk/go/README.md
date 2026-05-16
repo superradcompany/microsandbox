@@ -40,7 +40,9 @@ The `microsandbox` Go module provides native bindings to the [microsandbox](http
 go get github.com/superradcompany/microsandbox/sdk/go
 ```
 
-At program startup, call `EnsureInstalled` once before any other SDK function. It downloads the `msb` binary, `libkrunfw`, and the native FFI library to `~/.microsandbox/` the first time it runs; subsequent calls are no-ops.
+The SDK works out of the box — the FFI library is embedded in the Go binary and loads on first use. The first sandbox call also downloads `msb` + `libkrunfw` to `~/.microsandbox/` if they aren't already there.
+
+For long-lived processes, you can call `EnsureInstalled` explicitly at startup to surface any install errors up front instead of at first sandbox-spawn time. It's optional and idempotent:
 
 ```go
 import microsandbox "github.com/superradcompany/microsandbox/sdk/go"
@@ -475,7 +477,7 @@ sb, err := h.Connect(ctx)
 
 | Function | Description |
 |----------|-------------|
-| `EnsureInstalled(ctx)` | Download runtime dependencies to `~/.microsandbox/` (idempotent) |
+| `EnsureInstalled(ctx, opts...)` | Optional — download msb + libkrunfw to `~/.microsandbox/` up front (idempotent) |
 | `CreateSandbox(ctx, name, ...opts)` | Create and start a sandbox |
 | `CreateSandboxDetached(ctx, name, ...opts)` | Create a sandbox in detached mode |
 | `StartSandbox(ctx, name)` | Boot a stopped sandbox by name |
@@ -510,7 +512,7 @@ sb, err := h.Connect(ctx)
 | `Metrics` | Resource metrics (CPU %, memory bytes, disk I/O, network I/O, uptime) |
 | `SandboxConfig` / `NetworkConfig` / `TlsConfig` / `ExecConfig` / `VolumeConfig` | Configuration structs |
 | `SecretEntry`, `PolicyRule`, `PatchConfig`, `MountConfig` | Value types for secrets, network rules, rootfs patches, and volume mounts |
-| `Patch`, `Secret`, `NetworkPolicy`, `Mount` | Factory namespaces (`Patch.Text`, `Secret.Env`, `NetworkPolicy.None`, `Mount.Named`, …) |
+| `Patch`, `Secret`, `NetworkPolicy`, `Mount` | Helper namespaces — `Patch.Text`, `Secret.Env`, `NetworkPolicy.None`, `Mount.Named`, etc. |
 
 ### Sandbox Methods
 
@@ -523,6 +525,7 @@ sb, err := h.Connect(ctx)
 | `FS()` | Return a `*SandboxFs` for guest filesystem access |
 | `Metrics(ctx)` | Return current resource metrics |
 | `MetricsStream(ctx, interval)` | Live metrics subscription; returns `*MetricsStreamHandle` |
+| `Logs(ctx, opts)` | Read persisted sandbox logs |
 | `Attach(ctx, cmd, args...)` | Interactive PTY session; blocks until exit |
 | `AttachShell(ctx)` | Interactive PTY session in the default shell |
 | `Drain(ctx)` | Send graceful drain signal (SIGUSR1) |
@@ -541,6 +544,7 @@ sb, err := h.Connect(ctx)
 | Option | Description |
 |--------|-------------|
 | `WithImage(image)` | OCI image to run (e.g. `"python:3.12"`) |
+| `WithImageDisk(path, fstype)` | Disk-image rootfs with optional filesystem hint |
 | `WithMemory(mib)` | Memory limit in MiB |
 | `WithCPUs(n)` | CPU core limit |
 | `WithWorkdir(path)` | Default working directory inside the sandbox |
@@ -564,7 +568,6 @@ sb, err := h.Connect(ctx)
 | `WithScripts(map)` | Named scripts the agent can run by key |
 | `WithPullPolicy(p)` | `PullPolicyAlways` / `PullPolicyIfMissing` / `PullPolicyNever` |
 | `WithMaxDuration(d)` / `WithIdleTimeout(d)` | Lifecycle caps |
-| `WithStopSignal(sig)` | Override the graceful-stop signal (default SIGTERM) |
 | `WithRegistryAuth(auth)` | Credentials for private OCI registries |
 | `WithMounts(map)` | Volume mounts keyed by guest path — use `Mount.Named/Bind/Tmpfs` |
 | `WithExecCwd(path)` | Working directory for a single `Exec`/`Shell` call |
@@ -592,7 +595,7 @@ sb, err := h.Connect(ctx)
 | `ErrInvalidHandle` | Handle is stale, closed, or was never valid |
 | `ErrBufferTooSmall` | Response exceeded the fixed output buffer (stream instead) |
 | `ErrCancelled` | Operation cancelled via the caller's context |
-| `ErrLibraryNotLoaded` | `EnsureInstalled` was not called before using the SDK |
+| `ErrLibraryNotLoaded` | FFI library failed to load (e.g. unsupported platform or GLIBC too old) |
 | `ErrInternal` | Catch-all for unrecognised runtime errors |
 
 Additional kinds declared for forward compatibility with the Node/Python SDKs — currently surface as `ErrInternal` / `ErrInvalidConfig` / `ErrFilesystem` / `ErrImageNotFound`: `ErrSandboxNotRunning`, `ErrExecFailed`, `ErrPathNotFound`, `ErrImagePullFailed`, `ErrNetworkPolicy`, `ErrSecretViolation`, `ErrTLS`.
@@ -622,17 +625,20 @@ Each example is a self-contained `main.go` under `sdk/go/examples/`. Run any of 
 
 ## Development
 
-To use a locally-built FFI library instead of downloading a release:
+The SDK embeds the FFI library at build time, so a normal `go build` /
+`go test` needs no Rust toolchain. To iterate on the FFI shim itself,
+build the library locally and point the SDK at it via the
+`microsandbox_ffi_path` build tag:
 
 ```bash
 # Build the FFI crate from the repo root.
 cargo build -p microsandbox-go
 
-# Point the SDK at it.
-export MICROSANDBOX_LIB_PATH=$PWD/target/debug/libmicrosandbox_go_ffi.dylib  # macOS
-export MICROSANDBOX_LIB_PATH=$PWD/target/debug/libmicrosandbox_go_ffi.so     # Linux
+# Run against the freshly-built .so instead of the embed.
+export MICROSANDBOX_FFI_PATH=$PWD/target/debug/libmicrosandbox_go_ffi.dylib  # macOS
+export MICROSANDBOX_FFI_PATH=$PWD/target/debug/libmicrosandbox_go_ffi.so     # Linux
 
-go run ./examples/basic
+go run -tags microsandbox_ffi_path ./examples/basic
 ```
 
 Run the unit tests (no FFI library required):
@@ -641,10 +647,11 @@ Run the unit tests (no FFI library required):
 go test ./...
 ```
 
-Run the full integration suite under `sdk/go/integration/` (requires a built FFI library and a live microsandbox runtime):
+Run the full integration suite under `sdk/go/integration/` (requires a
+built FFI library and a live microsandbox runtime):
 
 ```bash
-go test -tags=integration -v -count=1 ./integration/...
+go test -tags "integration microsandbox_ffi_path" -v -count=1 ./integration/...
 ```
 
 The integration package is a black-box test suite organised by feature

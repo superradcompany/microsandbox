@@ -8,15 +8,12 @@
 //
 //	go get github.com/superradcompany/microsandbox/sdk/go
 //
-// At program startup, call EnsureInstalled once before any other SDK
-// function. It downloads the microsandbox runtime (msb, libkrunfw, and the
-// Go FFI shared library) into ~/.microsandbox/ on first use and is a no-op
-// on subsequent calls:
+// The SDK works out of the box: the FFI library is embedded in the Go
+// binary and loads on first use. EnsureInstalled is optional and only
+// governs the msb + libkrunfw runtime download into ~/.microsandbox/.
+// Call it at startup if you want install errors surfaced up front:
 //
 //	if err := microsandbox.EnsureInstalled(ctx); err != nil {
 //	    log.Fatal(err)
 //	}
-//
-// Set MICROSANDBOX_LIB_PATH to point at a locally built
-// libmicrosandbox_go_ffi to skip the download during development.
 package microsandbox

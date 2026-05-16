@@ -81,7 +81,7 @@ where
     F: for<'a> FnOnce(&'a mut RuleBuilder) -> &'a mut RuleBuilder
 ```
 
-Sugar for [`rule()`](#rule-1) with direction pre-set to `Any`. Rules committed inside apply in both directions.
+Sugar for [`rule()`](#rule) with direction pre-set to `Any`. Rules committed inside apply in both directions.
 
 ---
 
@@ -155,7 +155,7 @@ where
     F: for<'a> FnOnce(&'a mut RuleBuilder) -> &'a mut RuleBuilder
 ```
 
-Sugar for [`rule()`](#rule-1) with direction pre-set to `Egress`.
+Sugar for [`rule()`](#rule) with direction pre-set to `Egress`.
 
 ---
 
@@ -167,7 +167,7 @@ where
     F: for<'a> FnOnce(&'a mut RuleBuilder) -> &'a mut RuleBuilder
 ```
 
-Sugar for [`rule()`](#rule-1) with direction pre-set to `Ingress`.
+Sugar for [`rule()`](#rule) with direction pre-set to `Ingress`.
 
 ---
 
@@ -314,7 +314,7 @@ Add an inclusive port range.
 fn ports<I: IntoIterator<Item = u16>>(&mut self, ports: I) -> &mut Self
 ```
 
-Add multiple single ports. Equivalent to calling [`port()`](#port-1) once per element.
+Add multiple single ports. Equivalent to calling [`port()`](#port-setters) once per element.
 
 ---
 
@@ -612,6 +612,26 @@ fn max_connections(self, max: usize) -> Self
 ```
 
 Limit the maximum number of concurrent network connections from the sandbox.
+
+---
+
+#### ipv4_pool()
+
+```rust
+fn ipv4_pool(self, pool: Ipv4Network) -> Self
+```
+
+Set the IPv4 pool used to derive per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12`.
+
+---
+
+#### ipv6_pool()
+
+```rust
+fn ipv6_pool(self, pool: Ipv6Network) -> Self
+```
+
+Set the IPv6 pool used to derive per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48`.
 
 ---
 

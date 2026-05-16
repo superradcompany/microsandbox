@@ -55,7 +55,7 @@ impl JsInterfaceOverridesBuilder {
         Ok(self)
     }
 
-    /// Set the guest IPv4 address (e.g. `"100.96.0.5"`).
+    /// Set the guest IPv4 address (e.g. `"172.16.0.5"`).
     #[napi(js_name = "ipv4")]
     pub fn ipv4(&mut self, address: String) -> &Self {
         match Ipv4Addr::from_str(&address) {

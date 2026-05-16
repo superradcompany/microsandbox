@@ -1,20 +1,24 @@
-use microsandbox::sandbox::{NetworkPolicy, Patch, PullPolicy, SandboxConfig};
+use microsandbox::sandbox::{NetworkPolicy, Patch, PullPolicy, SandboxBuilder};
 use microsandbox::{LogLevel, RegistryAuth};
 use microsandbox_network::dns::Nameserver;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use crate::error::to_py_err;
-
 //--------------------------------------------------------------------------------------------------
 // Functions: Config Conversion
 //--------------------------------------------------------------------------------------------------
 
-/// Build a `SandboxConfig` from Python kwargs.
-pub fn build_config_from_kwargs(
+/// Build a `SandboxBuilder` from the `(name, **kwargs)` form of
+/// `Sandbox.create`.
+///
+/// Returns the builder so the async caller can drive `build().await` or
+/// `create().await` itself — the kwarg-extraction phase has to stay sync
+/// (PyO3 dict access needs the GIL), but the config materialization step
+/// is async because of snapshot manifest I/O.
+pub fn sandbox_builder_from_args(
     name: String,
     kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<SandboxConfig> {
+) -> PyResult<SandboxBuilder> {
     let Some(kwargs) = kwargs else {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "image= or snapshot= is required",
@@ -50,9 +54,9 @@ pub fn build_config_from_kwargs(
         };
         // Resolve the snapshot synchronously: read the manifest and
         // pin the image. We can't use the async `from_snapshot` here
-        // because `build_config_from_kwargs` runs in sync context;
-        // instead we replicate the resolution against the on-disk
-        // artifact directly via `snapshot_resolved`.
+        // because `sandbox_builder_from_args` runs in sync context; instead
+        // we replicate the resolution against the on-disk artifact
+        // directly via `snapshot_resolved`.
         let snap_dir = resolve_snapshot_dir(&snap_str);
         if !snap_dir.exists() {
             return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
@@ -169,7 +173,6 @@ pub fn build_config_from_kwargs(
         }
         builder = builder.idle_timeout(idle_timeout as u64);
     }
-    let stop_signal_val = extract_opt::<String>(kwargs, "stop_signal")?;
 
     // Environment variables.
     if let Some(env) = kwargs.get_item("env")? {
@@ -263,12 +266,7 @@ pub fn build_config_from_kwargs(
 
     // Ports.
     if let Some(ports) = kwargs.get_item("ports")? {
-        let ports_dict: &Bound<'_, PyDict> = ports.downcast()?;
-        for (host_obj, guest_obj) in ports_dict.iter() {
-            let host_port: u16 = host_obj.extract()?;
-            let guest_port: u16 = guest_obj.extract()?;
-            builder = builder.port(host_port, guest_port);
-        }
+        builder = apply_ports(builder, &ports)?;
     }
 
     // Network.
@@ -292,11 +290,7 @@ pub fn build_config_from_kwargs(
         builder = builder.network(|n| n.on_secret_violation(action));
     }
 
-    let mut config = builder.build().map_err(to_py_err)?;
-    if let Some(sig) = stop_signal_val {
-        config.stop_signal = Some(sig);
-    }
-    Ok(config)
+    Ok(builder)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -768,6 +762,20 @@ fn apply_network(
         builder = builder.network(|n| n.max_connections(max));
     }
 
+    // Guest IPv4 pool.
+    if let Some(raw) = extract_opt::<String>(net, "ipv4_pool")? {
+        let pool: ipnetwork::Ipv4Network = raw.parse().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid ipv4_pool {raw:?}: {e}"))
+        })?;
+        builder = builder.network(|n| n.ipv4_pool(pool));
+    }
+    if let Some(raw) = extract_opt::<String>(net, "ipv6_pool")? {
+        let pool: ipnetwork::Ipv6Network = raw.parse().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid ipv6_pool {raw:?}: {e}"))
+        })?;
+        builder = builder.network(|n| n.ipv6_pool(pool));
+    }
+
     // Host-CA trust (ship host's extra CAs into the guest at boot).
     if let Some(trust) = extract_opt::<bool>(net, "trust_host_cas")? {
         builder = builder.network(move |n| n.trust_host_cas(trust));
@@ -820,12 +828,50 @@ fn apply_network(
     if let Some(ports) = net.get_item("ports")?
         && !ports.is_none()
     {
-        let ports_dict: &Bound<'_, PyDict> = ports.downcast()?;
+        builder = apply_ports(builder, &ports)?;
+    }
+
+    Ok(builder)
+}
+
+fn apply_ports(
+    mut builder: microsandbox::sandbox::SandboxBuilder,
+    ports: &Bound<'_, PyAny>,
+) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
+    if let Ok(ports_dict) = ports.downcast::<PyDict>() {
         for (host_obj, guest_obj) in ports_dict.iter() {
             let host_port: u16 = host_obj.extract()?;
             let guest_port: u16 = guest_obj.extract()?;
             builder = builder.port(host_port, guest_port);
         }
+        return Ok(builder);
+    }
+
+    let iter = ports.try_iter().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "ports must be a mapping of host_port to guest_port or a sequence of PortBinding values",
+        )
+    })?;
+
+    for item in iter {
+        let item = item?;
+        let port = as_dict(&item)?;
+        let host_port: u16 = extract_required(&port, "host_port")?;
+        let guest_port: u16 = extract_required(&port, "guest_port")?;
+        let bind: String = extract_opt(&port, "bind")?.unwrap_or_else(|| "127.0.0.1".to_string());
+        let bind = bind.parse::<std::net::IpAddr>().map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid bind address: {bind}"))
+        })?;
+        let protocol: Option<String> = extract_opt(&port, "protocol")?;
+        builder = match protocol.as_deref().unwrap_or("tcp") {
+            "tcp" => builder.port_bind(bind, host_port, guest_port),
+            "udp" => builder.port_udp_bind(bind, host_port, guest_port),
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid port protocol: {other}"
+                )));
+            }
+        };
     }
 
     Ok(builder)

@@ -378,8 +378,19 @@ impl<'a> SandboxFs<'a> {
         host_path: impl AsRef<Path>,
         guest_path: &str,
     ) -> MicrosandboxResult<()> {
-        let data = tokio::fs::read(host_path.as_ref()).await?;
-        self.write(guest_path, &data).await
+        use tokio::io::AsyncReadExt;
+
+        let mut file = tokio::fs::File::open(host_path.as_ref()).await?;
+        let sink = self.write_stream(guest_path).await?;
+        let mut buf = vec![0u8; FS_CHUNK_SIZE];
+        loop {
+            let n = file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            sink.write(&buf[..n]).await?;
+        }
+        sink.close().await
     }
 
     /// Copy a file from the sandbox to the host.

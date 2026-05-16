@@ -54,6 +54,10 @@ sub = sb.on_event("task.progress", lambda event: (
 ))
 ```
 
+```go Go
+// Bidirectional events are not available in the current SDKs yet.
+```
+
 </CodeGroup>
 
 ## Send events to guest
@@ -86,6 +90,10 @@ await sb.emit("task.start", {
     "input_file": "/data/input.txt",
     "output_dir": "/data/output",
 })
+```
+
+```go Go
+// Bidirectional events are not available in the current SDKs yet.
 ```
 
 </CodeGroup>

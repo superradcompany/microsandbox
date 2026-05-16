@@ -63,6 +63,19 @@ await sb.shell("setup")
 output = await sb.shell("start")
 ```
 
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("ubuntu"),
+    m.WithScripts(map[string]string{
+        "setup": "#!/bin/bash\napt-get update && apt-get install -y python3 curl",
+        "start": "#!/bin/bash\nexec python3 /app/main.py",
+    }),
+)
+
+_, err = sb.Shell(ctx, "setup")
+output, err := sb.Shell(ctx, "start")
+```
+
 </CodeGroup>
 
 ## Patches
@@ -126,6 +139,22 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+mode755 := uint32(0o755)
+mode644 := uint32(0o644)
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("alpine"),
+    m.WithPatches(
+        m.Patch.Text("/etc/greeting.txt", "Hello from a patched rootfs!\n", m.PatchOptions{}),
+        m.Patch.Text("/etc/motd", "Custom message of the day.\n", m.PatchOptions{Replace: true}),
+        m.Patch.Mkdir("/app", m.PatchOptions{Mode: &mode755}),
+        m.Patch.Text("/app/config.json", `{"debug": true}`, m.PatchOptions{Mode: &mode644}),
+        m.Patch.CopyFile("./cert.pem", "/etc/ssl/cert.pem", m.PatchOptions{}),
+        m.Patch.Append("/etc/hosts", "127.0.0.1 myapp.local\n"),
+    ),
+)
+```
+
 </CodeGroup>
 
 ### Available operations
@@ -137,6 +166,7 @@ Full per-language signatures, parameters, and option shapes are documented in th
 - Rust: [`PatchBuilder`](/sdk/rust/sandbox#patchbuilder)
 - TypeScript: [`PatchBuilder`](/sdk/typescript/sandbox#patchbuilder)
 - Python: [`Patch`](/sdk/python/sandbox#patch) (factory) and [`PatchConfig`](/sdk/python/sandbox#patchconfig) (the value type)
+- Go: [`Patch`](/sdk/go/sandbox#patch) (helpers) and [`PatchConfig`](/sdk/go/sandbox#patchconfig) (the value type)
 
 ## Custom init system
 
@@ -195,6 +225,15 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("ghcr.io/superradcompany/debian-systemd:12"),
+    m.WithMemory(1024),
+    m.WithCPUs(2),
+    m.WithInit(m.Init.Auto()),
+)
+```
+
 ```bash CLI
 msb run ghcr.io/superradcompany/debian-systemd:12 \
   -m 1G -c 2 \
@@ -223,14 +262,6 @@ Pass extra argv and env to the init:
 Argv defaults to `[<cmd>]` when none is given; env is merged on top of the inherited environment.
 
 <CodeGroup>
-```bash CLI
-msb run ghcr.io/superradcompany/debian-systemd:12 \
-  --init /lib/systemd/systemd \
-  --init-arg --unit=multi-user.target \
-  --init-env container=microsandbox \
-  -- bash
-```
-
 ```rust Rust
 let sb = Sandbox::builder("worker")
     .image("ghcr.io/superradcompany/debian-systemd:12")
@@ -262,6 +293,26 @@ sb = await Sandbox.create(
         env={"container": "microsandbox"},
     ),
 )
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("ghcr.io/superradcompany/debian-systemd:12"),
+    m.WithInit(m.Init.Cmd("/lib/systemd/systemd",
+        m.InitOptions{
+            Args: []string{"--unit=multi-user.target"},
+            Env:  map[string]string{"container": "microsandbox"},
+        },
+    )),
+)
+```
+
+```bash CLI
+msb run ghcr.io/superradcompany/debian-systemd:12 \
+  --init /lib/systemd/systemd \
+  --init-arg --unit=multi-user.target \
+  --init-env container=microsandbox \
+  -- bash
 ```
 </CodeGroup>
 

@@ -33,6 +33,10 @@ icon: "bolt"
     pip install microsandbox
     ```
 
+    ```bash Go
+    go get github.com/superradcompany/microsandbox/sdk/go
+    ```
+
     ```bash CLI
     curl -fsSL https://install.microsandbox.dev | sh
     ```
@@ -92,6 +96,45 @@ icon: "bolt"
         await sb.stop()
 
     asyncio.run(main())
+    ```
+
+    ```go Go
+    package main
+
+    import (
+        "context"
+        "fmt"
+        "log"
+        "strings"
+
+        m "github.com/superradcompany/microsandbox/sdk/go"
+    )
+
+    func main() {
+        ctx := context.Background()
+        // Optional: download msb + libkrunfw to ~/.microsandbox/ if not
+        // already there. The first SDK call does this for you, but
+        // calling it explicitly surfaces install errors up front.
+        if err := m.EnsureInstalled(ctx); err != nil {
+            log.Fatal(err)
+        }
+
+        sb, err := m.CreateSandbox(ctx, "hello",
+            m.WithImage("python"),
+            m.WithMemory(512),
+        )
+        if err != nil {
+            log.Fatal(err)
+        }
+        defer sb.Close()
+        defer sb.Stop(ctx)
+
+        output, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello from a microVM!')"})
+        if err != nil {
+            log.Fatal(err)
+        }
+        fmt.Println(strings.TrimSpace(output.Stdout())) // Hello from a microVM!
+    }
     ```
 
     ```bash CLI

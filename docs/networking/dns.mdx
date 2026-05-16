@@ -76,6 +76,16 @@ sb = await Sandbox.create(
 )
 ```
 
+```go Go
+sb, err := m.CreateSandbox(ctx, "safe-agent",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
+        DenyDomains:        []string{"malware.example.com"},
+        DenyDomainSuffixes: []string{".tracking.com"},
+    }),
+)
+```
+
 ```bash CLI
 msb create python --name safe-agent \
   --deny-domain malware.example.com \
@@ -135,6 +145,19 @@ sb = await Sandbox.create(
             query_timeout_ms=3000,
         ),
     ),
+)
+```
+
+```go Go
+timeout := uint64(3000)
+sb, err := m.CreateSandbox(ctx, "safe-agent",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
+        DNS: &m.DNSConfig{
+            Nameservers:    []string{"1.1.1.1", "1.0.0.1"},
+            QueryTimeoutMs: &timeout,
+        },
+    }),
 )
 ```
 
