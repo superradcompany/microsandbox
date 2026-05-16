@@ -2099,6 +2099,9 @@ func AllSandboxMetrics(ctx context.Context) (map[string]*Metrics, error) {
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		return nil, fmt.Errorf("parse all_sandbox_metrics: %w", err)
 	}
+	for _, s := range resp.Sandboxes {
+		s.Uptime = time.Duration(s.UptimeSecs) * time.Second
+	}
 	return resp.Sandboxes, nil
 }
 
