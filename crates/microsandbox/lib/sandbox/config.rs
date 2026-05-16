@@ -412,8 +412,6 @@ impl Default for SandboxConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use microsandbox_image::ImageConfig;
 
     use crate::sandbox::{RootfsSource, VolumeMount};

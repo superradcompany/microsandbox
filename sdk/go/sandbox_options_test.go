@@ -96,13 +96,13 @@ func TestFFIWireShape_ScalarKnobs(t *testing.T) {
 	}
 }
 
-func TestFFIWireShape_ReplaceWithGraceMs(t *testing.T) {
+func TestFFIWireShape_ReplaceWithTimeoutMs(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),
-		WithReplaceWithGrace(750*time.Millisecond),
+		WithReplaceWithTimeout(750*time.Millisecond),
 	)
-	if v := mustField(t, got, "replace_with_grace_ms"); v != float64(750) {
-		t.Fatalf("replace_with_grace_ms = %v, want 750", v)
+	if v := mustField(t, got, "replace_with_timeout_ms"); v != float64(750) {
+		t.Fatalf("replace_with_timeout_ms = %v, want 750", v)
 	}
 	if v := mustField(t, got, "replace"); v != true {
 		t.Fatalf("replace = %v, want true", v)
@@ -111,14 +111,14 @@ func TestFFIWireShape_ReplaceWithGraceMs(t *testing.T) {
 	// Zero must round-trip (means "skip SIGTERM"), not be omitted.
 	got = marshalCreateOptions(t,
 		WithImage("alpine"),
-		WithReplaceWithGrace(0),
+		WithReplaceWithTimeout(0),
 	)
-	v, ok := got["replace_with_grace_ms"]
+	v, ok := got["replace_with_timeout_ms"]
 	if !ok {
-		t.Fatal("zero grace was omitted")
+		t.Fatal("zero timeout was omitted")
 	}
 	if v != float64(0) {
-		t.Fatalf("replace_with_grace_ms = %v, want 0", v)
+		t.Fatalf("replace_with_timeout_ms = %v, want 0", v)
 	}
 }
 

@@ -898,7 +898,7 @@ type CreateOptions struct {
 	Hostname           string               `json:"hostname,omitempty"`
 	User               string               `json:"user,omitempty"`
 	Replace            bool                 `json:"replace,omitempty"`
-	ReplaceWithGraceMs *uint64              `json:"replace_with_grace_ms,omitempty"`
+	ReplaceWithTimeoutMs *uint64            `json:"replace_with_timeout_ms,omitempty"`
 	Env                map[string]string    `json:"env,omitempty"`
 	Detached           bool                 `json:"detached,omitempty"`
 	Entrypoint         []string             `json:"entrypoint,omitempty"`

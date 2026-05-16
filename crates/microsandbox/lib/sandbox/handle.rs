@@ -259,8 +259,11 @@ impl SandboxHandle {
     ///
     /// - `timeout > 0`: ask the sandbox to shut down cleanly and wait
     ///   up to `timeout`; force-kill anything still running afterward.
+    ///   Pending writes that exceed the budget may be lost.
     /// - `timeout == Duration::ZERO`: force-kill immediately
-    ///   (equivalent to [`kill`](Self::kill)).
+    ///   (equivalent to [`kill`](Self::kill)). Pending writes that the
+    ///   workload hasn't `fsync`'d may be lost — same durability as a
+    ///   sudden power loss on a physical machine.
     pub async fn stop_with_timeout(&self, timeout: std::time::Duration) -> MicrosandboxResult<()> {
         if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
             return Ok(());
@@ -341,6 +344,11 @@ impl SandboxHandle {
     ///
     /// Waits for the process to exit (up to 5 seconds) and marks the
     /// sandbox as `Stopped`.
+    ///
+    /// Pending writes that the workload hasn't `fsync`'d may be lost —
+    /// same durability semantics as a sudden power loss on a physical
+    /// machine. Use [`stop`](Self::stop) for graceful shutdown that
+    /// gives the workload a chance to flush.
     pub async fn kill(&mut self) -> MicrosandboxResult<()> {
         if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
             return Ok(());

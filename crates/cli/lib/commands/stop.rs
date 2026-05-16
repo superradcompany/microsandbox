@@ -17,6 +17,7 @@ pub struct StopArgs {
     pub names: Vec<String>,
 
     /// Immediately kill the sandbox without graceful shutdown.
+    /// Pending writes that the workload hasn't `fsync`'d may be lost.
     #[arg(short, long)]
     pub force: bool,
 

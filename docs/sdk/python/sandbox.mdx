@@ -326,7 +326,11 @@ Run a command with streaming output. Returns a handle that emits stdout, stderr,
 async def kill() -> None
 ```
 
-Force-terminate the sandbox immediately (SIGKILL). No graceful shutdown.
+Force-terminate the sandbox immediately (SIGKILL). No graceful
+shutdown. Pending writes that the workload hasn't `fsync`'d may be
+lost — same durability semantics as a sudden power loss on a physical
+machine. Use [`stop()`](#stop) for graceful shutdown that gives the
+workload a chance to flush.
 
 ---
 

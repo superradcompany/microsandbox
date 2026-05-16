@@ -118,6 +118,12 @@ pending data to disk before it exits, so files written inside the
 sandbox aren't lost across a later `msb start`. If the sandbox is
 still running after the timeout, it is force-killed.
 
+`--force` and a timeout that elapses both end in a force-kill. Pending
+writes that the workload hasn't `fsync`'d at that point may be lost —
+same durability semantics as a sudden power loss on a physical
+machine. For durable writes, workloads should `fsync` important data
+themselves.
+
 | Flag | Description |
 |------|-------------|
 | `-f`, `--force` | Force terminate immediately. Pending writes may be lost |

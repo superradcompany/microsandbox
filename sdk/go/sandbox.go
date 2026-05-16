@@ -61,12 +61,12 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		Ports:           o.Ports,
 		PortsUDP:        o.PortsUDP,
 	}
-	if o.ReplaceWithGrace != nil {
+	if o.ReplaceWithTimeout != nil {
 		var ms uint64
-		if d := *o.ReplaceWithGrace; d > 0 {
+		if d := *o.ReplaceWithTimeout; d > 0 {
 			ms = uint64((d + time.Millisecond - 1) / time.Millisecond)
 		}
-		ffiOpts.ReplaceWithGraceMs = &ms
+		ffiOpts.ReplaceWithTimeoutMs = &ms
 	}
 	if o.Init != nil {
 		init := &ffi.InitOptions{Cmd: o.Init.Cmd, Args: append([]string(nil), o.Init.Args...)}

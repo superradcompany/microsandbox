@@ -328,7 +328,7 @@ sb = await Sandbox.create("worker", image="python", replace_with_timeout=30)  # 
 ```go Go
 sb, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("python"),
-    m.WithReplaceWithGrace(30*time.Second),
+    m.WithReplaceWithTimeout(30*time.Second),
 )
 ```
 

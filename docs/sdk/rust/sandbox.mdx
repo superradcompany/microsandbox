@@ -192,7 +192,12 @@ Get a filesystem handle for reading and writing files inside the running sandbox
 async fn kill(&self) -> MicrosandboxResult<()>
 ```
 
-Force-terminate the sandbox immediately with SIGKILL. No graceful shutdown - use when the sandbox is unresponsive.
+Force-terminate the sandbox immediately with SIGKILL. No graceful
+shutdown — use when the sandbox is unresponsive. Pending writes that
+the workload hasn't `fsync`'d may be lost, same durability semantics
+as a sudden power loss on a physical machine. Prefer
+[`stop()`](#stop) for graceful shutdown that gives the workload a
+chance to flush.
 
 ---
 
