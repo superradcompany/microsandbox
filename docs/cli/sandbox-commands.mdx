@@ -58,8 +58,9 @@ msb run --name public-api -p 0.0.0.0:8000:8000 python
 | `--pull` | When to pull the image: `always`, `if-missing` (default), `never` |
 | `--log-level` | Log verbosity for the sandbox runtime (`error`, `warn`, `info`, `debug`, `trace`) |
 | `--tmpfs` | Mount a temporary in-memory filesystem (`PATH` or `PATH:SIZE`) |
-| `--script` | Register an inline script (`NAME=BODY`). Available at `/.msb/scripts/<name>` and on `PATH` |
-| `--script-path` | Register a script from a host file (`NAME:PATH`). Same destination as `--script` |
+| `--script` | Register a shell snippet as a named script (`NAME=BODY`). Decodes `\n`, `\t`, `\r`, `\\`, `\"`, `\'`; unknown escapes pass through. Wrapped with a shebang from `--shell` (default `/bin/sh`). Available at `/.msb/scripts/<name>` and on `PATH` |
+| `--script-raw` | Register exact inline script contents (`NAME=BODY`). No escape decoding or shebang is added; caller must include `#!` if direct execution is needed |
+| `--script-path` | Register a script from a host file (`NAME:PATH`). File contents are read verbatim |
 | `--max-duration` | Kill the entire sandbox after this duration (e.g. `30s`, `5m`, `1h`). Sandbox-level lifetime limit |
 | `--idle-timeout` | Stop the sandbox after this period of inactivity (e.g. `30s`, `5m`, `1h`) |
 | `--no-network` | Disable all network access |
