@@ -70,7 +70,7 @@ pub struct SandboxOpts {
     pub script: Vec<String>,
 
     /// Register exact inline script contents (NAME=BODY). No escape decoding
-    /// or shebang is added — the caller must include a `#!` line if the
+    /// or shebang is added, so the caller must include a `#!` line if the
     /// script should be directly executable.
     #[arg(long, value_name = "NAME=BODY")]
     pub script_raw: Vec<String>,
