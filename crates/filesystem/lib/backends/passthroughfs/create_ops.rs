@@ -278,9 +278,25 @@ pub(crate) fn do_mknod(
 
 /// Create a symbolic link.
 ///
-/// On Linux, creates a file-backed symlink (regular file with target as content
-/// and S_IFLNK in xattr mode) because Linux cannot set user xattrs on symlinks.
-/// On macOS, creates a real symlink and sets xattr with XATTR_NOFOLLOW.
+/// Behavior depends on the mount policy:
+///
+/// - **`Strict` on Linux**: file-backed symlink (regular file with target as
+///   content and `S_IFLNK` in xattr mode). Linux refuses `user.*` xattrs on
+///   real symlinks, so this is the only way to carry the override overlay.
+///   Host tools see a regular file with the target path as bytes — that is
+///   the cost of uniform metadata virtualization.
+/// - **`Relaxed` / `Off` on Linux**: real `symlinkat(2)`. The overlay is
+///   skipped for symlinks; the guest sees the host's real uid/gid for the
+///   link (which is what those policies already accept for other inodes).
+///   Host tools see a real symlink, fixing host-side `git status`, `cp -a`,
+///   `tar`, and similar workflows.
+/// - **macOS** (any policy): real `symlinkat`. macOS allows xattrs on
+///   symlinks via `XATTR_NOFOLLOW`, so under `Strict`/`Relaxed` the overlay
+///   is written through that path.
+///
+/// The read side (`do_readlink`) already handles both file-backed and real
+/// host symlinks — the latter branch existed for symlinks that ship inside
+/// container images, so guest-created real symlinks ride that path for free.
 pub(crate) fn do_symlink(
     fs: &PassthroughFs,
     ctx: Context,
@@ -299,50 +315,58 @@ pub(crate) fn do_symlink(
 
     #[cfg(target_os = "linux")]
     {
-        // File-backed symlinks on Linux only work with the xattr overlay:
-        // the host file is a regular file and the only way the guest can
-        // tell it's actually a symlink is the override mode's S_IFLNK bits.
-        if !fs.cfg.xattr_enabled() {
-            return Err(platform::eopnotsupp());
-        }
+        if fs.cfg.strict_enabled() {
+            // Strict: file-backed symlink. The override xattr carries the
+            // `S_IFLNK` type so the guest still sees a symlink even though
+            // the host inode is a regular file. Required because Linux
+            // refuses `user.*` xattrs on real symlinks.
+            let fd = unsafe {
+                libc::openat(
+                    parent_fd.raw(),
+                    name.as_ptr(),
+                    libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_CLOEXEC,
+                    (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
+                )
+            };
+            if fd < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
 
-        // File-backed symlink: create a regular file with the target as content.
-        let fd = unsafe {
-            libc::openat(
-                parent_fd.raw(),
-                name.as_ptr(),
-                libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_CLOEXEC,
-                (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
-            )
-        };
-        if fd < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
+            // Write the symlink target as file content.
+            let target = linkname.to_bytes();
+            let written =
+                unsafe { libc::write(fd, target.as_ptr() as *const libc::c_void, target.len()) };
+            if written < 0 {
+                let err = io::Error::last_os_error();
+                unsafe { libc::close(fd) };
+                unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+                return Err(platform::linux_error(err));
+            }
+            if (written as usize) != target.len() {
+                unsafe { libc::close(fd) };
+                unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+                return Err(platform::eio());
+            }
 
-        // Write the symlink target as file content.
-        let target = linkname.to_bytes();
-        let written =
-            unsafe { libc::write(fd, target.as_ptr() as *const libc::c_void, target.len()) };
-        if written < 0 {
-            let err = io::Error::last_os_error();
+            // Set override xattr with S_IFLNK.
+            let mode = platform::MODE_LNK | 0o777;
+            if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0) {
+                unsafe { libc::close(fd) };
+                unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+                return Err(e);
+            }
             unsafe { libc::close(fd) };
-            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
-            return Err(platform::linux_error(err));
+        } else {
+            // Relaxed / Off: real `symlinkat`. No overlay xattr — the host
+            // sees a real symlink and the existing `patched_stat` and
+            // `do_readlink` short-circuits handle the read side. Per-symlink
+            // overlay uid/gid is intentionally forfeited; the kernel's
+            // 0o777-immutable symlink mode is unaffected.
+            let ret = unsafe { libc::symlinkat(linkname.as_ptr(), parent_fd.raw(), name.as_ptr()) };
+            if ret < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
         }
-        if (written as usize) != target.len() {
-            unsafe { libc::close(fd) };
-            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
-            return Err(platform::eio());
-        }
-
-        // Set override xattr with S_IFLNK.
-        let mode = platform::MODE_LNK | 0o777;
-        if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0) {
-            unsafe { libc::close(fd) };
-            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
-            return Err(e);
-        }
-        unsafe { libc::close(fd) };
     }
 
     #[cfg(target_os = "macos")]

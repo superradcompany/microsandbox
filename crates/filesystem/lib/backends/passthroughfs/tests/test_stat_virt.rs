@@ -170,20 +170,104 @@ fn test_off_rejects_mknod_all_special_types() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn test_off_rejects_symlink_on_linux() {
+fn test_off_creates_real_host_symlink_on_linux() {
+    // Under Off, symlinks are real host symlinks. The host sees an actual
+    // symlink (resolves `S_IFLNK` from the host's fstat), no override xattr
+    // is written, and `readlink` round-trips.
+    use std::os::unix::fs::MetadataExt;
     let sb = TestSandbox::with_config(|mut cfg| {
         cfg.stat_virtualization = StatVirtualization::Off;
         cfg
     });
 
-    let result = sb.fs.symlink(
-        sb.ctx(),
-        &TestSandbox::cstr("/target"),
-        ROOT_INODE,
-        &TestSandbox::cstr("link"),
-        Extensions::default(),
+    sb.fs
+        .symlink(
+            sb.ctx(),
+            &TestSandbox::cstr("/target"),
+            ROOT_INODE,
+            &TestSandbox::cstr("link"),
+            Extensions::default(),
+        )
+        .unwrap();
+
+    // Host view: real symlink with target == "/target".
+    let host_path = sb.root.join("link");
+    let host_meta = std::fs::symlink_metadata(&host_path).unwrap();
+    assert!(
+        host_meta.file_type().is_symlink(),
+        "host file is not a symlink"
     );
-    TestSandbox::assert_errno(result, 95); // EOPNOTSUPP
+    let target = std::fs::read_link(&host_path).unwrap();
+    assert_eq!(target.to_string_lossy(), "/target");
+    // Real Linux symlinks live in zero blocks (mode pinned at 0o777).
+    let _ = host_meta.mode();
+
+    // Guest readlink round-trips.
+    let entry = sb.lookup_root("link").unwrap();
+    let buf = sb.fs.readlink(sb.ctx(), entry.inode).unwrap();
+    assert_eq!(&buf[..], b"/target");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_relaxed_creates_real_host_symlink_on_linux() {
+    // Relaxed mirrors Off for the symlink case: host-visible real symlink,
+    // no overlay xattr. The overlay isn't load-bearing for symlinks because
+    // Linux pins the mode and the symlink itself has no perm bits to virtualize.
+    let sb = TestSandbox::with_config(|mut cfg| {
+        cfg.stat_virtualization = StatVirtualization::Relaxed;
+        cfg
+    });
+
+    sb.fs
+        .symlink(
+            sb.ctx(),
+            &TestSandbox::cstr("/target"),
+            ROOT_INODE,
+            &TestSandbox::cstr("link"),
+            Extensions::default(),
+        )
+        .unwrap();
+
+    let host_path = sb.root.join("link");
+    let host_meta = std::fs::symlink_metadata(&host_path).unwrap();
+    assert!(host_meta.file_type().is_symlink());
+    assert_eq!(
+        std::fs::read_link(&host_path).unwrap().to_string_lossy(),
+        "/target"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_strict_keeps_file_backed_symlink_on_linux() {
+    // Strict still uses the file-backed scheme so the overlay can carry
+    // S_IFLNK + uid/gid. The host sees a regular file whose content is the
+    // symlink target. Verified by checking host symlink_metadata and the
+    // override xattr's mode byte.
+    let sb = TestSandbox::with_config(|mut cfg| {
+        cfg.stat_virtualization = StatVirtualization::Strict;
+        cfg
+    });
+
+    sb.fs
+        .symlink(
+            sb.ctx(),
+            &TestSandbox::cstr("/target"),
+            ROOT_INODE,
+            &TestSandbox::cstr("link"),
+            Extensions::default(),
+        )
+        .unwrap();
+
+    let host_path = sb.root.join("link");
+    let host_meta = std::fs::symlink_metadata(&host_path).unwrap();
+    assert!(
+        host_meta.file_type().is_file(),
+        "Strict on Linux must still file-back symlinks (host should see a regular file)"
+    );
+    // Host content is the target path bytes.
+    assert_eq!(std::fs::read(&host_path).unwrap(), b"/target");
 }
 
 #[test]
