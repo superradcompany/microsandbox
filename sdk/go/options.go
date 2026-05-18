@@ -691,6 +691,16 @@ type MountConfig struct {
 	Fstype   string
 	Readonly bool
 	SizeMiB  uint32
+
+	// StatVirtualization is the per-mount stat-virtualization policy. Only
+	// meaningful for Bind and Named mounts. Zero value preserves the
+	// conservative default (Strict).
+	StatVirtualization StatVirtualization
+
+	// HostPermissions is the per-mount host-permission propagation policy.
+	// Only meaningful for Bind and Named mounts. Zero value preserves the
+	// conservative default (Private).
+	HostPermissions HostPermissions
 }
 
 // MountKind discriminates between the four mount flavours.
@@ -711,8 +721,14 @@ const (
 func (m MountConfig) Kind() MountKind { return m.kind }
 
 // MountOptions tunes bind and named mount factories.
+//
+// StatVirtualization and HostPermissions are virtiofs-only and rejected at
+// build time if combined with a tmpfs or disk-image mount. The zero values
+// preserve the conservative defaults (Strict + Private).
 type MountOptions struct {
-	Readonly bool
+	Readonly           bool
+	StatVirtualization StatVirtualization
+	HostPermissions    HostPermissions
 }
 
 // TmpfsOptions tunes the Tmpfs factory.
@@ -744,12 +760,24 @@ var Mount mountFactory
 
 // Bind returns a MountConfig that bind-mounts a host directory into the sandbox.
 func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig {
-	return MountConfig{kind: MountKindBind, Bind: hostPath, Readonly: opts.Readonly}
+	return MountConfig{
+		kind:               MountKindBind,
+		Bind:               hostPath,
+		Readonly:           opts.Readonly,
+		StatVirtualization: opts.StatVirtualization,
+		HostPermissions:    opts.HostPermissions,
+	}
 }
 
 // Named returns a MountConfig that mounts a named persistent volume.
 func (mountFactory) Named(name string, opts MountOptions) MountConfig {
-	return MountConfig{kind: MountKindNamed, Named: name, Readonly: opts.Readonly}
+	return MountConfig{
+		kind:               MountKindNamed,
+		Named:              name,
+		Readonly:           opts.Readonly,
+		StatVirtualization: opts.StatVirtualization,
+		HostPermissions:    opts.HostPermissions,
+	}
 }
 
 // Tmpfs returns a MountConfig that mounts an ephemeral in-memory filesystem.

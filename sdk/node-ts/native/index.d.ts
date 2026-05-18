@@ -298,6 +298,20 @@ export declare class MountBuilder {
   /** Tmpfs size cap in MiB (only valid with `.tmpfs()`). */
   size(mib: number): this
   /**
+   * Set the guest stat virtualization policy.
+   *
+   * Accepts `"strict"`, `"relaxed"`, or `"off"`. Valid only for bind and
+   * named volume mounts.
+   */
+  statVirtualization(policy: string): this
+  /**
+   * Set the host permission propagation policy.
+   *
+   * Accepts `"private"` or `"mirror"`. Valid only for bind and named volume
+   * mounts.
+   */
+  hostPermissions(policy: string): this
+  /**
    * Materialize the mount spec. Returns a flat `BuiltVolumeMount`
    * with a `kind` discriminator and per-variant fields.
    */
@@ -764,13 +778,23 @@ export declare class SandboxBuilder {
   shell(shell: string): this
   /** Configure registry connection settings via a callback. */
   registry(configure: (arg: RegistryConfigBuilder) => RegistryConfigBuilder): this
-  /** Replace any existing sandbox with the same name. */
+  /**
+   * Replace any existing sandbox with the same name.
+   *
+   * SIGTERMs the prior instance, waits up to 10 seconds for a
+   * graceful exit, then SIGKILLs. To override the grace, use
+   * `replaceWithGrace(ms)`; `replaceWithGrace(0)` skips SIGTERM and
+   * SIGKILLs immediately.
+   */
   replace(): this
   /**
-   * Replace, but with a specific grace period (in milliseconds) to
-   * wait for the existing sandbox to exit after SIGTERM before
-   * escalating to SIGKILL. Implies `replace` — calling this alone is
-   * enough. Zero skips SIGTERM entirely.
+   * Replace any existing sandbox, overriding the SIGTERM-to-SIGKILL
+   * grace. Implies `replace` — calling this alone is enough.
+   *
+   * - `graceMs > 0`: SIGTERM, wait up to `graceMs`, then SIGKILL.
+   * - `graceMs == 0`: SIGKILL immediately (skip SIGTERM).
+   *
+   * The default grace used by `replace` is 10_000 ms.
    */
   replaceWithGrace(graceMs: number): this
   /** Override the image entrypoint. */
@@ -844,8 +868,11 @@ export declare class SandboxBuilder {
   /**
    * Materialize the built configuration without creating a sandbox.
    * Returns the JSON-serialized `SandboxConfig` for inspection.
+   *
+   * # Safety
+   * See `create` for the `&mut self` async + `unsafe` rationale.
    */
-  build(): string
+  build(): Promise<string>
   /**
    * Create and start the sandbox in attached mode.
    *
@@ -1680,4 +1707,8 @@ export interface VolumeMount {
   sizeMib?: number
   format?: string
   fstype?: string
+  /** `"strict" | "relaxed" | "off"` for bind/named mounts; `None` for tmpfs/disk. */
+  statVirtualization?: string
+  /** `"private" | "mirror"` for bind/named mounts; `None` for tmpfs/disk. */
+  hostPermissions?: string
 }

@@ -819,6 +819,12 @@ struct MountSpec {
     #[serde(default)]
     readonly: bool,
     size_mib: Option<u32>,
+    /// Per-mount stat-virtualization policy ("strict" | "relaxed" | "off").
+    /// Only valid for bind / named mounts.
+    stat_virtualization: Option<String>,
+    /// Per-mount host-permission policy ("private" | "mirror").
+    /// Only valid for bind / named mounts.
+    host_permissions: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1341,6 +1347,20 @@ fn apply_volume(
         None
     };
 
+    // Pre-parse the policy strings so FFI errors fire before we touch the
+    // builder. Combo validation (e.g. `Off + Mirror`, policies on tmpfs)
+    // happens later inside `MountBuilder::build()`.
+    let stat_virt = m
+        .stat_virtualization
+        .as_deref()
+        .map(parse_stat_virt)
+        .transpose()?;
+    let host_perms = m
+        .host_permissions
+        .as_deref()
+        .map(parse_host_perms)
+        .transpose()?;
+
     let bind = m.bind.clone();
     let named = m.named.clone();
     let tmpfs = m.tmpfs;
@@ -1381,8 +1401,35 @@ fn apply_volume(
         if let Some(siz) = size_mib {
             mb = mb.size(siz);
         }
+        if let Some(p) = stat_virt {
+            mb = mb.stat_virtualization(p);
+        }
+        if let Some(p) = host_perms {
+            mb = mb.host_permissions(p);
+        }
         mb
     }))
+}
+
+fn parse_stat_virt(s: &str) -> Result<microsandbox::sandbox::StatVirtualization, FfiError> {
+    match s {
+        "strict" => Ok(microsandbox::sandbox::StatVirtualization::Strict),
+        "relaxed" => Ok(microsandbox::sandbox::StatVirtualization::Relaxed),
+        "off" => Ok(microsandbox::sandbox::StatVirtualization::Off),
+        other => Err(FfiError::invalid_argument(format!(
+            "invalid stat_virtualization {other:?} (expected strict|relaxed|off)"
+        ))),
+    }
+}
+
+fn parse_host_perms(s: &str) -> Result<microsandbox::sandbox::HostPermissions, FfiError> {
+    match s {
+        "private" => Ok(microsandbox::sandbox::HostPermissions::Private),
+        "mirror" => Ok(microsandbox::sandbox::HostPermissions::Mirror),
+        other => Err(FfiError::invalid_argument(format!(
+            "invalid host_permissions {other:?} (expected private|mirror)"
+        ))),
+    }
 }
 
 fn parse_action(s: &str) -> Result<microsandbox_network::policy::Action, FfiError> {
