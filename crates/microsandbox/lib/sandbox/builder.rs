@@ -762,12 +762,25 @@ impl SandboxBuilder {
         let (handle, sender) = microsandbox_image::progress_channel();
         let task = tokio::spawn(async move {
             let config = self.build().await?;
-            super::Sandbox::create_with_mode(
-                config,
-                crate::runtime::SpawnMode::Attached,
-                Some(sender),
-            )
-            .await
+            let backend = crate::backend::default_backend();
+            match backend.kind() {
+                crate::backend::BackendKind::Local => {
+                    crate::sandbox::create_local(
+                        backend,
+                        config,
+                        crate::runtime::SpawnMode::Attached,
+                        Some(sender),
+                    )
+                    .await
+                }
+                crate::backend::BackendKind::Cloud => {
+                    drop(sender);
+                    backend
+                        .sandboxes()
+                        .create(backend.clone(), config, true)
+                        .await
+                }
+            }
         });
         Ok((handle, task))
     }
@@ -783,12 +796,25 @@ impl SandboxBuilder {
         let (handle, sender) = microsandbox_image::progress_channel();
         let task = tokio::spawn(async move {
             let config = self.build().await?;
-            super::Sandbox::create_with_mode(
-                config,
-                crate::runtime::SpawnMode::Detached,
-                Some(sender),
-            )
-            .await
+            let backend = crate::backend::default_backend();
+            match backend.kind() {
+                crate::backend::BackendKind::Local => {
+                    crate::sandbox::create_local(
+                        backend,
+                        config,
+                        crate::runtime::SpawnMode::Detached,
+                        Some(sender),
+                    )
+                    .await
+                }
+                crate::backend::BackendKind::Cloud => {
+                    drop(sender);
+                    backend
+                        .sandboxes()
+                        .create_detached(backend.clone(), config)
+                        .await
+                }
+            }
         });
         Ok((handle, task))
     }

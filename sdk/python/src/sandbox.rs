@@ -224,7 +224,10 @@ impl PySandbox {
             .try_lock()
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("sandbox is busy"))?;
         let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
-        Ok(PySandboxFs::from_client(sb.client_arc()))
+        let client = sb
+            .client_arc()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PySandboxFs::from_client(client))
     }
 
     //----------------------------------------------------------------------------------------------

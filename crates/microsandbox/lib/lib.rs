@@ -27,11 +27,12 @@ pub use agent::{
     RawFrame, StreamHandle,
 };
 pub use backend::{
-    Backend, BackendKind, BackendSandbox, BackendSandboxHandle, BackendSandboxList, CloudBackend,
-    CloudBackendBuilder, CloudCreateSandboxRequest, CloudErrorBody, CloudMessageResponse,
-    CloudPaginated, CloudSandbox, CloudSandboxStatus, LocalBackend, Profile, ProfileBackend,
-    SandboxBackend, SdkConfig, default_backend, load_sdk_config, resolve_default_backend,
-    set_default_backend, with_backend,
+    Backend, BackendKind, CloudBackend, CloudBackendBuilder, CloudCreateSandboxRequest,
+    CloudErrorBody, CloudMessageResponse, CloudPaginated, CloudSandbox, CloudSandboxStatus,
+    LocalBackend, Profile, ProfileBackend, SandboxBackend, SandboxCloudState,
+    SandboxHandleCloudState, SandboxHandleInner, SandboxHandleLocalState, SandboxInner,
+    SandboxList, SandboxLocalState, SdkConfig, default_backend, load_sdk_config,
+    resolve_default_backend, set_default_backend, with_backend,
 };
 pub use config::set_sdk_libkrunfw_path as set_libkrunfw_path;
 pub use error::*;

@@ -23,7 +23,7 @@ mod cloud;
 mod cloud_wire;
 mod local;
 mod profile;
-mod sandbox;
+pub(crate) mod sandbox;
 
 pub use cloud::{CloudBackend, CloudBackendBuilder};
 pub use cloud_wire::{
@@ -32,7 +32,10 @@ pub use cloud_wire::{
 };
 pub use local::LocalBackend;
 pub use profile::{Profile, ProfileBackend, SdkConfig, load_sdk_config, resolve_default_backend};
-pub use sandbox::{BackendSandbox, BackendSandboxHandle, BackendSandboxList, SandboxBackend};
+pub use sandbox::{
+    SandboxBackend, SandboxCloudState, SandboxHandleCloudState, SandboxHandleInner,
+    SandboxHandleLocalState, SandboxInner, SandboxList, SandboxLocalState,
+};
 
 use std::sync::{Arc, OnceLock, RwLock};
 
