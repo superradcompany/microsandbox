@@ -2674,10 +2674,13 @@ name = "microsandbox-cli"
 version = "0.4.6"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "bytes",
  "chrono",
  "clap",
  "console",
  "dirs",
+ "futures",
  "indicatif",
  "ipnetwork",
  "libc",
