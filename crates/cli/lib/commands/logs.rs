@@ -490,22 +490,26 @@ fn parse_entry_time(t: &str) -> Option<DateTime<Utc>> {
 // Functions: Helpers — rendering
 //--------------------------------------------------------------------------------------------------
 
+fn write_entry_json(entry: &LogEntry, out: &mut impl Write) -> anyhow::Result<()> {
+    // Re-emit verbatim as a single JSON Lines line. We serialize from
+    // our parsed struct so that any malformed fields are normalized.
+    let line = serde_json::to_string(&serde_json::json!({
+        "t": entry.t,
+        "s": entry.s,
+        "d": entry.d,
+        "id": entry.id,
+        "e": entry.e,
+    }))?;
+    writeln!(out, "{line}")?;
+    Ok(())
+}
+
 fn render_entries(entries: &[LogEntry], args: &LogsArgs, color: ColorMode) -> anyhow::Result<()> {
     if args.json {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         for entry in entries {
-            // Re-emit verbatim as a single JSON Lines line. We
-            // serialize from our parsed struct so that any malformed
-            // fields are normalized.
-            let line = serde_json::to_string(&serde_json::json!({
-                "t": entry.t,
-                "s": entry.s,
-                "d": entry.d,
-                "id": entry.id,
-                "e": entry.e,
-            }))?;
-            writeln!(out, "{line}")?;
+            write_entry_json(entry, &mut out)?;
         }
         return Ok(());
     }
@@ -517,6 +521,13 @@ fn render_entries(entries: &[LogEntry], args: &LogsArgs, color: ColorMode) -> an
 }
 
 fn render_one(entry: &LogEntry, args: &LogsArgs, color: ColorMode) -> anyhow::Result<()> {
+    if args.json {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        write_entry_json(entry, &mut out)?;
+        return Ok(());
+    }
+
     // Resolve the body bytes (decode base64 if e == "b64"; else use d).
     let body = decode_body(entry);
     let body = apply_color_policy(&body, color);
