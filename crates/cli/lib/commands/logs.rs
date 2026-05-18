@@ -16,17 +16,20 @@
 
 use std::io::{IsTerminal, Write};
 use std::path::Path;
+use std::pin::pin;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use base64::Engine as _;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use clap::{Args, ValueEnum};
 use console::style;
 use futures::StreamExt;
+use microsandbox::MicrosandboxError;
 use microsandbox::logs::{
-    LogEntry as EngineLogEntry, LogOptions, LogSource, LogStreamOptions, LogStreamStart,
+    self, LogEntry as EngineLogEntry, LogOptions, LogSource, LogStreamOptions, LogStreamStart,
 };
+use microsandbox_runtime::boot_error::BootError;
 use microsandbox_utils::log_text::{base64_decode, strip_ansi};
 use regex::Regex;
 use serde::Deserialize;
@@ -170,7 +173,7 @@ struct LogEntry {
 
 /// Execute the `msb logs` command.
 pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
-    let log_dir = microsandbox::logs::log_dir_for(&args.name);
+    let log_dir = logs::log_dir_for(&args.name);
     if !log_dir.exists() {
         return Err(anyhow!(
             "no logs directory for sandbox {:?} (sandbox not found?)",
@@ -179,7 +182,7 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
     }
 
     let mask = resolve_sources(&args.source);
-    let engine_sources = mask_to_engine_sources(mask);
+    let engine_sources = mask.to_engine_sources();
     let since = parse_time_arg(args.since.as_deref())?;
     let until = parse_time_arg(args.until.as_deref())?;
     let grep_re = match args.grep.as_deref() {
@@ -206,7 +209,7 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
         until,
         sources: engine_sources.clone(),
     };
-    let snapshot = microsandbox::logs::read_logs(&args.name, &snapshot_opts)
+    let snapshot = logs::read_logs(&args.name, &snapshot_opts)
         .await
         .context("reading logs")?;
     for entry in &snapshot {
@@ -231,8 +234,8 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
         until,
         follow: true,
     };
-    let mut stream = std::pin::pin!(
-        microsandbox::logs::log_stream(&args.name, &stream_opts)
+    let mut stream = pin!(
+        logs::log_stream(&args.name, &stream_opts)
             .await
             .context("starting log stream")?
     );
@@ -244,7 +247,7 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
                     render_entry(&cli_entry, &args, color_policy)?;
                 }
             }
-            Err(microsandbox::MicrosandboxError::MissedRotation {
+            Err(MicrosandboxError::MissedRotation {
                 dropped_from_offset,
             }) => {
                 eprintln!(
@@ -301,12 +304,33 @@ struct SourceMask {
     system: bool,
 }
 
+impl SourceMask {
+    /// Translate the mask into the engine's flat source list. Order
+    /// is fixed (stdout, stderr, output, system) for stable behavior.
+    fn to_engine_sources(self) -> Vec<LogSource> {
+        let mut out = Vec::with_capacity(4);
+        if self.stdout {
+            out.push(LogSource::Stdout);
+        }
+        if self.stderr {
+            out.push(LogSource::Stderr);
+        }
+        if self.output {
+            out.push(LogSource::Output);
+        }
+        if self.system {
+            out.push(LogSource::System);
+        }
+        out
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers — boot-error block
 //--------------------------------------------------------------------------------------------------
 
 fn render_boot_error_if_present(log_dir: &Path, name: &str, json_mode: bool) -> anyhow::Result<()> {
-    let boot_err = match microsandbox_runtime::boot_error::BootError::read(log_dir) {
+    let boot_err = match BootError::read(log_dir) {
         Ok(Some(b)) => b,
         Ok(None) => return Ok(()),
         Err(_) => return Ok(()),
@@ -335,23 +359,6 @@ fn render_boot_error_if_present(log_dir: &Path, name: &str, json_mode: bool) -> 
 // Functions: Helpers — engine bridge
 //--------------------------------------------------------------------------------------------------
 
-fn mask_to_engine_sources(mask: SourceMask) -> Vec<LogSource> {
-    let mut out = Vec::with_capacity(4);
-    if mask.stdout {
-        out.push(LogSource::Stdout);
-    }
-    if mask.stderr {
-        out.push(LogSource::Stderr);
-    }
-    if mask.output {
-        out.push(LogSource::Output);
-    }
-    if mask.system {
-        out.push(LogSource::System);
-    }
-    out
-}
-
 /// Convert an engine entry into the CLI's local representation. The
 /// engine has already decoded base64 bodies; we keep the `e: "b64"`
 /// channel alive for `--json` output by re-encoding raw bytes that
@@ -370,10 +377,9 @@ fn engine_entry_to_cli(entry: &EngineLogEntry) -> LogEntry {
             Some("b64".to_string()),
         ),
     };
+
     LogEntry {
-        t: entry
-            .timestamp
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        t: entry.timestamp.to_rfc3339_opts(SecondsFormat::Millis, true),
         s: s.to_string(),
         d,
         id: entry.session_id,
@@ -704,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn mask_to_engine_sources_maps_each_flag() {
+    fn source_mask_to_engine_sources_maps_each_flag() {
         let mask = SourceMask {
             stdout: true,
             stderr: false,
@@ -712,7 +718,7 @@ mod tests {
             system: true,
         };
         assert_eq!(
-            mask_to_engine_sources(mask),
+            mask.to_engine_sources(),
             vec![LogSource::Stdout, LogSource::Output, LogSource::System],
         );
     }

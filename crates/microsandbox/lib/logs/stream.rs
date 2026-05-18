@@ -1,4 +1,4 @@
-//! Streaming engine. The [`Multiplexer`] takes a
+//! Streaming engine. The [`LogEngine`] takes a
 //! `&[LogFileConfig]` describing the streamable files, filters them
 //! by the caller's requested sources, opens a reader for each
 //! surviving file, and merges their outputs into one async
@@ -167,7 +167,7 @@ pub struct LogStreamOptions {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Multiplexer
+// LogEngine
 //--------------------------------------------------------------------------------------------------
 
 enum StepResult {
@@ -181,7 +181,7 @@ struct ReaderState {
     last_position: FilePosition,
 }
 
-pub(crate) struct Multiplexer {
+pub(crate) struct LogEngine {
     since: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
     follow: bool,
@@ -195,7 +195,7 @@ pub(crate) struct Multiplexer {
     finished: bool,
 }
 
-impl Multiplexer {
+impl LogEngine {
     pub(crate) async fn new(
         log_dir: PathBuf,
         log_files: &'static [LogFileConfig],
@@ -566,9 +566,9 @@ mod tests {
     async fn make_state(
         log_dir: PathBuf,
         opts: &LogStreamOptions,
-    ) -> MicrosandboxResult<Multiplexer> {
+    ) -> MicrosandboxResult<LogEngine> {
         let sources = LogSource::effective(&opts.sources);
-        Multiplexer::new(
+        LogEngine::new(
             log_dir,
             LOG_FILES,
             sources,

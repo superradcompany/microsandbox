@@ -68,7 +68,7 @@ use std::path::PathBuf;
 
 use futures::{Stream, TryStreamExt};
 
-use stream::{LogFileConfig, LogFileFormat, Multiplexer};
+use stream::{LogEngine, LogFileConfig, LogFileFormat};
 
 use crate::{MicrosandboxError, MicrosandboxResult};
 
@@ -77,9 +77,9 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 //--------------------------------------------------------------------------------------------------
 
 /// The set of log files microsandbox produces. Add a new file
-/// type by adding an entry here — the [`Multiplexer`] engine
-/// opens a reader for any entry whose `produces` list intersects
-/// the caller's requested sources.
+/// type by adding an entry here — the [`LogEngine`] opens a
+/// reader for any entry whose `produces` list intersects the
+/// caller's requested sources.
 const LOG_FILES: &[LogFileConfig] = &[
     LogFileConfig {
         filename: "exec.log",
@@ -158,7 +158,7 @@ pub async fn log_stream(
         return Err(MicrosandboxError::SandboxNotFound(name.to_string()));
     }
     let sources = LogSource::effective(&opts.sources);
-    let mux = Multiplexer::new(
+    let engine = LogEngine::new(
         log_dir,
         LOG_FILES,
         sources,
@@ -167,5 +167,5 @@ pub async fn log_stream(
         opts.follow,
     )
     .await?;
-    Ok(mux.into_stream())
+    Ok(engine.into_stream())
 }
