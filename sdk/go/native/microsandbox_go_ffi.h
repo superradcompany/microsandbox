@@ -264,6 +264,38 @@ char *msb_metrics_recv(uint64_t cancel_id,
 char *msb_metrics_close(Handle stream_handle, unsigned char *buf, uintptr_t buf_len);
 
 /**
+ * Start a log stream against a live sandbox handle. Returns
+ * `{"stream_handle":<u64>}`.
+ */
+char *msb_sandbox_log_stream(uint64_t cancel_id,
+                             Handle handle,
+                             const char *opts_json,
+                             unsigned char *buf,
+                             uintptr_t buf_len);
+
+/**
+ * Start a log stream against a sandbox identified by name (no live handle
+ * required). Returns `{"stream_handle":<u64>}`.
+ */
+char *msb_sandbox_handle_log_stream(uint64_t cancel_id,
+                                    const char *name,
+                                    const char *opts_json,
+                                    unsigned char *buf,
+                                    uintptr_t buf_len);
+
+/**
+ * Block for the next log entry on this stream. Returns a single log-entry
+ * JSON object, or `{"done":true}` when the stream has ended.
+ */
+char *msb_log_recv(uint64_t cancel_id, Handle stream_handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Close (drop) a log stream. The background driver task exits when the
+ * channel receiver is dropped.
+ */
+char *msb_log_close(Handle stream_handle, unsigned char *buf, uintptr_t buf_len);
+
+/**
  * Start a streaming exec session. Returns `{"exec_handle":<u64>}`.
  * The exec handle MUST be released with msb_exec_close when done.
  *
