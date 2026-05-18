@@ -40,6 +40,7 @@ libc.workspace = true
 microsandbox-db = { version = "0.4.6", path = "../db" }
 microsandbox-filesystem = { version = "0.4.6", path = "../filesystem", default-features = false }
 microsandbox-image = { version = "0.4.6", path = "../image" }
+microsandbox-metrics = { version = "0.4.6", path = "../metrics" }
 microsandbox-migration = { version = "0.4.6", path = "../migration" }
 microsandbox-network = { version = "0.4.6", path = "../network", optional = true }
 microsandbox-protocol = { version = "0.4.6", path = "../protocol" }

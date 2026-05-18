@@ -120,7 +120,6 @@ mod tests {
             "manifest_layer",
             "run",
             "sandbox",
-            "sandbox_metric",
             "sandbox_rootfs",
             "snapshot_index",
             "volume",

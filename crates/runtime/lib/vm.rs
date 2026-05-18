@@ -15,6 +15,7 @@ use std::time::Duration;
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::run as run_entity;
 use microsandbox_filesystem::{DynFileSystem, PassthroughConfig, PassthroughFs};
+use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 use msb_krun::VmBuilder;
 use sea_orm::{ColumnTrait, EntityTrait, Set};
 use serde::Serialize;
@@ -82,8 +83,26 @@ pub struct Config {
     /// Metrics sampling interval in milliseconds; `None` disables sampling.
     pub metrics_sample_interval_ms: Option<NonZero<u64>>,
 
+    /// Shared-memory metrics registry coordinates passed in by the host.
+    ///
+    /// When `None`, the runtime skips metrics activation entirely — either
+    /// metrics sampling is disabled or the host could not reserve a slot.
+    pub metrics_slot: Option<MetricsSlotHandoff>,
+
     /// VM hardware and rootfs configuration.
     pub vm: VmConfig,
+}
+
+/// Hidden CLI handoff describing the metrics slot the host reserved for this
+/// sandbox.
+#[derive(Clone, Debug)]
+pub struct MetricsSlotHandoff {
+    /// Name of the POSIX shared-memory object holding the registry.
+    pub shm_name: String,
+    /// Reserved slot index.
+    pub slot: u32,
+    /// Generation paired with the reservation.
+    pub generation: u64,
 }
 
 /// Specification for the writable upper layer attached as virtio-blk.
@@ -347,6 +366,27 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_reason: Arc<std::sync::atomic::AtomicU8> =
         Arc::new(std::sync::atomic::AtomicU8::new(EXIT_REASON_COMPLETED));
 
+    // Activate the shared-memory metrics writer if the host reserved a slot.
+    // The host always reserves and passes a handoff when sampling is enabled,
+    // so a missing handoff means sampling is disabled for this sandbox.
+    let metrics_writer = activate_metrics_writer(
+        config.metrics_slot.as_ref(),
+        config.metrics_sample_interval_ms,
+        run_db_id,
+        pid,
+    );
+
+    // If the host reserved a slot but activation failed (registry I/O error,
+    // generation mismatch from a stale reservation, etc.), the slot would
+    // otherwise stay in `Reserved` until the catalog reaper notices. Release
+    // it eagerly so it can be reused by other sandboxes.
+    if metrics_writer.is_none()
+        && config.metrics_slot.is_some()
+        && config.metrics_sample_interval_ms.is_some()
+    {
+        release_metrics_slot(config.metrics_slot.as_ref(), ReleaseMode::Free);
+    }
+
     // Build the VM with an exit observer for DB cleanup and socket removal.
     // The on_exit closure runs synchronously on the VMM thread before _exit().
     let rt_handle = tokio_rt.handle().clone();
@@ -356,6 +396,10 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     let exit_reason_for_observer = Arc::clone(&exit_reason);
     let exit_sock_path = config.agent_sock_path.clone();
     let exit_log_writer = exec_log_writer.clone();
+    // Capture the activated writer so the exit observer can release the slot
+    // without re-opening the registry (saving two mmap syscalls and a
+    // potential `wait_for_ready` round-trip on the VMM's exit path).
+    let exit_metrics_writer = metrics_writer.clone();
     let (vm, _network_termination_handle, network_metrics_handle) = match build_vm(
         &config,
         console_backend,
@@ -409,6 +453,18 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
                 writer.write_system("--- sandbox stopped ---");
             }
 
+            // Release the metrics slot. `Stale` preserves the last sample
+            // for observers until the slot is reused. Best-effort — the
+            // host's reaper will eventually reclaim it if this path is
+            // bypassed. We reuse the writer's Arc-backed registry handle
+            // rather than re-opening the segment, since `_exit()` is about
+            // to run and extra syscalls here delay the VMM teardown.
+            if let Some(ref writer) = exit_metrics_writer
+                && let Err(err) = writer.clone().release(ReleaseMode::Stale)
+            {
+                tracing::debug!(error = %err, slot = writer.slot(), "metrics slot release at exit");
+            }
+
             // Clean up agent.sock — the relay's async cleanup won't run because
             // _exit() is called immediately after this observer returns.
             let _ = std::fs::remove_file(&exit_sock_path);
@@ -418,6 +474,15 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         Ok(vm) => vm,
         Err(e) => {
             let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            // Free the slot: build_vm never started the sampler, so no live
+            // sample is worth preserving. Prefer the writer (already holds
+            // the registry handle) when activation succeeded; otherwise
+            // open the registry once via the handoff fields.
+            if let Some(writer) = metrics_writer.clone() {
+                let _ = writer.release(ReleaseMode::Free);
+            } else {
+                release_metrics_slot(config.metrics_slot.as_ref(), ReleaseMode::Free);
+            }
             return Err(e);
         }
     };
@@ -434,19 +499,35 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         }));
     }
 
-    match config.metrics_sample_interval_ms {
-        None => tracing::debug!(
+    match (config.metrics_sample_interval_ms, metrics_writer.clone()) {
+        (None, _) => tracing::debug!(
             sandbox = %config.sandbox_name,
             "metrics sampling disabled; not spawning sampler"
         ),
-        Some(interval_ms) => {
+        (Some(_), None) => {
+            // Distinguish "host did not reserve a slot" from "host reserved
+            // but runtime activation failed" so operators reading the warn
+            // can tell which path needs investigation.
+            if config.metrics_slot.is_some() {
+                tracing::warn!(
+                    sandbox = %config.sandbox_name,
+                    "metrics activation failed; slot was released and sampler not spawned"
+                );
+            } else {
+                tracing::warn!(
+                    sandbox = %config.sandbox_name,
+                    "metrics sampling enabled but no slot was reserved by the host; not spawning sampler"
+                );
+            }
+        }
+        (Some(interval_ms), Some(writer)) => {
             tracing::debug!(
                 sandbox = %config.sandbox_name,
                 interval_ms = interval_ms.get(),
                 "starting metrics sampler"
             );
             tokio_rt.spawn(run_metrics_sampler(
-                db.clone(),
+                writer,
                 config.sandbox_id,
                 pid,
                 interval_ms,
@@ -790,6 +871,48 @@ fn build_vm(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Open the shared-memory registry and promote the host-reserved slot to
+/// `Active`, returning a writer handle for the sampler.
+fn activate_metrics_writer(
+    handoff: Option<&MetricsSlotHandoff>,
+    interval: Option<NonZero<u64>>,
+    run_id: i32,
+    pid: u32,
+) -> Option<microsandbox_metrics::MetricsSlotWriter> {
+    interval?;
+    let handoff = handoff?;
+    let registry = match MetricsRegistry::open(&handoff.shm_name) {
+        Ok(reg) => reg,
+        Err(err) => {
+            tracing::warn!(error = %err, shm = %handoff.shm_name, "failed to open metrics registry");
+            return None;
+        }
+    };
+    let started_at = chrono::Utc::now();
+    match registry.activate_writer(ActivateSlot {
+        slot: handoff.slot,
+        generation: handoff.generation,
+        run_id,
+        pid: pid as i32,
+        started_at,
+    }) {
+        Ok(writer) => Some(writer),
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to activate metrics slot");
+            None
+        }
+    }
+}
+
+/// Best-effort release of a metrics slot. Used when activation has not yet
+/// happened (e.g. build_vm failure) and the slot would otherwise leak.
+fn release_metrics_slot(handoff: Option<&MetricsSlotHandoff>, mode: ReleaseMode) {
+    let Some(handoff) = handoff else { return };
+    if let Ok(reg) = MetricsRegistry::open(&handoff.shm_name) {
+        let _ = reg.release(handoff.slot, handoff.generation, mode);
+    }
+}
 
 /// Set up host log capture.
 ///

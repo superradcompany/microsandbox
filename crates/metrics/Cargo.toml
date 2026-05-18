@@ -1,0 +1,21 @@
+[package]
+name = "microsandbox-metrics"
+description = "Shared-memory live metrics registry for microsandbox."
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[lib]
+name = "microsandbox_metrics"
+path = "lib/lib.rs"
+
+[dependencies]
+chrono.workspace = true
+libc.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
