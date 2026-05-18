@@ -157,6 +157,21 @@ impl JsSandboxHandle {
             .collect())
     }
 
+    /// Stream captured output as it appears, with optional follow.
+    ///
+    /// Works without starting the sandbox; with `follow: true`, the
+    /// stream picks up new entries the moment they land in
+    /// `exec.log`.
+    #[napi]
+    pub async fn log_stream(
+        &self,
+        opts: Option<LogStreamOptions>,
+    ) -> Result<crate::sandbox::JsLogStream> {
+        let rust_opts =
+            crate::sandbox::log_stream_options_from_js(opts).map_err(napi::Error::from_reason)?;
+        crate::sandbox::spawn_log_stream(self.inner.name(), rust_opts).await
+    }
+
     /// Snapshot this (stopped) sandbox under a bare name.
     ///
     /// Resolves under `~/.microsandbox/snapshots/<name>/`. Use

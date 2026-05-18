@@ -246,6 +246,33 @@ export declare class InterfaceOverridesBuilder {
 export type JsInterfaceOverridesBuilder = InterfaceOverridesBuilder
 
 /**
+ * A streaming subscription for sandbox log entries.
+ *
+ * Supports both manual `recv()` calls and `for await...of` iteration:
+ * ```js
+ * const stream = await sb.logStream({ follow: true });
+ * for await (const entry of stream) {
+ *   process.stdout.write(entry.data);
+ * }
+ * ```
+ *
+ * This type implements JavaScript's async iterable protocol.
+ * It can be used with `for await...of` loops.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_async_iterator_and_async_iterable_protocols
+ */
+export declare class LogStream {
+  /**
+   * Receive the next entry. Returns `null` when the stream ends
+   * (snapshot drained, `until` reached, or fatal stream error
+   * already surfaced).
+   */
+  recv(): Promise<LogEntry | null>
+  [Symbol.asyncIterator](): AsyncGenerator<LogEntry, void, undefined>
+}
+export type JsLogStream = LogStream
+
+/**
  * A streaming subscription for sandbox metrics at a regular interval.
  *
  * Supports both manual `recv()` calls and `for await...of` iteration:
@@ -721,6 +748,15 @@ export declare class Sandbox {
    * protocol traffic.
    */
   logs(opts?: LogOptions | undefined | null): Promise<Array<LogEntry>>
+  /**
+   * Stream captured output as it appears, with optional follow.
+   *
+   * Returns an async iterable of `LogEntry`. Each entry carries
+   * an opaque `cursor` token suitable for passing back via
+   * `fromCursor` on a later call to resume exactly after that
+   * entry.
+   */
+  logStream(opts?: LogStreamOptions | undefined | null): Promise<LogStream>
 }
 
 /**
@@ -764,7 +800,14 @@ export declare class SandboxBuilder {
   shell(shell: string): this
   /** Configure registry connection settings via a callback. */
   registry(configure: (arg: RegistryConfigBuilder) => RegistryConfigBuilder): this
-  /** Replace any existing sandbox with the same name. */
+  /**
+   * Replace any existing sandbox with the same name.
+   *
+   * SIGTERMs the prior instance, waits up to 10 seconds for a
+   * graceful exit, then SIGKILLs. To override the grace, use
+   * `replaceWithTimeout(ms)`; `replaceWithTimeout(0)` skips SIGTERM and
+   * SIGKILLs immediately.
+   */
   replace(): this
   /**
    * Timeout (in milliseconds) to wait for the existing sandbox to
@@ -844,8 +887,11 @@ export declare class SandboxBuilder {
   /**
    * Materialize the built configuration without creating a sandbox.
    * Returns the JSON-serialized `SandboxConfig` for inspection.
+   *
+   * # Safety
+   * See `create` for the `&mut self` async + `unsafe` rationale.
    */
-  build(): string
+  build(): Promise<string>
   /**
    * Create and start the sandbox in attached mode.
    *
@@ -973,6 +1019,14 @@ export declare class SandboxHandle {
    * Works without starting the sandbox.
    */
   logs(opts?: LogOptions | undefined | null): Promise<Array<LogEntry>>
+  /**
+   * Stream captured output as it appears, with optional follow.
+   *
+   * Works without starting the sandbox; with `follow: true`, the
+   * stream picks up new entries the moment they land in
+   * `exec.log`.
+   */
+  logStream(opts?: LogStreamOptions | undefined | null): Promise<LogStream>
   /**
    * Snapshot this (stopped) sandbox under a bare name.
    *
@@ -1389,6 +1443,11 @@ export interface LogEntry {
    * preserves bytes via base64 round-trip on the host side.
    */
   data: Buffer
+  /**
+   * Opaque resume token. Pass back to `logStream` via
+   * `fromCursor` to pick up immediately after this entry.
+   */
+  cursor: string
 }
 
 /**
@@ -1410,6 +1469,39 @@ export interface LogOptions {
    * `["stdout", "stderr", "output"]` when omitted.
    */
   sources?: Array<string>
+}
+
+/**
+ * Options accepted by `Sandbox.logStream()`.
+ *
+ * All fields optional. Defaults: sources = `["stdout", "stderr",
+ * "output"]`, start from the beginning of available history, no
+ * upper bound, `follow = false`.
+ *
+ * `sinceMs` and `fromCursor` are mutually exclusive — passing both
+ * rejects at the boundary.
+ */
+export interface LogStreamOptions {
+  /** Same shape as `LogOptions.sources`. */
+  sources?: Array<string>
+  /**
+   * Start at the first entry whose timestamp is `>= sinceMs`.
+   * Mutually exclusive with `fromCursor`.
+   */
+  sinceMs?: number
+  /**
+   * Resume strictly after the entry identified by this cursor
+   * (the value of `LogEntry.cursor` from a prior call).
+   * Mutually exclusive with `sinceMs`.
+   */
+  fromCursor?: string
+  /** Stop emitting at the first entry whose timestamp is `>= untilMs`. */
+  untilMs?: number
+  /**
+   * When true, keep the stream open past current EOF and yield
+   * new entries as they are written.
+   */
+  follow?: boolean
 }
 
 export interface NetworkPolicy {

@@ -32,6 +32,10 @@ pub struct LogEntry {
     /// Body bytes. UTF-8 lossy decoded by default; raw mode (future)
     /// preserves bytes via base64 round-trip on the host side.
     pub data: napi::bindgen_prelude::Buffer,
+
+    /// Opaque resume token. Pass back to `logStream` via
+    /// `fromCursor` to pick up immediately after this entry.
+    pub cursor: String,
 }
 
 /// Filters applied by `Sandbox.logs()`.
@@ -53,6 +57,36 @@ pub struct LogOptions {
     /// `"output"`, `"system"`, or `"all"`. Defaults to
     /// `["stdout", "stderr", "output"]` when omitted.
     pub sources: Option<Vec<String>>,
+}
+
+/// Options accepted by `Sandbox.logStream()`.
+///
+/// All fields optional. Defaults: sources = `["stdout", "stderr",
+/// "output"]`, start from the beginning of available history, no
+/// upper bound, `follow = false`.
+///
+/// `sinceMs` and `fromCursor` are mutually exclusive — passing both
+/// rejects at the boundary.
+#[napi(object)]
+pub struct LogStreamOptions {
+    /// Same shape as `LogOptions.sources`.
+    pub sources: Option<Vec<String>>,
+
+    /// Start at the first entry whose timestamp is `>= sinceMs`.
+    /// Mutually exclusive with `fromCursor`.
+    pub since_ms: Option<f64>,
+
+    /// Resume strictly after the entry identified by this cursor
+    /// (the value of `LogEntry.cursor` from a prior call).
+    /// Mutually exclusive with `sinceMs`.
+    pub from_cursor: Option<String>,
+
+    /// Stop emitting at the first entry whose timestamp is `>= untilMs`.
+    pub until_ms: Option<f64>,
+
+    /// When true, keep the stream open past current EOF and yield
+    /// new entries as they are written.
+    pub follow: Option<bool>,
 }
 
 /// Filesystem entry metadata returned by `fs.list()`.
