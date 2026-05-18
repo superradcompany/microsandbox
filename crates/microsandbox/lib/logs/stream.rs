@@ -78,6 +78,8 @@ impl RotationConfig {
         self.max_index > 0
     }
 
+    /// Resolve the on-disk path for a rotation index. `0` is the
+    /// live file (bare filename), `N>0` is `<filename>.N`.
     fn path(&self, index: usize) -> PathBuf {
         if index == 0 {
             self.log_dir.join(&self.filename)
@@ -86,6 +88,9 @@ impl RotationConfig {
         }
     }
 
+    /// Find which rotation slot currently holds the file with the
+    /// given inode generation, or `None` if it has rotated out of
+    /// the retention window.
     async fn find_index(&self, wanted: u64) -> Option<usize> {
         for index in 0..=self.max_index {
             if let Some(found) = FileHandle::generation_of_path(&self.path(index)).await
@@ -97,6 +102,9 @@ impl RotationConfig {
         None
     }
 
+    /// Append every existing rotated file (`.max_index` → `.1`) to
+    /// `backfill` in oldest-first order so the reader drains
+    /// chronologically before reaching the live file.
     async fn queue_all_rotated(
         &self,
         backfill: &mut VecDeque<FileHandle>,
@@ -170,12 +178,17 @@ pub struct LogStreamOptions {
 // LogEngine
 //--------------------------------------------------------------------------------------------------
 
+/// Outcome of one engine step: keep going, end the stream cleanly,
+/// or surface a terminal error to the consumer.
 enum StepResult {
     Continue,
     Terminate,
     Error(MicrosandboxError),
 }
 
+/// One reader plus its most-recently-emitted [`FilePosition`]. The
+/// position is folded into each entry's [`LogCursor`] so consumers
+/// can resume per-source.
 struct ReaderState {
     reader: Reader,
     last_position: FilePosition,
@@ -196,6 +209,10 @@ pub(crate) struct LogEngine {
 }
 
 impl LogEngine {
+    /// Open one reader per [`LogFileConfig`] whose `produces` set
+    /// intersects `sources`. When `follow` is true, also subscribe
+    /// to filesystem change events on `log_dir` so [`step`] can wake
+    /// promptly on new writes.
     pub(crate) async fn new(
         log_dir: PathBuf,
         log_files: &'static [LogFileConfig],
@@ -246,12 +263,20 @@ impl LogEngine {
         })
     }
 
+    /// Snapshot the watermark across every active source as a
+    /// [`LogCursor`]. Called per emitted entry so the cursor on
+    /// that entry reflects the complete cross-source state at emit
+    /// time.
     fn snapshot_cursor(&self) -> LogCursor {
         LogCursor {
             positions: self.readers.iter().map(|r| r.last_position).collect(),
         }
     }
 
+    /// Drive every reader once: parse any newly-available entries,
+    /// stamp them with a fresh cursor, and queue them in `pending`.
+    /// If nothing parsed and `follow` is on, await a filesystem
+    /// event (or a poll fallback) before signaling `Continue`.
     async fn step(&mut self) -> StepResult {
         let mut any_progress = false;
 
@@ -288,6 +313,10 @@ impl LogEngine {
         }
     }
 
+    /// Wire up a non-recursive [`notify`] watcher on `log_dir` and
+    /// return its event receiver. The watcher's callback runs on a
+    /// background thread; we forward only the wake signal so the
+    /// async [`step`] loop can park efficiently between writes.
     fn build_watcher(
         log_dir: &Path,
     ) -> MicrosandboxResult<(
@@ -317,6 +346,9 @@ impl LogEngine {
         Ok((watcher, rx))
     }
 
+    /// Consume the engine and yield its entries as a [`futures::Stream`].
+    /// Drains `pending` first, then drives [`step`] until termination;
+    /// on error the stream yields one `Err` and ends.
     pub(crate) fn into_stream(
         self,
     ) -> impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<> {
@@ -360,6 +392,10 @@ struct Reader {
 }
 
 impl Reader {
+    /// Prepare a reader for one log file. For rotating files we
+    /// pre-queue the rotated siblings (oldest-first) when starting
+    /// from `Beginning`, or walk the rotation chain to locate the
+    /// cursor's generation when resuming from a [`LogCursor`].
     async fn open(
         config: &LogFileConfig,
         log_dir: &Path,
@@ -423,6 +459,10 @@ impl Reader {
         })
     }
 
+    /// Read whatever's available now: drain any queued rotated
+    /// files first, then read from the live file, then check for
+    /// rotation and reseat the live FD if the inode changed.
+    /// Returns an empty `Vec` when nothing new is on disk yet.
     async fn read_chunk(
         &mut self,
         since: Option<DateTime<Utc>>,
@@ -470,6 +510,11 @@ impl Reader {
         }
     }
 
+    /// Live inode changed: locate where the formerly-live file
+    /// rotated to, queue any intermediate files that appeared
+    /// (rotated past in between reads), and open the new live FD.
+    /// Returns [`MicrosandboxError::MissedRotation`] when the file
+    /// has rotated past the retention window.
     async fn handle_rotation(&mut self) -> MicrosandboxResult<Vec<(LogEntry, FilePosition)>> {
         let live = self
             .live
@@ -497,6 +542,10 @@ impl Reader {
         Ok(Vec::new())
     }
 
+    /// Non-rotating file's inode changed (e.g. truncate + rewrite):
+    /// reopen the live FD against the new inode. Any data on the
+    /// previous inode that wasn't read is lost by design — this
+    /// case is reserved for files that don't promise retention.
     async fn replace_live(&mut self) -> MicrosandboxResult<Vec<(LogEntry, FilePosition)>> {
         if let Some(src) = FileHandle::open(&self.primary_path).await? {
             self.live = Some(src);
