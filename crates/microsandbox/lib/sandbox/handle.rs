@@ -111,8 +111,25 @@ impl SandboxHandle {
     ///
     /// Same backing data as [`Sandbox::logs`](super::Sandbox::logs).
     /// Works without starting the sandbox.
-    pub fn logs(&self, opts: &super::LogOptions) -> MicrosandboxResult<Vec<super::LogEntry>> {
-        super::logs::read_logs(&self.name, opts)
+    pub async fn logs(
+        &self,
+        opts: &crate::logs::LogOptions,
+    ) -> MicrosandboxResult<Vec<crate::logs::LogEntry>> {
+        crate::logs::read_logs(&self.name, opts).await
+    }
+
+    /// Stream captured output as it appears, with optional follow.
+    ///
+    /// Same backing data as [`Sandbox::log_stream`](super::Sandbox::log_stream).
+    /// Works without starting the sandbox; with `follow: true`, the
+    /// stream picks up new entries the moment they land in `exec.log`.
+    pub async fn log_stream(
+        &self,
+        opts: &crate::logs::LogStreamOptions,
+    ) -> MicrosandboxResult<
+        impl futures::Stream<Item = MicrosandboxResult<crate::logs::LogEntry>> + Send + 'static,
+    > {
+        crate::logs::log_stream(&self.name, opts).await
     }
 
     /// Get the latest metrics snapshot for this sandbox.

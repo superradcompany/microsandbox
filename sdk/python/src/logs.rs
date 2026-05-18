@@ -55,12 +55,12 @@ impl PyLogEntry {
 //--------------------------------------------------------------------------------------------------
 
 /// Convert a Rust `LogEntry` into the Python class.
-pub fn convert_entry(entry: microsandbox::sandbox::LogEntry) -> PyLogEntry {
+pub fn convert_entry(entry: microsandbox::logs::LogEntry) -> PyLogEntry {
     let source = match entry.source {
-        microsandbox::sandbox::LogSource::Stdout => "stdout",
-        microsandbox::sandbox::LogSource::Stderr => "stderr",
-        microsandbox::sandbox::LogSource::Output => "output",
-        microsandbox::sandbox::LogSource::System => "system",
+        microsandbox::logs::LogSource::Stdout => "stdout",
+        microsandbox::logs::LogSource::Stderr => "stderr",
+        microsandbox::logs::LogSource::Output => "output",
+        microsandbox::logs::LogSource::System => "system",
     };
     PyLogEntry {
         timestamp_ms: entry.timestamp.timestamp_millis() as f64,
@@ -79,7 +79,7 @@ pub fn read_logs_blocking(
     until_ms: Option<f64>,
     sources: Option<Vec<String>>,
 ) -> PyResult<Vec<PyLogEntry>> {
-    use microsandbox::sandbox::{LogOptions, LogSource};
+    use microsandbox::logs::{LogOptions, LogSource};
 
     let mut opts = LogOptions {
         tail,
@@ -111,7 +111,9 @@ pub fn read_logs_blocking(
         }
     }
 
-    let entries = microsandbox::sandbox::logs::read_logs(name, &opts).map_err(to_py_err)?;
+    let entries = tokio::runtime::Handle::current()
+        .block_on(microsandbox::logs::read_logs(name, &opts))
+        .map_err(to_py_err)?;
     Ok(entries.into_iter().map(convert_entry).collect())
 }
 

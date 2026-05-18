@@ -51,11 +51,11 @@ use std::{
 use base64::Engine;
 use microsandbox::{
     LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
+    logs::{self, LogOptions, LogSource},
     sandbox::{
-        FsEntryKind, LogOptions, LogSource, PullPolicy, all_sandbox_metrics,
+        FsEntryKind, PullPolicy, all_sandbox_metrics,
         exec::{ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
-        logs,
     },
     snapshot::{ExportOpts, SnapshotDestination, SnapshotFormat},
     volume::{Volume, VolumeBuilder, VolumeHandle},
@@ -1995,7 +1995,7 @@ fn parse_log_options(opts_json: *const c_char) -> Result<LogOptions, FfiError> {
     })
 }
 
-fn log_entries_json(entries: Vec<microsandbox::sandbox::LogEntry>) -> Result<String, FfiError> {
+fn log_entries_json(entries: Vec<microsandbox::logs::LogEntry>) -> Result<String, FfiError> {
     let mut out = Vec::with_capacity(entries.len());
     for entry in entries {
         out.push(serde_json::json!({
@@ -2020,7 +2020,7 @@ pub unsafe extern "C" fn msb_sandbox_logs(
         let opts = parse_log_options(opts_json)?;
         Ok(Box::pin(async move {
             let sb = get(handle)?;
-            let entries = sb.logs(&opts).map_err(FfiError::from)?;
+            let entries = sb.logs(&opts).await.map_err(FfiError::from)?;
             log_entries_json(entries)
         }))
     })
@@ -2038,7 +2038,9 @@ pub unsafe extern "C" fn msb_sandbox_handle_logs(
         let name = unsafe { cstr(name) }?.to_owned();
         let opts = parse_log_options(opts_json)?;
         Ok(Box::pin(async move {
-            let entries = logs::read_logs(&name, &opts).map_err(FfiError::from)?;
+            let entries = logs::read_logs(&name, &opts)
+                .await
+                .map_err(FfiError::from)?;
             log_entries_json(entries)
         }))
     })

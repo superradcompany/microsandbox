@@ -389,8 +389,9 @@ impl Sandbox {
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
         let name = sb.name().to_string();
         let rust_opts = log_options_from_js(opts).map_err(napi::Error::from_reason)?;
-        let entries =
-            microsandbox::sandbox::logs::read_logs(&name, &rust_opts).map_err(to_napi_error)?;
+        let entries = microsandbox::logs::read_logs(&name, &rust_opts)
+            .await
+            .map_err(to_napi_error)?;
         Ok(entries.into_iter().map(log_entry_to_js).collect())
     }
 }
@@ -433,12 +434,12 @@ impl AsyncGenerator for JsMetricsStream {
     }
 }
 
-pub fn log_entry_to_js(entry: microsandbox::sandbox::LogEntry) -> LogEntry {
+pub fn log_entry_to_js(entry: microsandbox::logs::LogEntry) -> LogEntry {
     let source = match entry.source {
-        microsandbox::sandbox::LogSource::Stdout => "stdout",
-        microsandbox::sandbox::LogSource::Stderr => "stderr",
-        microsandbox::sandbox::LogSource::Output => "output",
-        microsandbox::sandbox::LogSource::System => "system",
+        microsandbox::logs::LogSource::Stdout => "stdout",
+        microsandbox::logs::LogSource::Stderr => "stderr",
+        microsandbox::logs::LogSource::Output => "output",
+        microsandbox::logs::LogSource::System => "system",
     };
     LogEntry {
         timestamp_ms: entry.timestamp.timestamp_millis() as f64,
@@ -450,11 +451,11 @@ pub fn log_entry_to_js(entry: microsandbox::sandbox::LogEntry) -> LogEntry {
 
 pub fn log_options_from_js(
     opts: Option<LogOptions>,
-) -> std::result::Result<microsandbox::sandbox::LogOptions, String> {
+) -> std::result::Result<microsandbox::logs::LogOptions, String> {
     let Some(o) = opts else {
-        return Ok(microsandbox::sandbox::LogOptions::default());
+        return Ok(microsandbox::logs::LogOptions::default());
     };
-    let mut out = microsandbox::sandbox::LogOptions {
+    let mut out = microsandbox::logs::LogOptions {
         tail: o.tail.map(|n| n as usize),
         since: o.since_ms.and_then(ms_to_datetime),
         until: o.until_ms.and_then(ms_to_datetime),
@@ -463,16 +464,16 @@ pub fn log_options_from_js(
     if let Some(srcs) = o.sources {
         for s in srcs {
             match s.as_str() {
-                "stdout" => out.sources.push(microsandbox::sandbox::LogSource::Stdout),
-                "stderr" => out.sources.push(microsandbox::sandbox::LogSource::Stderr),
-                "output" => out.sources.push(microsandbox::sandbox::LogSource::Output),
-                "system" => out.sources.push(microsandbox::sandbox::LogSource::System),
+                "stdout" => out.sources.push(microsandbox::logs::LogSource::Stdout),
+                "stderr" => out.sources.push(microsandbox::logs::LogSource::Stderr),
+                "output" => out.sources.push(microsandbox::logs::LogSource::Output),
+                "system" => out.sources.push(microsandbox::logs::LogSource::System),
                 "all" => {
                     out.sources = vec![
-                        microsandbox::sandbox::LogSource::Stdout,
-                        microsandbox::sandbox::LogSource::Stderr,
-                        microsandbox::sandbox::LogSource::Output,
-                        microsandbox::sandbox::LogSource::System,
+                        microsandbox::logs::LogSource::Stdout,
+                        microsandbox::logs::LogSource::Stderr,
+                        microsandbox::logs::LogSource::Output,
+                        microsandbox::logs::LogSource::System,
                     ];
                 }
                 other => return Err(format!("unknown log source {other:?}")),

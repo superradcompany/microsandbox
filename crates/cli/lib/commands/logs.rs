@@ -161,7 +161,7 @@ struct LogEntry {
 
 /// Execute the `msb logs` command.
 pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
-    let log_dir = microsandbox::sandbox::logs::log_dir_for(&args.name);
+    let log_dir = microsandbox::logs::log_dir_for(&args.name);
     if !log_dir.exists() {
         return Err(anyhow!(
             "no logs directory for sandbox {:?} (sandbox not found?)",

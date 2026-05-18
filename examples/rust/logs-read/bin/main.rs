@@ -1,6 +1,7 @@
 //! Read captured exec.log entries from a stopped sandbox.
 
-use microsandbox::sandbox::{LogOptions, LogSource, Sandbox};
+use microsandbox::logs::{LogOptions, LogSource};
+use microsandbox::sandbox::Sandbox;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -21,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
     let handle = Sandbox::get("logs-read").await?;
 
     // Default sources are user-program output (stdout/stderr/output).
-    let entries = handle.logs(&LogOptions::default())?;
+    let entries = handle.logs(&LogOptions::default()).await?;
     println!(
         "\n== default sources (stdout+stderr+output): {} entries",
         entries.len()
@@ -31,24 +32,28 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Adding `System` mixes in lifecycle markers and runtime/kernel diagnostics.
-    let with_system = handle.logs(&LogOptions {
-        sources: vec![
-            LogSource::Stdout,
-            LogSource::Stderr,
-            LogSource::Output,
-            LogSource::System,
-        ],
-        ..Default::default()
-    })?;
+    let with_system = handle
+        .logs(&LogOptions {
+            sources: vec![
+                LogSource::Stdout,
+                LogSource::Stderr,
+                LogSource::Output,
+                LogSource::System,
+            ],
+            ..Default::default()
+        })
+        .await?;
     println!(
         "\n== including system (runtime/kernel + lifecycle markers): {} entries",
         with_system.len()
     );
 
-    let tail = handle.logs(&LogOptions {
-        tail: Some(1),
-        ..Default::default()
-    })?;
+    let tail = handle
+        .logs(&LogOptions {
+            tail: Some(1),
+            ..Default::default()
+        })
+        .await?;
     println!("\n== tail=1: {} entries", tail.len());
     if let Some(e) = tail.first() {
         print_entry(e);
@@ -57,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_entry(e: &microsandbox::sandbox::LogEntry) {
+fn print_entry(e: &microsandbox::logs::LogEntry) {
     let id = e
         .session_id
         .map(|i| format!("id={i:>3}"))

@@ -1,6 +1,6 @@
 //! Text helpers for parsing/rendering captured log lines.
 //!
-//! Shared by the SDK's `microsandbox::sandbox::logs` reader and the
+//! Shared by the SDK's `microsandbox::logs` reader and the
 //! CLI's `msb logs` renderer — both consume the same on-disk JSON
 //! Lines format and need the same low-level transforms.
 
