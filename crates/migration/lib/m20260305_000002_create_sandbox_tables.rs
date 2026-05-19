@@ -1,4 +1,4 @@
-//! Migration: Create sandbox tables (sandboxes, runs, sandbox_metrics).
+//! Migration: Create sandbox tables (sandboxes, runs).
 
 use sea_orm_migration::prelude::*;
 
@@ -37,21 +37,6 @@ enum Run {
     SignalsSent,
     StartedAt,
     TerminatedAt,
-}
-
-#[derive(Iden)]
-enum SandboxMetric {
-    Table,
-    Id,
-    SandboxId,
-    CpuPercent,
-    MemoryBytes,
-    DiskReadBytes,
-    DiskWriteBytes,
-    NetRxBytes,
-    NetTxBytes,
-    SampledAt,
-    CreatedAt,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -122,61 +107,10 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // sandbox_metrics
-        manager
-            .create_table(
-                Table::create()
-                    .table(SandboxMetric::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(SandboxMetric::Id)
-                            .integer()
-                            .not_null()
-                            .auto_increment()
-                            .primary_key(),
-                    )
-                    .col(
-                        ColumnDef::new(SandboxMetric::SandboxId)
-                            .integer()
-                            .not_null(),
-                    )
-                    .col(ColumnDef::new(SandboxMetric::CpuPercent).float())
-                    .col(ColumnDef::new(SandboxMetric::MemoryBytes).big_integer())
-                    .col(ColumnDef::new(SandboxMetric::DiskReadBytes).big_integer())
-                    .col(ColumnDef::new(SandboxMetric::DiskWriteBytes).big_integer())
-                    .col(ColumnDef::new(SandboxMetric::NetRxBytes).big_integer())
-                    .col(ColumnDef::new(SandboxMetric::NetTxBytes).big_integer())
-                    .col(ColumnDef::new(SandboxMetric::SampledAt).date_time())
-                    .col(ColumnDef::new(SandboxMetric::CreatedAt).date_time())
-                    .foreign_key(
-                        ForeignKey::create()
-                            .from(SandboxMetric::Table, SandboxMetric::SandboxId)
-                            .to(Sandbox::Table, Sandbox::Id)
-                            .on_delete(ForeignKeyAction::Cascade),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-
-        // Composite index for time-range queries on sandbox metrics
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_sandbox_metrics_sandbox_sampled")
-                    .table(SandboxMetric::Table)
-                    .col(SandboxMetric::SandboxId)
-                    .col(SandboxMetric::SampledAt)
-                    .to_owned(),
-            )
-            .await?;
-
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .drop_table(Table::drop().table(SandboxMetric::Table).to_owned())
-            .await?;
         manager
             .drop_table(Table::drop().table(Run::Table).to_owned())
             .await?;

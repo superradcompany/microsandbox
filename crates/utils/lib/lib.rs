@@ -46,6 +46,23 @@ pub const TLS_SUBDIR: &str = "tls";
 /// Subdirectory for SSH keys.
 pub const SSH_SUBDIR: &str = "ssh";
 
+/// Subdirectory for ephemeral runtime artifacts that should not be backed up.
+pub const RUN_SUBDIR: &str = "run";
+
+/// Subdirectory under `run` for metrics-related diagnostic artifacts.
+pub const METRICS_RUN_SUBDIR: &str = "metrics";
+
+/// Filename of the optional registry-name diagnostic file under `run/metrics`.
+pub const METRICS_REGISTRY_NAME_FILENAME: &str = "registry-v1.name";
+
+/// Prefix used when constructing the POSIX shared-memory object name for the
+/// live metrics registry. Combined with a stable hash of `GlobalConfig::home()`
+/// so concurrent `MSB_HOME`-isolated environments do not collide.
+///
+/// Kept short because macOS limits `shm_open` names to ~31 bytes including the
+/// leading slash; the final form is `<prefix>-<hex16>-v1` (28 bytes).
+pub const METRICS_SHM_PREFIX: &str = "/msb-met";
+
 //--------------------------------------------------------------------------------------------------
 // Constants: Binary Names
 //--------------------------------------------------------------------------------------------------
@@ -98,6 +115,25 @@ pub const MICROSANDBOX_REPO: &str = "microsandbox";
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Derive a short, stable identifier from a path.
+///
+/// Used to build a POSIX shared-memory object name that depends only on the
+/// resolved home directory, so two processes pointed at the same `MSB_HOME`
+/// agree on a single registry without leaking the absolute path through a
+/// public name.
+pub fn stable_hash_path(path: &std::path::Path) -> String {
+    // Avoid pulling sha2 into the utils crate for one filename; a stable
+    // 64-bit FNV-1a over the OS-bytes is plenty for collision-resistance at
+    // this scale (one entry per concurrent MSB_HOME on a host).
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
 
 /// Resolve the microsandbox home directory.
 ///

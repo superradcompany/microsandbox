@@ -2594,6 +2594,7 @@ dependencies = [
  "microsandbox-db",
  "microsandbox-filesystem",
  "microsandbox-image",
+ "microsandbox-metrics",
  "microsandbox-migration",
  "microsandbox-network",
  "microsandbox-protocol",
@@ -2716,6 +2717,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "microsandbox-metrics"
+version = "0.4.6"
+dependencies = [
+ "chrono",
+ "libc",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "microsandbox-migration"
 version = "0.4.6"
 dependencies = [
@@ -2814,6 +2826,7 @@ dependencies = [
  "libc",
  "microsandbox-db",
  "microsandbox-filesystem",
+ "microsandbox-metrics",
  "microsandbox-network",
  "microsandbox-protocol",
  "microsandbox-utils",

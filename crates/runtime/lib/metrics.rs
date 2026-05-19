@@ -1,11 +1,14 @@
-//! Sandbox process metrics sampling and persistence.
+//! Sandbox process metrics sampling and shared-memory publication.
+//!
+//! Samples come from the host OS (Linux `/proc/{pid}/...`, macOS
+//! `proc_pid_rusage`) and are written into the process's reserved slot in
+//! the shared-memory registry. The catalog database is not touched on the
+//! per-sample path; lifecycle rows still flow through `DbWriteConnection`.
 
 use std::num::NonZero;
 use std::time::{Duration, Instant};
 
-use microsandbox_db::DbWriteConnection;
-use microsandbox_db::entity::sandbox_metric as sandbox_metric_entity;
-use sea_orm::{ActiveModelTrait, Set};
+use microsandbox_metrics::{MetricsError, MetricsSlotWriter, SampleWrite};
 
 use crate::{RuntimeError, RuntimeResult};
 
@@ -63,9 +66,10 @@ struct ProcessSample {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Run the background metrics sampler until the sandbox process exits.
+/// Run the background metrics sampler until the sandbox process exits or
+/// the slot is reclaimed.
 pub async fn run_metrics_sampler(
-    db: DbWriteConnection,
+    writer: MetricsSlotWriter,
     sandbox_id: i32,
     pid: u32,
     interval_ms: NonZero<u64>,
@@ -83,10 +87,19 @@ pub async fn run_metrics_sampler(
     };
     let mut previous_instant = Instant::now();
 
-    if let Err(err) =
-        persist_sample(&db, sandbox_id, 0.0, previous, network_metrics.as_deref()).await
-    {
-        tracing::warn!(sandbox_id, pid, error = %err, "failed to persist initial sandbox metrics");
+    match write_sample(&writer, 0.0, previous, network_metrics.as_deref()) {
+        Ok(()) => {}
+        Err(SampleWriteError::Generation) => {
+            tracing::info!(
+                sandbox_id,
+                pid,
+                "metrics slot reclaimed before first sample; stopping sampler"
+            );
+            return;
+        }
+        Err(SampleWriteError::Other(err)) => {
+            tracing::warn!(sandbox_id, pid, error = %err, "failed to write initial sandbox metrics");
+        }
     }
 
     loop {
@@ -111,16 +124,20 @@ pub async fn run_metrics_sampler(
             0.0
         };
 
-        if let Err(err) = persist_sample(
-            &db,
-            sandbox_id,
+        match write_sample(
+            &writer,
             cpu_percent as f32,
             current,
             network_metrics.as_deref(),
-        )
-        .await
-        {
-            tracing::warn!(sandbox_id, pid, error = %err, "failed to persist sandbox metrics");
+        ) {
+            Ok(()) => {}
+            Err(SampleWriteError::Generation) => {
+                tracing::info!(sandbox_id, pid, "metrics slot reclaimed; stopping sampler");
+                break;
+            }
+            Err(SampleWriteError::Other(err)) => {
+                tracing::warn!(sandbox_id, pid, error = %err, "failed to write sandbox metrics");
+            }
         }
 
         previous = current;
@@ -128,44 +145,35 @@ pub async fn run_metrics_sampler(
     }
 }
 
-async fn persist_sample(
-    db: &DbWriteConnection,
-    sandbox_id: i32,
+enum SampleWriteError {
+    Generation,
+    Other(MetricsError),
+}
+
+fn write_sample(
+    writer: &MetricsSlotWriter,
     cpu_percent: f32,
     process: ProcessSample,
     network_metrics: Option<&dyn NetworkMetrics>,
-) -> RuntimeResult<()> {
-    let now = chrono::Utc::now().naive_utc();
-    let (net_rx_bytes, net_tx_bytes) = if let Some(metrics) = network_metrics {
-        (
-            Some(to_i64(metrics.rx_bytes())?),
-            Some(to_i64(metrics.tx_bytes())?),
-        )
-    } else {
-        (Some(0), Some(0))
+) -> Result<(), SampleWriteError> {
+    let (rx, tx) = match network_metrics {
+        Some(m) => (m.rx_bytes(), m.tx_bytes()),
+        None => (0, 0),
     };
-
-    sandbox_metric_entity::ActiveModel {
-        sandbox_id: Set(sandbox_id),
-        cpu_percent: Set(Some(cpu_percent)),
-        memory_bytes: Set(Some(to_i64(process.memory_bytes)?)),
-        disk_read_bytes: Set(Some(to_i64(process.disk_read_bytes)?)),
-        disk_write_bytes: Set(Some(to_i64(process.disk_write_bytes)?)),
-        net_rx_bytes: Set(net_rx_bytes),
-        net_tx_bytes: Set(net_tx_bytes),
-        sampled_at: Set(Some(now)),
-        created_at: Set(Some(now)),
-        ..Default::default()
+    let sample = SampleWrite {
+        sampled_at: chrono::Utc::now(),
+        cpu_percent,
+        memory_bytes: process.memory_bytes,
+        disk_read_bytes: process.disk_read_bytes,
+        disk_write_bytes: process.disk_write_bytes,
+        net_rx_bytes: rx,
+        net_tx_bytes: tx,
+    };
+    match writer.write_sample(sample) {
+        Ok(()) => Ok(()),
+        Err(MetricsError::GenerationMismatch { .. }) => Err(SampleWriteError::Generation),
+        Err(other) => Err(SampleWriteError::Other(other)),
     }
-    .insert(db)
-    .await?;
-
-    Ok(())
-}
-
-fn to_i64(value: u64) -> RuntimeResult<i64> {
-    i64::try_from(value)
-        .map_err(|_| RuntimeError::Custom(format!("metric value overflowed i64: {value}")))
 }
 
 #[cfg(target_os = "linux")]

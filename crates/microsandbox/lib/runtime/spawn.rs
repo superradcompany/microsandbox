@@ -21,6 +21,7 @@ use tempfile::TempDir;
 use tokio::{io::AsyncBufReadExt, process::Command};
 
 use microsandbox_image::{Digest, GlobalCache};
+use microsandbox_metrics::{MetricsRegistry, ReleaseMode, ReserveSlot, SlotReservation};
 use microsandbox_protocol::{
     ENV_BLOCK_ROOT, ENV_DIR_MOUNTS, ENV_DISK_MOUNTS, ENV_FILE_MOUNTS, ENV_HANDOFF_INIT,
     ENV_HANDOFF_INIT_ARGS, ENV_HANDOFF_INIT_ENV, ENV_HOSTNAME, ENV_TMPFS, ENV_USER,
@@ -121,8 +122,19 @@ pub async fn spawn_sandbox(
 
     // Stage file bind mounts: each file gets its own isolated directory so
     // that virtio-fs (which requires directories) can share it without
-    // exposing adjacent files on the host.
+    // exposing adjacent files on the host. Done BEFORE the metrics
+    // reservation so that a staging failure does not leak a slot.
     let (staged_file_mounts, file_mounts_staging) = stage_file_mounts(config).await?;
+
+    // Reserve a metrics slot before spawning. Only do this when metrics are
+    // enabled so disabled sandboxes don't pay for an entry. Failures here are
+    // surfaced as warnings — the runtime will skip the sampler if no slot is
+    // present, but the sandbox itself should still boot.
+    let metrics_reservation = if config.effective_metrics_interval().is_some() {
+        reserve_metrics_slot(config, sandbox_id)
+    } else {
+        None
+    };
 
     // Build the command.
     let mut cmd = Command::new(&msb_path);
@@ -136,6 +148,7 @@ pub async fn spawn_sandbox(
         &agent_sock_path,
         &libkrunfw_path,
         &staged_file_mounts,
+        metrics_reservation.as_ref(),
     ));
 
     // Prevent the sandbox process from inheriting the parent's terminal on
@@ -153,18 +166,37 @@ pub async fn spawn_sandbox(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::inherit());
 
-    // Spawn the sandbox process.
-    let mut child = cmd.spawn()?;
+    // Spawn the sandbox process. On failure, release the metrics reservation
+    // so the slot does not leak.
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
+            return Err(e.into());
+        }
+    };
 
-    let _pid = child.id().ok_or_else(|| {
-        crate::MicrosandboxError::Runtime("sandbox process exited immediately".into())
-    })?;
+    let _pid = match child.id() {
+        Some(pid) => pid,
+        None => {
+            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
+            return Err(crate::MicrosandboxError::Runtime(
+                "sandbox process exited immediately".into(),
+            ));
+        }
+    };
     tracing::debug!(pid = _pid, sandbox = %config.name, "spawn_sandbox: process started");
 
     // Read the startup JSON from stdout.
-    let stdout = child.stdout.take().ok_or_else(|| {
-        crate::MicrosandboxError::Runtime("failed to capture sandbox stdout".into())
-    })?;
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
+            return Err(crate::MicrosandboxError::Runtime(
+                "failed to capture sandbox stdout".into(),
+            ));
+        }
+    };
 
     let mut reader = tokio::io::BufReader::new(stdout);
     let mut line = String::new();
@@ -177,10 +209,12 @@ pub async fn spawn_sandbox(
         Ok(Ok(_)) => {}
         Ok(Err(err)) => {
             terminate_startup_process(&mut child).await;
+            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
             return Err(err.into());
         }
         Err(_) => {
             terminate_startup_process(&mut child).await;
+            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
             return Err(crate::MicrosandboxError::Runtime(
                 "sandbox startup timeout: no JSON received within 30 seconds".into(),
             ));
@@ -191,6 +225,7 @@ pub async fn spawn_sandbox(
         Ok(info) => info,
         Err(_) => {
             let status = terminate_startup_process(&mut child).await;
+            release_metrics_reservation(config, metrics_reservation.as_ref(), ReleaseMode::Free);
             tracing::debug!(
                 raw_line = ?line,
                 exit_status = ?status,
@@ -215,8 +250,73 @@ pub async fn spawn_sandbox(
 }
 
 //--------------------------------------------------------------------------------------------------
+// Types: Metrics reservation
+//--------------------------------------------------------------------------------------------------
+
+/// Slot reservation handed off to the spawned sandbox process.
+struct MetricsReservation {
+    shm_name: String,
+    slot: u32,
+    generation: u64,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Open the registry and reserve a slot for an upcoming sandbox spawn.
+///
+/// Logs and returns `None` on any failure: the spawn should still succeed
+/// (the sandbox just runs without live metrics) so a registry hiccup does
+/// not block sandbox creation.
+fn reserve_metrics_slot(config: &SandboxConfig, sandbox_id: i32) -> Option<MetricsReservation> {
+    let shm_name = config::config().metrics_registry_shm_name();
+    let capacity = config::config().metrics_registry_capacity();
+    let registry = match MetricsRegistry::open_or_create(&shm_name, capacity) {
+        Ok(reg) => reg,
+        Err(err) => {
+            tracing::warn!(error = %err, sandbox = %config.name, "failed to open metrics registry");
+            return None;
+        }
+    };
+    let memory_limit_bytes = u64::from(config.memory_mib) * 1024 * 1024;
+    match registry.reserve(ReserveSlot {
+        sandbox_id,
+        name: &config.name,
+        memory_limit_bytes,
+    }) {
+        Ok(SlotReservation { slot, generation }) => Some(MetricsReservation {
+            shm_name,
+            slot,
+            generation,
+        }),
+        Err(err) => {
+            tracing::warn!(error = %err, sandbox = %config.name, "failed to reserve metrics slot");
+            None
+        }
+    }
+}
+
+/// Best-effort release of a reservation when spawn cannot continue.
+fn release_metrics_reservation(
+    config: &SandboxConfig,
+    reservation: Option<&MetricsReservation>,
+    mode: ReleaseMode,
+) {
+    let Some(reservation) = reservation else {
+        return;
+    };
+    let registry = match MetricsRegistry::open(&reservation.shm_name) {
+        Ok(reg) => reg,
+        Err(err) => {
+            tracing::debug!(error = %err, sandbox = %config.name, "release: failed to open metrics registry");
+            return;
+        }
+    };
+    if let Err(err) = registry.release(reservation.slot, reservation.generation, mode) {
+        tracing::debug!(error = %err, sandbox = %config.name, "release: metrics slot release failed");
+    }
+}
 
 async fn terminate_startup_process(
     child: &mut tokio::process::Child,
@@ -497,6 +597,7 @@ fn sandbox_cli_args(
     agent_sock_path: &Path,
     libkrunfw_path: &Path,
     staged_file_mounts: &HashMap<String, (PathBuf, String, String)>,
+    metrics_reservation: Option<&MetricsReservation>,
 ) -> Vec<OsString> {
     let mut args = vec![OsString::from("sandbox")];
 
@@ -541,6 +642,15 @@ fn sandbox_cli_args(
             args.push(OsString::from(ms.get().to_string()));
         }
         None => args.push(OsString::from("--disable-metrics-sample")),
+    }
+
+    if let Some(reservation) = metrics_reservation {
+        args.push(OsString::from("--metrics-shm-name"));
+        args.push(OsString::from(&reservation.shm_name));
+        args.push(OsString::from("--metrics-slot"));
+        args.push(OsString::from(reservation.slot.to_string()));
+        args.push(OsString::from("--metrics-generation"));
+        args.push(OsString::from(reservation.generation.to_string()));
     }
 
     match &config.image {
@@ -803,6 +913,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
+            None,
         )
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -823,6 +934,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             staged_file_mounts,
+            None,
         )
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -897,6 +1009,7 @@ mod tests {
             Path::new("/tmp/agent.sock"),
             Path::new("/tmp/libkrunfw.dylib"),
             &HashMap::new(),
+            None,
         );
 
         let rendered = args
@@ -1001,6 +1114,70 @@ mod tests {
                 .any(|arg| arg == "--metrics-sample-interval-ms"),
             "should not also emit interval flag; got {rendered:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_include_metrics_handoff_when_provided() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .metrics_sample_interval(std::time::Duration::from_millis(500))
+            .build()
+            .await
+            .unwrap();
+
+        let reservation = super::MetricsReservation {
+            shm_name: "/msb-met-deadbeef-v1".to_string(),
+            slot: 17,
+            generation: 99,
+        };
+
+        let rendered = sandbox_cli_args(
+            &config,
+            42,
+            Path::new("/tmp/msb.db"),
+            30,
+            Path::new("/tmp/logs"),
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/agent.sock"),
+            Path::new("/tmp/libkrunfw.dylib"),
+            &HashMap::new(),
+            Some(&reservation),
+        )
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+        assert!(
+            rendered
+                .windows(2)
+                .any(|p| p == ["--metrics-shm-name", "/msb-met-deadbeef-v1"]),
+            "missing --metrics-shm-name in {rendered:?}"
+        );
+        assert!(
+            rendered.windows(2).any(|p| p == ["--metrics-slot", "17"]),
+            "missing --metrics-slot in {rendered:?}"
+        );
+        assert!(
+            rendered
+                .windows(2)
+                .any(|p| p == ["--metrics-generation", "99"]),
+            "missing --metrics-generation in {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_omit_metrics_handoff_when_absent() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+
+        assert!(!rendered.iter().any(|a| a == "--metrics-shm-name"));
+        assert!(!rendered.iter().any(|a| a == "--metrics-slot"));
+        assert!(!rendered.iter().any(|a| a == "--metrics-generation"));
     }
 
     #[tokio::test]

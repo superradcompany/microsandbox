@@ -24,6 +24,7 @@ crossbeam-queue = { workspace = true }
 libc.workspace = true
 microsandbox-db = { version = "0.4.6", path = "../db" }
 microsandbox-filesystem = { version = "0.4.6", path = "../filesystem", default-features = false }
+microsandbox-metrics = { version = "0.4.6", path = "../metrics" }
 microsandbox-network = { version = "0.4.6", path = "../network", optional = true }
 microsandbox-protocol = { version = "0.4.6", path = "../protocol" }
 microsandbox-utils = { version = "0.4.6", path = "../utils" }
