@@ -569,10 +569,13 @@ jobs:
       - name: Run Python integration tests
         working-directory: sdk/python
         env:
-          MSB_HOME: ${{ runner.temp }}/msb-home-${{ github.run_id }}-python
           MSB_PATH: ${{ github.workspace }}/build/msb
           LD_LIBRARY_PATH: ${{ github.workspace }}/build:${{ github.workspace }}/sdk/python/microsandbox/_bundled/lib
-        run: uv run pytest integration
+        run: |
+          MSB_HOME=$(mktemp -d -p /tmp XXX)
+          trap "rm -rf '$MSB_HOME'" EXIT
+          export MSB_HOME
+          uv run pytest integration
 
   # ---------------------------------------------------------------------------
   # Go SDK integration tests (requires KVM)
