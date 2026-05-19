@@ -37,7 +37,7 @@ async def test_python_sdk_end_to_end_smoke():
     )
 
     try:
-        assert await sandbox.name() == name
+        assert await sandbox.name == name
 
         output = await sandbox.exec("echo", ["hello"])
         assert output.success is True
