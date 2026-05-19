@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
-from typing import Any
+from collections.abc import AsyncIterator, Mapping, Sequence
+from typing import Any, Literal
 
-from microsandbox.types import LogReadSource, LogSource
+from microsandbox.types import ExecOptions, LogReadSource, LogSource, Rlimit, Stdin
+
+ExecArgs = Sequence[str] | ExecOptions | dict[str, Any] | None
+StdinInput = Stdin | Literal["null", "pipe", "bytes"] | None
+RlimitsInput = Sequence[Rlimit | dict[str, Any]] | None
 
 class Sandbox:
     @staticmethod
@@ -30,15 +34,45 @@ class Sandbox:
     def fs(self) -> SandboxFs: ...
 
     async def exec(
-        self, cmd: str, args_or_options: list[str] | dict[str, Any] | None = None
+        self,
+        cmd: str,
+        args: ExecArgs = None,
+        *,
+        cwd: str | None = None,
+        user: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        stdin: StdinInput = None,
+        stdin_data: bytes | None = None,
+        tty: bool = False,
+        rlimits: RlimitsInput = None,
     ) -> ExecOutput: ...
     async def exec_stream(
-        self, cmd: str, args_or_options: list[str] | dict[str, Any] | None = None
+        self,
+        cmd: str,
+        args: ExecArgs = None,
+        *,
+        cwd: str | None = None,
+        user: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        stdin: StdinInput = None,
+        stdin_data: bytes | None = None,
+        tty: bool = False,
+        rlimits: RlimitsInput = None,
     ) -> ExecHandle: ...
     async def shell(self, script: str) -> ExecOutput: ...
     async def shell_stream(self, script: str) -> ExecHandle: ...
     async def attach(
-        self, cmd: str, args_or_options: list[str] | dict[str, Any] | None = None
+        self,
+        cmd: str,
+        args: ExecArgs = None,
+        *,
+        cwd: str | None = None,
+        user: str | None = None,
+        env: Mapping[str, str] | None = None,
+        detach_keys: str | None = None,
+        rlimits: RlimitsInput = None,
     ) -> int: ...
     async def attach_shell(self) -> int: ...
     async def metrics(self) -> SandboxMetrics: ...

@@ -205,7 +205,10 @@ class Stdin:
 
 @dataclass(frozen=True, slots=True)
 class ExecOptions:
-    """Full execution options (passed as second positional to exec/exec_stream)."""
+    """Backwards-compatible execution options object.
+
+    Prefer passing options as keyword arguments to ``exec`` and ``exec_stream``.
+    """
     args: tuple[str, ...] = ()
     cwd: str | None = None
     user: str | None = None

@@ -84,13 +84,17 @@ print(output.exit_code)      # 0
 output = await sandbox.shell("echo hello && pwd")
 print(output.stdout_text)
 
-# Full configuration via ExecOptions dict.
-output = await sandbox.exec("python3", {
-    "args": ["script.py"],
-    "cwd": "/app",
-    "env": {"PYTHONPATH": "/app/lib"},
-    "timeout": 30.0,
-})
+# Full configuration via keyword arguments.
+output = await sandbox.exec(
+    "python3",
+    ["script.py"],
+    cwd="/app",
+    env={"PYTHONPATH": "/app/lib"},
+    timeout=30.0,
+)
+
+# Keyword arguments also work without command args.
+output = await sandbox.exec("pwd", cwd="/app")
 
 # Streaming output.
 handle = await sandbox.exec_stream("tail", ["-f", "/var/log/app.log"])
