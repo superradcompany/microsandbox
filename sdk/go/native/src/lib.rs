@@ -3074,7 +3074,7 @@ pub unsafe extern "C" fn msb_fs_read(
         let sb = get(handle)?;
         let path = unsafe { cstr(path) }?;
         Ok(Box::pin(async move {
-            let bytes = sb.fs()?.read(&path).await.map_err(FfiError::from)?;
+            let bytes = sb.fs().read(&path).await.map_err(FfiError::from)?;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
             Ok(format!(r#"{{"data":"{b64}"}}"#))
         }))
@@ -3098,7 +3098,7 @@ pub unsafe extern "C" fn msb_fs_write(
             .decode(data_b64.as_bytes())
             .map_err(|e| FfiError::invalid_argument(format!("base64 decode: {e}")))?;
         Ok(Box::pin(async move {
-            sb.fs()?.write(&path, data).await.map_err(FfiError::from)?;
+            sb.fs().write(&path, data).await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
@@ -3116,7 +3116,7 @@ pub unsafe extern "C" fn msb_fs_list(
         let sb = get(handle)?;
         let path = unsafe { cstr(path) }?;
         Ok(Box::pin(async move {
-            let entries = sb.fs()?.list(&path).await.map_err(FfiError::from)?;
+            let entries = sb.fs().list(&path).await.map_err(FfiError::from)?;
             let out: Vec<_> = entries
                 .iter()
                 .map(|e| {
@@ -3145,7 +3145,7 @@ pub unsafe extern "C" fn msb_fs_stat(
         let sb = get(handle)?;
         let path = unsafe { cstr(path) }?;
         Ok(Box::pin(async move {
-            let m = sb.fs()?.stat(&path).await.map_err(FfiError::from)?;
+            let m = sb.fs().stat(&path).await.map_err(FfiError::from)?;
             Ok(serde_json::json!({
                 "kind": kind_str(m.kind),
                 "size": m.size,
@@ -3172,7 +3172,7 @@ pub unsafe extern "C" fn msb_fs_copy_from_host(
         let host_path = unsafe { cstr(host_path) }?;
         let guest_path = unsafe { cstr(guest_path) }?;
         Ok(Box::pin(async move {
-            sb.fs()?
+            sb.fs()
                 .copy_from_host(&host_path, &guest_path)
                 .await
                 .map_err(FfiError::from)?;
@@ -3195,7 +3195,7 @@ pub unsafe extern "C" fn msb_fs_copy_to_host(
         let guest_path = unsafe { cstr(guest_path) }?;
         let host_path = unsafe { cstr(host_path) }?;
         Ok(Box::pin(async move {
-            sb.fs()?
+            sb.fs()
                 .copy_to_host(&guest_path, &host_path)
                 .await
                 .map_err(FfiError::from)?;
@@ -3216,7 +3216,7 @@ pub unsafe extern "C" fn msb_fs_mkdir(
         let sb = get(handle)?;
         let path = unsafe { cstr(path) }?;
         Ok(Box::pin(async move {
-            sb.fs()?.mkdir(&path).await.map_err(FfiError::from)?;
+            sb.fs().mkdir(&path).await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
@@ -3234,7 +3234,7 @@ pub unsafe extern "C" fn msb_fs_remove(
         let sb = get(handle)?;
         let path = unsafe { cstr(path) }?;
         Ok(Box::pin(async move {
-            sb.fs()?.remove(&path).await.map_err(FfiError::from)?;
+            sb.fs().remove(&path).await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
@@ -3252,7 +3252,7 @@ pub unsafe extern "C" fn msb_fs_remove_dir(
         let sb = get(handle)?;
         let path = unsafe { cstr(path) }?;
         Ok(Box::pin(async move {
-            sb.fs()?.remove_dir(&path).await.map_err(FfiError::from)?;
+            sb.fs().remove_dir(&path).await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
@@ -3272,7 +3272,7 @@ pub unsafe extern "C" fn msb_fs_copy(
         let src = unsafe { cstr(src) }?;
         let dst = unsafe { cstr(dst) }?;
         Ok(Box::pin(async move {
-            sb.fs()?.copy(&src, &dst).await.map_err(FfiError::from)?;
+            sb.fs().copy(&src, &dst).await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
@@ -3292,7 +3292,7 @@ pub unsafe extern "C" fn msb_fs_rename(
         let src = unsafe { cstr(src) }?;
         let dst = unsafe { cstr(dst) }?;
         Ok(Box::pin(async move {
-            sb.fs()?.rename(&src, &dst).await.map_err(FfiError::from)?;
+            sb.fs().rename(&src, &dst).await.map_err(FfiError::from)?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })
@@ -3310,7 +3310,7 @@ pub unsafe extern "C" fn msb_fs_exists(
         let sb = get(handle)?;
         let path = unsafe { cstr(path) }?;
         Ok(Box::pin(async move {
-            let exists = sb.fs()?.exists(&path).await.map_err(FfiError::from)?;
+            let exists = sb.fs().exists(&path).await.map_err(FfiError::from)?;
             Ok(format!(r#"{{"exists":{exists}}}"#))
         }))
     })
@@ -4843,7 +4843,7 @@ pub unsafe extern "C" fn msb_fs_read_stream(
         let path_str = unsafe { cstr(path) }?.to_owned();
         Ok(Box::pin(async move {
             let stream = sb
-                .fs()?
+                .fs()
                 .read_stream(&path_str)
                 .await
                 .map_err(FfiError::from)?;
@@ -4919,7 +4919,7 @@ pub unsafe extern "C" fn msb_fs_write_stream(
         let path_str = unsafe { cstr(path) }?.to_owned();
         Ok(Box::pin(async move {
             let sink = sb
-                .fs()?
+                .fs()
                 .write_stream(&path_str)
                 .await
                 .map_err(FfiError::from)?;

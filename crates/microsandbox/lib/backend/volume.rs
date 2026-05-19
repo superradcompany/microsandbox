@@ -19,7 +19,7 @@ use futures::future::BoxFuture;
 
 use super::{Backend, CloudBackend, LocalBackend};
 use crate::sandbox::fs::{FsEntry, FsMetadata};
-use crate::volume::{Volume, VolumeConfig, VolumeHandle};
+use crate::volume::{Volume, VolumeConfig, VolumeFsReadStream, VolumeFsWriteSink, VolumeHandle};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -212,6 +212,20 @@ pub trait VolumeBackend: Send + Sync {
         name: &'a str,
         path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<bool>>;
+
+    /// Open a streaming reader for a volume file.
+    fn fs_read_stream<'a>(
+        &'a self,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<VolumeFsReadStream>>;
+
+    /// Open a streaming writer for a volume file. Creates parent dirs.
+    fn fs_write_stream<'a>(
+        &'a self,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<VolumeFsWriteSink>>;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -333,6 +347,22 @@ impl VolumeBackend for LocalBackend {
     ) -> BoxFuture<'a, MicrosandboxResult<bool>> {
         Box::pin(async move { crate::volume::fs::local::exists(self, name, path).await })
     }
+
+    fn fs_read_stream<'a>(
+        &'a self,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<VolumeFsReadStream>> {
+        Box::pin(async move { crate::volume::fs::local::read_stream(self, name, path).await })
+    }
+
+    fn fs_write_stream<'a>(
+        &'a self,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<VolumeFsWriteSink>> {
+        Box::pin(async move { crate::volume::fs::local::write_stream(self, name, path).await })
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -453,6 +483,22 @@ impl VolumeBackend for CloudBackend {
         _path: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<bool>> {
         Box::pin(async move { Err(unsupported("VolumeFs::exists")) })
+    }
+
+    fn fs_read_stream<'a>(
+        &'a self,
+        _name: &'a str,
+        _path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<VolumeFsReadStream>> {
+        Box::pin(async move { Err(unsupported("VolumeFs::read_stream")) })
+    }
+
+    fn fs_write_stream<'a>(
+        &'a self,
+        _name: &'a str,
+        _path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<VolumeFsWriteSink>> {
+        Box::pin(async move { Err(unsupported("VolumeFs::write_stream")) })
     }
 }
 

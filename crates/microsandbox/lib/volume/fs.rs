@@ -4,13 +4,12 @@
 //! agent protocol, [`VolumeFs`] reads + writes a volume's bytes directly. For
 //! the local backend that is `tokio::fs` against `volumes_dir/<name>/`; for
 //! cloud (Phase 6) it routes through msb-cloud HTTP. Today every cloud op
-//! returns [`MicrosandboxError::Unsupported`].
+//! returns [`crate::MicrosandboxError::Unsupported`].
 //!
 //! `VolumeFs` is a single type per D6.4 — no public variants. It borrows the
 //! parent volume's `Arc<dyn Backend>` + name and dispatches through the
 //! [`VolumeBackend`](crate::backend::VolumeBackend) trait.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -18,7 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::backend::Backend;
 use crate::{
-    MicrosandboxError, MicrosandboxResult,
+    MicrosandboxResult,
     sandbox::fs::{FsEntry, FsMetadata},
 };
 
@@ -53,12 +52,29 @@ pub struct VolumeFsReadStream {
     buf: Vec<u8>,
 }
 
+impl VolumeFsReadStream {
+    /// Construct from an already-opened file. Local impl only.
+    pub(crate) fn from_file(file: tokio::fs::File) -> Self {
+        Self {
+            file,
+            buf: vec![0u8; STREAM_CHUNK_SIZE],
+        }
+    }
+}
+
 /// A streaming writer for file data to a volume's host-side directory.
 ///
 /// **Local backend only** — opened against a host path. Cloud streaming will
 /// land alongside the cloud HTTP routes in Phase 6.
 pub struct VolumeFsWriteSink {
     file: tokio::fs::File,
+}
+
+impl VolumeFsWriteSink {
+    /// Construct from an already-opened file. Local impl only.
+    pub(crate) fn from_file(file: tokio::fs::File) -> Self {
+        Self { file }
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -105,16 +121,11 @@ impl<'a> VolumeFs<'a> {
     /// Read a file with streaming. Returns a [`VolumeFsReadStream`] that
     /// yields chunks of bytes.
     ///
-    /// **Local backend only** — cloud streaming routes through HTTP and
-    /// hasn't shipped yet; returns [`MicrosandboxError::Unsupported`] on
-    /// cloud.
+    /// Routes through the [`VolumeBackend`](crate::backend::VolumeBackend)
+    /// trait — cloud routes return [`crate::MicrosandboxError::Unsupported`]
+    /// until cloud volumes ship.
     pub async fn read_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsReadStream> {
-        let full = self.require_local_path(path, "VolumeFs::read_stream")?;
-        let file = tokio::fs::File::open(&full).await?;
-        Ok(VolumeFsReadStream {
-            file,
-            buf: vec![0u8; STREAM_CHUNK_SIZE],
-        })
+        self.backend.volumes().fs_read_stream(self.name, path).await
     }
 
     //----------------------------------------------------------------------------------------------
@@ -134,16 +145,14 @@ impl<'a> VolumeFs<'a> {
     /// Write to a file with streaming. Returns a [`VolumeFsWriteSink`] that
     /// accepts chunks of bytes. Creates parent directories as needed.
     ///
-    /// **Local backend only** — cloud streaming routes through HTTP and
-    /// hasn't shipped yet; returns [`MicrosandboxError::Unsupported`] on
-    /// cloud.
+    /// Routes through the [`VolumeBackend`](crate::backend::VolumeBackend)
+    /// trait — cloud routes return [`crate::MicrosandboxError::Unsupported`]
+    /// until cloud volumes ship.
     pub async fn write_stream(&self, path: &str) -> MicrosandboxResult<VolumeFsWriteSink> {
-        let full = self.require_local_path(path, "VolumeFs::write_stream")?;
-        if let Some(parent) = full.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let file = tokio::fs::File::create(&full).await?;
-        Ok(VolumeFsWriteSink { file })
+        self.backend
+            .volumes()
+            .fs_write_stream(self.name, path)
+            .await
     }
 
     //----------------------------------------------------------------------------------------------
@@ -200,29 +209,6 @@ impl<'a> VolumeFs<'a> {
     /// Returns `false` (not an error) if the path is absent.
     pub async fn exists(&self, path: &str) -> MicrosandboxResult<bool> {
         self.backend.volumes().fs_exists(self.name, path).await
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Methods: VolumeFs (helpers)
-//--------------------------------------------------------------------------------------------------
-
-impl VolumeFs<'_> {
-    /// Resolve a relative path against the local volume root. Errors with
-    /// [`MicrosandboxError::Unsupported`] on a non-local backend.
-    ///
-    /// Used by streaming ops which need a direct host path and don't fit the
-    /// boxed-future trait shape cleanly.
-    fn require_local_path(&self, path: &str, feature: &str) -> MicrosandboxResult<PathBuf> {
-        let local = self
-            .backend
-            .as_local()
-            .ok_or_else(|| MicrosandboxError::Unsupported {
-                feature: feature.into(),
-                available_when: "when cloud volumes ship".into(),
-            })?;
-        let root = local.volume_path(self.name);
-        local::resolve_relative(&root, path)
     }
 }
 
@@ -298,6 +284,8 @@ pub(crate) mod local {
         backend::LocalBackend,
         sandbox::fs::{FsEntry, FsEntryKind, FsMetadata},
     };
+
+    use super::{VolumeFsReadStream, VolumeFsWriteSink};
 
     /// Resolve a relative path against the volume root, preventing path traversal.
     pub(crate) fn resolve_relative(root: &Path, path: &str) -> MicrosandboxResult<PathBuf> {
@@ -505,6 +493,29 @@ pub(crate) mod local {
     ) -> MicrosandboxResult<bool> {
         let full = resolve(local, name, path)?;
         Ok(tokio::fs::try_exists(&full).await.unwrap_or(false))
+    }
+
+    pub(crate) async fn read_stream(
+        local: &LocalBackend,
+        name: &str,
+        path: &str,
+    ) -> MicrosandboxResult<VolumeFsReadStream> {
+        let full = resolve(local, name, path)?;
+        let file = tokio::fs::File::open(&full).await?;
+        Ok(VolumeFsReadStream::from_file(file))
+    }
+
+    pub(crate) async fn write_stream(
+        local: &LocalBackend,
+        name: &str,
+        path: &str,
+    ) -> MicrosandboxResult<VolumeFsWriteSink> {
+        let full = resolve(local, name, path)?;
+        if let Some(parent) = full.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let file = tokio::fs::File::create(&full).await?;
+        Ok(VolumeFsWriteSink::from_file(file))
     }
 
     //----------------------------------------------------------------------------------------------

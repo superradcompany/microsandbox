@@ -5,7 +5,7 @@
 //! methods (stop, kill, drain, wait) and access to the [`AgentClient`]
 //! for guest communication.
 
-mod attach;
+pub(crate) mod attach;
 mod builder;
 mod config;
 pub mod exec;
@@ -13,24 +13,23 @@ pub mod fs;
 mod handle;
 pub mod init;
 pub mod logs;
-mod metrics;
+pub(crate) mod metrics;
 mod patch;
 mod types;
 
 use std::{collections::HashMap, path::Path, process::ExitStatus, sync::Arc};
 
-use bytes::Bytes;
 use microsandbox_db::pool::DbPools;
 use microsandbox_db::{DbReadConnection, DbWriteConnection};
 use microsandbox_image::Registry;
 use microsandbox_protocol::{
-    exec::{ExecExited, ExecRequest, ExecRlimit, ExecStarted, ExecStderr, ExecStdin, ExecStdout},
+    exec::{ExecRequest, ExecRlimit},
     message::{Message, MessageType},
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set, sea_query::Expr,
 };
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 
 use microsandbox_image::{
     Digest, GlobalCache, PullOptions, PullProgressSender, PullResult, Reference, ext4, filetree,
@@ -46,8 +45,7 @@ use crate::{
     runtime::{ProcessHandle, SpawnMode, spawn_sandbox},
 };
 
-use self::attach::AttachOptions;
-use self::exec::{ExecEvent, ExecHandle, ExecOptions, ExecSink, StdinMode};
+use self::exec::{ExecHandle, ExecOptions};
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
@@ -460,7 +458,7 @@ pub(crate) async fn create_local(
 
     // Validate that the configured workdir exists inside the guest.
     if let Some(ref workdir) = sandbox.config.workdir
-        && !sandbox.fs()?.exists(workdir).await.unwrap_or(false)
+        && !sandbox.fs().exists(workdir).await.unwrap_or(false)
     {
         let _ = sandbox.stop().await;
         let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
@@ -883,30 +881,43 @@ impl Sandbox {
 
     /// Read captured output from `exec.log` for this sandbox.
     ///
-    /// Backed by the on-disk JSON Lines file the runtime writes via the
-    /// relay tap (see `crates/runtime/lib/exec_log.rs`). **Local backend
-    /// only** — cloud log retrieval routes through HTTP and is not wired up
-    /// in this delegation.
-    pub fn logs(&self, opts: &LogOptions) -> MicrosandboxResult<Vec<LogEntry>> {
-        self.require_local("logs")?;
-        let local =
-            self.backend
-                .as_local()
-                .ok_or_else(|| crate::MicrosandboxError::Unsupported {
-                    feature: "Sandbox::logs on cloud".into(),
-                    available_when: "when cloud logs land".into(),
-                })?;
-        logs::read_logs(local, self.name(), opts)
+    /// Routes through the [`SandboxBackend`](crate::backend::SandboxBackend)
+    /// trait. Local reads the on-disk JSON Lines file the runtime writes via
+    /// the relay tap (`crates/runtime/lib/exec_log.rs`); cloud returns
+    /// `Unsupported` until cloud logs land.
+    pub async fn logs(&self, opts: &LogOptions) -> MicrosandboxResult<Vec<LogEntry>> {
+        self.backend
+            .sandboxes()
+            .logs(self.backend.clone(), &self.name, opts)
+            .await
     }
 
-    /// Low-level access to the guest agent client. **Local backend only**.
-    pub fn client(&self) -> MicrosandboxResult<&AgentClient> {
-        Ok(&self.require_local("client")?.client)
+    /// Low-level access to the guest agent client.
+    ///
+    /// **Local-only**: panics if called on a cloud sandbox. Use
+    /// [`local()`](Self::local) to check first when calling from generic
+    /// code. The cloud variant has no `AgentClient` — the cloud worker owns
+    /// the in-VM bridge — so there is nothing to return.
+    pub fn client(&self) -> &AgentClient {
+        match self.local() {
+            Some(local) => &local.client,
+            None => {
+                panic!("Sandbox::client called on cloud sandbox — use sb.local() to check first")
+            }
+        }
     }
 
-    /// Get a cloneable reference to the agent client. **Local backend only**.
-    pub fn client_arc(&self) -> MicrosandboxResult<Arc<AgentClient>> {
-        Ok(Arc::clone(&self.require_local("client_arc")?.client))
+    /// Get a cloneable reference to the agent client.
+    ///
+    /// **Local-only**: panics if called on a cloud sandbox. Mirrors
+    /// [`client`](Self::client).
+    pub fn client_arc(&self) -> Arc<AgentClient> {
+        match self.local() {
+            Some(local) => Arc::clone(&local.client),
+            None => panic!(
+                "Sandbox::client_arc called on cloud sandbox — use sb.local() to check first"
+            ),
+        }
     }
 
     /// Returns `true` if this sandbox handle owns the process lifecycle.
@@ -919,10 +930,13 @@ impl Sandbox {
     }
 
     /// Read, write, and manage files inside the running sandbox.
-    /// Operations go through the guest agent (agentd). **Local backend only**.
-    pub fn fs(&self) -> MicrosandboxResult<fs::SandboxFs<'_>> {
-        let local = self.require_local("fs")?;
-        Ok(fs::SandboxFs::new(&local.client))
+    ///
+    /// Routes through the [`SandboxBackend`](crate::backend::SandboxBackend)
+    /// trait per-method, so this constructor is infallible. On cloud each
+    /// op returns `Unsupported` until cloud guest-fs lands; on local each
+    /// op routes through the agent protocol (`core.fs.*`).
+    pub fn fs(&self) -> fs::SandboxFs<'_> {
+        fs::SandboxFs::new(self.backend.clone(), &self.name)
     }
 
     /// Stop the sandbox gracefully.
@@ -1026,7 +1040,16 @@ impl Sandbox {
             args: args.into_iter().map(Into::into).collect(),
             ..Default::default()
         };
-        self.exec_stream_inner(cmd.into(), opts).await
+        self.backend
+            .sandboxes()
+            .exec_stream(
+                self.backend.clone(),
+                &self.name,
+                &self.config,
+                cmd.into(),
+                opts,
+            )
+            .await
     }
 
     /// Execute a command with full options and return a streaming handle.
@@ -1040,83 +1063,16 @@ impl Sandbox {
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecHandle> {
         let opts = f(ExecOptionsBuilder::default()).build()?;
-        self.exec_stream_inner(cmd.into(), opts).await
-    }
-
-    async fn exec_stream_inner(
-        &self,
-        cmd: String,
-        opts: ExecOptions,
-    ) -> MicrosandboxResult<ExecHandle> {
-        let local = self.require_local("exec_stream")?;
-        let client = &local.client;
-        let ExecOptions {
-            args,
-            cwd,
-            user,
-            env,
-            rlimits,
-            tty,
-            stdin: stdin_mode,
-            timeout: _,
-        } = opts;
-
-        tracing::debug!(
-            sandbox = %self.name,
-            cmd = %cmd,
-            args = ?args,
-            cwd = ?cwd,
-            tty,
-            "exec_stream"
-        );
-
-        // Allocate correlation ID and subscribe BEFORE sending.
-        let id = client.next_id();
-        let rx = client.subscribe(id).await;
-
-        let req = build_exec_request(
-            &self.config,
-            cmd,
-            args,
-            cwd,
-            user,
-            &env,
-            &rlimits,
-            tty,
-            24,
-            80,
-        );
-        let msg = Message::with_payload(MessageType::ExecRequest, id, &req)?;
-        client.send(&msg).await?;
-
-        // Build stdin sink (if Pipe mode).
-        let stdin = match &stdin_mode {
-            StdinMode::Pipe => Some(ExecSink::new(id, Arc::clone(client))),
-            _ => None,
-        };
-
-        // Handle StdinMode::Bytes — send bytes then close.
-        if let StdinMode::Bytes(ref data) = stdin_mode {
-            let data = data.clone();
-            let bridge = Arc::clone(client);
-            tokio::spawn(async move {
-                let payload = ExecStdin { data };
-                if let Ok(msg) = Message::with_payload(MessageType::ExecStdin, id, &payload) {
-                    let _ = bridge.send(&msg).await;
-                }
-                // Send empty to signal EOF.
-                let close = ExecStdin { data: Vec::new() };
-                if let Ok(msg) = Message::with_payload(MessageType::ExecStdin, id, &close) {
-                    let _ = bridge.send(&msg).await;
-                }
-            });
-        }
-
-        // Transform raw protocol messages into ExecEvents.
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        tokio::spawn(event_mapper_task(rx, event_tx));
-
-        Ok(ExecHandle::new(id, event_rx, stdin, Arc::clone(client)))
+        self.backend
+            .sandboxes()
+            .exec_stream(
+                self.backend.clone(),
+                &self.name,
+                &self.config,
+                cmd.into(),
+                opts,
+            )
+            .await
     }
 
     /// Execute a command and wait for completion.
@@ -1133,7 +1089,16 @@ impl Sandbox {
             args: args.into_iter().map(Into::into).collect(),
             ..Default::default()
         };
-        self.exec_with_opts(cmd.into(), opts).await
+        self.backend
+            .sandboxes()
+            .exec(
+                self.backend.clone(),
+                &self.name,
+                &self.config,
+                cmd.into(),
+                opts,
+            )
+            .await
     }
 
     /// Execute a command with full options and wait for completion.
@@ -1147,36 +1112,16 @@ impl Sandbox {
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecOutput> {
         let opts = f(ExecOptionsBuilder::default()).build()?;
-        self.exec_with_opts(cmd.into(), opts).await
-    }
-
-    /// Shared implementation for exec and exec_with.
-    async fn exec_with_opts(
-        &self,
-        cmd: String,
-        opts: ExecOptions,
-    ) -> MicrosandboxResult<ExecOutput> {
-        let timeout_duration = opts.timeout;
-        let mut handle = self.exec_stream_inner(cmd, opts).await?;
-
-        match timeout_duration {
-            Some(duration) => {
-                match tokio::time::timeout(duration, handle.collect()).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        // Timed out — kill the process and drain remaining events.
-                        let _ = handle.kill().await;
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_secs(5),
-                            handle.collect(),
-                        )
-                        .await;
-                        Err(crate::MicrosandboxError::ExecTimeout(duration))
-                    }
-                }
-            }
-            None => handle.collect().await,
-        }
+        self.backend
+            .sandboxes()
+            .exec(
+                self.backend.clone(),
+                &self.name,
+                &self.config,
+                cmd.into(),
+                opts,
+            )
+            .await
     }
 
     /// Run a shell command and wait for completion.
@@ -1187,8 +1132,20 @@ impl Sandbox {
     /// - `sandbox.shell("echo hello")`
     /// - `sandbox.shell("ENV=val cmd | other_cmd")`
     pub async fn shell(&self, script: impl Into<String>) -> MicrosandboxResult<ExecOutput> {
-        let mut handle = self.shell_stream(script).await?;
-        handle.collect().await
+        let shell = self
+            .config
+            .shell
+            .as_deref()
+            .unwrap_or("/bin/sh")
+            .to_string();
+        let opts = ExecOptions {
+            args: vec!["-c".to_string(), script.into()],
+            ..Default::default()
+        };
+        self.backend
+            .sandboxes()
+            .exec(self.backend.clone(), &self.name, &self.config, shell, opts)
+            .await
     }
 
     /// Run a shell command with streaming I/O.
@@ -1196,12 +1153,20 @@ impl Sandbox {
     /// Like [`shell`](Self::shell) but returns a streaming [`ExecHandle`]
     /// instead of waiting for completion.
     pub async fn shell_stream(&self, script: impl Into<String>) -> MicrosandboxResult<ExecHandle> {
-        let shell = self.config.shell.as_deref().unwrap_or("/bin/sh");
+        let shell = self
+            .config
+            .shell
+            .as_deref()
+            .unwrap_or("/bin/sh")
+            .to_string();
         let opts = ExecOptions {
             args: vec!["-c".to_string(), script.into()],
             ..Default::default()
         };
-        self.exec_stream_inner(shell.to_string(), opts).await
+        self.backend
+            .sandboxes()
+            .exec_stream(self.backend.clone(), &self.name, &self.config, shell, opts)
+            .await
     }
 }
 
@@ -1220,11 +1185,20 @@ impl Sandbox {
         cmd: impl Into<String>,
         args: impl IntoIterator<Item = impl Into<String>>,
     ) -> MicrosandboxResult<i32> {
-        let opts = AttachOptions {
-            args: args.into_iter().map(Into::into).collect(),
-            ..Default::default()
-        };
-        self.attach_inner(cmd.into(), opts).await
+        let mut builder = AttachOptionsBuilder::default();
+        for arg in args {
+            builder = builder.arg(arg);
+        }
+        self.backend
+            .sandboxes()
+            .attach(
+                self.backend.clone(),
+                &self.name,
+                &self.config,
+                cmd.into(),
+                builder,
+            )
+            .await
     }
 
     /// Attach to the sandbox with full options.
@@ -1237,227 +1211,38 @@ impl Sandbox {
         cmd: impl Into<String>,
         f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
     ) -> MicrosandboxResult<i32> {
-        let opts = f(AttachOptionsBuilder::default()).build()?;
-        self.attach_inner(cmd.into(), opts).await
-    }
-
-    /// Shared implementation for attach and attach_with.
-    async fn attach_inner(&self, cmd: String, opts: AttachOptions) -> MicrosandboxResult<i32> {
-        use std::os::fd::AsRawFd;
-
-        use microsandbox_protocol::exec::ExecResize;
-        use tokio::io::{AsyncWriteExt, unix::AsyncFd};
-
-        let client = Arc::clone(&self.require_local("attach")?.client);
-
-        let detach_keys = match &opts.detach_keys {
-            Some(spec) => attach::DetachKeys::parse(spec)?,
-            None => attach::DetachKeys::default_keys(),
-        };
-
-        // Get terminal size.
-        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-
-        // Allocate ID and subscribe.
-        let id = client.next_id();
-        let mut rx = client.subscribe(id).await;
-
-        // Build ExecRequest with tty=true.
-        let req = build_exec_request(
-            &self.config,
-            cmd,
-            opts.args,
-            opts.cwd,
-            opts.user,
-            &opts.env,
-            &opts.rlimits,
-            true,
-            rows,
-            cols,
-        );
-        let msg = Message::with_payload(MessageType::ExecRequest, id, &req)?;
-        client.send(&msg).await?;
-
-        // Enter raw mode.
-        crossterm::terminal::enable_raw_mode()
-            .map_err(|e| crate::MicrosandboxError::Terminal(e.to_string()))?;
-        let _raw_guard = scopeguard::guard((), |_| {
-            let _ = crossterm::terminal::disable_raw_mode();
-        });
-
-        // Re-open the controlling terminal for input and set only that fresh
-        // fd non-blocking. Toggling O_NONBLOCK on fd 0 would also affect
-        // stdout/stderr when all three stdio fds share the same TTY open file
-        // description, which truncates large terminal writes.
-        let tty_input_path = terminal_path_for_fd(std::io::stdin().as_raw_fd())
-            .map_err(|e| crate::MicrosandboxError::Terminal(format!("resolve tty path: {e}")))?;
-        let tty_input = open_nonblocking_terminal_input(&tty_input_path)
-            .map_err(|e| crate::MicrosandboxError::Terminal(format!("open tty input: {e}")))?;
-        let stdin_async = AsyncFd::new(tty_input)
-            .map_err(|e| crate::MicrosandboxError::Terminal(format!("async tty input: {e}")))?;
-
-        // Set up async I/O.
-        let mut stdout = tokio::io::stdout();
-        let mut sigwinch =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
-                .map_err(|e| crate::MicrosandboxError::Runtime(format!("sigwinch: {e}")))?;
-
-        let mut exit_code: i32 = -1;
-        let mut spawn_failure: Option<microsandbox_protocol::exec::ExecFailed> = None;
-        let detach_seq = detach_keys.sequence();
-        let mut match_pos = 0usize;
-
-        loop {
-            tokio::select! {
-                // Read stdin from host terminal (non-blocking fd).
-                result = stdin_async.readable() => {
-                    let mut guard = match result {
-                        Ok(g) => g,
-                        Err(_) => break,
-                    };
-
-                    let mut input_buf = [0u8; 1024];
-                    match guard.try_io(|inner| {
-                        read_from_fd(inner.get_ref().as_raw_fd(), &mut input_buf)
-                    }) {
-                        Ok(Ok(0)) => break, // EOF
-                        Ok(Ok(n)) => {
-                            let data = &input_buf[..n];
-
-                            // Check for detach key sequence.
-                            let mut detached = false;
-                            for &b in data {
-                                if b == detach_seq[match_pos] {
-                                    match_pos += 1;
-                                    if match_pos == detach_seq.len() {
-                                        detached = true;
-                                        break;
-                                    }
-                                } else {
-                                    match_pos = 0;
-                                    if b == detach_seq[0] {
-                                        match_pos = 1;
-                                    }
-                                }
-                            }
-
-                            if detached {
-                                break;
-                            }
-
-                            // Forward to guest.
-                            let payload = ExecStdin { data: data.to_vec() };
-                            if let Ok(msg) = Message::with_payload(MessageType::ExecStdin, id, &payload) {
-                                let _ = client.send(&msg).await;
-                            }
-                        }
-                        Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Ok(Err(_)) => break,
-                        Err(_would_block) => continue,
-                    }
-                }
-
-                // Receive output from guest.
-                //
-                // TUI apps (e.g. Ink-based CLIs) write a full re-render as one
-                // write(), but the guest PTY reader chunks it into ~4 KB
-                // ExecStdout messages. Writing each chunk to the host terminal
-                // separately lets the terminal emulator render intermediate
-                // states — partial cursor movements, partially overwritten
-                // lines — producing visible afterimage artifacts.
-                //
-                // Fix: after receiving the first message, drain all immediately
-                // available ExecStdout messages and batch their data into a
-                // single write. This coalesces the output so the terminal
-                // processes each re-render atomically.
-                Some(msg) = rx.recv() => {
-                    let mut should_break = false;
-
-                    match msg.t {
-                        MessageType::ExecStdout => {
-                            if let Ok(out) = msg.payload::<ExecStdout>() {
-                                let _ = stdout.write_all(&out.data).await;
-                            }
-                        }
-                        MessageType::ExecExited => {
-                            if let Ok(exited) = msg.payload::<ExecExited>() {
-                                exit_code = exited.code;
-                            }
-                            should_break = true;
-                        }
-                        MessageType::ExecFailed => {
-                            if let Ok(failed) =
-                                msg.payload::<microsandbox_protocol::exec::ExecFailed>()
-                            {
-                                spawn_failure = Some(failed);
-                            }
-                            should_break = true;
-                        }
-                        _ => {}
-                    }
-
-                    // Drain all buffered messages before flushing.
-                    if !should_break {
-                        while let Ok(next) = rx.try_recv() {
-                            match next.t {
-                                MessageType::ExecStdout => {
-                                    if let Ok(out) = next.payload::<ExecStdout>() {
-                                        let _ = stdout.write_all(&out.data).await;
-                                    }
-                                }
-                                MessageType::ExecExited => {
-                                    if let Ok(exited) = next.payload::<ExecExited>() {
-                                        exit_code = exited.code;
-                                    }
-                                    should_break = true;
-                                    break;
-                                }
-                                MessageType::ExecFailed => {
-                                    if let Ok(failed) = next
-                                        .payload::<microsandbox_protocol::exec::ExecFailed>()
-                                    {
-                                        spawn_failure = Some(failed);
-                                    }
-                                    should_break = true;
-                                    break;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-
-                    let _ = stdout.flush().await;
-
-                    if should_break {
-                        break;
-                    }
-                }
-
-                // Terminal resize.
-                _ = sigwinch.recv() => {
-                    if let Ok((new_cols, new_rows)) = crossterm::terminal::size() {
-                        let payload = ExecResize { rows: new_rows, cols: new_cols };
-                        if let Ok(msg) = Message::with_payload(MessageType::ExecResize, id, &payload) {
-                            let _ = client.send(&msg).await;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Guards restore: non-blocking → blocking, raw mode → cooked.
-        if let Some(failure) = spawn_failure {
-            return Err(crate::MicrosandboxError::ExecFailed(failure));
-        }
-        Ok(exit_code)
+        let builder = f(AttachOptionsBuilder::default());
+        self.backend
+            .sandboxes()
+            .attach(
+                self.backend.clone(),
+                &self.name,
+                &self.config,
+                cmd.into(),
+                builder,
+            )
+            .await
     }
 
     /// Attach to the sandbox's default shell.
     ///
     /// Uses the sandbox's configured shell (default: `/bin/sh`).
     pub async fn attach_shell(&self) -> MicrosandboxResult<i32> {
-        let shell = self.config.shell.as_deref().unwrap_or("/bin/sh");
-        self.attach_inner(shell.into(), AttachOptions::default())
+        let shell = self
+            .config
+            .shell
+            .as_deref()
+            .unwrap_or("/bin/sh")
+            .to_string();
+        self.backend
+            .sandboxes()
+            .attach(
+                self.backend.clone(),
+                &self.name,
+                &self.config,
+                shell,
+                AttachOptionsBuilder::default(),
+            )
             .await
     }
 }
@@ -1584,7 +1369,7 @@ fn read_boot_error(
 
 /// Build an `ExecRequest` by merging sandbox config with caller-provided overrides.
 #[allow(clippy::too_many_arguments)]
-fn build_exec_request(
+pub(crate) fn build_exec_request(
     config: &SandboxConfig,
     cmd: String,
     args: Vec<String>,
@@ -1639,7 +1424,7 @@ fn select_tty_term(term: Option<&str>) -> String {
     }
 }
 
-fn terminal_path_for_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::path::PathBuf> {
+pub(crate) fn terminal_path_for_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::path::PathBuf> {
     let mut buf = [0u8; 1024];
     let rc = unsafe { libc::ttyname_r(fd, buf.as_mut_ptr().cast(), buf.len()) };
     if rc != 0 {
@@ -1661,7 +1446,9 @@ fn terminal_path_for_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::path::Pa
     Ok(std::path::PathBuf::from(path))
 }
 
-fn open_nonblocking_terminal_input(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_nonblocking_terminal_input(
+    path: &std::path::Path,
+) -> std::io::Result<std::fs::File> {
     use std::os::fd::AsRawFd;
 
     let file = std::fs::File::open(path)?;
@@ -1676,67 +1463,12 @@ fn open_nonblocking_terminal_input(path: &std::path::Path) -> std::io::Result<st
     Ok(file)
 }
 
-fn read_from_fd(fd: std::os::fd::RawFd, buf: &mut [u8]) -> std::io::Result<usize> {
+pub(crate) fn read_from_fd(fd: std::os::fd::RawFd, buf: &mut [u8]) -> std::io::Result<usize> {
     let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
     if n < 0 {
         Err(std::io::Error::last_os_error())
     } else {
         Ok(n as usize)
-    }
-}
-
-/// Background task that converts raw protocol messages into [`ExecEvent`]s.
-async fn event_mapper_task(
-    mut rx: mpsc::UnboundedReceiver<Message>,
-    tx: mpsc::UnboundedSender<ExecEvent>,
-) {
-    while let Some(msg) = rx.recv().await {
-        let event = match msg.t {
-            MessageType::ExecStarted => {
-                if let Ok(started) = msg.payload::<ExecStarted>() {
-                    ExecEvent::Started { pid: started.pid }
-                } else {
-                    continue;
-                }
-            }
-            MessageType::ExecStdout => {
-                if let Ok(out) = msg.payload::<ExecStdout>() {
-                    ExecEvent::Stdout(Bytes::from(out.data))
-                } else {
-                    continue;
-                }
-            }
-            MessageType::ExecStderr => {
-                if let Ok(err) = msg.payload::<ExecStderr>() {
-                    ExecEvent::Stderr(Bytes::from(err.data))
-                } else {
-                    continue;
-                }
-            }
-            MessageType::ExecExited => {
-                if let Ok(exited) = msg.payload::<ExecExited>() {
-                    let _ = tx.send(ExecEvent::Exited { code: exited.code });
-                }
-                break;
-            }
-            MessageType::ExecFailed => {
-                if let Ok(failed) = msg.payload::<microsandbox_protocol::exec::ExecFailed>() {
-                    let _ = tx.send(ExecEvent::Failed(failed));
-                }
-                break;
-            }
-            MessageType::ExecStdinError => {
-                if let Ok(payload) = msg.payload::<microsandbox_protocol::exec::ExecStdinError>() {
-                    ExecEvent::StdinError(payload)
-                } else {
-                    continue;
-                }
-            }
-            _ => continue,
-        };
-        if tx.send(event).is_err() {
-            break;
-        }
     }
 }
 

@@ -216,7 +216,8 @@ impl PySandbox {
         })
     }
 
-    /// Get a filesystem handle. Extracts the AgentClient Arc — no lock per FS op.
+    /// Get a filesystem handle. Captures the backend Arc + name once — no
+    /// Sandbox mutex lock per FS op.
     #[getter]
     fn fs(&self) -> PyResult<PySandboxFs> {
         let guard = self
@@ -224,10 +225,10 @@ impl PySandbox {
             .try_lock()
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("sandbox is busy"))?;
         let sb = guard.as_ref().ok_or_else(crate::error::consumed)?;
-        let client = sb
-            .client_arc()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(PySandboxFs::from_client(client))
+        Ok(PySandboxFs::from_backend(
+            sb.backend().clone(),
+            sb.name().to_string(),
+        ))
     }
 
     //----------------------------------------------------------------------------------------------

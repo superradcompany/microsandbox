@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .shell("dd if=/dev/urandom of=/tmp/data.bin bs=1M count=10")
         .await?;
 
-    let mut stream = sandbox.fs()?.read_stream("/tmp/data.bin").await?;
+    let mut stream = sandbox.fs().read_stream("/tmp/data.bin").await?;
     let mut total_bytes = 0;
     let mut chunk_count = 0;
 

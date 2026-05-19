@@ -1,6 +1,7 @@
 //! Sandbox metrics APIs backed by persisted runtime samples.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream;
@@ -9,7 +10,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    backend::LocalBackend,
+    backend::{Backend, LocalBackend, sandbox::MetricsStream},
     db::entity::{sandbox as sandbox_entity, sandbox_metric as sandbox_metric_entity},
 };
 
@@ -51,91 +52,103 @@ impl Sandbox {
     ///
     /// Returns [`MicrosandboxError::MetricsDisabled`] when the sandbox
     /// was created with metrics sampling disabled
-    /// (`metrics_sample_interval_ms == None`). **Local backend only.**
+    /// (`metrics_sample_interval_ms == None`). **Local backend only** —
+    /// cloud routes return [`MicrosandboxError::Unsupported`].
     pub async fn metrics(&self) -> MicrosandboxResult<SandboxMetrics> {
-        let local = self.local().ok_or_else(|| MicrosandboxError::Unsupported {
-            feature: "Sandbox::metrics".into(),
-            available_when: "when cloud metrics land".into(),
-        })?;
-        if self.config().effective_metrics_interval().is_none() {
-            return Err(MicrosandboxError::MetricsDisabled(self.name().to_string()));
-        }
-        let backend = self
-            .backend()
-            .as_local()
-            .ok_or_else(|| MicrosandboxError::Unsupported {
-                feature: "Sandbox::metrics on cloud".into(),
-                available_when: "when cloud metrics land".into(),
-            })?;
-        let db = backend.db().await?.read();
-        metrics_for_sandbox(db, local.db_id, memory_limit_bytes(self.config())).await
+        self.backend()
+            .sandboxes()
+            .metrics(self.backend().clone(), self.name(), self.config())
+            .await
     }
 
-    /// Stream metrics snapshots at the requested interval. **Local backend only.**
+    /// Stream metrics snapshots at the requested interval. **Local backend only**.
+    /// Cloud routes yield a single [`MicrosandboxError::Unsupported`].
     pub fn metrics_stream(
         &self,
         interval: Duration,
     ) -> impl futures::Stream<Item = MicrosandboxResult<SandboxMetrics>> + Send + 'static {
-        // Boxed to homogenise the early-error branches with the long-running
-        // unfold branch.
-        type S = std::pin::Pin<
-            Box<dyn futures::Stream<Item = MicrosandboxResult<SandboxMetrics>> + Send + 'static>,
-        >;
-
-        let local = match self.local() {
-            Some(s) => s,
-            None => {
-                let s: S = Box::pin(stream::once(async {
-                    Err(MicrosandboxError::Unsupported {
-                        feature: "Sandbox::metrics_stream".into(),
-                        available_when: "when cloud metrics land".into(),
-                    })
-                }));
-                return s;
-            }
-        };
-
-        if self.config().effective_metrics_interval().is_none() {
-            let name = self.name().to_string();
-            let s: S = Box::pin(stream::once(async move {
-                Err(MicrosandboxError::MetricsDisabled(name))
-            }));
-            return s;
-        }
-
-        let db_id = local.db_id;
-        let memory_limit_bytes = memory_limit_bytes(self.config());
-        let interval = if interval.is_zero() {
-            Duration::from_millis(1)
-        } else {
-            interval
-        };
-
-        let backend = self.backend().clone();
-        let s: S = Box::pin(stream::unfold(
-            tokio::time::interval(interval),
-            move |mut ticker| {
-                let backend = backend.clone();
-                async move {
-                    ticker.tick().await;
-                    let item = match backend.as_local() {
-                        Some(local) => match local.db().await {
-                            Ok(pools) => {
-                                metrics_for_sandbox(pools.read(), db_id, memory_limit_bytes).await
-                            }
-                            Err(err) => Err(err),
-                        },
-                        None => Err(MicrosandboxError::Unsupported {
-                            feature: "Sandbox::metrics_stream on cloud".into(),
-                            available_when: "when cloud metrics land".into(),
-                        }),
-                    };
-                    Some((item, ticker))
-                }
-            },
-        ));
-        s
+        self.backend().sandboxes().metrics_stream(
+            self.backend().clone(),
+            self.name().to_string(),
+            self.config().clone(),
+            interval,
+        )
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: backend-trait dispatch
+//--------------------------------------------------------------------------------------------------
+
+/// Local-backend metrics fetch keyed by sandbox name. Called from the
+/// [`SandboxBackend::metrics`](crate::backend::SandboxBackend::metrics) impl on
+/// [`LocalBackend`](crate::backend::LocalBackend).
+pub(crate) async fn local_metrics(
+    local: &LocalBackend,
+    name: &str,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<SandboxMetrics> {
+    if config.effective_metrics_interval().is_none() {
+        return Err(MicrosandboxError::MetricsDisabled(name.to_string()));
+    }
+    let pools = local.db().await?;
+    let model = sandbox_entity::Entity::find()
+        .filter(sandbox_entity::Column::Name.eq(name))
+        .one(pools.read())
+        .await?
+        .ok_or_else(|| MicrosandboxError::SandboxNotFound(name.to_string()))?;
+    metrics_for_sandbox(pools.read(), model.id, memory_limit_bytes(config)).await
+}
+
+/// Local-backend streaming metrics. Called from the
+/// [`SandboxBackend::metrics_stream`](crate::backend::SandboxBackend::metrics_stream)
+/// impl on [`LocalBackend`](crate::backend::LocalBackend).
+pub(crate) fn local_metrics_stream(
+    backend: Arc<dyn Backend>,
+    name: String,
+    config: SandboxConfig,
+    interval: Duration,
+) -> MetricsStream {
+    if config.effective_metrics_interval().is_none() {
+        return Box::pin(stream::once(async move {
+            Err(MicrosandboxError::MetricsDisabled(name))
+        }));
+    }
+
+    let memory_limit_bytes = memory_limit_bytes(&config);
+    let interval = if interval.is_zero() {
+        Duration::from_millis(1)
+    } else {
+        interval
+    };
+
+    Box::pin(stream::unfold(
+        (tokio::time::interval(interval), backend, name),
+        move |(mut ticker, backend, name)| async move {
+            ticker.tick().await;
+            let item = match backend.as_local() {
+                Some(local) => match local.db().await {
+                    Ok(pools) => match sandbox_entity::Entity::find()
+                        .filter(sandbox_entity::Column::Name.eq(&name))
+                        .one(pools.read())
+                        .await
+                    {
+                        Ok(Some(model)) => {
+                            metrics_for_sandbox(pools.read(), model.id, memory_limit_bytes).await
+                        }
+                        Ok(None) => Err(MicrosandboxError::SandboxNotFound(name.clone())),
+                        Err(e) => Err(e.into()),
+                    },
+                    Err(err) => Err(err),
+                },
+                None => Err(MicrosandboxError::Unsupported {
+                    feature: "Sandbox::metrics_stream on cloud".into(),
+                    available_when: "when cloud metrics land".into(),
+                }),
+            };
+            Some((item, (ticker, backend, name)))
+        },
+    ))
 }
 
 //--------------------------------------------------------------------------------------------------

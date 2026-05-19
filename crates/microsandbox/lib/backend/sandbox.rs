@@ -7,17 +7,34 @@
 //! constructed inside each backend's trait impl and wrapped with the
 //! `Arc<dyn Backend>` the caller passes in.
 
+use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use futures::Stream;
 use futures::future::BoxFuture;
 
 use super::cloud_wire::{CloudCreateSandboxRequest, CloudSandbox, CloudSandboxStatus};
 use super::{Backend, CloudBackend, LocalBackend};
 use crate::agent::AgentClient;
 use crate::runtime::{ProcessHandle, SpawnMode};
+use crate::sandbox::exec::{ExecHandle, ExecOptions, ExecOutput};
+use crate::sandbox::fs::{FsEntry, FsMetadata, FsReadStream, FsWriteSink};
+use crate::sandbox::logs::{LogEntry, LogOptions};
+use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{RootfsSource, Sandbox, SandboxConfig, SandboxHandle, SandboxStatus};
 use crate::{MicrosandboxError, MicrosandboxResult};
+
+//--------------------------------------------------------------------------------------------------
+// Type Aliases
+//--------------------------------------------------------------------------------------------------
+
+/// Boxed stream of metrics samples returned by [`SandboxBackend::metrics_stream`].
+pub type MetricsStream =
+    Pin<Box<dyn Stream<Item = MicrosandboxResult<SandboxMetrics>> + Send + 'static>>;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -194,6 +211,187 @@ pub trait SandboxBackend: Send + Sync {
         backend: Arc<dyn Backend>,
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>>;
+
+    // ============================================================
+    // Exec
+    // ============================================================
+
+    /// Execute a command inside the named sandbox and wait for it to complete.
+    fn exec<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        config: &'a SandboxConfig,
+        cmd: String,
+        opts: ExecOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<ExecOutput>>;
+
+    /// Execute a command and return a streaming [`ExecHandle`].
+    fn exec_stream<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        config: &'a SandboxConfig,
+        cmd: String,
+        opts: ExecOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<ExecHandle>>;
+
+    /// Attach the host terminal to a PTY session in the named sandbox.
+    ///
+    /// Returns the exit code. Local routes through libkrun + agentd; cloud
+    /// returns [`MicrosandboxError::Unsupported`] until cloud attach lands.
+    fn attach<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        config: &'a SandboxConfig,
+        cmd: String,
+        opts: crate::sandbox::AttachOptionsBuilder,
+    ) -> BoxFuture<'a, MicrosandboxResult<i32>>;
+
+    // ============================================================
+    // Logs / metrics
+    // ============================================================
+
+    /// Read captured output for the named sandbox.
+    fn logs<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        opts: &'a LogOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<Vec<LogEntry>>>;
+
+    /// Latest metrics sample for the named sandbox.
+    fn metrics<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        config: &'a SandboxConfig,
+    ) -> BoxFuture<'a, MicrosandboxResult<SandboxMetrics>>;
+
+    /// Streaming metrics samples at `interval`. Local opens a DB poll loop;
+    /// cloud returns a stream that yields a single [`MicrosandboxError::Unsupported`].
+    fn metrics_stream(
+        &self,
+        backend: Arc<dyn Backend>,
+        name: String,
+        config: SandboxConfig,
+        interval: Duration,
+    ) -> MetricsStream;
+
+    // ============================================================
+    // Guest FS (sandbox.fs() surface)
+    // ============================================================
+
+    /// Read an entire guest file into memory.
+    fn fs_read<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Bytes>>;
+
+    /// Stream a guest file. Returns a [`FsReadStream`] yielding chunks.
+    fn fs_read_stream<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<FsReadStream>>;
+
+    /// Write `data` to a guest file (overwriting if it exists).
+    fn fs_write<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+        data: Vec<u8>,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>>;
+
+    /// Open a streaming writer for a guest file.
+    fn fs_write_stream<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<FsWriteSink>>;
+
+    /// List immediate children of a guest directory.
+    fn fs_list<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Vec<FsEntry>>>;
+
+    /// Get file/directory metadata.
+    fn fs_stat<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<FsMetadata>>;
+
+    /// Create a directory (and parents).
+    fn fs_mkdir<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>>;
+
+    /// Remove a file or (when `recursive`) directory.
+    fn fs_remove<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+        recursive: bool,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>>;
+
+    /// Copy a guest file from `from` to `to`.
+    fn fs_copy<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        from: &'a str,
+        to: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>>;
+
+    /// Rename/move a guest file or directory.
+    fn fs_rename<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        from: &'a str,
+        to: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>>;
+
+    /// Check whether a guest path exists.
+    fn fs_exists<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<bool>>;
+
+    /// Copy a host file into the guest sandbox.
+    fn fs_copy_from_host<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        host: &'a Path,
+        guest: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>>;
+
+    /// Copy a guest file out to the host.
+    fn fs_copy_to_host<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        guest: &'a str,
+        host: &'a Path,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>>;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -304,6 +502,202 @@ impl SandboxBackend for LocalBackend {
         name: &'a str,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         Box::pin(async move { crate::sandbox::drain_local(backend, name).await })
+    }
+
+    fn exec<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        config: &'a SandboxConfig,
+        cmd: String,
+        opts: ExecOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<ExecOutput>> {
+        Box::pin(
+            async move { crate::sandbox::exec::local::exec(self, name, config, cmd, opts).await },
+        )
+    }
+
+    fn exec_stream<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        config: &'a SandboxConfig,
+        cmd: String,
+        opts: ExecOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<ExecHandle>> {
+        Box::pin(async move {
+            crate::sandbox::exec::local::exec_stream(self, name, config, cmd, opts).await
+        })
+    }
+
+    fn attach<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        config: &'a SandboxConfig,
+        cmd: String,
+        opts: crate::sandbox::AttachOptionsBuilder,
+    ) -> BoxFuture<'a, MicrosandboxResult<i32>> {
+        Box::pin(async move {
+            crate::sandbox::attach::local::attach(self, name, config, cmd, opts).await
+        })
+    }
+
+    fn logs<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        opts: &'a LogOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<Vec<LogEntry>>> {
+        Box::pin(async move { crate::sandbox::logs::read_logs(self, name, opts) })
+    }
+
+    fn metrics<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        config: &'a SandboxConfig,
+    ) -> BoxFuture<'a, MicrosandboxResult<SandboxMetrics>> {
+        Box::pin(async move { crate::sandbox::metrics::local_metrics(self, name, config).await })
+    }
+
+    fn metrics_stream(
+        &self,
+        backend: Arc<dyn Backend>,
+        name: String,
+        config: SandboxConfig,
+        interval: Duration,
+    ) -> MetricsStream {
+        crate::sandbox::metrics::local_metrics_stream(backend, name, config, interval)
+    }
+
+    fn fs_read<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Bytes>> {
+        Box::pin(async move { crate::sandbox::fs::local::read(self, name, path).await })
+    }
+
+    fn fs_read_stream<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<FsReadStream>> {
+        Box::pin(async move { crate::sandbox::fs::local::read_stream(self, name, path).await })
+    }
+
+    fn fs_write<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+        data: Vec<u8>,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move { crate::sandbox::fs::local::write(self, name, path, data).await })
+    }
+
+    fn fs_write_stream<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<FsWriteSink>> {
+        Box::pin(async move { crate::sandbox::fs::local::write_stream(self, name, path).await })
+    }
+
+    fn fs_list<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Vec<FsEntry>>> {
+        Box::pin(async move { crate::sandbox::fs::local::list(self, name, path).await })
+    }
+
+    fn fs_stat<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<FsMetadata>> {
+        Box::pin(async move { crate::sandbox::fs::local::stat(self, name, path).await })
+    }
+
+    fn fs_mkdir<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move { crate::sandbox::fs::local::mkdir(self, name, path).await })
+    }
+
+    fn fs_remove<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+        recursive: bool,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(
+            async move { crate::sandbox::fs::local::remove(self, name, path, recursive).await },
+        )
+    }
+
+    fn fs_copy<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        from: &'a str,
+        to: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move { crate::sandbox::fs::local::copy(self, name, from, to).await })
+    }
+
+    fn fs_rename<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        from: &'a str,
+        to: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move { crate::sandbox::fs::local::rename(self, name, from, to).await })
+    }
+
+    fn fs_exists<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<bool>> {
+        Box::pin(async move { crate::sandbox::fs::local::exists(self, name, path).await })
+    }
+
+    fn fs_copy_from_host<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        host: &'a Path,
+        guest: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(
+            async move { crate::sandbox::fs::local::copy_from_host(self, name, host, guest).await },
+        )
+    }
+
+    fn fs_copy_to_host<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        name: &'a str,
+        guest: &'a str,
+        host: &'a Path,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(
+            async move { crate::sandbox::fs::local::copy_to_host(self, name, guest, host).await },
+        )
     }
 }
 
@@ -442,6 +836,192 @@ impl SandboxBackend for CloudBackend {
                 "when cloud graceful-drain lands",
             ))
         })
+    }
+
+    fn exec<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _config: &'a SandboxConfig,
+        _cmd: String,
+        _opts: ExecOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<ExecOutput>> {
+        Box::pin(async move { Err(unsupported_exec("Sandbox::exec")) })
+    }
+
+    fn exec_stream<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _config: &'a SandboxConfig,
+        _cmd: String,
+        _opts: ExecOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<ExecHandle>> {
+        Box::pin(async move { Err(unsupported_exec("Sandbox::exec_stream")) })
+    }
+
+    fn attach<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _config: &'a SandboxConfig,
+        _cmd: String,
+        _opts: crate::sandbox::AttachOptionsBuilder,
+    ) -> BoxFuture<'a, MicrosandboxResult<i32>> {
+        Box::pin(async move { Err(unsupported_exec("Sandbox::attach")) })
+    }
+
+    fn logs<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _opts: &'a LogOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<Vec<LogEntry>>> {
+        Box::pin(async move { Err(unsupported_logs("Sandbox::logs")) })
+    }
+
+    fn metrics<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _config: &'a SandboxConfig,
+    ) -> BoxFuture<'a, MicrosandboxResult<SandboxMetrics>> {
+        Box::pin(async move { Err(unsupported_metrics("Sandbox::metrics")) })
+    }
+
+    fn metrics_stream(
+        &self,
+        _backend: Arc<dyn Backend>,
+        _name: String,
+        _config: SandboxConfig,
+        _interval: Duration,
+    ) -> MetricsStream {
+        Box::pin(futures::stream::once(async {
+            Err(unsupported_metrics("Sandbox::metrics_stream"))
+        }))
+    }
+
+    fn fs_read<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Bytes>> {
+        Box::pin(async move { Err(unsupported_fs("SandboxFs::read")) })
+    }
+
+    fn fs_read_stream<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<FsReadStream>> {
+        Box::pin(async move { Err(unsupported_fs("SandboxFs::read_stream")) })
+    }
+
+    fn fs_write<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _path: &'a str,
+        _data: Vec<u8>,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move { Err(unsupported_fs("SandboxFs::write")) })
+    }
+
+    fn fs_write_stream<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<FsWriteSink>> {
+        Box::pin(async move { Err(unsupported_fs("SandboxFs::write_stream")) })
+    }
+
+    fn fs_list<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<Vec<FsEntry>>> {
+        Box::pin(async move { Err(unsupported_fs("SandboxFs::list")) })
+    }
+
+    fn fs_stat<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<FsMetadata>> {
+        Box::pin(async move { Err(unsupported_fs("SandboxFs::stat")) })
+    }
+
+    fn fs_mkdir<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move { Err(unsupported_fs("SandboxFs::mkdir")) })
+    }
+
+    fn fs_remove<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _path: &'a str,
+        _recursive: bool,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move { Err(unsupported_fs("SandboxFs::remove")) })
+    }
+
+    fn fs_copy<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _from: &'a str,
+        _to: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move { Err(unsupported_fs("SandboxFs::copy")) })
+    }
+
+    fn fs_rename<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _from: &'a str,
+        _to: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move { Err(unsupported_fs("SandboxFs::rename")) })
+    }
+
+    fn fs_exists<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _path: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<bool>> {
+        Box::pin(async move { Err(unsupported_fs("SandboxFs::exists")) })
+    }
+
+    fn fs_copy_from_host<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _host: &'a Path,
+        _guest: &'a str,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move { Err(unsupported_fs("SandboxFs::copy_from_host")) })
+    }
+
+    fn fs_copy_to_host<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        _guest: &'a str,
+        _host: &'a Path,
+    ) -> BoxFuture<'a, MicrosandboxResult<()>> {
+        Box::pin(async move { Err(unsupported_fs("SandboxFs::copy_to_host")) })
     }
 }
 
@@ -652,6 +1232,34 @@ fn unsupported(feature: &'static str, available_when: &'static str) -> Microsand
     MicrosandboxError::Unsupported {
         feature: feature.into(),
         available_when: available_when.into(),
+    }
+}
+
+fn unsupported_exec(feature: &'static str) -> MicrosandboxError {
+    MicrosandboxError::Unsupported {
+        feature: feature.into(),
+        available_when: "when cloud exec lands".into(),
+    }
+}
+
+fn unsupported_fs(feature: &'static str) -> MicrosandboxError {
+    MicrosandboxError::Unsupported {
+        feature: feature.into(),
+        available_when: "when cloud guest fs lands".into(),
+    }
+}
+
+fn unsupported_logs(feature: &'static str) -> MicrosandboxError {
+    MicrosandboxError::Unsupported {
+        feature: feature.into(),
+        available_when: "when cloud logs land".into(),
+    }
+}
+
+fn unsupported_metrics(feature: &'static str) -> MicrosandboxError {
+    MicrosandboxError::Unsupported {
+        feature: feature.into(),
+        available_when: "when cloud metrics land".into(),
     }
 }
 
