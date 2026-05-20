@@ -462,7 +462,7 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("volume must be in format source:guest"))?;
 
-    if source.starts_with('/') || source.starts_with("./") || source.starts_with("../") {
+    if microsandbox_utils::looks_like_local_path_text(source) {
         Ok(builder.volume(guest, |m| m.bind(source)))
     } else {
         Ok(builder.volume(guest, |m| m.named(source)))
@@ -1156,6 +1156,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use microsandbox::sandbox::VolumeMount;
+
     use super::*;
 
     /// Write a temp file with unique name, return its path.
@@ -1167,6 +1169,36 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path
+    }
+
+    async fn build_volume(spec: &str) -> VolumeMount {
+        let builder = SandboxBuilder::new("test").image("alpine");
+        let config = apply_volume(builder, spec).unwrap().build().await.unwrap();
+        config.mounts.into_iter().next().unwrap()
+    }
+
+    // --- apply_volume ---
+
+    #[tokio::test]
+    async fn apply_volume_dot_source_is_bind_mount() {
+        match build_volume(".:/mnt").await {
+            VolumeMount::Bind { host, guest, .. } => {
+                assert_eq!(host, PathBuf::from("."));
+                assert_eq!(guest, "/mnt");
+            }
+            other => panic!("expected bind mount, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_volume_dot_dot_source_is_bind_mount() {
+        match build_volume("..:/mnt").await {
+            VolumeMount::Bind { host, guest, .. } => {
+                assert_eq!(host, PathBuf::from(".."));
+                assert_eq!(guest, "/mnt");
+            }
+            other => panic!("expected bind mount, got {other:?}"),
+        }
     }
 
     // --- parse_script_spec ---

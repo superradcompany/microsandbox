@@ -49,8 +49,8 @@ pub enum RootfsSource {
 /// [`RootfsSource`] variant:
 ///
 /// - **`PathBuf`** → always local (bind mount or disk image based on extension).
-/// - **`&str` / `String`** → local path if prefixed with `/`, `./`, or `../`;
-///   otherwise [`RootfsSource::Oci`].
+/// - **`&str` / `String`** → local path if `.`, `..`, or prefixed with `/`,
+///   `./`, or `../`; otherwise [`RootfsSource::Oci`].
 ///
 /// Disk image extensions (`.qcow2`, `.raw`, `.vmdk`) resolve to
 /// [`RootfsSource::DiskImage`].
@@ -581,7 +581,7 @@ impl ImageSource {
         match self {
             Self::Path(path) => Self::resolve_path(path),
             Self::Text(s) => {
-                if s.starts_with('/') || s.starts_with("./") || s.starts_with("../") {
+                if microsandbox_utils::looks_like_local_path_text(&s) {
                     Self::resolve_path(PathBuf::from(s))
                 } else {
                     Ok(RootfsSource::Oci(s))
@@ -1148,6 +1148,26 @@ mod tests {
         let source = ImageSource::from("./rootfs");
         let rootfs = source.into_rootfs_source().unwrap();
         assert!(matches!(rootfs, RootfsSource::Bind(_)));
+    }
+
+    #[test]
+    fn test_image_source_resolves_dot_as_bind() {
+        let source = ImageSource::from(".");
+        let rootfs = source.into_rootfs_source().unwrap();
+        match rootfs {
+            RootfsSource::Bind(path) => assert_eq!(path, PathBuf::from(".")),
+            _ => panic!("expected Bind"),
+        }
+    }
+
+    #[test]
+    fn test_image_source_resolves_dot_dot_as_bind() {
+        let source = ImageSource::from("..");
+        let rootfs = source.into_rootfs_source().unwrap();
+        match rootfs {
+            RootfsSource::Bind(path) => assert_eq!(path, PathBuf::from("..")),
+            _ => panic!("expected Bind"),
+        }
     }
 
     #[test]
