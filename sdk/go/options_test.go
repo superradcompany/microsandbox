@@ -120,15 +120,15 @@ func TestWithReplace(t *testing.T) {
 	if !o.Replace {
 		t.Error("WithReplace should set Replace to true")
 	}
-	if o.ReplaceWithGrace != nil {
-		t.Errorf("WithReplace should leave ReplaceWithGrace nil, got %v", *o.ReplaceWithGrace)
+	if o.ReplaceWithTimeout != nil {
+		t.Errorf("WithReplace should leave ReplaceWithTimeout nil, got %v", *o.ReplaceWithTimeout)
 	}
 }
 
-func TestWithReplaceWithGrace(t *testing.T) {
+func TestWithReplaceWithTimeout(t *testing.T) {
 	cases := []struct {
-		name  string
-		grace time.Duration
+		name    string
+		timeout time.Duration
 	}{
 		{"five seconds", 5 * time.Second},
 		{"zero (immediate SIGKILL)", 0},
@@ -136,15 +136,15 @@ func TestWithReplaceWithGrace(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			o := SandboxConfig{}
-			WithReplaceWithGrace(tc.grace)(&o)
+			WithReplaceWithTimeout(tc.timeout)(&o)
 			if !o.Replace {
-				t.Error("WithReplaceWithGrace should imply Replace")
+				t.Error("WithReplaceWithTimeout should imply Replace")
 			}
-			if o.ReplaceWithGrace == nil {
-				t.Fatal("ReplaceWithGrace should be set")
+			if o.ReplaceWithTimeout == nil {
+				t.Fatal("ReplaceWithTimeout should be set")
 			}
-			if *o.ReplaceWithGrace != tc.grace {
-				t.Errorf("ReplaceWithGrace: got %v, want %v", *o.ReplaceWithGrace, tc.grace)
+			if *o.ReplaceWithTimeout != tc.timeout {
+				t.Errorf("ReplaceWithTimeout: got %v, want %v", *o.ReplaceWithTimeout, tc.timeout)
 			}
 		})
 	}

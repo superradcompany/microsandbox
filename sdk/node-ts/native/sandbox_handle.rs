@@ -88,10 +88,45 @@ impl JsSandboxHandle {
         Ok(Sandbox::from_rust(inner))
     }
 
-    /// Stop the sandbox (SIGTERM).
+    /// Connect with an explicit timeout in milliseconds.
+    ///
+    /// If the sandbox doesn't respond within this window, the call
+    /// returns a typed error instead of blocking. `connect()` uses
+    /// 10_000 ms by default.
+    #[napi]
+    pub async fn connect_with_timeout(&self, timeout_ms: u32) -> Result<Sandbox> {
+        let timeout = std::time::Duration::from_millis(timeout_ms.into());
+        let inner = self
+            .inner
+            .connect_with_timeout(timeout)
+            .await
+            .map_err(to_napi_error)?;
+        Ok(Sandbox::from_rust(inner))
+    }
+
+    /// Stop the sandbox gracefully.
+    ///
+    /// Lets the sandbox finish writing any pending data to disk before
+    /// it exits, so files written inside the sandbox aren't lost across
+    /// a later restart. Waits 10_000 ms by default before force-kill;
+    /// override with `stopWithTimeout(timeoutMs)`.
     #[napi]
     pub async fn stop(&self) -> Result<()> {
         self.inner.stop().await.map_err(to_napi_error)
+    }
+
+    /// Stop the sandbox gracefully with an explicit timeout in
+    /// milliseconds. If the sandbox is still running after this window,
+    /// it is force-killed. `timeoutMs == 0` force-kills immediately.
+    /// The call resolves successfully either way — it does not throw
+    /// on timeout expiry.
+    #[napi]
+    pub async fn stop_with_timeout(&self, timeout_ms: u32) -> Result<()> {
+        let timeout = std::time::Duration::from_millis(timeout_ms.into());
+        self.inner
+            .stop_with_timeout(timeout)
+            .await
+            .map_err(to_napi_error)
     }
 
     /// Kill the sandbox (SIGKILL).

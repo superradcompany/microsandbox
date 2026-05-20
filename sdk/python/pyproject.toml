@@ -67,3 +67,4 @@ ignore = ["RUF022"]  # __all__ organized by category, not alphabetically
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+testpaths = ["tests"]

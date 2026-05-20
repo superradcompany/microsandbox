@@ -46,11 +46,13 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub replace: bool,
 
-    /// Grace period the existing sandbox gets after SIGTERM before it
-    /// is SIGKILLed during a replace. Accepts `0`, `500ms`, `5s`, `2m`.
-    /// Implies `--replace`. Default 10s when `--replace` is set on its own.
+    /// Timeout the existing sandbox gets after SIGTERM before it is
+    /// SIGKILLed during a replace. Accepts `0`, `500ms`, `5s`, `2m`.
+    /// Implies `--replace`. Default 10s when `--replace` is set on its
+    /// own. An expired timeout force-kills the prior sandbox; the
+    /// `create` call still proceeds.
     #[arg(long, value_name = "DURATION")]
-    pub replace_with_grace: Option<String>,
+    pub replace_with_timeout: Option<String>,
 
     /// Suppress progress output.
     #[arg(short, long)]
@@ -61,14 +63,22 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub tmpfs: Vec<String>,
 
-    /// Register an inline script in the sandbox (NAME=BODY). The body is
-    /// taken literally as the script content. Available at `/.msb/scripts/<name>`
-    /// and on `PATH`.
+    /// Register a shell snippet as a named script (NAME=BODY). The body
+    /// supports `\n`, `\t`, `\r`, `\\`, `\"`, `\'` escapes; unknown escapes
+    /// are preserved verbatim. The snippet is wrapped with a shebang derived
+    /// from `--shell` (default `/bin/sh`) and made executable at
+    /// `/.msb/scripts/<name>`; the directory is on `PATH`.
     #[arg(long, value_name = "NAME=BODY")]
     pub script: Vec<String>,
 
+    /// Register exact inline script contents (NAME=BODY). No escape decoding
+    /// or shebang is added, so the caller must include a `#!` line if the
+    /// script should be directly executable.
+    #[arg(long, value_name = "NAME=BODY")]
+    pub script_raw: Vec<String>,
+
     /// Register a script from a host file (NAME:PATH). Same destination as
-    /// `--script`; the file's contents are read at launch time.
+    /// `--script`; the file's contents are read verbatim at launch time.
     #[arg(long, value_name = "NAME:PATH")]
     pub script_path: Vec<String>,
 
@@ -283,6 +293,7 @@ impl SandboxOpts {
             || !self.env.is_empty()
             || !self.tmpfs.is_empty()
             || !self.script.is_empty()
+            || !self.script_raw.is_empty()
             || !self.script_path.is_empty()
             || self.entrypoint.is_some()
             || self.init.is_some()
@@ -345,11 +356,13 @@ pub fn apply_sandbox_opts(
         builder = builder.workdir(workdir);
     }
     if let Some(ref shell) = opts.shell {
+        validate_shell(shell)?;
         builder = builder.shell(shell);
     }
-    if let Some(ref grace) = opts.replace_with_grace {
-        let d = parse_duration(grace).map_err(|e| anyhow::anyhow!("--replace-with-grace: {e}"))?;
-        builder = builder.replace_with_grace(d);
+    if let Some(ref timeout) = opts.replace_with_timeout {
+        let d =
+            parse_duration(timeout).map_err(|e| anyhow::anyhow!("--replace-with-timeout: {e}"))?;
+        builder = builder.replace_with_timeout(d);
     } else if opts.replace {
         builder = builder.replace();
     }
@@ -376,7 +389,12 @@ pub fn apply_sandbox_opts(
     }
 
     // --- Scripts ---
-    for (name, content) in collect_scripts(&opts.script, &opts.script_path)? {
+    for (name, content) in collect_scripts(
+        opts.shell.as_deref(),
+        &opts.script,
+        &opts.script_raw,
+        &opts.script_path,
+    )? {
         builder = builder.script(name, content);
     }
 
@@ -522,7 +540,7 @@ pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<Sandb
         }
     }
 
-    let is_path = source.starts_with('/') || source.starts_with("./") || source.starts_with("../");
+    let is_path = microsandbox_utils::looks_like_local_path_text(source);
     let source = source.to_string();
     let guest = guest.to_string();
     Ok(builder.volume(guest, move |mut m| {
@@ -965,22 +983,36 @@ fn parse_tmpfs(spec: &str) -> anyhow::Result<(String, Option<u32>)> {
     }
 }
 
-/// Resolve `--script` / `--script-path` specs into a deduped list of
-/// `(name, content)` pairs preserving argv order. Inline entries are
-/// processed first, then path entries; duplicate names across either
-/// flag are rejected.
-fn collect_scripts(inline: &[String], paths: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+/// Resolve `--script` / `--script-raw` / `--script-path` specs into a
+/// deduped list of `(name, content)` pairs preserving argv order:
+/// inline shell snippets first, then raw inline, then path-backed.
+/// Duplicate names across any source are rejected. `shell` is used to
+/// generate the shebang for `--script` entries only.
+fn collect_scripts(
+    shell: Option<&str>,
+    scripts: &[String],
+    raw_scripts: &[String],
+    paths: &[String],
+) -> anyhow::Result<Vec<(String, String)>> {
     use std::collections::HashSet;
 
-    let mut out = Vec::with_capacity(inline.len() + paths.len());
+    let mut out = Vec::with_capacity(scripts.len() + raw_scripts.len() + paths.len());
     let mut seen: HashSet<String> = HashSet::new();
 
-    for spec in inline {
-        let (name, content) = parse_script_inline(spec)?;
+    for spec in scripts {
+        let (name, body) = parse_script_spec(spec, "script")?;
         if !seen.insert(name.clone()) {
             anyhow::bail!("script name '{name}' specified more than once");
         }
-        out.push((name, content));
+        let decoded = decode_script_escapes(&body);
+        out.push((name, wrap_shell_script(shell, &decoded)));
+    }
+    for spec in raw_scripts {
+        let (name, body) = parse_script_spec(spec, "script-raw")?;
+        if !seen.insert(name.clone()) {
+            anyhow::bail!("script name '{name}' specified more than once");
+        }
+        out.push((name, body));
     }
     for spec in paths {
         let (name, content) = parse_script_path(spec)?;
@@ -992,16 +1024,89 @@ fn collect_scripts(inline: &[String], paths: &[String]) -> anyhow::Result<Vec<(S
     Ok(out)
 }
 
-/// Parse an inline script spec: `NAME=BODY`. Splits on the first `=` so
-/// bodies may freely contain `=`.
-fn parse_script_inline(spec: &str) -> anyhow::Result<(String, String)> {
+/// Parse a `NAME=BODY` spec for `--script` / `--script-raw`. Splits on
+/// the first `=` so bodies may freely contain `=`. `flag` is used in
+/// the error message.
+fn parse_script_spec(spec: &str, flag: &str) -> anyhow::Result<(String, String)> {
     let (name, body) = spec
         .split_once('=')
-        .ok_or_else(|| anyhow::anyhow!("script must be in format NAME=BODY"))?;
+        .ok_or_else(|| anyhow::anyhow!("{flag} must be in format NAME=BODY"))?;
     if name.is_empty() {
         anyhow::bail!("script name must not be empty (NAME=BODY)");
     }
     Ok((name.to_string(), body.to_string()))
+}
+
+/// Reject `--shell` values that would corrupt the generated shebang
+/// line or fail to exec interactively. Whitespace (including newlines)
+/// and NUL break shebang parsing; an empty string or `/` leave no
+/// interpreter for the kernel to run.
+fn validate_shell(shell: &str) -> anyhow::Result<()> {
+    if shell.is_empty() {
+        anyhow::bail!("--shell must not be empty");
+    }
+    if shell.chars().any(|c| c.is_whitespace() || c == '\0') {
+        anyhow::bail!(
+            "--shell must not contain whitespace or NUL (got {shell:?}); \
+             use --script-raw or --script-path if you need a custom shebang"
+        );
+    }
+    if shell == "/" {
+        anyhow::bail!("--shell {shell:?} is not a valid interpreter");
+    }
+    Ok(())
+}
+
+/// Build the shebang line for a `--script` snippet. Absolute paths
+/// (`/bin/bash`) are used directly; bare names (`bash`) go through
+/// `/usr/bin/env`.
+fn script_shebang(shell: Option<&str>) -> String {
+    let shell = shell.unwrap_or("/bin/sh");
+    if shell.contains('/') {
+        format!("#!{shell}")
+    } else {
+        format!("#!/usr/bin/env {shell}")
+    }
+}
+
+/// Decode the small set of backslash escapes supported by `--script`.
+/// Unknown escapes (e.g. `\d`) are preserved verbatim so regexes and
+/// paths survive untouched.
+fn decode_script_escapes(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('\'') => out.push('\''),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Wrap a decoded shell snippet with the generated shebang and ensure
+/// a trailing newline so the file is well-formed.
+fn wrap_shell_script(shell: Option<&str>, body: &str) -> String {
+    let mut script = script_shebang(shell);
+    script.push('\n');
+    script.push_str(body);
+    if !script.ends_with('\n') {
+        script.push('\n');
+    }
+    script
 }
 
 /// Parse a script-from-file spec: `NAME:PATH` and read file content.
@@ -1326,40 +1431,182 @@ mod tests {
         path
     }
 
-    // --- parse_script_inline ---
+    async fn build_volume(spec: &str) -> VolumeMount {
+        let builder = SandboxBuilder::new("test").image("alpine");
+        let config = apply_volume(builder, spec).unwrap().build().await.unwrap();
+        config.mounts.into_iter().next().unwrap()
+    }
+
+    // --- apply_volume ---
+
+    #[tokio::test]
+    async fn apply_volume_dot_source_is_bind_mount() {
+        match build_volume(".:/mnt").await {
+            VolumeMount::Bind { host, guest, .. } => {
+                assert_eq!(host, PathBuf::from("."));
+                assert_eq!(guest, "/mnt");
+            }
+            other => panic!("expected bind mount, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_volume_dot_dot_source_is_bind_mount() {
+        match build_volume("..:/mnt").await {
+            VolumeMount::Bind { host, guest, .. } => {
+                assert_eq!(host, PathBuf::from(".."));
+                assert_eq!(guest, "/mnt");
+            }
+            other => panic!("expected bind mount, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_volume_plain_source_is_named_mount() {
+        match build_volume("data:/mnt").await {
+            VolumeMount::Named { name, guest, .. } => {
+                assert_eq!(name, "data");
+                assert_eq!(guest, "/mnt");
+            }
+            other => panic!("expected named mount, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_volume_rejects_path_like_named_source() {
+        let builder = SandboxBuilder::new("test").image("alpine");
+        let err = apply_volume(builder, "data/../../secrets:/mnt")
+            .unwrap()
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("volume name"));
+    }
+
+    // --- parse_script_spec ---
 
     #[test]
-    fn inline_basic() {
-        let (name, body) = parse_script_inline("greet=echo hi").unwrap();
+    fn spec_basic() {
+        let (name, body) = parse_script_spec("greet=echo hi", "script").unwrap();
         assert_eq!(name, "greet");
         assert_eq!(body, "echo hi");
     }
 
     #[test]
-    fn inline_body_may_contain_equals() {
-        let (name, body) = parse_script_inline("kv=K=V test: a=b=c").unwrap();
+    fn spec_body_may_contain_equals() {
+        let (name, body) = parse_script_spec("kv=K=V test: a=b=c", "script").unwrap();
         assert_eq!(name, "kv");
         assert_eq!(body, "K=V test: a=b=c");
     }
 
     #[test]
-    fn inline_empty_body_is_allowed() {
-        let (name, body) = parse_script_inline("noop=").unwrap();
+    fn spec_empty_body_is_allowed() {
+        let (name, body) = parse_script_spec("noop=", "script").unwrap();
         assert_eq!(name, "noop");
         assert_eq!(body, "");
     }
 
     #[test]
-    fn inline_missing_equals_errors() {
-        let err = parse_script_inline("noequals").unwrap_err();
+    fn spec_missing_equals_errors() {
+        let err = parse_script_spec("noequals", "script").unwrap_err();
         assert!(err.to_string().contains("NAME=BODY"), "got: {err}");
+        assert!(err.to_string().starts_with("script "), "got: {err}");
     }
 
     #[test]
-    fn inline_empty_name_errors() {
-        let err = parse_script_inline("=echo hi").unwrap_err();
+    fn spec_empty_name_errors() {
+        let err = parse_script_spec("=echo hi", "script").unwrap_err();
         assert!(err.to_string().contains("must not be empty"), "got: {err}");
     }
+
+    #[test]
+    fn spec_flag_label_propagates() {
+        let err = parse_script_spec("noequals", "script-raw").unwrap_err();
+        assert!(err.to_string().starts_with("script-raw "), "got: {err}");
+    }
+
+    // --- escape decoding / shebang / wrapping ---
+
+    #[test]
+    fn decode_known_escapes() {
+        assert_eq!(decode_script_escapes(r"a\nb"), "a\nb");
+        assert_eq!(decode_script_escapes(r"a\tb"), "a\tb");
+        assert_eq!(decode_script_escapes(r"a\rb"), "a\rb");
+        assert_eq!(decode_script_escapes(r"a\\b"), "a\\b");
+        assert_eq!(decode_script_escapes(r#"a\"b"#), "a\"b");
+        assert_eq!(decode_script_escapes(r"a\'b"), "a'b");
+    }
+
+    #[test]
+    fn decode_unknown_escapes_preserved() {
+        assert_eq!(decode_script_escapes(r"a\db"), r"a\db");
+        assert_eq!(decode_script_escapes(r"\x \y \z"), r"\x \y \z");
+    }
+
+    #[test]
+    fn decode_trailing_backslash_preserved() {
+        assert_eq!(decode_script_escapes(r"foo\"), r"foo\");
+    }
+
+    #[test]
+    fn shebang_absolute_path_used_directly() {
+        assert_eq!(script_shebang(Some("/bin/bash")), "#!/bin/bash");
+        assert_eq!(
+            script_shebang(Some("/usr/local/bin/zsh")),
+            "#!/usr/local/bin/zsh"
+        );
+    }
+
+    #[test]
+    fn shebang_bare_name_goes_through_env() {
+        assert_eq!(script_shebang(Some("bash")), "#!/usr/bin/env bash");
+        assert_eq!(script_shebang(Some("zsh")), "#!/usr/bin/env zsh");
+    }
+
+    #[test]
+    fn shebang_defaults_to_bin_sh() {
+        assert_eq!(script_shebang(None), "#!/bin/sh");
+    }
+
+    #[test]
+    fn wrap_appends_trailing_newline() {
+        assert_eq!(
+            wrap_shell_script(None, "echo hello"),
+            "#!/bin/sh\necho hello\n"
+        );
+    }
+
+    #[test]
+    fn validate_shell_rejects_bad_shapes() {
+        assert!(validate_shell("").is_err());
+        assert!(validate_shell("/").is_err());
+        assert!(validate_shell("bash -x").is_err());
+        assert!(validate_shell("bash\nrm -rf /").is_err());
+        assert!(validate_shell("bash\trm").is_err());
+        assert!(validate_shell("bash\0").is_err());
+        assert!(validate_shell(" bash").is_err());
+        assert!(validate_shell("bash ").is_err());
+    }
+
+    #[test]
+    fn validate_shell_accepts_valid_shapes() {
+        assert!(validate_shell("bash").is_ok());
+        assert!(validate_shell("sh").is_ok());
+        assert!(validate_shell("/bin/sh").is_ok());
+        assert!(validate_shell("/bin/bash").is_ok());
+        assert!(validate_shell("/usr/local/bin/zsh").is_ok());
+    }
+
+    #[test]
+    fn wrap_does_not_double_trailing_newline() {
+        assert_eq!(
+            wrap_shell_script(None, "echo hello\n"),
+            "#!/bin/sh\necho hello\n"
+        );
+    }
+
+    // --- collect_scripts (duplicate logic) ---
 
     // --- parse_port_mapping ---
 
@@ -1428,34 +1675,94 @@ mod tests {
     // --- collect_scripts (duplicate logic) ---
 
     #[test]
-    fn collect_inline_only_preserves_order() {
-        let inline = vec!["a=echo a".to_string(), "b=echo b".to_string()];
-        let out = collect_scripts(&inline, &[]).unwrap();
+    fn collect_script_wraps_with_default_shebang() {
+        let scripts = vec!["start=echo hello".to_string()];
+        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
         assert_eq!(
             out,
-            vec![
-                ("a".to_string(), "echo a".to_string()),
-                ("b".to_string(), "echo b".to_string()),
-            ]
+            vec![("start".to_string(), "#!/bin/sh\necho hello\n".to_string())]
         );
     }
 
     #[test]
-    fn collect_combines_inline_then_paths() {
-        let p = write_temp("from-file");
-        let inline = vec!["a=echo a".to_string()];
-        let paths = vec![format!("b:{}", p.display())];
-        let out = collect_scripts(&inline, &paths).unwrap();
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0], ("a".to_string(), "echo a".to_string()));
-        assert_eq!(out[1], ("b".to_string(), "from-file".to_string()));
+    fn collect_script_decodes_newlines_in_body() {
+        let scripts = vec![r#"start=echo hello\npython -c "print(123)""#.to_string()];
+        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
+        assert_eq!(
+            out[0].1,
+            "#!/bin/sh\necho hello\npython -c \"print(123)\"\n"
+        );
+    }
+
+    #[test]
+    fn collect_script_uses_absolute_shell_path() {
+        let scripts = vec!["start=echo hi".to_string()];
+        let out = collect_scripts(Some("/bin/bash"), &scripts, &[], &[]).unwrap();
+        assert_eq!(out[0].1, "#!/bin/bash\necho hi\n");
+    }
+
+    #[test]
+    fn collect_script_uses_env_for_bare_shell() {
+        let scripts = vec!["start=echo $BASH_VERSION".to_string()];
+        let out = collect_scripts(Some("bash"), &scripts, &[], &[]).unwrap();
+        assert_eq!(out[0].1, "#!/usr/bin/env bash\necho $BASH_VERSION\n");
+    }
+
+    #[test]
+    fn collect_script_raw_is_exact() {
+        let raw = vec!["start=echo hello".to_string()];
+        let out = collect_scripts(None, &[], &raw, &[]).unwrap();
+        assert_eq!(out, vec![("start".to_string(), "echo hello".to_string())]);
+    }
+
+    #[test]
+    fn collect_script_raw_preserves_escapes_literally() {
+        let raw = vec![r"start=echo hello\nworld".to_string()];
+        let out = collect_scripts(None, &[], &raw, &[]).unwrap();
+        assert_eq!(out[0].1, r"echo hello\nworld");
+    }
+
+    #[test]
+    fn collect_script_path_is_exact_file_contents() {
+        let p = write_temp("#!/bin/sh\necho from-file\n");
+        let paths = vec![format!("start:{}", p.display())];
+        let out = collect_scripts(None, &[], &[], &paths).unwrap();
+        assert_eq!(out[0].1, "#!/bin/sh\necho from-file\n");
         let _ = std::fs::remove_file(&p);
     }
 
     #[test]
-    fn collect_rejects_duplicate_within_inline() {
-        let inline = vec!["foo=echo a".to_string(), "foo=echo b".to_string()];
-        let err = collect_scripts(&inline, &[]).unwrap_err();
+    fn collect_script_preserves_unknown_escapes() {
+        let scripts = vec![r"re=grep '\d\+' file".to_string()];
+        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
+        assert_eq!(out[0].1, "#!/bin/sh\ngrep '\\d\\+' file\n");
+    }
+
+    #[test]
+    fn collect_script_always_ends_with_newline() {
+        let scripts = vec!["start=echo hello".to_string()];
+        let out = collect_scripts(None, &scripts, &[], &[]).unwrap();
+        assert!(out[0].1.ends_with('\n'));
+    }
+
+    #[test]
+    fn collect_preserves_order_across_all_three_sources() {
+        let p = write_temp("from-file");
+        let scripts = vec!["a=echo a".to_string()];
+        let raw = vec!["b=echo b".to_string()];
+        let paths = vec![format!("c:{}", p.display())];
+        let out = collect_scripts(None, &scripts, &raw, &paths).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].0, "a");
+        assert_eq!(out[1], ("b".to_string(), "echo b".to_string()));
+        assert_eq!(out[2], ("c".to_string(), "from-file".to_string()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn collect_rejects_duplicate_within_script() {
+        let scripts = vec!["foo=echo a".to_string(), "foo=echo b".to_string()];
+        let err = collect_scripts(None, &scripts, &[], &[]).unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
             "got: {err}"
@@ -1469,7 +1776,7 @@ mod tests {
             format!("foo:{}", p.display()),
             format!("foo:{}", p.display()),
         ];
-        let err = collect_scripts(&[], &paths).unwrap_err();
+        let err = collect_scripts(None, &[], &[], &paths).unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
             "got: {err}"
@@ -1478,21 +1785,36 @@ mod tests {
     }
 
     #[test]
-    fn collect_rejects_duplicate_across_flags() {
+    fn collect_rejects_duplicate_across_all_three_sources() {
         let p = write_temp("x");
-        let inline = vec!["foo=echo a".to_string()];
+        let scripts = vec!["foo=echo a".to_string()];
+        let raw = vec!["foo=echo b".to_string()];
         let paths = vec![format!("foo:{}", p.display())];
-        let err = collect_scripts(&inline, &paths).unwrap_err();
+
+        let err = collect_scripts(None, &scripts, &raw, &[]).unwrap_err();
         assert!(
             err.to_string().contains("'foo' specified more than once"),
-            "got: {err}"
+            "script vs script-raw: {err}"
         );
+
+        let err = collect_scripts(None, &scripts, &[], &paths).unwrap_err();
+        assert!(
+            err.to_string().contains("'foo' specified more than once"),
+            "script vs script-path: {err}"
+        );
+
+        let err = collect_scripts(None, &[], &raw, &paths).unwrap_err();
+        assert!(
+            err.to_string().contains("'foo' specified more than once"),
+            "script-raw vs script-path: {err}"
+        );
+
         let _ = std::fs::remove_file(&p);
     }
 
     #[test]
     fn collect_empty_inputs_ok() {
-        let out = collect_scripts(&[], &[]).unwrap();
+        let out = collect_scripts(None, &[], &[], &[]).unwrap();
         assert!(out.is_empty());
     }
 }

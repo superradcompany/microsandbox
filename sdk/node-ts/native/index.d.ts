@@ -782,21 +782,22 @@ export declare class SandboxBuilder {
    * Replace any existing sandbox with the same name.
    *
    * SIGTERMs the prior instance, waits up to 10 seconds for a
-   * graceful exit, then SIGKILLs. To override the grace, use
-   * `replaceWithGrace(ms)`; `replaceWithGrace(0)` skips SIGTERM and
+   * graceful exit, then SIGKILLs. To override the timeout, use
+   * `replaceWithTimeout(ms)`; `replaceWithTimeout(0)` skips SIGTERM and
    * SIGKILLs immediately.
    */
   replace(): this
   /**
    * Replace any existing sandbox, overriding the SIGTERM-to-SIGKILL
-   * grace. Implies `replace` — calling this alone is enough.
+   * timeout. Implies `replace` — calling this alone is enough.
    *
-   * - `graceMs > 0`: SIGTERM, wait up to `graceMs`, then SIGKILL.
-   * - `graceMs == 0`: SIGKILL immediately (skip SIGTERM).
+   * - `timeoutMs > 0`: SIGTERM, wait up to `timeoutMs`, then SIGKILL.
+   * - `timeoutMs == 0`: SIGKILL immediately (skip SIGTERM).
    *
-   * The default grace used by `replace` is 10_000 ms.
+   * An expired timeout force-kills the prior sandbox; `create()` still proceeds.
+   * The default timeout used by `replace` is 10_000 ms.
    */
-  replaceWithGrace(graceMs: number): this
+  replaceWithTimeout(timeoutMs: number): this
   /** Override the image entrypoint. */
   entrypoint(cmd: Array<string>): this
   /**
@@ -970,9 +971,27 @@ export declare class SandboxHandle {
   startDetached(): Promise<Sandbox>
   /** Connect to an already-running sandbox (no lifecycle ownership). */
   connect(): Promise<Sandbox>
-  /** Stop the sandbox (SIGTERM). */
+  /**
+   * Connect with an explicit timeout (ms). Returns a typed error if
+   * the sandbox doesn't respond in this window. `connect()` uses
+   * 10_000 ms by default.
+   */
+  connectWithTimeout(timeoutMs: number): Promise<Sandbox>
+  /**
+   * Stop the sandbox gracefully. Lets it finish writing any pending
+   * data to disk before it exits, so files written inside the sandbox
+   * aren't lost across a later restart. Force-kills after 10_000 ms by
+   * default; override with `stopWithTimeout(timeoutMs)`.
+   */
   stop(): Promise<void>
-  /** Kill the sandbox (SIGKILL). */
+  /**
+   * Stop gracefully with an explicit timeout (ms). If the sandbox is
+   * still running after this window, it is force-killed. `0`
+   * force-kills immediately. Resolves successfully either way — does
+   * not throw on timeout expiry.
+   */
+  stopWithTimeout(timeoutMs: number): Promise<void>
+  /** Force terminate immediately. Pending writes may be lost. */
   kill(): Promise<void>
   /** Remove the sandbox from the database. */
   remove(): Promise<void>

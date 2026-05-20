@@ -248,7 +248,7 @@ impl PySandbox {
 
             let output = if let Some(opts) = options {
                 sandbox
-                    .exec_with(&cmd, |e| apply_exec_options(e, opts))
+                    .exec_with(&cmd, |e| apply_exec_options(e, args, opts))
                     .await
                     .map_err(to_py_err)?
             } else {
@@ -275,7 +275,7 @@ impl PySandbox {
 
             let handle = if let Some(opts) = options {
                 sandbox
-                    .exec_stream_with(&cmd, |e| apply_exec_options(e, opts))
+                    .exec_stream_with(&cmd, |e| apply_exec_options(e, args, opts))
                     .await
                     .map_err(to_py_err)?
             } else {
@@ -681,6 +681,7 @@ fn parse_exec_args(
 
 fn apply_exec_options(
     mut builder: microsandbox::sandbox::exec::ExecOptionsBuilder,
+    args: Vec<String>,
     opts: ExecOpts,
 ) -> microsandbox::sandbox::exec::ExecOptionsBuilder {
     if !opts.env.is_empty() {
@@ -731,7 +732,7 @@ fn apply_exec_options(
         };
         builder = builder.rlimit_range(res, *soft, *hard);
     }
-    builder
+    builder.args(args)
 }
 
 //--------------------------------------------------------------------------------------------------

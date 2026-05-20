@@ -306,19 +306,19 @@ async with await Sandbox.create("temp", image="alpine", replace=True) as sb:
 
 `replace=True` stops a sandbox with the same name (if any) and
 recreates it. By default the existing one gets 10 seconds to exit
-cleanly after `SIGTERM` before `SIGKILL`; pass `replace_with_grace` (in
-seconds, fractional allowed) to override. Setting `replace_with_grace`
-implies `replace=True`.
+cleanly after `SIGTERM` before `SIGKILL`; pass `replace_with_timeout`
+(in seconds, fractional allowed) to override. Setting
+`replace_with_timeout` implies `replace=True`.
 
 ```python
-# Default 10s SIGTERM grace.
+# Default 10s SIGTERM timeout.
 sb = await Sandbox.create("worker", image="alpine", replace=True)
 
 # Wait longer for a workload that needs more time to shut down.
-sb = await Sandbox.create("worker", image="alpine", replace_with_grace=30)
+sb = await Sandbox.create("worker", image="alpine", replace_with_timeout=30)
 
 # Skip SIGTERM entirely; SIGKILL immediately.
-sb = await Sandbox.create("worker", image="alpine", replace_with_grace=0)
+sb = await Sandbox.create("worker", image="alpine", replace_with_timeout=0)
 ```
 
 If you'd rather handle the conflict yourself, catch the typed error:
