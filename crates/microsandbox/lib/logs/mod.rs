@@ -4,8 +4,7 @@
 //!
 //! - [`read_logs`] returns a snapshot `Vec<LogEntry>` filtered with
 //!   [`LogOptions`]. Reads everything currently on disk, sorts by
-//!   timestamp, and returns. Implemented as a thin drain of
-//!   [`log_stream`] with `follow: false`.
+//!   timestamp, and returns.
 //! - [`log_stream`] returns a [`futures::Stream`] over the same
 //!   files, suitable for live-tailing or replaying a fixed range.
 //!   Uses filesystem change notifications (the `notify` crate) for
@@ -66,7 +65,7 @@ pub use types::{LogEntry, LogOptions, LogSource};
 
 use std::path::PathBuf;
 
-use futures::{Stream, TryStreamExt};
+use futures::Stream;
 
 use stream::{LogEngine, LogFileConfig, LogFileFormat};
 
@@ -110,6 +109,19 @@ const LOG_FILES: &[LogFileConfig] = &[
 // Public API
 //--------------------------------------------------------------------------------------------------
 
+/// Chronologically sorted log snapshot plus the cursor at the end
+/// of the drained on-disk content.
+#[derive(Debug, Clone)]
+pub struct LogSnapshot {
+    /// Entries matching the requested [`LogOptions`].
+    pub entries: Vec<LogEntry>,
+
+    /// Cursor positioned after all content consumed for the
+    /// snapshot, including entries later removed by `tail` /
+    /// `until` filtering.
+    pub cursor: LogCursor,
+}
+
 /// Compute the on-disk log directory for a sandbox name.
 pub fn log_dir_for(name: &str) -> PathBuf {
     crate::config::config()
@@ -130,6 +142,15 @@ pub fn log_dir_for(name: &str) -> PathBuf {
 /// post-collect because the stream's per-source ordering doesn't
 /// match snapshot's "filter after sort" contract.
 pub async fn read_logs(name: &str, opts: &LogOptions) -> MicrosandboxResult<Vec<LogEntry>> {
+    Ok(read_logs_snapshot(name, opts).await?.entries)
+}
+
+/// Read all matching log entries and return the snapshot end cursor.
+///
+/// This is useful when handing a bounded historical read to
+/// [`log_stream`] with [`LogStreamStart::From`] without losing log
+/// lines written between the snapshot drain and follow startup.
+pub async fn read_logs_snapshot(name: &str, opts: &LogOptions) -> MicrosandboxResult<LogSnapshot> {
     let stream_opts = LogStreamOptions {
         sources: opts.sources.clone(),
         // Push `since` into the parser when possible so early
@@ -138,10 +159,23 @@ pub async fn read_logs(name: &str, opts: &LogOptions) -> MicrosandboxResult<Vec<
         until: None,
         follow: false,
     };
-    let mut entries: Vec<LogEntry> = log_stream(name, &stream_opts).await?.try_collect().await?;
-    entries.sort_by_key(|e| e.timestamp);
+    let log_dir = log_dir_for(name);
+    if !tokio::fs::try_exists(&log_dir).await.unwrap_or(false) {
+        return Err(MicrosandboxError::SandboxNotFound(name.to_string()));
+    }
+    let sources = LogSource::effective(&stream_opts.sources);
+    let engine = LogEngine::new(
+        log_dir,
+        LOG_FILES,
+        sources,
+        &stream_opts.start,
+        stream_opts.until,
+        stream_opts.follow,
+    )
+    .await?;
+    let (mut entries, cursor) = engine.drain_sorted_snapshot().await?;
     opts.apply_to(&mut entries);
-    Ok(entries)
+    Ok(LogSnapshot { entries, cursor })
 }
 
 /// Stream log entries for the named sandbox.

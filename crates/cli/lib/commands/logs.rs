@@ -209,10 +209,10 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
         until,
         sources: engine_sources.clone(),
     };
-    let snapshot = logs::read_logs(&args.name, &snapshot_opts)
+    let snapshot = logs::read_logs_snapshot(&args.name, &snapshot_opts)
         .await
         .context("reading logs")?;
-    for entry in &snapshot {
+    for entry in &snapshot.entries {
         let cli_entry = engine_entry_to_cli(entry);
         if grep_matches(grep_re.as_ref(), &cli_entry.d) {
             render_entry(&cli_entry, &args, color_policy)?;
@@ -223,14 +223,12 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Follow: pick up entries written after the snapshot completed.
-    // `Since(now)` keeps the boundary simple and avoids replaying the
-    // tail we already rendered; the race window between the snapshot
-    // read and `now` is microseconds wide.
-    let cutoff = Utc::now();
+    // Follow: resume from the exact snapshot end cursor so entries
+    // written between the snapshot drain and stream startup are not
+    // skipped.
     let stream_opts = LogStreamOptions {
         sources: engine_sources,
-        start: LogStreamStart::Since(cutoff),
+        start: LogStreamStart::From(snapshot.cursor),
         until,
         follow: true,
     };

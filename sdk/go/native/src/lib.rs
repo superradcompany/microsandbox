@@ -2760,16 +2760,14 @@ static NEXT_LOG_STREAM_HANDLE: AtomicU64 = AtomicU64::new(1);
 
 type LogStreamItem = Result<microsandbox::logs::LogEntry, microsandbox::MicrosandboxError>;
 type LogStreamEntry =
-    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<LogStreamItem>>>;
+    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<LogStreamItem>>>;
 
 fn log_stream_registry() -> &'static RwLock<HashMap<Handle, LogStreamEntry>> {
     static REG: OnceLock<RwLock<HashMap<Handle, LogStreamEntry>>> = OnceLock::new();
     REG.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-fn register_log_stream(
-    rx: tokio::sync::mpsc::UnboundedReceiver<LogStreamItem>,
-) -> Result<Handle, FfiError> {
+fn register_log_stream(rx: tokio::sync::mpsc::Receiver<LogStreamItem>) -> Result<Handle, FfiError> {
     let h = NEXT_LOG_STREAM_HANDLE.fetch_add(1, Ordering::Relaxed);
     log_stream_registry()
         .write()
@@ -2801,13 +2799,13 @@ async fn start_log_stream_for(
         .await
         .map_err(FfiError::from)?;
     let mut stream = Box::pin(stream);
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<LogStreamItem>();
+    let (tx, rx) = tokio::sync::mpsc::channel::<LogStreamItem>(16);
     // The forwarder task is moved off the foreground future so the caller
     // can return the stream handle immediately. The task stops naturally
     // when the receiver is dropped (msb_log_close).
     tokio::spawn(async move {
         while let Some(item) = stream.next().await {
-            if tx.send(item).is_err() {
+            if tx.send(item).await.is_err() {
                 break;
             }
         }

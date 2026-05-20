@@ -18,7 +18,7 @@ use notify::Watcher;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::cursor::{FilePosition, LogCursor};
-use super::parser::{FileHandle, ParserKind};
+use super::parser::{FileHandle, ParsedChunk, ParserKind};
 use super::types::{LogEntry, LogSource};
 
 //--------------------------------------------------------------------------------------------------
@@ -194,13 +194,20 @@ struct ReaderState {
     last_position: FilePosition,
 }
 
+struct PositionedLogEntry {
+    entry: LogEntry,
+    reader_idx: usize,
+    position: FilePosition,
+}
+
 pub(crate) struct LogEngine {
     since: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
     follow: bool,
 
     readers: Vec<ReaderState>,
-    pending: VecDeque<LogEntry>,
+    initial_positions: Vec<FilePosition>,
+    pending: VecDeque<PositionedLogEntry>,
 
     _watcher: Option<notify::RecommendedWatcher>,
     event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
@@ -232,12 +239,14 @@ impl LogEngine {
             .collect();
 
         let mut readers = Vec::with_capacity(selected.len());
+        let mut initial_positions = Vec::with_capacity(selected.len());
         for (idx, config) in selected.iter().enumerate() {
             let initial_position = match start {
                 LogStreamStart::From(c) => c.positions.get(idx).copied().unwrap_or_default(),
                 _ => FilePosition::default(),
             };
             let reader = Reader::open(config, &log_dir, &sources, start, initial_position).await?;
+            initial_positions.push(initial_position);
             readers.push(ReaderState {
                 reader,
                 last_position: initial_position,
@@ -256,6 +265,7 @@ impl LogEngine {
             until,
             follow,
             readers,
+            initial_positions,
             pending: VecDeque::new(),
             _watcher: watcher,
             event_rx,
@@ -273,6 +283,37 @@ impl LogEngine {
         }
     }
 
+    pub(crate) async fn drain_sorted_snapshot(
+        mut self,
+    ) -> MicrosandboxResult<(Vec<LogEntry>, LogCursor)> {
+        let mut entries = Vec::new();
+        loop {
+            while let Some(entry) = self.pending.pop_front() {
+                entries.push(entry);
+            }
+            if self.finished {
+                break;
+            }
+            match self.step().await {
+                StepResult::Continue => continue,
+                StepResult::Terminate => break,
+                StepResult::Error(e) => return Err(e),
+            }
+        }
+        let end_cursor = self.snapshot_cursor();
+        entries.sort_by_key(|e| e.entry.timestamp);
+
+        let mut positions = self.initial_positions.clone();
+        for entry in &mut entries {
+            positions[entry.reader_idx] = entry.position;
+            entry.entry.cursor = LogCursor {
+                positions: positions.clone(),
+            };
+        }
+
+        Ok((entries.into_iter().map(|e| e.entry).collect(), end_cursor))
+    }
+
     /// Drive every reader once: parse any newly-available entries,
     /// stamp them with a fresh cursor, and queue them in `pending`.
     /// If nothing parsed and `follow` is on, await a filesystem
@@ -286,13 +327,20 @@ impl LogEngine {
                 Ok(p) => p,
                 Err(e) => return StepResult::Error(e),
             };
-            if !parsed.is_empty() {
+            if parsed.position.is_some() || !parsed.entries.is_empty() {
                 any_progress = true;
             }
-            for (mut entry, position) in parsed {
+            for (mut entry, position) in parsed.entries {
                 self.readers[idx].last_position = position;
                 entry.cursor = self.snapshot_cursor();
-                self.pending.push_back(entry);
+                self.pending.push_back(PositionedLogEntry {
+                    entry,
+                    reader_idx: idx,
+                    position,
+                });
+            }
+            if let Some(position) = parsed.position {
+                self.readers[idx].last_position = position;
             }
         }
 
@@ -354,13 +402,13 @@ impl LogEngine {
     ) -> impl Stream<Item = MicrosandboxResult<LogEntry>> + Send + 'static + use<> {
         stream::unfold(self, |mut state| async move {
             loop {
-                if let Some(entry) = state.pending.pop_front() {
+                if let Some(positioned) = state.pending.pop_front() {
                     if let Some(until) = state.until
-                        && entry.timestamp >= until
+                        && positioned.entry.timestamp >= until
                     {
                         return None;
                     }
-                    return Some((Ok(entry), state));
+                    return Some((Ok(positioned.entry), state));
                 }
                 if state.finished {
                     return None;
@@ -466,41 +514,52 @@ impl Reader {
     async fn read_chunk(
         &mut self,
         since: Option<DateTime<Utc>>,
-    ) -> MicrosandboxResult<Vec<(LogEntry, FilePosition)>> {
+    ) -> MicrosandboxResult<ParsedChunk> {
         while let Some(src) = self.backfill.front_mut() {
-            let entries = self
+            let chunk = self
                 .parser
                 .parse_from(src, &self.primary_path, since)
                 .await?;
-            if !entries.is_empty() {
-                return Ok(entries);
+            if chunk.position.is_some() || !chunk.entries.is_empty() {
+                return Ok(chunk);
             }
             self.backfill.pop_front();
         }
 
         if self.live.is_none() {
             let Some(mut src) = FileHandle::open(&self.primary_path).await? else {
-                return Ok(Vec::new());
+                return Ok(ParsedChunk {
+                    entries: Vec::new(),
+                    position: None,
+                });
             };
             src.offset = self.initial_live_offset;
             self.live = Some(src);
         }
 
         let live = self.live.as_mut().unwrap();
-        let entries = self
+        let chunk = self
             .parser
             .parse_from(live, &self.primary_path, since)
             .await?;
-        if !entries.is_empty() {
-            return Ok(entries);
+        if chunk.position.is_some() || !chunk.entries.is_empty() {
+            return Ok(chunk);
         }
 
         let current_inode = match FileHandle::generation_of_path(&self.primary_path).await {
             Some(g) => g,
-            None => return Ok(Vec::new()),
+            None => {
+                return Ok(ParsedChunk {
+                    entries: Vec::new(),
+                    position: None,
+                });
+            }
         };
         if current_inode == live.inode {
-            return Ok(Vec::new());
+            return Ok(ParsedChunk {
+                entries: Vec::new(),
+                position: None,
+            });
         }
 
         if self.rotation.rotates() {
@@ -515,7 +574,7 @@ impl Reader {
     /// (rotated past in between reads), and open the new live FD.
     /// Returns [`MicrosandboxError::MissedRotation`] when the file
     /// has rotated past the retention window.
-    async fn handle_rotation(&mut self) -> MicrosandboxResult<Vec<(LogEntry, FilePosition)>> {
+    async fn handle_rotation(&mut self) -> MicrosandboxResult<ParsedChunk> {
         let live = self
             .live
             .as_ref()
@@ -539,18 +598,24 @@ impl Reader {
         if let Some(new_live) = FileHandle::open(&self.primary_path).await? {
             self.live = Some(new_live);
         }
-        Ok(Vec::new())
+        Ok(ParsedChunk {
+            entries: Vec::new(),
+            position: None,
+        })
     }
 
     /// Non-rotating file's inode changed (e.g. truncate + rewrite):
     /// reopen the live FD against the new inode. Any data on the
     /// previous inode that wasn't read is lost by design — this
     /// case is reserved for files that don't promise retention.
-    async fn replace_live(&mut self) -> MicrosandboxResult<Vec<(LogEntry, FilePosition)>> {
+    async fn replace_live(&mut self) -> MicrosandboxResult<ParsedChunk> {
         if let Some(src) = FileHandle::open(&self.primary_path).await? {
             self.live = Some(src);
         }
-        Ok(Vec::new())
+        Ok(ParsedChunk {
+            entries: Vec::new(),
+            position: None,
+        })
     }
 }
 

@@ -55,6 +55,12 @@ fn jsonl(ts: &str, source: &str, data: &str, id: u64) -> String {
     format!(r#"{{"t":"{ts}","s":"{source}","d":"{data}","id":{id}}}"#)
 }
 
+fn ts(s: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
 fn write_lines(path: &std::path::Path, lines: &[String]) {
     let mut blob = String::new();
     for l in lines {
@@ -330,6 +336,97 @@ async fn read_logs_returns_sorted_snapshot() {
     assert!(
         entries[entries.len() - 1].data.as_ref() == b"late stdout",
         "expected stdout entry last: {entries:?}",
+    );
+}
+
+#[tokio::test]
+async fn read_logs_sorted_cursor_resumes_after_selected_entry() {
+    let name = "read-logs-sorted-cursor-resume";
+    let log_dir = make_log_dir(name);
+    write_lines(
+        &log_dir.join("exec.log"),
+        &[
+            jsonl("2026-05-01T10:00:00.000Z", "stdout", "a", 1),
+            jsonl("2026-05-01T10:02:00.000Z", "stdout", "c", 1),
+        ],
+    );
+    write_lines(
+        &log_dir.join("runtime.log"),
+        &["2026-05-01T10:01:00.000Z INFO b".to_string()],
+    );
+
+    let entries = logs::read_logs(
+        name,
+        &LogOptions {
+            sources: vec![LogSource::Stdout, LogSource::System],
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("snapshot read");
+
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].data.as_ref(), b"a");
+    assert!(
+        std::str::from_utf8(&entries[1].data)
+            .unwrap()
+            .contains("INFO b")
+    );
+    assert_eq!(entries[2].data.as_ref(), b"c");
+
+    let stream = logs::log_stream(
+        name,
+        &LogStreamOptions {
+            sources: vec![LogSource::Stdout, LogSource::System],
+            start: LogStreamStart::From(entries[1].cursor.clone()),
+            follow: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("resume stream");
+    let resumed: Vec<_> = stream.try_collect().await.expect("drain resumed stream");
+
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].data.as_ref(), b"c");
+}
+
+#[tokio::test]
+async fn read_logs_snapshot_cursor_advances_past_since_filtered_entries() {
+    let name = "read-logs-snapshot-cursor-since-filter";
+    let log_dir = make_log_dir(name);
+    write_lines(
+        &log_dir.join("exec.log"),
+        &[jsonl("2026-05-01T10:00:00.000Z", "stdout", "old", 1)],
+    );
+
+    let snapshot = logs::read_logs_snapshot(
+        name,
+        &LogOptions {
+            since: Some(ts("2026-05-01T10:01:00.000Z")),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("snapshot read");
+
+    assert!(snapshot.entries.is_empty());
+
+    let stream = logs::log_stream(
+        name,
+        &LogStreamOptions {
+            start: LogStreamStart::From(snapshot.cursor),
+            follow: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("resume stream");
+    let resumed: Vec<_> = stream.try_collect().await.expect("drain resumed stream");
+
+    assert!(
+        resumed.is_empty(),
+        "since-filtered entries replayed after snapshot cursor: {resumed:?}"
     );
 }
 

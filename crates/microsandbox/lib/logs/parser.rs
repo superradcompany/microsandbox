@@ -149,6 +149,11 @@ impl RawEntry {
 // ParserKind
 //--------------------------------------------------------------------------------------------------
 
+pub(super) struct ParsedChunk {
+    pub(super) entries: Vec<(LogEntry, FilePosition)>,
+    pub(super) position: Option<FilePosition>,
+}
+
 /// How a reader parses bytes from its source file.
 pub(super) enum ParserKind {
     /// JSON Lines (one record per line). Filters by `sources`.
@@ -168,7 +173,7 @@ impl ParserKind {
         src: &mut FileHandle,
         primary_path: &Path,
         since: Option<DateTime<Utc>>,
-    ) -> MicrosandboxResult<Vec<(LogEntry, FilePosition)>> {
+    ) -> MicrosandboxResult<ParsedChunk> {
         let mut buf = vec![0u8; MAX_READ_BYTES];
         src.file
             .seek(std::io::SeekFrom::Start(src.offset))
@@ -180,7 +185,10 @@ impl ParserKind {
             .await
             .map_err(MicrosandboxError::Io)?;
         if read == 0 {
-            return Ok(Vec::new());
+            return Ok(ParsedChunk {
+                entries: Vec::new(),
+                position: None,
+            });
         }
         let mut entries = Vec::new();
         let consumed = match self {
@@ -205,7 +213,11 @@ impl ParserKind {
             }
         };
         src.offset += consumed as u64;
-        Ok(entries)
+        let position = (consumed > 0).then_some(FilePosition {
+            generation: src.inode,
+            offset: src.offset,
+        });
+        Ok(ParsedChunk { entries, position })
     }
 
     /// Parse JSON Lines bytes. Emits `(entry, position)` pairs;
@@ -265,8 +277,8 @@ impl ParserKind {
         out: &mut Vec<(LogEntry, FilePosition)>,
     ) -> usize {
         Self::walk_lines(bytes, base_offset, out, |raw_line, entry_end_offset| {
-            let line = std::str::from_utf8(raw_line).ok()?;
-            let stripped = strip_ansi(line);
+            let line = String::from_utf8_lossy(raw_line);
+            let stripped = strip_ansi(&line);
             let (timestamp, body) = match split_leading_timestamp(&stripped) {
                 Some((s, rest)) => (
                     DateTime::parse_from_rfc3339(s)
@@ -474,6 +486,18 @@ mod tests {
         ParserKind::parse_text(bytes, 0, 0, mtime, None, &mut out);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0.timestamp, mtime);
+    }
+
+    #[test]
+    fn text_replaces_invalid_utf8_lossily() {
+        let bytes = b"2026-04-30T20:30:00.000Z bad \xff line\n";
+        let mut out = Vec::new();
+        ParserKind::parse_text(bytes, 0, 0, Utc::now(), None, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            std::str::from_utf8(&out[0].0.data).unwrap(),
+            "bad \u{fffd} line\n"
+        );
     }
 
     #[test]
