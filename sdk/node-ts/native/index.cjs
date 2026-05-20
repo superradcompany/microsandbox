@@ -576,6 +576,7 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
+module.exports.AgentClient = nativeBinding.AgentClient
 module.exports.AttachOptionsBuilder = nativeBinding.AttachOptionsBuilder
 module.exports.JsAttachOptionsBuilder = nativeBinding.JsAttachOptionsBuilder
 module.exports.DnsBuilder = nativeBinding.DnsBuilder

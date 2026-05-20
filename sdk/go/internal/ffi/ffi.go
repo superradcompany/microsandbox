@@ -17,10 +17,15 @@
 //
 // # Boundary contract
 //
-// Every msb_* call returns:
+// Most msb_* calls return:
 //   - NULL on success, writing a JSON document into the caller's buffer.
 //   - A heap-allocated C string (JSON {kind,message}) on failure. The Go
 //     side MUST free it with call_msb_free_string immediately after reading.
+//
+// Raw agent calls (`msb_agent_*`) are the exception: they return scalar values
+// through out parameters and variable-size CBOR bodies as Rust-allocated byte
+// buffers. The Go side MUST copy those bytes and free them with
+// call_msb_agent_free_bytes.
 //
 // Sandboxes are identified across the boundary by opaque uint64 handles
 // allocated by the Rust side. Call (*Sandbox).Close to release.
@@ -31,7 +36,9 @@
 // Rust MUST copy any string it needs before returning — it must not retain
 // Go pointers across calls. Error strings returned by Rust are heap-allocated
 // by Rust and freed by Go via call_msb_free_string. Output JSON is written
-// into a Go-owned buffer; Rust does not retain that pointer.
+// into a Go-owned buffer; Rust does not retain that pointer. Raw agent byte
+// outputs are allocated by Rust, copied by Go, then released through
+// call_msb_agent_free_bytes.
 //
 // # Thread safety
 //
@@ -150,6 +157,17 @@ typedef char *(*msb_fs_write_stream_fn)(uint64_t cancel_id, uint64_t handle, con
 typedef char *(*msb_fs_write_stream_write_fn)(uint64_t cancel_id, uint64_t stream_handle, const char *data_b64, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_fs_write_stream_close_fn)(uint64_t cancel_id, uint64_t stream_handle, uint8_t *buf, size_t buf_len);
 
+typedef char *(*msb_agent_open_sandbox_fn)(uint64_t cancel_id, const char *name, uint64_t *out_handle);
+typedef char *(*msb_agent_open_path_fn)(uint64_t cancel_id, const char *path, uint64_t *out_handle);
+typedef char *(*msb_agent_request_fn)(uint64_t cancel_id, uint64_t agent_handle, uint8_t flags, const uint8_t *body_ptr, size_t body_len, uint32_t *out_id, uint8_t *out_flags, uint8_t **out_body_ptr, size_t *out_body_len);
+typedef char *(*msb_agent_stream_open_fn)(uint64_t cancel_id, uint64_t agent_handle, uint8_t flags, const uint8_t *body_ptr, size_t body_len, uint32_t *out_id, uint64_t *out_stream_handle);
+typedef char *(*msb_agent_stream_next_fn)(uint64_t cancel_id, uint64_t agent_handle, uint64_t stream_handle, bool *out_present, uint32_t *out_id, uint8_t *out_flags, uint8_t **out_body_ptr, size_t *out_body_len);
+typedef char *(*msb_agent_stream_close_fn)(uint64_t cancel_id, uint64_t agent_handle, uint64_t stream_handle);
+typedef char *(*msb_agent_send_fn)(uint64_t cancel_id, uint64_t agent_handle, uint32_t id, uint8_t flags, const uint8_t *body_ptr, size_t body_len);
+typedef char *(*msb_agent_ready_bytes_fn)(uint64_t agent_handle, uint8_t **out_body_ptr, size_t *out_body_len);
+typedef char *(*msb_agent_close_fn)(uint64_t cancel_id, uint64_t agent_handle);
+typedef void (*msb_agent_free_bytes_fn)(uint8_t *ptr, size_t len);
+
 // ---------------------------------------------------------------------------
 // Function pointer globals — NULL until load_microsandbox() succeeds.
 // ---------------------------------------------------------------------------
@@ -218,6 +236,16 @@ static msb_fs_read_stream_close_fn ptr_msb_fs_read_stream_close = NULL;
 static msb_fs_write_stream_fn      ptr_msb_fs_write_stream      = NULL;
 static msb_fs_write_stream_write_fn ptr_msb_fs_write_stream_write = NULL;
 static msb_fs_write_stream_close_fn ptr_msb_fs_write_stream_close = NULL;
+static msb_agent_open_sandbox_fn    ptr_msb_agent_open_sandbox    = NULL;
+static msb_agent_open_path_fn       ptr_msb_agent_open_path       = NULL;
+static msb_agent_request_fn         ptr_msb_agent_request         = NULL;
+static msb_agent_stream_open_fn     ptr_msb_agent_stream_open     = NULL;
+static msb_agent_stream_next_fn     ptr_msb_agent_stream_next     = NULL;
+static msb_agent_stream_close_fn    ptr_msb_agent_stream_close    = NULL;
+static msb_agent_send_fn            ptr_msb_agent_send            = NULL;
+static msb_agent_ready_bytes_fn     ptr_msb_agent_ready_bytes     = NULL;
+static msb_agent_close_fn           ptr_msb_agent_close           = NULL;
+static msb_agent_free_bytes_fn      ptr_msb_agent_free_bytes      = NULL;
 static msb_version_fn              ptr_msb_version              = NULL;
 static msb_image_get_fn            ptr_msb_image_get            = NULL;
 static msb_image_list_fn           ptr_msb_image_list           = NULL;
@@ -335,6 +363,16 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_fs_write_stream);
 	RESOLVE(msb_fs_write_stream_write);
 	RESOLVE(msb_fs_write_stream_close);
+	RESOLVE(msb_agent_open_sandbox);
+	RESOLVE(msb_agent_open_path);
+	RESOLVE(msb_agent_request);
+	RESOLVE(msb_agent_stream_open);
+	RESOLVE(msb_agent_stream_next);
+	RESOLVE(msb_agent_stream_close);
+	RESOLVE(msb_agent_send);
+	RESOLVE(msb_agent_ready_bytes);
+	RESOLVE(msb_agent_close);
+	RESOLVE(msb_agent_free_bytes);
 	RESOLVE(msb_version);
 	RESOLVE(msb_image_get);
 	RESOLVE(msb_image_list);
@@ -562,6 +600,36 @@ char *call_msb_fs_write_stream_write(uint64_t cancel_id, uint64_t stream_handle,
 char *call_msb_fs_write_stream_close(uint64_t cancel_id, uint64_t stream_handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_fs_write_stream_close ? ptr_msb_fs_write_stream_close(cancel_id, stream_handle, buf, buf_len) : NULL;
 }
+char *call_msb_agent_open_sandbox(uint64_t cancel_id, const char *name, uint64_t *out_handle) {
+	return ptr_msb_agent_open_sandbox ? ptr_msb_agent_open_sandbox(cancel_id, name, out_handle) : NULL;
+}
+char *call_msb_agent_open_path(uint64_t cancel_id, const char *path, uint64_t *out_handle) {
+	return ptr_msb_agent_open_path ? ptr_msb_agent_open_path(cancel_id, path, out_handle) : NULL;
+}
+char *call_msb_agent_request(uint64_t cancel_id, uint64_t agent_handle, uint8_t flags, const uint8_t *body_ptr, size_t body_len, uint32_t *out_id, uint8_t *out_flags, uint8_t **out_body_ptr, size_t *out_body_len) {
+	return ptr_msb_agent_request ? ptr_msb_agent_request(cancel_id, agent_handle, flags, body_ptr, body_len, out_id, out_flags, out_body_ptr, out_body_len) : NULL;
+}
+char *call_msb_agent_stream_open(uint64_t cancel_id, uint64_t agent_handle, uint8_t flags, const uint8_t *body_ptr, size_t body_len, uint32_t *out_id, uint64_t *out_stream_handle) {
+	return ptr_msb_agent_stream_open ? ptr_msb_agent_stream_open(cancel_id, agent_handle, flags, body_ptr, body_len, out_id, out_stream_handle) : NULL;
+}
+char *call_msb_agent_stream_next(uint64_t cancel_id, uint64_t agent_handle, uint64_t stream_handle, bool *out_present, uint32_t *out_id, uint8_t *out_flags, uint8_t **out_body_ptr, size_t *out_body_len) {
+	return ptr_msb_agent_stream_next ? ptr_msb_agent_stream_next(cancel_id, agent_handle, stream_handle, out_present, out_id, out_flags, out_body_ptr, out_body_len) : NULL;
+}
+char *call_msb_agent_stream_close(uint64_t cancel_id, uint64_t agent_handle, uint64_t stream_handle) {
+	return ptr_msb_agent_stream_close ? ptr_msb_agent_stream_close(cancel_id, agent_handle, stream_handle) : NULL;
+}
+char *call_msb_agent_send(uint64_t cancel_id, uint64_t agent_handle, uint32_t id, uint8_t flags, const uint8_t *body_ptr, size_t body_len) {
+	return ptr_msb_agent_send ? ptr_msb_agent_send(cancel_id, agent_handle, id, flags, body_ptr, body_len) : NULL;
+}
+char *call_msb_agent_ready_bytes(uint64_t agent_handle, uint8_t **out_body_ptr, size_t *out_body_len) {
+	return ptr_msb_agent_ready_bytes ? ptr_msb_agent_ready_bytes(agent_handle, out_body_ptr, out_body_len) : NULL;
+}
+char *call_msb_agent_close(uint64_t cancel_id, uint64_t agent_handle) {
+	return ptr_msb_agent_close ? ptr_msb_agent_close(cancel_id, agent_handle) : NULL;
+}
+void call_msb_agent_free_bytes(uint8_t *ptr, size_t len) {
+	if (ptr_msb_agent_free_bytes) ptr_msb_agent_free_bytes(ptr, len);
+}
 char *call_msb_version(uint8_t *buf, size_t buf_len) {
 	return ptr_msb_version ? ptr_msb_version(buf, buf_len) : NULL;
 }
@@ -780,6 +848,24 @@ type Sandbox struct {
 	name   string
 }
 
+// AgentFrame is one raw protocol frame from agentd.
+type AgentFrame struct {
+	ID    uint32
+	Flags uint8
+	Body  []byte
+}
+
+// AgentClient is an opaque handle to a Rust-side AgentBridge.
+type AgentClient struct {
+	handle atomic.Uint64
+}
+
+// AgentStreamHandle is an opaque reference to an open raw agent stream.
+type AgentStreamHandle struct {
+	agentHandle C.uint64_t
+	handle      C.uint64_t
+}
+
 // Handle returns the underlying integer handle (for debugging only). Returns
 // 0 after Close.
 func (s *Sandbox) Handle() uint64 { return s.handle.Load() }
@@ -845,6 +931,76 @@ func callBuf(ctx context.Context, bufSize int, fn func(cancelID C.uint64_t, buf 
 	}
 }
 
+func callRaw(ctx context.Context, fn func(cancelID C.uint64_t) *C.char) error {
+	type res struct {
+		err error
+	}
+	done := make(chan res, 1)
+	cancelID := C.call_msb_cancel_alloc()
+
+	go func() {
+		done <- res{err: errorFromPtr(fn(cancelID))}
+	}()
+
+	select {
+	case r := <-done:
+		return r.err
+	case <-ctx.Done():
+		C.call_msb_cancel_trigger(cancelID)
+		<-done
+		return ctx.Err()
+	}
+}
+
+func errorFromPtr(errPtr *C.char) error {
+	if errPtr == nil {
+		return nil
+	}
+	msg := C.GoString(errPtr)
+	C.call_msb_free_string(errPtr)
+	var e Error
+	if jerr := json.Unmarshal([]byte(msg), &e); jerr != nil {
+		e = Error{Kind: KindInternal, Message: msg}
+	}
+	return &e
+}
+
+func cBytePtr(data []byte) (*C.uint8_t, C.size_t) {
+	if len(data) == 0 {
+		return nil, 0
+	}
+	return (*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data))
+}
+
+func takeRustBytes(ptr *C.uint8_t, len C.size_t) []byte {
+	if ptr == nil || len == 0 {
+		return []byte{}
+	}
+	defer C.call_msb_agent_free_bytes(ptr, len)
+	return append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(ptr)), int(len))...)
+}
+
+func freeRustBytes(ptrSlot **C.uint8_t, lenSlot *C.size_t) {
+	if ptrSlot == nil || lenSlot == nil || *ptrSlot == nil {
+		return
+	}
+	C.call_msb_agent_free_bytes(*ptrSlot, *lenSlot)
+	*ptrSlot = nil
+	*lenSlot = 0
+}
+
+func allocRustBytesOut() (**C.uint8_t, *C.size_t, func()) {
+	ptrSlot := (**C.uint8_t)(C.malloc(C.size_t(unsafe.Sizeof(uintptr(0)))))
+	lenSlot := (*C.size_t)(C.malloc(C.size_t(unsafe.Sizeof(C.size_t(0)))))
+	*ptrSlot = nil
+	*lenSlot = 0
+	cleanup := func() {
+		C.free(unsafe.Pointer(ptrSlot))
+		C.free(unsafe.Pointer(lenSlot))
+	}
+	return ptrSlot, lenSlot, cleanup
+}
+
 // salvageHandle attempts a best-effort recovery of the `handle` field from a
 // create/connect response body when strict unmarshalling failed. Returns 0
 // if the handle cannot be recovered. Used to avoid leaking Rust-side state
@@ -878,6 +1034,161 @@ func salvageHandle(body string) uint64 {
 func releaseHandle(handle uint64) {
 	_, _ = call(context.Background(), func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_sandbox_close(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+}
+
+// =============================================================================
+// Agent client
+// =============================================================================
+
+// OpenAgentSandbox connects to a running sandbox by name.
+func OpenAgentSandbox(ctx context.Context, name string) (*AgentClient, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+
+	var handle C.uint64_t
+	if err := callRaw(ctx, func(cancelID C.uint64_t) *C.char {
+		return C.call_msb_agent_open_sandbox(cancelID, cName, &handle)
+	}); err != nil {
+		return nil, err
+	}
+	c := &AgentClient{}
+	c.handle.Store(uint64(handle))
+	return c, nil
+}
+
+// OpenAgentPath connects to an agentd relay socket by path.
+func OpenAgentPath(ctx context.Context, path string) (*AgentClient, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	var handle C.uint64_t
+	if err := callRaw(ctx, func(cancelID C.uint64_t) *C.char {
+		return C.call_msb_agent_open_path(cancelID, cPath, &handle)
+	}); err != nil {
+		return nil, err
+	}
+	c := &AgentClient{}
+	c.handle.Store(uint64(handle))
+	return c, nil
+}
+
+func (c *AgentClient) h() C.uint64_t { return C.uint64_t(c.handle.Load()) }
+
+// Request sends one raw frame and waits for one response frame.
+func (c *AgentClient) Request(ctx context.Context, flags uint8, body []byte) (*AgentFrame, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	bodyPtr, bodyLen := cBytePtr(body)
+	var id C.uint32_t
+	var outFlags C.uint8_t
+	outBodyPtr, outBodyLen, cleanup := allocRustBytesOut()
+	defer cleanup()
+	if err := callRaw(ctx, func(cancelID C.uint64_t) *C.char {
+		return C.call_msb_agent_request(cancelID, c.h(), C.uint8_t(flags), bodyPtr, bodyLen, &id, &outFlags, outBodyPtr, outBodyLen)
+	}); err != nil {
+		freeRustBytes(outBodyPtr, outBodyLen)
+		return nil, err
+	}
+	return &AgentFrame{ID: uint32(id), Flags: uint8(outFlags), Body: takeRustBytes(*outBodyPtr, *outBodyLen)}, nil
+}
+
+// StreamOpen starts a raw streaming session.
+func (c *AgentClient) StreamOpen(ctx context.Context, flags uint8, body []byte) (uint32, *AgentStreamHandle, error) {
+	if err := ensureLoaded(); err != nil {
+		return 0, nil, err
+	}
+	bodyPtr, bodyLen := cBytePtr(body)
+	var id C.uint32_t
+	var streamHandle C.uint64_t
+	if err := callRaw(ctx, func(cancelID C.uint64_t) *C.char {
+		return C.call_msb_agent_stream_open(cancelID, c.h(), C.uint8_t(flags), bodyPtr, bodyLen, &id, &streamHandle)
+	}); err != nil {
+		return 0, nil, err
+	}
+	return uint32(id), &AgentStreamHandle{agentHandle: c.h(), handle: streamHandle}, nil
+}
+
+// StreamNext blocks until the next raw stream frame or EOF.
+func (s *AgentStreamHandle) StreamNext(ctx context.Context) (*AgentFrame, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	var present C.bool
+	var id C.uint32_t
+	var flags C.uint8_t
+	outBodyPtr, outBodyLen, cleanup := allocRustBytesOut()
+	defer cleanup()
+	if err := callRaw(ctx, func(cancelID C.uint64_t) *C.char {
+		return C.call_msb_agent_stream_next(cancelID, s.agentHandle, s.handle, &present, &id, &flags, outBodyPtr, outBodyLen)
+	}); err != nil {
+		freeRustBytes(outBodyPtr, outBodyLen)
+		return nil, err
+	}
+	if !bool(present) {
+		return nil, nil
+	}
+	return &AgentFrame{ID: uint32(id), Flags: uint8(flags), Body: takeRustBytes(*outBodyPtr, *outBodyLen)}, nil
+}
+
+// Close releases the raw stream handle.
+func (s *AgentStreamHandle) Close(ctx context.Context) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	return callRaw(ctx, func(cancelID C.uint64_t) *C.char {
+		return C.call_msb_agent_stream_close(cancelID, s.agentHandle, s.handle)
+	})
+}
+
+// Send sends a follow-up frame on an existing correlation id.
+func (c *AgentClient) Send(ctx context.Context, id uint32, flags uint8, body []byte) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	bodyPtr, bodyLen := cBytePtr(body)
+	return callRaw(ctx, func(cancelID C.uint64_t) *C.char {
+		return C.call_msb_agent_send(cancelID, c.h(), C.uint32_t(id), C.uint8_t(flags), bodyPtr, bodyLen)
+	})
+}
+
+// ReadyBytes returns the cached handshake core.ready CBOR body.
+func (c *AgentClient) ReadyBytes() ([]byte, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	outBodyPtr, outBodyLen, cleanup := allocRustBytesOut()
+	defer cleanup()
+	if err := errorFromPtr(C.call_msb_agent_ready_bytes(c.h(), outBodyPtr, outBodyLen)); err != nil {
+		freeRustBytes(outBodyPtr, outBodyLen)
+		return nil, err
+	}
+	return takeRustBytes(*outBodyPtr, *outBodyLen), nil
+}
+
+// Close releases the Rust-side agent client handle.
+func (c *AgentClient) Close() error {
+	return c.CloseCtx(context.Background())
+}
+
+// CloseCtx is Close with a caller-controlled context.
+func (c *AgentClient) CloseCtx(ctx context.Context) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	h := c.handle.Swap(0)
+	if h == 0 {
+		return nil
+	}
+	return callRaw(ctx, func(cancelID C.uint64_t) *C.char {
+		return C.call_msb_agent_close(cancelID, C.uint64_t(h))
 	})
 }
 

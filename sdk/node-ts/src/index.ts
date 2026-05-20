@@ -1,6 +1,16 @@
 import { mapNapiError } from "./internal/error-mapping.js";
 import { napi } from "./internal/napi.js";
 
+// Low-level agent client (raw transport to agentd).
+export {
+  AgentClient,
+  AgentStream,
+  FLAG_SESSION_START,
+  FLAG_SHUTDOWN,
+  FLAG_TERMINAL,
+  type RawFrame,
+} from "./agent.js";
+
 // Sandbox lifecycle and execution
 export { PullProgressCreate, Sandbox } from "./sandbox.js";
 import { Sandbox as _Sandbox, type SandboxBuilder as _SBT } from "./sandbox.js";

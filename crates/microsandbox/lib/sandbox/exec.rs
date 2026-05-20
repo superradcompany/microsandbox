@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use bytes::Bytes;
 use microsandbox_protocol::{
     exec::{ExecSignal, ExecStdin},
-    message::{Message, MessageType},
+    message::MessageType,
 };
 
 pub use microsandbox_protocol::exec::RlimitResource;
@@ -406,8 +406,10 @@ impl ExecHandle {
     /// running process inside the guest.
     pub async fn signal(&self, signal: i32) -> MicrosandboxResult<()> {
         let payload = ExecSignal { signal };
-        let msg = Message::with_payload(MessageType::ExecSignal, self.id, &payload)?;
-        self.client.send(&msg).await
+        self.client
+            .send(self.id, MessageType::ExecSignal, &payload)
+            .await?;
+        Ok(())
     }
 
     /// Send SIGKILL to the running process.
@@ -427,14 +429,18 @@ impl ExecSink {
         let payload = ExecStdin {
             data: data.as_ref().to_vec(),
         };
-        let msg = Message::with_payload(MessageType::ExecStdin, self.id, &payload)?;
-        self.client.send(&msg).await
+        self.client
+            .send(self.id, MessageType::ExecStdin, &payload)
+            .await?;
+        Ok(())
     }
 
     /// Close stdin (sends EOF to the process).
     pub async fn close(&self) -> MicrosandboxResult<()> {
         let payload = ExecStdin { data: Vec::new() };
-        let msg = Message::with_payload(MessageType::ExecStdin, self.id, &payload)?;
-        self.client.send(&msg).await
+        self.client
+            .send(self.id, MessageType::ExecStdin, &payload)
+            .await?;
+        Ok(())
     }
 }
