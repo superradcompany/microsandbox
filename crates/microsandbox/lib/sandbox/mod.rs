@@ -308,11 +308,16 @@ impl Sandbox {
         tracing::debug!(sandbox_id, sandbox = %config.name, "create_with_mode: db record inserted");
 
         // Spawn the sandbox process and create the bridge. On failure, mark the sandbox
-        // as stopped so it doesn't appear as a phantom "Running" entry.
+        // as stopped so it doesn't appear as a phantom "Running" entry. Also
+        // free the metrics slot: the runtime may have reserved one but its
+        // exit observer cannot be relied upon if the child was SIGKILL'd
+        // before activation, and `reconcile_sandbox_runtime_state` will not
+        // run reaper cleanup for a Stopped sandbox.
         let sandbox = match Self::create_inner(config, sandbox_id, mode).await {
             Ok(sandbox) => sandbox,
             Err(e) => {
                 let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+                free_metrics_slot_for(sandbox_id, None, microsandbox_metrics::ReleaseMode::Free);
                 return Err(e);
             }
         };
@@ -324,6 +329,7 @@ impl Sandbox {
         {
             let _ = sandbox.stop().await;
             let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+            free_metrics_slot_for(sandbox_id, None, microsandbox_metrics::ReleaseMode::Free);
             return Err(err);
         }
 
@@ -333,6 +339,7 @@ impl Sandbox {
         {
             let _ = sandbox.stop().await;
             let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+            free_metrics_slot_for(sandbox_id, None, microsandbox_metrics::ReleaseMode::Free);
             return Err(crate::MicrosandboxError::InvalidConfig(format!(
                 "workdir does not exist in guest: {workdir}"
             )));
@@ -371,6 +378,7 @@ impl Sandbox {
             Ok(sandbox) => Ok(sandbox),
             Err(err) => {
                 let _ = update_sandbox_status(write_db, model.id, SandboxStatus::Stopped).await;
+                free_metrics_slot_for(model.id, None, microsandbox_metrics::ReleaseMode::Free);
                 Err(err)
             }
         }
@@ -466,6 +474,7 @@ impl Sandbox {
                 .sandboxes_dir()
                 .join(&self.config.name),
         )?;
+        free_metrics_slot_for(self.db_id, None, microsandbox_metrics::ReleaseMode::Free);
         sandbox_entity::Entity::delete_by_id(self.db_id)
             .exec(pools.write())
             .await?;
@@ -1510,6 +1519,11 @@ async fn mark_sandbox_runtime_stale(
     sandbox_id: i32,
     run_id: Option<i32>,
 ) -> MicrosandboxResult<()> {
+    // The runtime exit observer normally clears its own slot. When the
+    // reaper is running, the runtime crashed without that hook firing —
+    // free the slot here so it can be reused.
+    free_metrics_slot_for(sandbox_id, run_id, microsandbox_metrics::ReleaseMode::Free);
+
     db.transaction(|txn| async move {
         let now = chrono::Utc::now().naive_utc();
 
@@ -1548,6 +1562,34 @@ async fn mark_sandbox_runtime_stale(
         Ok((txn, ()))
     })
     .await
+}
+
+/// Best-effort free of the metrics slot for a given sandbox/run identity.
+///
+/// Matches by run id first (most precise) and falls back to sandbox id when
+/// no run id is known. Failures here are swallowed because the registry
+/// itself will eventually reclaim dead slots under capacity pressure.
+fn free_metrics_slot_for(
+    sandbox_id: i32,
+    run_id: Option<i32>,
+    mode: microsandbox_metrics::ReleaseMode,
+) {
+    let name = crate::config::config().metrics_registry_shm_name();
+    let reg = match microsandbox_metrics::MetricsRegistry::open(&name) {
+        Ok(reg) => reg,
+        Err(microsandbox_metrics::MetricsError::Io(ref e))
+            if e.raw_os_error() == Some(libc::ENOENT) =>
+        {
+            return;
+        }
+        Err(err) => {
+            tracing::debug!(error = %err, "failed to open metrics registry for slot cleanup");
+            return;
+        }
+    };
+    if let Err(err) = reg.release_by_identity(sandbox_id, run_id, mode) {
+        tracing::debug!(error = %err, sandbox_id, ?run_id, "metrics slot cleanup failed");
+    }
 }
 
 pub(super) fn pid_is_alive(pid: i32) -> bool {
@@ -1740,6 +1782,11 @@ async fn prepare_create_target(
         if active {
             stop_sandbox_for_replacement(pools, &model, config.replace_with_grace).await?;
         }
+
+        // Free any lingering metrics slot before the row goes away; once the
+        // sandbox id is gone there is no way for the reaper to map a slot
+        // back to it.
+        free_metrics_slot_for(model.id, None, microsandbox_metrics::ReleaseMode::Free);
 
         sandbox_entity::Entity::delete_by_id(model.id)
             .exec(pools.write())

@@ -95,25 +95,16 @@ impl SandboxHandle {
 
     /// Get the latest metrics snapshot for this sandbox.
     pub async fn metrics(&self) -> MicrosandboxResult<super::SandboxMetrics> {
-        if self.status != SandboxStatus::Running && self.status != SandboxStatus::Draining {
-            return Err(crate::MicrosandboxError::Custom(format!(
-                "sandbox '{}' is not running (status: {:?})",
-                self.name, self.status
-            )));
-        }
-
+        // Skip the stale-status snapshot check on purpose: it can lag behind
+        // a sandbox that just crashed, and `metrics_for_sandbox` already
+        // returns a clear "no active run" error via `load_active_run`.
         let config = self.config()?;
         if config.effective_metrics_interval().is_none() {
             return Err(crate::MicrosandboxError::MetricsDisabled(self.name.clone()));
         }
 
         let db = crate::db::init_global().await?.read();
-        super::metrics::metrics_for_sandbox(
-            db,
-            self.db_id,
-            u64::from(config.memory_mib) * 1024 * 1024,
-        )
-        .await
+        super::metrics::metrics_for_sandbox(db, self.db_id, &config).await
     }
 
     /// Start this sandbox and return a live handle.
@@ -258,6 +249,7 @@ impl SandboxHandle {
         let pools = crate::db::init_global().await?;
 
         super::remove_dir_if_exists(&crate::config::config().sandboxes_dir().join(&self.name))?;
+        super::free_metrics_slot_for(self.db_id, None, microsandbox_metrics::ReleaseMode::Free);
         sandbox_entity::Entity::delete_by_id(self.db_id)
             .exec(pools.write())
             .await?;

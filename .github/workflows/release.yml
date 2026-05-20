@@ -529,6 +529,7 @@ jobs:
             microsandbox-image \
             microsandbox-filesystem \
             microsandbox-network \
+            microsandbox-metrics \
             microsandbox-runtime \
             microsandbox \
             microsandbox-cli; do

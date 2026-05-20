@@ -6,6 +6,7 @@ members = [
     "crates/db",
     "crates/filesystem",
     "crates/image",
+    "crates/metrics",
     "crates/microsandbox",
     "crates/migration",
     "crates/protocol",

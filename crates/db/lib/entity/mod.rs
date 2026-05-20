@@ -7,7 +7,6 @@ pub mod manifest;
 pub mod manifest_layer;
 pub mod run;
 pub mod sandbox;
-pub mod sandbox_metric;
 pub mod sandbox_rootfs;
 pub mod snapshot;
 pub mod volume;
