@@ -15,7 +15,7 @@ use std::time::Duration;
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::run as run_entity;
 use microsandbox_filesystem::{
-  DynFileSystem, HostPermissions, PassthroughConfig, PassthroughFs, StatVirtualization
+    DynFileSystem, HostPermissions, PassthroughConfig, PassthroughFs, StatVirtualization,
 };
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 use msb_krun::VmBuilder;
