@@ -7,6 +7,7 @@ use lru::LruCache;
 use rustls::DigitallySignedStruct;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use time::{Duration, OffsetDateTime};
 use tokio_rustls::TlsConnector;
 
 use super::ca::CertAuthority;
@@ -50,6 +51,10 @@ enum BypassPattern {
 /// validation. Used when `verify_upstream` is `false`.
 #[derive(Debug)]
 struct NoVerify;
+
+/// Refresh cached leaf certs shortly before expiry so long-lived sandboxes
+/// do not start serving an already-expired intercept certificate.
+const CERT_REFRESH_WINDOW: Duration = Duration::minutes(5);
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -103,7 +108,9 @@ impl TlsState {
     pub fn get_or_generate_cert(&self, domain: &str) -> Arc<DomainCert> {
         let mut cache = self.cert_cache.lock().unwrap();
         if let Some(cert) = cache.get(domain) {
-            return cert.clone();
+            if cert.not_after > OffsetDateTime::now_utc() + CERT_REFRESH_WINDOW {
+                return cert.clone();
+            }
         }
 
         let cert = Arc::new(certgen::generate_domain_cert(
@@ -129,6 +136,35 @@ impl TlsState {
     /// Get the CA certificate PEM bytes for guest installation.
     pub fn ca_cert_pem(&self) -> Vec<u8> {
         self.intercept_ca.cert_pem()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secrets::config::SecretsConfig;
+
+    #[test]
+    fn regenerates_cached_domain_cert_when_near_expiry() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let state = TlsState::new(TlsConfig::default(), SecretsConfig::default());
+        let first = state.get_or_generate_cert("openrouter.ai");
+        let original_not_after = first.not_after;
+
+        {
+            let mut cache = state.cert_cache.lock().unwrap();
+            let stale = Arc::new(DomainCert {
+                chain: first.chain.clone(),
+                key: first.key.clone_key(),
+                not_after: OffsetDateTime::now_utc() + Duration::seconds(30),
+                server_config: first.server_config.clone(),
+            });
+            cache.put("openrouter.ai".to_string(), stale);
+        }
+
+        let refreshed = state.get_or_generate_cert("openrouter.ai");
+        assert!(refreshed.not_after > OffsetDateTime::now_utc() + Duration::hours(23));
+        assert!(refreshed.not_after > original_not_after - Duration::minutes(10));
     }
 }
 

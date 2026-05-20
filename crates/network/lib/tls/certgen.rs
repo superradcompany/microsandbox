@@ -17,6 +17,8 @@ pub struct DomainCert {
     pub chain: Vec<CertificateDer<'static>>,
     /// Leaf certificate private key.
     pub key: PrivateKeyDer<'static>,
+    /// Expiry time for the generated leaf certificate.
+    pub not_after: OffsetDateTime,
     /// Pre-built `ServerConfig` for this domain (avoids per-connection rebuild).
     pub server_config: std::sync::Arc<rustls::ServerConfig>,
 }
@@ -29,6 +31,7 @@ pub struct DomainCert {
 pub fn generate_domain_cert(domain: &str, ca: &CertAuthority, validity_hours: u64) -> DomainCert {
     let now = OffsetDateTime::now_utc();
     let params = build_domain_cert_params(domain, validity_hours, now);
+    let not_after = params.not_after;
 
     let key_pair = rcgen::KeyPair::generate().expect("failed to generate domain key pair");
 
@@ -51,6 +54,7 @@ pub fn generate_domain_cert(domain: &str, ca: &CertAuthority, validity_hours: u6
     DomainCert {
         chain,
         key,
+        not_after,
         server_config: std::sync::Arc::new(server_config),
     }
 }
