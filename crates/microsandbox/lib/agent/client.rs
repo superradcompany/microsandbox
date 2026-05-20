@@ -36,9 +36,11 @@ use crate::MicrosandboxResult;
 pub struct AgentClient {
     /// Writer half of the Unix socket connection.
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
-    /// Next correlation ID to allocate (starts at `id_offset + 1`).
+    /// Next correlation ID to allocate (starts at `id_start`).
     next_id: AtomicU32,
-    /// Upper bound (exclusive) of the assigned ID range.
+    /// Inclusive lower bound of the assigned ID range (`id_offset + 1`).
+    id_start: u32,
+    /// Exclusive upper bound of the assigned ID range (`id_offset + id_range_step`).
     id_max: u32,
     /// Pending response channels keyed by correlation ID.
     pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Message>>>>,
@@ -74,19 +76,21 @@ impl AgentClient {
 
         let (mut reader, writer) = stream.into_split();
 
-        // Read the handshake: [id_offset: u32 BE][ready_frame_bytes...]
-        let mut offset_buf = [0u8; 4];
-        tokio::time::timeout_at(deadline, reader.read_exact(&mut offset_buf))
+        // Read the handshake header:
+        // [id_offset: u32 BE][id_range_step: u32 BE][ready_frame_bytes...]
+        let mut header_buf = [0u8; 8];
+        tokio::time::timeout_at(deadline, reader.read_exact(&mut header_buf))
             .await
             .map_err(|_| {
                 crate::MicrosandboxError::Runtime(
-                    "handshake read id_offset: timed out before relay sent bytes".into(),
+                    "handshake read header: timed out before relay sent bytes".into(),
                 )
             })?
             .map_err(|e| {
-                crate::MicrosandboxError::Runtime(format!("handshake read id_offset: {e}"))
+                crate::MicrosandboxError::Runtime(format!("handshake read header: {e}"))
             })?;
-        let id_offset = u32::from_be_bytes(offset_buf);
+        let id_offset = u32::from_be_bytes(header_buf[0..4].try_into().unwrap());
+        let id_range_step = u32::from_be_bytes(header_buf[4..8].try_into().unwrap());
 
         // Read the ready frame using the protocol codec directly.
         let ready_msg = tokio::time::timeout_at(deadline, codec::read_message(&mut reader))
@@ -105,7 +109,7 @@ impl AgentClient {
             .map_err(|e| crate::MicrosandboxError::Runtime(format!("decode ready payload: {e}")))?;
 
         tracing::info!(
-            "agent client: connected to relay, id_offset={id_offset}, boot_time={}ns",
+            "agent client: connected to relay, id_offset={id_offset}, id_range_step={id_range_step}, boot_time={}ns",
             ready.boot_time_ns
         );
 
@@ -116,14 +120,13 @@ impl AgentClient {
 
         let writer = Arc::new(Mutex::new(writer));
 
-        // Compute the upper bound of the assigned ID range.
-        // ID_RANGE_STEP = u32::MAX / 16 ≈ 268M IDs per client.
-        let id_range_step: u32 = u32::MAX / 16;
+        let id_start = id_offset.saturating_add(1);
         let id_max = id_offset.saturating_add(id_range_step);
 
         Ok(Self {
             writer,
-            next_id: AtomicU32::new(id_offset + 1),
+            next_id: AtomicU32::new(id_start),
+            id_start,
             id_max,
             pending,
             reader_handle,
@@ -137,12 +140,11 @@ impl AgentClient {
     pub fn next_id(&self) -> u32 {
         loop {
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            if id != 0 && id < self.id_max {
+            if id >= self.id_start && id < self.id_max {
                 return id;
             }
-            // Wrapped past the range or hit 0 (reserved) — reset to range start.
-            let start = self.id_max.saturating_sub(u32::MAX / 16) + 1;
-            self.next_id.store(start, Ordering::Relaxed);
+            // Wrapped past the range — reset to range start.
+            self.next_id.store(self.id_start, Ordering::Relaxed);
         }
     }
 

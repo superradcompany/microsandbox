@@ -62,9 +62,12 @@ type SessionRegistry = std::sync::Mutex<HashMap<u32, SessionInfo>>;
 //--------------------------------------------------------------------------------------------------
 
 /// Maximum number of simultaneous clients.
-const MAX_CLIENTS: u32 = 16;
+const MAX_CLIENTS: u32 = 128;
 
 /// Size of the correlation ID range allocated to each client.
+///
+/// Sent to each client during handshake, so the SDK never needs to know
+/// `MAX_CLIENTS`. Changing `MAX_CLIENTS` requires no SDK rebuild.
 const ID_RANGE_STEP: u32 = u32::MAX / MAX_CLIENTS;
 
 /// Size of the length prefix in the wire format.
@@ -323,11 +326,13 @@ impl AgentRelay {
                                 "agent relay: client connected slot={slot} id_offset={id_offset}"
                             );
 
-                            // Perform handshake: send [id_offset: u32 BE][ready_frame_bytes...].
+                            // Perform handshake: send
+                            // [id_offset: u32 BE][id_range_step: u32 BE][ready_frame_bytes...].
                             let (reader_half, mut writer_half) = stream.into_split();
 
-                            let mut handshake = Vec::with_capacity(4 + ready_frame.len());
+                            let mut handshake = Vec::with_capacity(8 + ready_frame.len());
                             handshake.extend_from_slice(&id_offset.to_be_bytes());
+                            handshake.extend_from_slice(&ID_RANGE_STEP.to_be_bytes());
                             handshake.extend_from_slice(&ready_frame);
 
                             if let Err(e) = writer_half.write_all(&handshake).await {
