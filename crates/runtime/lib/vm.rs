@@ -14,7 +14,9 @@ use std::time::Duration;
 
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::run as run_entity;
-use microsandbox_filesystem::{DynFileSystem, PassthroughConfig, PassthroughFs};
+use microsandbox_filesystem::{
+    DynFileSystem, HostPermissions, PassthroughConfig, PassthroughFs, StatVirtualization,
+};
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 use msb_krun::VmBuilder;
 use sea_orm::{ColumnTrait, EntityTrait, Set};
@@ -746,22 +748,20 @@ fn build_vm(
 
     // Additional mounts.
     for mount_spec in &vm.mounts {
-        let (spec, _readonly) = match mount_spec.strip_suffix(":ro") {
-            Some(s) => (s, true),
-            None => (mount_spec.as_str(), false),
-        };
+        let parsed = parse_mount_spec(mount_spec)
+            .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;
 
-        if let Some((tag, path)) = spec.split_once(':') {
-            let tag = tag.to_string();
-            let cfg = PassthroughConfig {
-                root_dir: PathBuf::from(path),
-                inject_init: false,
-                ..Default::default()
-            };
-            let backend = PassthroughFs::new(cfg)
-                .map_err(|e| RuntimeError::Custom(format!("mount {tag}: {e}")))?;
-            builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
-        }
+        let tag = parsed.tag;
+        let cfg = PassthroughConfig {
+            root_dir: PathBuf::from(parsed.host_path),
+            inject_init: false,
+            stat_virtualization: parsed.stat_virtualization,
+            host_permissions: parsed.host_permissions,
+            ..Default::default()
+        };
+        let backend = PassthroughFs::new(cfg)
+            .map_err(|e| RuntimeError::Custom(format!("mount {tag}: {e}")))?;
+        builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(backend)));
     }
 
     // Disk-image volume mounts. Each adds an extra virtio-blk device with
@@ -1084,6 +1084,141 @@ fn spawn_log_thread(
     Ok(())
 }
 
+/// Parsed `--mount` spec: tag, host path, plus optional policies.
+///
+/// Wire format: `tag:host_path[:ro][,stat-virt=strict|relaxed|off][,host-perms=private|mirror]`.
+/// Defaults: `stat-virt=strict`, `host-perms=private`. The `:ro` segment is
+/// kept for protocol compatibility but only used by agentd, not the host fs.
+#[derive(Debug)]
+struct ParsedMountSpec {
+    tag: String,
+    host_path: String,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+}
+
+/// Parse a `--mount` spec into [`ParsedMountSpec`].
+///
+/// Wire grammar: `tag:host_path[:ro][,key=value]*`. The host path may contain
+/// commas — the comma-option suffix is identified relative to the trailing
+/// `:ro` (if present) or, when absent, by the first `,` after the host path.
+///
+/// To make this unambiguous we split on the first `:` (tag/host boundary) and
+/// then peel the option suffix off the right side rather than splitting the
+/// whole spec on `,` first.
+fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
+    let (tag, rest) = spec
+        .split_once(':')
+        .ok_or_else(|| format!("expected tag:host_path[:ro][,opts] shape, got {spec:?}"))?;
+    if tag.is_empty() {
+        return Err(format!("empty tag in mount spec {spec:?}"));
+    }
+
+    // Peel the trailing options block. Strategy:
+    //   1) If `:ro` is present in the spec (only ever after host_path), the
+    //      options block starts at the first `,` *after* the `:ro` token.
+    //   2) Otherwise the options block starts at the first `,` after the
+    //      first `:` that follows the host path. We accept that paths
+    //      containing both `:` and `,` outside this contract may be
+    //      misparsed — the producer side never emits such paths.
+    let (host_path_with_ro, options) = split_path_and_options(rest);
+
+    let (host_path, _readonly) = match host_path_with_ro.strip_suffix(":ro") {
+        Some(p) => (p, true),
+        None => (host_path_with_ro, false),
+    };
+
+    if host_path.is_empty() {
+        return Err(format!("empty host path in mount spec {spec:?}"));
+    }
+
+    let mut stat_virtualization = StatVirtualization::Strict;
+    let mut host_permissions = HostPermissions::Private;
+    let mut seen_stat_virt = false;
+    let mut seen_host_perms = false;
+
+    if let Some(opts) = options {
+        for opt in opts.split(',') {
+            let opt = opt.trim();
+            if opt.is_empty() {
+                continue;
+            }
+            let (key, value) = opt
+                .split_once('=')
+                .ok_or_else(|| format!("expected key=value option, got {opt:?}"))?;
+            match key {
+                "stat-virt" => {
+                    if seen_stat_virt {
+                        return Err("mount option `stat-virt` specified more than once".to_string());
+                    }
+                    seen_stat_virt = true;
+                    stat_virtualization = match value {
+                        "strict" => StatVirtualization::Strict,
+                        "relaxed" => StatVirtualization::Relaxed,
+                        "off" => StatVirtualization::Off,
+                        other => {
+                            return Err(format!(
+                                "invalid stat-virt {other:?} (expected strict|relaxed|off)"
+                            ));
+                        }
+                    }
+                }
+                "host-perms" => {
+                    if seen_host_perms {
+                        return Err(
+                            "mount option `host-perms` specified more than once".to_string()
+                        );
+                    }
+                    seen_host_perms = true;
+                    host_permissions = match value {
+                        "private" => HostPermissions::Private,
+                        "mirror" => HostPermissions::Mirror,
+                        other => {
+                            return Err(format!(
+                                "invalid host-perms {other:?} (expected private|mirror)"
+                            ));
+                        }
+                    }
+                }
+                other => return Err(format!("unknown mount option {other:?}")),
+            }
+        }
+    }
+
+    Ok(ParsedMountSpec {
+        tag: tag.to_string(),
+        host_path: host_path.to_string(),
+        stat_virtualization,
+        host_permissions,
+    })
+}
+
+/// Split `rest = "host_path[:ro][,opts]"` into `(host_path_with_ro, opts)`.
+///
+/// The split point is the first `,` that follows either `:ro` (if present) or
+/// the entire `rest` (if no `,` exists). Producer-side encoding never embeds
+/// `,` in host paths, so the first comma after `:ro` (or anywhere, if no
+/// `:ro`) is always the options separator.
+fn split_path_and_options(rest: &str) -> (&str, Option<&str>) {
+    // If we have ":ro" anywhere, the option block is the first comma after the
+    // ":ro" position. Otherwise, the option block is the first comma anywhere.
+    let comma_start = if let Some(ro_idx) = rest.find(":ro") {
+        let after_ro = ro_idx + ":ro".len();
+        rest[after_ro..].find(',').map(|i| after_ro + i)
+    } else {
+        rest.find(',')
+    };
+
+    match comma_start {
+        Some(i) => (&rest[..i], Some(&rest[i + 1..])),
+        None => (rest, None),
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Mount Spec Parsing
+//--------------------------------------------------------------------------------------------------
+
 /// Validate a disk image format string.
 pub fn validate_disk_format(format: Option<&str>) -> msb_krun::Result<msb_krun::DiskImageFormat> {
     match format.unwrap_or("raw") {
@@ -1129,7 +1264,82 @@ pub fn prepend_scripts_path(env: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_block_root_env, prepend_scripts_path, validate_disk_format};
+    use super::{
+        HostPermissions, StatVirtualization, append_block_root_env, parse_mount_spec,
+        prepend_scripts_path, validate_disk_format,
+    };
+
+    #[test]
+    fn test_parse_mount_spec_minimal() {
+        let p = parse_mount_spec("foo:/host/data").unwrap();
+        assert_eq!(p.tag, "foo");
+        assert_eq!(p.host_path, "/host/data");
+        assert!(matches!(p.stat_virtualization, StatVirtualization::Strict));
+        assert!(matches!(p.host_permissions, HostPermissions::Private));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_with_ro_and_policies() {
+        let p = parse_mount_spec("foo:/host/data:ro,stat-virt=relaxed,host-perms=mirror").unwrap();
+        assert_eq!(p.host_path, "/host/data");
+        assert!(matches!(p.stat_virtualization, StatVirtualization::Relaxed));
+        assert!(matches!(p.host_permissions, HostPermissions::Mirror));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_stat_virt_off() {
+        let p = parse_mount_spec("foo:/host/data,stat-virt=off").unwrap();
+        assert!(matches!(p.stat_virtualization, StatVirtualization::Off));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_unknown_key() {
+        let err = parse_mount_spec("foo:/host/data,bogus=1").unwrap_err();
+        assert!(err.contains("unknown mount option"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_invalid_stat_virt() {
+        let err = parse_mount_spec("foo:/host/data,stat-virt=nope").unwrap_err();
+        assert!(err.contains("invalid stat-virt"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_invalid_host_perms() {
+        let err = parse_mount_spec("foo:/host/data,host-perms=public").unwrap_err();
+        assert!(err.contains("invalid host-perms"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_missing_colon_errors() {
+        let err = parse_mount_spec("nopath").unwrap_err();
+        assert!(err.contains("expected tag:host_path"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_empty_tag_errors() {
+        let err = parse_mount_spec(":/host").unwrap_err();
+        assert!(err.contains("empty tag"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_spec_with_ro_anchors_options_block() {
+        // The SDK rejects commas in host paths, so the producer can guarantee
+        // commas in the wire format are always option separators. But the
+        // `:ro`-anchored split is still load-bearing: it ensures the option
+        // block starts after the `:ro` token even if a future relaxation of
+        // the path rules ever lets `,` slip through, the option scanner
+        // operates on the correct slice.
+        let p = parse_mount_spec("foo:/host/data:ro,stat-virt=relaxed").unwrap();
+        assert_eq!(p.host_path, "/host/data");
+        assert!(matches!(p.stat_virtualization, StatVirtualization::Relaxed));
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_duplicate_stat_virt() {
+        let err = parse_mount_spec("foo:/host,stat-virt=strict,stat-virt=off").unwrap_err();
+        assert!(err.contains("more than once"), "got: {err}");
+    }
 
     #[test]
     fn test_validate_disk_format_rejects_unknown_values() {

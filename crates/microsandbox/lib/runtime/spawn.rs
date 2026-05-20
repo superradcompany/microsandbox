@@ -32,7 +32,10 @@ use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 use crate::{
     MicrosandboxResult, config,
     runtime::handle::ProcessHandle,
-    sandbox::{DiskImageFormat, Rlimit, RootfsSource, SandboxConfig, VolumeMount},
+    sandbox::{
+        DiskImageFormat, HostPermissions, Rlimit, RootfsSource, SandboxConfig, StatVirtualization,
+        VolumeMount,
+    },
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -344,7 +347,15 @@ async fn stage_file_mounts(
                 host,
                 guest,
                 readonly,
-            } if host.is_file() => Some((host, guest, *readonly)),
+                stat_virtualization,
+                host_permissions,
+            } if host.is_file() => Some((
+                host,
+                guest,
+                *readonly,
+                *stat_virtualization,
+                *host_permissions,
+            )),
             _ => None,
         })
         .collect();
@@ -356,7 +367,7 @@ async fn stage_file_mounts(
     let tempdir = tempfile::tempdir()?;
     let mut staged = HashMap::new();
 
-    for (host, guest, readonly) in file_mounts {
+    for (host, guest, readonly, _stat_virt, _host_perms) in file_mounts {
         // Generate a random tag to avoid collisions.
         let id: u32 = rand::rng().random();
         let tag = format!("fm_{id:08x}");
@@ -424,20 +435,41 @@ async fn stage_file_mounts(
     Ok((staged, Some(tempdir)))
 }
 
-/// Push a `--mount tag:host_path[:ro]` arg pair.
+/// Push a `--mount tag:host_path[:ro][,stat-virt=...][,host-perms=...]` arg pair.
 fn push_dir_mount_arg(
     args: &mut Vec<OsString>,
     guest: &str,
     host_display: &impl std::fmt::Display,
     readonly: bool,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
 ) {
     let tag = guest_mount_tag(guest);
     let mut arg = format!("{tag}:{host_display}");
     if readonly {
         arg.push_str(":ro");
     }
+    append_policy_options(&mut arg, stat_virtualization, host_permissions);
     args.push(OsString::from("--mount"));
     args.push(OsString::from(arg));
+}
+
+/// Append `,stat-virt=...,host-perms=...` to a `--mount` arg when the policies
+/// deviate from the runtime defaults. Defaults are omitted to keep args tidy.
+fn append_policy_options(
+    arg: &mut String,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+) {
+    match stat_virtualization {
+        StatVirtualization::Strict => {}
+        StatVirtualization::Relaxed => arg.push_str(",stat-virt=relaxed"),
+        StatVirtualization::Off => arg.push_str(",stat-virt=off"),
+    }
+    match host_permissions {
+        HostPermissions::Private => {}
+        HostPermissions::Mirror => arg.push_str(",host-perms=mirror"),
+    }
 }
 
 /// Append a `tag:guest_path[:ro]` entry to the `MSB_DIR_MOUNTS` env var value.
@@ -454,12 +486,20 @@ fn push_dir_mounts_spec(dir_mounts_val: &mut String, guest: &str, readonly: bool
     }
 }
 
-/// Push a `--mount fm_tag:file_mount_dir[:ro]` arg pair.
-fn push_file_mount_arg(args: &mut Vec<OsString>, tag: &str, file_mount_dir: &Path, readonly: bool) {
+/// Push a `--mount fm_tag:file_mount_dir[:ro][,stat-virt=...][,host-perms=...]` arg pair.
+fn push_file_mount_arg(
+    args: &mut Vec<OsString>,
+    tag: &str,
+    file_mount_dir: &Path,
+    readonly: bool,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+) {
     let mut arg = format!("{tag}:{}", file_mount_dir.display());
     if readonly {
         arg.push_str(":ro");
     }
+    append_policy_options(&mut arg, stat_virtualization, host_permissions);
     args.push(OsString::from("--mount"));
     args.push(OsString::from(arg));
 }
@@ -721,12 +761,28 @@ fn sandbox_cli_args(
                 host,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => {
                 if let Some((file_mount_dir, filename, tag)) = staged_file_mounts.get(guest) {
-                    push_file_mount_arg(&mut args, tag, file_mount_dir, *readonly);
+                    push_file_mount_arg(
+                        &mut args,
+                        tag,
+                        file_mount_dir,
+                        *readonly,
+                        *stat_virtualization,
+                        *host_permissions,
+                    );
                     push_file_mounts_spec(&mut file_mounts_val, tag, filename, guest, *readonly);
                 } else {
-                    push_dir_mount_arg(&mut args, guest, &host.display(), *readonly);
+                    push_dir_mount_arg(
+                        &mut args,
+                        guest,
+                        &host.display(),
+                        *readonly,
+                        *stat_virtualization,
+                        *host_permissions,
+                    );
                     push_dir_mounts_spec(&mut dir_mounts_val, guest, *readonly);
                 }
             }
@@ -734,9 +790,18 @@ fn sandbox_cli_args(
                 name,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => {
                 let vol_path = config::config().volumes_dir().join(name);
-                push_dir_mount_arg(&mut args, guest, &vol_path.display(), *readonly);
+                push_dir_mount_arg(
+                    &mut args,
+                    guest,
+                    &vol_path.display(),
+                    *readonly,
+                    *stat_virtualization,
+                    *host_permissions,
+                );
                 push_dir_mounts_spec(&mut dir_mounts_val, guest, *readonly);
             }
             VolumeMount::Tmpfs {
@@ -939,6 +1004,127 @@ mod tests {
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect()
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Tests: stat-virt + host-perms encoding in --mount args
+    //----------------------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_dir_mount_arg_omits_defaults() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.bind("/host/data"))
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        // Default Strict + Private must not show up in the wire format.
+        let mount_args: Vec<&String> = rendered
+            .windows(2)
+            .filter(|p| p[0] == "--mount")
+            .map(|p| &p[1])
+            .collect();
+        assert!(!mount_args.is_empty());
+        let m = mount_args[0];
+        assert!(
+            !m.contains("stat-virt") && !m.contains("host-perms"),
+            "default-policy mount leaked policy options into wire format: {m}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dir_mount_arg_encodes_relaxed_stat_virt() {
+        use crate::sandbox::StatVirtualization;
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/host-tmp", |m| {
+                m.bind("/tmp")
+                    .readonly()
+                    .stat_virtualization(StatVirtualization::Relaxed)
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let m = rendered
+            .windows(2)
+            .find(|p| p[0] == "--mount")
+            .map(|p| p[1].clone())
+            .expect("expected --mount arg");
+        assert!(m.contains(":ro"), "expected ro flag: {m}");
+        assert!(m.contains(",stat-virt=relaxed"), "missing policy: {m}");
+    }
+
+    #[tokio::test]
+    async fn test_dir_mount_arg_encodes_mirror_host_perms() {
+        use crate::sandbox::HostPermissions;
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/work", |m| {
+                m.bind("./project")
+                    .host_permissions(HostPermissions::Mirror)
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let m = rendered
+            .windows(2)
+            .find(|p| p[0] == "--mount")
+            .map(|p| p[1].clone())
+            .expect("expected --mount arg");
+        assert!(m.contains(",host-perms=mirror"), "missing policy: {m}");
+    }
+
+    #[tokio::test]
+    async fn test_dir_mount_arg_encodes_both_policies_off_plus_private() {
+        // `Off + Mirror` is rejected at build time; combine `Off` with the
+        // explicit (matching default) `Private` to verify both encoders fire.
+        use crate::sandbox::{HostPermissions, StatVirtualization};
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/host", |m| {
+                m.bind("/mnt/windows")
+                    .readonly()
+                    .stat_virtualization(StatVirtualization::Off)
+                    .host_permissions(HostPermissions::Private)
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let m = rendered
+            .windows(2)
+            .find(|p| p[0] == "--mount")
+            .map(|p| p[1].clone())
+            .expect("expected --mount arg");
+        assert!(m.contains(",stat-virt=off"));
+        // host-perms=private is the default and is omitted from the wire format.
+        assert!(!m.contains("host-perms"));
+    }
+
+    #[tokio::test]
+    async fn test_off_plus_mirror_rejected_at_build_time() {
+        use crate::sandbox::{HostPermissions, StatVirtualization};
+        let err = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/host", |m| {
+                m.bind("/mnt/windows")
+                    .stat_virtualization(StatVirtualization::Off)
+                    .host_permissions(HostPermissions::Mirror)
+            })
+            .build()
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Off cannot be combined with"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]

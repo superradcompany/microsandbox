@@ -344,6 +344,20 @@ export declare class MountBuilder {
   /** Tmpfs size cap in MiB (only valid with `.tmpfs()`). */
   size(mib: number): this
   /**
+   * Set the guest stat virtualization policy.
+   *
+   * Accepts `"strict"`, `"relaxed"`, or `"off"`. Valid only for bind and
+   * named volume mounts.
+   */
+  statVirtualization(policy: string): this
+  /**
+   * Set the host permission propagation policy.
+   *
+   * Accepts `"private"` or `"mirror"`. Valid only for bind and named volume
+   * mounts.
+   */
+  hostPermissions(policy: string): this
+  /**
    * Materialize the mount spec. Returns a flat `BuiltVolumeMount`
    * with a `kind` discriminator and per-variant fields.
    */
@@ -814,15 +828,19 @@ export declare class SandboxBuilder {
    * Replace any existing sandbox with the same name.
    *
    * SIGTERMs the prior instance, waits up to 10 seconds for a
-   * graceful exit, then SIGKILLs. To override the grace, use
-   * `replaceWithGrace(ms)`; `replaceWithGrace(0)` skips SIGTERM and
-   * SIGKILLs immediately.
+   * graceful exit, then SIGKILLs. To override the timeout, use
+   * `replaceWithTimeout(ms)`; `replaceWithTimeout(0)` skips SIGTERM
+   * and SIGKILLs immediately.
    */
   replace(): this
   /**
-   * Timeout (in milliseconds) to wait for the existing sandbox to
-   * exit after SIGTERM before escalating to SIGKILL during a replace.
-   * Implies `replace`. Zero skips SIGTERM entirely. An expired
+   * Replace any existing sandbox, overriding the SIGTERM-to-SIGKILL
+   * timeout. Implies `replace` — calling this alone is enough.
+   *
+   * - `timeoutMs > 0`: SIGTERM, wait up to `timeoutMs`, then SIGKILL.
+   * - `timeoutMs == 0`: SIGKILL immediately (skip SIGTERM).
+   *
+   * The default timeout used by `replace` is 10_000 ms. An expired
    * timeout force-kills the prior sandbox; `create()` still proceeds.
    */
   replaceWithTimeout(timeoutMs: number): this
@@ -1000,26 +1018,31 @@ export declare class SandboxHandle {
   /** Connect to an already-running sandbox (no lifecycle ownership). */
   connect(): Promise<Sandbox>
   /**
-   * Connect with an explicit timeout (ms). Returns a typed error if
-   * the sandbox doesn't respond in this window. `connect()` uses
+   * Connect with an explicit timeout in milliseconds.
+   *
+   * If the sandbox doesn't respond within this window, the call
+   * returns a typed error instead of blocking. `connect()` uses
    * 10_000 ms by default.
    */
   connectWithTimeout(timeoutMs: number): Promise<Sandbox>
   /**
-   * Stop the sandbox gracefully. Lets it finish writing any pending
-   * data to disk before it exits, so files written inside the sandbox
-   * aren't lost across a later restart. Force-kills after 10_000 ms by
-   * default; override with `stopWithTimeout(timeoutMs)`.
+   * Stop the sandbox gracefully.
+   *
+   * Lets the sandbox finish writing any pending data to disk before
+   * it exits, so files written inside the sandbox aren't lost across
+   * a later restart. Waits 10_000 ms by default before force-kill;
+   * override with `stopWithTimeout(timeoutMs)`.
    */
   stop(): Promise<void>
   /**
-   * Stop gracefully with an explicit timeout (ms). If the sandbox is
-   * still running after this window, it is force-killed. `0`
-   * force-kills immediately. Resolves successfully either way — does
-   * not throw on timeout expiry.
+   * Stop the sandbox gracefully with an explicit timeout in
+   * milliseconds. If the sandbox is still running after this window,
+   * it is force-killed. `timeoutMs == 0` force-kills immediately.
+   * The call resolves successfully either way — it does not throw
+   * on timeout expiry.
    */
   stopWithTimeout(timeoutMs: number): Promise<void>
-  /** Force terminate immediately. Pending writes may be lost. */
+  /** Kill the sandbox (SIGKILL). */
   kill(): Promise<void>
   /** Remove the sandbox from the database. */
   remove(): Promise<void>
@@ -1265,6 +1288,12 @@ export declare class VolumeHandle {
 }
 export type JsVolumeHandle = VolumeHandle
 
+/** Options for connecting to an agent relay. */
+export interface AgentConnectOptions {
+  /** Handshake timeout in milliseconds. Defaults to 10_000. */
+  timeoutMs?: number
+}
+
 /** Get metrics for all running sandboxes. */
 export declare function allSandboxMetrics(): Promise<Record<string, SandboxMetrics>>
 
@@ -1276,12 +1305,6 @@ export interface AttachOptions {
   env: Record<string, string>
   detachKeys?: string
   rlimits: Array<JsRlimit>
-}
-
-/** Options for connecting to an agent relay. */
-export interface AgentConnectOptions {
-  /** Handshake timeout in milliseconds. Defaults to 10_000. */
-  timeoutMs?: number
 }
 
 /** DNS interception configuration produced by `DnsBuilder.build()`. */
@@ -1786,4 +1809,8 @@ export interface VolumeMount {
   sizeMib?: number
   format?: string
   fstype?: string
+  /** `"strict" | "relaxed" | "off"` for bind/named mounts; `None` for tmpfs/disk. */
+  statVirtualization?: string
+  /** `"private" | "mirror"` for bind/named mounts; `None` for tmpfs/disk. */
+  hostPermissions?: string
 }

@@ -13,6 +13,7 @@
 
 use std::{io, os::fd::AsRawFd, time::Duration};
 
+use super::host_mode::{fchmod_mirror, fchmod_raw, host_strip_priv_bits, mirror_eligible_type};
 use super::{PassthroughFs, inode};
 use crate::{
     Context, SetattrValid,
@@ -55,6 +56,12 @@ pub(crate) fn do_setattr(
         return Err(platform::eacces());
     }
 
+    // With xattr-overlay disabled, the only honest answer to a uid/gid change
+    // is to reject it — the host process cannot chown(2) without CAP_CHOWN.
+    if !fs.cfg.xattr_enabled() && valid.intersects(SetattrValid::UID | SetattrValid::GID) {
+        return Err(platform::eperm());
+    }
+
     #[cfg(target_os = "macos")]
     let guest_file_type = platform::mode_file_type(inode::stat_inode(fs, ino)?.st_mode);
 
@@ -91,41 +98,82 @@ pub(crate) fn do_setattr(
     let kill_priv = valid.intersects(SetattrValid::UID | SetattrValid::GID)
         || (valid.contains(SetattrValid::SIZE) && valid.contains(SetattrValid::KILL_SUIDGID));
 
-    // Handle uid/gid/mode changes via xattr (not real chown/chmod).
+    // Mode-change handling depends on three orthogonal flags:
+    //   - xattr_enabled        : whether the override overlay is in use
+    //   - mirror_host_perms    : whether guest chmod mutates the host inode
+    //   - kill_priv            : kernel asked us to clear setuid/setgid
     if valid.intersects(SetattrValid::UID | SetattrValid::GID | SetattrValid::MODE) || kill_priv {
-        let current = stat_override::get_override(*close_fd, fs.cfg.xattr, fs.cfg.strict)?;
-        let (cur_uid, cur_gid, cur_mode, cur_rdev) = match current {
-            Some(ovr) => (ovr.uid, ovr.gid, ovr.mode, ovr.rdev),
-            None => {
-                let st = platform::fstat(*close_fd)?;
-                let mode = platform::mode_u32(st.st_mode);
-                (st.st_uid, st.st_gid, mode, 0)
+        if fs.cfg.xattr_enabled() {
+            let current = stat_override::get_override(
+                *close_fd,
+                fs.cfg.xattr_enabled(),
+                fs.cfg.strict_enabled(),
+            )?;
+            let (cur_uid, cur_gid, cur_mode, cur_rdev) = match current {
+                Some(ovr) => (ovr.uid, ovr.gid, ovr.mode, ovr.rdev),
+                None => {
+                    let st = platform::fstat(*close_fd)?;
+                    let mode = platform::mode_u32(st.st_mode);
+                    (st.st_uid, st.st_gid, mode, 0)
+                }
+            };
+
+            let new_uid = if valid.contains(SetattrValid::UID) {
+                attr.st_uid
+            } else {
+                cur_uid
+            };
+            let new_gid = if valid.contains(SetattrValid::GID) {
+                attr.st_gid
+            } else {
+                cur_gid
+            };
+            let new_mode = if valid.contains(SetattrValid::MODE) {
+                let attr_mode = platform::mode_u32(attr.st_mode);
+                (cur_mode & platform::MODE_TYPE_MASK) | (attr_mode & !platform::MODE_TYPE_MASK)
+            } else {
+                cur_mode
+            };
+            let new_mode = if kill_priv {
+                new_mode & !(platform::MODE_SETUID | platform::MODE_SETGID)
+            } else {
+                new_mode
+            };
+
+            // Mirror perm bits to the host inode *first* — if fchmod fails we
+            // must not advance the overlay past a state the host cannot back.
+            if fs.cfg.mirror_host_permissions()
+                && valid.contains(SetattrValid::MODE)
+                && mirror_eligible_type(new_mode & platform::MODE_TYPE_MASK)
+            {
+                fchmod_mirror(*close_fd, new_mode, new_mode & platform::MODE_TYPE_MASK)?;
             }
-        };
 
-        let new_uid = if valid.contains(SetattrValid::UID) {
-            attr.st_uid
-        } else {
-            cur_uid
-        };
-        let new_gid = if valid.contains(SetattrValid::GID) {
-            attr.st_gid
-        } else {
-            cur_gid
-        };
-        let new_mode = if valid.contains(SetattrValid::MODE) {
+            stat_override::set_override(*close_fd, new_uid, new_gid, new_mode, cur_rdev)?;
+        } else if valid.contains(SetattrValid::MODE) {
+            // xattr off: guest sees real host stat. Apply chmod directly.
+            // For REG/DIR we keep the owner-access floor so the host process
+            // doesn't lock itself out; for other types (notably macOS
+            // symlinks) we pass the raw perms because clamping symlink mode
+            // bits would silently corrupt link state.
             let attr_mode = platform::mode_u32(attr.st_mode);
-            (cur_mode & platform::MODE_TYPE_MASK) | (attr_mode & !platform::MODE_TYPE_MASK)
-        } else {
-            cur_mode
-        };
-        let new_mode = if kill_priv {
-            new_mode & !(platform::MODE_SETUID | platform::MODE_SETGID)
-        } else {
-            new_mode
-        };
-
-        stat_override::set_override(*close_fd, new_uid, new_gid, new_mode, cur_rdev)?;
+            let host_st = platform::fstat(*close_fd)?;
+            let file_type = platform::mode_u32(host_st.st_mode) & platform::MODE_TYPE_MASK;
+            let mut perms = attr_mode & 0o7777;
+            if kill_priv {
+                perms &= !(platform::MODE_SETUID | platform::MODE_SETGID);
+            }
+            if mirror_eligible_type(file_type) {
+                fchmod_mirror(*close_fd, perms, file_type)?;
+            } else {
+                fchmod_raw(*close_fd, perms)?;
+            }
+        } else if kill_priv {
+            // xattr off + kill_priv with no MODE bit (typical: SIZE truncate
+            // of a setuid binary). Strip setuid/setgid on the host inode so
+            // we honor HANDLE_KILLPRIV_V2 semantics for `Off` mounts too.
+            host_strip_priv_bits(*close_fd)?;
+        }
     }
 
     // Handle size changes via ftruncate.
@@ -222,7 +270,7 @@ fn stat_handle(fs: &PassthroughFs, handle: u64) -> io::Result<stat64> {
     let fd = file.as_raw_fd();
     let st = platform::fstat(fd)?;
 
-    stat_override::patched_stat(fd, st, fs.cfg.xattr, fs.cfg.strict)
+    stat_override::patched_stat(fd, st, fs.cfg.xattr_enabled(), fs.cfg.strict_enabled())
 }
 
 #[cfg(target_os = "macos")]

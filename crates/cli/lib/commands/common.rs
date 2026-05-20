@@ -460,16 +460,106 @@ pub fn apply_sandbox_opts(
 }
 
 /// Parse a volume spec and apply it to the builder.
+///
+/// Accepts: `SRC:DST[,ro][,stat-virt=strict|relaxed|off][,host-perms=private|mirror]`.
+///
+/// SRC and DST may contain commas — the parser splits on `:` first to
+/// separate `SRC` from `DST[,opts]`, and only then treats commas inside the
+/// DST portion as option separators. Duplicate option keys are rejected.
 pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
-    let (source, guest) = spec
+    use microsandbox::sandbox::{HostPermissions, StatVirtualization};
+
+    let (source, guest_and_opts) = spec
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("volume must be in format source:guest"))?;
 
-    if microsandbox_utils::looks_like_local_path_text(source) {
-        Ok(builder.volume(guest, |m| m.bind(source)))
-    } else {
-        Ok(builder.volume(guest, |m| m.named(source)))
+    let (guest, options) = match guest_and_opts.split_once(',') {
+        Some((g, o)) => (g, Some(o)),
+        None => (guest_and_opts, None),
+    };
+
+    let mut readonly = false;
+    let mut stat_virt: Option<StatVirtualization> = None;
+    let mut host_perms: Option<HostPermissions> = None;
+    let mut seen_ro = false;
+    let mut seen_stat_virt = false;
+    let mut seen_host_perms = false;
+
+    if let Some(opts) = options {
+        for opt in opts.split(',') {
+            let opt = opt.trim();
+            if opt.is_empty() {
+                continue;
+            }
+            match opt {
+                "ro" | "rw" => {
+                    if seen_ro {
+                        anyhow::bail!("volume option `ro`/`rw` specified more than once");
+                    }
+                    seen_ro = true;
+                    readonly = opt == "ro";
+                }
+                _ => {
+                    let (key, value) = opt.split_once('=').ok_or_else(|| {
+                        anyhow::anyhow!("volume option {opt:?} must be key=value")
+                    })?;
+                    match key {
+                        "stat-virt" => {
+                            if seen_stat_virt {
+                                anyhow::bail!("volume option `stat-virt` specified more than once");
+                            }
+                            seen_stat_virt = true;
+                            stat_virt = Some(match value {
+                                "strict" => StatVirtualization::Strict,
+                                "relaxed" => StatVirtualization::Relaxed,
+                                "off" => StatVirtualization::Off,
+                                other => anyhow::bail!(
+                                    "invalid stat-virt {other:?} (expected strict|relaxed|off)"
+                                ),
+                            });
+                        }
+                        "host-perms" => {
+                            if seen_host_perms {
+                                anyhow::bail!(
+                                    "volume option `host-perms` specified more than once"
+                                );
+                            }
+                            seen_host_perms = true;
+                            host_perms = Some(match value {
+                                "private" => HostPermissions::Private,
+                                "mirror" => HostPermissions::Mirror,
+                                other => anyhow::bail!(
+                                    "invalid host-perms {other:?} (expected private|mirror)"
+                                ),
+                            });
+                        }
+                        other => anyhow::bail!("unknown volume option {other:?}"),
+                    }
+                }
+            }
+        }
     }
+
+    let is_path = microsandbox_utils::looks_like_local_path_text(source);
+    let source = source.to_string();
+    let guest = guest.to_string();
+    Ok(builder.volume(guest, move |mut m| {
+        m = if is_path {
+            m.bind(&source)
+        } else {
+            m.named(&source)
+        };
+        if readonly {
+            m = m.readonly();
+        }
+        if let Some(sv) = stat_virt {
+            m = m.stat_virtualization(sv);
+        }
+        if let Some(hp) = host_perms {
+            m = m.host_permissions(hp);
+        }
+        m
+    }))
 }
 
 /// Apply network-related options to the builder (requires "net" feature).
@@ -1159,9 +1249,176 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use microsandbox::sandbox::VolumeMount;
+    use microsandbox::sandbox::{HostPermissions, StatVirtualization, VolumeMount};
 
     use super::*;
+
+    //----------------------------------------------------------------------------------------------
+    // Tests: apply_volume / -v parser
+    //----------------------------------------------------------------------------------------------
+
+    /// Apply a single `-v` spec to a fresh builder and return the resulting mount.
+    async fn build_one(spec: &str) -> VolumeMount {
+        let builder = SandboxBuilder::new("test").image("/tmp/rootfs");
+        let builder = apply_volume(builder, spec).unwrap();
+        let config = builder.build().await.unwrap();
+        config.mounts.into_iter().next().unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_bind_defaults_to_strict_private() {
+        let mount = build_one("/host:/guest").await;
+        match mount {
+            VolumeMount::Bind {
+                stat_virtualization,
+                host_permissions,
+                readonly,
+                ..
+            } => {
+                assert!(matches!(stat_virtualization, StatVirtualization::Strict));
+                assert!(matches!(host_permissions, HostPermissions::Private));
+                assert!(!readonly);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_ro_flag() {
+        let mount = build_one("/host:/guest,ro").await;
+        match mount {
+            VolumeMount::Bind { readonly, .. } => assert!(readonly),
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_stat_virt_relaxed() {
+        let mount = build_one("/host:/guest,ro,stat-virt=relaxed").await;
+        match mount {
+            VolumeMount::Bind {
+                stat_virtualization,
+                readonly,
+                ..
+            } => {
+                assert!(matches!(stat_virtualization, StatVirtualization::Relaxed));
+                assert!(readonly);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_host_perms_mirror() {
+        let mount = build_one("./project:/work,host-perms=mirror").await;
+        match mount {
+            VolumeMount::Bind {
+                host_permissions, ..
+            } => {
+                assert!(matches!(host_permissions, HostPermissions::Mirror));
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_combined_policies() {
+        // Off + Mirror is rejected at build; use Relaxed + Mirror instead.
+        let mount = build_one("/mnt:/host,ro,stat-virt=relaxed,host-perms=mirror").await;
+        match mount {
+            VolumeMount::Bind {
+                stat_virtualization,
+                host_permissions,
+                readonly,
+                ..
+            } => {
+                assert!(matches!(stat_virtualization, StatVirtualization::Relaxed));
+                assert!(matches!(host_permissions, HostPermissions::Mirror));
+                assert!(readonly);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_rejects_off_plus_mirror_at_sandbox_build() {
+        // The Off+Mirror conflict surfaces at SandboxBuilder.build() time
+        // because MountBuilder.build() is deferred inside the volume closure.
+        let builder = SandboxBuilder::new("test").image("/tmp/rootfs");
+        let builder = apply_volume(builder, "/mnt:/host,stat-virt=off,host-perms=mirror")
+            .expect("apply_volume defers validation");
+        let err = builder.build().await.unwrap_err();
+        assert!(
+            err.to_string().contains("Off cannot be combined with"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_named() {
+        let mount = build_one("mycache:/data,stat-virt=relaxed").await;
+        match mount {
+            VolumeMount::Named {
+                name,
+                stat_virtualization,
+                ..
+            } => {
+                assert_eq!(name, "mycache");
+                assert!(matches!(stat_virtualization, StatVirtualization::Relaxed));
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    fn expect_apply_volume_err(spec: &str) -> String {
+        let builder = SandboxBuilder::new("test").image("/tmp/rootfs");
+        match apply_volume(builder, spec) {
+            Ok(_) => panic!("expected error for spec {spec:?}"),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_unknown_stat_virt() {
+        let err = expect_apply_volume_err("/host:/guest,stat-virt=bogus");
+        assert!(err.contains("invalid stat-virt"), "got: {err}");
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_unknown_host_perms() {
+        let err = expect_apply_volume_err("/host:/guest,host-perms=public");
+        assert!(err.contains("invalid host-perms"), "got: {err}");
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_unknown_option_key() {
+        let err = expect_apply_volume_err("/host:/guest,bogus=1");
+        assert!(err.contains("unknown volume option"), "got: {err}");
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_duplicate_stat_virt() {
+        let err = expect_apply_volume_err("/host:/guest,stat-virt=strict,stat-virt=off");
+        assert!(err.contains("more than once"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_rejects_comma_in_source_path() {
+        // Embedded commas in host paths could silently inject mount options
+        // through the spawn → VM wire format. The SDK rejects them at build
+        // time with a clear error; the CLI surfaces that error verbatim.
+        let builder = SandboxBuilder::new("test").image("/tmp/rootfs");
+        // apply_volume itself defers to MountBuilder which only validates at
+        // SandboxBuilder::build() — so the parse step succeeds and the
+        // rejection comes from the subsequent build.
+        let builder =
+            apply_volume(builder, "/path/with,comma:/dst").expect("apply_volume defers validation");
+        let err = builder.build().await.unwrap_err();
+        assert!(
+            err.to_string().contains("must not contain ','"),
+            "got: {err}"
+        );
+    }
 
     /// Write a temp file with unique name, return its path.
     fn write_temp(content: &str) -> PathBuf {

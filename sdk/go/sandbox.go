@@ -90,14 +90,16 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		ffiOpts.Volumes = make(map[string]ffi.MountSpec, len(o.Volumes))
 		for guestPath, m := range o.Volumes {
 			ffiOpts.Volumes[guestPath] = ffi.MountSpec{
-				Bind:     m.Bind,
-				Named:    m.Named,
-				Tmpfs:    m.Tmpfs,
-				Disk:     m.Disk,
-				Format:   m.Format,
-				Fstype:   m.Fstype,
-				Readonly: m.Readonly,
-				SizeMiB:  m.SizeMiB,
+				Bind:               m.Bind,
+				Named:              m.Named,
+				Tmpfs:              m.Tmpfs,
+				Disk:               m.Disk,
+				Format:             m.Format,
+				Fstype:             m.Fstype,
+				Readonly:           m.Readonly,
+				SizeMiB:            m.SizeMiB,
+				StatVirtualization: string(m.StatVirtualization),
+				HostPermissions:    string(m.HostPermissions),
 			}
 		}
 	}

@@ -75,6 +75,17 @@ class MountKind(enum.StrEnum):
     TMPFS = "tmpfs"
     DISK = "disk"
 
+class StatVirtualization(enum.StrEnum):
+    """Per-mount stat-virtualization policy for virtiofs-backed mounts."""
+    STRICT = "strict"
+    RELAXED = "relaxed"
+    OFF = "off"
+
+class HostPermissions(enum.StrEnum):
+    """Per-mount host-permission policy for virtiofs-backed mounts."""
+    PRIVATE = "private"
+    MIRROR = "mirror"
+
 class FsEntryKind(enum.StrEnum):
     FILE = "file"
     DIRECTORY = "directory"
@@ -297,7 +308,12 @@ class AttachOptions:
 
 @dataclass(frozen=True, slots=True)
 class MountConfig:
-    """Volume mount configuration."""
+    """Volume mount configuration.
+
+    ``stat_virtualization`` and ``host_permissions`` are only meaningful for
+    virtiofs-backed mounts (``BIND`` and ``NAMED``). Setting either on a
+    ``TMPFS`` or ``DISK`` mount raises ``ValueError`` at serialization time.
+    """
     kind: MountKind
     bind: str | None = None
     named: str | None = None
@@ -306,6 +322,8 @@ class MountConfig:
     disk: str | None = None
     format: DiskImageFormat | None = None
     fstype: str | None = None
+    stat_virtualization: StatVirtualization | None = None
+    host_permissions: HostPermissions | None = None
 
     def _to_dict(self) -> dict:
         # Drive emission off `kind` exclusively so a `MountConfig` with
@@ -334,6 +352,18 @@ class MountConfig:
                 d["fstype"] = self.fstype
         else:  # pragma: no cover - StrEnum exhaustive above
             raise ValueError(f"unknown MountKind: {self.kind!r}")
+
+        # Per-mount policies — only valid for virtiofs-backed kinds.
+        if self.kind in (MountKind.BIND, MountKind.NAMED):
+            if self.stat_virtualization is not None:
+                d["stat_virtualization"] = self.stat_virtualization.value
+            if self.host_permissions is not None:
+                d["host_permissions"] = self.host_permissions.value
+        elif self.stat_virtualization is not None or self.host_permissions is not None:
+            raise ValueError(
+                f"stat_virtualization/host_permissions are only valid for "
+                f"BIND/NAMED mounts (got kind={self.kind.value})"
+            )
         return d
 
 #--------------------------------------------------------------------------------------------------
