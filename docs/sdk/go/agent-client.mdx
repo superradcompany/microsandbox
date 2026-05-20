@@ -1,0 +1,163 @@
+---
+title: Agent Client
+description: Go SDK - Low-level agentd client reference
+icon: "plug"
+---
+
+`AgentClient` is the low-level raw transport for talking to `agentd` through a running sandbox's relay socket. Most applications should use [`Sandbox`](/sdk/go/sandbox), [`Exec`](/sdk/go/execution), and filesystem helpers instead. Use this API when you are building protocol-level tools or higher-level SDK helpers.
+
+All request bodies and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you.
+
+The raw body is the full CBOR-encoded protocol `Message` body: `v`, `t`, and `p`. It is not just the inner payload.
+
+```go
+import m "github.com/superradcompany/microsandbox/sdk/go"
+```
+
+```go
+client, err := m.ConnectAgentSandbox(ctx, "dev")
+if err != nil {
+    return err
+}
+defer client.Close()
+
+ready, err := client.ReadyBytes()
+if err != nil {
+    return err
+}
+_ = ready
+```
+
+---
+
+## Constants
+
+| Name | Type | Description |
+|------|------|-------------|
+| `FlagTerminal` / `FLAG_TERMINAL` | `uint8` | Last frame for a correlation id |
+| `FlagSessionStart` / `FLAG_SESSION_START` | `uint8` | First frame of a streaming session |
+| `FlagShutdown` / `FLAG_SHUTDOWN` | `uint8` | Shutdown frame |
+
+---
+
+#### ConnectAgentSandbox()
+
+```go
+func ConnectAgentSandbox(ctx context.Context, name string) (*AgentClient, error)
+```
+
+Connect to a running sandbox by name.
+
+---
+
+#### ConnectAgentPath()
+
+```go
+func ConnectAgentPath(ctx context.Context, path string) (*AgentClient, error)
+```
+
+Connect to an agent relay socket by path.
+
+---
+
+#### Request()
+
+```go
+func (c *AgentClient) Request(ctx context.Context, flags uint8, body []byte) (*RawFrame, error)
+```
+
+Send one raw frame and wait for one response frame.
+
+---
+
+#### Stream()
+
+```go
+func (c *AgentClient) Stream(ctx context.Context, flags uint8, body []byte) (*AgentStream, error)
+```
+
+Open a raw streaming session.
+
+```go
+stream, err := client.Stream(ctx, m.FlagSessionStart, body)
+if err != nil {
+    return err
+}
+defer stream.Close(ctx)
+
+for {
+    frame, err := stream.Next(ctx)
+    if err != nil {
+        return err
+    }
+    if frame == nil || frame.Flags&m.FlagTerminal != 0 {
+        break
+    }
+}
+```
+
+---
+
+#### Send()
+
+```go
+func (c *AgentClient) Send(ctx context.Context, id uint32, flags uint8, body []byte) error
+```
+
+Send a follow-up frame on an existing correlation id. Use this with the id returned by `AgentStream.ID()`.
+
+---
+
+#### ReadyBytes()
+
+```go
+func (c *AgentClient) ReadyBytes() ([]byte, error)
+```
+
+Return the cached handshake `core.ready` frame body as CBOR bytes.
+
+---
+
+#### Close()
+
+```go
+func (c *AgentClient) Close() error
+```
+
+Release the client handle. Calling it more than once is safe.
+
+---
+
+#### CloseCtx()
+
+```go
+func (c *AgentClient) CloseCtx(ctx context.Context) error
+```
+
+Release the client handle with a caller-controlled context.
+
+---
+
+## RawFrame
+
+```go
+type RawFrame struct {
+    ID    uint32
+    Flags uint8
+    Body  []byte
+}
+```
+
+`ID` is the protocol correlation id, `Flags` is the frame flag byte, and `Body` is the CBOR-encoded protocol message body.
+
+---
+
+## AgentStream
+
+```go
+func (s *AgentStream) ID() uint32
+func (s *AgentStream) Next(ctx context.Context) (*RawFrame, error)
+func (s *AgentStream) Close(ctx context.Context) error
+```
+
+`ID()` returns the protocol correlation id. Pass it to [`AgentClient.Send()`](#send) for follow-up frames in the same session. `Next()` returns `nil, nil` at EOF.

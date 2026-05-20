@@ -1,0 +1,163 @@
+---
+title: Agent Client
+description: Rust SDK - Low-level agentd client reference
+icon: "plug"
+---
+
+`AgentClient` is the low-level transport for talking to `agentd` through a running sandbox's relay socket. Most applications should use [`Sandbox`](/sdk/rust/sandbox), [`exec`](/sdk/rust/execution), and [`fs`](/sdk/rust/filesystem) instead. Use `AgentClient` when you are building a protocol-level integration or an SDK layer.
+
+The Rust client has two tiers:
+
+- **Typed** methods encode and decode microsandbox protocol messages for you.
+- **Raw** methods move framed CBOR bytes without decoding the message body.
+
+The raw body is the full CBOR-encoded protocol `Message` body: `v`, `t`, and `p`. It is not just the inner payload.
+
+```rust
+use microsandbox::{
+    AgentClient,
+    protocol::{
+        fs::{FsOp, FsRequest, FsResponse},
+        message::MessageType,
+    },
+};
+
+let client = AgentClient::connect_sandbox("dev").await?;
+let response = client
+    .request(
+        MessageType::FsRequest,
+        &FsRequest {
+            op: FsOp::Stat {
+                path: "/etc/os-release".to_string(),
+            },
+        },
+    )
+    .await?;
+let fs_response: FsResponse = response.payload()?;
+```
+
+---
+
+#### connect()
+
+```rust
+async fn connect(sock_path: impl AsRef<Path>) -> AgentClientResult<AgentClient>
+```
+
+Connect to an agent relay socket by path. The connection performs the relay handshake, validates the cached `core.ready` frame, and starts one background reader task.
+
+---
+
+#### connect_sandbox()
+
+```rust
+async fn connect_sandbox(name: &str) -> AgentClientResult<AgentClient>
+```
+
+Resolve a sandbox name to its relay socket path and connect to it.
+
+---
+
+#### request()
+
+```rust
+async fn request<T: Serialize>(&self, t: MessageType, payload: &T) -> AgentClientResult<Message>
+```
+
+Send one typed protocol message and wait for one response frame with the same correlation id. Use this for one-shot RPCs such as filesystem stat/list requests.
+
+---
+
+#### stream()
+
+```rust
+async fn stream<T: Serialize>(&self, t: MessageType, payload: &T) -> AgentClientResult<(u32, UnboundedReceiver<Message>)>
+```
+
+Open a typed streaming session. The returned id is the protocol correlation id. Use it with [`send()`](#send) for follow-up messages such as stdin, resize, signal, or file data chunks.
+
+The receiver yields messages until a terminal frame is delivered or the connection closes.
+
+---
+
+#### send()
+
+```rust
+async fn send<T: Serialize>(&self, id: u32, t: MessageType, payload: &T) -> AgentClientResult<()>
+```
+
+Send a typed follow-up message on an existing correlation id.
+
+---
+
+#### request_raw()
+
+```rust
+async fn request_raw(&self, flags: u8, body: Vec<u8>) -> AgentClientResult<RawFrame>
+```
+
+Allocate a correlation id, send one raw frame, and wait for one raw response frame.
+
+---
+
+#### stream_raw()
+
+```rust
+async fn stream_raw(&self, flags: u8, body: Vec<u8>) -> AgentClientResult<(u32, UnboundedReceiver<RawFrame>)>
+```
+
+Open a raw streaming session. The receiver yields raw frames for the returned correlation id until a terminal frame is delivered or the receiver is dropped.
+
+---
+
+#### send_raw()
+
+```rust
+async fn send_raw(&self, id: u32, flags: u8, body: &[u8]) -> AgentClientResult<()>
+```
+
+Send a raw follow-up frame on an existing correlation id.
+
+---
+
+#### ready()
+
+```rust
+fn ready(&self) -> AgentClientResult<Ready>
+```
+
+Return the decoded `core.ready` payload from the handshake.
+
+---
+
+#### ready_bytes()
+
+```rust
+fn ready_bytes(&self) -> &[u8]
+```
+
+Return the cached handshake `core.ready` frame body as CBOR bytes.
+
+---
+
+#### close()
+
+```rust
+async fn close(self)
+```
+
+Close the client by consuming it. Dropping the client has the same effect.
+
+---
+
+## RawFrame
+
+```rust
+pub struct RawFrame {
+    pub id: u32,
+    pub flags: u8,
+    pub body: Vec<u8>,
+}
+```
+
+`id` is the protocol correlation id, `flags` is the frame flag byte, and `body` is the CBOR-encoded protocol message body.
