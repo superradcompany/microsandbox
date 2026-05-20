@@ -65,9 +65,6 @@ type SessionRegistry = std::sync::Mutex<HashMap<u32, SessionInfo>>;
 const MAX_CLIENTS: u32 = 128;
 
 /// Size of the correlation ID range allocated to each client.
-///
-/// Sent to each client during handshake, so the SDK never needs to know
-/// `MAX_CLIENTS`. Changing `MAX_CLIENTS` requires no SDK rebuild.
 const ID_RANGE_STEP: u32 = u32::MAX / MAX_CLIENTS;
 
 /// Size of the length prefix in the wire format.
@@ -322,17 +319,19 @@ impl AgentRelay {
                             };
 
                             let id_offset = slot * ID_RANGE_STEP;
+                            let id_start = id_offset.saturating_add(1);
+                            let id_end_exclusive = id_offset.saturating_add(ID_RANGE_STEP);
                             tracing::info!(
-                                "agent relay: client connected slot={slot} id_offset={id_offset}"
+                                "agent relay: client connected slot={slot} id_start={id_start} id_end_exclusive={id_end_exclusive}"
                             );
 
                             // Perform handshake: send
-                            // [id_offset: u32 BE][id_range_step: u32 BE][ready_frame_bytes...].
+                            // [id_start: u32 BE][id_end_exclusive: u32 BE][ready_frame_bytes...].
                             let (reader_half, mut writer_half) = stream.into_split();
 
                             let mut handshake = Vec::with_capacity(8 + ready_frame.len());
-                            handshake.extend_from_slice(&id_offset.to_be_bytes());
-                            handshake.extend_from_slice(&ID_RANGE_STEP.to_be_bytes());
+                            handshake.extend_from_slice(&id_start.to_be_bytes());
+                            handshake.extend_from_slice(&id_end_exclusive.to_be_bytes());
                             handshake.extend_from_slice(&ready_frame);
 
                             if let Err(e) = writer_half.write_all(&handshake).await {
@@ -384,6 +383,8 @@ impl AgentRelay {
                                 drain_tx_clone,
                                 registry_clone,
                                 next_id_clone,
+                                id_start,
+                                id_end_exclusive,
                             ));
                         }
                         Err(e) => {
@@ -746,6 +747,8 @@ async fn client_reader_task(
     drain_tx: mpsc::Sender<()>,
     session_registry: Arc<SessionRegistry>,
     next_session_id: Arc<AtomicU64>,
+    id_start: u32,
+    id_end_exclusive: u32,
 ) {
     loop {
         let frame = match read_raw_frame(&mut reader).await {
@@ -755,6 +758,16 @@ async fn client_reader_task(
                 break;
             }
         };
+
+        if frame.id < id_start || frame.id >= id_end_exclusive {
+            tracing::warn!(
+                "agent relay: client slot={slot} sent out-of-range id={} range=[{}, {})",
+                frame.id,
+                id_start,
+                id_end_exclusive
+            );
+            break;
+        }
 
         // Track session starts for disconnect cleanup.
         let is_session_start = (frame.flags & FLAG_SESSION_START) != 0;

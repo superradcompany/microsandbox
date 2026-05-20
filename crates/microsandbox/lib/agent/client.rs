@@ -38,9 +38,9 @@ pub struct AgentClient {
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
     /// Next correlation ID to allocate (starts at `id_start`).
     next_id: AtomicU32,
-    /// Inclusive lower bound of the assigned ID range (`id_offset + 1`).
+    /// Inclusive lower bound of the assigned ID range.
     id_start: u32,
-    /// Exclusive upper bound of the assigned ID range (`id_offset + id_range_step`).
+    /// Exclusive upper bound of the assigned ID range.
     id_max: u32,
     /// Pending response channels keyed by correlation ID.
     pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Message>>>>,
@@ -77,7 +77,7 @@ impl AgentClient {
         let (mut reader, writer) = stream.into_split();
 
         // Read the handshake header:
-        // [id_offset: u32 BE][id_range_step: u32 BE][ready_frame_bytes...]
+        // [id_start: u32 BE][id_end_exclusive: u32 BE][ready_frame_bytes...]
         let mut header_buf = [0u8; 8];
         tokio::time::timeout_at(deadline, reader.read_exact(&mut header_buf))
             .await
@@ -89,8 +89,14 @@ impl AgentClient {
             .map_err(|e| {
                 crate::MicrosandboxError::Runtime(format!("handshake read header: {e}"))
             })?;
-        let id_offset = u32::from_be_bytes(header_buf[0..4].try_into().unwrap());
-        let id_range_step = u32::from_be_bytes(header_buf[4..8].try_into().unwrap());
+        let id_start = u32::from_be_bytes(header_buf[0..4].try_into().unwrap());
+        let id_max = u32::from_be_bytes(header_buf[4..8].try_into().unwrap());
+
+        if id_start >= id_max {
+            return Err(crate::MicrosandboxError::Runtime(format!(
+                "invalid relay id range: start={id_start}, end={id_max}"
+            )));
+        }
 
         // Read the ready frame using the protocol codec directly.
         let ready_msg = tokio::time::timeout_at(deadline, codec::read_message(&mut reader))
@@ -109,7 +115,7 @@ impl AgentClient {
             .map_err(|e| crate::MicrosandboxError::Runtime(format!("decode ready payload: {e}")))?;
 
         tracing::info!(
-            "agent client: connected to relay, id_offset={id_offset}, id_range_step={id_range_step}, boot_time={}ns",
+            "agent client: connected to relay, id_start={id_start}, id_end_exclusive={id_max}, boot_time={}ns",
             ready.boot_time_ns
         );
 
@@ -119,9 +125,6 @@ impl AgentClient {
         let reader_handle = tokio::spawn(reader_loop(reader, Arc::clone(&pending)));
 
         let writer = Arc::new(Mutex::new(writer));
-
-        let id_start = id_offset.saturating_add(1);
-        let id_max = id_offset.saturating_add(id_range_step);
 
         Ok(Self {
             writer,
