@@ -33,7 +33,8 @@ pub fn generate_domain_cert(domain: &str, ca: &CertAuthority, validity_hours: u6
     let params: CertificateParams = build_domain_cert_params(domain, validity_hours, now);
     let expires_at: OffsetDateTime = params.not_after;
 
-    let key_pair: rcgen::KeyPair = rcgen::KeyPair::generate().expect("failed to generate domain key pair");
+    let key_pair: rcgen::KeyPair =
+        rcgen::KeyPair::generate().expect("failed to generate domain key pair");
 
     let cert_der = params
         .signed_by(&key_pair, &ca.cert, &ca.key_pair)
