@@ -3,12 +3,13 @@
 //! When the sandbox process places a CA certificate at `/.msb/tls/ca.pem` via the
 //! runtime virtiofs mount, this module detects it during init and:
 //!
-//! 1. Copies the CA PEM to distro-specific trust directories (if they exist).
+//! 1. Copies the CA PEM to distro-specific trust directories.
 //! 2. Appends the CA PEM to the system CA bundle.
 //! 3. Sets environment variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, etc.)
 //!    so that common runtimes trust the microsandbox CA.
 
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::{env, fs};
 
 use crate::AgentdResult;
@@ -17,9 +18,8 @@ use crate::AgentdResult;
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Distro-specific CA trust directories. If the directory exists, the CA cert
-/// is copied into it. This covers programs that scan the directory rather than
-/// reading the bundle file directly.
+/// Distro-specific CA trust directories. These are created if missing so a
+/// later `ca-certificates` install/update can pick up the microsandbox CA.
 const CA_TRUST_DIRS: &[&str] = &[
     "/usr/local/share/ca-certificates", // Debian, Ubuntu, Alpine
     "/etc/pki/ca-trust/source/anchors", // RHEL, Fedora, CentOS
@@ -43,6 +43,9 @@ const CA_CERT_FILENAMES: &[&str] = &["microsandbox-ca.pem", "microsandbox-ca.crt
 /// Filenames for the host-CA bundle when copied to distro trust directories.
 const HOST_CAS_FILENAMES: &[&str] = &["microsandbox-host-cas.pem", "microsandbox-host-cas.crt"];
 
+/// Directory mode for trust-store paths created by agentd.
+const CA_TRUST_DIR_MODE: u32 = 0o755;
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -62,7 +65,7 @@ pub fn install_ca_cert() -> AgentdResult<()> {
         ca_path.display()
     );
 
-    // Copy to distro-specific trust directories (if they exist).
+    // Copy to distro-specific trust directories.
     copy_to_trust_dirs(&ca_pem, CA_CERT_FILENAMES);
 
     // Append to the system CA bundle.
@@ -111,24 +114,61 @@ pub fn install_host_cas() -> AgentdResult<()> {
     Ok(())
 }
 
-/// Copies a PEM to distro-specific trust directories that exist, under
+/// Copies a PEM to distro-specific trust directories, under
 /// each of the given filenames. Both `.pem` and `.crt` are typically
 /// passed so tools that scan by extension pick one up.
 ///
 /// Best-effort: logs warnings on failure but does not abort.
 fn copy_to_trust_dirs(pem: &str, filenames: &[&str]) {
     for &dir in CA_TRUST_DIRS {
-        let dir_path = Path::new(dir);
-        if dir_path.is_dir() {
-            for &filename in filenames {
-                let dest = dir_path.join(filename);
-                match fs::write(&dest, pem) {
-                    Ok(()) => eprintln!("tls: copied CA cert to {}", dest.display()),
-                    Err(e) => eprintln!("tls: failed to copy CA cert to {}: {e}", dest.display()),
-                }
-            }
+        copy_to_trust_dir(Path::new(dir), pem, filenames);
+    }
+}
+
+fn copy_to_trust_dir(dir_path: &Path, pem: &str, filenames: &[&str]) {
+    let missing_dirs = missing_ancestors(dir_path);
+
+    if let Err(e) = fs::create_dir_all(dir_path) {
+        eprintln!(
+            "tls: failed to create CA trust directory {}: {e}",
+            dir_path.display()
+        );
+        return;
+    }
+
+    for dir in missing_dirs {
+        if let Err(e) = fs::set_permissions(&dir, fs::Permissions::from_mode(CA_TRUST_DIR_MODE)) {
+            eprintln!(
+                "tls: failed to set CA trust directory permissions on {}: {e}",
+                dir.display()
+            );
+            return;
         }
     }
+
+    for &filename in filenames {
+        let dest = dir_path.join(filename);
+        match fs::write(&dest, pem) {
+            Ok(()) => eprintln!("tls: copied CA cert to {}", dest.display()),
+            Err(e) => eprintln!("tls: failed to copy CA cert to {}: {e}", dest.display()),
+        }
+    }
+}
+
+fn missing_ancestors(path: &Path) -> Vec<PathBuf> {
+    let mut missing = Vec::new();
+    let mut current = path;
+
+    while !current.exists() {
+        missing.push(current.to_path_buf());
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+
+    missing.reverse();
+    missing
 }
 
 /// Appends the CA PEM to the first found CA bundle, or creates a fallback.
@@ -164,5 +204,27 @@ mod tests {
     fn ca_cert_filenames_cover_both_extensions() {
         assert!(CA_CERT_FILENAMES.contains(&"microsandbox-ca.pem"));
         assert!(CA_CERT_FILENAMES.contains(&"microsandbox-ca.crt"));
+    }
+
+    #[test]
+    fn copy_to_trust_dir_creates_missing_dir_with_mode() {
+        let root = std::env::temp_dir().join(format!(
+            "microsandbox-agentd-ca-test-{}",
+            std::process::id()
+        ));
+        let dir = root.join("usr/local/share/ca-certificates");
+        let _ = fs::remove_dir_all(&root);
+
+        copy_to_trust_dir(&dir, "test pem", &["microsandbox-ca.crt"]);
+
+        assert_eq!(
+            fs::read_to_string(dir.join("microsandbox-ca.crt")).unwrap(),
+            "test pem"
+        );
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            CA_TRUST_DIR_MODE
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }
