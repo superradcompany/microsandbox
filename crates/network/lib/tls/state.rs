@@ -107,10 +107,10 @@ impl TlsState {
     /// Get or generate a certificate for the given domain.
     pub fn get_or_generate_cert(&self, domain: &str) -> Arc<DomainCert> {
         let mut cache = self.cert_cache.lock().unwrap();
-        if let Some(cert) = cache.get(domain) {
-            if cert.expires_at > OffsetDateTime::now_utc() + CERT_REFRESH_WINDOW {
-                return cert.clone();
-            }
+        if let Some(cert) = cache.get(domain)
+            && cert.expires_at > OffsetDateTime::now_utc() + CERT_REFRESH_WINDOW
+        {
+            return cert.clone();
         }
 
         let cert = Arc::new(certgen::generate_domain_cert(
