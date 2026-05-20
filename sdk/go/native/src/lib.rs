@@ -719,10 +719,10 @@ struct SandboxCreateOpts {
     user: Option<String>,
     #[serde(default)]
     replace: bool,
-    /// Grace period in milliseconds between SIGTERM and SIGKILL when
+    /// Timeout in milliseconds between SIGTERM and SIGKILL when
     /// replacing an existing sandbox. `Some(0)` skips SIGTERM. `None`
     /// uses the Rust SDK default when `replace` is set.
-    replace_with_grace_ms: Option<u64>,
+    replace_with_timeout_ms: Option<u64>,
     /// User-workload entrypoint override (separate from `init`, which is
     /// guest PID 1). Sent across as an array of strings.
     #[serde(default)]
@@ -1477,8 +1477,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             if let Some(u) = opts.user {
                 builder = builder.user(u);
             }
-            if let Some(grace_ms) = opts.replace_with_grace_ms {
-                builder = builder.replace_with_grace(std::time::Duration::from_millis(grace_ms));
+            if let Some(timeout_ms) = opts.replace_with_timeout_ms {
+                builder =
+                    builder.replace_with_timeout(std::time::Duration::from_millis(timeout_ms));
             } else if opts.replace {
                 builder = builder.replace();
             }

@@ -46,11 +46,13 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub replace: bool,
 
-    /// Grace period the existing sandbox gets after SIGTERM before it
-    /// is SIGKILLed during a replace. Accepts `0`, `500ms`, `5s`, `2m`.
-    /// Implies `--replace`. Default 10s when `--replace` is set on its own.
+    /// Timeout the existing sandbox gets after SIGTERM before it is
+    /// SIGKILLed during a replace. Accepts `0`, `500ms`, `5s`, `2m`.
+    /// Implies `--replace`. Default 10s when `--replace` is set on its
+    /// own. An expired timeout force-kills the prior sandbox; the
+    /// `create` call still proceeds.
     #[arg(long, value_name = "DURATION")]
-    pub replace_with_grace: Option<String>,
+    pub replace_with_timeout: Option<String>,
 
     /// Suppress progress output.
     #[arg(short, long)]
@@ -357,9 +359,10 @@ pub fn apply_sandbox_opts(
         validate_shell(shell)?;
         builder = builder.shell(shell);
     }
-    if let Some(ref grace) = opts.replace_with_grace {
-        let d = parse_duration(grace).map_err(|e| anyhow::anyhow!("--replace-with-grace: {e}"))?;
-        builder = builder.replace_with_grace(d);
+    if let Some(ref timeout) = opts.replace_with_timeout {
+        let d =
+            parse_duration(timeout).map_err(|e| anyhow::anyhow!("--replace-with-timeout: {e}"))?;
+        builder = builder.replace_with_timeout(d);
     } else if opts.replace {
         builder = builder.replace();
     }

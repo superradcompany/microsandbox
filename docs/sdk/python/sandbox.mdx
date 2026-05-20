@@ -34,7 +34,7 @@ Create and boot a sandbox. The first argument is either a name (`str`) or a full
 | entrypoint | `list[str]` | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sb.exec` / `sb.shell` — those pass `cmd` literally |
 | init | `str \| dict \|` [`InitConfig`](#initconfig) | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/customize#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
 | replace | `bool` | Replace existing sandbox with same name (10s SIGTERM grace, then SIGKILL) |
-| replace_with_grace | `float` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (default `10`; `0` skips `SIGTERM`). Implies `replace=True` |
+| replace_with_timeout | `float` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (default `10`; `0` skips `SIGTERM`). Implies `replace=True` |
 | max_duration | `float` | Maximum sandbox lifetime in seconds |
 | idle_timeout | `float` | Idle timeout in seconds |
 | env | `dict[str, str]` | Environment variables visible to all commands |
@@ -326,7 +326,11 @@ Run a command with streaming output. Returns a handle that emits stdout, stderr,
 async def kill() -> None
 ```
 
-Force-terminate the sandbox immediately (SIGKILL). No graceful shutdown.
+Force-terminate the sandbox immediately (SIGKILL). No graceful
+shutdown. Pending writes that the workload hasn't `fsync`'d may be
+lost — same durability semantics as a sudden power loss on a physical
+machine. Use [`stop()`](#stop) for graceful shutdown that gives the
+workload a chance to flush.
 
 ---
 
@@ -500,7 +504,11 @@ Shell command with streaming output.
 async def stop() -> None
 ```
 
-Gracefully shut down the sandbox (SIGTERM).
+Gracefully shut down the sandbox. Lets the sandbox finish writing
+any pending data to disk before it exits, so files written inside
+the sandbox aren't lost across a later restart. Waits up to ten
+seconds for a clean exit; if the sandbox is still running after
+that, it is force-killed.
 
 ---
 
@@ -906,10 +914,12 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 | config_json | `str` | Raw JSON configuration |
 | created_at | `float \| None` | Creation timestamp (ms since epoch) |
 | updated_at | `float \| None` | Last update timestamp (ms since epoch) |
-| connect() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Connect to a running sandbox |
+| connect() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Connect to a running sandbox; returns an error if it doesn't respond within 10 seconds |
+| connect_with_timeout(timeout) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Same as `connect()` with an explicit timeout in seconds |
 | start(*, detached=False) | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Start in attached or detached mode |
-| stop() | `Awaitable[None]` | Graceful shutdown |
-| kill() | `Awaitable[None]` | Force terminate |
+| stop() | `Awaitable[None]` | Gracefully shut down. Waits up to 10 seconds for pending writes to flush, then force-kills |
+| stop_with_timeout(timeout) | `Awaitable[None]` | Same as `stop()` with an explicit timeout in seconds; `0` force-kills immediately |
+| kill() | `Awaitable[None]` | Force terminate immediately. Pending writes may be lost |
 | remove() | `Awaitable[None]` | Delete sandbox and state |
 | metrics() | `Awaitable[`[`SandboxMetrics`](#sandboxmetrics)`]` | Point-in-time resource metrics |
 | logs() | `Awaitable[list[`[`LogEntry`](#logentry)`]]` | Read captured `exec.log` (works without starting) |

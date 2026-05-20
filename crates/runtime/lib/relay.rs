@@ -235,9 +235,11 @@ impl AgentRelay {
     /// console ring buffers, and handles client disconnects with session
     /// cleanup.
     ///
-    /// If a client sends a `core.shutdown` message (identified by
+    /// When a client sends a `core.shutdown` message (identified by
     /// `FLAG_SHUTDOWN` in the frame header), the relay notifies the caller
-    /// via `drain_tx`.
+    /// via `drain_tx` after forwarding the frame to agentd. The caller is
+    /// expected to give agentd a flush window before forcing host-side
+    /// teardown.
     pub async fn run(
         self,
         mut shutdown: watch::Receiver<bool>,
@@ -774,7 +776,11 @@ async fn client_reader_task(
         let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
         let is_shutdown = (frame.flags & FLAG_SHUTDOWN) != 0;
 
-        // Notify the caller to start drain escalation.
+        // Forward shutdown to agentd (via the agent_tx send below) so the
+        // guest can sync filesystems and power off cleanly. Also notify the
+        // caller so it can start the flush-grace fallback timer — if the
+        // guest's clean poweroff doesn't reach VMM exit within that window,
+        // the caller force-exits as a backstop.
         if is_shutdown {
             tracing::info!("agent relay: client slot={slot} sent core.shutdown, notifying drain");
             let _ = drain_tx.try_send(());

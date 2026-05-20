@@ -12,8 +12,9 @@ use crate::ui;
 /// Start a stopped sandbox.
 #[derive(Debug, Args)]
 pub struct StartArgs {
-    /// Sandbox to start.
-    pub name: String,
+    /// Sandbox(es) to start.
+    #[arg(required = true)]
+    pub names: Vec<String>,
 
     /// Suppress progress output.
     #[arg(short, long)]
@@ -26,22 +27,32 @@ pub struct StartArgs {
 
 /// Execute the `msb start` command.
 pub async fn run(args: StartArgs) -> anyhow::Result<()> {
-    let spinner = if args.quiet {
-        ui::Spinner::quiet()
-    } else {
-        ui::Spinner::start("Starting", &args.name)
-    };
+    let mut failed = false;
 
-    match Sandbox::start_detached(&args.name).await {
-        Ok(sandbox) => {
-            sandbox.detach().await;
-            spinner.finish_success("Started");
-            // Sandbox stays running — the sandbox process continues in the background.
+    for name in &args.names {
+        let spinner = if args.quiet {
+            ui::Spinner::quiet()
+        } else {
+            ui::Spinner::start("Starting", name)
+        };
+
+        match Sandbox::start_detached(name).await {
+            Ok(sandbox) => {
+                sandbox.detach().await;
+                spinner.finish_success("Started");
+            }
+            Err(e) => {
+                spinner.finish_clear();
+                if !args.quiet {
+                    ui::error(&format!("{e}"));
+                }
+                failed = true;
+            }
         }
-        Err(e) => {
-            spinner.finish_clear();
-            return Err(e.into());
-        }
+    }
+
+    if failed {
+        std::process::exit(1);
     }
 
     Ok(())

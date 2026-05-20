@@ -18,12 +18,12 @@ type SandboxConfig struct {
 	Hostname    string
 	User        string
 	Replace     bool
-	// ReplaceWithGrace, if non-nil, sets a specific grace period
-	// between SIGTERM and SIGKILL when replacing an existing sandbox.
-	// nil means "use the runtime default" (10s when Replace is set).
-	// Setting this implies Replace=true. Zero is honored — it skips
-	// SIGTERM and SIGKILLs immediately. Use WithReplaceWithGrace.
-	ReplaceWithGrace *time.Duration
+	// ReplaceWithTimeout, if non-nil, sets a specific timeout between
+	// SIGTERM and SIGKILL when replacing an existing sandbox. nil means
+	// "use the runtime default" (10s when Replace is set). Setting this
+	// implies Replace=true. Zero is honored — it skips SIGTERM and
+	// SIGKILLs immediately. Use WithReplaceWithTimeout.
+	ReplaceWithTimeout *time.Duration
 	Env              map[string]string
 	Detached         bool
 	Entrypoint       []string
@@ -114,21 +114,21 @@ func WithUser(user string) SandboxOption {
 
 // WithReplace stops any existing sandbox with the same name before
 // creating. Sends SIGTERM, waits up to 10s for graceful exit, then
-// escalates to SIGKILL. Use WithReplaceWithGrace to set a different
-// grace period or skip SIGTERM entirely.
+// escalates to SIGKILL. Use WithReplaceWithTimeout to set a different
+// timeout or skip SIGTERM entirely.
 func WithReplace() SandboxOption {
 	return func(o *SandboxConfig) { o.Replace = true }
 }
 
-// WithReplaceWithGrace is like WithReplace but with a caller-specified
-// grace period between SIGTERM and SIGKILL. Implies WithReplace —
-// calling this alone is enough. A zero duration skips SIGTERM and
-// SIGKILLs immediately.
-func WithReplaceWithGrace(grace time.Duration) SandboxOption {
+// WithReplaceWithTimeout is like WithReplace but with a caller-specified
+// timeout between SIGTERM and SIGKILL. Implies WithReplace — calling
+// this alone is enough. A zero duration skips SIGTERM and SIGKILLs
+// immediately.
+func WithReplaceWithTimeout(timeout time.Duration) SandboxOption {
 	return func(o *SandboxConfig) {
 		o.Replace = true
-		g := grace
-		o.ReplaceWithGrace = &g
+		t := timeout
+		o.ReplaceWithTimeout = &t
 	}
 }
 

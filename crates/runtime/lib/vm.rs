@@ -559,13 +559,22 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         }
     });
 
-    // Shutdown listener: when the relay receives core.shutdown from an SDK
-    // client (e.g. sandbox.stop()), trigger VM exit.
+    // Shutdown listener: when the relay forwards a `core.shutdown` frame to
+    // agentd, we give the guest a window to flush block-backed roots and
+    // power off cleanly. If the VM doesn't exit on its own within
+    // `SHUTDOWN_FLUSH_TIMEOUT`, the host triggers exit as a fallback so a
+    // wedged guest doesn't strand the VMM. The window's relationship to
+    // agentd's internal `HANDOFF_POWEROFF_TIMEOUT` is enforced at compile
+    // time in microsandbox-protocol.
     {
         let shutdown_exit_handle = exit_handle.clone();
         tokio_rt.spawn(async move {
             if relay_drain_rx.recv().await.is_some() {
-                tracing::info!("core.shutdown received, triggering exit");
+                tracing::info!(
+                    "core.shutdown forwarded to agentd, allowing flush window before host fallback"
+                );
+                tokio::time::sleep(microsandbox_protocol::SHUTDOWN_FLUSH_TIMEOUT).await;
+                tracing::info!("flush window elapsed, triggering host exit");
                 shutdown_exit_handle.trigger();
             }
         });

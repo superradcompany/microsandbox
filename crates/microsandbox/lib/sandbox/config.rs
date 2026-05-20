@@ -23,6 +23,17 @@ const DEFAULT_OCI_TMPFS_PATH: &str = "/tmp";
 const DEFAULT_OCI_TMPFS_MAX_SIZE_MIB: u32 = 512;
 const DEFAULT_OCI_TMPFS_MEMORY_DIVISOR: u32 = 4;
 
+/// Default timeout given to the existing sandbox during a `.replace()`
+/// create before it is force-killed.
+///
+/// Distinct from [`SandboxHandle::stop`]'s timeout: this one applies
+/// to the builder's override-an-existing-sandbox flow, not the
+/// user-facing stop. They share a numeric value today by coincidence,
+/// not by design.
+///
+/// [`SandboxHandle::stop`]: super::SandboxHandle::stop
+pub const DEFAULT_REPLACE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn default_cpus() -> u8 {
     crate::config::config().sandbox_defaults.cpus
 }
@@ -204,13 +215,13 @@ pub struct SandboxConfig {
     ///
     /// Only consulted when `replace_existing` is true. A zero duration
     /// skips SIGTERM entirely and goes straight to SIGKILL. Default is
-    /// ten seconds, which gives the exit observer plenty of headroom
-    /// to flush logs and clean up the agent socket on a healthy
-    /// sandbox before we escalate.
+    /// [`DEFAULT_REPLACE_TIMEOUT`], which gives the exit observer plenty
+    /// of headroom to flush logs and clean up the agent socket on a
+    /// healthy sandbox before we escalate.
     ///
     /// This is an operation flag, not persisted sandbox state.
     #[serde(skip)]
-    pub replace_with_grace: std::time::Duration,
+    pub replace_with_timeout: std::time::Duration,
 
     /// Manifest digest for the resolved OCI image.
     ///
@@ -388,7 +399,7 @@ impl Default for SandboxConfig {
             insecure: false,
             ca_certs: Vec::new(),
             replace_existing: false,
-            replace_with_grace: std::time::Duration::from_secs(10),
+            replace_with_timeout: DEFAULT_REPLACE_TIMEOUT,
             manifest_digest: None,
             snapshot_upper_source: None,
         }
@@ -401,8 +412,6 @@ impl Default for SandboxConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use microsandbox_image::ImageConfig;
 
     use crate::sandbox::{RootfsSource, VolumeMount};
