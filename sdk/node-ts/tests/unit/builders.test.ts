@@ -9,6 +9,7 @@ import {
   NetworkBuilder,
   PatchBuilder,
   Sandbox,
+  SecretBuilder,
   Stdin,
 } from "../../dist/index.js";
 
@@ -350,6 +351,34 @@ describe("NetworkBuilder.secretEnvSimple (3-arg shorthand)", () => {
     expect(cfg.secrets.secrets[0].envVar).toBe("API_KEY");
     // Placeholder defaults to the value when omitted.
     expect(cfg.secrets.secrets[0].placeholder).toBe("sk-abc");
+  });
+});
+
+describe("NetworkBuilder secret passthrough", () => {
+  it("builds global passthrough host allowlists", () => {
+    const cfg = new NetworkBuilder()
+      .allowSecretPassthroughHost("api.anthropic.com")
+      .allowSecretPassthroughHostPattern("*.anthropic.com")
+      .build() as {
+      secrets: {
+        passthroughHosts: unknown[];
+      };
+    };
+
+    expect(cfg.secrets.passthroughHosts).toHaveLength(2);
+  });
+
+  it("builds per-secret passthrough host allowlists", () => {
+    const secret = new SecretBuilder()
+      .env("API_KEY")
+      .value("sk-abc")
+      .allowHost("api.github.com")
+      .allowPassthroughHost("api.anthropic.com")
+      .allowPassthroughHostPattern("*.anthropic.com")
+      .build();
+
+    expect(secret.passthroughHosts).toEqual(["api.anthropic.com"]);
+    expect(secret.passthroughHostPatterns).toEqual(["*.anthropic.com"]);
   });
 });
 

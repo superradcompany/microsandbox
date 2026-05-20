@@ -222,13 +222,29 @@ impl JsNetworkBuilder {
     }
 
     /// Set the violation action for secrets: `"block" | "block-and-log"
-    /// | "block-and-terminate"`.
+    /// | "block-and-terminate" | "passthrough"`.
     #[napi(js_name = "onSecretViolation")]
     pub fn on_secret_violation(&mut self, action: String) -> Result<&Self> {
         let act = parse_violation_action(&action)?;
         let prev = self.take_inner();
         self.inner = Some(prev.on_secret_violation(act));
         Ok(self)
+    }
+
+    /// Allow a host to receive secret placeholders without substitution.
+    #[napi(js_name = "allowSecretPassthroughHost")]
+    pub fn allow_secret_passthrough_host(&mut self, host: String) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.allow_secret_passthrough_host(host));
+        self
+    }
+
+    /// Allow hosts matching a wildcard pattern to receive secret placeholders without substitution.
+    #[napi(js_name = "allowSecretPassthroughHostPattern")]
+    pub fn allow_secret_passthrough_host_pattern(&mut self, pattern: String) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.allow_secret_passthrough_host_pattern(pattern));
+        self
     }
 
     /// Set the maximum number of concurrent connections.
@@ -316,8 +332,9 @@ fn parse_violation_action(s: &str) -> Result<RustViolationAction> {
         "block" => Ok(RustViolationAction::Block),
         "block-and-log" => Ok(RustViolationAction::BlockAndLog),
         "block-and-terminate" => Ok(RustViolationAction::BlockAndTerminate),
+        "passthrough" => Ok(RustViolationAction::Passthrough),
         other => Err(napi::Error::from_reason(format!(
-            "unknown violation action `{other}` (expected block | block-and-log | block-and-terminate)"
+            "unknown violation action `{other}` (expected block | block-and-log | block-and-terminate | passthrough)"
         ))),
     }
 }

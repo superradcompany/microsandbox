@@ -272,7 +272,7 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub secret: Vec<String>,
 
-    /// Action when a secret is sent to a disallowed host (block, block-and-log, block-and-terminate).
+    /// Action when a secret is sent to a disallowed host (block, block-and-log, block-and-terminate, passthrough).
     #[cfg(feature = "net")]
     #[arg(long)]
     pub on_secret_violation: Option<String>,
@@ -967,8 +967,9 @@ fn parse_violation_action(
         Some("block") => Ok(Some(ViolationAction::Block)),
         Some("block-and-log") => Ok(Some(ViolationAction::BlockAndLog)),
         Some("block-and-terminate") => Ok(Some(ViolationAction::BlockAndTerminate)),
+        Some("passthrough") => Ok(Some(ViolationAction::Passthrough)),
         Some(other) => anyhow::bail!(
-            "invalid violation action: {other} (expected: block, block-and-log, block-and-terminate)"
+            "invalid violation action: {other} (expected: block, block-and-log, block-and-terminate, passthrough)"
         ),
     }
 }
@@ -1252,6 +1253,19 @@ mod tests {
     use microsandbox::sandbox::{HostPermissions, StatVirtualization, VolumeMount};
 
     use super::*;
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn parse_violation_action_accepts_passthrough() {
+        let action = parse_violation_action(&Some("passthrough".to_string()))
+            .expect("passthrough should parse")
+            .expect("action should be present");
+
+        assert!(matches!(
+            action,
+            microsandbox_network::secrets::config::ViolationAction::Passthrough
+        ));
+    }
 
     //----------------------------------------------------------------------------------------------
     // Tests: apply_volume / -v parser

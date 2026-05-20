@@ -626,6 +626,8 @@ export interface NapiSecretBuilder {
   allowHost(host: string): this;
   allowHostPattern(pattern: string): this;
   allowAnyHostDangerous(iUnderstand: boolean): this;
+  allowPassthroughHost(host: string): this;
+  allowPassthroughHostPattern(pattern: string): this;
   requireTlsIdentity(enabled: boolean): this;
   injectHeaders(enabled: boolean): this;
   injectBasicAuth(enabled: boolean): this;
@@ -640,6 +642,8 @@ export interface NapiSecretEntry {
   readonly placeholder: string;
   readonly allowedHosts: string[];
   readonly allowedHostPatterns: string[];
+  readonly passthroughHosts: string[];
+  readonly passthroughHostPatterns: string[];
   readonly allowAnyHost: boolean;
   readonly requireTlsIdentity: boolean;
   readonly injection: NapiSecretInjection;
@@ -669,6 +673,8 @@ export interface NapiNetworkBuilder {
     configure: (b: NapiInterfaceOverridesBuilder) => NapiInterfaceOverridesBuilder,
   ): this;
   onSecretViolation(action: string): this;
+  allowSecretPassthroughHost(host: string): this;
+  allowSecretPassthroughHostPattern(pattern: string): this;
   maxConnections(max: number): this;
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;

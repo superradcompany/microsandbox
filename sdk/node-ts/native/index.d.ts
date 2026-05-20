@@ -417,9 +417,13 @@ export declare class NetworkBuilder {
   interface(configure: (arg: InterfaceOverridesBuilder) => InterfaceOverridesBuilder): this
   /**
    * Set the violation action for secrets: `"block" | "block-and-log"
-   * | "block-and-terminate"`.
+   * | "block-and-terminate" | "passthrough"`.
    */
   onSecretViolation(action: string): this
+  /** Allow a host to receive secret placeholders without substitution. */
+  allowSecretPassthroughHost(host: string): this
+  /** Allow hosts matching a wildcard pattern to receive secret placeholders without substitution. */
+  allowSecretPassthroughHostPattern(pattern: string): this
   /** Set the maximum number of concurrent connections. */
   maxConnections(max: number): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
@@ -1083,6 +1087,10 @@ export declare class SecretBuilder {
    * Pass `true` to opt in.
    */
   allowAnyHostDangerous(iUnderstand: boolean): this
+  /** Add an exact-match host that may receive the placeholder unchanged. */
+  allowPassthroughHost(host: string): this
+  /** Add a wildcard host pattern that may receive the placeholder unchanged. */
+  allowPassthroughHostPattern(pattern: string): this
   /** Require verified TLS identity before substituting (default: true). */
   requireTlsIdentity(enabled: boolean): this
   /** Configure header injection (default: true). */
@@ -1676,6 +1684,10 @@ export interface SecretEntry {
   allowedHosts: Array<string>
   /** Wildcard host patterns (e.g. `*.openai.com`) allowed to receive this secret. */
   allowedHostPatterns: Array<string>
+  /** Exact host names allowed to receive this secret's placeholder unchanged. */
+  passthroughHosts: Array<string>
+  /** Wildcard host patterns allowed to receive this secret's placeholder unchanged. */
+  passthroughHostPatterns: Array<string>
   /** Allow any host. **Dangerous** — secret can be exfiltrated. */
   allowAnyHost: boolean
   /** Require verified TLS identity before substituting (default: true). */

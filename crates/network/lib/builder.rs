@@ -48,6 +48,7 @@ pub struct SecretBuilder {
     value: Option<String>,
     placeholder: Option<String>,
     allowed_hosts: Vec<HostPattern>,
+    passthrough_hosts: Vec<HostPattern>,
     injection: SecretInjection,
     require_tls_identity: bool,
 }
@@ -178,6 +179,7 @@ impl NetworkBuilder {
             value: value.into(),
             placeholder: placeholder.into(),
             allowed_hosts: vec![HostPattern::Exact(allowed_host.into())],
+            passthrough_hosts: Vec::new(),
             injection: SecretInjection::default(),
             require_tls_identity: true,
         });
@@ -187,6 +189,24 @@ impl NetworkBuilder {
     /// Set the violation action for secrets.
     pub fn on_secret_violation(mut self, action: ViolationAction) -> Self {
         self.config.secrets.on_violation = action;
+        self
+    }
+
+    /// Allow a host to receive secret placeholders without substitution.
+    pub fn allow_secret_passthrough_host(mut self, host: impl Into<String>) -> Self {
+        self.config
+            .secrets
+            .passthrough_hosts
+            .push(HostPattern::Exact(host.into()));
+        self
+    }
+
+    /// Allow hosts matching a wildcard pattern to receive secret placeholders without substitution.
+    pub fn allow_secret_passthrough_host_pattern(mut self, pattern: impl Into<String>) -> Self {
+        self.config
+            .secrets
+            .passthrough_hosts
+            .push(HostPattern::Wildcard(pattern.into()));
         self
     }
 
@@ -370,6 +390,7 @@ impl SecretBuilder {
             value: None,
             placeholder: None,
             allowed_hosts: Vec::new(),
+            passthrough_hosts: Vec::new(),
             injection: SecretInjection::default(),
             require_tls_identity: true,
         }
@@ -413,6 +434,19 @@ impl SecretBuilder {
         if i_understand_the_risk {
             self.allowed_hosts.push(HostPattern::Any);
         }
+        self
+    }
+
+    /// Allow a host to receive this secret's placeholder without substitution.
+    pub fn allow_passthrough_host(mut self, host: impl Into<String>) -> Self {
+        self.passthrough_hosts.push(HostPattern::Exact(host.into()));
+        self
+    }
+
+    /// Allow hosts matching a wildcard pattern to receive this secret's placeholder without substitution.
+    pub fn allow_passthrough_host_pattern(mut self, pattern: impl Into<String>) -> Self {
+        self.passthrough_hosts
+            .push(HostPattern::Wildcard(pattern.into()));
         self
     }
 
@@ -462,6 +496,7 @@ impl SecretBuilder {
             value,
             placeholder,
             allowed_hosts: self.allowed_hosts,
+            passthrough_hosts: self.passthrough_hosts,
             injection: self.injection,
             require_tls_identity: self.require_tls_identity,
         }
@@ -523,5 +558,45 @@ mod tests {
         assert_eq!(cfg.ports[0].protocol, PortProtocol::Tcp);
         assert_eq!(cfg.ports[1].host_bind, bind);
         assert_eq!(cfg.ports[1].protocol, PortProtocol::Udp);
+    }
+
+    #[test]
+    fn network_builder_sets_global_passthrough_hosts() {
+        let cfg = NetworkBuilder::new()
+            .allow_secret_passthrough_host("api.anthropic.com")
+            .allow_secret_passthrough_host_pattern("*.anthropic.com")
+            .build()
+            .unwrap();
+
+        assert_eq!(cfg.secrets.passthrough_hosts.len(), 2);
+        assert!(matches!(
+            &cfg.secrets.passthrough_hosts[0],
+            HostPattern::Exact(host) if host == "api.anthropic.com"
+        ));
+        assert!(matches!(
+            &cfg.secrets.passthrough_hosts[1],
+            HostPattern::Wildcard(pattern) if pattern == "*.anthropic.com"
+        ));
+    }
+
+    #[test]
+    fn secret_builder_sets_passthrough_hosts() {
+        let secret = SecretBuilder::new()
+            .env("TOKEN")
+            .value("secret-value")
+            .allow_host("api.github.com")
+            .allow_passthrough_host("api.anthropic.com")
+            .allow_passthrough_host_pattern("*.anthropic.com")
+            .build();
+
+        assert_eq!(secret.passthrough_hosts.len(), 2);
+        assert!(matches!(
+            &secret.passthrough_hosts[0],
+            HostPattern::Exact(host) if host == "api.anthropic.com"
+        ));
+        assert!(matches!(
+            &secret.passthrough_hosts[1],
+            HostPattern::Wildcard(pattern) if pattern == "*.anthropic.com"
+        ));
     }
 }

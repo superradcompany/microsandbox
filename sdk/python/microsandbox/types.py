@@ -68,6 +68,7 @@ class ViolationAction(enum.StrEnum):
     BLOCK = "block"
     BLOCK_AND_LOG = "block-and-log"
     BLOCK_AND_TERMINATE = "block-and-terminate"
+    PASSTHROUGH = "passthrough"
 
 class MountKind(enum.StrEnum):
     BIND = "bind"
@@ -506,9 +507,10 @@ class SecretEntry:
     value: str
     allow_hosts: tuple[str, ...] = ()
     allow_host_patterns: tuple[str, ...] = ()
+    passthrough_hosts: tuple[str, ...] = ()
+    passthrough_host_patterns: tuple[str, ...] = ()
     placeholder: str | None = None
     require_tls: bool = True
-    on_violation: ViolationAction = ViolationAction.BLOCK_AND_LOG
     injection: SecretInjection = field(default_factory=SecretInjection)
 
     def _to_dict(self) -> dict:
@@ -517,12 +519,14 @@ class SecretEntry:
             d["allow_hosts"] = list(self.allow_hosts)
         if self.allow_host_patterns:
             d["allow_host_patterns"] = list(self.allow_host_patterns)
+        if self.passthrough_hosts:
+            d["passthrough_hosts"] = list(self.passthrough_hosts)
+        if self.passthrough_host_patterns:
+            d["passthrough_host_patterns"] = list(self.passthrough_host_patterns)
         if self.placeholder is not None:
             d["placeholder"] = self.placeholder
         if not self.require_tls:
             d["require_tls"] = False
-        if self.on_violation != ViolationAction.BLOCK_AND_LOG:
-            d["on_violation"] = str(self.on_violation)
         injection = self.injection._to_dict()
         if injection:
             d["injection"] = injection
@@ -538,9 +542,10 @@ class Secret:
         value: str,
         allow_hosts: Sequence[str] = (),
         allow_host_patterns: Sequence[str] = (),
+        passthrough_hosts: Sequence[str] = (),
+        passthrough_host_patterns: Sequence[str] = (),
         placeholder: str | None = None,
         require_tls: bool = True,
-        on_violation: ViolationAction = ViolationAction.BLOCK_AND_LOG,
         injection: SecretInjection | None = None,
     ) -> SecretEntry:
         return SecretEntry(
@@ -548,9 +553,10 @@ class Secret:
             value=value,
             allow_hosts=tuple(allow_hosts),
             allow_host_patterns=tuple(allow_host_patterns),
+            passthrough_hosts=tuple(passthrough_hosts),
+            passthrough_host_patterns=tuple(passthrough_host_patterns),
             placeholder=placeholder,
             require_tls=require_tls,
-            on_violation=on_violation,
             injection=injection if injection is not None else SecretInjection(),
         )
 
@@ -727,6 +733,9 @@ class Network:
     """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
     to ``fd42:6d73:62::/48``."""
     max_connections: int | None = None
+    on_secret_violation: ViolationAction = ViolationAction.BLOCK_AND_LOG
+    secret_passthrough_hosts: tuple[str, ...] = ()
+    secret_passthrough_host_patterns: tuple[str, ...] = ()
 
     @classmethod
     def none(cls) -> Network:
@@ -768,6 +777,12 @@ class Network:
             d["ipv6_pool"] = self.ipv6_pool
         if self.max_connections is not None:
             d["max_connections"] = self.max_connections
+        if self.on_secret_violation != ViolationAction.BLOCK_AND_LOG:
+            d["on_secret_violation"] = str(self.on_secret_violation)
+        if self.secret_passthrough_hosts:
+            d["secret_passthrough_hosts"] = list(self.secret_passthrough_hosts)
+        if self.secret_passthrough_host_patterns:
+            d["secret_passthrough_host_patterns"] = list(self.secret_passthrough_host_patterns)
         return d
 
 #--------------------------------------------------------------------------------------------------

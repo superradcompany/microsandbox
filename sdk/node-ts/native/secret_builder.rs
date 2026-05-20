@@ -22,6 +22,10 @@ pub struct JsSecretEntry {
     pub allowed_hosts: Vec<String>,
     /// Wildcard host patterns (e.g. `*.openai.com`) allowed to receive this secret.
     pub allowed_host_patterns: Vec<String>,
+    /// Exact host names allowed to receive this secret's placeholder unchanged.
+    pub passthrough_hosts: Vec<String>,
+    /// Wildcard host patterns allowed to receive this secret's placeholder unchanged.
+    pub passthrough_host_patterns: Vec<String>,
     /// Allow any host. **Dangerous** — secret can be exfiltrated.
     pub allow_any_host: bool,
     /// Require verified TLS identity before substituting (default: true).
@@ -105,6 +109,22 @@ impl JsSecretBuilder {
     pub fn allow_any_host_dangerous(&mut self, i_understand: bool) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.allow_any_host_dangerous(i_understand));
+        self
+    }
+
+    /// Add an exact-match host that may receive the placeholder unchanged.
+    #[napi(js_name = "allowPassthroughHost")]
+    pub fn allow_passthrough_host(&mut self, host: String) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.allow_passthrough_host(host));
+        self
+    }
+
+    /// Add a wildcard host pattern that may receive the placeholder unchanged.
+    #[napi(js_name = "allowPassthroughHostPattern")]
+    pub fn allow_passthrough_host_pattern(&mut self, pattern: String) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.allow_passthrough_host_pattern(pattern));
         self
     }
 
@@ -203,11 +223,22 @@ pub(crate) fn to_js_secret_entry(entry: RustSecretEntry) -> JsSecretEntry {
     let mut allowed_hosts = Vec::new();
     let mut allowed_host_patterns = Vec::new();
     let mut allow_any_host = false;
+    let mut passthrough_hosts = Vec::new();
+    let mut passthrough_host_patterns = Vec::new();
     for h in entry.allowed_hosts {
         match h {
             HostPattern::Exact(s) => allowed_hosts.push(s),
             HostPattern::Wildcard(s) => allowed_host_patterns.push(s),
             HostPattern::Any => allow_any_host = true,
+        }
+    }
+    for h in entry.passthrough_hosts {
+        match h {
+            HostPattern::Exact(s) => passthrough_hosts.push(s),
+            HostPattern::Wildcard(s) => passthrough_host_patterns.push(s),
+            HostPattern::Any => unreachable!(
+                "passthrough_hosts cannot contain HostPattern::Any; builder only emits exact/wildcard patterns"
+            ),
         }
     }
     JsSecretEntry {
@@ -216,6 +247,8 @@ pub(crate) fn to_js_secret_entry(entry: RustSecretEntry) -> JsSecretEntry {
         placeholder: entry.placeholder,
         allowed_hosts,
         allowed_host_patterns,
+        passthrough_hosts,
+        passthrough_host_patterns,
         allow_any_host,
         require_tls_identity: entry.require_tls_identity,
         injection: JsSecretInjection {

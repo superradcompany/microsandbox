@@ -13,6 +13,10 @@ pub struct SecretsConfig {
     #[serde(default)]
     pub secrets: Vec<SecretEntry>,
 
+    /// Hosts allowed to receive secret placeholders without substitution.
+    #[serde(default)]
+    pub passthrough_hosts: Vec<HostPattern>,
+
     /// Action on secret violation (placeholder leaked to disallowed host).
     #[serde(default)]
     pub on_violation: ViolationAction,
@@ -33,6 +37,10 @@ pub struct SecretEntry {
     /// Hosts allowed to receive this secret.
     #[serde(default)]
     pub allowed_hosts: Vec<HostPattern>,
+
+    /// Hosts allowed to receive this secret's placeholder without substitution.
+    #[serde(default)]
+    pub passthrough_hosts: Vec<HostPattern>,
 
     /// Where the secret can be injected.
     #[serde(default)]
@@ -77,7 +85,7 @@ pub struct SecretInjection {
 }
 
 /// Action when a secret placeholder is detected going to a disallowed host.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ViolationAction {
     /// Block the request silently.
     Block,
@@ -86,6 +94,9 @@ pub enum ViolationAction {
     BlockAndLog,
     /// Block and terminate the sandbox.
     BlockAndTerminate,
+    /// Forward the request with the placeholder unchanged.
+    #[serde(rename = "passthrough")]
+    Passthrough,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -99,6 +110,7 @@ impl std::fmt::Debug for SecretEntry {
             .field("value", &"[REDACTED]")
             .field("placeholder", &self.placeholder)
             .field("allowed_hosts", &self.allowed_hosts)
+            .field("passthrough_hosts", &self.passthrough_hosts)
             .field("injection", &self.injection)
             .field("require_tls_identity", &self.require_tls_identity)
             .finish()
@@ -198,6 +210,7 @@ mod tests {
             value: "v".into(),
             placeholder: "$K".into(),
             allowed_hosts: vec![],
+            passthrough_hosts: vec![],
             injection: SecretInjection::default(),
             require_tls_identity: true,
         };

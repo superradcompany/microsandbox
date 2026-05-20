@@ -21,6 +21,9 @@ Network(
     ipv4_pool: str | None = None,
     ipv6_pool: str | None = None,
     max_connections: int | None = None,
+    on_secret_violation: ViolationAction = ViolationAction.BLOCK_AND_LOG,
+    secret_passthrough_hosts: tuple[str, ...] = (),
+    secret_passthrough_host_patterns: tuple[str, ...] = (),
     trust_host_cas: bool | None = None,
 )
 ```
@@ -36,6 +39,9 @@ Network(
 | ipv4_pool | `str \| None` | IPv4 pool used for per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12` |
 | ipv6_pool | `str \| None` | IPv6 pool used for per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48` |
 | max_connections | `int \| None` | Maximum concurrent connections |
+| on_secret_violation | [`ViolationAction`](/sdk/python/secrets#violationaction) | Sandbox-wide action when a secret placeholder reaches a disallowed host |
+| secret_passthrough_hosts | `tuple[str, ...]` | Hosts allowed to receive secret placeholders unchanged. Does not enable substitution |
+| secret_passthrough_host_patterns | `tuple[str, ...]` | Wildcard host patterns allowed to receive secret placeholders unchanged. Does not enable substitution |
 | trust_host_cas | `bool \| None` | Ship the host's trusted root CAs into the guest at boot so outbound TLS works behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, Netskope, etc.). These proxies install a gateway CA on the host that's unknown to the guest's stock Mozilla bundle. Opt-in |
 
 ---

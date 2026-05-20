@@ -1031,6 +1031,26 @@ Set the action taken when a secret reaches a disallowed host. See [`ViolationAct
 
 ---
 
+#### allowSecretPassthroughHost()
+
+```typescript
+allowSecretPassthroughHost(host: string): this
+```
+
+Allow configured secret placeholders to pass through unchanged to an exact host. This does **not** allow that host to receive real secret values.
+
+---
+
+#### allowSecretPassthroughHostPattern()
+
+```typescript
+allowSecretPassthroughHostPattern(pattern: string): this
+```
+
+Allow configured secret placeholders to pass through unchanged to hosts matching a wildcard pattern. This does **not** allow those hosts to receive real secret values.
+
+---
+
 #### policy()
 
 ```typescript

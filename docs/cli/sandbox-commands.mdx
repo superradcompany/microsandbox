@@ -75,7 +75,7 @@ msb run --name public-api -p 0.0.0.0:8000:8000 python
 | `--max-connections` | Limit the number of concurrent network connections |
 | `--trust-host-cas` | Ship the host's trusted root CAs into the guest so outbound TLS works behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, etc.) whose gateway CA is installed on the host but unknown to the guest's stock bundle. Opt-in; by default the guest validates against its stock Mozilla bundle only |
 | `--secret` | Inject a secret that is only sent to an allowed host (`ENV=VALUE@HOST`) |
-| `--on-secret-violation` | Action when a secret is sent to a disallowed host (`block`, `block-and-log`, `block-and-terminate`) |
+| `--on-secret-violation` | Action when a secret is sent to a disallowed host (`block`, `block-and-log`, `block-and-terminate`, `passthrough`) |
 | `--tls-intercept` | Intercept and inspect HTTPS traffic via a built-in TLS proxy |
 | `--tls-intercept-port` | TCP port to apply TLS interception on (default: 443) |
 | `--tls-bypass` | Skip TLS interception for a domain (e.g. `*.internal.com`) |

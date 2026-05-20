@@ -21,11 +21,13 @@ use super::config::{SecretsConfig, ViolationAction};
 pub struct SecretsHandler {
     /// Secrets eligible for substitution on this connection.
     eligible: Vec<EligibleSecret>,
+    /// Secret placeholders allowed to pass through unchanged on this connection.
+    eligible_passthrough: Vec<String>,
     /// All placeholder strings (for violation detection on disallowed hosts).
     all_placeholders: Vec<String>,
     /// Violation action.
     on_violation: ViolationAction,
-    /// Whether any ineligible secrets exist (pre-computed for fast-path skip).
+    /// Whether any disallowed placeholders exist (pre-computed for fast-path skip).
     has_ineligible: bool,
     /// Whether this connection is TLS-intercepted (not bypass).
     tls_intercepted: bool,
@@ -122,7 +124,9 @@ impl SecretsHandler {
     /// (true) or a bypass/plain connection (false).
     pub fn new(config: &SecretsConfig, sni: &str, tls_intercepted: bool) -> Self {
         let mut eligible = Vec::new();
+        let mut eligible_passthrough = Vec::new();
         let mut all_placeholders = Vec::new();
+        let global_passthrough_allowed = config.passthrough_hosts.iter().any(|p| p.matches(sni));
 
         for secret in &config.secrets {
             all_placeholders.push(secret.placeholder.clone());
@@ -140,16 +144,23 @@ impl SecretsHandler {
                     inject_body: secret.injection.body,
                     require_tls_identity: secret.require_tls_identity,
                 });
+            } else {
+                let secret_passthrough_allowed =
+                    secret.passthrough_hosts.iter().any(|p| p.matches(sni));
+                if global_passthrough_allowed || secret_passthrough_allowed {
+                    eligible_passthrough.push(secret.placeholder.clone());
+                }
             }
         }
 
-        let has_ineligible = eligible.len() < all_placeholders.len();
+        let has_ineligible = eligible.len() + eligible_passthrough.len() < all_placeholders.len();
         let max_placeholder_len = all_placeholders.iter().map(String::len).max().unwrap_or(0);
 
         Self {
             eligible,
+            eligible_passthrough,
             all_placeholders,
-            on_violation: config.on_violation.clone(),
+            on_violation: config.on_violation,
             has_ineligible,
             tls_intercepted,
             max_placeholder_len,
@@ -184,19 +195,24 @@ impl SecretsHandler {
 
         // Fast path: skip violation check when no ineligible secrets exist.
         if self.has_ineligible && self.has_violation(data, &header_str) {
-            self.update_tail(data);
             match self.on_violation {
-                ViolationAction::Block => return None,
+                ViolationAction::Block => {
+                    self.update_tail(data);
+                    return None;
+                }
                 ViolationAction::BlockAndLog => {
+                    self.update_tail(data);
                     tracing::warn!("secret violation: placeholder detected for disallowed host");
                     return None;
                 }
                 ViolationAction::BlockAndTerminate => {
+                    self.update_tail(data);
                     tracing::error!(
                         "secret violation: placeholder detected for disallowed host — terminating"
                     );
                     return None;
                 }
+                ViolationAction::Passthrough => {}
             }
         }
         self.update_tail(data);
@@ -239,15 +255,16 @@ impl SecretsHandler {
         matches!(self.on_violation, ViolationAction::BlockAndTerminate)
     }
 
-    /// Check if any placeholder appears in data for a host that isn't allowed.
+    /// Check if any placeholder appears in data for a host that isn't allowed
+    /// to receive either the real secret or the placeholder.
     /// Scans the raw bytes (stitched with the previous call's tail for
     /// cross-write detection), plus URL- and JSON-decoded variants for
     /// encoded-placeholder bypass attempts, plus base64-decoded Basic auth
     /// credentials.
     fn has_violation(&self, data: &[u8], headers: &str) -> bool {
-        // Fast path: if all placeholders have matching eligible entries, no
-        // violation is possible (every secret is allowed for this host).
-        if self.eligible.len() == self.all_placeholders.len() {
+        // Fast path: if every placeholder is either substitutable or explicitly
+        // allowed to pass through on this host, no violation is possible.
+        if !self.has_ineligible {
             return false;
         }
 
@@ -262,7 +279,9 @@ impl SecretsHandler {
         let scan = scan_buf.as_ref();
 
         for placeholder in &self.all_placeholders {
-            if self.eligible.iter().any(|s| s.placeholder == *placeholder) {
+            if self.eligible.iter().any(|s| s.placeholder == *placeholder)
+                || self.eligible_passthrough.iter().any(|p| p == placeholder)
+            {
                 continue;
             }
             let needle = placeholder.as_bytes();
@@ -434,6 +453,7 @@ mod tests {
     fn make_config(secrets: Vec<SecretEntry>) -> SecretsConfig {
         SecretsConfig {
             secrets,
+            passthrough_hosts: vec![],
             on_violation: ViolationAction::Block,
         }
     }
@@ -444,6 +464,7 @@ mod tests {
             value: value.into(),
             placeholder: placeholder.into(),
             allowed_hosts: vec![HostPattern::Exact(host.into())],
+            passthrough_hosts: vec![],
             injection: SecretInjection::default(),
             require_tls_identity: true,
         }
@@ -478,6 +499,70 @@ mod tests {
 
         let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
         assert!(handler.substitute(input).is_none());
+    }
+
+    #[test]
+    fn global_passthrough_host_forwards_placeholder_unchanged() {
+        let mut config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        config
+            .passthrough_hosts
+            .push(HostPattern::Exact("api.anthropic.com".into()));
+        let mut handler = SecretsHandler::new(&config, "api.anthropic.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert_eq!(&*output, input);
+        assert!(!handler.terminates_on_violation());
+    }
+
+    #[test]
+    fn per_secret_passthrough_host_forwards_placeholder_unchanged() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret
+            .passthrough_hosts
+            .push(HostPattern::Exact("api.anthropic.com".into()));
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.anthropic.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert_eq!(&*output, input);
+    }
+
+    #[test]
+    fn global_passthrough_action_forwards_disallowed_placeholder_unchanged() {
+        let mut config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        config.on_violation = ViolationAction::Passthrough;
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert_eq!(&*output, input);
+    }
+
+    #[test]
+    fn passthrough_host_does_not_allow_other_disallowed_placeholders() {
+        let mut passthrough = make_secret("$PASSTHROUGH", "real-secret-a", "api.openai.com");
+        passthrough
+            .passthrough_hosts
+            .push(HostPattern::Exact("api.anthropic.com".into()));
+        let blocked = make_secret("$BLOCKED", "real-secret-b", "api.github.com");
+        let config = make_config(vec![passthrough, blocked]);
+        let mut handler = SecretsHandler::new(&config, "api.anthropic.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nX-A: $PASSTHROUGH\r\nX-B: $BLOCKED\r\n\r\n";
+        assert!(handler.substitute(input).is_none());
+    }
+
+    #[test]
+    fn global_block_and_terminate_marks_violation_as_terminating() {
+        let mut config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        config.on_violation = ViolationAction::BlockAndTerminate;
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\n\r\n";
+        assert!(handler.substitute(input).is_none());
+        assert!(handler.terminates_on_violation());
     }
 
     #[test]

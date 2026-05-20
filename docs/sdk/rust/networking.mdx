@@ -645,6 +645,26 @@ Set the action taken when a secret placeholder is detected in traffic destined f
 
 ---
 
+#### allow_secret_passthrough_host()
+
+```rust
+fn allow_secret_passthrough_host(self, host: impl Into<String>) -> Self
+```
+
+Allow any configured secret placeholder to pass through unchanged to an exact host. This does **not** allow the host to receive the real secret value; substitution still only happens for hosts configured with `SecretBuilder::allow_host()`.
+
+---
+
+#### allow_secret_passthrough_host_pattern()
+
+```rust
+fn allow_secret_passthrough_host_pattern(self, pattern: impl Into<String>) -> Self
+```
+
+Allow any configured secret placeholder to pass through unchanged to hosts matching a wildcard pattern (for example, `"*.anthropic.com"`). This does **not** allow those hosts to receive real secret values.
+
+---
+
 #### policy()
 
 ```rust
@@ -935,3 +955,4 @@ Action taken when a secret placeholder is sent to a disallowed host.
 | `Block` | Silently drop the request. The guest sees a connection reset. This is the default. |
 | `BlockAndLog` | Drop the request and emit a warning log on the host side. |
 | `BlockAndTerminate` | Drop the request, log an error, and shut down the entire sandbox. |
+| `Passthrough` | Forward the request with the placeholder unchanged. The real secret is not substituted. |

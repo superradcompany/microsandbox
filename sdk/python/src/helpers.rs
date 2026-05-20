@@ -832,6 +832,23 @@ fn apply_network(
         builder = builder.network(|n| n.on_secret_violation(action));
     }
 
+    // Secret passthrough hosts (sandbox-level).
+    let secret_passthrough_hosts: Vec<String> =
+        extract_opt(net, "secret_passthrough_hosts")?.unwrap_or_default();
+    let secret_passthrough_host_patterns: Vec<String> =
+        extract_opt(net, "secret_passthrough_host_patterns")?.unwrap_or_default();
+    if !secret_passthrough_hosts.is_empty() || !secret_passthrough_host_patterns.is_empty() {
+        builder = builder.network(|mut n| {
+            for host in &secret_passthrough_hosts {
+                n = n.allow_secret_passthrough_host(host);
+            }
+            for pattern in &secret_passthrough_host_patterns {
+                n = n.allow_secret_passthrough_host_pattern(pattern);
+            }
+            n
+        });
+    }
+
     // TLS config.
     if let Some(tls) = net.get_item("tls")?
         && !tls.is_none()
@@ -935,6 +952,10 @@ fn apply_secret(
     let allow_hosts: Vec<String> = extract_opt(secret, "allow_hosts")?.unwrap_or_default();
     let allow_host_patterns: Vec<String> =
         extract_opt(secret, "allow_host_patterns")?.unwrap_or_default();
+    let passthrough_hosts: Vec<String> =
+        extract_opt(secret, "passthrough_hosts")?.unwrap_or_default();
+    let passthrough_host_patterns: Vec<String> =
+        extract_opt(secret, "passthrough_host_patterns")?.unwrap_or_default();
 
     let placeholder: Option<String> = extract_opt(secret, "placeholder")?;
     let require_tls: Option<bool> = extract_opt(secret, "require_tls")?;
@@ -959,6 +980,12 @@ fn apply_secret(
         }
         for pattern in &allow_host_patterns {
             s = s.allow_host_pattern(pattern);
+        }
+        for host in &passthrough_hosts {
+            s = s.allow_passthrough_host(host);
+        }
+        for pattern in &passthrough_host_patterns {
+            s = s.allow_passthrough_host_pattern(pattern);
         }
         if let Some(ref ph) = placeholder {
             s = s.placeholder(ph);
@@ -1016,6 +1043,7 @@ fn parse_violation_action(
         "block" => Ok(ViolationAction::Block),
         "block-and-log" | "block_and_log" => Ok(ViolationAction::BlockAndLog),
         "block-and-terminate" | "block_and_terminate" => Ok(ViolationAction::BlockAndTerminate),
+        "passthrough" => Ok(ViolationAction::Passthrough),
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "unknown violation action: {s}"
         ))),
