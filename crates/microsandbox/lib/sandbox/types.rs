@@ -85,6 +85,40 @@ pub trait IntoImage {
     fn into_rootfs_source(self) -> crate::MicrosandboxResult<RootfsSource>;
 }
 
+/// Stat virtualization policy for a virtiofs-backed volume mount.
+///
+/// Mirrors `microsandbox_filesystem::StatVirtualization`. See
+/// `design/filesystems/stat-virtualization.md` for the threat model.
+///
+/// Serializes/deserializes as the lowercase variant name (`"strict"`,
+/// `"relaxed"`, `"off"`) so persisted JSON aligns with the CLI grammar
+/// (`stat-virt=strict|relaxed|off`) and the NAPI string contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StatVirtualization {
+    /// Fail-closed: probe the host backing path; require xattr support.
+    Strict,
+    /// Opportunistic: apply the overlay when present; tolerate missing xattr support.
+    Relaxed,
+    /// Literal host metadata: do not read or apply the override xattr.
+    Off,
+}
+
+/// Host permission propagation policy for a virtiofs-backed volume mount.
+///
+/// Mirrors `microsandbox_filesystem::HostPermissions`.
+///
+/// Serializes/deserializes as the lowercase variant name (`"private"`,
+/// `"mirror"`) to align with the CLI and NAPI spellings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostPermissions {
+    /// Guest chmod stays in the metadata overlay only.
+    Private,
+    /// Mirror ordinary rwx bits for regular files and directories to the host inode.
+    Mirror,
+}
+
 /// A volume mount specification for a sandbox.
 #[derive(Clone)]
 pub enum VolumeMount {
@@ -96,6 +130,10 @@ pub enum VolumeMount {
         guest: String,
         /// Whether the mount is read-only.
         readonly: bool,
+        /// Guest-visible stat virtualization policy.
+        stat_virtualization: StatVirtualization,
+        /// Host permission propagation policy.
+        host_permissions: HostPermissions,
     },
 
     /// Mount a named volume into the guest.
@@ -106,6 +144,10 @@ pub enum VolumeMount {
         guest: String,
         /// Whether the mount is read-only.
         readonly: bool,
+        /// Guest-visible stat virtualization policy.
+        stat_virtualization: StatVirtualization,
+        /// Host permission propagation policy.
+        host_permissions: HostPermissions,
     },
 
     /// Temporary filesystem (memory-backed).
@@ -146,6 +188,8 @@ pub struct MountBuilder {
     size_mib: Option<u32>,
     disk_format: Option<DiskImageFormat>,
     disk_fstype: Option<String>,
+    stat_virtualization: Option<StatVirtualization>,
+    host_permissions: Option<HostPermissions>,
     error: Option<crate::MicrosandboxError>,
 }
 
@@ -268,6 +312,8 @@ impl MountBuilder {
             size_mib: None,
             disk_format: None,
             disk_fstype: None,
+            stat_virtualization: None,
+            host_permissions: None,
             error: None,
         }
     }
@@ -338,6 +384,24 @@ impl MountBuilder {
         self
     }
 
+    /// Set the guest stat virtualization policy. Default: [`StatVirtualization::Strict`].
+    ///
+    /// Valid only for bind and named-directory/file mounts. Calling this on
+    /// a tmpfs or disk-image mount produces an error at `.build()` time.
+    pub fn stat_virtualization(mut self, policy: StatVirtualization) -> Self {
+        self.stat_virtualization = Some(policy);
+        self
+    }
+
+    /// Set the host permission propagation policy. Default: [`HostPermissions::Private`].
+    ///
+    /// Valid only for bind and named-directory/file mounts. Calling this on
+    /// a tmpfs or disk-image mount produces an error at `.build()` time.
+    pub fn host_permissions(mut self, policy: HostPermissions) -> Self {
+        self.host_permissions = Some(policy);
+        self
+    }
+
     /// Set size limit (for tmpfs).
     ///
     /// Accepts bare `u32` (interpreted as MiB) or a [`SizeExt`](crate::size::SizeExt) helper:
@@ -379,6 +443,7 @@ impl MountBuilder {
         // Reject options set on the wrong kind.
         let is_tmpfs = matches!(self.mount, MountKind::Tmpfs);
         let is_disk = matches!(self.mount, MountKind::Disk(_));
+        let is_virtiofs = matches!(self.mount, MountKind::Bind(_) | MountKind::Named(_));
         if self.size_mib.is_some() && !is_tmpfs {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 ".size() is only valid for tmpfs mounts".into(),
@@ -394,19 +459,74 @@ impl MountBuilder {
                 ".fstype() is only valid for disk image mounts".into(),
             ));
         }
+        if self.stat_virtualization.is_some() && !is_virtiofs {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                ".stat_virtualization() is only valid for bind and named volume mounts".into(),
+            ));
+        }
+        if self.host_permissions.is_some() && !is_virtiofs {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                ".host_permissions() is only valid for bind and named volume mounts".into(),
+            ));
+        }
+
+        // `Off + Mirror` is a contradiction. With xattr disabled there is no
+        // overlay to keep guest chmod private, so chmod always hits the host —
+        // `Mirror` would silently be a no-op as a distinct policy. Reject only
+        // when the caller explicitly chose both, so the conservative defaults
+        // never trip the check.
+        if matches!(self.stat_virtualization, Some(StatVirtualization::Off))
+            && matches!(self.host_permissions, Some(HostPermissions::Mirror))
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "stat_virtualization=Off cannot be combined with host_permissions=Mirror: \
+                 Off has no overlay, so chmod already operates on the host inode and Mirror \
+                 would be a no-op. Drop one or the other."
+                    .into(),
+            ));
+        }
+
+        let stat_virtualization = self
+            .stat_virtualization
+            .unwrap_or(StatVirtualization::Strict);
+        let host_permissions = self.host_permissions.unwrap_or(HostPermissions::Private);
 
         match self.mount {
-            MountKind::Bind(host) => Ok(VolumeMount::Bind {
-                host,
-                guest: self.guest,
-                readonly: self.readonly,
-            }),
+            MountKind::Bind(host) => {
+                // The spawn → VM wire format encodes mount specs as
+                // `tag:host[:ro][,key=value]`. Embedded commas or colons in
+                // the host path would collide with that grammar and could
+                // silently inject policy options. Reject at the SDK
+                // boundary so callers get a clear error rather than a
+                // confusing parse failure later.
+                if let Some(s) = host.to_str() {
+                    if s.contains(',') {
+                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                            "bind host path must not contain ',': {s}"
+                        )));
+                    }
+                    if s.contains(':') {
+                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                            "bind host path must not contain ':': {s}"
+                        )));
+                    }
+                }
+                Ok(VolumeMount::Bind {
+                    host,
+                    guest: self.guest,
+                    readonly: self.readonly,
+                    stat_virtualization,
+                    host_permissions,
+                })
+            }
             MountKind::Named(name) => {
                 crate::volume::validate_volume_name(&name)?;
                 Ok(VolumeMount::Named {
                     name,
                     guest: self.guest,
                     readonly: self.readonly,
+                    stat_virtualization,
+                    host_permissions,
                 })
             }
             MountKind::Tmpfs => Ok(VolumeMount::Tmpfs {
@@ -801,24 +921,32 @@ impl Serialize for VolumeMount {
                 host,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => {
-                let mut map = serializer.serialize_map(Some(4))?;
+                let mut map = serializer.serialize_map(Some(6))?;
                 map.serialize_entry("type", "Bind")?;
                 map.serialize_entry("host", host)?;
                 map.serialize_entry("guest", guest)?;
                 map.serialize_entry("readonly", readonly)?;
+                map.serialize_entry("stat_virtualization", stat_virtualization)?;
+                map.serialize_entry("host_permissions", host_permissions)?;
                 map.end()
             }
             Self::Named {
                 name,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => {
-                let mut map = serializer.serialize_map(Some(4))?;
+                let mut map = serializer.serialize_map(Some(6))?;
                 map.serialize_entry("type", "Named")?;
                 map.serialize_entry("name", name)?;
                 map.serialize_entry("guest", guest)?;
                 map.serialize_entry("readonly", readonly)?;
+                map.serialize_entry("stat_virtualization", stat_virtualization)?;
+                map.serialize_entry("host_permissions", host_permissions)?;
                 map.end()
             }
             Self::Tmpfs {
@@ -857,6 +985,13 @@ impl Serialize for VolumeMount {
 impl<'de> Deserialize<'de> for VolumeMount {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         /// Helper for tagged deserialization.
+        fn default_strict() -> StatVirtualization {
+            StatVirtualization::Strict
+        }
+        fn default_private() -> HostPermissions {
+            HostPermissions::Private
+        }
+
         #[derive(Deserialize)]
         #[serde(tag = "type")]
         enum VolumeMountHelper {
@@ -865,12 +1000,20 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 guest: String,
                 #[serde(default)]
                 readonly: bool,
+                #[serde(default = "default_strict")]
+                stat_virtualization: StatVirtualization,
+                #[serde(default = "default_private")]
+                host_permissions: HostPermissions,
             },
             Named {
                 name: String,
                 guest: String,
                 #[serde(default)]
                 readonly: bool,
+                #[serde(default = "default_strict")]
+                stat_virtualization: StatVirtualization,
+                #[serde(default = "default_private")]
+                host_permissions: HostPermissions,
             },
             Tmpfs {
                 guest: String,
@@ -896,19 +1039,27 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 host,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => Self::Bind {
                 host,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             },
             VolumeMountHelper::Named {
                 name,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => Self::Named {
                 name,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             },
             VolumeMountHelper::Tmpfs {
                 guest,
@@ -943,21 +1094,29 @@ impl std::fmt::Debug for VolumeMount {
                 host,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => f
                 .debug_struct("Bind")
                 .field("host", host)
                 .field("guest", guest)
                 .field("readonly", readonly)
+                .field("stat_virtualization", stat_virtualization)
+                .field("host_permissions", host_permissions)
                 .finish(),
             Self::Named {
                 name,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => f
                 .debug_struct("Named")
                 .field("name", name)
                 .field("guest", guest)
                 .field("readonly", readonly)
+                .field("stat_virtualization", stat_virtualization)
+                .field("host_permissions", host_permissions)
                 .finish(),
             Self::Tmpfs {
                 guest,

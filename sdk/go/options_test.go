@@ -562,6 +562,73 @@ func TestMountReadonlyOption(t *testing.T) {
 	}
 }
 
+func TestMountBindDefaultsLeavePoliciesEmpty(t *testing.T) {
+	m := Mount.Bind("/host/data", MountOptions{})
+	if m.StatVirtualization != "" {
+		t.Errorf("StatVirtualization: want empty, got %q", m.StatVirtualization)
+	}
+	if m.HostPermissions != "" {
+		t.Errorf("HostPermissions: want empty, got %q", m.HostPermissions)
+	}
+}
+
+func TestMountBindPropagatesPolicies(t *testing.T) {
+	m := Mount.Bind("/host/data", MountOptions{
+		Readonly:           true,
+		StatVirtualization: StatVirtualizationRelaxed,
+		HostPermissions:    HostPermissionsMirror,
+	})
+	if m.StatVirtualization != StatVirtualizationRelaxed {
+		t.Errorf("StatVirtualization: got %q, want relaxed", m.StatVirtualization)
+	}
+	if m.HostPermissions != HostPermissionsMirror {
+		t.Errorf("HostPermissions: got %q, want mirror", m.HostPermissions)
+	}
+	if !m.Readonly {
+		t.Error("Readonly: want true")
+	}
+}
+
+func TestMountNamedPropagatesPolicies(t *testing.T) {
+	m := Mount.Named("cache", MountOptions{
+		StatVirtualization: StatVirtualizationOff,
+	})
+	if m.StatVirtualization != StatVirtualizationOff {
+		t.Errorf("StatVirtualization: got %q, want off", m.StatVirtualization)
+	}
+	// Host permissions defaults to empty (i.e. runtime default Private).
+	if m.HostPermissions != "" {
+		t.Errorf("HostPermissions: want empty, got %q", m.HostPermissions)
+	}
+}
+
+func TestStatVirtualizationConstants(t *testing.T) {
+	cases := map[StatVirtualization]string{
+		StatVirtualizationDefault: "",
+		StatVirtualizationStrict:  "strict",
+		StatVirtualizationRelaxed: "relaxed",
+		StatVirtualizationOff:     "off",
+	}
+	for got, want := range cases {
+		if string(got) != want {
+			t.Errorf("StatVirtualization: got %q, want %q", got, want)
+		}
+	}
+}
+
+func TestHostPermissionsConstants(t *testing.T) {
+	cases := map[HostPermissions]string{
+		HostPermissionsDefault: "",
+		HostPermissionsPrivate: "private",
+		HostPermissionsMirror:  "mirror",
+	}
+	for got, want := range cases {
+		if string(got) != want {
+			t.Errorf("HostPermissions: got %q, want %q", got, want)
+		}
+	}
+}
+
 func TestWithVolumeLabelsMerge(t *testing.T) {
 	o := VolumeConfig{}
 	WithVolumeLabels(map[string]string{"a": "1"})(&o)

@@ -28,7 +28,10 @@ pub use backends::{
         DualFsConfig, MergeReadsBackendAPrecedence, ReadBackendBWriteBackendA,
     },
     memfs::{CachePolicy as MemCachePolicy, MemFs, MemFsConfig},
-    passthroughfs::{CachePolicy, PassthroughConfig, PassthroughFs, PassthroughFsBuilder},
+    passthroughfs::{
+        CachePolicy, HostPermissions, PassthroughConfig, PassthroughFs, PassthroughFsBuilder,
+        StatVirtualization,
+    },
 };
 pub use microsandbox_utils::size::{ByteSize, Bytes, Mebibytes, SizeExt};
 pub use msb_krun::backends::fs::{

@@ -934,14 +934,16 @@ type RegistryAuthOptions struct {
 
 // MountSpec describes a volume mount for a sandbox.
 type MountSpec struct {
-	Bind     string `json:"bind,omitempty"`
-	Named    string `json:"named,omitempty"`
-	Tmpfs    bool   `json:"tmpfs,omitempty"`
-	Disk     string `json:"disk,omitempty"`
-	Format   string `json:"format,omitempty"`
-	Fstype   string `json:"fstype,omitempty"`
-	Readonly bool   `json:"readonly,omitempty"`
-	SizeMiB  uint32 `json:"size_mib,omitempty"`
+	Bind               string `json:"bind,omitempty"`
+	Named              string `json:"named,omitempty"`
+	Tmpfs              bool   `json:"tmpfs,omitempty"`
+	Disk               string `json:"disk,omitempty"`
+	Format             string `json:"format,omitempty"`
+	Fstype             string `json:"fstype,omitempty"`
+	Readonly           bool   `json:"readonly,omitempty"`
+	SizeMiB            uint32 `json:"size_mib,omitempty"`
+	StatVirtualization string `json:"stat_virtualization,omitempty"`
+	HostPermissions    string `json:"host_permissions,omitempty"`
 }
 
 // NetworkOptions is the JSON representation of the network config block.

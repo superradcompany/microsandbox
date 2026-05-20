@@ -25,6 +25,7 @@ use std::{
     sync::{Arc, RwLock, atomic::Ordering},
 };
 
+use super::host_mode::{OWNER_FLOOR_DIR, OWNER_FLOOR_FILE, fchmod_at_mirror, fchmod_mirror};
 use super::{PassthroughFs, inode};
 use crate::{
     Context, Entry, Extensions, OpenOptions,
@@ -37,9 +38,11 @@ use crate::{
 
 /// Create and open a regular file.
 ///
-/// The host file is created with `S_IRUSR | S_IWUSR` (0o600) regardless of the
-/// requested mode — the guest-visible permissions are stored in the override xattr.
-/// This ensures the host process can always read/write the file for I/O operations.
+/// With xattr virtualization enabled, the host file is created with
+/// `S_IRUSR | S_IWUSR` (0o600) and the guest-visible permissions live in the
+/// override xattr. With `host_permissions = Mirror`, the host file's perm
+/// bits are `fchmod`'d to match the guest's request (with an owner-access
+/// floor). With xattr disabled, the host file simply uses the requested mode.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn do_create(
     fs: &PassthroughFs,
@@ -66,24 +69,45 @@ pub(crate) fn do_create(
     let mut open_flags = inode::translate_open_flags(flags as i32);
     open_flags |= libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW;
 
+    // With overlay, default to conservative 0o600 and let `Mirror` widen via
+    // `fchmod` after creation. Without overlay (`Off`), use the guest's request
+    // OR'd with the owner-access floor so the host process can keep accessing
+    // inodes even if the guest requested a restrictive mode like 0o000.
+    let host_initial_mode = if fs.cfg.xattr_enabled() {
+        (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint
+    } else {
+        (file_mode | OWNER_FLOOR_FILE) as libc::c_uint
+    };
+
     let fd = unsafe {
         libc::openat(
             parent_fd.raw(),
             name.as_ptr(),
             open_flags,
-            (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
+            host_initial_mode,
         )
     };
     if fd < 0 {
         return Err(platform::linux_error(io::Error::last_os_error()));
     }
 
-    // Set override xattr with requested permissions.
-    let full_mode = platform::MODE_REG | file_mode;
-    if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, full_mode, 0) {
-        unsafe { libc::close(fd) };
-        unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
-        return Err(e);
+    if fs.cfg.xattr_enabled() {
+        // Mirror perm bits to the host before writing the overlay so that a
+        // failed `fchmod` leaves no half-state.
+        if fs.cfg.mirror_host_permissions()
+            && let Err(e) = fchmod_mirror(fd, file_mode, platform::MODE_REG)
+        {
+            unsafe { libc::close(fd) };
+            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+            return Err(e);
+        }
+
+        let full_mode = platform::MODE_REG | file_mode;
+        if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, full_mode, 0) {
+            unsafe { libc::close(fd) };
+            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+            return Err(e);
+        }
     }
 
     // Close the fd we used for xattr, then do a proper lookup.
@@ -96,13 +120,19 @@ pub(crate) fn do_create(
     let open_fd = inode::open_inode_fd(fs, entry.inode, open_flags & !libc::O_CREAT)?;
 
     // Clear SUID/SGID on create+truncate of existing file (HANDLE_KILLPRIV_V2).
-    if kill_priv
-        && (open_flags & libc::O_TRUNC != 0)
-        && let Some(ovr) = stat_override::get_override(open_fd, fs.cfg.xattr, fs.cfg.strict)?
-    {
-        let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
-        if new_mode != ovr.mode {
-            let _ = stat_override::set_override(open_fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+    if kill_priv && (open_flags & libc::O_TRUNC != 0) {
+        if fs.cfg.xattr_enabled() {
+            if let Some(ovr) = stat_override::get_override(open_fd, true, fs.cfg.strict_enabled())?
+            {
+                let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
+                if new_mode != ovr.mode {
+                    let _ =
+                        stat_override::set_override(open_fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+                }
+            }
+        } else {
+            // Off: strip setuid/setgid on the host inode directly.
+            let _ = super::host_mode::host_strip_priv_bits(open_fd);
         }
     }
 
@@ -136,24 +166,35 @@ pub(crate) fn do_mkdir(
     let parent_fd = inode::get_inode_fd(fs, parent)?;
     let dir_mode = mode & !umask & 0o7777;
 
-    let ret = unsafe {
-        libc::mkdirat(
-            parent_fd.raw(),
-            name.as_ptr(),
-            (libc::S_IRWXU) as libc::mode_t,
-        )
+    // With overlay, start conservative (owner rwx) and let `Mirror` widen via
+    // `fchmod`. Without overlay (`Off`), use the guest's mode OR the owner
+    // floor so the host process can still traverse the directory.
+    let initial_dir_mode = if fs.cfg.xattr_enabled() {
+        libc::S_IRWXU as libc::mode_t
+    } else {
+        (dir_mode | OWNER_FLOOR_DIR) as libc::mode_t
     };
+
+    let ret = unsafe { libc::mkdirat(parent_fd.raw(), name.as_ptr(), initial_dir_mode) };
     if ret < 0 {
         return Err(platform::linux_error(io::Error::last_os_error()));
     }
 
-    // Set override xattr.
-    let full_mode = platform::MODE_DIR | dir_mode;
-    if let Err(e) =
-        stat_override::set_override_at(parent_fd.raw(), name, ctx.uid, ctx.gid, full_mode, 0)
-    {
-        unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), libc::AT_REMOVEDIR) };
-        return Err(e);
+    if fs.cfg.xattr_enabled() {
+        if fs.cfg.mirror_host_permissions()
+            && let Err(e) = fchmod_at_mirror(parent_fd.raw(), name, dir_mode, platform::MODE_DIR)
+        {
+            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), libc::AT_REMOVEDIR) };
+            return Err(e);
+        }
+
+        let full_mode = platform::MODE_DIR | dir_mode;
+        if let Err(e) =
+            stat_override::set_override_at(parent_fd.raw(), name, ctx.uid, ctx.gid, full_mode, 0)
+        {
+            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), libc::AT_REMOVEDIR) };
+            return Err(e);
+        }
     }
 
     inode::do_lookup(fs, parent, name)
@@ -184,25 +225,51 @@ pub(crate) fn do_mknod(
     let perm_mode = mode & !umask & 0o7777;
     let file_type = mode & platform::MODE_TYPE_MASK;
 
-    // Always create a regular file on host.
+    // Without xattr virtualization, the guest sees the real host stat —
+    // a regular file masquerading as a device/fifo/socket would be a lie.
+    // Allow only S_IFREG (which becomes a real host regular file).
+    if !fs.cfg.xattr_enabled() && file_type != platform::MODE_REG && file_type != 0 {
+        return Err(platform::eopnotsupp());
+    }
+
+    // Always create a regular file on host. With overlay, start at 0o600 and
+    // let `Mirror` widen. Without overlay (`Off`), OR with the owner floor.
+    let host_initial_mode = if fs.cfg.xattr_enabled() {
+        (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint
+    } else {
+        (perm_mode | OWNER_FLOOR_FILE) as libc::c_uint
+    };
     let fd = unsafe {
         libc::openat(
             parent_fd.raw(),
             name.as_ptr(),
             libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_CLOEXEC,
-            (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
+            host_initial_mode,
         )
     };
     if fd < 0 {
         return Err(platform::linux_error(io::Error::last_os_error()));
     }
 
-    // Store the requested type and permissions in xattr.
-    let full_mode = file_type | perm_mode;
-    if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, full_mode, rdev) {
-        unsafe { libc::close(fd) };
-        unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
-        return Err(e);
+    if fs.cfg.xattr_enabled() {
+        // Mirror only for guest-regular files; special types live entirely
+        // in the overlay and have no meaningful host perm bits.
+        if fs.cfg.mirror_host_permissions()
+            && file_type == platform::MODE_REG
+            && let Err(e) = fchmod_mirror(fd, perm_mode, platform::MODE_REG)
+        {
+            unsafe { libc::close(fd) };
+            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+            return Err(e);
+        }
+
+        // Store the requested type and permissions in xattr.
+        let full_mode = file_type | perm_mode;
+        if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, full_mode, rdev) {
+            unsafe { libc::close(fd) };
+            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+            return Err(e);
+        }
     }
     unsafe { libc::close(fd) };
 
@@ -211,9 +278,25 @@ pub(crate) fn do_mknod(
 
 /// Create a symbolic link.
 ///
-/// On Linux, creates a file-backed symlink (regular file with target as content
-/// and S_IFLNK in xattr mode) because Linux cannot set user xattrs on symlinks.
-/// On macOS, creates a real symlink and sets xattr with XATTR_NOFOLLOW.
+/// Behavior depends on the mount policy:
+///
+/// - **`Strict` on Linux**: file-backed symlink (regular file with target as
+///   content and `S_IFLNK` in xattr mode). Linux refuses `user.*` xattrs on
+///   real symlinks, so this is the only way to carry the override overlay.
+///   Host tools see a regular file with the target path as bytes — that is
+///   the cost of uniform metadata virtualization.
+/// - **`Relaxed` / `Off` on Linux**: real `symlinkat(2)`. The overlay is
+///   skipped for symlinks; the guest sees the host's real uid/gid for the
+///   link (which is what those policies already accept for other inodes).
+///   Host tools see a real symlink, fixing host-side `git status`, `cp -a`,
+///   `tar`, and similar workflows.
+/// - **macOS** (any policy): real `symlinkat`. macOS allows xattrs on
+///   symlinks via `XATTR_NOFOLLOW`, so under `Strict`/`Relaxed` the overlay
+///   is written through that path.
+///
+/// The read side (`do_readlink`) already handles both file-backed and real
+/// host symlinks — the latter branch existed for symlinks that ship inside
+/// container images, so guest-created real symlinks ride that path for free.
 pub(crate) fn do_symlink(
     fs: &PassthroughFs,
     ctx: Context,
@@ -232,74 +315,91 @@ pub(crate) fn do_symlink(
 
     #[cfg(target_os = "linux")]
     {
-        // File-backed symlink: create a regular file with the target as content.
-        let fd = unsafe {
-            libc::openat(
-                parent_fd.raw(),
-                name.as_ptr(),
-                libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_CLOEXEC,
-                (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
-            )
-        };
-        if fd < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
+        if fs.cfg.strict_enabled() {
+            // Strict: file-backed symlink. The override xattr carries the
+            // `S_IFLNK` type so the guest still sees a symlink even though
+            // the host inode is a regular file. Required because Linux
+            // refuses `user.*` xattrs on real symlinks.
+            let fd = unsafe {
+                libc::openat(
+                    parent_fd.raw(),
+                    name.as_ptr(),
+                    libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_CLOEXEC,
+                    (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
+                )
+            };
+            if fd < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
 
-        // Write the symlink target as file content.
-        let target = linkname.to_bytes();
-        let written =
-            unsafe { libc::write(fd, target.as_ptr() as *const libc::c_void, target.len()) };
-        if written < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
-            return Err(platform::linux_error(err));
-        }
-        if (written as usize) != target.len() {
-            unsafe { libc::close(fd) };
-            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
-            return Err(platform::eio());
-        }
+            // Write the symlink target as file content.
+            let target = linkname.to_bytes();
+            let written =
+                unsafe { libc::write(fd, target.as_ptr() as *const libc::c_void, target.len()) };
+            if written < 0 {
+                let err = io::Error::last_os_error();
+                unsafe { libc::close(fd) };
+                unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+                return Err(platform::linux_error(err));
+            }
+            if (written as usize) != target.len() {
+                unsafe { libc::close(fd) };
+                unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+                return Err(platform::eio());
+            }
 
-        // Set override xattr with S_IFLNK.
-        let mode = platform::MODE_LNK | 0o777;
-        if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0) {
+            // Set override xattr with S_IFLNK.
+            let mode = platform::MODE_LNK | 0o777;
+            if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0) {
+                unsafe { libc::close(fd) };
+                unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+                return Err(e);
+            }
             unsafe { libc::close(fd) };
-            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
-            return Err(e);
+        } else {
+            // Relaxed / Off: real `symlinkat`. No overlay xattr — the host
+            // sees a real symlink and the existing `patched_stat` and
+            // `do_readlink` short-circuits handle the read side. Per-symlink
+            // overlay uid/gid is intentionally forfeited; the kernel's
+            // 0o777-immutable symlink mode is unaffected.
+            let ret = unsafe { libc::symlinkat(linkname.as_ptr(), parent_fd.raw(), name.as_ptr()) };
+            if ret < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
         }
-        unsafe { libc::close(fd) };
     }
 
     #[cfg(target_os = "macos")]
     {
-        // Real symlink on macOS.
+        // Real symlink on macOS — works with or without the xattr overlay.
         let ret = unsafe { libc::symlinkat(linkname.as_ptr(), parent_fd.raw(), name.as_ptr()) };
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
 
-        // Set override metadata on the symlink itself by opening it with
-        // O_SYMLINK and writing the xattr through that fd.
-        let mode = platform::MODE_LNK | 0o777;
-        let fd = unsafe {
-            libc::openat(
-                parent_fd.raw(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK,
-            )
-        };
-        if fd < 0 {
-            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
+        if fs.cfg.xattr_enabled() {
+            // Set override metadata on the symlink itself by opening it with
+            // O_SYMLINK and writing the xattr through that fd.
+            let mode = platform::MODE_LNK | 0o777;
+            let fd = unsafe {
+                libc::openat(
+                    parent_fd.raw(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK,
+                )
+            };
+            if fd < 0 {
+                unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
 
-        let xattr_result = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0);
-        unsafe { libc::close(fd) };
+            let xattr_result = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0);
+            unsafe { libc::close(fd) };
 
-        if let Err(err) = xattr_result {
-            unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
-            return Err(err);
+            if let Err(err) = xattr_result {
+                unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+                return Err(err);
+            }
         }
     }
 
@@ -397,7 +497,11 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
 
         // Verify override xattr says S_IFLNK before reading file content.
         // Without this check, a guest could read any regular file's content via readlink.
-        match stat_override::get_override(inode_fd.raw(), fs.cfg.xattr, fs.cfg.strict)? {
+        match stat_override::get_override(
+            inode_fd.raw(),
+            fs.cfg.xattr_enabled(),
+            fs.cfg.strict_enabled(),
+        )? {
             Some(ovr) if ovr.mode & platform::MODE_TYPE_MASK == platform::MODE_LNK => {}
             _ => return Err(platform::einval()),
         }

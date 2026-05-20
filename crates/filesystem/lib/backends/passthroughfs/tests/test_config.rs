@@ -1,14 +1,13 @@
 use super::*;
+use crate::backends::passthroughfs::{HostPermissions, StatVirtualization};
 
 #[test]
-fn test_strict_xattr_true_succeeds_on_xattr_fs() {
-    // tmpdir supports xattrs, so strict+xattr should succeed.
+fn test_strict_succeeds_on_xattr_capable_fs() {
+    // tmpdir supports xattrs, so Strict should mount cleanly and operate fully.
     let sb = TestSandbox::with_config(|mut cfg| {
-        cfg.xattr = true;
-        cfg.strict = true;
+        cfg.stat_virtualization = StatVirtualization::Strict;
         cfg
     });
-    // Filesystem is usable — create a file and read it back.
     let (entry, handle) = sb.fuse_create_root("test.txt").unwrap();
     sb.fuse_write(entry.inode, handle, b"ok", 0).unwrap();
     let data = sb.fuse_read(entry.inode, handle, 1024, 0).unwrap();
@@ -16,32 +15,10 @@ fn test_strict_xattr_true_succeeds_on_xattr_fs() {
 }
 
 #[test]
-fn test_xattr_false_strict_true_skips_probe() {
-    // When xattr=false, the probe is skipped even if strict=true.
-    // This should succeed regardless of xattr support.
-    let _sb = TestSandbox::with_config(|mut cfg| {
-        cfg.xattr = false;
-        cfg.strict = true;
-        cfg
-    });
-    // Construction succeeded — probe was skipped.
-}
-
-#[test]
-fn test_xattr_false_strict_false_skips_probe() {
-    let _sb = TestSandbox::with_config(|mut cfg| {
-        cfg.xattr = false;
-        cfg.strict = false;
-        cfg
-    });
-}
-
-#[test]
-fn test_xattr_true_strict_false_skips_probe() {
-    // When strict=false, the probe is skipped even if xattr=true.
+fn test_relaxed_skips_eager_probe() {
+    // Relaxed never probes the bind root.
     let sb = TestSandbox::with_config(|mut cfg| {
-        cfg.xattr = true;
-        cfg.strict = false;
+        cfg.stat_virtualization = StatVirtualization::Relaxed;
         cfg
     });
     // Should still be fully functional.
@@ -49,6 +26,53 @@ fn test_xattr_true_strict_false_skips_probe() {
     sb.fuse_write(entry.inode, handle, b"data", 0).unwrap();
     let data = sb.fuse_read(entry.inode, handle, 1024, 0).unwrap();
     assert_eq!(&data[..], b"data");
+}
+
+#[test]
+fn test_off_skips_eager_probe() {
+    // Off does not require xattr support and skips the probe.
+    let _sb = TestSandbox::with_config(|mut cfg| {
+        cfg.stat_virtualization = StatVirtualization::Off;
+        cfg
+    });
+    // Construction succeeded — probe was skipped.
+}
+
+#[test]
+fn test_off_relaxed_strict_derived_booleans() {
+    let strict = PassthroughConfig {
+        stat_virtualization: StatVirtualization::Strict,
+        ..Default::default()
+    };
+    assert!(strict.xattr_enabled());
+    assert!(strict.strict_enabled());
+
+    let relaxed = PassthroughConfig {
+        stat_virtualization: StatVirtualization::Relaxed,
+        ..Default::default()
+    };
+    assert!(relaxed.xattr_enabled());
+    assert!(!relaxed.strict_enabled());
+
+    let off = PassthroughConfig {
+        stat_virtualization: StatVirtualization::Off,
+        ..Default::default()
+    };
+    assert!(!off.xattr_enabled());
+    assert!(!off.strict_enabled());
+}
+
+#[test]
+fn test_host_permissions_defaults_private() {
+    let cfg = PassthroughConfig::default();
+    assert!(matches!(cfg.host_permissions, HostPermissions::Private));
+    assert!(!cfg.mirror_host_permissions());
+
+    let mirror = PassthroughConfig {
+        host_permissions: HostPermissions::Mirror,
+        ..Default::default()
+    };
+    assert!(mirror.mirror_host_permissions());
 }
 
 #[test]

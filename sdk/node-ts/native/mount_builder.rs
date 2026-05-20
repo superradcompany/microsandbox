@@ -4,7 +4,8 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use microsandbox::sandbox::{
-    DiskImageFormat as RustDiskImageFormat, MountBuilder as RustMountBuilder,
+    DiskImageFormat as RustDiskImageFormat, HostPermissions as RustHostPermissions,
+    MountBuilder as RustMountBuilder, StatVirtualization as RustStatVirtualization,
     VolumeMount as RustVolumeMount,
 };
 use microsandbox::size::Mebibytes;
@@ -29,6 +30,10 @@ pub struct JsBuiltVolumeMount {
     pub size_mib: Option<u32>,
     pub format: Option<String>,
     pub fstype: Option<String>,
+    /// `"strict" | "relaxed" | "off"` for bind/named mounts; `None` for tmpfs/disk.
+    pub stat_virtualization: Option<String>,
+    /// `"private" | "mirror"` for bind/named mounts; `None` for tmpfs/disk.
+    pub host_permissions: Option<String>,
 }
 
 /// Fluent builder for a sandbox volume mount.
@@ -130,6 +135,47 @@ impl JsMountBuilder {
         self
     }
 
+    /// Set the guest stat virtualization policy.
+    ///
+    /// Accepts `"strict"`, `"relaxed"`, or `"off"`. Valid only for bind and
+    /// named volume mounts.
+    #[napi]
+    pub fn stat_virtualization(&mut self, policy: String) -> Result<&Self> {
+        let p = match policy.as_str() {
+            "strict" => RustStatVirtualization::Strict,
+            "relaxed" => RustStatVirtualization::Relaxed,
+            "off" => RustStatVirtualization::Off,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "invalid stat_virtualization `{other}` (expected strict | relaxed | off)"
+                )));
+            }
+        };
+        let prev = self.take_inner();
+        self.inner = Some(prev.stat_virtualization(p));
+        Ok(self)
+    }
+
+    /// Set the host permission propagation policy.
+    ///
+    /// Accepts `"private"` or `"mirror"`. Valid only for bind and named volume
+    /// mounts.
+    #[napi]
+    pub fn host_permissions(&mut self, policy: String) -> Result<&Self> {
+        let p = match policy.as_str() {
+            "private" => RustHostPermissions::Private,
+            "mirror" => RustHostPermissions::Mirror,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "invalid host_permissions `{other}` (expected private | mirror)"
+                )));
+            }
+        };
+        let prev = self.take_inner();
+        self.inner = Some(prev.host_permissions(p));
+        Ok(self)
+    }
+
     /// Materialize the mount spec. Returns a flat `BuiltVolumeMount`
     /// with a `kind` discriminator and per-variant fields.
     #[napi]
@@ -145,11 +191,29 @@ impl JsMountBuilder {
 }
 
 fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
+    fn sv_str(s: RustStatVirtualization) -> String {
+        match s {
+            RustStatVirtualization::Strict => "strict",
+            RustStatVirtualization::Relaxed => "relaxed",
+            RustStatVirtualization::Off => "off",
+        }
+        .into()
+    }
+    fn hp_str(h: RustHostPermissions) -> String {
+        match h {
+            RustHostPermissions::Private => "private",
+            RustHostPermissions::Mirror => "mirror",
+        }
+        .into()
+    }
+
     match mount {
         RustVolumeMount::Bind {
             host,
             guest,
             readonly,
+            stat_virtualization,
+            host_permissions,
         } => JsBuiltVolumeMount {
             kind: "bind".into(),
             guest,
@@ -159,11 +223,15 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             size_mib: None,
             format: None,
             fstype: None,
+            stat_virtualization: Some(sv_str(stat_virtualization)),
+            host_permissions: Some(hp_str(host_permissions)),
         },
         RustVolumeMount::Named {
             name,
             guest,
             readonly,
+            stat_virtualization,
+            host_permissions,
         } => JsBuiltVolumeMount {
             kind: "named".into(),
             guest,
@@ -173,6 +241,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             size_mib: None,
             format: None,
             fstype: None,
+            stat_virtualization: Some(sv_str(stat_virtualization)),
+            host_permissions: Some(hp_str(host_permissions)),
         },
         RustVolumeMount::Tmpfs {
             guest,
@@ -187,6 +257,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             size_mib,
             format: None,
             fstype: None,
+            stat_virtualization: None,
+            host_permissions: None,
         },
         RustVolumeMount::DiskImage {
             host,
@@ -210,6 +282,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
                 .into(),
             ),
             fstype,
+            stat_virtualization: None,
+            host_permissions: None,
         },
     }
 }

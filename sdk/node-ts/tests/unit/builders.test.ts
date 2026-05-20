@@ -61,6 +61,8 @@ describe("MountBuilder", () => {
       host: "/host/data",
       guest: "/data",
       readonly: false,
+      statVirtualization: "strict",
+      hostPermissions: "private",
     });
   });
 
@@ -127,6 +129,77 @@ describe("MountBuilder", () => {
   it("rejects guest paths containing : or ;", () => {
     const builder = new MountBuilder("/foo:bar").bind("/host");
     expect(() => builder.build()).toThrow(InvalidConfigError);
+  });
+
+  it("defaults bind mount to strict + private when policies are not set", () => {
+    const m = new MountBuilder("/data").bind("/host/data").build();
+    expect(m.statVirtualization).toBe("strict");
+    expect(m.hostPermissions).toBe("private");
+  });
+
+  it("propagates explicit stat-virt and host-perms on a bind mount", () => {
+    const m = new MountBuilder("/work")
+      .bind("./project")
+      .statVirtualization("relaxed")
+      .hostPermissions("mirror")
+      .build();
+    expect(m).toMatchObject({
+      kind: "bind",
+      statVirtualization: "relaxed",
+      hostPermissions: "mirror",
+    });
+  });
+
+  it("propagates stat-virt + host-perms on a named volume", () => {
+    const m = new MountBuilder("/cache")
+      .named("my-cache")
+      .statVirtualization("off")
+      .build();
+    expect(m).toMatchObject({
+      kind: "named",
+      name: "my-cache",
+      statVirtualization: "off",
+      hostPermissions: "private",
+    });
+  });
+
+  it("rejects unknown stat-virt strings at the FFI boundary", () => {
+    expect(() =>
+      new MountBuilder("/data").bind("/host").statVirtualization("bogus"),
+    ).toThrow(/invalid stat_virtualization/);
+  });
+
+  it("rejects unknown host-perms strings at the FFI boundary", () => {
+    expect(() =>
+      new MountBuilder("/data").bind("/host").hostPermissions("public"),
+    ).toThrow(/invalid host_permissions/);
+  });
+
+  it("rejects stat-virt on a tmpfs mount at build time", () => {
+    const builder = new MountBuilder("/scratch")
+      .tmpfs()
+      .statVirtualization("relaxed");
+    expect(() => builder.build()).toThrow(InvalidConfigError);
+  });
+
+  it("rejects host-perms on a disk mount at build time", () => {
+    const builder = new MountBuilder("/data")
+      .disk("./d.raw")
+      .hostPermissions("mirror");
+    expect(() => builder.build()).toThrow(InvalidConfigError);
+  });
+
+  it("rejects Off + Mirror at build time", () => {
+    const builder = new MountBuilder("/data")
+      .bind("/host")
+      .statVirtualization("off")
+      .hostPermissions("mirror");
+    expect(() => builder.build()).toThrow(/Off cannot be combined with/);
+  });
+
+  it("rejects commas in bind host paths at build time", () => {
+    const builder = new MountBuilder("/data").bind("/host/with,comma");
+    expect(() => builder.build()).toThrow(/must not contain ','/);
   });
 });
 

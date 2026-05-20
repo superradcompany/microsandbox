@@ -765,6 +765,8 @@ export interface NapiMountBuilder {
   fstype(fstype: string): this;
   readonly(): this;
   size(mib: number): this;
+  statVirtualization(policy: string): this;
+  hostPermissions(policy: string): this;
 }
 
 export interface NapiPatchBuilder {

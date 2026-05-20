@@ -395,6 +395,19 @@ export const VolumeMountKinds: readonly VolumeMountKind[] = [
   "tmpfs",
   "disk",
 ] as const;
+/** Per-mount stat-virtualization policy for virtiofs-backed mounts. */
+export type StatVirtualization = "strict" | "relaxed" | "off";
+export const StatVirtualizations: readonly StatVirtualization[] = [
+  "strict",
+  "relaxed",
+  "off",
+] as const;
+/** Per-mount host-permission policy for virtiofs-backed mounts. */
+export type HostPermissions = "private" | "mirror";
+export const HostPermissionsList: readonly HostPermissions[] = [
+  "private",
+  "mirror",
+] as const;
 export type PatchKind =
   | "text"
   | "file"

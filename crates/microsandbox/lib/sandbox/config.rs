@@ -582,6 +582,8 @@ mod tests {
                 host: "/host/tmp".into(),
                 guest: "/tmp/".into(),
                 readonly: false,
+                stat_virtualization: crate::sandbox::StatVirtualization::Strict,
+                host_permissions: crate::sandbox::HostPermissions::Private,
             }],
             ..Default::default()
         };

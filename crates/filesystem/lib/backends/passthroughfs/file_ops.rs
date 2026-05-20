@@ -19,6 +19,7 @@ use std::{
     sync::{Arc, RwLock, atomic::Ordering},
 };
 
+use super::host_mode::host_strip_priv_bits;
 use super::{PassthroughFs, inode};
 use crate::{
     Context, OpenOptions, ZeroCopyReader, ZeroCopyWriter,
@@ -60,13 +61,19 @@ pub(crate) fn do_open(
     let fd = inode::open_inode_fd(fs, inode, open_flags)?;
 
     // Clear SUID/SGID on open+truncate (HANDLE_KILLPRIV_V2).
-    if kill_priv
-        && (open_flags & libc::O_TRUNC != 0)
-        && let Some(ovr) = stat_override::get_override(fd, fs.cfg.xattr, fs.cfg.strict)?
-    {
-        let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
-        if new_mode != ovr.mode {
-            let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+    if kill_priv && (open_flags & libc::O_TRUNC != 0) {
+        if fs.cfg.xattr_enabled() {
+            if let Some(ovr) = stat_override::get_override(fd, true, fs.cfg.strict_enabled())? {
+                let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
+                if new_mode != ovr.mode {
+                    let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+                }
+            }
+        } else {
+            // Off: no overlay — strip setuid/setgid bits directly on the host
+            // inode so guest-side truncate of a privileged binary still
+            // honors HANDLE_KILLPRIV_V2.
+            let _ = host_strip_priv_bits(fd);
         }
     }
 
@@ -128,10 +135,17 @@ pub(crate) fn do_write(
     let written = r.read_to(&f, size as usize, offset)?;
 
     let fd = f.as_raw_fd();
-    if kill_priv && let Some(ovr) = stat_override::get_override(fd, fs.cfg.xattr, fs.cfg.strict)? {
-        let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
-        if new_mode != ovr.mode {
-            let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+    if kill_priv {
+        if fs.cfg.xattr_enabled() {
+            if let Some(ovr) = stat_override::get_override(fd, true, fs.cfg.strict_enabled())? {
+                let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
+                if new_mode != ovr.mode {
+                    let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+                }
+            }
+        } else {
+            // Off: strip setuid/setgid on the host inode directly.
+            let _ = host_strip_priv_bits(fd);
         }
     }
 

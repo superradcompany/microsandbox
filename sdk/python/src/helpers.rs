@@ -380,16 +380,40 @@ fn apply_mount(
     mount: &Bound<'_, PyDict>,
 ) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
     let readonly = extract_opt::<bool>(mount, "readonly")?.unwrap_or(false);
+    let stat_virt = extract_opt::<String>(mount, "stat_virtualization")?
+        .map(parse_stat_virt)
+        .transpose()?;
+    let host_perms = extract_opt::<String>(mount, "host_permissions")?
+        .map(parse_host_perms)
+        .transpose()?;
 
     if let Some(bind_path) = extract_opt::<String>(mount, "bind")? {
         Ok(builder.volume(&guest_path, |v| {
-            let m = v.bind(&bind_path);
-            if readonly { m.readonly() } else { m }
+            let mut m = v.bind(&bind_path);
+            if readonly {
+                m = m.readonly();
+            }
+            if let Some(p) = stat_virt {
+                m = m.stat_virtualization(p);
+            }
+            if let Some(p) = host_perms {
+                m = m.host_permissions(p);
+            }
+            m
         }))
     } else if let Some(vol_name) = extract_opt::<String>(mount, "named")? {
         Ok(builder.volume(&guest_path, |v| {
-            let m = v.named(&vol_name);
-            if readonly { m.readonly() } else { m }
+            let mut m = v.named(&vol_name);
+            if readonly {
+                m = m.readonly();
+            }
+            if let Some(p) = stat_virt {
+                m = m.stat_virtualization(p);
+            }
+            if let Some(p) = host_perms {
+                m = m.host_permissions(p);
+            }
+            m
         }))
     } else if extract_opt::<bool>(mount, "tmpfs")?.unwrap_or(false) {
         let size_mib = extract_opt::<u32>(mount, "size_mib")?;
@@ -424,6 +448,27 @@ fn apply_mount(
         Err(pyo3::exceptions::PyValueError::new_err(
             "mount must have one of: bind, named, tmpfs, disk",
         ))
+    }
+}
+
+fn parse_stat_virt(s: String) -> PyResult<microsandbox::sandbox::StatVirtualization> {
+    match s.as_str() {
+        "strict" => Ok(microsandbox::sandbox::StatVirtualization::Strict),
+        "relaxed" => Ok(microsandbox::sandbox::StatVirtualization::Relaxed),
+        "off" => Ok(microsandbox::sandbox::StatVirtualization::Off),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid stat_virtualization {other:?} (expected strict|relaxed|off)"
+        ))),
+    }
+}
+
+fn parse_host_perms(s: String) -> PyResult<microsandbox::sandbox::HostPermissions> {
+    match s.as_str() {
+        "private" => Ok(microsandbox::sandbox::HostPermissions::Private),
+        "mirror" => Ok(microsandbox::sandbox::HostPermissions::Mirror),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid host_permissions {other:?} (expected private|mirror)"
+        ))),
     }
 }
 
