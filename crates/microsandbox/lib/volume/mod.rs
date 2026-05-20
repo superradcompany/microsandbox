@@ -335,7 +335,7 @@ impl From<VolumeConfig> for VolumeBuilder {
 ///
 /// Names must start with an alphanumeric character and contain only
 /// alphanumeric characters, dots, hyphens, and underscores.
-fn validate_volume_name(name: &str) -> MicrosandboxResult<()> {
+pub(crate) fn validate_volume_name(name: &str) -> MicrosandboxResult<()> {
     if name.is_empty() {
         return Err(MicrosandboxError::InvalidConfig(
             "volume name must not be empty".into(),

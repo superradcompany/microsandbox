@@ -1201,6 +1201,29 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn apply_volume_plain_source_is_named_mount() {
+        match build_volume("data:/mnt").await {
+            VolumeMount::Named { name, guest, .. } => {
+                assert_eq!(name, "data");
+                assert_eq!(guest, "/mnt");
+            }
+            other => panic!("expected named mount, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_volume_rejects_path_like_named_source() {
+        let builder = SandboxBuilder::new("test").image("alpine");
+        let err = apply_volume(builder, "data/../../secrets:/mnt")
+            .unwrap()
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("volume name"));
+    }
+
     // --- parse_script_spec ---
 
     #[test]

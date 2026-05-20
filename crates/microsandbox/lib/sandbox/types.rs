@@ -401,11 +401,14 @@ impl MountBuilder {
                 guest: self.guest,
                 readonly: self.readonly,
             }),
-            MountKind::Named(name) => Ok(VolumeMount::Named {
-                name,
-                guest: self.guest,
-                readonly: self.readonly,
-            }),
+            MountKind::Named(name) => {
+                crate::volume::validate_volume_name(&name)?;
+                Ok(VolumeMount::Named {
+                    name,
+                    guest: self.guest,
+                    readonly: self.readonly,
+                })
+            }
             MountKind::Tmpfs => Ok(VolumeMount::Tmpfs {
                 guest: self.guest,
                 size_mib: self.size_mib,
@@ -1076,6 +1079,27 @@ mod tests {
             err.to_string()
                 .contains(".fstype() is only valid for disk image mounts")
         );
+    }
+
+    #[test]
+    fn test_mount_builder_accepts_valid_named_volume() {
+        let mount = MountBuilder::new("/data").named("cache_1").build().unwrap();
+        match mount {
+            VolumeMount::Named { name, guest, .. } => {
+                assert_eq!(name, "cache_1");
+                assert_eq!(guest, "/data");
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mount_builder_rejects_invalid_named_volume() {
+        let err = MountBuilder::new("/data")
+            .named("cache/../../secrets")
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("volume name"));
     }
 
     #[test]
