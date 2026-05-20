@@ -796,10 +796,10 @@ struct SandboxCreateOpts {
     user: Option<String>,
     #[serde(default)]
     replace: bool,
-    /// Grace period in milliseconds between SIGTERM and SIGKILL when
+    /// Timeout in milliseconds between SIGTERM and SIGKILL when
     /// replacing an existing sandbox. `Some(0)` skips SIGTERM. `None`
     /// uses the Rust SDK default when `replace` is set.
-    replace_with_grace_ms: Option<u64>,
+    replace_with_timeout_ms: Option<u64>,
     /// User-workload entrypoint override (separate from `init`, which is
     /// guest PID 1). Sent across as an array of strings.
     #[serde(default)]
@@ -1554,8 +1554,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             if let Some(u) = opts.user {
                 builder = builder.user(u);
             }
-            if let Some(grace_ms) = opts.replace_with_grace_ms {
-                builder = builder.replace_with_grace(std::time::Duration::from_millis(grace_ms));
+            if let Some(timeout_ms) = opts.replace_with_timeout_ms {
+                builder =
+                    builder.replace_with_timeout(std::time::Duration::from_millis(timeout_ms));
             } else if opts.replace {
                 builder = builder.replace();
             }
@@ -3998,10 +3999,35 @@ pub unsafe extern "C" fn msb_fs_write_stream_close(
 // Agent client — raw protocol frames
 // ---------------------------------------------------------------------------
 
+async fn connect_agent_sandbox(
+    name: &str,
+    timeout_ms: u64,
+) -> microsandbox::AgentClientResult<AgentBridge> {
+    match agent_timeout(timeout_ms) {
+        Some(timeout) => AgentBridge::connect_sandbox_with_timeout(name, timeout).await,
+        None => AgentBridge::connect_sandbox(name).await,
+    }
+}
+
+async fn connect_agent_path(
+    path: &str,
+    timeout_ms: u64,
+) -> microsandbox::AgentClientResult<AgentBridge> {
+    match agent_timeout(timeout_ms) {
+        Some(timeout) => AgentBridge::connect_path_with_timeout(path, timeout).await,
+        None => AgentBridge::connect_path(path).await,
+    }
+}
+
+fn agent_timeout(timeout_ms: u64) -> Option<Duration> {
+    (timeout_ms > 0).then(|| Duration::from_millis(timeout_ms))
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_agent_open_sandbox(
     cancel_id: u64,
     name: *const c_char,
+    timeout_ms: u64,
     out_handle: *mut Handle,
 ) -> *mut c_char {
     let result = (|| -> Result<(), FfiError> {
@@ -4012,7 +4038,7 @@ pub unsafe extern "C" fn msb_agent_open_sandbox(
         let name = unsafe { cstr(name) }?;
         let agent = rt().block_on(async {
             tokio::select! {
-                r = AgentBridge::connect_sandbox(&name) => r.map_err(agent_error),
+                r = connect_agent_sandbox(&name, timeout_ms) => r.map_err(agent_error),
                 _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
             }
         })?;
@@ -4033,6 +4059,7 @@ pub unsafe extern "C" fn msb_agent_open_sandbox(
 pub unsafe extern "C" fn msb_agent_open_path(
     cancel_id: u64,
     path: *const c_char,
+    timeout_ms: u64,
     out_handle: *mut Handle,
 ) -> *mut c_char {
     let result = (|| -> Result<(), FfiError> {
@@ -4043,7 +4070,7 @@ pub unsafe extern "C" fn msb_agent_open_path(
         let path = unsafe { cstr(path) }?;
         let agent = rt().block_on(async {
             tokio::select! {
-                r = AgentBridge::connect_path(&path) => r.map_err(agent_error),
+                r = connect_agent_path(&path, timeout_ms) => r.map_err(agent_error),
                 _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
             }
         })?;

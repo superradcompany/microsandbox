@@ -232,26 +232,28 @@ impl SandboxBuilder {
     /// is owned by an in-process `Sandbox` handle, the handle's
     /// underlying child is signalled and reaped directly.
     ///
-    /// To override the ten-second grace, use [`replace_with_grace`]; pass
-    /// `Duration::ZERO` to skip SIGTERM and SIGKILL immediately.
+    /// To override the ten-second timeout, use [`replace_with_timeout`];
+    /// pass `Duration::ZERO` to skip SIGTERM and SIGKILL immediately.
     ///
-    /// [`replace_with_grace`]: Self::replace_with_grace
+    /// [`replace_with_timeout`]: Self::replace_with_timeout
     pub fn replace(mut self) -> Self {
         self.config.replace_existing = true;
         self
     }
 
     /// Replace an existing sandbox, overriding the SIGTERM-to-SIGKILL
-    /// grace. Implies [`replace`](Self::replace) — calling this alone is
-    /// enough.
+    /// timeout. Implies [`replace`](Self::replace) — calling this alone
+    /// is enough.
     ///
-    /// - `grace > 0`: SIGTERM, wait up to `grace`, then SIGKILL.
-    /// - `grace == Duration::ZERO`: SIGKILL immediately (skip SIGTERM).
+    /// - `timeout > 0`: SIGTERM, wait up to `timeout`, then SIGKILL.
+    /// - `timeout == Duration::ZERO`: SIGKILL immediately (skip SIGTERM).
     ///
-    /// The default grace used by [`replace`](Self::replace) is ten seconds.
-    pub fn replace_with_grace(mut self, grace: std::time::Duration) -> Self {
+    /// The default timeout used by [`replace`](Self::replace) is ten
+    /// seconds. An expired timeout does not surface an error — the
+    /// existing sandbox is force-killed and `create()` proceeds.
+    pub fn replace_with_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.config.replace_existing = true;
-        self.config.replace_with_grace = grace;
+        self.config.replace_with_timeout = timeout;
         self
     }
 

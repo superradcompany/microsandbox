@@ -157,8 +157,8 @@ typedef char *(*msb_fs_write_stream_fn)(uint64_t cancel_id, uint64_t handle, con
 typedef char *(*msb_fs_write_stream_write_fn)(uint64_t cancel_id, uint64_t stream_handle, const char *data_b64, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_fs_write_stream_close_fn)(uint64_t cancel_id, uint64_t stream_handle, uint8_t *buf, size_t buf_len);
 
-typedef char *(*msb_agent_open_sandbox_fn)(uint64_t cancel_id, const char *name, uint64_t *out_handle);
-typedef char *(*msb_agent_open_path_fn)(uint64_t cancel_id, const char *path, uint64_t *out_handle);
+typedef char *(*msb_agent_open_sandbox_fn)(uint64_t cancel_id, const char *name, uint64_t timeout_ms, uint64_t *out_handle);
+typedef char *(*msb_agent_open_path_fn)(uint64_t cancel_id, const char *path, uint64_t timeout_ms, uint64_t *out_handle);
 typedef char *(*msb_agent_request_fn)(uint64_t cancel_id, uint64_t agent_handle, uint8_t flags, const uint8_t *body_ptr, size_t body_len, uint32_t *out_id, uint8_t *out_flags, uint8_t **out_body_ptr, size_t *out_body_len);
 typedef char *(*msb_agent_stream_open_fn)(uint64_t cancel_id, uint64_t agent_handle, uint8_t flags, const uint8_t *body_ptr, size_t body_len, uint32_t *out_id, uint64_t *out_stream_handle);
 typedef char *(*msb_agent_stream_next_fn)(uint64_t cancel_id, uint64_t agent_handle, uint64_t stream_handle, bool *out_present, uint32_t *out_id, uint8_t *out_flags, uint8_t **out_body_ptr, size_t *out_body_len);
@@ -600,11 +600,11 @@ char *call_msb_fs_write_stream_write(uint64_t cancel_id, uint64_t stream_handle,
 char *call_msb_fs_write_stream_close(uint64_t cancel_id, uint64_t stream_handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_fs_write_stream_close ? ptr_msb_fs_write_stream_close(cancel_id, stream_handle, buf, buf_len) : NULL;
 }
-char *call_msb_agent_open_sandbox(uint64_t cancel_id, const char *name, uint64_t *out_handle) {
-	return ptr_msb_agent_open_sandbox ? ptr_msb_agent_open_sandbox(cancel_id, name, out_handle) : NULL;
+char *call_msb_agent_open_sandbox(uint64_t cancel_id, const char *name, uint64_t timeout_ms, uint64_t *out_handle) {
+	return ptr_msb_agent_open_sandbox ? ptr_msb_agent_open_sandbox(cancel_id, name, timeout_ms, out_handle) : NULL;
 }
-char *call_msb_agent_open_path(uint64_t cancel_id, const char *path, uint64_t *out_handle) {
-	return ptr_msb_agent_open_path ? ptr_msb_agent_open_path(cancel_id, path, out_handle) : NULL;
+char *call_msb_agent_open_path(uint64_t cancel_id, const char *path, uint64_t timeout_ms, uint64_t *out_handle) {
+	return ptr_msb_agent_open_path ? ptr_msb_agent_open_path(cancel_id, path, timeout_ms, out_handle) : NULL;
 }
 char *call_msb_agent_request(uint64_t cancel_id, uint64_t agent_handle, uint8_t flags, const uint8_t *body_ptr, size_t body_len, uint32_t *out_id, uint8_t *out_flags, uint8_t **out_body_ptr, size_t *out_body_len) {
 	return ptr_msb_agent_request ? ptr_msb_agent_request(cancel_id, agent_handle, flags, body_ptr, body_len, out_id, out_flags, out_body_ptr, out_body_len) : NULL;
@@ -1001,6 +1001,19 @@ func allocRustBytesOut() (**C.uint8_t, *C.size_t, func()) {
 	return ptrSlot, lenSlot, cleanup
 }
 
+func timeoutMillisFromContext(ctx context.Context) C.uint64_t {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return 0
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 1
+	}
+	ms := (remaining + time.Millisecond - 1) / time.Millisecond
+	return C.uint64_t(ms)
+}
+
 // salvageHandle attempts a best-effort recovery of the `handle` field from a
 // create/connect response body when strict unmarshalling failed. Returns 0
 // if the handle cannot be recovered. Used to avoid leaking Rust-side state
@@ -1050,8 +1063,9 @@ func OpenAgentSandbox(ctx context.Context, name string) (*AgentClient, error) {
 	defer C.free(unsafe.Pointer(cName))
 
 	var handle C.uint64_t
+	timeoutMs := timeoutMillisFromContext(ctx)
 	if err := callRaw(ctx, func(cancelID C.uint64_t) *C.char {
-		return C.call_msb_agent_open_sandbox(cancelID, cName, &handle)
+		return C.call_msb_agent_open_sandbox(cancelID, cName, timeoutMs, &handle)
 	}); err != nil {
 		return nil, err
 	}
@@ -1069,8 +1083,9 @@ func OpenAgentPath(ctx context.Context, path string) (*AgentClient, error) {
 	defer C.free(unsafe.Pointer(cPath))
 
 	var handle C.uint64_t
+	timeoutMs := timeoutMillisFromContext(ctx)
 	if err := callRaw(ctx, func(cancelID C.uint64_t) *C.char {
-		return C.call_msb_agent_open_path(cancelID, cPath, &handle)
+		return C.call_msb_agent_open_path(cancelID, cPath, timeoutMs, &handle)
 	}); err != nil {
 		return nil, err
 	}
@@ -1199,35 +1214,35 @@ func (c *AgentClient) CloseCtx(ctx context.Context) error {
 // CreateOptions matches the JSON payload shape expected by msb_sandbox_create.
 // Zero-valued fields are omitted; the Rust side applies defaults.
 type CreateOptions struct {
-	Image              string               `json:"image,omitempty"`
-	ImageFstype        string               `json:"image_fstype,omitempty"`
-	Snapshot           string               `json:"snapshot,omitempty"`
-	MemoryMiB          uint32               `json:"memory_mib,omitempty"`
-	CPUs               uint8                `json:"cpus,omitempty"`
-	Workdir            string               `json:"workdir,omitempty"`
-	Shell              string               `json:"shell,omitempty"`
-	Hostname           string               `json:"hostname,omitempty"`
-	User               string               `json:"user,omitempty"`
-	Replace            bool                 `json:"replace,omitempty"`
-	ReplaceWithGraceMs *uint64              `json:"replace_with_grace_ms,omitempty"`
-	Env                map[string]string    `json:"env,omitempty"`
-	Detached           bool                 `json:"detached,omitempty"`
-	Entrypoint         []string             `json:"entrypoint,omitempty"`
-	Init               *InitOptions         `json:"init,omitempty"`
-	LogLevel           string               `json:"log_level,omitempty"`
-	QuietLogs          bool                 `json:"quiet_logs,omitempty"`
-	Scripts            map[string]string    `json:"scripts,omitempty"`
-	PullPolicy         string               `json:"pull_policy,omitempty"`
-	MaxDurationSecs    uint64               `json:"max_duration_secs,omitempty"`
-	IdleTimeoutSecs    uint64               `json:"idle_timeout_secs,omitempty"`
-	RegistryAuth       *RegistryAuthOptions `json:"registry_auth,omitempty"`
-	Ports              map[uint16]uint16    `json:"ports,omitempty"`
-	PortsUDP           map[uint16]uint16    `json:"ports_udp,omitempty"`
-	PortBindings       []PortBindingOptions `json:"port_bindings,omitempty"`
-	Network            *NetworkOptions      `json:"network,omitempty"`
-	Secrets            []SecretOptions      `json:"secrets,omitempty"`
-	Patches            []PatchOptions       `json:"patches,omitempty"`
-	Volumes            map[string]MountSpec `json:"volumes,omitempty"`
+	Image                string               `json:"image,omitempty"`
+	ImageFstype          string               `json:"image_fstype,omitempty"`
+	Snapshot             string               `json:"snapshot,omitempty"`
+	MemoryMiB            uint32               `json:"memory_mib,omitempty"`
+	CPUs                 uint8                `json:"cpus,omitempty"`
+	Workdir              string               `json:"workdir,omitempty"`
+	Shell                string               `json:"shell,omitempty"`
+	Hostname             string               `json:"hostname,omitempty"`
+	User                 string               `json:"user,omitempty"`
+	Replace              bool                 `json:"replace,omitempty"`
+	ReplaceWithTimeoutMs *uint64              `json:"replace_with_timeout_ms,omitempty"`
+	Env                  map[string]string    `json:"env,omitempty"`
+	Detached             bool                 `json:"detached,omitempty"`
+	Entrypoint           []string             `json:"entrypoint,omitempty"`
+	Init                 *InitOptions         `json:"init,omitempty"`
+	LogLevel             string               `json:"log_level,omitempty"`
+	QuietLogs            bool                 `json:"quiet_logs,omitempty"`
+	Scripts              map[string]string    `json:"scripts,omitempty"`
+	PullPolicy           string               `json:"pull_policy,omitempty"`
+	MaxDurationSecs      uint64               `json:"max_duration_secs,omitempty"`
+	IdleTimeoutSecs      uint64               `json:"idle_timeout_secs,omitempty"`
+	RegistryAuth         *RegistryAuthOptions `json:"registry_auth,omitempty"`
+	Ports                map[uint16]uint16    `json:"ports,omitempty"`
+	PortsUDP             map[uint16]uint16    `json:"ports_udp,omitempty"`
+	PortBindings         []PortBindingOptions `json:"port_bindings,omitempty"`
+	Network              *NetworkOptions      `json:"network,omitempty"`
+	Secrets              []SecretOptions      `json:"secrets,omitempty"`
+	Patches              []PatchOptions       `json:"patches,omitempty"`
+	Volumes              map[string]MountSpec `json:"volumes,omitempty"`
 }
 
 // InitOptions describes a guest PID-1 init handoff.

@@ -12,9 +12,9 @@ export declare class AgentClient {
    * Connect to a sandbox by name. Resolves the agent socket from the
    * SDK's configured sandboxes directory.
    */
-  static connectSandbox(name: string): Promise<AgentClient>
+  static connectSandbox(name: string, opts?: AgentConnectOptions | undefined | null): Promise<AgentClient>
   /** Connect to an agentd relay socket by path. */
-  static connect(path: string): Promise<AgentClient>
+  static connect(path: string, opts?: AgentConnectOptions | undefined | null): Promise<AgentClient>
   /**
    * Send one frame and await a single response frame.
    *
@@ -820,15 +820,12 @@ export declare class SandboxBuilder {
    */
   replace(): this
   /**
-   * Replace any existing sandbox, overriding the SIGTERM-to-SIGKILL
-   * grace. Implies `replace` — calling this alone is enough.
-   *
-   * - `graceMs > 0`: SIGTERM, wait up to `graceMs`, then SIGKILL.
-   * - `graceMs == 0`: SIGKILL immediately (skip SIGTERM).
-   *
-   * The default grace used by `replace` is 10_000 ms.
+   * Timeout (in milliseconds) to wait for the existing sandbox to
+   * exit after SIGTERM before escalating to SIGKILL during a replace.
+   * Implies `replace`. Zero skips SIGTERM entirely. An expired
+   * timeout force-kills the prior sandbox; `create()` still proceeds.
    */
-  replaceWithGrace(graceMs: number): this
+  replaceWithTimeout(timeoutMs: number): this
   /** Override the image entrypoint. */
   entrypoint(cmd: Array<string>): this
   /**
@@ -1002,9 +999,27 @@ export declare class SandboxHandle {
   startDetached(): Promise<Sandbox>
   /** Connect to an already-running sandbox (no lifecycle ownership). */
   connect(): Promise<Sandbox>
-  /** Stop the sandbox (SIGTERM). */
+  /**
+   * Connect with an explicit timeout (ms). Returns a typed error if
+   * the sandbox doesn't respond in this window. `connect()` uses
+   * 10_000 ms by default.
+   */
+  connectWithTimeout(timeoutMs: number): Promise<Sandbox>
+  /**
+   * Stop the sandbox gracefully. Lets it finish writing any pending
+   * data to disk before it exits, so files written inside the sandbox
+   * aren't lost across a later restart. Force-kills after 10_000 ms by
+   * default; override with `stopWithTimeout(timeoutMs)`.
+   */
   stop(): Promise<void>
-  /** Kill the sandbox (SIGKILL). */
+  /**
+   * Stop gracefully with an explicit timeout (ms). If the sandbox is
+   * still running after this window, it is force-killed. `0`
+   * force-kills immediately. Resolves successfully either way — does
+   * not throw on timeout expiry.
+   */
+  stopWithTimeout(timeoutMs: number): Promise<void>
+  /** Force terminate immediately. Pending writes may be lost. */
   kill(): Promise<void>
   /** Remove the sandbox from the database. */
   remove(): Promise<void>
@@ -1261,6 +1276,12 @@ export interface AttachOptions {
   env: Record<string, string>
   detachKeys?: string
   rlimits: Array<JsRlimit>
+}
+
+/** Options for connecting to an agent relay. */
+export interface AgentConnectOptions {
+  /** Handshake timeout in milliseconds. Defaults to 10_000. */
+  timeoutMs?: number
 }
 
 /** DNS interception configuration produced by `DnsBuilder.build()`. */

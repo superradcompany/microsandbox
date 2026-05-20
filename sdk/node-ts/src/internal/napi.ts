@@ -59,8 +59,12 @@ export interface NativeBindings {
 }
 
 export interface NapiAgentClientStatic {
-  connectSandbox(name: string): Promise<NapiAgentClient>;
-  connect(path: string): Promise<NapiAgentClient>;
+  connectSandbox(name: string, opts?: AgentConnectOptions): Promise<NapiAgentClient>;
+  connect(path: string, opts?: AgentConnectOptions): Promise<NapiAgentClient>;
+}
+
+export interface AgentConnectOptions {
+  timeoutMs?: number;
 }
 
 export interface NapiRawFrame {
@@ -123,7 +127,7 @@ export interface NapiSandboxBuilderSetters {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   registry(configure: (b: any) => any): this;
   replace(): this;
-  replaceWithGrace(graceMs: number): this;
+  replaceWithTimeout(timeoutMs: number): this;
   entrypoint(cmd: string[]): this;
   init(cmd: string, args?: string[]): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -198,7 +202,9 @@ export interface NapiSandboxHandle {
   start(): Promise<NapiSandbox>;
   startDetached(): Promise<NapiSandbox>;
   connect(): Promise<NapiSandbox>;
+  connectWithTimeout(timeoutMs: number): Promise<NapiSandbox>;
   stop(): Promise<void>;
+  stopWithTimeout(timeoutMs: number): Promise<void>;
   kill(): Promise<void>;
   remove(): Promise<void>;
   logs(opts?: LogOptions): Promise<LogEntry[]>;

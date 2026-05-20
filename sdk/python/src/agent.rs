@@ -1,6 +1,8 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use microsandbox::{AgentBridge, BridgeFrame};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
@@ -24,11 +26,19 @@ pub struct PyAgentClient {
 impl PyAgentClient {
     /// Connect to a running sandbox by name.
     #[staticmethod]
-    fn connect_sandbox<'py>(py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (name, *, timeout = None))]
+    fn connect_sandbox<'py>(
+        py: Python<'py>,
+        name: String,
+        timeout: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let timeout = timeout_duration(timeout)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let bridge = AgentBridge::connect_sandbox(&name)
-                .await
-                .map_err(to_py_err_agent)?;
+            let bridge = match timeout {
+                Some(timeout) => AgentBridge::connect_sandbox_with_timeout(&name, timeout).await,
+                None => AgentBridge::connect_sandbox(&name).await,
+            }
+            .map_err(to_py_err_agent)?;
             Ok(Self {
                 inner: Arc::new(bridge),
             })
@@ -37,11 +47,19 @@ impl PyAgentClient {
 
     /// Connect to an agentd relay socket by path.
     #[staticmethod]
-    fn connect<'py>(py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (path, *, timeout = None))]
+    fn connect<'py>(
+        py: Python<'py>,
+        path: String,
+        timeout: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let timeout = timeout_duration(timeout)?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let bridge = AgentBridge::connect_path(&path)
-                .await
-                .map_err(to_py_err_agent)?;
+            let bridge = match timeout {
+                Some(timeout) => AgentBridge::connect_path_with_timeout(&path, timeout).await,
+                None => AgentBridge::connect_path(&path).await,
+            }
+            .map_err(to_py_err_agent)?;
             Ok(Self {
                 inner: Arc::new(bridge),
             })
@@ -153,4 +171,16 @@ fn frame_to_py(frame: BridgeFrame) -> PyResult<PyObject> {
 
 fn to_py_err_agent(err: microsandbox::AgentClientError) -> PyErr {
     to_py_err(microsandbox::MicrosandboxError::AgentClient(err))
+}
+
+fn timeout_duration(timeout: Option<f64>) -> PyResult<Option<Duration>> {
+    match timeout {
+        Some(timeout) if timeout.is_finite() && timeout >= 0.0 => {
+            Ok(Some(Duration::from_secs_f64(timeout)))
+        }
+        Some(_) => Err(PyValueError::new_err(
+            "timeout must be a non-negative finite number",
+        )),
+        None => Ok(None),
+    }
 }

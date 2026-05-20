@@ -43,6 +43,7 @@ type AgentStream struct {
 }
 
 // ConnectAgentSandbox connects to a running sandbox by name.
+// Use context.WithTimeout to override the default 10s handshake timeout.
 func ConnectAgentSandbox(ctx context.Context, name string) (*AgentClient, error) {
 	inner, err := ffi.OpenAgentSandbox(ctx, name)
 	if err != nil {
@@ -52,6 +53,7 @@ func ConnectAgentSandbox(ctx context.Context, name string) (*AgentClient, error)
 }
 
 // ConnectAgentPath connects to an agentd relay socket by path.
+// Use context.WithTimeout to override the default 10s handshake timeout.
 func ConnectAgentPath(ctx context.Context, path string) (*AgentClient, error) {
 	inner, err := ffi.OpenAgentPath(ctx, path)
 	if err != nil {

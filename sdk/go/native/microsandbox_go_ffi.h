@@ -520,9 +520,15 @@ char *msb_fs_write_stream_close(uint64_t cancel_id,
                                 unsigned char *buf,
                                 uintptr_t buf_len);
 
-char *msb_agent_open_sandbox(uint64_t cancel_id, const char *name, Handle *out_handle);
+char *msb_agent_open_sandbox(uint64_t cancel_id,
+                             const char *name,
+                             uint64_t timeout_ms,
+                             Handle *out_handle);
 
-char *msb_agent_open_path(uint64_t cancel_id, const char *path, Handle *out_handle);
+char *msb_agent_open_path(uint64_t cancel_id,
+                          const char *path,
+                          uint64_t timeout_ms,
+                          Handle *out_handle);
 
 char *msb_agent_request(uint64_t cancel_id,
                         Handle agent_handle,

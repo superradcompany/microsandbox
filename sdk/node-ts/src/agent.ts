@@ -27,6 +27,12 @@ export interface RawFrame {
   readonly body: Buffer;
 }
 
+/** Options for connecting to an agent relay. */
+export interface AgentConnectOptions {
+  /** Handshake timeout in milliseconds. Defaults to 10_000. */
+  readonly timeoutMs?: number;
+}
+
 /**
  * Low-level client for talking to agentd through the sandbox relay socket.
  *
@@ -47,9 +53,12 @@ export class AgentClient {
   private constructor(private readonly native: NapiAgentClient) {}
 
   /** Connect to a running sandbox by name. */
-  static async connectSandbox(name: string): Promise<AgentClient> {
+  static async connectSandbox(
+    name: string,
+    opts?: AgentConnectOptions,
+  ): Promise<AgentClient> {
     try {
-      const inner = await napi.AgentClient.connectSandbox(name);
+      const inner = await napi.AgentClient.connectSandbox(name, opts);
       return new AgentClient(inner);
     } catch (e) {
       throw mapNapiError(e);
@@ -57,9 +66,12 @@ export class AgentClient {
   }
 
   /** Connect to an agentd relay socket by path. */
-  static async connect(path: string): Promise<AgentClient> {
+  static async connect(
+    path: string,
+    opts?: AgentConnectOptions,
+  ): Promise<AgentClient> {
     try {
-      const inner = await napi.AgentClient.connect(path);
+      const inner = await napi.AgentClient.connect(path, opts);
       return new AgentClient(inner);
     } catch (e) {
       throw mapNapiError(e);

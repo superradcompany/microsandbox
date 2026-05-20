@@ -59,10 +59,10 @@ use self::exec::{ExecEvent, ExecHandle, ExecOptions, ExecSink, StdinMode};
 pub use crate::db::entity::sandbox::SandboxStatus;
 pub use attach::AttachOptionsBuilder;
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
-pub use config::SandboxConfig;
+pub use config::{DEFAULT_REPLACE_TIMEOUT, SandboxConfig};
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
-pub use handle::SandboxHandle;
+pub use handle::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_STOP_TIMEOUT, SandboxHandle};
 pub use init::{HandoffInit, InitOptionsBuilder};
 pub use logs::{LogEntry, LogOptions, LogSource};
 pub use metrics::{SandboxMetrics, all_sandbox_metrics};
@@ -532,7 +532,11 @@ impl Sandbox {
         fs::SandboxFs::new(&self.client)
     }
 
-    /// Stop the sandbox gracefully by sending `core.shutdown` to agentd.
+    /// Ask the sandbox to shut down gracefully.
+    ///
+    /// Returns as soon as the request is sent — does not wait for the
+    /// sandbox to actually exit. Use [`stop_and_wait`](Self::stop_and_wait)
+    /// to also block on exit.
     pub async fn stop(&self) -> MicrosandboxResult<()> {
         tracing::debug!(sandbox = %self.config.name, "stop: sending shutdown");
         // Shutdown carries no useful payload; agentd dispatches on `msg.t`.
@@ -1764,7 +1768,7 @@ async fn prepare_create_target(
             SandboxStatus::Running | SandboxStatus::Draining | SandboxStatus::Paused
         );
         if active {
-            stop_sandbox_for_replacement(pools, &model, config.replace_with_grace).await?;
+            stop_sandbox_for_replacement(pools, &model, config.replace_with_timeout).await?;
         }
 
         // Free any lingering metrics slot before the row goes away; once the

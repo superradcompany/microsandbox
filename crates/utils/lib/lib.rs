@@ -204,6 +204,12 @@ pub fn http_client() -> ureq::Agent {
         .new_agent()
 }
 
+/// Returns true when a user-provided text value should be interpreted as a
+/// local filesystem path rather than a named resource or OCI reference.
+pub fn looks_like_local_path_text(s: &str) -> bool {
+    s == "." || s == ".." || s.starts_with('/') || s.starts_with("./") || s.starts_with("../")
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------

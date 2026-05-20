@@ -77,12 +77,22 @@ class AgentClient:
         self._native = native
 
     @classmethod
-    async def connect_sandbox(cls, name: str) -> AgentClient:
-        return cls(await _PyAgentClient.connect_sandbox(name))
+    async def connect_sandbox(
+        cls,
+        name: str,
+        *,
+        timeout: float | None = None,
+    ) -> AgentClient:
+        return cls(await _PyAgentClient.connect_sandbox(name, timeout=timeout))
 
     @classmethod
-    async def connect(cls, path: str) -> AgentClient:
-        return cls(await _PyAgentClient.connect(path))
+    async def connect(
+        cls,
+        path: str,
+        *,
+        timeout: float | None = None,
+    ) -> AgentClient:
+        return cls(await _PyAgentClient.connect(path, timeout=timeout))
 
     async def request(self, flags: int, body: bytes) -> RawFrame:
         return await self._native.request(flags, body)

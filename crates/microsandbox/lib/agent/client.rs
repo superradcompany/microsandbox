@@ -42,7 +42,7 @@ use super::error::{AgentClientError, AgentClientResult};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
-/// Default handshake deadline used by [`AgentClient::connect`].
+/// Default handshake timeout used by [`AgentClient::connect`].
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Per-client correlation ID range step. Mirrors the relay-side constant in
@@ -83,7 +83,16 @@ impl AgentClient {
     /// Connect to the sandbox's agent relay socket using the default 10s
     /// handshake timeout.
     pub async fn connect(sock_path: impl AsRef<Path>) -> AgentClientResult<Self> {
-        let deadline = Instant::now() + DEFAULT_HANDSHAKE_TIMEOUT;
+        Self::connect_with_timeout(sock_path, DEFAULT_HANDSHAKE_TIMEOUT).await
+    }
+
+    /// Connect to the sandbox's agent relay socket using an explicit
+    /// handshake timeout.
+    pub async fn connect_with_timeout(
+        sock_path: impl AsRef<Path>,
+        timeout: Duration,
+    ) -> AgentClientResult<Self> {
+        let deadline = Instant::now() + timeout;
         Self::connect_with_deadline(sock_path, deadline).await
     }
 
@@ -172,11 +181,20 @@ impl AgentClient {
     /// The socket lives under the SDK's configured sandboxes directory at
     /// `<sandboxes_dir>/<name>/runtime/agent.sock`.
     pub async fn connect_sandbox(name: &str) -> AgentClientResult<Self> {
+        Self::connect_sandbox_with_timeout(name, DEFAULT_HANDSHAKE_TIMEOUT).await
+    }
+
+    /// Resolve a sandbox name to its agent socket path and connect with an
+    /// explicit handshake timeout.
+    pub async fn connect_sandbox_with_timeout(
+        name: &str,
+        timeout: Duration,
+    ) -> AgentClientResult<Self> {
         let sock_path = sandbox_socket_path(name);
         if !sock_path.exists() {
             return Err(AgentClientError::SandboxNotFound(name.to_string()));
         }
-        Self::connect(&sock_path).await
+        Self::connect_with_timeout(&sock_path, timeout).await
     }
 
     /// Close the connection. Drops the writer and aborts the reader task;

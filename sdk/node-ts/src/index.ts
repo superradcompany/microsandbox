@@ -8,6 +8,7 @@ export {
   FLAG_SESSION_START,
   FLAG_SHUTDOWN,
   FLAG_TERMINAL,
+  type AgentConnectOptions,
   type RawFrame,
 } from "./agent.js";
 

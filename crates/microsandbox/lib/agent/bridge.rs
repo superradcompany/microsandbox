@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use microsandbox_protocol::codec::RawFrame;
 use tokio::sync::Mutex;
@@ -65,9 +66,28 @@ impl AgentBridge {
         Ok(Self::from_client(client))
     }
 
+    /// Connect to a sandbox by name with an explicit handshake timeout.
+    pub async fn connect_sandbox_with_timeout(
+        name: &str,
+        timeout: Duration,
+    ) -> AgentClientResult<Self> {
+        let client = AgentClient::connect_sandbox_with_timeout(name, timeout).await?;
+        Ok(Self::from_client(client))
+    }
+
     /// Connect to an arbitrary agentd relay socket.
     pub async fn connect_path(path: &str) -> AgentClientResult<Self> {
         let client = AgentClient::connect(path).await?;
+        Ok(Self::from_client(client))
+    }
+
+    /// Connect to an arbitrary agentd relay socket with an explicit handshake
+    /// timeout.
+    pub async fn connect_path_with_timeout(
+        path: &str,
+        timeout: Duration,
+    ) -> AgentClientResult<Self> {
+        let client = AgentClient::connect_with_timeout(path, timeout).await?;
         Ok(Self::from_client(client))
     }
 

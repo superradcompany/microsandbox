@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use microsandbox::{AgentBridge, BridgeFrame};
 use napi::bindgen_prelude::*;
@@ -34,6 +35,13 @@ pub struct StreamOpenResult {
     pub handle: BigInt,
 }
 
+/// Options for connecting to an agent relay.
+#[napi(object)]
+pub struct AgentConnectOptions {
+    /// Handshake timeout in milliseconds. Defaults to 10_000.
+    pub timeout_ms: Option<u32>,
+}
+
 /// Low-level client for talking to agentd through the sandbox relay socket.
 ///
 /// All bodies are raw CBOR bytes — encode and decode in JS userland with a
@@ -53,10 +61,15 @@ impl AgentClient {
     /// Connect to a sandbox by name. Resolves the agent socket from the
     /// SDK's configured sandboxes directory.
     #[napi(factory, js_name = "connectSandbox")]
-    pub async fn connect_sandbox(name: String) -> Result<AgentClient> {
-        let bridge = AgentBridge::connect_sandbox(&name)
-            .await
-            .map_err(to_napi_error_agent)?;
+    pub async fn connect_sandbox(
+        name: String,
+        opts: Option<AgentConnectOptions>,
+    ) -> Result<AgentClient> {
+        let bridge = match timeout_from_options(opts) {
+            Some(timeout) => AgentBridge::connect_sandbox_with_timeout(&name, timeout).await,
+            None => AgentBridge::connect_sandbox(&name).await,
+        }
+        .map_err(to_napi_error_agent)?;
         Ok(AgentClient {
             inner: Arc::new(bridge),
         })
@@ -64,10 +77,12 @@ impl AgentClient {
 
     /// Connect to an agentd relay socket by path.
     #[napi(factory)]
-    pub async fn connect(path: String) -> Result<AgentClient> {
-        let bridge = AgentBridge::connect_path(&path)
-            .await
-            .map_err(to_napi_error_agent)?;
+    pub async fn connect(path: String, opts: Option<AgentConnectOptions>) -> Result<AgentClient> {
+        let bridge = match timeout_from_options(opts) {
+            Some(timeout) => AgentBridge::connect_path_with_timeout(&path, timeout).await,
+            None => AgentBridge::connect_path(&path).await,
+        }
+        .map_err(to_napi_error_agent)?;
         Ok(AgentClient {
             inner: Arc::new(bridge),
         })
@@ -170,4 +185,11 @@ fn frame_to_js(frame: BridgeFrame) -> RawFrame {
 fn to_napi_error_agent(err: microsandbox::AgentClientError) -> napi::Error {
     // Route through the existing error mapper by wrapping in MicrosandboxError.
     to_napi_error(microsandbox::MicrosandboxError::AgentClient(err))
+}
+
+fn timeout_from_options(opts: Option<AgentConnectOptions>) -> Option<Duration> {
+    opts.and_then(|opts| {
+        opts.timeout_ms
+            .map(|timeout_ms| Duration::from_millis(u64::from(timeout_ms)))
+    })
 }
