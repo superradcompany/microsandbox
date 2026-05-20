@@ -108,7 +108,7 @@ impl TlsState {
     pub fn get_or_generate_cert(&self, domain: &str) -> Arc<DomainCert> {
         let mut cache = self.cert_cache.lock().unwrap();
         if let Some(cert) = cache.get(domain) {
-            if cert.not_after > OffsetDateTime::now_utc() + CERT_REFRESH_WINDOW {
+            if cert.expires_at > OffsetDateTime::now_utc() + CERT_REFRESH_WINDOW {
                 return cert.clone();
             }
         }
@@ -149,22 +149,22 @@ mod tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let state = TlsState::new(TlsConfig::default(), SecretsConfig::default());
         let first = state.get_or_generate_cert("openrouter.ai");
-        let original_not_after = first.not_after;
+        let original_expires_at = first.expires_at;
 
         {
             let mut cache = state.cert_cache.lock().unwrap();
             let stale = Arc::new(DomainCert {
                 chain: first.chain.clone(),
                 key: first.key.clone_key(),
-                not_after: OffsetDateTime::now_utc() + Duration::seconds(30),
+                expires_at: OffsetDateTime::now_utc() + Duration::seconds(30),
                 server_config: first.server_config.clone(),
             });
             cache.put("openrouter.ai".to_string(), stale);
         }
 
         let refreshed = state.get_or_generate_cert("openrouter.ai");
-        assert!(refreshed.not_after > OffsetDateTime::now_utc() + Duration::hours(23));
-        assert!(refreshed.not_after > original_not_after - Duration::minutes(10));
+        assert!(refreshed.expires_at > OffsetDateTime::now_utc() + Duration::hours(23));
+        assert!(refreshed.expires_at > original_expires_at - Duration::minutes(10));
     }
 }
 
