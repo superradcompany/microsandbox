@@ -712,7 +712,9 @@ fn apply_network_opts(
                 n = n.trust_host_cas(true);
             }
             if let Some(action) = violation_action {
-                n = n.on_secret_violation(action);
+                n = n.on_secret_violation(|_| {
+                    microsandbox_network::builder::ViolationActionBuilder::from_action(action)
+                });
             }
 
             // TLS configuration.
@@ -961,13 +963,16 @@ fn parse_secret(spec: &str) -> anyhow::Result<(String, String, String)> {
 fn parse_violation_action(
     s: &Option<String>,
 ) -> anyhow::Result<Option<microsandbox_network::secrets::config::ViolationAction>> {
-    use microsandbox_network::secrets::config::ViolationAction;
+    use microsandbox_network::secrets::config::{HostPattern, PassthroughPolicy, ViolationAction};
     match s.as_deref() {
         None => Ok(None),
         Some("block") => Ok(Some(ViolationAction::Block)),
         Some("block-and-log") => Ok(Some(ViolationAction::BlockAndLog)),
         Some("block-and-terminate") => Ok(Some(ViolationAction::BlockAndTerminate)),
-        Some("passthrough") => Ok(Some(ViolationAction::Passthrough)),
+        Some("passthrough") => Ok(Some(ViolationAction::Passthrough(PassthroughPolicy {
+            hosts: vec![HostPattern::Any],
+            fallback: Box::new(ViolationAction::BlockAndLog),
+        }))),
         Some(other) => anyhow::bail!(
             "invalid violation action: {other} (expected: block, block-and-log, block-and-terminate, passthrough)"
         ),
@@ -1263,7 +1268,7 @@ mod tests {
 
         assert!(matches!(
             action,
-            microsandbox_network::secrets::config::ViolationAction::Passthrough
+            microsandbox_network::secrets::config::ViolationAction::Passthrough(_)
         ));
     }
 

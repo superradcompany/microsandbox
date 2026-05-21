@@ -34,6 +34,7 @@ export interface NativeBindings {
   readonly DnsBuilder: NapiBuilderCtor<NapiDnsBuilder>;
   readonly TlsBuilder: NapiBuilderCtor<NapiTlsBuilder>;
   readonly SecretBuilder: NapiBuilderCtor<NapiSecretBuilder>;
+  readonly ViolationActionBuilder: NapiBuilderCtor<NapiViolationActionBuilder>;
   readonly NetworkBuilder: NapiBuilderCtor<NapiNetworkBuilder>;
   readonly NetworkPolicyBuilder: NapiBuilderCtor<NapiNetworkPolicyBuilder>;
   readonly RuleBuilder: NapiBuilderCtor<NapiRuleBuilder>;
@@ -626,13 +627,14 @@ export interface NapiSecretBuilder {
   allowHost(host: string): this;
   allowHostPattern(pattern: string): this;
   allowAnyHostDangerous(iUnderstand: boolean): this;
-  allowPassthroughHost(host: string): this;
-  allowPassthroughHostPattern(pattern: string): this;
   requireTlsIdentity(enabled: boolean): this;
   injectHeaders(enabled: boolean): this;
   injectBasicAuth(enabled: boolean): this;
   injectQuery(enabled: boolean): this;
   injectBody(enabled: boolean): this;
+  onViolation(
+    configure: (b: NapiViolationActionBuilder) => NapiViolationActionBuilder,
+  ): this;
   build(): NapiSecretEntry;
 }
 
@@ -642,8 +644,6 @@ export interface NapiSecretEntry {
   readonly placeholder: string;
   readonly allowedHosts: string[];
   readonly allowedHostPatterns: string[];
-  readonly passthroughHosts: string[];
-  readonly passthroughHostPatterns: string[];
   readonly allowAnyHost: boolean;
   readonly requireTlsIdentity: boolean;
   readonly injection: NapiSecretInjection;
@@ -672,9 +672,9 @@ export interface NapiNetworkBuilder {
   interface(
     configure: (b: NapiInterfaceOverridesBuilder) => NapiInterfaceOverridesBuilder,
   ): this;
-  onSecretViolation(action: string): this;
-  allowSecretPassthroughHost(host: string): this;
-  allowSecretPassthroughHostPattern(pattern: string): this;
+  onSecretViolation(
+    configure: (b: NapiViolationActionBuilder) => NapiViolationActionBuilder,
+  ): this;
   maxConnections(max: number): this;
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;
@@ -686,6 +686,15 @@ export interface NapiInterfaceOverridesBuilder {
   mtu(mtu: number): this;
   ipv4(address: string): this;
   ipv6(address: string): this;
+}
+
+export interface NapiViolationActionBuilder {
+  block(): this;
+  blockAndLog(): this;
+  blockAndTerminate(): this;
+  passthroughHost(host: string): this;
+  passthroughHostPattern(pattern: string): this;
+  passthroughAllHosts(iUnderstand: boolean): this;
 }
 
 export interface NapiPullProgressEvent {

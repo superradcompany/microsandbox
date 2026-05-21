@@ -115,6 +115,7 @@ from microsandbox.types import (
     Stdin,
     TlsConfig,
     ViolationAction,
+    ViolationPolicy,
 )
 
 # Pass the bundled msb path to Rust explicitly. `MSB_PATH` remains a user
@@ -198,6 +199,7 @@ __all__ = [
     "SecretInjection",
     "TlsConfig",
     "ViolationAction",
+    "ViolationPolicy",
     # Images / rootfs
     "Image",
     "ImageSource",

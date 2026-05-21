@@ -33,5 +33,6 @@ mod snapshot;
 mod snapshot_builder;
 mod tls_builder;
 mod types;
+mod violation_action_builder;
 mod volume;
 mod volume_builder;

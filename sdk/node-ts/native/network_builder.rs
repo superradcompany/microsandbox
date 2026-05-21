@@ -6,13 +6,13 @@ use std::str::FromStr;
 
 use microsandbox_network::builder::NetworkBuilder as RustNetworkBuilder;
 use microsandbox_network::policy::NetworkPolicy as RustNetworkPolicy;
-use microsandbox_network::secrets::config::ViolationAction as RustViolationAction;
 
 use crate::dns_builder::JsDnsBuilder;
 use crate::interface_overrides_builder::JsInterfaceOverridesBuilder;
 use crate::network_policy_builder::JsNetworkPolicyBuilder;
 use crate::secret_builder::JsSecretBuilder;
 use crate::tls_builder::JsTlsBuilder;
+use crate::violation_action_builder::JsViolationActionBuilder;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -221,30 +221,22 @@ impl JsNetworkBuilder {
         Ok(self)
     }
 
-    /// Set the violation action for secrets: `"block" | "block-and-log"
-    /// | "block-and-terminate" | "passthrough"`.
+    /// Configure the violation action for secrets.
     #[napi(js_name = "onSecretViolation")]
-    pub fn on_secret_violation(&mut self, action: String) -> Result<&Self> {
-        let act = parse_violation_action(&action)?;
+    pub fn on_secret_violation(
+        &mut self,
+        env: &Env,
+        configure: Function<
+            ClassInstance<JsViolationActionBuilder>,
+            ClassInstance<JsViolationActionBuilder>,
+        >,
+    ) -> Result<&Self> {
+        let initial = JsViolationActionBuilder::new().into_instance(env)?;
+        let mut returned = configure.call(initial)?;
+        let violation_builder = returned.take_inner_builder()?;
         let prev = self.take_inner();
-        self.inner = Some(prev.on_secret_violation(act));
+        self.inner = Some(prev.on_secret_violation(|_default| violation_builder));
         Ok(self)
-    }
-
-    /// Allow a host to receive secret placeholders without substitution.
-    #[napi(js_name = "allowSecretPassthroughHost")]
-    pub fn allow_secret_passthrough_host(&mut self, host: String) -> &Self {
-        let prev = self.take_inner();
-        self.inner = Some(prev.allow_secret_passthrough_host(host));
-        self
-    }
-
-    /// Allow hosts matching a wildcard pattern to receive secret placeholders without substitution.
-    #[napi(js_name = "allowSecretPassthroughHostPattern")]
-    pub fn allow_secret_passthrough_host_pattern(&mut self, pattern: String) -> &Self {
-        let prev = self.take_inner();
-        self.inner = Some(prev.allow_secret_passthrough_host_pattern(pattern));
-        self
     }
 
     /// Set the maximum number of concurrent connections.
@@ -320,21 +312,5 @@ impl JsNetworkBuilder {
         self.inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("NetworkBuilder already consumed"))
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions
-//--------------------------------------------------------------------------------------------------
-
-fn parse_violation_action(s: &str) -> Result<RustViolationAction> {
-    match s {
-        "block" => Ok(RustViolationAction::Block),
-        "block-and-log" => Ok(RustViolationAction::BlockAndLog),
-        "block-and-terminate" => Ok(RustViolationAction::BlockAndTerminate),
-        "passthrough" => Ok(RustViolationAction::Passthrough),
-        other => Err(napi::Error::from_reason(format!(
-            "unknown violation action `{other}` (expected block | block-and-log | block-and-terminate | passthrough)"
-        ))),
     }
 }

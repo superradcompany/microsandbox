@@ -355,30 +355,43 @@ describe("NetworkBuilder.secretEnvSimple (3-arg shorthand)", () => {
 });
 
 describe("NetworkBuilder secret passthrough", () => {
-  it("builds global passthrough host allowlists", () => {
+  it("builds global passthrough violation policy", () => {
     const cfg = new NetworkBuilder()
-      .allowSecretPassthroughHost("api.anthropic.com")
-      .allowSecretPassthroughHostPattern("*.anthropic.com")
+      .onSecretViolation((v) =>
+        v
+          .blockAndTerminate()
+          .passthroughHost("api.anthropic.com")
+          .passthroughHostPattern("*.anthropic.com"),
+      )
       .build() as {
       secrets: {
-        passthroughHosts: unknown[];
+        onViolation: {
+          passthrough: {
+            hosts: unknown[];
+            fallback: string;
+          };
+        };
       };
     };
 
-    expect(cfg.secrets.passthroughHosts).toHaveLength(2);
+    expect(cfg.secrets.onViolation.passthrough.hosts).toHaveLength(2);
+    expect(cfg.secrets.onViolation.passthrough.fallback).toBe("BlockAndTerminate");
   });
 
-  it("builds per-secret passthrough host allowlists", () => {
+  it("builds per-secret passthrough violation policy", () => {
     const secret = new SecretBuilder()
       .env("API_KEY")
       .value("sk-abc")
       .allowHost("api.github.com")
-      .allowPassthroughHost("api.anthropic.com")
-      .allowPassthroughHostPattern("*.anthropic.com")
+      .onViolation((v) =>
+        v
+          .blockAndLog()
+          .passthroughHost("api.anthropic.com")
+          .passthroughHostPattern("*.anthropic.com"),
+      )
       .build();
 
-    expect(secret.passthroughHosts).toEqual(["api.anthropic.com"]);
-    expect(secret.passthroughHostPatterns).toEqual(["*.anthropic.com"]);
+    expect(secret.allowedHosts).toEqual(["api.github.com"]);
   });
 });
 

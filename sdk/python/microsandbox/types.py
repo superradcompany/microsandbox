@@ -70,6 +70,59 @@ class ViolationAction(enum.StrEnum):
     BLOCK_AND_TERMINATE = "block-and-terminate"
     PASSTHROUGH = "passthrough"
 
+@dataclass(frozen=True, slots=True)
+class ViolationPolicy:
+    """Secret violation behavior, including optional passthrough hosts."""
+    fallback: ViolationAction = ViolationAction.BLOCK_AND_LOG
+    passthrough_hosts: tuple[str, ...] = ()
+    passthrough_host_patterns: tuple[str, ...] = ()
+    passthrough_all_hosts: bool = False
+
+    @classmethod
+    def block(cls) -> ViolationPolicy:
+        return cls(fallback=ViolationAction.BLOCK)
+
+    @classmethod
+    def block_and_log(cls) -> ViolationPolicy:
+        return cls(fallback=ViolationAction.BLOCK_AND_LOG)
+
+    @classmethod
+    def block_and_terminate(cls) -> ViolationPolicy:
+        return cls(fallback=ViolationAction.BLOCK_AND_TERMINATE)
+
+    @classmethod
+    def passthrough(
+        cls,
+        *,
+        hosts: Sequence[str] = (),
+        host_patterns: Sequence[str] = (),
+        all_hosts: bool = False,
+        fallback: ViolationAction = ViolationAction.BLOCK_AND_LOG,
+    ) -> ViolationPolicy:
+        return cls(
+            fallback=fallback,
+            passthrough_hosts=tuple(hosts),
+            passthrough_host_patterns=tuple(host_patterns),
+            passthrough_all_hosts=all_hosts,
+        )
+
+    def _to_dict(self) -> str | dict:
+        if (
+            not self.passthrough_hosts
+            and not self.passthrough_host_patterns
+            and not self.passthrough_all_hosts
+        ):
+            return str(self.fallback)
+
+        passthrough: dict = {"fallback": str(self.fallback)}
+        if self.passthrough_hosts:
+            passthrough["hosts"] = list(self.passthrough_hosts)
+        if self.passthrough_host_patterns:
+            passthrough["host_patterns"] = list(self.passthrough_host_patterns)
+        if self.passthrough_all_hosts:
+            passthrough["all_hosts"] = True
+        return {"passthrough": passthrough}
+
 class MountKind(enum.StrEnum):
     BIND = "bind"
     NAMED = "named"
@@ -507,10 +560,9 @@ class SecretEntry:
     value: str
     allow_hosts: tuple[str, ...] = ()
     allow_host_patterns: tuple[str, ...] = ()
-    passthrough_hosts: tuple[str, ...] = ()
-    passthrough_host_patterns: tuple[str, ...] = ()
     placeholder: str | None = None
     require_tls: bool = True
+    on_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG
     injection: SecretInjection = field(default_factory=SecretInjection)
 
     def _to_dict(self) -> dict:
@@ -519,14 +571,13 @@ class SecretEntry:
             d["allow_hosts"] = list(self.allow_hosts)
         if self.allow_host_patterns:
             d["allow_host_patterns"] = list(self.allow_host_patterns)
-        if self.passthrough_hosts:
-            d["passthrough_hosts"] = list(self.passthrough_hosts)
-        if self.passthrough_host_patterns:
-            d["passthrough_host_patterns"] = list(self.passthrough_host_patterns)
         if self.placeholder is not None:
             d["placeholder"] = self.placeholder
         if not self.require_tls:
             d["require_tls"] = False
+        violation = violation_policy_to_dict(self.on_violation)
+        if violation != str(ViolationAction.BLOCK_AND_LOG):
+            d["on_violation"] = violation
         injection = self.injection._to_dict()
         if injection:
             d["injection"] = injection
@@ -542,10 +593,9 @@ class Secret:
         value: str,
         allow_hosts: Sequence[str] = (),
         allow_host_patterns: Sequence[str] = (),
-        passthrough_hosts: Sequence[str] = (),
-        passthrough_host_patterns: Sequence[str] = (),
         placeholder: str | None = None,
         require_tls: bool = True,
+        on_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG,
         injection: SecretInjection | None = None,
     ) -> SecretEntry:
         return SecretEntry(
@@ -553,10 +603,9 @@ class Secret:
             value=value,
             allow_hosts=tuple(allow_hosts),
             allow_host_patterns=tuple(allow_host_patterns),
-            passthrough_hosts=tuple(passthrough_hosts),
-            passthrough_host_patterns=tuple(passthrough_host_patterns),
             placeholder=placeholder,
             require_tls=require_tls,
+            on_violation=on_violation,
             injection=injection if injection is not None else SecretInjection(),
         )
 
@@ -733,9 +782,7 @@ class Network:
     """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
     to ``fd42:6d73:62::/48``."""
     max_connections: int | None = None
-    on_secret_violation: ViolationAction = ViolationAction.BLOCK_AND_LOG
-    secret_passthrough_hosts: tuple[str, ...] = ()
-    secret_passthrough_host_patterns: tuple[str, ...] = ()
+    on_secret_violation: ViolationAction | ViolationPolicy = ViolationAction.BLOCK_AND_LOG
 
     @classmethod
     def none(cls) -> Network:
@@ -777,13 +824,16 @@ class Network:
             d["ipv6_pool"] = self.ipv6_pool
         if self.max_connections is not None:
             d["max_connections"] = self.max_connections
-        if self.on_secret_violation != ViolationAction.BLOCK_AND_LOG:
-            d["on_secret_violation"] = str(self.on_secret_violation)
-        if self.secret_passthrough_hosts:
-            d["secret_passthrough_hosts"] = list(self.secret_passthrough_hosts)
-        if self.secret_passthrough_host_patterns:
-            d["secret_passthrough_host_patterns"] = list(self.secret_passthrough_host_patterns)
+        violation = violation_policy_to_dict(self.on_secret_violation)
+        if violation != str(ViolationAction.BLOCK_AND_LOG):
+            d["on_secret_violation"] = violation
         return d
+
+
+def violation_policy_to_dict(policy: ViolationAction | ViolationPolicy) -> str | dict:
+    if isinstance(policy, ViolationPolicy):
+        return policy._to_dict()
+    return str(policy)
 
 #--------------------------------------------------------------------------------------------------
 # Types: Registry Auth

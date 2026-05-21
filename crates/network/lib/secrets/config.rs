@@ -13,10 +13,6 @@ pub struct SecretsConfig {
     #[serde(default)]
     pub secrets: Vec<SecretEntry>,
 
-    /// Hosts allowed to receive secret placeholders without substitution.
-    #[serde(default)]
-    pub passthrough_hosts: Vec<HostPattern>,
-
     /// Action on secret violation (placeholder leaked to disallowed host).
     #[serde(default)]
     pub on_violation: ViolationAction,
@@ -38,13 +34,13 @@ pub struct SecretEntry {
     #[serde(default)]
     pub allowed_hosts: Vec<HostPattern>,
 
-    /// Hosts allowed to receive this secret's placeholder without substitution.
-    #[serde(default)]
-    pub passthrough_hosts: Vec<HostPattern>,
-
     /// Where the secret can be injected.
     #[serde(default)]
     pub injection: SecretInjection,
+
+    /// Action on secret violation for this secret.
+    #[serde(default)]
+    pub on_violation: ViolationAction,
 
     /// Require verified TLS identity before substituting (default: true).
     /// When true, secret is only substituted if the connection uses TLS
@@ -54,7 +50,7 @@ pub struct SecretEntry {
 }
 
 /// Host pattern for secret allowlist.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HostPattern {
     /// Exact hostname match.
     Exact(String),
@@ -85,7 +81,7 @@ pub struct SecretInjection {
 }
 
 /// Action when a secret placeholder is detected going to a disallowed host.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ViolationAction {
     /// Block the request silently.
     Block,
@@ -94,9 +90,21 @@ pub enum ViolationAction {
     BlockAndLog,
     /// Block and terminate the sandbox.
     BlockAndTerminate,
-    /// Forward the request with the placeholder unchanged.
+    /// Forward the request with the placeholder unchanged for matching hosts.
     #[serde(rename = "passthrough")]
-    Passthrough,
+    Passthrough(PassthroughPolicy),
+}
+
+/// Hosts that may receive placeholders unchanged, plus the fallback action for
+/// non-matching hosts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PassthroughPolicy {
+    /// Hosts allowed to receive placeholders unchanged.
+    #[serde(default)]
+    pub hosts: Vec<HostPattern>,
+    /// Action for hosts that do not match `hosts`.
+    #[serde(default)]
+    pub fallback: Box<ViolationAction>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -110,8 +118,8 @@ impl std::fmt::Debug for SecretEntry {
             .field("value", &"[REDACTED]")
             .field("placeholder", &self.placeholder)
             .field("allowed_hosts", &self.allowed_hosts)
-            .field("passthrough_hosts", &self.passthrough_hosts)
             .field("injection", &self.injection)
+            .field("on_violation", &self.on_violation)
             .field("require_tls_identity", &self.require_tls_identity)
             .finish()
     }
@@ -210,8 +218,8 @@ mod tests {
             value: "v".into(),
             placeholder: "$K".into(),
             allowed_hosts: vec![],
-            passthrough_hosts: vec![],
             injection: SecretInjection::default(),
+            on_violation: ViolationAction::default(),
             require_tls_identity: true,
         };
         assert!(entry.require_tls_identity);

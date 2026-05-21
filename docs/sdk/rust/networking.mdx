@@ -638,30 +638,40 @@ Set the IPv6 pool used to derive per-sandbox `/64` guest prefixes. Defaults to `
 #### on_secret_violation()
 
 ```rust
-fn on_secret_violation(self, action: ViolationAction) -> Self
+fn on_secret_violation(
+    self,
+    f: impl FnOnce(ViolationActionBuilder) -> ViolationActionBuilder,
+) -> Self
 ```
 
-Set the action taken when a secret placeholder is detected in traffic destined for a host not in the secret's allow list. See [`ViolationAction`](#violationaction).
+Set the action taken when a secret placeholder is detected in traffic destined for a host not in the secret's allow list. The builder can configure a blocking fallback and optional passthrough hosts:
+
+```rust
+.network(|n| n.on_secret_violation(|v| {
+    v.block_and_log()
+     .passthrough_host("api.anthropic.com")
+     .passthrough_host_pattern("*.example.com")
+}))
+```
+
+Passthrough hosts receive the placeholder unchanged. They do **not** receive real secret values.
 
 ---
 
-#### allow_secret_passthrough_host()
+## ViolationActionBuilder
 
-```rust
-fn allow_secret_passthrough_host(self, host: impl Into<String>) -> Self
-```
+Builder for secret violation behavior. Used by [`NetworkBuilder::on_secret_violation()`](#on_secret_violation) and `SecretBuilder::on_violation(...)`.
 
-Allow any configured secret placeholder to pass through unchanged to an exact host. This does **not** allow the host to receive the real secret value; substitution still only happens for hosts configured with `SecretBuilder::allow_host()`.
+| Method | Description |
+|--------|-------------|
+| `block()` | Use `Block` as the fallback action |
+| `block_and_log()` | Use `BlockAndLog` as the fallback action |
+| `block_and_terminate()` | Use `BlockAndTerminate` as the fallback action |
+| `passthrough_host(host)` | Allow placeholders to pass through unchanged to an exact host |
+| `passthrough_host_pattern(pattern)` | Allow placeholders to pass through unchanged to matching wildcard hosts |
+| `passthrough_all_hosts(true)` | Allow placeholders to pass through unchanged to any host |
 
----
-
-#### allow_secret_passthrough_host_pattern()
-
-```rust
-fn allow_secret_passthrough_host_pattern(self, pattern: impl Into<String>) -> Self
-```
-
-Allow any configured secret placeholder to pass through unchanged to hosts matching a wildcard pattern (for example, `"*.anthropic.com"`). This does **not** allow those hosts to receive real secret values.
+Passthrough host calls accumulate. Blocking calls update the fallback action and keep any passthrough hosts already added.
 
 ---
 
@@ -955,4 +965,4 @@ Action taken when a secret placeholder is sent to a disallowed host.
 | `Block` | Silently drop the request. The guest sees a connection reset. This is the default. |
 | `BlockAndLog` | Drop the request and emit a warning log on the host side. |
 | `BlockAndTerminate` | Drop the request, log an error, and shut down the entire sandbox. |
-| `Passthrough` | Forward the request with the placeholder unchanged. The real secret is not substituted. |
+| `Passthrough(PassthroughPolicy)` | Forward matching hosts with the placeholder unchanged; use the policy fallback for non-matching hosts. |

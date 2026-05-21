@@ -10,7 +10,9 @@ use ipnetwork::{Ipv4Network, Ipv6Network};
 use crate::config::{DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort};
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
-use crate::secrets::config::{HostPattern, SecretEntry, SecretInjection, ViolationAction};
+use crate::secrets::config::{
+    HostPattern, PassthroughPolicy, SecretEntry, SecretInjection, ViolationAction,
+};
 use crate::tls::TlsConfig;
 
 //--------------------------------------------------------------------------------------------------
@@ -48,9 +50,15 @@ pub struct SecretBuilder {
     value: Option<String>,
     placeholder: Option<String>,
     allowed_hosts: Vec<HostPattern>,
-    passthrough_hosts: Vec<HostPattern>,
     injection: SecretInjection,
+    on_violation: ViolationAction,
     require_tls_identity: bool,
+}
+
+/// Fluent builder for a [`ViolationAction`].
+pub struct ViolationActionBuilder {
+    fallback: ViolationAction,
+    passthrough_hosts: Vec<HostPattern>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -179,34 +187,19 @@ impl NetworkBuilder {
             value: value.into(),
             placeholder: placeholder.into(),
             allowed_hosts: vec![HostPattern::Exact(allowed_host.into())],
-            passthrough_hosts: Vec::new(),
             injection: SecretInjection::default(),
+            on_violation: ViolationAction::default(),
             require_tls_identity: true,
         });
         self
     }
 
     /// Set the violation action for secrets.
-    pub fn on_secret_violation(mut self, action: ViolationAction) -> Self {
-        self.config.secrets.on_violation = action;
-        self
-    }
-
-    /// Allow a host to receive secret placeholders without substitution.
-    pub fn allow_secret_passthrough_host(mut self, host: impl Into<String>) -> Self {
-        self.config
-            .secrets
-            .passthrough_hosts
-            .push(HostPattern::Exact(host.into()));
-        self
-    }
-
-    /// Allow hosts matching a wildcard pattern to receive secret placeholders without substitution.
-    pub fn allow_secret_passthrough_host_pattern(mut self, pattern: impl Into<String>) -> Self {
-        self.config
-            .secrets
-            .passthrough_hosts
-            .push(HostPattern::Wildcard(pattern.into()));
+    pub fn on_secret_violation(
+        mut self,
+        f: impl FnOnce(ViolationActionBuilder) -> ViolationActionBuilder,
+    ) -> Self {
+        self.config.secrets.on_violation = f(ViolationActionBuilder::new()).build();
         self
     }
 
@@ -390,8 +383,8 @@ impl SecretBuilder {
             value: None,
             placeholder: None,
             allowed_hosts: Vec::new(),
-            passthrough_hosts: Vec::new(),
             injection: SecretInjection::default(),
+            on_violation: ViolationAction::default(),
             require_tls_identity: true,
         }
     }
@@ -437,16 +430,12 @@ impl SecretBuilder {
         self
     }
 
-    /// Allow a host to receive this secret's placeholder without substitution.
-    pub fn allow_passthrough_host(mut self, host: impl Into<String>) -> Self {
-        self.passthrough_hosts.push(HostPattern::Exact(host.into()));
-        self
-    }
-
-    /// Allow hosts matching a wildcard pattern to receive this secret's placeholder without substitution.
-    pub fn allow_passthrough_host_pattern(mut self, pattern: impl Into<String>) -> Self {
-        self.passthrough_hosts
-            .push(HostPattern::Wildcard(pattern.into()));
+    /// Set the violation action for this secret.
+    pub fn on_violation(
+        mut self,
+        f: impl FnOnce(ViolationActionBuilder) -> ViolationActionBuilder,
+    ) -> Self {
+        self.on_violation = f(ViolationActionBuilder::new()).build();
         self
     }
 
@@ -496,10 +485,88 @@ impl SecretBuilder {
             value,
             placeholder,
             allowed_hosts: self.allowed_hosts,
-            passthrough_hosts: self.passthrough_hosts,
             injection: self.injection,
+            on_violation: self.on_violation,
             require_tls_identity: self.require_tls_identity,
         }
+    }
+}
+
+impl ViolationActionBuilder {
+    /// Start building a violation action.
+    pub fn new() -> Self {
+        Self {
+            fallback: ViolationAction::default(),
+            passthrough_hosts: Vec::new(),
+        }
+    }
+
+    /// Start building from an existing action.
+    pub fn from_action(action: ViolationAction) -> Self {
+        match action {
+            ViolationAction::Passthrough(policy) => Self {
+                fallback: *policy.fallback,
+                passthrough_hosts: policy.hosts,
+            },
+            action => Self {
+                fallback: action,
+                passthrough_hosts: Vec::new(),
+            },
+        }
+    }
+
+    /// Block the request silently.
+    pub fn block(mut self) -> Self {
+        self.fallback = ViolationAction::Block;
+        self
+    }
+
+    /// Block the request and emit a warning log.
+    pub fn block_and_log(mut self) -> Self {
+        self.fallback = ViolationAction::BlockAndLog;
+        self
+    }
+
+    /// Block the request and terminate the sandbox.
+    pub fn block_and_terminate(mut self) -> Self {
+        self.fallback = ViolationAction::BlockAndTerminate;
+        self
+    }
+
+    /// Allow a host to receive secret placeholders without substitution.
+    pub fn passthrough_host(mut self, host: impl Into<String>) -> Self {
+        self.push_passthrough_host(HostPattern::Exact(host.into()));
+        self
+    }
+
+    /// Allow hosts matching a wildcard pattern to receive secret placeholders without substitution.
+    pub fn passthrough_host_pattern(mut self, pattern: impl Into<String>) -> Self {
+        self.push_passthrough_host(HostPattern::Wildcard(pattern.into()));
+        self
+    }
+
+    /// Allow any host to receive secret placeholders without substitution.
+    pub fn passthrough_all_hosts(mut self, i_understand_the_risk: bool) -> Self {
+        if i_understand_the_risk {
+            self.push_passthrough_host(HostPattern::Any);
+        }
+        self
+    }
+
+    /// Consume the builder and return the action.
+    pub fn build(self) -> ViolationAction {
+        if self.passthrough_hosts.is_empty() {
+            return self.fallback;
+        }
+
+        ViolationAction::Passthrough(PassthroughPolicy {
+            hosts: self.passthrough_hosts,
+            fallback: Box::new(self.fallback),
+        })
+    }
+
+    fn push_passthrough_host(&mut self, host: HostPattern) {
+        self.passthrough_hosts.push(host);
     }
 }
 
@@ -520,6 +587,12 @@ impl Default for TlsBuilder {
 }
 
 impl Default for SecretBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for ViolationActionBuilder {
     fn default() -> Self {
         Self::new()
     }
@@ -561,42 +634,88 @@ mod tests {
     }
 
     #[test]
-    fn network_builder_sets_global_passthrough_hosts() {
+    fn network_builder_sets_global_passthrough_action() {
         let cfg = NetworkBuilder::new()
-            .allow_secret_passthrough_host("api.anthropic.com")
-            .allow_secret_passthrough_host_pattern("*.anthropic.com")
+            .on_secret_violation(|v| {
+                v.passthrough_host("api.anthropic.com")
+                    .passthrough_host_pattern("*.anthropic.com")
+            })
             .build()
             .unwrap();
 
-        assert_eq!(cfg.secrets.passthrough_hosts.len(), 2);
-        assert!(matches!(
-            &cfg.secrets.passthrough_hosts[0],
-            HostPattern::Exact(host) if host == "api.anthropic.com"
-        ));
-        assert!(matches!(
-            &cfg.secrets.passthrough_hosts[1],
-            HostPattern::Wildcard(pattern) if pattern == "*.anthropic.com"
-        ));
+        assert_eq!(
+            cfg.secrets.on_violation,
+            ViolationAction::Passthrough(PassthroughPolicy {
+                hosts: vec![
+                    HostPattern::Exact("api.anthropic.com".into()),
+                    HostPattern::Wildcard("*.anthropic.com".into()),
+                ],
+                fallback: Box::new(ViolationAction::BlockAndLog),
+            })
+        );
     }
 
     #[test]
-    fn secret_builder_sets_passthrough_hosts() {
+    fn secret_builder_sets_violation_action() {
         let secret = SecretBuilder::new()
             .env("TOKEN")
             .value("secret-value")
             .allow_host("api.github.com")
-            .allow_passthrough_host("api.anthropic.com")
-            .allow_passthrough_host_pattern("*.anthropic.com")
+            .on_violation(|v| {
+                v.passthrough_host("api.anthropic.com")
+                    .passthrough_host_pattern("*.anthropic.com")
+            })
             .build();
 
-        assert_eq!(secret.passthrough_hosts.len(), 2);
-        assert!(matches!(
-            &secret.passthrough_hosts[0],
-            HostPattern::Exact(host) if host == "api.anthropic.com"
-        ));
-        assert!(matches!(
-            &secret.passthrough_hosts[1],
-            HostPattern::Wildcard(pattern) if pattern == "*.anthropic.com"
-        ));
+        assert_eq!(
+            secret.on_violation,
+            ViolationAction::Passthrough(PassthroughPolicy {
+                hosts: vec![
+                    HostPattern::Exact("api.anthropic.com".into()),
+                    HostPattern::Wildcard("*.anthropic.com".into()),
+                ],
+                fallback: Box::new(ViolationAction::BlockAndLog),
+            })
+        );
+    }
+
+    #[test]
+    fn violation_action_builder_preserves_fallback_action() {
+        let action = ViolationActionBuilder::new()
+            .passthrough_host("google.com")
+            .block_and_terminate()
+            .passthrough_host("facebook.com")
+            .build();
+
+        assert_eq!(
+            action,
+            ViolationAction::Passthrough(PassthroughPolicy {
+                hosts: vec![
+                    HostPattern::Exact("google.com".into()),
+                    HostPattern::Exact("facebook.com".into()),
+                ],
+                fallback: Box::new(ViolationAction::BlockAndTerminate),
+            })
+        );
+    }
+
+    #[test]
+    fn violation_action_builder_accumulates_passthrough_hosts() {
+        let action = ViolationActionBuilder::new()
+            .block()
+            .passthrough_host("google.com")
+            .passthrough_host("facebook.com")
+            .build();
+
+        assert_eq!(
+            action,
+            ViolationAction::Passthrough(PassthroughPolicy {
+                hosts: vec![
+                    HostPattern::Exact("google.com".into()),
+                    HostPattern::Exact("facebook.com".into()),
+                ],
+                fallback: Box::new(ViolationAction::Block),
+            })
+        );
     }
 }

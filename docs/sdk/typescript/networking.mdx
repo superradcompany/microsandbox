@@ -1024,30 +1024,36 @@ Set the IPv6 pool used to derive per-sandbox `/64` guest prefixes. Defaults to `
 #### onSecretViolation()
 
 ```typescript
-onSecretViolation(action: ViolationAction): this
+onSecretViolation(configure: (v: ViolationActionBuilder) => ViolationActionBuilder): this
 ```
 
-Set the action taken when a secret reaches a disallowed host. See [`ViolationAction`](/sdk/typescript/secrets#violationaction).
+Configure the action taken when a secret reaches a disallowed host:
+
+```typescript
+.network((n) =>
+  n.onSecretViolation((v) =>
+    v.blockAndLog()
+     .passthroughHost("api.anthropic.com")
+  )
+)
+```
+
+Passthrough hosts receive placeholders unchanged. They do **not** receive real secret values.
 
 ---
 
-#### allowSecretPassthroughHost()
+## ViolationActionBuilder
 
-```typescript
-allowSecretPassthroughHost(host: string): this
-```
+| Method | Description |
+|--------|-------------|
+| `block()` | Use `block` as the fallback action |
+| `blockAndLog()` | Use `block-and-log` as the fallback action |
+| `blockAndTerminate()` | Use `block-and-terminate` as the fallback action |
+| `passthroughHost(host)` | Allow placeholders to pass through unchanged to an exact host |
+| `passthroughHostPattern(pattern)` | Allow placeholders to pass through unchanged to matching wildcard hosts |
+| `passthroughAllHosts(true)` | Allow placeholders to pass through unchanged to any host |
 
-Allow configured secret placeholders to pass through unchanged to an exact host. This does **not** allow that host to receive real secret values.
-
----
-
-#### allowSecretPassthroughHostPattern()
-
-```typescript
-allowSecretPassthroughHostPattern(pattern: string): this
-```
-
-Allow configured secret placeholders to pass through unchanged to hosts matching a wildcard pattern. This does **not** allow those hosts to receive real secret values.
+Passthrough host calls accumulate. Blocking calls update the fallback action and keep any passthrough hosts already added.
 
 ---
 

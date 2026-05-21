@@ -285,9 +285,15 @@ pub fn sandbox_builder_from_args(
     }
 
     // Secret violation action (top-level kwarg).
-    if let Some(violation) = extract_opt::<String>(kwargs, "on_secret_violation")? {
-        let action = parse_violation_action(&violation)?;
-        builder = builder.network(|n| n.on_secret_violation(action));
+    if let Some(violation_obj) = kwargs.get_item("on_secret_violation")?
+        && !violation_obj.is_none()
+    {
+        let action = parse_violation_action_obj(&violation_obj)?;
+        builder = builder.network(|n| {
+            n.on_secret_violation(|_| {
+                microsandbox_network::builder::ViolationActionBuilder::from_action(action)
+            })
+        });
     }
 
     Ok(builder)
@@ -827,25 +833,14 @@ fn apply_network(
     }
 
     // Secret violation action (sandbox-level, not per-secret).
-    if let Some(violation) = extract_opt::<String>(net, "on_secret_violation")? {
-        let action = parse_violation_action(&violation)?;
-        builder = builder.network(|n| n.on_secret_violation(action));
-    }
-
-    // Secret passthrough hosts (sandbox-level).
-    let secret_passthrough_hosts: Vec<String> =
-        extract_opt(net, "secret_passthrough_hosts")?.unwrap_or_default();
-    let secret_passthrough_host_patterns: Vec<String> =
-        extract_opt(net, "secret_passthrough_host_patterns")?.unwrap_or_default();
-    if !secret_passthrough_hosts.is_empty() || !secret_passthrough_host_patterns.is_empty() {
-        builder = builder.network(|mut n| {
-            for host in &secret_passthrough_hosts {
-                n = n.allow_secret_passthrough_host(host);
-            }
-            for pattern in &secret_passthrough_host_patterns {
-                n = n.allow_secret_passthrough_host_pattern(pattern);
-            }
-            n
+    if let Some(violation_obj) = net.get_item("on_secret_violation")?
+        && !violation_obj.is_none()
+    {
+        let action = parse_violation_action_obj(&violation_obj)?;
+        builder = builder.network(|n| {
+            n.on_secret_violation(|_| {
+                microsandbox_network::builder::ViolationActionBuilder::from_action(action)
+            })
         });
     }
 
@@ -952,10 +947,13 @@ fn apply_secret(
     let allow_hosts: Vec<String> = extract_opt(secret, "allow_hosts")?.unwrap_or_default();
     let allow_host_patterns: Vec<String> =
         extract_opt(secret, "allow_host_patterns")?.unwrap_or_default();
-    let passthrough_hosts: Vec<String> =
-        extract_opt(secret, "passthrough_hosts")?.unwrap_or_default();
-    let passthrough_host_patterns: Vec<String> =
-        extract_opt(secret, "passthrough_host_patterns")?.unwrap_or_default();
+    let on_violation = if let Some(violation_obj) = secret.get_item("on_violation")?
+        && !violation_obj.is_none()
+    {
+        Some(parse_violation_action_obj(&violation_obj)?)
+    } else {
+        None
+    };
 
     let placeholder: Option<String> = extract_opt(secret, "placeholder")?;
     let require_tls: Option<bool> = extract_opt(secret, "require_tls")?;
@@ -981,11 +979,10 @@ fn apply_secret(
         for pattern in &allow_host_patterns {
             s = s.allow_host_pattern(pattern);
         }
-        for host in &passthrough_hosts {
-            s = s.allow_passthrough_host(host);
-        }
-        for pattern in &passthrough_host_patterns {
-            s = s.allow_passthrough_host_pattern(pattern);
+        if let Some(action) = on_violation {
+            s = s.on_violation(|_| {
+                microsandbox_network::builder::ViolationActionBuilder::from_action(action)
+            });
         }
         if let Some(ref ph) = placeholder {
             s = s.placeholder(ph);
@@ -1038,16 +1035,74 @@ fn as_dict<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
 fn parse_violation_action(
     s: &str,
 ) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
-    use microsandbox_network::secrets::config::ViolationAction;
+    use microsandbox_network::secrets::config::{HostPattern, PassthroughPolicy, ViolationAction};
     match s {
         "block" => Ok(ViolationAction::Block),
         "block-and-log" | "block_and_log" => Ok(ViolationAction::BlockAndLog),
         "block-and-terminate" | "block_and_terminate" => Ok(ViolationAction::BlockAndTerminate),
-        "passthrough" => Ok(ViolationAction::Passthrough),
+        "passthrough" => Ok(ViolationAction::Passthrough(PassthroughPolicy {
+            hosts: vec![HostPattern::Any],
+            fallback: Box::new(ViolationAction::BlockAndLog),
+        })),
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "unknown violation action: {s}"
         ))),
     }
+}
+
+fn parse_violation_action_obj(
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
+    if let Ok(s) = obj.extract::<String>() {
+        return parse_violation_action(&s);
+    }
+
+    let dict = as_dict(obj)?;
+    if let Some(passthrough_obj) = dict.get_item("passthrough")?
+        && !passthrough_obj.is_none()
+    {
+        return parse_passthrough_policy(&as_dict(&passthrough_obj)?);
+    }
+
+    Err(pyo3::exceptions::PyValueError::new_err(
+        "expected violation action string or {'passthrough': {...}}",
+    ))
+}
+
+fn parse_passthrough_policy(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
+    use microsandbox_network::secrets::config::{HostPattern, PassthroughPolicy, ViolationAction};
+
+    let fallback = extract_opt::<String>(dict, "fallback")?
+        .map(|s| parse_violation_action(&s))
+        .transpose()?
+        .unwrap_or(ViolationAction::BlockAndLog);
+    if matches!(fallback, ViolationAction::Passthrough(_)) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "passthrough fallback must be a blocking action",
+        ));
+    }
+
+    let hosts: Vec<String> = extract_opt(dict, "hosts")?.unwrap_or_default();
+    let host_patterns: Vec<String> = extract_opt(dict, "host_patterns")?.unwrap_or_default();
+    let all_hosts = extract_opt::<bool>(dict, "all_hosts")?.unwrap_or(false);
+
+    let mut patterns = Vec::new();
+    for host in hosts {
+        patterns.push(HostPattern::Exact(host));
+    }
+    for pattern in host_patterns {
+        patterns.push(HostPattern::Wildcard(pattern));
+    }
+    if all_hosts {
+        patterns.push(HostPattern::Any);
+    }
+
+    Ok(ViolationAction::Passthrough(PassthroughPolicy {
+        hosts: patterns,
+        fallback: Box::new(fallback),
+    }))
 }
 
 fn extract_opt<'py, T: FromPyObject<'py>>(

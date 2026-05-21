@@ -42,8 +42,6 @@ export interface SecretEntry {
   readonly placeholder: string | null;
   readonly allowedHosts: readonly string[];
   readonly allowedHostPatterns: readonly string[];
-  readonly passthroughHosts: readonly string[];
-  readonly passthroughHostPatterns: readonly string[];
   readonly allowAnyHost: boolean;
   readonly requireTlsIdentity: boolean;
   readonly injection: SecretInjection;
