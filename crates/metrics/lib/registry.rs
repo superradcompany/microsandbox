@@ -379,9 +379,18 @@ impl MetricsRegistry {
 
     /// Snapshot every active or stale slot.
     pub fn snapshot(&self) -> MetricsResult<Vec<LiveMetric>> {
+        self.snapshot_slots(true)
+    }
+
+    /// Snapshot every active slot that has written at least one sample.
+    pub fn active_snapshot(&self) -> MetricsResult<Vec<LiveMetric>> {
+        self.snapshot_slots(false)
+    }
+
+    fn snapshot_slots(&self, include_stale: bool) -> MetricsResult<Vec<LiveMetric>> {
         let mut out = Vec::new();
         for idx in 0..self.inner.capacity {
-            if let Some(metric) = self.read_slot(idx) {
+            if let Some(metric) = self.read_slot(idx, include_stale) {
                 out.push(metric);
             }
         }
@@ -402,7 +411,7 @@ impl MetricsRegistry {
             // Re-verify identity from the coherent snapshot: the slot could
             // have been released and reused for a different sandbox between
             // the outer filter and the seqlock-protected read.
-            if let Some(metric) = self.read_slot(idx)
+            if let Some(metric) = self.read_slot(idx, true)
                 && metric.sandbox_id == sandbox_id
             {
                 return Ok(Some(metric));
@@ -422,7 +431,7 @@ impl MetricsRegistry {
             if slot.run_id.load(Ordering::Acquire) != run_id {
                 continue;
             }
-            if let Some(metric) = self.read_slot(idx)
+            if let Some(metric) = self.read_slot(idx, true)
                 && metric.run_id == run_id
             {
                 return Ok(Some(metric));
@@ -496,7 +505,7 @@ impl MetricsRegistry {
         Ok(self.slot(idx))
     }
 
-    fn read_slot(&self, idx: u32) -> Option<LiveMetric> {
+    fn read_slot(&self, idx: u32, include_stale: bool) -> Option<LiveMetric> {
         let slot = self.slot(idx);
         // Try many times to obtain a coherent snapshot. A tight-loop writer
         // can complete a full cycle in <100 ns, so we need a generous budget
@@ -504,7 +513,7 @@ impl MetricsRegistry {
         // case) and effectively unbounded in practice.
         for _ in 0..4096 {
             let state = slot.state.load(Ordering::Acquire);
-            if state != SLOT_ACTIVE && state != SLOT_STALE {
+            if !slot_visible(state, include_stale) {
                 return None;
             }
             // Capture generation before reading fields so we can confirm the
@@ -534,11 +543,11 @@ impl MetricsRegistry {
             let s2 = slot.seq.load(Ordering::Acquire);
             // Reject torn reads (s1 != s2), reads that landed mid-write
             // (s2 odd), reads where the slot was reused under us
-            // (generation changed), or reads where state moved out of
-            // {Active, Stale} between the initial state check and now.
+            // (generation changed), or reads where state moved outside the
+            // caller's accepted state set.
             let gen_after = slot.generation.load(Ordering::Acquire);
             let state_after = slot.state.load(Ordering::Acquire);
-            let state_stable = state_after == SLOT_ACTIVE || state_after == SLOT_STALE;
+            let state_stable = slot_visible(state_after, include_stale);
             if s1 != s2 || s2 & 1 == 1 || gen_before != gen_after || !state_stable {
                 std::hint::spin_loop();
                 continue;
@@ -963,6 +972,10 @@ fn ms_to_datetime(ms: i64) -> DateTime<Utc> {
         .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap())
 }
 
+fn slot_visible(state: u32, include_stale: bool) -> bool {
+    state == SLOT_ACTIVE || (include_stale && state == SLOT_STALE)
+}
+
 // `AtomicU8`, `AtomicU16`, and `AtomicU64` are referenced to keep the
 // reservation/write helpers self-contained.
 fn _assert_atomic_traits() {
@@ -1081,6 +1094,47 @@ mod tests {
             err.to_string(),
             "sandbox name is too long for metrics slot: 129 bytes (max 128)"
         );
+        cleanup(&name);
+    }
+
+    #[test]
+    fn active_snapshot_excludes_stale_slots() {
+        let name = unique_name("act");
+        let reg = MetricsRegistry::open_or_create(&name, 2).unwrap();
+
+        let res = reg
+            .reserve(ReserveSlot {
+                sandbox_id: 7,
+                name: "alpine",
+                memory_limit_bytes: 256 * 1024 * 1024,
+            })
+            .unwrap();
+        let writer = reg
+            .activate_writer(ActivateSlot {
+                slot: res.slot,
+                generation: res.generation,
+                run_id: 99,
+                pid: 4242,
+                started_at: Utc::now(),
+            })
+            .unwrap();
+        writer
+            .write_sample(SampleWrite {
+                sampled_at: Utc::now(),
+                cpu_percent: 12.5,
+                memory_bytes: 1024 * 1024,
+                disk_read_bytes: 4096,
+                disk_write_bytes: 8192,
+                net_rx_bytes: 100,
+                net_tx_bytes: 200,
+            })
+            .unwrap();
+
+        assert_eq!(reg.active_snapshot().unwrap().len(), 1);
+        writer.release(ReleaseMode::Stale).unwrap();
+        assert_eq!(reg.snapshot().unwrap().len(), 1);
+        assert!(reg.active_snapshot().unwrap().is_empty());
+
         cleanup(&name);
     }
 
