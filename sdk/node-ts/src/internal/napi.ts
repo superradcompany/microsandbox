@@ -55,6 +55,37 @@ export interface NativeBindings {
   readonly install: () => Promise<void>;
   readonly isInstalled: () => boolean;
   readonly allSandboxMetrics: () => Promise<Record<string, NapiSandboxMetrics>>;
+  readonly AgentClient: NapiAgentClientStatic;
+}
+
+export interface NapiAgentClientStatic {
+  connectSandbox(name: string, opts?: AgentConnectOptions): Promise<NapiAgentClient>;
+  connect(path: string, opts?: AgentConnectOptions): Promise<NapiAgentClient>;
+}
+
+export interface AgentConnectOptions {
+  timeoutMs?: number;
+}
+
+export interface NapiRawFrame {
+  id: number;
+  flags: number;
+  body: Buffer;
+}
+
+export interface NapiStreamOpenResult {
+  id: number;
+  handle: bigint;
+}
+
+export interface NapiAgentClient {
+  request(flags: number, body: Buffer): Promise<NapiRawFrame>;
+  streamOpen(flags: number, body: Buffer): Promise<NapiStreamOpenResult>;
+  streamNext(handle: bigint): Promise<NapiRawFrame | null>;
+  streamClose(handle: bigint): Promise<void>;
+  send(id: number, flags: number, body: Buffer): Promise<void>;
+  readyBytes(): Buffer;
+  close(): Promise<void>;
 }
 
 export type NapiBuilderCtor<T> = new () => T;

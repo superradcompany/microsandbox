@@ -395,13 +395,14 @@ impl Sandbox {
         // Wait for the relay socket to become available.
         let client = wait_for_relay(&agent_sock_path, &mut handle, &config.name).await?;
 
-        let ready = client.ready();
-        tracing::info!(
-            boot_time_ms = ready.boot_time_ns / 1_000_000,
-            init_time_ms = ready.init_time_ns / 1_000_000,
-            ready_time_ms = ready.ready_time_ns / 1_000_000,
-            "sandbox ready",
-        );
+        if let Ok(ready) = client.ready() {
+            tracing::info!(
+                boot_time_ms = ready.boot_time_ns / 1_000_000,
+                init_time_ms = ready.init_time_ns / 1_000_000,
+                ready_time_ms = ready.ready_time_ns / 1_000_000,
+                "sandbox ready",
+            );
+        }
         Ok(Self {
             db_id: sandbox_id,
             config,
@@ -538,8 +539,9 @@ impl Sandbox {
     /// to also block on exit.
     pub async fn stop(&self) -> MicrosandboxResult<()> {
         tracing::debug!(sandbox = %self.config.name, "stop: sending shutdown");
-        let msg = Message::new(MessageType::Shutdown, 0, Vec::new());
-        self.client.send(&msg).await
+        // Shutdown carries no useful payload; agentd dispatches on `msg.t`.
+        self.client.send(0, MessageType::Shutdown, &()).await?;
+        Ok(())
     }
 
     /// Stop the sandbox gracefully and wait for the process to exit.
@@ -664,10 +666,6 @@ impl Sandbox {
             "exec_stream"
         );
 
-        // Allocate correlation ID and subscribe BEFORE sending.
-        let id = self.client.next_id();
-        let rx = self.client.subscribe(id).await;
-
         let req = build_exec_request(
             &self.config,
             cmd,
@@ -680,8 +678,7 @@ impl Sandbox {
             24,
             80,
         );
-        let msg = Message::with_payload(MessageType::ExecRequest, id, &req)?;
-        self.client.send(&msg).await?;
+        let (id, rx) = self.client.stream(MessageType::ExecRequest, &req).await?;
 
         // Build stdin sink (if Pipe mode).
         let stdin = match &stdin_mode {
@@ -695,14 +692,10 @@ impl Sandbox {
             let bridge = Arc::clone(&self.client);
             tokio::spawn(async move {
                 let payload = ExecStdin { data };
-                if let Ok(msg) = Message::with_payload(MessageType::ExecStdin, id, &payload) {
-                    let _ = bridge.send(&msg).await;
-                }
+                let _ = bridge.send(id, MessageType::ExecStdin, &payload).await;
                 // Send empty to signal EOF.
                 let close = ExecStdin { data: Vec::new() };
-                if let Ok(msg) = Message::with_payload(MessageType::ExecStdin, id, &close) {
-                    let _ = bridge.send(&msg).await;
-                }
+                let _ = bridge.send(id, MessageType::ExecStdin, &close).await;
             });
         }
 
@@ -855,11 +848,7 @@ impl Sandbox {
         // Get terminal size.
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
 
-        // Allocate ID and subscribe.
-        let id = self.client.next_id();
-        let mut rx = self.client.subscribe(id).await;
-
-        // Build ExecRequest with tty=true.
+        // Build ExecRequest with tty=true and open the stream.
         let req = build_exec_request(
             &self.config,
             cmd,
@@ -872,8 +861,7 @@ impl Sandbox {
             rows,
             cols,
         );
-        let msg = Message::with_payload(MessageType::ExecRequest, id, &req)?;
-        self.client.send(&msg).await?;
+        let (id, mut rx) = self.client.stream(MessageType::ExecRequest, &req).await?;
 
         // Enter raw mode.
         crossterm::terminal::enable_raw_mode()
@@ -944,9 +932,7 @@ impl Sandbox {
 
                             // Forward to guest.
                             let payload = ExecStdin { data: data.to_vec() };
-                            if let Ok(msg) = Message::with_payload(MessageType::ExecStdin, id, &payload) {
-                                let _ = self.client.send(&msg).await;
-                            }
+                            let _ = self.client.send(id, MessageType::ExecStdin, &payload).await;
                         }
                         Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                         Ok(Err(_)) => break,
@@ -1034,9 +1020,7 @@ impl Sandbox {
                 _ = sigwinch.recv() => {
                     if let Ok((new_cols, new_rows)) = crossterm::terminal::size() {
                         let payload = ExecResize { rows: new_rows, cols: new_cols };
-                        if let Ok(msg) = Message::with_payload(MessageType::ExecResize, id, &payload) {
-                            let _ = self.client.send(&msg).await;
-                        }
+                        let _ = self.client.send(id, MessageType::ExecResize, &payload).await;
                     }
                 }
             }
@@ -1090,7 +1074,7 @@ async fn wait_for_relay(
 
     loop {
         attempts += 1;
-        match AgentClient::connect(sock_path, deadline).await {
+        match AgentClient::connect_with_deadline(sock_path, deadline).await {
             Ok(client) => {
                 tracing::debug!(attempts, "wait_for_relay: connected");
                 // The relay is up — clear any stale boot-error.json from
@@ -1159,7 +1143,7 @@ async fn wait_for_relay(
                         err: boot_err,
                     });
                 }
-                return Err(e);
+                return Err(e.into());
             }
         }
     }

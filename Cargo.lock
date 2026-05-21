@@ -2581,6 +2581,7 @@ dependencies = [
  "async-compression",
  "bytes",
  "chrono",
+ "ciborium",
  "crossterm",
  "dbus",
  "dirs",

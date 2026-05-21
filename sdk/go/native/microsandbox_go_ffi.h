@@ -520,6 +520,60 @@ char *msb_fs_write_stream_close(uint64_t cancel_id,
                                 unsigned char *buf,
                                 uintptr_t buf_len);
 
+char *msb_agent_open_sandbox(uint64_t cancel_id,
+                             const char *name,
+                             uint64_t timeout_ms,
+                             Handle *out_handle);
+
+char *msb_agent_open_path(uint64_t cancel_id,
+                          const char *path,
+                          uint64_t timeout_ms,
+                          Handle *out_handle);
+
+char *msb_agent_request(uint64_t cancel_id,
+                        Handle agent_handle,
+                        unsigned char flags,
+                        const unsigned char *body_ptr,
+                        uintptr_t body_len,
+                        uint32_t *out_id,
+                        unsigned char *out_flags,
+                        unsigned char **out_body_ptr,
+                        uintptr_t *out_body_len);
+
+char *msb_agent_stream_open(uint64_t cancel_id,
+                            Handle agent_handle,
+                            unsigned char flags,
+                            const unsigned char *body_ptr,
+                            uintptr_t body_len,
+                            uint32_t *out_id,
+                            Handle *out_stream_handle);
+
+char *msb_agent_stream_next(uint64_t cancel_id,
+                            Handle agent_handle,
+                            Handle stream_handle,
+                            bool *out_present,
+                            uint32_t *out_id,
+                            unsigned char *out_flags,
+                            unsigned char **out_body_ptr,
+                            uintptr_t *out_body_len);
+
+char *msb_agent_stream_close(uint64_t cancel_id, Handle agent_handle, Handle stream_handle);
+
+char *msb_agent_send(uint64_t cancel_id,
+                     Handle agent_handle,
+                     uint32_t id,
+                     unsigned char flags,
+                     const unsigned char *body_ptr,
+                     uintptr_t body_len);
+
+char *msb_agent_ready_bytes(Handle agent_handle,
+                            unsigned char **out_body_ptr,
+                            uintptr_t *out_body_len);
+
+char *msb_agent_close(uint64_t cancel_id, Handle agent_handle);
+
+void msb_agent_free_bytes(unsigned char *ptr, uintptr_t len);
+
 /**
  * Attach to a sandbox with an interactive PTY session.
  * Returns `{"exit_code":<int>}` when the process exits.

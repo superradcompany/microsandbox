@@ -4,25 +4,46 @@
 //! relay. During connection, the relay assigns a non-overlapping correlation ID
 //! range and sends the cached `core.ready` payload so the client can begin
 //! issuing commands immediately.
+//!
+//! Two API tiers share one socket and one reader task:
+//!
+//! - **Raw** ([`request_raw`](AgentClient::request_raw),
+//!   [`stream_raw`](AgentClient::stream_raw),
+//!   [`send_raw`](AgentClient::send_raw)) — exchange [`RawFrame`]s. The SDK
+//!   handles framing and correlation IDs; CBOR encoding/decoding is left to
+//!   the caller. Use this when wrapping the client for other languages.
+//! - **Typed** ([`request`](AgentClient::request),
+//!   [`stream`](AgentClient::stream), [`send`](AgentClient::send)) — same
+//!   primitives over [`Message`]; the SDK serializes payloads with CBOR.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicU32, Ordering},
 };
+use std::time::Duration;
 
 use microsandbox_protocol::{
-    codec,
+    codec::{self, RawFrame},
     core::Ready,
-    message::{FLAG_TERMINAL, Message},
+    message::{FLAG_TERMINAL, Message, MessageType},
 };
+use serde::Serialize;
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixStream;
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
-use crate::MicrosandboxResult;
+use super::error::{AgentClientError, AgentClientResult};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Default handshake timeout used by [`AgentClient::connect`].
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -30,177 +51,311 @@ use crate::MicrosandboxResult;
 
 /// Client for communicating with agentd through the agent relay.
 ///
-/// Connects over a Unix domain socket to the sandbox process's agent relay.
-/// Correlation IDs are allocated from the range assigned during the relay
-/// handshake.
+/// See the module-level docs for an overview of the two API tiers.
 pub struct AgentClient {
     /// Writer half of the Unix socket connection.
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
-    /// Next correlation ID to allocate (starts at `id_start`).
+    /// Next correlation ID to allocate (starts at `id_min`).
     next_id: AtomicU32,
-    /// Inclusive lower bound of the assigned ID range.
-    id_start: u32,
-    /// Exclusive upper bound of the assigned ID range.
+    /// Lower bound (inclusive) of the assigned ID range, used for wrap-around.
+    id_min: u32,
+    /// Upper bound (exclusive) of the assigned ID range.
     id_max: u32,
     /// Pending response channels keyed by correlation ID.
-    pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Message>>>>,
+    pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<RawFrame>>>>,
     /// Background reader task handle.
     reader_handle: JoinHandle<()>,
-    /// Cached `core.ready` payload from the relay handshake.
+    /// Cached `core.ready` frame body (raw CBOR bytes) from the relay handshake.
+    ready_body: Vec<u8>,
+    /// Decoded `core.ready` payload from the relay handshake.
     ready: Ready,
 }
 
 //--------------------------------------------------------------------------------------------------
-// Methods
+// Methods: Connection lifecycle
 //--------------------------------------------------------------------------------------------------
 
 impl AgentClient {
-    /// Connect to the sandbox's agent relay socket.
-    ///
-    /// Performs the relay handshake to receive the assigned ID offset and
-    /// the cached `core.ready` payload, then spawns a background reader task.
+    /// Connect to the sandbox's agent relay socket using the default 10s
+    /// handshake timeout.
+    pub async fn connect(sock_path: impl AsRef<Path>) -> AgentClientResult<Self> {
+        Self::connect_with_timeout(sock_path, DEFAULT_HANDSHAKE_TIMEOUT).await
+    }
+
+    /// Connect to the sandbox's agent relay socket using an explicit
+    /// handshake timeout.
+    pub async fn connect_with_timeout(
+        sock_path: impl AsRef<Path>,
+        timeout: Duration,
+    ) -> AgentClientResult<Self> {
+        let deadline = Instant::now() + timeout;
+        Self::connect_with_deadline(sock_path, deadline).await
+    }
+
+    /// Connect with an explicit handshake deadline.
     ///
     /// `deadline` bounds both handshake reads. Without it, an accepted
     /// connection that stalls (e.g. a sandbox alive but wedged before
     /// writing the handshake bytes) would block this call indefinitely.
-    pub async fn connect(
-        sock_path: &Path,
-        deadline: tokio::time::Instant,
-    ) -> MicrosandboxResult<Self> {
-        let stream = UnixStream::connect(sock_path).await.map_err(|e| {
-            crate::MicrosandboxError::Runtime(format!(
-                "failed to connect to agent relay at {}: {e}",
-                sock_path.display()
-            ))
-        })?;
+    pub async fn connect_with_deadline(
+        sock_path: impl AsRef<Path>,
+        deadline: Instant,
+    ) -> AgentClientResult<Self> {
+        let sock_path = sock_path.as_ref();
+        let stream =
+            UnixStream::connect(sock_path)
+                .await
+                .map_err(|source| AgentClientError::Connect {
+                    path: sock_path.to_path_buf(),
+                    source,
+                })?;
 
         let (mut reader, writer) = stream.into_split();
 
-        // Read the handshake header:
-        // [id_start: u32 BE][id_end_exclusive: u32 BE][ready_frame_bytes...]
-        let mut header_buf = [0u8; 8];
-        tokio::time::timeout_at(deadline, reader.read_exact(&mut header_buf))
+        // Handshake: [id_min: u32 BE][id_max: u32 BE][ready_frame_bytes...]
+        let mut range_buf = [0u8; 8];
+        tokio::time::timeout_at(deadline, reader.read_exact(&mut range_buf))
             .await
             .map_err(|_| {
-                crate::MicrosandboxError::Runtime(
-                    "handshake read header: timed out before relay sent bytes".into(),
+                AgentClientError::Handshake(
+                    "read id range: timed out before relay sent bytes".into(),
                 )
             })?
-            .map_err(|e| {
-                crate::MicrosandboxError::Runtime(format!("handshake read header: {e}"))
-            })?;
-        let id_start = u32::from_be_bytes(header_buf[0..4].try_into().unwrap());
-        let id_max = u32::from_be_bytes(header_buf[4..8].try_into().unwrap());
+            .map_err(|e| AgentClientError::Handshake(format!("read id range: {e}")))?;
+        let id_min = u32::from_be_bytes(range_buf[0..4].try_into().unwrap());
+        let id_max = u32::from_be_bytes(range_buf[4..8].try_into().unwrap());
 
-        if id_start >= id_max {
-            return Err(crate::MicrosandboxError::Runtime(format!(
-                "invalid relay id range: start={id_start}, end={id_max}"
+        if id_min >= id_max {
+            return Err(AgentClientError::Handshake(format!(
+                "invalid relay id range: start={id_min}, end={id_max}"
             )));
         }
 
-        // Read the ready frame using the protocol codec directly.
-        let ready_msg = tokio::time::timeout_at(deadline, codec::read_message(&mut reader))
+        let ready_frame = tokio::time::timeout_at(deadline, codec::read_raw_frame(&mut reader))
             .await
             .map_err(|_| {
-                crate::MicrosandboxError::Runtime(
-                    "handshake read ready frame: timed out before relay sent frame".into(),
+                AgentClientError::Handshake(
+                    "read ready frame: timed out before relay sent frame".into(),
                 )
             })?
-            .map_err(|e| {
-                crate::MicrosandboxError::Runtime(format!("handshake read ready frame: {e}"))
-            })?;
-
+            .map_err(|e| AgentClientError::Handshake(format!("read ready frame: {e}")))?;
+        let ready_msg = codec::raw_frame_to_message(ready_frame.clone())
+            .map_err(|e| AgentClientError::Handshake(format!("decode ready frame: {e}")))?;
+        if ready_msg.t != MessageType::Ready {
+            return Err(AgentClientError::Handshake(format!(
+                "expected core.ready frame, got {}",
+                ready_msg.t.as_str()
+            )));
+        }
         let ready: Ready = ready_msg
             .payload()
-            .map_err(|e| crate::MicrosandboxError::Runtime(format!("decode ready payload: {e}")))?;
+            .map_err(|e| AgentClientError::Handshake(format!("decode ready payload: {e}")))?;
 
         tracing::info!(
-            "agent client: connected to relay, id_start={id_start}, id_end_exclusive={id_max}, boot_time={}ns",
-            ready.boot_time_ns
+            id_min,
+            id_max,
+            ready_bytes = ready_frame.body.len(),
+            boot_time_ns = ready.boot_time_ns,
+            "agent client: connected to relay"
         );
 
-        let pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Message>>>> =
+        let pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<RawFrame>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         let reader_handle = tokio::spawn(reader_loop(reader, Arc::clone(&pending)));
-
         let writer = Arc::new(Mutex::new(writer));
 
         Ok(Self {
             writer,
-            next_id: AtomicU32::new(id_start),
-            id_start,
+            next_id: AtomicU32::new(id_min),
+            id_min,
             id_max,
             pending,
             reader_handle,
+            ready_body: ready_frame.body,
             ready,
         })
     }
 
-    /// Allocate a new unique correlation ID from the assigned range.
+    /// Resolve a sandbox name to its agent socket path and connect.
     ///
-    /// Wraps around within the assigned range if the counter overflows.
-    pub fn next_id(&self) -> u32 {
-        loop {
-            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            if id >= self.id_start && id < self.id_max {
-                return id;
-            }
-            // Wrapped past the range — reset to range start.
-            self.next_id.store(self.id_start, Ordering::Relaxed);
+    /// The socket lives under the SDK's configured sandboxes directory at
+    /// `<sandboxes_dir>/<name>/runtime/agent.sock`.
+    pub async fn connect_sandbox(name: &str) -> AgentClientResult<Self> {
+        Self::connect_sandbox_with_timeout(name, DEFAULT_HANDSHAKE_TIMEOUT).await
+    }
+
+    /// Resolve a sandbox name to its agent socket path and connect with an
+    /// explicit handshake timeout.
+    pub async fn connect_sandbox_with_timeout(
+        name: &str,
+        timeout: Duration,
+    ) -> AgentClientResult<Self> {
+        let sock_path = sandbox_socket_path(name);
+        if !sock_path.exists() {
+            return Err(AgentClientError::SandboxNotFound(name.to_string()));
         }
+        Self::connect_with_timeout(&sock_path, timeout).await
     }
 
-    /// Send a message to agentd through the relay without waiting for a response.
-    pub async fn send(&self, msg: &Message) -> MicrosandboxResult<()> {
-        let mut buf = Vec::new();
-        codec::encode_to_buf(msg, &mut buf)
-            .map_err(|e| crate::MicrosandboxError::Runtime(format!("encode message: {e}")))?;
-
-        let mut writer = self.writer.lock().await;
-        tokio::io::AsyncWriteExt::write_all(&mut *writer, &buf)
-            .await
-            .map_err(|e| crate::MicrosandboxError::Runtime(format!("write to relay: {e}")))?;
-
-        Ok(())
+    /// Close the connection. Drops the writer and aborts the reader task;
+    /// any in-flight requests resolve with [`AgentClientError::Closed`].
+    pub async fn close(self) {
+        // Drop runs: reader aborts via Drop impl, writer closes when the
+        // last Arc reference dies. Senders in `pending` drop with self,
+        // resolving outstanding waiters.
     }
+}
 
-    /// Send a request and wait for the correlated response.
+//--------------------------------------------------------------------------------------------------
+// Methods: Raw transport (CBOR-blind)
+//--------------------------------------------------------------------------------------------------
+
+impl AgentClient {
+    /// One-shot raw request: alloc id, send a frame with `(flags, body)`,
+    /// await one response frame with the matching id.
     ///
-    /// Assigns a unique correlation ID to the message before sending.
-    pub async fn request(&self, mut msg: Message) -> MicrosandboxResult<Message> {
-        let id = self.next_id();
-        msg.id = id;
-
+    /// Use this for protocol RPCs that produce exactly one terminal response
+    /// (e.g. `FsRequest` → `FsResponse`).
+    pub async fn request_raw(&self, flags: u8, body: Vec<u8>) -> AgentClientResult<RawFrame> {
+        let id = self.alloc_id();
         let (tx, mut rx) = mpsc::unbounded_channel();
         self.pending.lock().await.insert(id, tx);
 
-        if let Err(e) = self.send(&msg).await {
+        if let Err(e) = self.write_frame(id, flags, &body).await {
             self.pending.lock().await.remove(&id);
             return Err(e);
         }
 
-        rx.recv().await.ok_or_else(|| {
-            crate::MicrosandboxError::Runtime("agent client reader closed before response".into())
-        })
+        rx.recv().await.ok_or(AgentClientError::ReaderClosed(id))
     }
 
-    /// Register a channel for the given correlation ID.
+    /// Open a streaming raw session: alloc id, register a subscription,
+    /// send the opening frame, return `(id, receiver)`.
     ///
-    /// Returns a receiver that will receive all messages dispatched to this ID.
-    /// The subscription is automatically removed when a terminal message is
-    /// received or when the receiver is dropped.
-    ///
-    /// Call this **before** sending the request to ensure no messages are lost.
-    pub async fn subscribe(&self, id: u32) -> mpsc::UnboundedReceiver<Message> {
+    /// The receiver yields every frame the relay forwards for this `id`
+    /// until a frame with [`FLAG_TERMINAL`] arrives or the receiver is dropped.
+    /// Use [`send_raw`](Self::send_raw) with the returned id to send
+    /// follow-up frames within the session.
+    pub async fn stream_raw(
+        &self,
+        flags: u8,
+        body: Vec<u8>,
+    ) -> AgentClientResult<(u32, mpsc::UnboundedReceiver<RawFrame>)> {
+        let id = self.alloc_id();
         let (tx, rx) = mpsc::unbounded_channel();
         self.pending.lock().await.insert(id, tx);
-        rx
+
+        if let Err(e) = self.write_frame(id, flags, &body).await {
+            self.pending.lock().await.remove(&id);
+            return Err(e);
+        }
+
+        Ok((id, rx))
     }
 
-    /// Return the cached `core.ready` payload from the relay handshake.
-    pub fn ready(&self) -> &Ready {
-        &self.ready
+    /// Send a follow-up raw frame on an existing correlation id.
+    ///
+    /// Use for messages that belong to a session started via
+    /// [`stream_raw`](Self::stream_raw) (e.g. `ExecStdin`, `ExecSignal`,
+    /// `ExecResize`, `FsData` chunks).
+    pub async fn send_raw(&self, id: u32, flags: u8, body: &[u8]) -> AgentClientResult<()> {
+        self.write_frame(id, flags, body).await
+    }
+
+    /// The cached `core.ready` handshake frame body bytes (CBOR-encoded).
+    ///
+    /// Useful for bindings that want to deserialize the ready payload with
+    /// their own CBOR tooling. For typed access, use [`ready`](Self::ready).
+    pub fn ready_bytes(&self) -> &[u8] {
+        &self.ready_body
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods: Typed transport (CBOR-aware)
+//--------------------------------------------------------------------------------------------------
+
+impl AgentClient {
+    /// One-shot typed request. Flags are derived from the message type.
+    pub async fn request<T: Serialize>(
+        &self,
+        t: MessageType,
+        payload: &T,
+    ) -> AgentClientResult<Message> {
+        let flags = t.flags();
+        let body = encode_message_body(t, payload)?;
+        let frame = self.request_raw(flags, body).await?;
+        Ok(codec::raw_frame_to_message(frame)?)
+    }
+
+    /// Open a streaming typed session. Flags are derived from the message type.
+    /// Returns the assigned id and a typed receiver.
+    pub async fn stream<T: Serialize>(
+        &self,
+        t: MessageType,
+        payload: &T,
+    ) -> AgentClientResult<(u32, mpsc::UnboundedReceiver<Message>)> {
+        let flags = t.flags();
+        let body = encode_message_body(t, payload)?;
+        let (id, raw_rx) = self.stream_raw(flags, body).await?;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(decode_stream_task(raw_rx, tx));
+        Ok((id, rx))
+    }
+
+    /// Send a follow-up typed message on an existing correlation id.
+    pub async fn send<T: Serialize>(
+        &self,
+        id: u32,
+        t: MessageType,
+        payload: &T,
+    ) -> AgentClientResult<()> {
+        let flags = t.flags();
+        let body = encode_message_body(t, payload)?;
+        self.write_frame(id, flags, &body).await
+    }
+
+    /// Decode the cached handshake `core.ready` payload.
+    pub fn ready(&self) -> AgentClientResult<Ready> {
+        Ok(self.ready.clone())
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods: Internals
+//--------------------------------------------------------------------------------------------------
+
+impl AgentClient {
+    /// Allocate a unique correlation ID from the relay-assigned range.
+    ///
+    /// Wraps around within the assigned range if the counter overflows.
+    fn alloc_id(&self) -> u32 {
+        loop {
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            if id >= self.id_min && id < self.id_max {
+                return id;
+            }
+            self.next_id.store(self.id_min, Ordering::Relaxed);
+        }
+    }
+
+    /// Write a single framed message to the socket.
+    async fn write_frame(&self, id: u32, flags: u8, body: &[u8]) -> AgentClientResult<()> {
+        let mut buf = Vec::with_capacity(4 + 5 + body.len());
+        codec::encode_raw_to_buf(
+            &RawFrame {
+                id,
+                flags,
+                body: body.to_vec(),
+            },
+            &mut buf,
+        )?;
+
+        let mut writer = self.writer.lock().await;
+        tokio::io::AsyncWriteExt::write_all(&mut *writer, &buf).await?;
+        Ok(())
     }
 }
 
@@ -208,41 +363,124 @@ impl AgentClient {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Background task that reads messages from the relay and dispatches them
-/// to pending channels by correlation ID.
+/// Background task that reads frames from the relay and dispatches them to
+/// pending channels by correlation ID. Operates on raw frames — no CBOR.
 async fn reader_loop(
     mut reader: tokio::net::unix::OwnedReadHalf,
-    pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<Message>>>>,
+    pending: Arc<Mutex<HashMap<u32, mpsc::UnboundedSender<RawFrame>>>>,
 ) {
     loop {
-        let msg = match codec::read_message(&mut reader).await {
-            Ok(msg) => msg,
+        let frame = match codec::read_raw_frame(&mut reader).await {
+            Ok(frame) => frame,
             Err(e) => {
                 tracing::debug!("agent client: reader EOF or error: {e}");
                 break;
             }
         };
 
-        let dispatch_id = msg.id;
-        let is_terminal = (msg.flags & FLAG_TERMINAL) != 0;
+        let id = frame.id;
+        let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
 
         let mut map = pending.lock().await;
-        if let Some(tx) = map.get(&dispatch_id) {
-            if tx.send(msg).is_err() {
+        if let Some(tx) = map.get(&id) {
+            if tx.send(frame).is_err() {
                 // Receiver dropped — clean up.
-                map.remove(&dispatch_id);
+                map.remove(&id);
             } else if is_terminal {
-                // Terminal message sent successfully — remove subscription.
-                map.remove(&dispatch_id);
+                // Terminal frame delivered — remove subscription.
+                map.remove(&id);
             }
         } else {
-            tracing::trace!("agent client: no pending handler for id={dispatch_id}");
+            tracing::trace!("agent client: no pending handler for id={id}");
         }
     }
 
-    // When the reader exits, drop all senders so receivers get None.
+    // Reader exited — drop all senders so outstanding receivers wake up.
     let mut map = pending.lock().await;
     map.clear();
+}
+
+/// Translate a stream of raw frames into typed messages.
+async fn decode_stream_task(
+    mut raw_rx: mpsc::UnboundedReceiver<RawFrame>,
+    tx: mpsc::UnboundedSender<Message>,
+) {
+    while let Some(frame) = raw_rx.recv().await {
+        match codec::raw_frame_to_message(frame) {
+            Ok(msg) => {
+                if tx.send(msg).is_err() {
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("agent client: failed to decode frame in stream: {e}");
+                // Continue — single malformed frame shouldn't kill the stream.
+            }
+        }
+    }
+}
+
+/// Encode a typed payload to a CBOR `Message` body.
+fn encode_message_body<T: Serialize>(t: MessageType, payload: &T) -> AgentClientResult<Vec<u8>> {
+    let msg = Message::with_payload(t, 0, payload)?;
+    let mut body = Vec::new();
+    ciborium::into_writer(&msg, &mut body).map_err(microsandbox_protocol::ProtocolError::from)?;
+    Ok(body)
+}
+
+/// Build the standard agent socket path for a sandbox name.
+fn sandbox_socket_path(name: &str) -> PathBuf {
+    crate::config::config()
+        .sandboxes_dir()
+        .join(name)
+        .join("runtime")
+        .join("agent.sock")
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use microsandbox_protocol::core::Ready;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::UnixListener;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn connect_decodes_ready_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let sock_path = temp.path().join("agent.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let ready = Ready {
+            boot_time_ns: 11,
+            init_time_ns: 22,
+            ready_time_ns: 33,
+        };
+        let ready_msg = Message::with_payload(MessageType::Ready, 0, &ready).unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(&1u32.to_be_bytes()).await.unwrap();
+            socket.write_all(&1024u32.to_be_bytes()).await.unwrap();
+            codec::write_message(&mut socket, &ready_msg).await.unwrap();
+        });
+
+        let client =
+            AgentClient::connect_with_deadline(&sock_path, Instant::now() + Duration::from_secs(1))
+                .await
+                .unwrap();
+
+        let decoded = client.ready().unwrap();
+        assert_eq!(decoded.boot_time_ns, ready.boot_time_ns);
+        assert_eq!(decoded.init_time_ns, ready.init_time_ns);
+        assert_eq!(decoded.ready_time_ns, ready.ready_time_ns);
+
+        let raw_msg: Message = ciborium::from_reader(client.ready_bytes()).unwrap();
+        assert_eq!(raw_msg.t, MessageType::Ready);
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

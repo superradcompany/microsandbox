@@ -50,7 +50,7 @@ use std::{
 
 use base64::Engine;
 use microsandbox::{
-    LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
+    AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
     sandbox::{
         FsEntryKind, LogOptions, LogSource, PullPolicy, all_sandbox_metrics,
         exec::{ExecEvent, ExecHandle, ExecSink},
@@ -94,6 +94,7 @@ type Handle = u64;
 // surprising readers who assume a single namespace.
 static NEXT_SANDBOX_HANDLE: AtomicU64 = AtomicU64::new(1);
 static NEXT_EXEC_HANDLE: AtomicU64 = AtomicU64::new(1);
+static NEXT_AGENT_HANDLE: AtomicU64 = AtomicU64::new(1);
 static NEXT_CANCEL_ID: AtomicU64 = AtomicU64::new(1);
 
 fn registry() -> &'static RwLock<HashMap<Handle, std::sync::Arc<Sandbox>>> {
@@ -203,6 +204,42 @@ fn remove_exec(handle: Handle) -> Result<Option<ExecEntry>, FfiError> {
     Ok(exec_registry()
         .write()
         .map_err(|_| FfiError::internal("exec registry lock poisoned"))?
+        .remove(&handle))
+}
+
+// ---------------------------------------------------------------------------
+// Agent client registry
+// ---------------------------------------------------------------------------
+
+type AgentEntry = std::sync::Arc<AgentBridge>;
+
+fn agent_registry() -> &'static RwLock<HashMap<Handle, AgentEntry>> {
+    static AGENT_REG: OnceLock<RwLock<HashMap<Handle, AgentEntry>>> = OnceLock::new();
+    AGENT_REG.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn register_agent(agent: AgentBridge) -> Result<Handle, FfiError> {
+    let h = NEXT_AGENT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    agent_registry()
+        .write()
+        .map_err(|_| FfiError::internal("agent registry lock poisoned"))?
+        .insert(h, std::sync::Arc::new(agent));
+    Ok(h)
+}
+
+fn get_agent(handle: Handle) -> Result<AgentEntry, FfiError> {
+    agent_registry()
+        .read()
+        .map_err(|_| FfiError::internal("agent registry lock poisoned"))?
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| FfiError::invalid_handle(handle))
+}
+
+fn remove_agent(handle: Handle) -> Result<Option<AgentEntry>, FfiError> {
+    Ok(agent_registry()
+        .write()
+        .map_err(|_| FfiError::internal("agent registry lock poisoned"))?
         .remove(&handle))
 }
 
@@ -378,6 +415,46 @@ unsafe fn cstr(ptr: *const c_char) -> Result<String, FfiError> {
         .to_str()
         .map(|s| s.to_owned())
         .map_err(|e| FfiError::invalid_argument(format!("invalid UTF-8: {e}")))
+}
+
+/// SAFETY: when `len > 0`, `ptr` must point to `len` readable bytes owned by
+/// the caller for the duration of this call.
+unsafe fn bytes(ptr: *const c_uchar, len: usize) -> Result<Vec<u8>, FfiError> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    if ptr.is_null() {
+        return Err(FfiError::invalid_argument("null byte pointer argument"));
+    }
+    Ok(unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec())
+}
+
+/// Heap-allocate bytes for Go. The caller owns the result and must release it
+/// with `msb_agent_free_bytes(ptr, len)`.
+fn write_agent_bytes(
+    data: Vec<u8>,
+    out_ptr: *mut *mut c_uchar,
+    out_len: *mut usize,
+) -> Result<(), FfiError> {
+    if out_ptr.is_null() || out_len.is_null() {
+        return Err(FfiError::invalid_argument("null output pointer argument"));
+    }
+    if data.is_empty() {
+        unsafe {
+            *out_ptr = std::ptr::null_mut();
+            *out_len = 0;
+        }
+        return Ok(());
+    }
+    let len = data.len();
+    let mut boxed = data.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    unsafe {
+        *out_ptr = ptr;
+        *out_len = len;
+    }
+    Ok(())
 }
 
 /// Copy `json` (plus a trailing NUL) into the caller-provided buffer.
@@ -3966,6 +4043,317 @@ pub unsafe extern "C" fn msb_fs_write_stream_close(
 }
 
 // ---------------------------------------------------------------------------
+// Agent client — raw protocol frames
+// ---------------------------------------------------------------------------
+
+async fn connect_agent_sandbox(
+    name: &str,
+    timeout_ms: u64,
+) -> microsandbox::AgentClientResult<AgentBridge> {
+    match agent_timeout(timeout_ms) {
+        Some(timeout) => AgentBridge::connect_sandbox_with_timeout(name, timeout).await,
+        None => AgentBridge::connect_sandbox(name).await,
+    }
+}
+
+async fn connect_agent_path(
+    path: &str,
+    timeout_ms: u64,
+) -> microsandbox::AgentClientResult<AgentBridge> {
+    match agent_timeout(timeout_ms) {
+        Some(timeout) => AgentBridge::connect_path_with_timeout(path, timeout).await,
+        None => AgentBridge::connect_path(path).await,
+    }
+}
+
+fn agent_timeout(timeout_ms: u64) -> Option<Duration> {
+    (timeout_ms > 0).then(|| Duration::from_millis(timeout_ms))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_open_sandbox(
+    cancel_id: u64,
+    name: *const c_char,
+    timeout_ms: u64,
+    out_handle: *mut Handle,
+) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        if out_handle.is_null() {
+            return Err(FfiError::invalid_argument("null output handle argument"));
+        }
+        let token = lookup_cancel_token(cancel_id)?;
+        let name = unsafe { cstr(name) }?;
+        let agent = rt().block_on(async {
+            tokio::select! {
+                r = connect_agent_sandbox(&name, timeout_ms) => r.map_err(agent_error),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })?;
+        let handle = register_agent(agent)?;
+        unsafe {
+            *out_handle = handle;
+        }
+        Ok(())
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_open_path(
+    cancel_id: u64,
+    path: *const c_char,
+    timeout_ms: u64,
+    out_handle: *mut Handle,
+) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        if out_handle.is_null() {
+            return Err(FfiError::invalid_argument("null output handle argument"));
+        }
+        let token = lookup_cancel_token(cancel_id)?;
+        let path = unsafe { cstr(path) }?;
+        let agent = rt().block_on(async {
+            tokio::select! {
+                r = connect_agent_path(&path, timeout_ms) => r.map_err(agent_error),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })?;
+        let handle = register_agent(agent)?;
+        unsafe {
+            *out_handle = handle;
+        }
+        Ok(())
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_request(
+    cancel_id: u64,
+    agent_handle: Handle,
+    flags: c_uchar,
+    body_ptr: *const c_uchar,
+    body_len: usize,
+    out_id: *mut u32,
+    out_flags: *mut c_uchar,
+    out_body_ptr: *mut *mut c_uchar,
+    out_body_len: *mut usize,
+) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        if out_id.is_null() || out_flags.is_null() {
+            return Err(FfiError::invalid_argument("null frame output argument"));
+        }
+        let token = lookup_cancel_token(cancel_id)?;
+        let agent = get_agent(agent_handle)?;
+        let body = unsafe { bytes(body_ptr, body_len) }?;
+        let frame = rt().block_on(async {
+            tokio::select! {
+                r = agent.request(flags, body) => r.map_err(agent_error),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })?;
+        unsafe {
+            *out_id = frame.id;
+            *out_flags = frame.flags;
+        }
+        write_agent_bytes(frame.body, out_body_ptr, out_body_len)
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_stream_open(
+    cancel_id: u64,
+    agent_handle: Handle,
+    flags: c_uchar,
+    body_ptr: *const c_uchar,
+    body_len: usize,
+    out_id: *mut u32,
+    out_stream_handle: *mut Handle,
+) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        if out_id.is_null() || out_stream_handle.is_null() {
+            return Err(FfiError::invalid_argument("null stream output argument"));
+        }
+        let token = lookup_cancel_token(cancel_id)?;
+        let agent = get_agent(agent_handle)?;
+        let body = unsafe { bytes(body_ptr, body_len) }?;
+        let (id, stream_handle) = rt().block_on(async {
+            tokio::select! {
+                r = agent.stream_open(flags, body) => r.map_err(agent_error),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })?;
+        unsafe {
+            *out_id = id;
+            *out_stream_handle = stream_handle;
+        }
+        Ok(())
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_stream_next(
+    cancel_id: u64,
+    agent_handle: Handle,
+    stream_handle: Handle,
+    out_present: *mut bool,
+    out_id: *mut u32,
+    out_flags: *mut c_uchar,
+    out_body_ptr: *mut *mut c_uchar,
+    out_body_len: *mut usize,
+) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        if out_present.is_null() || out_id.is_null() || out_flags.is_null() {
+            return Err(FfiError::invalid_argument("null frame output argument"));
+        }
+        let token = lookup_cancel_token(cancel_id)?;
+        let agent = get_agent(agent_handle)?;
+        let frame = rt().block_on(async {
+            tokio::select! {
+                r = agent.stream_next(stream_handle) => r.map_err(agent_error),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })?;
+        match frame {
+            Some(frame) => {
+                unsafe {
+                    *out_present = true;
+                    *out_id = frame.id;
+                    *out_flags = frame.flags;
+                }
+                write_agent_bytes(frame.body, out_body_ptr, out_body_len)
+            }
+            None => {
+                unsafe {
+                    *out_present = false;
+                    *out_id = 0;
+                    *out_flags = 0;
+                }
+                write_agent_bytes(Vec::new(), out_body_ptr, out_body_len)
+            }
+        }
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_stream_close(
+    cancel_id: u64,
+    agent_handle: Handle,
+    stream_handle: Handle,
+) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        let token = lookup_cancel_token(cancel_id)?;
+        let agent = get_agent(agent_handle)?;
+        rt().block_on(async {
+            tokio::select! {
+                _ = agent.stream_close(stream_handle) => Ok(()),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_send(
+    cancel_id: u64,
+    agent_handle: Handle,
+    id: u32,
+    flags: c_uchar,
+    body_ptr: *const c_uchar,
+    body_len: usize,
+) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        let token = lookup_cancel_token(cancel_id)?;
+        let agent = get_agent(agent_handle)?;
+        let body = unsafe { bytes(body_ptr, body_len) }?;
+        rt().block_on(async {
+            tokio::select! {
+                r = agent.send(id, flags, body) => r.map_err(agent_error),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_ready_bytes(
+    agent_handle: Handle,
+    out_body_ptr: *mut *mut c_uchar,
+    out_body_len: *mut usize,
+) -> *mut c_char {
+    match get_agent(agent_handle).and_then(|agent| {
+        let body = agent.ready_bytes().map_err(agent_error)?;
+        write_agent_bytes(body, out_body_ptr, out_body_len)
+    }) {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_close(cancel_id: u64, agent_handle: Handle) -> *mut c_char {
+    let result = (|| -> Result<(), FfiError> {
+        let token = lookup_cancel_token(cancel_id)?;
+        let agent =
+            remove_agent(agent_handle)?.ok_or_else(|| FfiError::invalid_handle(agent_handle))?;
+        rt().block_on(async {
+            tokio::select! {
+                _ = agent.close() => Ok(()),
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_agent_free_bytes(ptr: *mut c_uchar, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    let slice = std::ptr::slice_from_raw_parts_mut(ptr, len);
+    unsafe {
+        drop(Box::from_raw(slice));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Attach / AttachShell — interactive PTY sessions
 //
 // These block the calling thread until the guest process exits.
@@ -4056,4 +4444,8 @@ fn kind_str(kind: FsEntryKind) -> &'static str {
         FsEntryKind::Symlink => "symlink",
         FsEntryKind::Other => "other",
     }
+}
+
+fn agent_error(err: microsandbox::AgentClientError) -> FfiError {
+    FfiError::from(MicrosandboxError::AgentClient(err))
 }

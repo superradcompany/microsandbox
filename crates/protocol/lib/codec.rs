@@ -23,19 +23,36 @@ use crate::{
 pub const MAX_FRAME_SIZE: u32 = 4 * 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
-// Functions
+// Types
 //--------------------------------------------------------------------------------------------------
 
-/// Encodes a message to a byte buffer using the length-prefixed frame format.
+/// A frame with the binary header parsed but the CBOR body left untouched.
 ///
-/// Frame format: `[len: u32 BE][id: u32 BE][flags: u8][CBOR(v, t, p)]`
-pub fn encode_to_buf(msg: &Message, buf: &mut Vec<u8>) -> ProtocolResult<()> {
-    // Serialize the CBOR body (v, t, p — id and flags are excluded via serde(skip)).
-    let mut cbor = Vec::new();
-    ciborium::into_writer(msg, &mut cbor)?;
+/// Used by routers, relays, and FFI consumers that want to handle framing
+/// without paying for CBOR (de)serialization. The [`body`](Self::body) field
+/// contains the exact CBOR-encoded `Message` body bytes — `v`, `t`, `p` —
+/// the same bytes that follow the binary header on the wire.
+#[derive(Debug, Clone)]
+pub struct RawFrame {
+    /// Correlation ID. Same as [`Message::id`].
+    pub id: u32,
 
-    // Total frame payload = id (4) + flags (1) + CBOR body.
-    let frame_len = u32::try_from(FRAME_HEADER_SIZE + cbor.len()).map_err(|_| {
+    /// Frame flags. Same as [`Message::flags`].
+    pub flags: u8,
+
+    /// Raw CBOR bytes of the message body (`v`, `t`, `p`). Not decoded.
+    pub body: Vec<u8>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Raw frame codec (CBOR-blind)
+//--------------------------------------------------------------------------------------------------
+
+/// Encodes a raw frame to a byte buffer using the length-prefixed format.
+///
+/// Frame format: `[len: u32 BE][id: u32 BE][flags: u8][body...]`
+pub fn encode_raw_to_buf(frame: &RawFrame, buf: &mut Vec<u8>) -> ProtocolResult<()> {
+    let frame_len = u32::try_from(FRAME_HEADER_SIZE + frame.body.len()).map_err(|_| {
         ProtocolError::FrameTooLarge {
             size: u32::MAX,
             max: MAX_FRAME_SIZE,
@@ -50,19 +67,19 @@ pub fn encode_to_buf(msg: &Message, buf: &mut Vec<u8>) -> ProtocolResult<()> {
     }
 
     buf.extend_from_slice(&frame_len.to_be_bytes());
-    buf.extend_from_slice(&msg.id.to_be_bytes());
-    buf.push(msg.flags);
-    buf.extend_from_slice(&cbor);
+    buf.extend_from_slice(&frame.id.to_be_bytes());
+    buf.push(frame.flags);
+    buf.extend_from_slice(&frame.body);
     Ok(())
 }
 
-/// Tries to decode a complete message from a byte buffer.
+/// Tries to decode a complete raw frame from a byte buffer.
 ///
-/// Returns `Some(Message)` if a complete frame is available, consuming
+/// Returns `Some(RawFrame)` if a complete frame is available, consuming
 /// the bytes. Returns `None` if more data is needed.
 ///
-/// Frame format: `[len: u32 BE][id: u32 BE][flags: u8][CBOR(v, t, p)]`
-pub fn try_decode_from_buf(buf: &mut Vec<u8>) -> ProtocolResult<Option<Message>> {
+/// Frame format: `[len: u32 BE][id: u32 BE][flags: u8][body...]`
+pub fn try_decode_raw_from_buf(buf: &mut Vec<u8>) -> ProtocolResult<Option<RawFrame>> {
     if buf.len() < 4 {
         return Ok(None);
     }
@@ -90,25 +107,18 @@ pub fn try_decode_from_buf(buf: &mut Vec<u8>) -> ProtocolResult<Option<Message>>
         });
     }
 
-    // Extract header fields.
     let id = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
     let flags = buf[8];
-
-    // Deserialize the CBOR body.
-    let cbor = &buf[4 + FRAME_HEADER_SIZE..total];
-    let mut msg: Message = ciborium::from_reader(cbor)?;
-    msg.id = id;
-    msg.flags = flags;
+    let body = buf[4 + FRAME_HEADER_SIZE..total].to_vec();
 
     buf.drain(..total);
-    Ok(Some(msg))
+    Ok(Some(RawFrame { id, flags, body }))
 }
 
-/// Reads a length-prefixed message from the given reader.
+/// Reads a length-prefixed raw frame from the given reader.
 ///
-/// Frame format: `[len: u32 BE][id: u32 BE][flags: u8][CBOR(v, t, p)]`
-pub async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> ProtocolResult<Message> {
-    // Read the 4-byte length prefix.
+/// Frame format: `[len: u32 BE][id: u32 BE][flags: u8][body...]`
+pub async fn read_raw_frame<R: AsyncRead + Unpin>(reader: &mut R) -> ProtocolResult<RawFrame> {
     let mut len_buf = [0u8; 4];
     match reader.read_exact(&mut len_buf).await {
         Ok(_) => {}
@@ -136,21 +146,69 @@ pub async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> ProtocolResul
         });
     }
 
-    // Read the full frame payload.
     let mut payload = vec![0u8; frame_len];
     reader.read_exact(&mut payload).await?;
 
-    // Extract header fields.
     let id = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
     let flags = payload[4];
+    let body = payload[FRAME_HEADER_SIZE..].to_vec();
 
-    // Deserialize the CBOR body.
-    let cbor = &payload[FRAME_HEADER_SIZE..];
-    let mut msg: Message = ciborium::from_reader(cbor)?;
-    msg.id = id;
-    msg.flags = flags;
+    Ok(RawFrame { id, flags, body })
+}
 
-    Ok(msg)
+/// Writes a length-prefixed raw frame to the given writer.
+///
+/// Frame format: `[len: u32 BE][id: u32 BE][flags: u8][body...]`
+pub async fn write_raw_frame<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    frame: &RawFrame,
+) -> ProtocolResult<()> {
+    let mut buf = Vec::new();
+    encode_raw_to_buf(frame, &mut buf)?;
+    writer.write_all(&buf).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Typed message codec (CBOR-aware)
+//--------------------------------------------------------------------------------------------------
+
+/// Encodes a message to a byte buffer using the length-prefixed frame format.
+///
+/// Frame format: `[len: u32 BE][id: u32 BE][flags: u8][CBOR(v, t, p)]`
+pub fn encode_to_buf(msg: &Message, buf: &mut Vec<u8>) -> ProtocolResult<()> {
+    let mut body = Vec::new();
+    ciborium::into_writer(msg, &mut body)?;
+    encode_raw_to_buf(
+        &RawFrame {
+            id: msg.id,
+            flags: msg.flags,
+            body,
+        },
+        buf,
+    )
+}
+
+/// Tries to decode a complete message from a byte buffer.
+///
+/// Returns `Some(Message)` if a complete frame is available, consuming
+/// the bytes. Returns `None` if more data is needed.
+///
+/// Frame format: `[len: u32 BE][id: u32 BE][flags: u8][CBOR(v, t, p)]`
+pub fn try_decode_from_buf(buf: &mut Vec<u8>) -> ProtocolResult<Option<Message>> {
+    match try_decode_raw_from_buf(buf)? {
+        Some(frame) => Ok(Some(raw_frame_to_message(frame)?)),
+        None => Ok(None),
+    }
+}
+
+/// Reads a length-prefixed message from the given reader.
+///
+/// Frame format: `[len: u32 BE][id: u32 BE][flags: u8][CBOR(v, t, p)]`
+pub async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> ProtocolResult<Message> {
+    let frame = read_raw_frame(reader).await?;
+    raw_frame_to_message(frame)
 }
 
 /// Writes a length-prefixed message to the given writer.
@@ -165,6 +223,14 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
     writer.write_all(&buf).await?;
     writer.flush().await?;
     Ok(())
+}
+
+/// Decodes a [`RawFrame`] into a typed [`Message`] by CBOR-deserializing the body.
+pub fn raw_frame_to_message(frame: RawFrame) -> ProtocolResult<Message> {
+    let mut msg: Message = ciborium::from_reader(&frame.body[..])?;
+    msg.id = frame.id;
+    msg.flags = frame.flags;
+    Ok(msg)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -332,5 +398,61 @@ mod tests {
 
         let result = try_decode_from_buf(&mut buf);
         assert!(matches!(result, Err(ProtocolError::FrameTooShort { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_raw_frame_roundtrip() {
+        let frame = RawFrame {
+            id: 0xDEADBEEF,
+            flags: FLAG_TERMINAL,
+            body: vec![1, 2, 3, 4, 5],
+        };
+
+        let mut buf = Vec::new();
+        write_raw_frame(&mut buf, &frame).await.unwrap();
+
+        let mut cursor = &buf[..];
+        let decoded = read_raw_frame(&mut cursor).await.unwrap();
+
+        assert_eq!(decoded.id, frame.id);
+        assert_eq!(decoded.flags, frame.flags);
+        assert_eq!(decoded.body, frame.body);
+    }
+
+    #[test]
+    fn test_raw_frame_sync_roundtrip() {
+        let frame = RawFrame {
+            id: 42,
+            flags: FLAG_SESSION_START,
+            body: vec![0xAA; 100],
+        };
+
+        let mut buf = Vec::new();
+        encode_raw_to_buf(&frame, &mut buf).unwrap();
+
+        let decoded = try_decode_raw_from_buf(&mut buf).unwrap().unwrap();
+        assert_eq!(decoded.id, frame.id);
+        assert_eq!(decoded.flags, frame.flags);
+        assert_eq!(decoded.body, frame.body);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_raw_frame_to_message() {
+        use crate::exec::ExecExited;
+
+        let msg =
+            Message::with_payload(MessageType::ExecExited, 13, &ExecExited { code: 7 }).unwrap();
+
+        let mut buf = Vec::new();
+        encode_to_buf(&msg, &mut buf).unwrap();
+
+        let frame = try_decode_raw_from_buf(&mut buf).unwrap().unwrap();
+        let decoded = raw_frame_to_message(frame).unwrap();
+
+        assert_eq!(decoded.id, 13);
+        assert_eq!(decoded.t, MessageType::ExecExited);
+        let payload: ExecExited = decoded.payload().unwrap();
+        assert_eq!(payload.code, 7);
     }
 }
