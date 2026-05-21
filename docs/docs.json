@@ -93,6 +93,7 @@
             "icon": "rust",
             "pages": [
               "sdk/rust/sandbox",
+              "sdk/rust/agent-client",
               "sdk/rust/execution",
               "sdk/rust/filesystem",
               "sdk/rust/volumes",
@@ -107,6 +108,7 @@
             "icon": "js",
             "pages": [
               "sdk/typescript/sandbox",
+              "sdk/typescript/agent-client",
               "sdk/typescript/execution",
               "sdk/typescript/filesystem",
               "sdk/typescript/volumes",
@@ -121,6 +123,7 @@
             "icon": "python",
             "pages": [
               "sdk/python/sandbox",
+              "sdk/python/agent-client",
               "sdk/python/execution",
               "sdk/python/filesystem",
               "sdk/python/volumes",
@@ -135,6 +138,7 @@
             "icon": "golang",
             "pages": [
               "sdk/go/sandbox",
+              "sdk/go/agent-client",
               "sdk/go/execution",
               "sdk/go/filesystem",
               "sdk/go/volumes",

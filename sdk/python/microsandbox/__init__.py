@@ -31,6 +31,13 @@ from microsandbox._microsandbox import (
     set_runtime_msb_path as _set_runtime_msb_path,
 )
 from microsandbox._runtime import msb_path as _msb_path
+from microsandbox.agent import (
+    FLAG_SESSION_START,
+    FLAG_SHUTDOWN,
+    FLAG_TERMINAL,
+    AgentClient,
+    AgentStream,
+)
 from microsandbox.errors import (
     ExecFailedError,
     ExecTimeoutError,
@@ -79,6 +86,7 @@ from microsandbox.types import (
     ExitStatus,
     FsEntryKind,
     GiB,
+    HostPermissions,
     Image,
     ImageSource,
     InitConfig,
@@ -105,6 +113,7 @@ from microsandbox.types import (
     SecretEntry,
     SecretInjection,
     Size,
+    StatVirtualization,
     Stdin,
     TlsConfig,
     ViolationAction,
@@ -123,6 +132,12 @@ __all__ = [
     "SandboxHandle",
     "PullSession",
     "SandboxStatus",
+    # Low-level agent client
+    "AgentClient",
+    "AgentStream",
+    "FLAG_TERMINAL",
+    "FLAG_SESSION_START",
+    "FLAG_SHUTDOWN",
     # Execution (native)
     "ExecHandle",
     "ExecOutput",
@@ -166,6 +181,8 @@ __all__ = [
     "VolumeHandle",
     "MountConfig",
     "MountKind",
+    "StatVirtualization",
+    "HostPermissions",
     # Snapshots
     "Snapshot",
     "SnapshotHandle",

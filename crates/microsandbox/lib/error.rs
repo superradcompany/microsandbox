@@ -70,6 +70,10 @@ pub enum MicrosandboxError {
     #[error("protocol error: {0}")]
     Protocol(#[from] microsandbox_protocol::ProtocolError),
 
+    /// An agent client error occurred.
+    #[error("agent client error: {0}")]
+    AgentClient(#[from] crate::agent::AgentClientError),
+
     /// A nix/errno error occurred.
     #[error("nix error: {0}")]
     Nix(#[from] nix::errno::Errno),

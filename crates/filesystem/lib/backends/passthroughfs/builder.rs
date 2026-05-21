@@ -1,10 +1,12 @@
 //! Builder API for constructing a PassthroughFs instance.
 //!
 //! ```ignore
+//! use microsandbox_filesystem::{HostPermissions, PassthroughFs, StatVirtualization};
+//!
 //! PassthroughFs::builder()
 //!     .root_dir("./rootfs")
-//!     .xattr(true)
-//!     .strict(true)
+//!     .stat_virtualization(StatVirtualization::Strict)
+//!     .host_permissions(HostPermissions::Private)
 //!     .build()?
 //! ```
 
@@ -21,7 +23,7 @@ use std::{
     time::Duration,
 };
 
-use super::{CachePolicy, PassthroughFs};
+use super::{CachePolicy, HostPermissions, PassthroughFs, StatVirtualization};
 use crate::backends::shared::{
     init_binary, inode_table::MultikeyBTreeMap, platform, stat_override,
 };
@@ -33,8 +35,8 @@ use crate::backends::shared::{
 /// Builder for constructing a [`PassthroughFs`] instance.
 pub struct PassthroughFsBuilder {
     root_dir: Option<PathBuf>,
-    xattr: bool,
-    strict: bool,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
     entry_timeout: Duration,
     attr_timeout: Duration,
     cache_policy: CachePolicy,
@@ -51,8 +53,8 @@ impl PassthroughFsBuilder {
     pub(crate) fn new() -> Self {
         Self {
             root_dir: None,
-            xattr: true,
-            strict: true,
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
             entry_timeout: Duration::from_secs(5),
             attr_timeout: Duration::from_secs(5),
             cache_policy: CachePolicy::Auto,
@@ -67,15 +69,15 @@ impl PassthroughFsBuilder {
         self
     }
 
-    /// Enable or disable xattr-based stat virtualization.
-    pub fn xattr(mut self, enabled: bool) -> Self {
-        self.xattr = enabled;
+    /// Set the stat virtualization policy. Default: [`StatVirtualization::Strict`].
+    pub fn stat_virtualization(mut self, policy: StatVirtualization) -> Self {
+        self.stat_virtualization = policy;
         self
     }
 
-    /// Enable or disable strict mode.
-    pub fn strict(mut self, enabled: bool) -> Self {
-        self.strict = enabled;
+    /// Set the host permission propagation policy. Default: [`HostPermissions::Private`].
+    pub fn host_permissions(mut self, policy: HostPermissions) -> Self {
+        self.host_permissions = policy;
         self
     }
 
@@ -132,12 +134,22 @@ impl PassthroughFsBuilder {
         let root_fd = unsafe { File::from_raw_fd(root_fd_raw) };
 
         // Probe xattr support if strict mode is enabled.
-        if self.strict && self.xattr {
+        let cfg_probe = super::PassthroughConfig {
+            root_dir: root_dir.clone(),
+            stat_virtualization: self.stat_virtualization,
+            host_permissions: self.host_permissions,
+            entry_timeout: self.entry_timeout,
+            attr_timeout: self.attr_timeout,
+            cache_policy: self.cache_policy,
+            writeback: self.writeback,
+            inject_init: self.inject_init,
+        };
+        if cfg_probe.strict_enabled() && cfg_probe.xattr_enabled() {
             let supported = stat_override::probe_xattr_support(root_fd.as_raw_fd())?;
             if !supported {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
-                    "xattr not supported on root filesystem and strict mode is enabled",
+                    "xattr not supported on root filesystem and stat_virtualization is Strict",
                 ));
             }
         }
@@ -160,16 +172,7 @@ impl PassthroughFsBuilder {
             unsafe { File::from_raw_fd(fd) }
         };
 
-        let cfg = super::PassthroughConfig {
-            root_dir,
-            xattr: self.xattr,
-            strict: self.strict,
-            entry_timeout: self.entry_timeout,
-            attr_timeout: self.attr_timeout,
-            cache_policy: self.cache_policy,
-            writeback: self.writeback,
-            inject_init: self.inject_init,
-        };
+        let cfg = cfg_probe;
 
         Ok(PassthroughFs {
             cfg,

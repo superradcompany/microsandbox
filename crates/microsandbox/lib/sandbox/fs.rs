@@ -111,16 +111,12 @@ impl<'a> SandboxFs<'a> {
 
     /// Read an entire file from the guest filesystem into memory.
     pub async fn read(&self, path: &str) -> MicrosandboxResult<Bytes> {
-        let id = self.client.next_id();
-        let mut rx = self.client.subscribe(id).await;
-
         let req = FsRequest {
             op: FsOp::Read {
                 path: path.to_string(),
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, id, &req)?;
-        self.client.send(&msg).await?;
+        let (_id, mut rx) = self.client.stream(MessageType::FsRequest, &req).await?;
 
         // Collect FsData chunks until FsResponse (terminal).
         let mut data = Vec::new();
@@ -157,17 +153,12 @@ impl<'a> SandboxFs<'a> {
     ///
     /// Returns an [`FsReadStream`] that yields chunks of data as they arrive.
     pub async fn read_stream(&self, path: &str) -> MicrosandboxResult<FsReadStream> {
-        let id = self.client.next_id();
-        let rx = self.client.subscribe(id).await;
-
         let req = FsRequest {
             op: FsOp::Read {
                 path: path.to_string(),
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, id, &req)?;
-        self.client.send(&msg).await?;
-
+        let (_id, rx) = self.client.stream(MessageType::FsRequest, &req).await?;
         Ok(FsReadStream { rx })
     }
 
@@ -178,32 +169,27 @@ impl<'a> SandboxFs<'a> {
     /// Write data to a file in the guest, creating it if it doesn't exist.
     pub async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
         let data = data.as_ref();
-        let id = self.client.next_id();
-        let mut rx = self.client.subscribe(id).await;
 
-        // Send write request.
+        // Open the write session.
         let req = FsRequest {
             op: FsOp::Write {
                 path: path.to_string(),
                 mode: None,
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, id, &req)?;
-        self.client.send(&msg).await?;
+        let (id, mut rx) = self.client.stream(MessageType::FsRequest, &req).await?;
 
         // Send data chunks.
         for chunk in data.chunks(FS_CHUNK_SIZE) {
             let fs_data = FsData {
                 data: chunk.to_vec(),
             };
-            let msg = Message::with_payload(MessageType::FsData, id, &fs_data)?;
-            self.client.send(&msg).await?;
+            self.client.send(id, MessageType::FsData, &fs_data).await?;
         }
 
         // Send EOF.
         let eof = FsData { data: Vec::new() };
-        let msg = Message::with_payload(MessageType::FsData, id, &eof)?;
-        self.client.send(&msg).await?;
+        self.client.send(id, MessageType::FsData, &eof).await?;
 
         // Wait for terminal response.
         wait_for_ok_response(&mut rx).await
@@ -214,19 +200,13 @@ impl<'a> SandboxFs<'a> {
     /// Returns an [`FsWriteSink`] for writing data in chunks. Call
     /// [`FsWriteSink::close`] when done writing.
     pub async fn write_stream(&self, path: &str) -> MicrosandboxResult<FsWriteSink> {
-        let id = self.client.next_id();
-
-        // Subscribe before sending to avoid race.
-        let rx = self.client.subscribe(id).await;
-
         let req = FsRequest {
             op: FsOp::Write {
                 path: path.to_string(),
                 mode: None,
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, id, &req)?;
-        self.client.send(&msg).await?;
+        let (id, rx) = self.client.stream(MessageType::FsRequest, &req).await?;
 
         Ok(FsWriteSink {
             id,
@@ -246,8 +226,7 @@ impl<'a> SandboxFs<'a> {
                 path: path.to_string(),
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.client.request(msg).await?;
+        let resp_msg = self.client.request(MessageType::FsRequest, &req).await?;
         let resp: FsResponse = resp_msg.payload()?;
 
         if !resp.ok {
@@ -271,8 +250,7 @@ impl<'a> SandboxFs<'a> {
                 path: path.to_string(),
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.client.request(msg).await?;
+        let resp_msg = self.client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
     }
 
@@ -283,8 +261,7 @@ impl<'a> SandboxFs<'a> {
                 path: path.to_string(),
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.client.request(msg).await?;
+        let resp_msg = self.client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
     }
 
@@ -299,8 +276,7 @@ impl<'a> SandboxFs<'a> {
                 path: path.to_string(),
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.client.request(msg).await?;
+        let resp_msg = self.client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
     }
 
@@ -312,8 +288,7 @@ impl<'a> SandboxFs<'a> {
                 dst: to.to_string(),
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.client.request(msg).await?;
+        let resp_msg = self.client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
     }
 
@@ -325,8 +300,7 @@ impl<'a> SandboxFs<'a> {
                 dst: to.to_string(),
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.client.request(msg).await?;
+        let resp_msg = self.client.request(MessageType::FsRequest, &req).await?;
         check_response(resp_msg)
     }
 
@@ -341,8 +315,7 @@ impl<'a> SandboxFs<'a> {
                 path: path.to_string(),
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.client.request(msg).await?;
+        let resp_msg = self.client.request(MessageType::FsRequest, &req).await?;
         let resp: FsResponse = resp_msg.payload()?;
 
         if !resp.ok {
@@ -458,8 +431,10 @@ impl FsWriteSink {
         let fs_data = FsData {
             data: data.as_ref().to_vec(),
         };
-        let msg = Message::with_payload(MessageType::FsData, self.id, &fs_data)?;
-        self.client.send(&msg).await
+        self.client
+            .send(self.id, MessageType::FsData, &fs_data)
+            .await?;
+        Ok(())
     }
 
     /// Close the write stream (sends EOF) and wait for confirmation.
@@ -468,8 +443,7 @@ impl FsWriteSink {
     /// error if the guest reports a write failure.
     pub async fn close(mut self) -> MicrosandboxResult<()> {
         let eof = FsData { data: Vec::new() };
-        let msg = Message::with_payload(MessageType::FsData, self.id, &eof)?;
-        self.client.send(&msg).await?;
+        self.client.send(self.id, MessageType::FsData, &eof).await?;
 
         // Wait for the terminal FsResponse from the guest.
         wait_for_ok_response(&mut self.rx).await

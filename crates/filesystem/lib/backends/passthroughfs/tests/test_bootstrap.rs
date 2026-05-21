@@ -113,9 +113,13 @@ fn test_cache_dir_always() {
 
 #[test]
 fn test_default_config_values() {
+    use crate::backends::passthroughfs::{HostPermissions, StatVirtualization};
     let cfg = PassthroughConfig::default();
-    assert!(cfg.xattr);
-    assert!(cfg.strict);
+    assert!(matches!(
+        cfg.stat_virtualization,
+        StatVirtualization::Strict
+    ));
+    assert!(matches!(cfg.host_permissions, HostPermissions::Private));
     assert_eq!(cfg.entry_timeout, Duration::from_secs(5));
     assert_eq!(cfg.attr_timeout, Duration::from_secs(5));
     assert_eq!(cfg.cache_policy, CachePolicy::Auto);

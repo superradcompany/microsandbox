@@ -1,3 +1,4 @@
+mod agent;
 mod error;
 mod exec;
 mod fs;
@@ -30,6 +31,7 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<exec::PyExecOutput>()?;
     m.add_class::<exec::PyExecHandle>()?;
     m.add_class::<exec::PyExecSink>()?;
+    m.add_class::<agent::PyAgentClient>()?;
     m.add_class::<fs::PySandboxFs>()?;
     m.add_class::<fs::PyFsReadStream>()?;
     m.add_class::<fs::PyFsWriteSink>()?;

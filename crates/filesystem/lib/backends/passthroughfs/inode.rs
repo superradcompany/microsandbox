@@ -278,8 +278,12 @@ fn do_lookup_linux(
     let mnt_id = stx.stx_mnt_id;
     let alt_key = InodeAltKey::new(st.st_ino, st.st_dev, mnt_id);
     let alias = NamespaceAlias::new(parent, name.to_bytes());
-    let patched =
-        crate::backends::shared::stat_override::patched_stat(fd, st, fs.cfg.xattr, fs.cfg.strict)?;
+    let patched = crate::backends::shared::stat_override::patched_stat(
+        fd,
+        st,
+        fs.cfg.xattr_enabled(),
+        fs.cfg.strict_enabled(),
+    )?;
 
     let mut inodes = fs.inodes.write().unwrap();
     if let Some(data) = inodes.get_alt(&alt_key).cloned() {
@@ -339,8 +343,8 @@ fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
         platform::stat_dev(&st),
         platform::stat_ino(&st),
         st,
-        fs.cfg.xattr,
-        fs.cfg.strict,
+        fs.cfg.xattr_enabled(),
+        fs.cfg.strict_enabled(),
     )?;
 
     // Fast path: most lookups hit an already-tracked inode and only need a
@@ -967,8 +971,8 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
         crate::backends::shared::stat_override::patched_stat(
             fd.raw(),
             st,
-            fs.cfg.xattr,
-            fs.cfg.strict,
+            fs.cfg.xattr_enabled(),
+            fs.cfg.strict_enabled(),
         )
     }
 
@@ -984,8 +988,8 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
             return crate::backends::shared::stat_override::patched_stat(
                 ufd as i32,
                 st,
-                fs.cfg.xattr,
-                fs.cfg.strict,
+                fs.cfg.xattr_enabled(),
+                fs.cfg.strict_enabled(),
             );
         }
 
@@ -994,8 +998,8 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
                 crate::backends::shared::stat_override::patched_stat(
                     fd,
                     st,
-                    fs.cfg.xattr,
-                    fs.cfg.strict,
+                    fs.cfg.xattr_enabled(),
+                    fs.cfg.strict_enabled(),
                 )
             });
             unsafe { libc::close(fd) };
@@ -1008,6 +1012,12 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
-        open_and_patch_stat_macos(data.dev, data.ino, st, fs.cfg.xattr, fs.cfg.strict)
+        open_and_patch_stat_macos(
+            data.dev,
+            data.ino,
+            st,
+            fs.cfg.xattr_enabled(),
+            fs.cfg.strict_enabled(),
+        )
     }
 }

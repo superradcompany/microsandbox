@@ -194,8 +194,7 @@ impl SandboxHandle {
             .join("runtime")
             .join("agent.sock");
 
-        let deadline = tokio::time::Instant::now() + timeout;
-        let client = AgentClient::connect(&sock_path, deadline).await?;
+        let client = AgentClient::connect_with_timeout(&sock_path, timeout).await?;
         let config: SandboxConfig = serde_json::from_str(&self.config_json)?;
 
         Ok(Sandbox {

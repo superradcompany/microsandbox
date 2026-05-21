@@ -1,0 +1,134 @@
+---
+title: Agent Client
+description: TypeScript SDK - Low-level agentd client reference
+icon: "plug"
+---
+
+`AgentClient` is the low-level raw transport for talking to `agentd` through a running sandbox's relay socket. Most applications should use [`Sandbox`](/sdk/typescript/sandbox), [`exec`](/sdk/typescript/execution), and [`fs`](/sdk/typescript/filesystem) instead. Use this API when you are building protocol-level tools or higher-level SDK helpers.
+
+All request bodies and response bodies are raw CBOR bytes. The SDK handles framing and correlation ids, but it does not encode or decode the CBOR message body for you.
+
+The raw body is the full CBOR-encoded protocol `Message` body: `v`, `t`, and `p`. It is not just the inner payload.
+
+```typescript
+import { AgentClient } from "microsandbox";
+
+const client = await AgentClient.connectSandbox("dev");
+const ready = client.readyBytes();
+await client.close();
+```
+
+---
+
+## Constants
+
+| Name | Value | Description |
+|------|-------|-------------|
+| `FLAG_TERMINAL` | `0b0000_0001` | Last frame for a correlation id |
+| `FLAG_SESSION_START` | `0b0000_0010` | First frame of a streaming session |
+| `FLAG_SHUTDOWN` | `0b0000_0100` | Shutdown frame |
+
+---
+
+#### AgentClient.connectSandbox()
+
+```typescript
+static connectSandbox(name: string): Promise<AgentClient>
+```
+
+Connect to a running sandbox by name.
+
+---
+
+#### AgentClient.connect()
+
+```typescript
+static connect(path: string): Promise<AgentClient>
+```
+
+Connect to an agent relay socket by path.
+
+---
+
+#### request()
+
+```typescript
+request(flags: number, body: Buffer): Promise<RawFrame>
+```
+
+Send one raw frame and wait for one response frame.
+
+---
+
+#### stream()
+
+```typescript
+stream(flags: number, body: Buffer): Promise<AgentStream>
+```
+
+Open a raw streaming session. The returned stream carries the protocol correlation id and is also an async iterator of raw frames.
+
+```typescript
+const stream = await client.stream(FLAG_SESSION_START, body);
+for await (const frame of stream) {
+  if ((frame.flags & FLAG_TERMINAL) !== 0) break;
+}
+```
+
+---
+
+#### send()
+
+```typescript
+send(id: number, flags: number, body: Buffer): Promise<void>
+```
+
+Send a follow-up frame on an existing correlation id. Use this with the `id` on the [`AgentStream`](#agentstream) returned by [`stream()`](#stream).
+
+---
+
+#### readyBytes()
+
+```typescript
+readyBytes(): Buffer
+```
+
+Return the cached handshake `core.ready` frame body as CBOR bytes.
+
+---
+
+#### close()
+
+```typescript
+close(): Promise<void>
+```
+
+Close the client. Calling it more than once is safe.
+
+---
+
+## RawFrame
+
+```typescript
+interface RawFrame {
+  readonly id: number;
+  readonly flags: number;
+  readonly body: Buffer;
+}
+```
+
+`id` is the protocol correlation id, `flags` is the frame flag byte, and `body` is the CBOR-encoded protocol message body.
+
+---
+
+## AgentStream
+
+```typescript
+class AgentStream implements AsyncIterableIterator<RawFrame> {
+  readonly id: number;
+  next(): Promise<IteratorResult<RawFrame>>;
+  close(): Promise<void>;
+}
+```
+
+`id` is the protocol correlation id. Pass it to [`AgentClient.send()`](#send) for follow-up frames in the same session. `close()` releases the stream handle early.

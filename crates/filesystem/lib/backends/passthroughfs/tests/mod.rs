@@ -6,6 +6,7 @@ mod test_create_ops;
 mod test_dir_ops;
 mod test_file_ops;
 mod test_flag_translation;
+mod test_host_permissions;
 mod test_init_binary;
 mod test_kill_priv;
 mod test_lookup_inode;
@@ -14,6 +15,7 @@ mod test_name_validation;
 mod test_open_after_unlink;
 mod test_remove_ops;
 mod test_special_ops;
+mod test_stat_virt;
 mod test_vol_lookup;
 mod test_xattr_ops;
 
