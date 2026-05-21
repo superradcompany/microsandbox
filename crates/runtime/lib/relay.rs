@@ -761,7 +761,12 @@ async fn client_reader_task(
             }
         };
 
-        if frame.id < id_start || frame.id >= id_end_exclusive {
+        // Track session starts for disconnect cleanup.
+        let is_session_start = (frame.flags & FLAG_SESSION_START) != 0;
+        let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
+        let is_shutdown = (frame.flags & FLAG_SHUTDOWN) != 0;
+
+        if !is_client_frame_allowed(frame.id, frame.flags, id_start, id_end_exclusive) {
             tracing::warn!(
                 "agent relay: client slot={slot} sent out-of-range id={} range=[{}, {})",
                 frame.id,
@@ -770,11 +775,6 @@ async fn client_reader_task(
             );
             break;
         }
-
-        // Track session starts for disconnect cleanup.
-        let is_session_start = (frame.flags & FLAG_SESSION_START) != 0;
-        let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
-        let is_shutdown = (frame.flags & FLAG_SHUTDOWN) != 0;
 
         // Forward shutdown to agentd (via the agent_tx send below) so the
         // guest can sync filesystems and power off cleanly. Also notify the
@@ -882,4 +882,42 @@ async fn client_reader_task(
     // Release the client slot.
     used_slots.lock().await.remove(&slot);
     tracing::debug!("agent relay: slot={slot} released");
+}
+
+/// Return whether a client-originated frame may be forwarded to agentd.
+///
+/// Most client frames must use a correlation ID from the relay-assigned
+/// range so responses route back to the owning client. `core.shutdown` is a
+/// process-level control frame, not a correlated request, and the SDK sends it
+/// with ID 0.
+fn is_client_frame_allowed(id: u32, flags: u8, id_start: u32, id_end_exclusive: u32) -> bool {
+    let is_shutdown_control = (flags & FLAG_SHUTDOWN) != 0 && id == 0;
+    is_shutdown_control || (id >= id_start && id < id_end_exclusive)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_frame_validation_allows_ids_in_assigned_range() {
+        assert!(is_client_frame_allowed(10, 0, 10, 20));
+        assert!(is_client_frame_allowed(19, FLAG_SESSION_START, 10, 20));
+    }
+
+    #[test]
+    fn client_frame_validation_rejects_non_shutdown_ids_outside_range() {
+        assert!(!is_client_frame_allowed(0, 0, 10, 20));
+        assert!(!is_client_frame_allowed(9, FLAG_SESSION_START, 10, 20));
+        assert!(!is_client_frame_allowed(20, FLAG_TERMINAL, 10, 20));
+    }
+
+    #[test]
+    fn client_frame_validation_allows_shutdown_control_id_zero() {
+        assert!(is_client_frame_allowed(0, FLAG_SHUTDOWN, 10, 20));
+    }
 }
