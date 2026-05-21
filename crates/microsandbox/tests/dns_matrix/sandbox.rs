@@ -2,7 +2,7 @@
 //! configuration, install the DNS tooling we need, and surface the
 //! guest's gateway IP for scenarios that target it explicitly.
 
-use std::net::Ipv4Addr;
+use std::{net::Ipv4Addr, time::Duration};
 
 use ipnetwork::{IpNetwork, Ipv4Network};
 use microsandbox::{NetworkPolicy, Sandbox};
@@ -57,9 +57,46 @@ pub(crate) fn deny_resolver(resolver: &str) -> Result<NetworkPolicy, Box<dyn std
 /// Install `dig` inside the guest. The built-in busybox `nslookup`
 /// doesn't support `+tcp` / `+tls`, so bind-tools is required.
 async fn install_dig(sb: &Sandbox) -> Result<(), Box<dyn std::error::Error>> {
-    sb.shell("apk add --quiet --no-progress bind-tools >/dev/null 2>&1")
-        .await?;
-    Ok(())
+    let mut last_error = String::new();
+    for attempt in 1..=3 {
+        let out = sb.shell("apk add --quiet --no-progress bind-tools").await?;
+        if out.status().success {
+            let check = sb.shell("command -v dig").await?;
+            if check.status().success {
+                return Ok(());
+            }
+            last_error = format!(
+                "bind-tools installed, but dig was not found (attempt {attempt}):\n{}",
+                describe_output(&check),
+            );
+        } else {
+            last_error = format!(
+                "apk add bind-tools failed (attempt {attempt}):\n{}",
+                describe_output(&out),
+            );
+        }
+
+        if attempt < 3 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+
+    Err(format!("failed to install dig inside guest after 3 attempts:\n{last_error}").into())
+}
+
+fn describe_output(output: &microsandbox::sandbox::exec::ExecOutput) -> String {
+    let stdout = output
+        .stdout()
+        .unwrap_or_else(|_| String::from_utf8_lossy(output.stdout_bytes()).into_owned());
+    let stderr = output
+        .stderr()
+        .unwrap_or_else(|_| String::from_utf8_lossy(output.stderr_bytes()).into_owned());
+    format!(
+        "exit code: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status().code,
+        stdout.trim(),
+        stderr.trim(),
+    )
 }
 
 /// Read the guest's first configured nameserver (the sandbox gateway)

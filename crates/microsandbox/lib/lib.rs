@@ -14,6 +14,7 @@ pub mod config;
 #[allow(dead_code)]
 pub(crate) mod db;
 pub mod image;
+pub mod logs;
 pub mod runtime;
 pub mod sandbox;
 pub mod setup;

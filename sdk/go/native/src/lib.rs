@@ -51,11 +51,11 @@ use std::{
 use base64::Engine;
 use microsandbox::{
     AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
+    logs::{self, LogOptions, LogSource},
     sandbox::{
-        FsEntryKind, LogOptions, LogSource, PullPolicy, all_sandbox_metrics,
+        FsEntryKind, PullPolicy, all_sandbox_metrics,
         exec::{ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
-        logs,
     },
     snapshot::{ExportOpts, SnapshotDestination, SnapshotFormat},
     volume::{Volume, VolumeBuilder, VolumeHandle},
@@ -857,6 +857,17 @@ struct LogReadOpts {
     until_ms: Option<i64>,
     #[serde(default)]
     sources: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct LogStreamOpts {
+    #[serde(default)]
+    sources: Vec<String>,
+    since_ms: Option<i64>,
+    from_cursor: Option<String>,
+    until_ms: Option<i64>,
+    #[serde(default)]
+    follow: bool,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -2119,16 +2130,69 @@ fn parse_log_options(opts_json: *const c_char) -> Result<LogOptions, FfiError> {
     })
 }
 
-fn log_entries_json(entries: Vec<microsandbox::sandbox::LogEntry>) -> Result<String, FfiError> {
-    let mut out = Vec::with_capacity(entries.len());
-    for entry in entries {
-        out.push(serde_json::json!({
-            "source": log_source_str(entry.source),
-            "session_id": entry.session_id,
-            "timestamp_ms": entry.timestamp.timestamp_millis(),
-            "data_b64": base64::engine::general_purpose::STANDARD.encode(entry.data),
-        }));
+fn parse_log_stream_options(
+    opts_json: *const c_char,
+) -> Result<microsandbox::logs::LogStreamOptions, FfiError> {
+    use microsandbox::logs::{LogCursor, LogCursorParseError, LogStreamStart};
+
+    let raw = if opts_json.is_null() {
+        "{}".to_string()
+    } else {
+        unsafe { cstr(opts_json) }?.to_string()
+    };
+    let opts: LogStreamOpts = serde_json::from_str(&raw)
+        .map_err(|e| FfiError::invalid_argument(format!("invalid log stream opts JSON: {e}")))?;
+    if opts.since_ms.is_some() && opts.from_cursor.is_some() {
+        return Err(FfiError::invalid_argument(
+            "since_ms and from_cursor are mutually exclusive",
+        ));
     }
+    let start = if let Some(ms) = opts.since_ms {
+        let ts = chrono::DateTime::from_timestamp_millis(ms).ok_or_else(|| {
+            FfiError::invalid_argument(format!("invalid since_ms timestamp: {ms}"))
+        })?;
+        LogStreamStart::Since(ts)
+    } else if let Some(token) = opts.from_cursor.as_deref() {
+        let cursor: LogCursor = token.parse().map_err(|e: LogCursorParseError| {
+            FfiError::invalid_argument(format!("invalid from_cursor: {e}"))
+        })?;
+        LogStreamStart::From(cursor)
+    } else {
+        LogStreamStart::Beginning
+    };
+    let until = opts
+        .until_ms
+        .map(|ms| {
+            chrono::DateTime::from_timestamp_millis(ms).ok_or_else(|| {
+                FfiError::invalid_argument(format!("invalid until_ms timestamp: {ms}"))
+            })
+        })
+        .transpose()?;
+    let sources = opts
+        .sources
+        .iter()
+        .map(|s| parse_log_source(s))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(microsandbox::logs::LogStreamOptions {
+        sources,
+        start,
+        until,
+        follow: opts.follow,
+    })
+}
+
+fn log_entry_json(entry: microsandbox::logs::LogEntry) -> serde_json::Value {
+    serde_json::json!({
+        "source": log_source_str(entry.source),
+        "session_id": entry.session_id,
+        "timestamp_ms": entry.timestamp.timestamp_millis(),
+        "data_b64": base64::engine::general_purpose::STANDARD.encode(entry.data),
+        "cursor": entry.cursor.to_string(),
+    })
+}
+
+fn log_entries_json(entries: Vec<microsandbox::logs::LogEntry>) -> Result<String, FfiError> {
+    let out: Vec<serde_json::Value> = entries.into_iter().map(log_entry_json).collect();
     serde_json::to_string(&out).map_err(|e| FfiError::internal(format!("serialise logs: {e}")))
 }
 
@@ -2144,7 +2208,7 @@ pub unsafe extern "C" fn msb_sandbox_logs(
         let opts = parse_log_options(opts_json)?;
         Ok(Box::pin(async move {
             let sb = get(handle)?;
-            let entries = sb.logs(&opts).map_err(FfiError::from)?;
+            let entries = sb.logs(&opts).await.map_err(FfiError::from)?;
             log_entries_json(entries)
         }))
     })
@@ -2162,7 +2226,9 @@ pub unsafe extern "C" fn msb_sandbox_handle_logs(
         let name = unsafe { cstr(name) }?.to_owned();
         let opts = parse_log_options(opts_json)?;
         Ok(Box::pin(async move {
-            let entries = logs::read_logs(&name, &opts).map_err(FfiError::from)?;
+            let entries = logs::read_logs(&name, &opts)
+                .await
+                .map_err(FfiError::from)?;
             log_entries_json(entries)
         }))
     })
@@ -2801,6 +2867,164 @@ pub unsafe extern "C" fn msb_metrics_close(
 ) -> *mut c_char {
     run(buf, buf_len, || {
         remove_metrics(stream_handle);
+        Ok(r#"{"ok":true}"#.into())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Log streaming
+//
+// msb_sandbox_log_stream         — start; returns a stream_handle u64
+// msb_sandbox_handle_log_stream  — start by name; same return shape
+// msb_log_recv                   — block for next entry (or {"done":true})
+// msb_log_close                  — drop the stream
+// ---------------------------------------------------------------------------
+
+static NEXT_LOG_STREAM_HANDLE: AtomicU64 = AtomicU64::new(1);
+
+type LogStreamItem = Result<microsandbox::logs::LogEntry, microsandbox::MicrosandboxError>;
+type LogStreamEntry =
+    std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<LogStreamItem>>>;
+
+fn log_stream_registry() -> &'static RwLock<HashMap<Handle, LogStreamEntry>> {
+    static REG: OnceLock<RwLock<HashMap<Handle, LogStreamEntry>>> = OnceLock::new();
+    REG.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn register_log_stream(rx: tokio::sync::mpsc::Receiver<LogStreamItem>) -> Result<Handle, FfiError> {
+    let h = NEXT_LOG_STREAM_HANDLE.fetch_add(1, Ordering::Relaxed);
+    log_stream_registry()
+        .write()
+        .map_err(|_| FfiError::internal("log stream registry lock poisoned"))?
+        .insert(h, std::sync::Arc::new(tokio::sync::Mutex::new(rx)));
+    Ok(h)
+}
+
+fn get_log_stream(handle: Handle) -> Result<LogStreamEntry, FfiError> {
+    log_stream_registry()
+        .read()
+        .map_err(|_| FfiError::internal("log stream registry lock poisoned"))?
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| FfiError::invalid_handle(handle))
+}
+
+fn remove_log_stream(handle: Handle) {
+    let _ = log_stream_registry().write().map(|mut r| r.remove(&handle));
+}
+
+/// Spawn a forwarder that drives the engine stream into an unbounded mpsc
+/// channel, register the receiver, and return the handle.
+async fn start_log_stream_for(
+    log_dir_name: &str,
+    opts: microsandbox::logs::LogStreamOptions,
+) -> Result<Handle, FfiError> {
+    let stream = microsandbox::logs::log_stream(log_dir_name, &opts)
+        .await
+        .map_err(FfiError::from)?;
+    let mut stream = Box::pin(stream);
+    let (tx, rx) = tokio::sync::mpsc::channel::<LogStreamItem>(16);
+    // The forwarder task is moved off the foreground future so the caller
+    // can return the stream handle immediately. The task stops naturally
+    // when the receiver is dropped (msb_log_close).
+    tokio::spawn(async move {
+        while let Some(item) = stream.next().await {
+            if tx.send(item).await.is_err() {
+                break;
+            }
+        }
+    });
+    register_log_stream(rx)
+}
+
+/// Start a log stream against a live sandbox handle. Returns
+/// `{"stream_handle":<u64>}`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_log_stream(
+    cancel_id: u64,
+    handle: Handle,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let opts = parse_log_stream_options(opts_json)?;
+        Ok(Box::pin(async move {
+            let sb = get(handle)?;
+            let name = sb.name().to_string();
+            let sh = start_log_stream_for(&name, opts).await?;
+            Ok(format!(r#"{{"stream_handle":{sh}}}"#))
+        }))
+    })
+}
+
+/// Start a log stream against a sandbox identified by name (no live handle
+/// required). Returns `{"stream_handle":<u64>}`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_handle_log_stream(
+    cancel_id: u64,
+    name: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let name = unsafe { cstr(name) }?.to_owned();
+        let opts = parse_log_stream_options(opts_json)?;
+        Ok(Box::pin(async move {
+            let sh = start_log_stream_for(&name, opts).await?;
+            Ok(format!(r#"{{"stream_handle":{sh}}}"#))
+        }))
+    })
+}
+
+/// Block for the next log entry on this stream. Returns a single log-entry
+/// JSON object, or `{"done":true}` when the stream has ended.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_log_recv(
+    cancel_id: u64,
+    stream_handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    let result: Result<(), FfiError> = (|| -> Result<(), FfiError> {
+        let token = lookup_cancel_token(cancel_id)?;
+        let entry = get_log_stream(stream_handle)?;
+        let mut recv = entry
+            .try_lock()
+            .map_err(|_| FfiError::internal("log stream mutex busy"))?;
+        let json = rt().block_on(async {
+            tokio::select! {
+                item = recv.recv() => {
+                    match item {
+                        None => Ok(r#"{"done":true}"#.to_string()),
+                        Some(Ok(e)) => serde_json::to_string(&log_entry_json(e))
+                            .map_err(|e| FfiError::internal(format!("serialise log entry: {e}"))),
+                        Some(Err(e)) => Err(FfiError::from(e)),
+                    }
+                }
+                _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
+            }
+        })?;
+        write_output(buf, buf_len, &json)
+    })();
+    cancel_unregister(cancel_id);
+    match result {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => err_ptr(e),
+    }
+}
+
+/// Close (drop) a log stream. The background driver task exits when the
+/// channel receiver is dropped.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_log_close(
+    stream_handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run(buf, buf_len, || {
+        remove_log_stream(stream_handle);
         Ok(r#"{"ok":true}"#.into())
     })
 }

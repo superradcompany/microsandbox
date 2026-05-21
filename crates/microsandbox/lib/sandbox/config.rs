@@ -412,11 +412,9 @@ impl Default for SandboxConfig {
 
 #[cfg(test)]
 mod tests {
-    use microsandbox_image::ImageConfig;
-
-    use crate::sandbox::{RootfsSource, VolumeMount};
-
     use super::{SandboxConfig, merge_env};
+    use crate::sandbox::{RootfsSource, VolumeMount};
+    use microsandbox_image::ImageConfig;
 
     #[test]
     fn test_merge_env_image_base_with_user_override() {

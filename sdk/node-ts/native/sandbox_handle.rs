@@ -150,11 +150,26 @@ impl JsSandboxHandle {
     pub async fn logs(&self, opts: Option<LogOptions>) -> Result<Vec<LogEntry>> {
         let rust_opts =
             crate::sandbox::log_options_from_js(opts).map_err(napi::Error::from_reason)?;
-        let entries = self.inner.logs(&rust_opts).map_err(to_napi_error)?;
+        let entries = self.inner.logs(&rust_opts).await.map_err(to_napi_error)?;
         Ok(entries
             .into_iter()
             .map(crate::sandbox::log_entry_to_js)
             .collect())
+    }
+
+    /// Stream captured output as it appears, with optional follow.
+    ///
+    /// Works without starting the sandbox; with `follow: true`, the
+    /// stream picks up new entries the moment they land in
+    /// `exec.log`.
+    #[napi]
+    pub async fn log_stream(
+        &self,
+        opts: Option<LogStreamOptions>,
+    ) -> Result<crate::sandbox::JsLogStream> {
+        let rust_opts =
+            crate::sandbox::log_stream_options_from_js(opts).map_err(napi::Error::from_reason)?;
+        crate::sandbox::spawn_log_stream(self.inner.name(), rust_opts).await
     }
 
     /// Snapshot this (stopped) sandbox under a bare name.
