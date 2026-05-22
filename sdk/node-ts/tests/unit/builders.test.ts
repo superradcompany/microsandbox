@@ -371,7 +371,12 @@ describe("NetworkBuilder secret passthrough", () => {
       };
     };
 
-    expect(cfg.secrets.onViolation.passthrough).toHaveLength(2);
+    expect(cfg.secrets.onViolation).toEqual({
+      Passthrough: [
+        { Exact: "api.anthropic.com" },
+        { Wildcard: "*.anthropic.com" },
+      ],
+    });
   });
 
   it("builds per-secret passthrough violation policy", () => {
