@@ -191,6 +191,7 @@ export interface NapiSandbox {
   detach(): Promise<void>;
   removePersisted(): Promise<void>;
   logs(opts?: LogOptions): Promise<LogEntry[]>;
+  logStream(opts?: LogStreamOptions): Promise<NapiLogStream>;
 }
 
 export interface NapiSandboxHandle {
@@ -209,6 +210,7 @@ export interface NapiSandboxHandle {
   kill(): Promise<void>;
   remove(): Promise<void>;
   logs(opts?: LogOptions): Promise<LogEntry[]>;
+  logStream(opts?: LogStreamOptions): Promise<NapiLogStream>;
   snapshot(name: string): Promise<NapiSnapshot>;
   snapshotTo(path: string): Promise<NapiSnapshot>;
 }
@@ -219,6 +221,7 @@ export interface LogEntry {
   readonly source: string;
   readonly sessionId: number | null;
   readonly data: Buffer;
+  readonly cursor: string;
 }
 
 /** Native filter object accepted by `logs()`. */
@@ -227,6 +230,20 @@ export interface LogOptions {
   sinceMs?: number;
   untilMs?: number;
   sources?: string[];
+}
+
+/** Native option object accepted by `logStream()`. */
+export interface LogStreamOptions {
+  sources?: string[];
+  sinceMs?: number;
+  fromCursor?: string;
+  untilMs?: number;
+  follow?: boolean;
+}
+
+/** Native stream returned by `logStream()`. */
+export interface NapiLogStream extends AsyncIterable<LogEntry> {
+  recv(): Promise<LogEntry | null>;
 }
 
 export interface NapiSandboxInfo {

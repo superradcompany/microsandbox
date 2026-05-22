@@ -123,6 +123,10 @@ typedef char *(*msb_all_sandbox_metrics_fn)(uint64_t cancel_id, uint8_t *buf, si
 typedef char *(*msb_sandbox_handle_metrics_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_logs_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_logs_fn)(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_log_stream_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_log_stream_fn)(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_log_recv_fn)(uint64_t cancel_id, uint64_t stream_handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_log_close_fn)(uint64_t stream_handle, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_volume_create_fn)(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_volume_remove_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
@@ -226,6 +230,10 @@ static msb_all_sandbox_metrics_fn  ptr_msb_all_sandbox_metrics  = NULL;
 static msb_sandbox_handle_metrics_fn ptr_msb_sandbox_handle_metrics = NULL;
 static msb_sandbox_logs_fn          ptr_msb_sandbox_logs          = NULL;
 static msb_sandbox_handle_logs_fn   ptr_msb_sandbox_handle_logs   = NULL;
+static msb_sandbox_log_stream_fn        ptr_msb_sandbox_log_stream        = NULL;
+static msb_sandbox_handle_log_stream_fn ptr_msb_sandbox_handle_log_stream = NULL;
+static msb_log_recv_fn                  ptr_msb_log_recv                  = NULL;
+static msb_log_close_fn                 ptr_msb_log_close                 = NULL;
 static msb_volume_create_fn       ptr_msb_volume_create       = NULL;
 static msb_volume_remove_fn       ptr_msb_volume_remove       = NULL;
 static msb_volume_list_fn         ptr_msb_volume_list         = NULL;
@@ -353,6 +361,10 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_handle_metrics);
 	RESOLVE(msb_sandbox_logs);
 	RESOLVE(msb_sandbox_handle_logs);
+	RESOLVE(msb_sandbox_log_stream);
+	RESOLVE(msb_sandbox_handle_log_stream);
+	RESOLVE(msb_log_recv);
+	RESOLVE(msb_log_close);
 	RESOLVE(msb_volume_create);
 	RESOLVE(msb_volume_remove);
 	RESOLVE(msb_volume_list);
@@ -569,6 +581,18 @@ char *call_msb_sandbox_logs(uint64_t cancel_id, uint64_t handle, const char *opt
 }
 char *call_msb_sandbox_handle_logs(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_handle_logs ? ptr_msb_sandbox_handle_logs(cancel_id, name, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_log_stream(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_log_stream ? ptr_msb_sandbox_log_stream(cancel_id, handle, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_log_stream(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_log_stream ? ptr_msb_sandbox_handle_log_stream(cancel_id, name, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_log_recv(uint64_t cancel_id, uint64_t stream_handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_log_recv ? ptr_msb_log_recv(cancel_id, stream_handle, buf, buf_len) : NULL;
+}
+char *call_msb_log_close(uint64_t stream_handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_log_close ? ptr_msb_log_close(stream_handle, buf, buf_len) : NULL;
 }
 char *call_msb_volume_create(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_volume_create ? ptr_msb_volume_create(cancel_id, name, opts_json, buf, buf_len) : NULL;
@@ -1454,6 +1478,25 @@ type LogEntry struct {
 	SessionID   *uint64 `json:"session_id"`
 	TimestampMs int64   `json:"timestamp_ms"`
 	DataB64     string  `json:"data_b64"`
+	Cursor      string  `json:"cursor"`
+}
+
+// LogStreamOptions configures a live log stream. `SinceMs` and
+// `FromCursor` are mutually exclusive.
+type LogStreamOptions struct {
+	Sources    []string `json:"sources,omitempty"`
+	SinceMs    *int64   `json:"since_ms,omitempty"`
+	FromCursor *string  `json:"from_cursor,omitempty"`
+	UntilMs    *int64   `json:"until_ms,omitempty"`
+	Follow     bool     `json:"follow,omitempty"`
+}
+
+func logStreamOptionsJSON(opts LogStreamOptions) (*C.char, error) {
+	b, err := json.Marshal(opts)
+	if err != nil {
+		return nil, fmt.Errorf("marshal log stream opts: %w", err)
+	}
+	return C.CString(string(b)), nil
 }
 
 func logsOptionsJSON(opts LogOptions) (*C.char, error) {
@@ -2191,6 +2234,119 @@ func (h *MetricsStreamHandle) Close() error {
 	}
 	buf := make([]byte, defaultBufSize)
 	errPtr := C.call_msb_metrics_close(h.handle, (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+	if errPtr != nil {
+		msg := C.GoString(errPtr)
+		C.call_msb_free_string(errPtr)
+		var e Error
+		if jerr := json.Unmarshal([]byte(msg), &e); jerr != nil {
+			e = Error{Kind: KindInternal, Message: msg}
+		}
+		return &e
+	}
+	return nil
+}
+
+// =============================================================================
+// Log streaming
+
+// LogStreamHandle is an opaque reference to a running log stream. Call Close
+// to release Rust-side resources and stop the background task.
+type LogStreamHandle struct {
+	handle C.uint64_t
+}
+
+// LogStream starts a log stream against a live sandbox handle. Caller must
+// Close the returned handle to release Rust-side resources.
+func (s *Sandbox) LogStream(ctx context.Context, opts LogStreamOptions) (*LogStreamHandle, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cOpts, err := logStreamOptionsJSON(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer C.free(unsafe.Pointer(cOpts))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_log_stream(cancelID, s.h(), cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		StreamHandle uint64 `json:"stream_handle"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, fmt.Errorf("parse log_stream response: %w", err)
+	}
+	return &LogStreamHandle{handle: C.uint64_t(resp.StreamHandle)}, nil
+}
+
+// SandboxHandleLogStream starts a log stream identified by name without
+// requiring a live sandbox handle.
+func SandboxHandleLogStream(
+	ctx context.Context,
+	name string,
+	opts LogStreamOptions,
+) (*LogStreamHandle, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	cOpts, err := logStreamOptionsJSON(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer C.free(unsafe.Pointer(cOpts))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_log_stream(cancelID, cName, cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		StreamHandle uint64 `json:"stream_handle"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, fmt.Errorf("parse log_stream response: %w", err)
+	}
+	return &LogStreamHandle{handle: C.uint64_t(resp.StreamHandle)}, nil
+}
+
+// Recv blocks until the next log entry arrives or ctx is cancelled. Returns
+// nil when the stream has ended (snapshot drained, until reached, or fatal
+// stream error has already been surfaced on a prior call).
+func (h *LogStreamHandle) Recv(ctx context.Context) (*LogEntry, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_log_recv(cancelID, h.handle, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var done struct {
+		Done bool `json:"done"`
+	}
+	if jerr := json.Unmarshal([]byte(out), &done); jerr == nil && done.Done {
+		return nil, nil
+	}
+	var entry LogEntry
+	if err := json.Unmarshal([]byte(out), &entry); err != nil {
+		return nil, fmt.Errorf("parse log_recv response: %w", err)
+	}
+	return &entry, nil
+}
+
+// Close drops the stream handle. The background Rust task stops when the
+// channel is closed.
+func (h *LogStreamHandle) Close() error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	buf := make([]byte, defaultBufSize)
+	errPtr := C.call_msb_log_close(h.handle, (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
 	if errPtr != nil {
 		msg := C.GoString(errPtr)
 		C.call_msb_free_string(errPtr)

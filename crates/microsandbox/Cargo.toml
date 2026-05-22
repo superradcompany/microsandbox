@@ -28,6 +28,7 @@ net = ["dep:microsandbox-network", "microsandbox-runtime/net"]
 [dependencies]
 astral-tokio-tar.workspace = true
 async-compression = { workspace = true, features = ["tokio", "zstd", "gzip"] }
+base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 ciborium.workspace = true
@@ -48,6 +49,7 @@ microsandbox-protocol = { version = "0.4.6", path = "../protocol" }
 microsandbox-runtime = { version = "0.4.6", path = "../runtime", default-features = false }
 microsandbox-utils = { version = "0.4.6", path = "../utils" }
 nix = { workspace = true, features = ["process", "signal"] }
+notify.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 scopeguard.workspace = true

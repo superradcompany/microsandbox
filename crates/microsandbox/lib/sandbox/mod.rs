@@ -12,7 +12,6 @@ pub mod exec;
 pub mod fs;
 mod handle;
 pub mod init;
-pub mod logs;
 mod metrics;
 mod patch;
 mod types;
@@ -64,7 +63,6 @@ pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
 pub use handle::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_STOP_TIMEOUT, SandboxHandle};
 pub use init::{HandoffInit, InitOptionsBuilder};
-pub use logs::{LogEntry, LogOptions, LogSource};
 pub use metrics::{SandboxMetrics, all_sandbox_metrics};
 pub use microsandbox_image::{PullPolicy, PullProgress, PullProgressHandle};
 #[cfg(feature = "net")]
@@ -501,8 +499,29 @@ impl Sandbox {
     /// running and stopped sandboxes alike — there is no protocol
     /// traffic. Pass `LogOptions::default()` for "everything,
     /// stdout+stderr".
-    pub fn logs(&self, opts: &LogOptions) -> MicrosandboxResult<Vec<LogEntry>> {
-        logs::read_logs(self.name(), opts)
+    pub async fn logs(
+        &self,
+        opts: &crate::logs::LogOptions,
+    ) -> MicrosandboxResult<Vec<crate::logs::LogEntry>> {
+        crate::logs::read_logs(self.name(), opts).await
+    }
+
+    /// Stream captured output as it appears, with optional follow.
+    ///
+    /// Backed by the same on-disk `exec.log` as [`logs`](Self::logs),
+    /// but yields entries lazily as a [`futures::Stream`]. Pass
+    /// `LogStreamOptions { follow: true, .. }` to keep the stream
+    /// open past current EOF and pick up new entries as they are
+    /// written; otherwise the stream drains the current contents and
+    /// ends. See the type docs on [`crate::logs::LogStreamOptions`] and
+    /// [`crate::logs::LogStreamStart`] for replay / resume options.
+    pub async fn log_stream(
+        &self,
+        opts: &crate::logs::LogStreamOptions,
+    ) -> MicrosandboxResult<
+        impl futures::Stream<Item = MicrosandboxResult<crate::logs::LogEntry>> + Send + 'static,
+    > {
+        crate::logs::log_stream(self.name(), opts).await
     }
 
     /// Low-level access to the guest agent client. Use this for custom

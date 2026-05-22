@@ -118,6 +118,44 @@ impl PySandboxHandle {
         })
     }
 
+    /// Stream captured output as it appears, with optional follow.
+    ///
+    /// Works without starting the sandbox; with `follow=True`, the
+    /// stream picks up new entries the moment they land in
+    /// `exec.log`. `since_ms` and `from_cursor` are mutually
+    /// exclusive.
+    #[pyo3(signature = (
+        sources = None,
+        since_ms = None,
+        from_cursor = None,
+        until_ms = None,
+        follow = false,
+    ))]
+    fn log_stream<'py>(
+        &self,
+        py: Python<'py>,
+        sources: Option<Vec<String>>,
+        since_ms: Option<f64>,
+        from_cursor: Option<String>,
+        until_ms: Option<f64>,
+        follow: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let opts = crate::logs::parse_log_stream_options(
+            sources,
+            since_ms,
+            from_cursor,
+            until_ms,
+            follow,
+        )?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let name = guard.name().to_string();
+            drop(guard);
+            crate::logs::open_log_stream(&name, opts).await
+        })
+    }
+
     /// Start the sandbox.
     #[pyo3(signature = (*, detached = false))]
     fn start<'py>(&self, py: Python<'py>, detached: bool) -> PyResult<Bound<'py, PyAny>> {

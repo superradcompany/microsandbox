@@ -80,8 +80,13 @@ export type {
 } from "./image.js";
 
 // Logs
-export { LogEntry } from "./logs.js";
-export type { LogReadOptions, LogReadSource, LogSource } from "./logs.js";
+export { LogEntry, LogStream } from "./logs.js";
+export type {
+  LogReadOptions,
+  LogReadSource,
+  LogSource,
+  LogStreamOptions,
+} from "./logs.js";
 
 // Metrics streaming
 export { MetricsStream } from "./metrics-stream.js";

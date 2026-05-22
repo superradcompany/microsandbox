@@ -43,6 +43,7 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<metrics::PyMetricsStream>()?;
     m.add_class::<metrics::PySandboxMetrics>()?;
     m.add_class::<logs::PyLogEntry>()?;
+    m.add_class::<logs::PyLogStream>()?;
     m.add_class::<sandbox::PyPullSession>()?;
     m.add_class::<exec::PyExecEvent>()?;
     m.add_class::<fs::PyFsEntry>()?;

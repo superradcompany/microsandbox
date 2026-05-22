@@ -6,9 +6,12 @@ import type {
 } from "./internal/napi.js";
 import {
   LogEntry,
+  LogStream,
   type LogReadOptions,
+  type LogStreamOptions,
   logEntryFromNapi,
   logReadOptionsToNapi,
+  logStreamOptionsToNapi,
 } from "./logs.js";
 import { Sandbox } from "./sandbox.js";
 import type { SandboxStatus } from "./sandbox-status.js";
@@ -130,6 +133,20 @@ export class SandboxHandle {
     const napiOpts = logReadOptionsToNapi(opts);
     const raw = await withMappedErrors(() => live.logs(napiOpts));
     return raw.map(logEntryFromNapi);
+  }
+
+  /**
+   * Stream captured output as it appears, with optional follow.
+   *
+   * Works without starting the sandbox; with `{ follow: true }`,
+   * the stream picks up new entries the moment they land in
+   * `exec.log`.
+   */
+  async logStream(opts?: LogStreamOptions): Promise<LogStream> {
+    const live = this.requireLive();
+    const napiOpts = logStreamOptionsToNapi(opts);
+    const raw = await withMappedErrors(() => live.logStream(napiOpts));
+    return new LogStream(raw);
   }
 
   /**

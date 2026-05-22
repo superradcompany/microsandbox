@@ -41,6 +41,20 @@ pub struct JsMetricsStream {
     rx: Arc<Mutex<tokio::sync::mpsc::Receiver<napi::Result<SandboxMetrics>>>>,
 }
 
+/// A streaming subscription for sandbox log entries.
+///
+/// Supports both manual `recv()` calls and `for await...of` iteration:
+/// ```js
+/// const stream = await sb.logStream({ follow: true });
+/// for await (const entry of stream) {
+///   process.stdout.write(entry.data);
+/// }
+/// ```
+#[napi(async_iterator, js_name = "LogStream")]
+pub struct JsLogStream {
+    rx: Arc<Mutex<tokio::sync::mpsc::Receiver<napi::Result<LogEntry>>>>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -389,9 +403,25 @@ impl Sandbox {
         let sb = guard.as_ref().ok_or_else(consumed_error)?;
         let name = sb.name().to_string();
         let rust_opts = log_options_from_js(opts).map_err(napi::Error::from_reason)?;
-        let entries =
-            microsandbox::sandbox::logs::read_logs(&name, &rust_opts).map_err(to_napi_error)?;
+        let entries = microsandbox::logs::read_logs(&name, &rust_opts)
+            .await
+            .map_err(to_napi_error)?;
         Ok(entries.into_iter().map(log_entry_to_js).collect())
+    }
+
+    /// Stream captured output as it appears, with optional follow.
+    ///
+    /// Returns an async iterable of `LogEntry`. Each entry carries
+    /// an opaque `cursor` token suitable for passing back via
+    /// `fromCursor` on a later call to resume exactly after that
+    /// entry.
+    #[napi]
+    pub async fn log_stream(&self, opts: Option<LogStreamOptions>) -> Result<JsLogStream> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let name = sb.name().to_string();
+        let rust_opts = log_stream_options_from_js(opts).map_err(napi::Error::from_reason)?;
+        spawn_log_stream(&name, rust_opts).await
     }
 }
 
@@ -433,28 +463,91 @@ impl AsyncGenerator for JsMetricsStream {
     }
 }
 
-pub fn log_entry_to_js(entry: microsandbox::sandbox::LogEntry) -> LogEntry {
+#[napi]
+impl JsLogStream {
+    /// Receive the next entry. Returns `null` when the stream ends
+    /// (snapshot drained, `until` reached, or fatal stream error
+    /// already surfaced).
+    #[napi]
+    pub async fn recv(&self) -> Result<Option<LogEntry>> {
+        let mut guard = self.rx.lock().await;
+        match guard.recv().await {
+            Some(result) => Ok(Some(result?)),
+            None => Ok(None),
+        }
+    }
+}
+
+#[napi]
+impl AsyncGenerator for JsLogStream {
+    type Yield = LogEntry;
+    type Next = ();
+    type Return = ();
+
+    fn next(
+        &mut self,
+        _value: Option<Self::Next>,
+    ) -> impl std::future::Future<Output = Result<Option<Self::Yield>>> + Send + 'static {
+        let rx = Arc::clone(&self.rx);
+        async move {
+            let mut guard = rx.lock().await;
+            match guard.recv().await {
+                Some(result) => Ok(Some(result?)),
+                None => Ok(None),
+            }
+        }
+    }
+}
+
+/// Open a log stream against the given sandbox name and bridge it
+/// onto a JS-side mpsc channel. Shared between `Sandbox::log_stream`
+/// and `SandboxHandle::log_stream`.
+pub async fn spawn_log_stream(
+    name: &str,
+    opts: microsandbox::logs::LogStreamOptions,
+) -> Result<JsLogStream> {
+    let mut stream = Box::pin(
+        microsandbox::logs::log_stream(name, &opts)
+            .await
+            .map_err(to_napi_error)?,
+    );
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move {
+        while let Some(result) = stream.next().await {
+            let item = result.map(log_entry_to_js).map_err(to_napi_error);
+            if tx.send(item).await.is_err() {
+                break;
+            }
+        }
+    });
+    Ok(JsLogStream {
+        rx: Arc::new(Mutex::new(rx)),
+    })
+}
+
+pub fn log_entry_to_js(entry: microsandbox::logs::LogEntry) -> LogEntry {
     let source = match entry.source {
-        microsandbox::sandbox::LogSource::Stdout => "stdout",
-        microsandbox::sandbox::LogSource::Stderr => "stderr",
-        microsandbox::sandbox::LogSource::Output => "output",
-        microsandbox::sandbox::LogSource::System => "system",
+        microsandbox::logs::LogSource::Stdout => "stdout",
+        microsandbox::logs::LogSource::Stderr => "stderr",
+        microsandbox::logs::LogSource::Output => "output",
+        microsandbox::logs::LogSource::System => "system",
     };
     LogEntry {
         timestamp_ms: entry.timestamp.timestamp_millis() as f64,
         source: source.to_string(),
         session_id: entry.session_id.map(|id| id as f64),
         data: entry.data.to_vec().into(),
+        cursor: entry.cursor.to_string(),
     }
 }
 
 pub fn log_options_from_js(
     opts: Option<LogOptions>,
-) -> std::result::Result<microsandbox::sandbox::LogOptions, String> {
+) -> std::result::Result<microsandbox::logs::LogOptions, String> {
     let Some(o) = opts else {
-        return Ok(microsandbox::sandbox::LogOptions::default());
+        return Ok(microsandbox::logs::LogOptions::default());
     };
-    let mut out = microsandbox::sandbox::LogOptions {
+    let mut out = microsandbox::logs::LogOptions {
         tail: o.tail.map(|n| n as usize),
         since: o.since_ms.and_then(ms_to_datetime),
         until: o.until_ms.and_then(ms_to_datetime),
@@ -463,16 +556,16 @@ pub fn log_options_from_js(
     if let Some(srcs) = o.sources {
         for s in srcs {
             match s.as_str() {
-                "stdout" => out.sources.push(microsandbox::sandbox::LogSource::Stdout),
-                "stderr" => out.sources.push(microsandbox::sandbox::LogSource::Stderr),
-                "output" => out.sources.push(microsandbox::sandbox::LogSource::Output),
-                "system" => out.sources.push(microsandbox::sandbox::LogSource::System),
+                "stdout" => out.sources.push(microsandbox::logs::LogSource::Stdout),
+                "stderr" => out.sources.push(microsandbox::logs::LogSource::Stderr),
+                "output" => out.sources.push(microsandbox::logs::LogSource::Output),
+                "system" => out.sources.push(microsandbox::logs::LogSource::System),
                 "all" => {
                     out.sources = vec![
-                        microsandbox::sandbox::LogSource::Stdout,
-                        microsandbox::sandbox::LogSource::Stderr,
-                        microsandbox::sandbox::LogSource::Output,
-                        microsandbox::sandbox::LogSource::System,
+                        microsandbox::logs::LogSource::Stdout,
+                        microsandbox::logs::LogSource::Stderr,
+                        microsandbox::logs::LogSource::Output,
+                        microsandbox::logs::LogSource::System,
                     ];
                 }
                 other => return Err(format!("unknown log source {other:?}")),
@@ -480,6 +573,57 @@ pub fn log_options_from_js(
         }
     }
     Ok(out)
+}
+
+pub fn log_stream_options_from_js(
+    opts: Option<LogStreamOptions>,
+) -> std::result::Result<microsandbox::logs::LogStreamOptions, String> {
+    let Some(o) = opts else {
+        return Ok(microsandbox::logs::LogStreamOptions::default());
+    };
+    if o.since_ms.is_some() && o.from_cursor.is_some() {
+        return Err("sinceMs and fromCursor are mutually exclusive".into());
+    }
+    let start = if let Some(ms) = o.since_ms {
+        let ts = ms_to_datetime(ms).ok_or_else(|| format!("invalid sinceMs value {ms}"))?;
+        microsandbox::logs::LogStreamStart::Since(ts)
+    } else if let Some(token) = o.from_cursor.as_deref() {
+        let cursor: microsandbox::logs::LogCursor =
+            token
+                .parse()
+                .map_err(|e: microsandbox::logs::LogCursorParseError| {
+                    format!("invalid fromCursor: {e}")
+                })?;
+        microsandbox::logs::LogStreamStart::From(cursor)
+    } else {
+        microsandbox::logs::LogStreamStart::Beginning
+    };
+    let mut sources = Vec::new();
+    if let Some(srcs) = o.sources {
+        for s in srcs {
+            match s.as_str() {
+                "stdout" => sources.push(microsandbox::logs::LogSource::Stdout),
+                "stderr" => sources.push(microsandbox::logs::LogSource::Stderr),
+                "output" => sources.push(microsandbox::logs::LogSource::Output),
+                "system" => sources.push(microsandbox::logs::LogSource::System),
+                "all" => {
+                    sources = vec![
+                        microsandbox::logs::LogSource::Stdout,
+                        microsandbox::logs::LogSource::Stderr,
+                        microsandbox::logs::LogSource::Output,
+                        microsandbox::logs::LogSource::System,
+                    ];
+                }
+                other => return Err(format!("unknown log source {other:?}")),
+            }
+        }
+    }
+    Ok(microsandbox::logs::LogStreamOptions {
+        sources,
+        start,
+        until: o.until_ms.and_then(ms_to_datetime),
+        follow: o.follow.unwrap_or(false),
+    })
 }
 
 fn ms_to_datetime(ms: f64) -> Option<chrono::DateTime<chrono::Utc>> {

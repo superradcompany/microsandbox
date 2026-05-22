@@ -1,24 +1,36 @@
 //! `msb logs` command — read the captured output of a sandbox.
 //!
-//! Reads `<sandbox-dir>/logs/exec.log` (the JSON Lines file produced by
+//! Backed by `microsandbox::logs::read_logs` for the historical
+//! snapshot and `microsandbox::logs::log_stream` for `--follow`. Both
+//! read `<sandbox-dir>/logs/exec.log` (the JSON Lines file produced by
 //! the runtime's relay tap, see `crates/runtime/lib/exec_log.rs`),
-//! decodes each entry, and renders it to the terminal per
-//! `design/runtime/sandbox-logs.md` D5.
+//! plus `runtime.log` and `kernel.log` when `--source system` is in
+//! scope. This command decodes each entry and renders it to the
+//! terminal per `design/runtime/sandbox-logs.md` D5.
 //!
 //! Supports filtering by source (stdout/stderr/system), time window,
-//! tail count, regex search, follow mode (polling), and JSON-Lines
-//! passthrough. ANSI escape sequences are passed through to TTYs and
-//! stripped on pipes by default (matching `ls`/`grep` convention).
+//! tail count, regex search, follow mode (filesystem-watch driven),
+//! and JSON-Lines passthrough. ANSI escape sequences are passed
+//! through to TTYs and stripped on pipes by default (matching
+//! `ls`/`grep` convention).
 
 use std::io::{IsTerminal, Write};
 use std::path::Path;
+use std::pin::pin;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use chrono::{DateTime, Utc};
+use base64::Engine as _;
+use chrono::{DateTime, SecondsFormat, Utc};
 use clap::{Args, ValueEnum};
 use console::style;
-use microsandbox_utils::log_text::{base64_decode, split_leading_timestamp, strip_ansi};
+use futures::StreamExt;
+use microsandbox::MicrosandboxError;
+use microsandbox::logs::{
+    self, LogEntry as EngineLogEntry, LogOptions, LogSource, LogStreamOptions, LogStreamStart,
+};
+use microsandbox_runtime::boot_error::BootError;
+use microsandbox_utils::log_text::{base64_decode, strip_ansi};
 use regex::Regex;
 use serde::Deserialize;
 
@@ -161,7 +173,7 @@ struct LogEntry {
 
 /// Execute the `msb logs` command.
 pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
-    let log_dir = microsandbox::sandbox::logs::log_dir_for(&args.name);
+    let log_dir = logs::log_dir_for(&args.name);
     if !log_dir.exists() {
         return Err(anyhow!(
             "no logs directory for sandbox {:?} (sandbox not found?)",
@@ -169,7 +181,8 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
         ));
     }
 
-    let sources = resolve_sources(&args.source);
+    let mask = resolve_sources(&args.source);
+    let engine_sources = mask.to_engine_sources();
     let since = parse_time_arg(args.since.as_deref())?;
     let until = parse_time_arg(args.until.as_deref())?;
     let grep_re = match args.grep.as_deref() {
@@ -187,25 +200,63 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
     // boot-error.json sits next to exec.log in the same log_dir).
     render_boot_error_if_present(&log_dir, &args.name, args.json)?;
 
-    // Initial dump (history).
-    let mut entries = read_all_entries(&log_dir, sources)?;
-    apply_filters(&mut entries, since, until, grep_re.as_ref(), args.tail);
-    render_entries(&entries, &args, color_policy)?;
-
-    // Optional follow mode — poll the file for new entries.
-    if args.follow {
-        let last_t = entries.last().map(|e| e.t.clone());
-        follow_loop(
-            &log_dir,
-            sources,
-            &args,
-            color_policy,
-            last_t,
-            grep_re.as_ref(),
-        )
-        .await?;
+    // Snapshot: drain the chronologically-sorted history. `read_logs`
+    // applies tail / since / until / source filtering; --grep is
+    // applied locally so it can match against the decoded body string.
+    let snapshot_opts = LogOptions {
+        tail: args.tail,
+        since,
+        until,
+        sources: engine_sources.clone(),
+    };
+    let snapshot = logs::read_logs_snapshot(&args.name, &snapshot_opts)
+        .await
+        .context("reading logs")?;
+    for entry in &snapshot.entries {
+        let cli_entry = engine_entry_to_cli(entry);
+        if grep_matches(grep_re.as_ref(), &cli_entry.d) {
+            render_entry(&cli_entry, &args, color_policy)?;
+        }
     }
 
+    if !args.follow {
+        return Ok(());
+    }
+
+    // Follow: resume from the exact snapshot end cursor so entries
+    // written between the snapshot drain and stream startup are not
+    // skipped.
+    let stream_opts = LogStreamOptions {
+        sources: engine_sources,
+        start: LogStreamStart::From(snapshot.cursor),
+        until,
+        follow: true,
+    };
+    let mut stream = pin!(
+        logs::log_stream(&args.name, &stream_opts)
+            .await
+            .context("starting log stream")?
+    );
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(entry) => {
+                let cli_entry = engine_entry_to_cli(&entry);
+                if grep_matches(grep_re.as_ref(), &cli_entry.d) {
+                    render_entry(&cli_entry, &args, color_policy)?;
+                }
+            }
+            Err(MicrosandboxError::MissedRotation {
+                dropped_from_offset,
+            }) => {
+                eprintln!(
+                    "log follower fell behind: missed rotation at offset {dropped_from_offset}. \
+                     restart `msb logs -f` to resume."
+                );
+                return Ok(());
+            }
+            Err(e) => return Err(anyhow!(e)),
+        }
+    }
     Ok(())
 }
 
@@ -252,8 +303,23 @@ struct SourceMask {
 }
 
 impl SourceMask {
-    fn includes_exec_sources(&self) -> bool {
-        self.stdout || self.stderr || self.output
+    /// Translate the mask into the engine's flat source list. Order
+    /// is fixed (stdout, stderr, output, system) for stable behavior.
+    fn to_engine_sources(self) -> Vec<LogSource> {
+        let mut out = Vec::with_capacity(4);
+        if self.stdout {
+            out.push(LogSource::Stdout);
+        }
+        if self.stderr {
+            out.push(LogSource::Stderr);
+        }
+        if self.output {
+            out.push(LogSource::Output);
+        }
+        if self.system {
+            out.push(LogSource::System);
+        }
+        out
     }
 }
 
@@ -262,7 +328,7 @@ impl SourceMask {
 //--------------------------------------------------------------------------------------------------
 
 fn render_boot_error_if_present(log_dir: &Path, name: &str, json_mode: bool) -> anyhow::Result<()> {
-    let boot_err = match microsandbox_runtime::boot_error::BootError::read(log_dir) {
+    let boot_err = match BootError::read(log_dir) {
         Ok(Some(b)) => b,
         Ok(None) => return Ok(()),
         Err(_) => return Ok(()),
@@ -288,166 +354,44 @@ fn render_boot_error_if_present(log_dir: &Path, name: &str, json_mode: bool) -> 
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Helpers — reading
+// Functions: Helpers — engine bridge
 //--------------------------------------------------------------------------------------------------
 
-/// Read all entries from `exec.log` (and its rotated siblings) plus
-/// optional system sources, ordered chronologically.
-fn read_all_entries(log_dir: &Path, sources: SourceMask) -> anyhow::Result<Vec<LogEntry>> {
-    let mut entries: Vec<LogEntry> = Vec::new();
-
-    if sources.includes_exec_sources() {
-        // Rotated files first (.3 → .2 → .1 → current) so output is
-        // chronologically ordered.
-        for suffix in [".3", ".2", ".1", ""].iter() {
-            let path = if suffix.is_empty() {
-                log_dir.join("exec.log")
-            } else {
-                log_dir.join(format!("exec.log{suffix}"))
-            };
-            if !path.exists() {
-                continue;
-            }
-            append_jsonl_entries(&path, &mut entries, sources)?;
-        }
-    }
-
-    if sources.system {
-        // Cross-merge runtime.log and kernel.log as `s: "system"`.
-        // Both are unstructured text; we synthesize timestamps from
-        // file mtimes (kernel.log) or per-line tracing prefixes
-        // (runtime.log).
-        append_text_log_as_system(&log_dir.join("runtime.log"), &mut entries);
-        append_text_log_as_system(&log_dir.join("kernel.log"), &mut entries);
-
-        // Stable sort by parsed timestamp. We parse rather than
-        // string-compare because runtime.log uses microsecond-precision
-        // RFC 3339 (`.615119Z`) while exec.log uses millisecond
-        // (`.969Z`) — lexical compare across mixed precisions gives
-        // the wrong order.
-        entries.sort_by_key(|e| parse_entry_time(&e.t).unwrap_or(DateTime::<Utc>::MIN_UTC));
-    }
-
-    Ok(entries)
-}
-
-fn append_jsonl_entries(
-    path: &Path,
-    out: &mut Vec<LogEntry>,
-    sources: SourceMask,
-) -> anyhow::Result<()> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let text = String::from_utf8_lossy(&bytes);
-    for line in text.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<LogEntry>(line) {
-            Ok(entry) => {
-                if entry_passes_source_mask(&entry, sources) {
-                    out.push(entry);
-                }
-            }
-            Err(_) => {
-                // Skip malformed lines — never let one bad entry
-                // poison the whole file.
-            }
-        }
-    }
-    Ok(())
-}
-
-fn entry_passes_source_mask(entry: &LogEntry, mask: SourceMask) -> bool {
-    match entry.s.as_str() {
-        "stdout" => mask.stdout,
-        "stderr" => mask.stderr,
-        "output" => mask.output,
-        "system" => mask.system,
-        _ => true, // Unknown source: include defensively.
-    }
-}
-
-/// Read a plain-text log file (runtime.log / kernel.log) and append
-/// each line as a synthetic `s: "system"` entry.
-fn append_text_log_as_system(path: &Path, out: &mut Vec<LogEntry>) {
-    if !path.exists() {
-        return;
-    }
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(_) => return,
+/// Convert an engine entry into the CLI's local representation. The
+/// engine has already decoded base64 bodies; we keep the `e: "b64"`
+/// channel alive for `--json` output by re-encoding raw bytes that
+/// aren't valid UTF-8, so downstream consumers can round-trip them.
+fn engine_entry_to_cli(entry: &EngineLogEntry) -> LogEntry {
+    let s = match entry.source {
+        LogSource::Stdout => "stdout",
+        LogSource::Stderr => "stderr",
+        LogSource::Output => "output",
+        LogSource::System => "system",
     };
-    let text = String::from_utf8_lossy(&bytes);
-    let mtime_iso = file_mtime_rfc3339(path).unwrap_or_else(now_rfc3339);
+    let (d, e) = match std::str::from_utf8(&entry.data) {
+        Ok(text) => (text.to_string(), None),
+        Err(_) => (
+            base64::engine::general_purpose::STANDARD.encode(&entry.data),
+            Some("b64".to_string()),
+        ),
+    };
 
-    for line in text.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        // tracing-formatted lines start with ANSI color escapes
-        // around the timestamp (`\x1b[2m2026-…Z\x1b[0m  INFO …`).
-        // Strip ANSI first so the leading-timestamp parser sees a
-        // bare RFC 3339 token. Fall back to file mtime if that
-        // still fails (e.g. unstructured kernel.log).
-        let stripped = strip_ansi(line);
-        let (t, body) = match split_leading_timestamp(&stripped) {
-            Some((t, body)) => (t.to_string(), body.to_string()),
-            None => (mtime_iso.clone(), stripped.clone()),
-        };
-        out.push(LogEntry {
-            t,
-            s: "system".into(),
-            d: format!("{}\n", body),
-            id: None,
-            e: None,
-        });
+    LogEntry {
+        t: entry.timestamp.to_rfc3339_opts(SecondsFormat::Millis, true),
+        s: s.to_string(),
+        d,
+        id: entry.session_id,
+        e,
     }
 }
 
-fn file_mtime_rfc3339(path: &Path) -> Option<String> {
-    let meta = std::fs::metadata(path).ok()?;
-    let modified = meta.modified().ok()?;
-    let dt: DateTime<Utc> = modified.into();
-    Some(dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-}
-
-fn now_rfc3339() -> String {
-    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+fn grep_matches(re: Option<&Regex>, body: &str) -> bool {
+    re.is_none_or(|r| r.is_match(body))
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Helpers — filters
+// Functions: Helpers — time parsing
 //--------------------------------------------------------------------------------------------------
-
-fn apply_filters(
-    entries: &mut Vec<LogEntry>,
-    since: Option<DateTime<Utc>>,
-    until: Option<DateTime<Utc>>,
-    grep: Option<&Regex>,
-    tail: Option<usize>,
-) {
-    if let Some(s) = since {
-        entries.retain(|e| match parse_entry_time(&e.t) {
-            Some(t) => t >= s,
-            None => true,
-        });
-    }
-    if let Some(u) = until {
-        entries.retain(|e| match parse_entry_time(&e.t) {
-            Some(t) => t < u,
-            None => true,
-        });
-    }
-    if let Some(re) = grep {
-        entries.retain(|e| re.is_match(&e.d));
-    }
-    if let Some(n) = tail
-        && entries.len() > n
-    {
-        let drop = entries.len() - n;
-        entries.drain(0..drop);
-    }
-}
 
 fn parse_time_arg(input: Option<&str>) -> anyhow::Result<Option<DateTime<Utc>>> {
     let Some(raw) = input else {
@@ -480,54 +424,31 @@ fn parse_duration(raw: &str) -> Option<Duration> {
     Some(Duration::from_secs(secs))
 }
 
-fn parse_entry_time(t: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(t)
-        .ok()
-        .map(|d| d.with_timezone(&Utc))
-}
-
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers — rendering
 //--------------------------------------------------------------------------------------------------
 
-fn write_entry_json(entry: &LogEntry, out: &mut impl Write) -> anyhow::Result<()> {
-    // Re-emit verbatim as a single JSON Lines line. We serialize from
-    // our parsed struct so that any malformed fields are normalized.
-    let line = serde_json::to_string(&serde_json::json!({
-        "t": entry.t,
-        "s": entry.s,
-        "d": entry.d,
-        "id": entry.id,
-        "e": entry.e,
-    }))?;
-    writeln!(out, "{line}")?;
-    Ok(())
-}
-
-fn render_entries(entries: &[LogEntry], args: &LogsArgs, color: ColorMode) -> anyhow::Result<()> {
+fn render_entry(entry: &LogEntry, args: &LogsArgs, color: ColorMode) -> anyhow::Result<()> {
     if args.json {
+        // Re-emit verbatim as a single JSON Lines line. We serialize
+        // from our parsed struct so that any malformed fields are
+        // normalized.
+        let line = serde_json::to_string(&serde_json::json!({
+            "t": entry.t,
+            "s": entry.s,
+            "d": entry.d,
+            "id": entry.id,
+            "e": entry.e,
+        }))?;
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
-        for entry in entries {
-            write_entry_json(entry, &mut out)?;
-        }
+        writeln!(out, "{line}")?;
         return Ok(());
     }
-
-    for entry in entries {
-        render_one(entry, args, color)?;
-    }
-    Ok(())
+    render_one(entry, args, color)
 }
 
 fn render_one(entry: &LogEntry, args: &LogsArgs, color: ColorMode) -> anyhow::Result<()> {
-    if args.json {
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        write_entry_json(entry, &mut out)?;
-        return Ok(());
-    }
-
     // Resolve the body bytes (decode base64 if e == "b64"; else use d).
     let body = decode_body(entry);
     let body = apply_color_policy(&body, color);
@@ -706,80 +627,6 @@ fn prefix_with_timestamp(t: &str, id_prefix: Option<&str>, body: &str) -> String
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Helpers — follow mode
-//--------------------------------------------------------------------------------------------------
-
-async fn follow_loop(
-    log_dir: &Path,
-    sources: SourceMask,
-    args: &LogsArgs,
-    color: ColorMode,
-    mut last_t: Option<String>,
-    grep_re: Option<&Regex>,
-) -> anyhow::Result<()> {
-    let path = log_dir.join("exec.log");
-    let (mut last_size, mut last_inode) = match std::fs::metadata(&path) {
-        Ok(m) => (m.len(), inode_from_meta(&m)),
-        Err(_) => (0u64, 0u64),
-    };
-
-    loop {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        let Ok(meta) = std::fs::metadata(&path) else {
-            // File missing — sandbox stopped or removed. Exit cleanly.
-            break;
-        };
-        let inode = inode_from_meta(&meta);
-        let size = meta.len();
-
-        // Detect rotation (inode changed, or size shrank): re-read the
-        // whole file from the top.
-        let need_full_reread = inode != last_inode || size < last_size;
-
-        if !need_full_reread && size == last_size {
-            continue;
-        }
-
-        let mut new_entries: Vec<LogEntry> = Vec::new();
-        if sources.includes_exec_sources() {
-            append_jsonl_entries(&path, &mut new_entries, sources)?;
-        }
-
-        // Filter to only entries newer than the last we rendered.
-        let cutoff = last_t.clone();
-        new_entries.retain(|e| match cutoff.as_deref() {
-            Some(c) => e.t.as_str() > c,
-            None => true,
-        });
-
-        if let Some(re) = grep_re {
-            new_entries.retain(|e| re.is_match(&e.d));
-        }
-
-        for entry in &new_entries {
-            render_one(entry, args, color)?;
-            last_t = Some(entry.t.clone());
-        }
-
-        last_size = size;
-        last_inode = inode;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn inode_from_meta(meta: &std::fs::Metadata) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    meta.ino()
-}
-
-#[cfg(not(unix))]
-fn inode_from_meta(_meta: &std::fs::Metadata) -> u64 {
-    0
-}
-
-//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
@@ -849,43 +696,62 @@ mod tests {
     }
 
     #[test]
-    fn apply_filters_tail_keeps_last_n() {
-        let mut entries: Vec<LogEntry> = (0..5)
-            .map(|i| LogEntry {
-                t: format!("2026-04-30T00:00:0{i}.000Z"),
-                s: "stdout".into(),
-                d: format!("line {i}"),
-                id: Some(1),
-                e: None,
-            })
-            .collect();
-        apply_filters(&mut entries, None, None, None, Some(2));
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].d, "line 3");
-        assert_eq!(entries[1].d, "line 4");
+    fn grep_matches_returns_true_when_no_pattern() {
+        assert!(grep_matches(None, "anything"));
     }
 
     #[test]
-    fn apply_filters_grep() {
-        let mut entries: Vec<LogEntry> = vec![
-            LogEntry {
-                t: "1".into(),
-                s: "stdout".into(),
-                d: "ok".into(),
-                id: Some(1),
-                e: None,
-            },
-            LogEntry {
-                t: "2".into(),
-                s: "stdout".into(),
-                d: "error: bad".into(),
-                id: Some(1),
-                e: None,
-            },
-        ];
-        let re = Regex::new("error").unwrap();
-        apply_filters(&mut entries, None, None, Some(&re), None);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].d, "error: bad");
+    fn grep_matches_filters_by_pattern() {
+        let re = Regex::new("err").unwrap();
+        assert!(grep_matches(Some(&re), "error: bad"));
+        assert!(!grep_matches(Some(&re), "ok"));
+    }
+
+    #[test]
+    fn source_mask_to_engine_sources_maps_each_flag() {
+        let mask = SourceMask {
+            stdout: true,
+            stderr: false,
+            output: true,
+            system: true,
+        };
+        assert_eq!(
+            mask.to_engine_sources(),
+            vec![LogSource::Stdout, LogSource::Output, LogSource::System],
+        );
+    }
+
+    #[test]
+    fn engine_entry_to_cli_preserves_utf8_body() {
+        let entry = EngineLogEntry {
+            timestamp: DateTime::parse_from_rfc3339("2026-04-30T00:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            source: LogSource::Stdout,
+            session_id: Some(7),
+            data: bytes::Bytes::from_static(b"hello world"),
+            cursor: microsandbox::logs::LogCursor::empty(),
+        };
+        let cli = engine_entry_to_cli(&entry);
+        assert_eq!(cli.s, "stdout");
+        assert_eq!(cli.id, Some(7));
+        assert_eq!(cli.d, "hello world");
+        assert!(cli.e.is_none());
+    }
+
+    #[test]
+    fn engine_entry_to_cli_base64s_non_utf8_body() {
+        let entry = EngineLogEntry {
+            timestamp: DateTime::parse_from_rfc3339("2026-04-30T00:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            source: LogSource::Output,
+            session_id: None,
+            data: bytes::Bytes::from_static(&[0xff, 0xfe, 0xfd]),
+            cursor: microsandbox::logs::LogCursor::empty(),
+        };
+        let cli = engine_entry_to_cli(&entry);
+        assert_eq!(cli.e.as_deref(), Some("b64"));
+        assert_eq!(cli.d, "//79");
     }
 }

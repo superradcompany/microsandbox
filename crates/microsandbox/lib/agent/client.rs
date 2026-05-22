@@ -45,10 +45,6 @@ use super::error::{AgentClientError, AgentClientResult};
 /// Default handshake timeout used by [`AgentClient::connect`].
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Per-client correlation ID range step. Mirrors the relay-side constant in
-/// `microsandbox-runtime`; both ends must agree on this value.
-const ID_RANGE_STEP: u32 = u32::MAX / 16;
-
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -59,7 +55,7 @@ const ID_RANGE_STEP: u32 = u32::MAX / 16;
 pub struct AgentClient {
     /// Writer half of the Unix socket connection.
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
-    /// Next correlation ID to allocate (starts at `id_offset + 1`).
+    /// Next correlation ID to allocate (starts at `id_min`).
     next_id: AtomicU32,
     /// Lower bound (inclusive) of the assigned ID range, used for wrap-around.
     id_min: u32,
@@ -116,17 +112,24 @@ impl AgentClient {
 
         let (mut reader, writer) = stream.into_split();
 
-        // Handshake: [id_offset: u32 BE][ready_frame_bytes...]
-        let mut offset_buf = [0u8; 4];
-        tokio::time::timeout_at(deadline, reader.read_exact(&mut offset_buf))
+        // Handshake: [id_min: u32 BE][id_max: u32 BE][ready_frame_bytes...]
+        let mut range_buf = [0u8; 8];
+        tokio::time::timeout_at(deadline, reader.read_exact(&mut range_buf))
             .await
             .map_err(|_| {
                 AgentClientError::Handshake(
-                    "read id_offset: timed out before relay sent bytes".into(),
+                    "read id range: timed out before relay sent bytes".into(),
                 )
             })?
-            .map_err(|e| AgentClientError::Handshake(format!("read id_offset: {e}")))?;
-        let id_offset = u32::from_be_bytes(offset_buf);
+            .map_err(|e| AgentClientError::Handshake(format!("read id range: {e}")))?;
+        let id_min = u32::from_be_bytes(range_buf[0..4].try_into().unwrap());
+        let id_max = u32::from_be_bytes(range_buf[4..8].try_into().unwrap());
+
+        if id_min >= id_max {
+            return Err(AgentClientError::Handshake(format!(
+                "invalid relay id range: start={id_min}, end={id_max}"
+            )));
+        }
 
         let ready_frame = tokio::time::timeout_at(deadline, codec::read_raw_frame(&mut reader))
             .await
@@ -149,7 +152,8 @@ impl AgentClient {
             .map_err(|e| AgentClientError::Handshake(format!("decode ready payload: {e}")))?;
 
         tracing::info!(
-            id_offset,
+            id_min,
+            id_max,
             ready_bytes = ready_frame.body.len(),
             boot_time_ns = ready.boot_time_ns,
             "agent client: connected to relay"
@@ -160,9 +164,6 @@ impl AgentClient {
 
         let reader_handle = tokio::spawn(reader_loop(reader, Arc::clone(&pending)));
         let writer = Arc::new(Mutex::new(writer));
-
-        let id_min = id_offset + 1;
-        let id_max = id_offset.saturating_add(ID_RANGE_STEP);
 
         Ok(Self {
             writer,
@@ -462,7 +463,8 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            socket.write_all(&0u32.to_be_bytes()).await.unwrap();
+            socket.write_all(&1u32.to_be_bytes()).await.unwrap();
+            socket.write_all(&1024u32.to_be_bytes()).await.unwrap();
             codec::write_message(&mut socket, &ready_msg).await.unwrap();
         });
 

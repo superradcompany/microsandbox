@@ -428,13 +428,15 @@ jobs:
       # MSB_TEST_ISOLATE_HOME=1 turns on per-test ~/.microsandbox isolation
       # (see crates/test-utils), so nextest can run tests in parallel without
       # sqlite/image-cache contention.
+      # Keep real microVM/network concurrency bounded even on large self-hosted
+      # runners; num-cpus fan-out can overwhelm guest package installs.
       - name: Run integration tests
         env:
           MSB_TEST_ISOLATE_HOME: "1"
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
-          cargo nextest run -p microsandbox --tests --run-ignored=only
+          cargo nextest run -p microsandbox --tests --run-ignored=only --test-threads 4
 
   # ---------------------------------------------------------------------------
   # Node.js SDK smoke tests (requires KVM)

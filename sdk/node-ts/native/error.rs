@@ -44,6 +44,8 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::SnapshotImageMissing(_) => "SnapshotImageMissing",
         MicrosandboxError::SnapshotIntegrity(_) => "SnapshotIntegrity",
         MicrosandboxError::MetricsDisabled(_) => "MetricsDisabled",
+        MicrosandboxError::MissedRotation { .. } => "MissedRotation",
+        MicrosandboxError::InvalidCursor(_) => "InvalidCursor",
         MicrosandboxError::AgentClient(_) => "AgentClient",
         MicrosandboxError::Custom(_) => "Custom",
     }

@@ -154,6 +154,25 @@ pub enum MicrosandboxError {
     #[error("metrics disabled for sandbox: {0}")]
     MetricsDisabled(String),
 
+    /// A log stream fell behind enough that the file it was reading
+    /// rotated out of the on-disk retention window. The stream
+    /// yields this error and ends; restart from
+    /// `LogStreamStart::Beginning`, `LogStreamStart::Since(now)`,
+    /// or `LogStreamStart::From(c)` with the cursor of the last
+    /// entry that was successfully consumed.
+    #[error("log stream missed rotation (dropped from offset {dropped_from_offset})")]
+    MissedRotation {
+        /// Byte offset within the lost file at which streamed
+        /// entries stop. Useful for diagnostics.
+        dropped_from_offset: u64,
+    },
+
+    /// A cursor passed to `log_stream` via `LogStreamStart::From`
+    /// could not be located in the current rotation chain.
+    /// Yielded once at stream start, then the stream ends.
+    #[error("invalid log cursor: {0}")]
+    InvalidCursor(String),
+
     /// A custom error message.
     #[error("{0}")]
     Custom(String),
