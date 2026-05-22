@@ -68,12 +68,12 @@ func WithSnapshot(pathOrName string) SandboxOption {
 	return func(o *SandboxConfig) { o.Snapshot = pathOrName }
 }
 
-// WithMemory sets the memory limit in MiB.
+// WithMemory sets the memory limit in MiB (default 512MiB).
 func WithMemory(mebibytes uint32) SandboxOption {
 	return func(o *SandboxConfig) { o.MemoryMiB = mebibytes }
 }
 
-// WithCPUs sets the CPU limit in whole cores.
+// WithCPUs sets the CPU limit in whole cores (default 1).
 func WithCPUs(cpus uint8) SandboxOption {
 	return func(o *SandboxConfig) { o.CPUs = cpus }
 }
