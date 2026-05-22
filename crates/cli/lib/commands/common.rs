@@ -963,16 +963,13 @@ fn parse_secret(spec: &str) -> anyhow::Result<(String, String, String)> {
 fn parse_violation_action(
     s: &Option<String>,
 ) -> anyhow::Result<Option<microsandbox_network::secrets::config::ViolationAction>> {
-    use microsandbox_network::secrets::config::{HostPattern, PassthroughPolicy, ViolationAction};
+    use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
     match s.as_deref() {
         None => Ok(None),
         Some("block") => Ok(Some(ViolationAction::Block)),
         Some("block-and-log") => Ok(Some(ViolationAction::BlockAndLog)),
         Some("block-and-terminate") => Ok(Some(ViolationAction::BlockAndTerminate)),
-        Some("passthrough") => Ok(Some(ViolationAction::Passthrough(PassthroughPolicy {
-            hosts: vec![HostPattern::Any],
-            fallback: Box::new(ViolationAction::BlockAndLog),
-        }))),
+        Some("passthrough") => Ok(Some(ViolationAction::Passthrough(vec![HostPattern::Any]))),
         Some(other) => anyhow::bail!(
             "invalid violation action: {other} (expected: block, block-and-log, block-and-terminate, passthrough)"
         ),

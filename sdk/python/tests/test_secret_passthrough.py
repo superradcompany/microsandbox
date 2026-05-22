@@ -17,7 +17,6 @@ def test_secret_passthrough_hosts_serialize() -> None:
         on_violation=ViolationPolicy.passthrough(
             hosts=("api.anthropic.com",),
             host_patterns=("*.anthropic.com",),
-            fallback=ViolationAction.BLOCK_AND_TERMINATE,
         ),
     )
 
@@ -27,7 +26,6 @@ def test_secret_passthrough_hosts_serialize() -> None:
         "allow_hosts": ["api.github.com"],
         "on_violation": {
             "passthrough": {
-                "fallback": "block-and-terminate",
                 "hosts": ["api.anthropic.com"],
                 "host_patterns": ["*.anthropic.com"],
             }
@@ -43,7 +41,6 @@ def test_network_secret_passthrough_hosts_serialize() -> None:
     assert network._to_dict() == {
         "on_secret_violation": {
             "passthrough": {
-                "fallback": "block-and-log",
                 "all_hosts": True,
             }
         },

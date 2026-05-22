@@ -10,9 +10,7 @@ use ipnetwork::{Ipv4Network, Ipv6Network};
 use crate::config::{DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort};
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
-use crate::secrets::config::{
-    HostPattern, PassthroughPolicy, SecretEntry, SecretInjection, ViolationAction,
-};
+use crate::secrets::config::{HostPattern, SecretEntry, SecretInjection, ViolationAction};
 use crate::tls::TlsConfig;
 
 //--------------------------------------------------------------------------------------------------
@@ -51,14 +49,14 @@ pub struct SecretBuilder {
     placeholder: Option<String>,
     allowed_hosts: Vec<HostPattern>,
     injection: SecretInjection,
-    on_violation: ViolationAction,
+    on_violation: Option<ViolationAction>,
     require_tls_identity: bool,
 }
 
 /// Fluent builder for a [`ViolationAction`].
+#[derive(Default)]
 pub struct ViolationActionBuilder {
-    fallback: ViolationAction,
-    passthrough_hosts: Vec<HostPattern>,
+    action: ViolationAction,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -188,7 +186,7 @@ impl NetworkBuilder {
             placeholder: placeholder.into(),
             allowed_hosts: vec![HostPattern::Exact(allowed_host.into())],
             injection: SecretInjection::default(),
-            on_violation: ViolationAction::default(),
+            on_violation: None,
             require_tls_identity: true,
         });
         self
@@ -199,7 +197,7 @@ impl NetworkBuilder {
         mut self,
         f: impl FnOnce(ViolationActionBuilder) -> ViolationActionBuilder,
     ) -> Self {
-        self.config.secrets.on_violation = f(ViolationActionBuilder::new()).build();
+        self.config.secrets.on_violation = f(ViolationActionBuilder::default()).build();
         self
     }
 
@@ -384,7 +382,7 @@ impl SecretBuilder {
             placeholder: None,
             allowed_hosts: Vec::new(),
             injection: SecretInjection::default(),
-            on_violation: ViolationAction::default(),
+            on_violation: None,
             require_tls_identity: true,
         }
     }
@@ -435,7 +433,7 @@ impl SecretBuilder {
         mut self,
         f: impl FnOnce(ViolationActionBuilder) -> ViolationActionBuilder,
     ) -> Self {
-        self.on_violation = f(ViolationActionBuilder::new()).build();
+        self.on_violation = Some(f(ViolationActionBuilder::default()).build());
         self
     }
 
@@ -495,41 +493,29 @@ impl SecretBuilder {
 impl ViolationActionBuilder {
     /// Start building a violation action.
     pub fn new() -> Self {
-        Self {
-            fallback: ViolationAction::default(),
-            passthrough_hosts: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Start building from an existing action.
     pub fn from_action(action: ViolationAction) -> Self {
-        match action {
-            ViolationAction::Passthrough(policy) => Self {
-                fallback: *policy.fallback,
-                passthrough_hosts: policy.hosts,
-            },
-            action => Self {
-                fallback: action,
-                passthrough_hosts: Vec::new(),
-            },
-        }
+        action.into()
     }
 
     /// Block the request silently.
     pub fn block(mut self) -> Self {
-        self.fallback = ViolationAction::Block;
+        self.action = ViolationAction::Block;
         self
     }
 
     /// Block the request and emit a warning log.
     pub fn block_and_log(mut self) -> Self {
-        self.fallback = ViolationAction::BlockAndLog;
+        self.action = ViolationAction::BlockAndLog;
         self
     }
 
     /// Block the request and terminate the sandbox.
     pub fn block_and_terminate(mut self) -> Self {
-        self.fallback = ViolationAction::BlockAndTerminate;
+        self.action = ViolationAction::BlockAndTerminate;
         self
     }
 
@@ -553,20 +539,17 @@ impl ViolationActionBuilder {
         self
     }
 
-    /// Consume the builder and return the action.
-    pub fn build(self) -> ViolationAction {
-        if self.passthrough_hosts.is_empty() {
-            return self.fallback;
+    /// Helper to accumulate passthrough hosts into the current action.
+    fn push_passthrough_host(&mut self, host: HostPattern) {
+        match self.action {
+            ViolationAction::Passthrough(ref mut hosts) => hosts.push(host),
+            _ => self.action = ViolationAction::Passthrough(vec![host]),
         }
-
-        ViolationAction::Passthrough(PassthroughPolicy {
-            hosts: self.passthrough_hosts,
-            fallback: Box::new(self.fallback),
-        })
     }
 
-    fn push_passthrough_host(&mut self, host: HostPattern) {
-        self.passthrough_hosts.push(host);
+    /// Consume the builder and return the action.
+    pub fn build(self) -> ViolationAction {
+        self.action
     }
 }
 
@@ -591,10 +574,9 @@ impl Default for SecretBuilder {
         Self::new()
     }
 }
-
-impl Default for ViolationActionBuilder {
-    fn default() -> Self {
-        Self::new()
+impl From<ViolationAction> for ViolationActionBuilder {
+    fn from(action: ViolationAction) -> Self {
+        Self { action }
     }
 }
 
@@ -645,13 +627,10 @@ mod tests {
 
         assert_eq!(
             cfg.secrets.on_violation,
-            ViolationAction::Passthrough(PassthroughPolicy {
-                hosts: vec![
-                    HostPattern::Exact("api.anthropic.com".into()),
-                    HostPattern::Wildcard("*.anthropic.com".into()),
-                ],
-                fallback: Box::new(ViolationAction::BlockAndLog),
-            })
+            ViolationAction::Passthrough(vec![
+                HostPattern::Exact("api.anthropic.com".into()),
+                HostPattern::Wildcard("*.anthropic.com".into()),
+            ])
         );
     }
 
@@ -669,19 +648,16 @@ mod tests {
 
         assert_eq!(
             secret.on_violation,
-            ViolationAction::Passthrough(PassthroughPolicy {
-                hosts: vec![
-                    HostPattern::Exact("api.anthropic.com".into()),
-                    HostPattern::Wildcard("*.anthropic.com".into()),
-                ],
-                fallback: Box::new(ViolationAction::BlockAndLog),
-            })
+            Some(ViolationAction::Passthrough(vec![
+                HostPattern::Exact("api.anthropic.com".into()),
+                HostPattern::Wildcard("*.anthropic.com".into()),
+            ])),
         );
     }
 
     #[test]
-    fn violation_action_builder_preserves_fallback_action() {
-        let action = ViolationActionBuilder::new()
+    fn violation_action_builder_blocking_call_replaces_passthrough_policy() {
+        let action = ViolationActionBuilder::default()
             .passthrough_host("google.com")
             .block_and_terminate()
             .passthrough_host("facebook.com")
@@ -689,19 +665,13 @@ mod tests {
 
         assert_eq!(
             action,
-            ViolationAction::Passthrough(PassthroughPolicy {
-                hosts: vec![
-                    HostPattern::Exact("google.com".into()),
-                    HostPattern::Exact("facebook.com".into()),
-                ],
-                fallback: Box::new(ViolationAction::BlockAndTerminate),
-            })
+            ViolationAction::Passthrough(vec![HostPattern::Exact("facebook.com".into())])
         );
     }
 
     #[test]
     fn violation_action_builder_accumulates_passthrough_hosts() {
-        let action = ViolationActionBuilder::new()
+        let action = ViolationActionBuilder::default()
             .block()
             .passthrough_host("google.com")
             .passthrough_host("facebook.com")
@@ -709,13 +679,10 @@ mod tests {
 
         assert_eq!(
             action,
-            ViolationAction::Passthrough(PassthroughPolicy {
-                hosts: vec![
-                    HostPattern::Exact("google.com".into()),
-                    HostPattern::Exact("facebook.com".into()),
-                ],
-                fallback: Box::new(ViolationAction::Block),
-            })
+            ViolationAction::Passthrough(vec![
+                HostPattern::Exact("google.com".into()),
+                HostPattern::Exact("facebook.com".into()),
+            ]),
         );
     }
 }

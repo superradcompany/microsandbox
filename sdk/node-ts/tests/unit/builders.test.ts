@@ -366,16 +366,12 @@ describe("NetworkBuilder secret passthrough", () => {
       .build() as {
       secrets: {
         onViolation: {
-          passthrough: {
-            hosts: unknown[];
-            fallback: string;
-          };
+          passthrough: unknown[];
         };
       };
     };
 
-    expect(cfg.secrets.onViolation.passthrough.hosts).toHaveLength(2);
-    expect(cfg.secrets.onViolation.passthrough.fallback).toBe("BlockAndTerminate");
+    expect(cfg.secrets.onViolation.passthrough).toHaveLength(2);
   });
 
   it("builds per-secret passthrough violation policy", () => {

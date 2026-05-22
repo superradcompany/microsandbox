@@ -60,7 +60,7 @@ use microsandbox::{
     snapshot::{ExportOpts, SnapshotDestination, SnapshotFormat},
     volume::{Volume, VolumeBuilder, VolumeHandle},
 };
-use microsandbox_network::secrets::config::ViolationAction;
+use microsandbox_network::{builder::ViolationActionBuilder, secrets::config::ViolationAction};
 use tokio::runtime::Runtime;
 use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
@@ -1121,7 +1121,9 @@ fn apply_network(
     // Sandbox-wide secret violation action.
     if let Some(ref violation) = net.on_secret_violation {
         let action = parse_violation_action(violation)?;
-        builder = builder.network(move |n| n.on_secret_violation(action));
+        builder = builder.network(move |n| {
+            n.on_secret_violation(move |_| ViolationActionBuilder::from_action(action))
+        });
     }
 
     // Ports nested inside network object.
@@ -1319,6 +1321,12 @@ fn apply_secret(
     let allow_host_patterns = s.allow_host_patterns.clone();
     let placeholder = s.placeholder.clone();
     let require_tls = s.require_tls;
+    let on_violation = s
+        .on_violation
+        .as_ref()
+        .map(|violation| parse_violation_action(violation))
+        .transpose()?;
+
     builder = builder.secret(move |mut sb| {
         sb = sb.env(&env_var).value(value.clone());
         for h in &allow_hosts {
@@ -1333,12 +1341,11 @@ fn apply_secret(
         if let Some(req) = require_tls {
             sb = sb.require_tls_identity(req);
         }
+        if let Some(action) = on_violation {
+            sb = sb.on_violation(move |_| ViolationActionBuilder::from_action(action));
+        }
         sb
     });
-    if let Some(ref violation) = s.on_violation {
-        let action = parse_violation_action(violation)?;
-        builder = builder.network(move |n| n.on_secret_violation(action));
-    }
     Ok(builder)
 }
 

@@ -97,10 +97,8 @@ class ViolationPolicy:
         hosts: Sequence[str] = (),
         host_patterns: Sequence[str] = (),
         all_hosts: bool = False,
-        fallback: ViolationAction = ViolationAction.BLOCK_AND_LOG,
     ) -> ViolationPolicy:
         return cls(
-            fallback=fallback,
             passthrough_hosts=tuple(hosts),
             passthrough_host_patterns=tuple(host_patterns),
             passthrough_all_hosts=all_hosts,
@@ -114,7 +112,7 @@ class ViolationPolicy:
         ):
             return str(self.fallback)
 
-        passthrough: dict = {"fallback": str(self.fallback)}
+        passthrough: dict = {}
         if self.passthrough_hosts:
             passthrough["hosts"] = list(self.passthrough_hosts)
         if self.passthrough_host_patterns:

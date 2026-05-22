@@ -39,8 +39,8 @@ pub struct SecretEntry {
     pub injection: SecretInjection,
 
     /// Action on secret violation for this secret.
-    #[serde(default)]
-    pub on_violation: ViolationAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_violation: Option<ViolationAction>,
 
     /// Require verified TLS identity before substituting (default: true).
     /// When true, secret is only substituted if the connection uses TLS
@@ -91,20 +91,7 @@ pub enum ViolationAction {
     /// Block and terminate the sandbox.
     BlockAndTerminate,
     /// Forward the request with the placeholder unchanged for matching hosts.
-    #[serde(rename = "passthrough")]
-    Passthrough(PassthroughPolicy),
-}
-
-/// Hosts that may receive placeholders unchanged, plus the fallback action for
-/// non-matching hosts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PassthroughPolicy {
-    /// Hosts allowed to receive placeholders unchanged.
-    #[serde(default)]
-    pub hosts: Vec<HostPattern>,
-    /// Action for hosts that do not match `hosts`.
-    #[serde(default)]
-    pub fallback: Box<ViolationAction>,
+    Passthrough(Vec<HostPattern>),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -219,7 +206,7 @@ mod tests {
             placeholder: "$K".into(),
             allowed_hosts: vec![],
             injection: SecretInjection::default(),
-            on_violation: ViolationAction::default(),
+            on_violation: None,
             require_tls_identity: true,
         };
         assert!(entry.require_tls_identity);

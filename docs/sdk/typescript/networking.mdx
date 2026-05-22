@@ -1046,14 +1046,14 @@ Passthrough hosts receive placeholders unchanged. They do **not** receive real s
 
 | Method | Description |
 |--------|-------------|
-| `block()` | Use `block` as the fallback action |
-| `blockAndLog()` | Use `block-and-log` as the fallback action |
-| `blockAndTerminate()` | Use `block-and-terminate` as the fallback action |
+| `block()` | Block the request silently |
+| `blockAndLog()` | Block the request and emit a warning log |
+| `blockAndTerminate()` | Block the request and terminate the sandbox |
 | `passthroughHost(host)` | Allow placeholders to pass through unchanged to an exact host |
 | `passthroughHostPattern(pattern)` | Allow placeholders to pass through unchanged to matching wildcard hosts |
 | `passthroughAllHosts(true)` | Allow placeholders to pass through unchanged to any host |
 
-Passthrough host calls accumulate. Blocking calls update the fallback action and keep any passthrough hosts already added.
+Passthrough host calls accumulate. When passthrough hosts are configured, non-matching hosts use the default secret violation action.
 
 ---
 

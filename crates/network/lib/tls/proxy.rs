@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use super::sni;
 use super::state::TlsState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
+use crate::secrets::config::ViolationAction;
 use crate::secrets::handler::SecretsHandler;
 use crate::shared::SharedState;
 
@@ -358,20 +359,21 @@ async fn forward_plaintext(
             continue;
         }
 
-        let substituted = secrets_handler.substitute(&buf[..n]);
-        if let Some(data) = substituted {
-            server_tls.write_all(&data).await?;
-            continue;
+        match secrets_handler.substitute(&buf[..n]) {
+            Ok(data) => {
+                server_tls.write_all(&data).await?;
+            }
+            Err(action) => {
+                // Violation: placeholder going to disallowed host. Drop the connection.
+                if matches!(action, ViolationAction::BlockAndTerminate) {
+                    shared.trigger_termination();
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "secret violation: placeholder sent to disallowed host",
+                ));
+            }
         }
-
-        // Violation: placeholder going to disallowed host. Drop the connection.
-        if secrets_handler.terminates_on_violation() {
-            shared.trigger_termination();
-        }
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "secret violation: placeholder sent to disallowed host",
-        ));
     }
     Ok(())
 }

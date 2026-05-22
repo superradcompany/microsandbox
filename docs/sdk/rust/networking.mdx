@@ -644,7 +644,7 @@ fn on_secret_violation(
 ) -> Self
 ```
 
-Set the action taken when a secret placeholder is detected in traffic destined for a host not in the secret's allow list. The builder can configure a blocking fallback and optional passthrough hosts:
+Set the action taken when a secret placeholder is detected in traffic destined for a host not in the secret's allow list. The builder can configure a blocking action or passthrough hosts:
 
 ```rust
 .network(|n| n.on_secret_violation(|v| {
@@ -664,14 +664,14 @@ Builder for secret violation behavior. Used by [`NetworkBuilder::on_secret_viola
 
 | Method | Description |
 |--------|-------------|
-| `block()` | Use `Block` as the fallback action |
-| `block_and_log()` | Use `BlockAndLog` as the fallback action |
-| `block_and_terminate()` | Use `BlockAndTerminate` as the fallback action |
+| `block()` | Block the request silently |
+| `block_and_log()` | Block the request and emit a warning log |
+| `block_and_terminate()` | Block the request and terminate the sandbox |
 | `passthrough_host(host)` | Allow placeholders to pass through unchanged to an exact host |
 | `passthrough_host_pattern(pattern)` | Allow placeholders to pass through unchanged to matching wildcard hosts |
 | `passthrough_all_hosts(true)` | Allow placeholders to pass through unchanged to any host |
 
-Passthrough host calls accumulate. Blocking calls update the fallback action and keep any passthrough hosts already added.
+Passthrough host calls accumulate. When passthrough hosts are configured, non-matching hosts use the default secret violation action.
 
 ---
 
@@ -965,4 +965,4 @@ Action taken when a secret placeholder is sent to a disallowed host.
 | `Block` | Silently drop the request. The guest sees a connection reset. This is the default. |
 | `BlockAndLog` | Drop the request and emit a warning log on the host side. |
 | `BlockAndTerminate` | Drop the request, log an error, and shut down the entire sandbox. |
-| `Passthrough(PassthroughPolicy)` | Forward matching hosts with the placeholder unchanged; use the policy fallback for non-matching hosts. |
+| `Passthrough(Vec<HostPattern>)` | Forward matching hosts with the placeholder unchanged. Non-matching hosts use the default secret violation action. |

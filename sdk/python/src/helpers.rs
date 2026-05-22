@@ -1035,15 +1035,12 @@ fn as_dict<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
 fn parse_violation_action(
     s: &str,
 ) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
-    use microsandbox_network::secrets::config::{HostPattern, PassthroughPolicy, ViolationAction};
+    use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
     match s {
         "block" => Ok(ViolationAction::Block),
         "block-and-log" | "block_and_log" => Ok(ViolationAction::BlockAndLog),
         "block-and-terminate" | "block_and_terminate" => Ok(ViolationAction::BlockAndTerminate),
-        "passthrough" => Ok(ViolationAction::Passthrough(PassthroughPolicy {
-            hosts: vec![HostPattern::Any],
-            fallback: Box::new(ViolationAction::BlockAndLog),
-        })),
+        "passthrough" => Ok(ViolationAction::Passthrough(vec![HostPattern::Any])),
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "unknown violation action: {s}"
         ))),
@@ -1072,13 +1069,14 @@ fn parse_violation_action_obj(
 fn parse_passthrough_policy(
     dict: &Bound<'_, PyDict>,
 ) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
-    use microsandbox_network::secrets::config::{HostPattern, PassthroughPolicy, ViolationAction};
+    use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
 
-    let fallback = extract_opt::<String>(dict, "fallback")?
-        .map(|s| parse_violation_action(&s))
-        .transpose()?
-        .unwrap_or(ViolationAction::BlockAndLog);
-    if matches!(fallback, ViolationAction::Passthrough(_)) {
+    if let Some(fallback) = extract_opt::<String>(dict, "fallback")?
+        && matches!(
+            parse_violation_action(&fallback)?,
+            ViolationAction::Passthrough(_)
+        )
+    {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "passthrough fallback must be a blocking action",
         ));
@@ -1099,10 +1097,7 @@ fn parse_passthrough_policy(
         patterns.push(HostPattern::Any);
     }
 
-    Ok(ViolationAction::Passthrough(PassthroughPolicy {
-        hosts: patterns,
-        fallback: Box::new(fallback),
-    }))
+    Ok(ViolationAction::Passthrough(patterns))
 }
 
 fn extract_opt<'py, T: FromPyObject<'py>>(
