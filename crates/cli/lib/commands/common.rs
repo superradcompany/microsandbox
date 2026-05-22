@@ -197,11 +197,16 @@ pub struct SandboxOpts {
     /// rule tokens. Token grammar:
     /// `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`.
     ///
-    /// Examples:
-    ///   --net-rule "allow@public"
-    ///   --net-rule "deny@198.51.100.5,allow@public"
-    ///   --net-rule "allow:ingress@private"
-    ///   --net-rule "allow@example.com:tcp:443"
+    /// Target kinds: IPs/CIDRs, domains (`example.com`), domain suffixes
+    /// (`*.example.com` shorthand or `suffix=example.com`), and groups
+    /// (`public`, `private`, `multicast`, ...). Suffixes must be at
+    /// least two labels (e.g. `*.example.com`, not `*.com`).
+    ///
+    /// Examples: --net-rule "allow@public"
+    /// --net-rule "deny@198.51.100.5,allow@public"
+    /// --net-rule "allow:ingress@private"
+    /// --net-rule "allow@example.com:tcp:443"
+    /// --net-rule "deny@*.ads.example.com"
     #[cfg(feature = "net")]
     #[arg(long = "net-rule", value_name = "TOKENS")]
     pub net_rule: Vec<String>,
@@ -830,6 +835,9 @@ fn build_network_policy(
     for s in deny_domain_suffixes {
         let suffix: DomainName = s
             .parse()
+            .with_context(|| format!("--deny-domain-suffix {s:?}"))?;
+        let suffix = suffix
+            .try_into_suffix()
             .with_context(|| format!("--deny-domain-suffix {s:?}"))?;
         rules.push(Rule::deny_egress(Destination::DomainSuffix(suffix)));
     }
