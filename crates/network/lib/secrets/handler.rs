@@ -180,10 +180,10 @@ impl SecretsHandler {
             let action = secret.on_violation.as_ref().unwrap_or(&config.on_violation);
 
             // Passthrough means the placeholder can be forwarded unchanged to this SNI.
-            if let ViolationAction::Passthrough(hosts) = action {
-                if hosts.iter().any(|p| p.matches(sni)) {
-                    continue;
-                }
+            if let ViolationAction::Passthrough(hosts) = action
+                && hosts.iter().any(|p| p.matches(sni))
+            {
+                continue;
             }
 
             // Non-matching passthrough policies fall back to the default blocking action.
