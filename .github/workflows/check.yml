@@ -495,9 +495,13 @@ jobs:
 
       - name: Run SDK tests (Node)
         working-directory: sdk/node-ts
-        env:
-          MSB_HOME: ${{ runner.temp }}/msb-home-${{ github.run_id }}-node
-        run: npm test
+        # Linux unix-socket paths are 108 bytes — anchor MSB_HOME under
+        # /tmp/XXX so sandboxes/<long-name>/runtime/agent.sock fits.
+        run: |
+          MSB_HOME=$(mktemp -d -p /tmp XXX)
+          trap "rm -rf '$MSB_HOME'" EXIT
+          export MSB_HOME
+          npm test
 
       # setup-bun downloads a zipped release; unzip isn't preinstalled on
       # the self-hosted runner.
@@ -508,9 +512,13 @@ jobs:
 
       - name: Run SDK tests (Bun)
         working-directory: sdk/node-ts
-        env:
-          MSB_HOME: ${{ runner.temp }}/msb-home-${{ github.run_id }}-bun
-        run: bunx --bun vitest run
+        # Linux unix-socket paths are 108 bytes — anchor MSB_HOME under
+        # /tmp/XXX so sandboxes/<long-name>/runtime/agent.sock fits.
+        run: |
+          MSB_HOME=$(mktemp -d -p /tmp XXX)
+          trap "rm -rf '$MSB_HOME'" EXIT
+          export MSB_HOME
+          bunx --bun vitest run
 
   # ---------------------------------------------------------------------------
   # Python SDK integration tests (requires KVM)
