@@ -372,9 +372,9 @@ describe("NetworkBuilder secret passthrough", () => {
     };
 
     expect(cfg.secrets.onViolation).toEqual({
-      Passthrough: [
-        { Exact: "api.anthropic.com" },
-        { Wildcard: "*.anthropic.com" },
+      passthrough: [
+        { exact: "api.anthropic.com" },
+        { wildcard: "*.anthropic.com" },
       ],
     });
   });
