@@ -153,19 +153,6 @@ pub struct SandboxOpts {
     )]
     pub no_net: bool,
 
-    /// Deny egress to a domain. Equivalent to a `deny Domain("...")`
-    /// policy rule appended after any `--net-rule` entries.
-    #[cfg(feature = "net")]
-    #[arg(long = "deny-domain", value_name = "NAME")]
-    pub deny_domain: Vec<String>,
-
-    /// Deny egress to all subdomains of a suffix (e.g. `.ads.example`).
-    /// Equivalent to a `deny DomainSuffix("...")` rule appended after
-    /// any `--net-rule` entries.
-    #[cfg(feature = "net")]
-    #[arg(long = "deny-domain-suffix", value_name = "SUFFIX")]
-    pub deny_domain_suffix: Vec<String>,
-
     /// Allow DNS responses pointing to private/internal IP addresses.
     #[cfg(feature = "net")]
     #[arg(long)]
@@ -330,8 +317,6 @@ impl SandboxOpts {
         #[cfg(feature = "net")]
         let net = !self.port.is_empty()
             || self.no_net
-            || !self.deny_domain.is_empty()
-            || !self.deny_domain_suffix.is_empty()
             || self.no_dns_rebind_protection
             || !self.dns_nameserver.is_empty()
             || self.dns_query_timeout_ms.is_some()
@@ -609,9 +594,7 @@ fn apply_network_opts(
     }
 
     // DNS, TLS, and other network configuration.
-    let has_network_config = !opts.deny_domain.is_empty()
-        || !opts.deny_domain_suffix.is_empty()
-        || opts.no_dns_rebind_protection
+    let has_network_config = opts.no_dns_rebind_protection
         || !opts.dns_nameserver.is_empty()
         || opts.dns_query_timeout_ms.is_some()
         || !opts.net_rule.is_empty()
@@ -646,8 +629,6 @@ fn apply_network_opts(
             opts.net_default.as_deref(),
             opts.net_default_egress.as_deref(),
             opts.net_default_ingress.as_deref(),
-            &opts.deny_domain,
-            &opts.deny_domain_suffix,
         )?;
         let max_conn = opts.max_connections;
         let ipv4_pool = opts
@@ -793,9 +774,9 @@ pub fn parse_duration(s: &str) -> anyhow::Result<std::time::Duration> {
     }
 }
 
-/// Assemble a [`NetworkPolicy`] from `--net-rule` / `--net-default*` /
-/// `--no-net` and the bulk-deny flags. Returns `None` when no flag is
-/// set. Multiple `--net-rule` invocations concatenate in argv order.
+/// Assemble a [`NetworkPolicy`] from `--net-rule`, `--net-default*`,
+/// and `--no-net`. Returns `None` when no flag is set. Multiple
+/// `--net-rule` invocations concatenate in argv order.
 ///
 /// `--no-net` desugars to `--net-default deny`; clap rejects combining
 /// it with the explicit defaults, so the four default-source params are
@@ -807,41 +788,21 @@ fn build_network_policy(
     default_both: Option<&str>,
     default_egress: Option<&str>,
     default_ingress: Option<&str>,
-    deny_domains: &[String],
-    deny_domain_suffixes: &[String],
 ) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
-    use anyhow::Context;
-    use microsandbox_network::policy::{Action, Destination, DomainName, NetworkPolicy, Rule};
+    use microsandbox_network::policy::{Action, NetworkPolicy};
 
     use crate::net_rule::parse_rule_list;
 
-    let no_rule_flags = rule_args.is_empty()
+    let no_flags = rule_args.is_empty()
         && !no_net
         && default_both.is_none()
         && default_egress.is_none()
         && default_ingress.is_none();
-    let no_block_flags = deny_domains.is_empty() && deny_domain_suffixes.is_empty();
-    if no_rule_flags && no_block_flags {
+    if no_flags {
         return Ok(None);
     }
 
     let mut rules = Vec::new();
-
-    // Prepend bulk-deny flags so they outrank later allow rules.
-    for d in deny_domains {
-        let domain: DomainName = d.parse().with_context(|| format!("--deny-domain {d:?}"))?;
-        rules.push(Rule::deny_egress(Destination::Domain(domain)));
-    }
-    for s in deny_domain_suffixes {
-        let suffix: DomainName = s
-            .parse()
-            .with_context(|| format!("--deny-domain-suffix {s:?}"))?;
-        let suffix = suffix
-            .try_into_suffix()
-            .with_context(|| format!("--deny-domain-suffix {s:?}"))?;
-        rules.push(Rule::deny_egress(Destination::DomainSuffix(suffix)));
-    }
-
     for arg in rule_args {
         let parsed = parse_rule_list(arg).map_err(anyhow::Error::from)?;
         rules.extend(parsed);
@@ -870,16 +831,10 @@ fn build_network_policy(
     // When the user sets no defaults explicitly, fall through to
     // NetworkPolicy::public_only's defaults so behaviour stays in sync
     // with the preset.
-    //
-    // Exception: if only --deny-domain / --deny-domain-suffix were set
-    // (no --net-rule, no --net-default*, no --no-net), default egress
-    // flips to Allow so the rest of the network keeps working — these
-    // flags add deny entries on top of permissive defaults.
     let preset = NetworkPolicy::public_only();
     let default_egress = match (symmetric, default_egress) {
         (_, Some(raw)) => parse_action("--net-default-egress", raw)?,
         (Some(action), None) => action,
-        (None, None) if no_rule_flags => Action::Allow,
         (None, None) => preset.default_egress,
     };
     let default_ingress = match (symmetric, default_ingress) {
@@ -1861,14 +1816,14 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_no_flags_returns_none() {
-        let p = build_network_policy(&[], false, None, None, None, &[], &[]).unwrap();
+        let p = build_network_policy(&[], false, None, None, None).unwrap();
         assert!(p.is_none());
     }
 
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_net_default_deny_sets_both_directions() {
-        let p = build_network_policy(&[], false, Some("deny"), None, None, &[], &[])
+        let p = build_network_policy(&[], false, Some("deny"), None, None)
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Deny);
@@ -1879,7 +1834,7 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_net_default_allow_sets_both_directions() {
-        let p = build_network_policy(&[], false, Some("allow"), None, None, &[], &[])
+        let p = build_network_policy(&[], false, Some("allow"), None, None)
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Allow);
@@ -1889,7 +1844,7 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_no_net_desugars_to_deny_both() {
-        let p = build_network_policy(&[], true, None, None, None, &[], &[])
+        let p = build_network_policy(&[], true, None, None, None)
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Deny);
@@ -1900,7 +1855,7 @@ mod tests {
     #[test]
     fn build_policy_no_net_with_allow_rule_yields_allowlist() {
         let rules = vec!["allow@example.com".to_string()];
-        let p = build_network_policy(&rules, true, None, None, None, &[], &[])
+        let p = build_network_policy(&rules, true, None, None, None)
             .unwrap()
             .expect("policy");
         assert_eq!(p.default_egress, Action::Deny);
@@ -1912,11 +1867,26 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn build_policy_net_default_rejects_unknown_action() {
-        let err =
-            build_network_policy(&[], false, Some("maybe"), None, None, &[], &[]).unwrap_err();
+        let err = build_network_policy(&[], false, Some("maybe"), None, None).unwrap_err();
         assert!(
             err.to_string().contains("--net-default"),
             "expected --net-default in error, got: {err}"
         );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_rule_only_uses_preset_defaults() {
+        // Without any --net-default* flag, rules apply on top of the
+        // public_only preset (deny egress, allow ingress). Verifies the
+        // "rules alone keep the preset's defaults" path now that the
+        // --deny-domain* flip-to-allow exception is gone.
+        let rules = vec!["allow@example.com".to_string()];
+        let p = build_network_policy(&rules, false, None, None, None)
+            .unwrap()
+            .expect("policy");
+        let preset = microsandbox_network::policy::NetworkPolicy::public_only();
+        assert_eq!(p.default_egress, preset.default_egress);
+        assert_eq!(p.default_ingress, preset.default_ingress);
     }
 }

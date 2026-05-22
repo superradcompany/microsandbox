@@ -87,9 +87,8 @@ sb, err := m.CreateSandbox(ctx, "safe-agent",
 ```
 
 ```bash CLI
-msb create python --name safe-agent \
-  --deny-domain malware.example.com \
-  --deny-domain-suffix .tracking.com
+msb create python --name safe-agent --net-default allow \
+  --net-rule "deny@malware.example.com,deny@*.tracking.com"
 ```
 
 </CodeGroup>
