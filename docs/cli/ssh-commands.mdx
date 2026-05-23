@@ -24,21 +24,6 @@ msb ssh --name serve -- uptime
 
 `msb connect <sandbox>` is a top-level alias for `msb ssh <sandbox>`.
 
-## msb ssh connect
-
-Explicit subcommand form for native SSH client sessions.
-
-```bash
-msb ssh connect devbox
-msb ssh connect devbox -- uname -a
-```
-
-| Argument | Description |
-|----------|-------------|
-| `sandbox` | Sandbox name |
-| `--name NAME` | Explicit sandbox name |
-| `-- COMMAND...` | Remote command to run through the sandbox shell |
-
 ## msb ssh serve
 
 Serve a sandbox over SSH for external OpenSSH, SFTP, or `ProxyCommand` clients.
@@ -69,6 +54,21 @@ Host devbox.msb
   User root
   ProxyCommand msb ssh serve devbox --stdio
 ```
+
+## msb ssh connect
+
+Explicit subcommand form for native SSH client sessions.
+
+```bash
+msb ssh connect devbox
+msb ssh connect devbox -- uname -a
+```
+
+| Argument | Description |
+|----------|-------------|
+| `sandbox` | Sandbox name |
+| `--name NAME` | Explicit sandbox name |
+| `-- COMMAND...` | Remote command to run through the sandbox shell |
 
 ## msb ssh authorize
 
