@@ -1,7 +1,6 @@
 ---
 title: Overview
 description: Connect to sandboxes through SSH protocol sessions
-icon: "lock"
 ---
 
 microsandbox can speak SSH for a sandbox without running `sshd` inside the guest. The SSH server runs in the host-side microsandbox process, then forwards shell, exec, PTY, and SFTP activity through the sandbox's existing command and filesystem channels.
