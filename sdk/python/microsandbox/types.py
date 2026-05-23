@@ -240,6 +240,9 @@ class Rlimit:
     def stack(cls, limit: int) -> Rlimit:
         return cls(RlimitResource.STACK, limit, limit)
 
+    def _to_dict(self) -> dict:
+        return {"resource": str(self.resource), "soft": self.soft, "hard": self.hard}
+
 #--------------------------------------------------------------------------------------------------
 # Types: Stdin
 #--------------------------------------------------------------------------------------------------
@@ -268,7 +271,7 @@ class Stdin:
 
 @dataclass(frozen=True, slots=True)
 class ExecOptions:
-    """Full execution options (passed as second positional to exec/exec_stream)."""
+    """Reusable execution options for ``options=`` on exec/exec_stream/shell."""
     args: tuple[str, ...] = ()
     cwd: str | None = None
     user: str | None = None
@@ -335,7 +338,7 @@ class InitConfig:
 
 @dataclass(frozen=True, slots=True)
 class AttachOptions:
-    """Full options for attach (passed as second positional to attach)."""
+    """Reusable attach options for ``options=`` on attach."""
     args: tuple[str, ...] = ()
     cwd: str | None = None
     user: str | None = None
@@ -372,10 +375,10 @@ class MountConfig:
     size_mib: int | None = None
     readonly: bool = False
     disk: str | None = None
-    format: DiskImageFormat | None = None
+    format: DiskImageFormat | str | None = None
     fstype: str | None = None
-    stat_virtualization: StatVirtualization | None = None
-    host_permissions: HostPermissions | None = None
+    stat_virtualization: StatVirtualization | str | None = None
+    host_permissions: HostPermissions | str | None = None
 
     def _to_dict(self) -> dict:
         # Drive emission off `kind` exclusively so a `MountConfig` with
@@ -399,7 +402,7 @@ class MountConfig:
                 raise ValueError("MountConfig kind=DISK requires disk=...")
             d["disk"] = self.disk
             if self.format is not None:
-                d["format"] = self.format.value
+                d["format"] = _enum_value(self.format)
             if self.fstype is not None:
                 d["fstype"] = self.fstype
         else:  # pragma: no cover - StrEnum exhaustive above
@@ -408,15 +411,18 @@ class MountConfig:
         # Per-mount policies — only valid for virtiofs-backed kinds.
         if self.kind in (MountKind.BIND, MountKind.NAMED):
             if self.stat_virtualization is not None:
-                d["stat_virtualization"] = self.stat_virtualization.value
+                d["stat_virtualization"] = _enum_value(self.stat_virtualization)
             if self.host_permissions is not None:
-                d["host_permissions"] = self.host_permissions.value
+                d["host_permissions"] = _enum_value(self.host_permissions)
         elif self.stat_virtualization is not None or self.host_permissions is not None:
             raise ValueError(
                 f"stat_virtualization/host_permissions are only valid for "
                 f"BIND/NAMED mounts (got kind={self.kind.value})"
             )
         return d
+
+def _enum_value(value: enum.Enum | str) -> str:
+    return value.value if isinstance(value, enum.Enum) else value
 
 #--------------------------------------------------------------------------------------------------
 # Types: Image

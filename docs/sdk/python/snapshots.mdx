@@ -18,7 +18,7 @@ from microsandbox import Sandbox, Snapshot, SnapshotHandle
 
 ```python
 @staticmethod
-async def create(name_or_config, *, snapshot: str | os.PathLike | None = None, **kwargs) -> Sandbox
+async def create(name: str, *, snapshot: str | os.PathLike | None = None, **kwargs) -> Sandbox
 ```
 
 Boot a fresh sandbox from a snapshot artifact by passing `snapshot=` as a peer of `image=`. The two are mutually exclusive — pass exactly one.

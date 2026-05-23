@@ -84,13 +84,14 @@ print(output.exit_code)      # 0
 output = await sandbox.shell("echo hello && pwd")
 print(output.stdout_text)
 
-# Full configuration via ExecOptions dict.
-output = await sandbox.exec("python3", {
-    "args": ["script.py"],
-    "cwd": "/app",
-    "env": {"PYTHONPATH": "/app/lib"},
-    "timeout": 30.0,
-})
+# Full configuration via keyword-only options.
+output = await sandbox.exec(
+    "python3",
+    ["script.py"],
+    cwd="/app",
+    env={"PYTHONPATH": "/app/lib"},
+    timeout=30.0,
+)
 
 # Streaming output.
 handle = await sandbox.exec_stream("tail", ["-f", "/var/log/app.log"])
@@ -431,8 +432,8 @@ if not is_installed():
 
 | Type | Description |
 |------|-------------|
-| `ExecOptions` | Full execution options (args, cwd, env, timeout, tty, rlimits) |
-| `AttachOptions` | Attach options (args, cwd, env, detach_keys) |
+| `ExecOptions` | Reusable execution options for `options=` |
+| `AttachOptions` | Reusable attach options for `options=` |
 | `ExitStatus` | Exit code and success flag |
 | `MountConfig` | Volume mount (bind, named, or tmpfs) |
 | `PatchConfig` | Pre-boot filesystem modification |

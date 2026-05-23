@@ -47,12 +47,10 @@ async def test_python_sdk_end_to_end_smoke():
 
         configured = await sandbox.exec(
             "sh",
-            {
-                "args": ["-c", 'printf "%s:%s\\n" "$(pwd)" "$PYTHON_SMOKE"'],
-                "cwd": "/tmp",
-                "env": {"PYTHON_SMOKE": "ok"},
-                "timeout": 30.0,
-            },
+            ["-c", 'printf "%s:%s\\n" "$(pwd)" "$PYTHON_SMOKE"'],
+            cwd="/tmp",
+            env={"PYTHON_SMOKE": "ok"},
+            timeout=30.0,
         )
         assert configured.success is True
         assert configured.stdout_text == "/tmp:ok\n"

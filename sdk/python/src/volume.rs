@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyModule};
 
 use crate::error::to_py_err;
 
@@ -101,40 +102,42 @@ impl PyVolume {
     }
 
     //----------------------------------------------------------------------------------------------
-    // Static Factories (for mount configs — return dicts)
+    // Static Factories (for mount configs)
     //----------------------------------------------------------------------------------------------
 
     /// Create a bind mount config.
     #[staticmethod]
     #[pyo3(signature = (path, *, readonly = false))]
     fn bind(py: Python<'_>, path: String, readonly: bool) -> PyResult<PyObject> {
-        let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("bind", path)?;
-        dict.set_item("readonly", readonly)?;
-        Ok(dict.into())
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("kind", mount_kind(py, "BIND")?)?;
+        kwargs.set_item("bind", path)?;
+        kwargs.set_item("readonly", readonly)?;
+        Ok(mount_config_class(py)?.call((), Some(&kwargs))?.unbind())
     }
 
     /// Create a named volume mount config.
     #[staticmethod]
     #[pyo3(signature = (name, *, readonly = false))]
     fn named(py: Python<'_>, name: String, readonly: bool) -> PyResult<PyObject> {
-        let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("named", name)?;
-        dict.set_item("readonly", readonly)?;
-        Ok(dict.into())
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("kind", mount_kind(py, "NAMED")?)?;
+        kwargs.set_item("named", name)?;
+        kwargs.set_item("readonly", readonly)?;
+        Ok(mount_config_class(py)?.call((), Some(&kwargs))?.unbind())
     }
 
     /// Create a tmpfs mount config.
     #[staticmethod]
     #[pyo3(signature = (*, size_mib = None, readonly = false))]
     fn tmpfs(py: Python<'_>, size_mib: Option<u32>, readonly: bool) -> PyResult<PyObject> {
-        let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("tmpfs", true)?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("kind", mount_kind(py, "TMPFS")?)?;
         if let Some(size) = size_mib {
-            dict.set_item("size_mib", size)?;
+            kwargs.set_item("size_mib", size)?;
         }
-        dict.set_item("readonly", readonly)?;
-        Ok(dict.into())
+        kwargs.set_item("readonly", readonly)?;
+        Ok(mount_config_class(py)?.call((), Some(&kwargs))?.unbind())
     }
 
     /// Create a disk-image volume mount config.
@@ -153,16 +156,17 @@ impl PyVolume {
         fstype: Option<String>,
         readonly: bool,
     ) -> PyResult<PyObject> {
-        let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("disk", path)?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("kind", mount_kind(py, "DISK")?)?;
+        kwargs.set_item("disk", path)?;
         if let Some(format) = format {
-            dict.set_item("format", format)?;
+            kwargs.set_item("format", format)?;
         }
         if let Some(fstype) = fstype {
-            dict.set_item("fstype", fstype)?;
+            kwargs.set_item("fstype", fstype)?;
         }
-        dict.set_item("readonly", readonly)?;
-        Ok(dict.into())
+        kwargs.set_item("readonly", readonly)?;
+        Ok(mount_config_class(py)?.call((), Some(&kwargs))?.unbind())
     }
 }
 
@@ -310,4 +314,18 @@ impl PyVolumeFs {
             Ok(exists)
         })
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn mount_config_class<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    let types = PyModule::import(py, "microsandbox.types")?;
+    types.getattr("MountConfig")
+}
+
+fn mount_kind<'py>(py: Python<'py>, variant: &str) -> PyResult<Bound<'py, PyAny>> {
+    let types = PyModule::import(py, "microsandbox.types")?;
+    types.getattr("MountKind")?.getattr(variant)
 }

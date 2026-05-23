@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
-from microsandbox.types import LogReadSource, LogSource
+from microsandbox.types import (
+    AttachOptions,
+    ExecOptions,
+    LogReadSource,
+    LogSource,
+    MountConfig,
+    Rlimit,
+    Stdin,
+)
 
 class PyAgentClient:
     @staticmethod
@@ -31,7 +39,7 @@ class PyAgentClient:
 
 class Sandbox:
     @staticmethod
-    async def create(name_or_config: str | dict[str, Any], **kwargs: Any) -> Sandbox: ...
+    async def create(name: str, **kwargs: Any) -> Sandbox: ...
     @staticmethod
     async def start(name: str, *, detached: bool = False) -> Sandbox: ...
     @staticmethod
@@ -42,7 +50,7 @@ class Sandbox:
     async def remove(name: str) -> None: ...
     @staticmethod
     def create_with_progress(
-        name_or_config: str | dict[str, Any], **kwargs: Any
+        name: str, **kwargs: Any
     ) -> PullSession: ...
 
     async def name(self) -> str: ...
@@ -51,15 +59,69 @@ class Sandbox:
     def fs(self) -> SandboxFs: ...
 
     async def exec(
-        self, cmd: str, args_or_options: list[str] | dict[str, Any] | None = None
+        self,
+        cmd: str,
+        args: list[str] | None = None,
+        *,
+        cwd: str | None = None,
+        user: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        stdin: Stdin | bytes | str | None = None,
+        tty: bool = False,
+        rlimits: list[Rlimit] | None = None,
+        options: ExecOptions | None = None,
     ) -> ExecOutput: ...
     async def exec_stream(
-        self, cmd: str, args_or_options: list[str] | dict[str, Any] | None = None
+        self,
+        cmd: str,
+        args: list[str] | None = None,
+        *,
+        cwd: str | None = None,
+        user: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        stdin: Stdin | bytes | str | None = None,
+        tty: bool = False,
+        rlimits: list[Rlimit] | None = None,
+        options: ExecOptions | None = None,
     ) -> ExecHandle: ...
-    async def shell(self, script: str) -> ExecOutput: ...
-    async def shell_stream(self, script: str) -> ExecHandle: ...
+    async def shell(
+        self,
+        script: str,
+        *,
+        cwd: str | None = None,
+        user: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        stdin: Stdin | bytes | str | None = None,
+        tty: bool = False,
+        rlimits: list[Rlimit] | None = None,
+        options: ExecOptions | None = None,
+    ) -> ExecOutput: ...
+    async def shell_stream(
+        self,
+        script: str,
+        *,
+        cwd: str | None = None,
+        user: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        stdin: Stdin | bytes | str | None = None,
+        tty: bool = False,
+        rlimits: list[Rlimit] | None = None,
+        options: ExecOptions | None = None,
+    ) -> ExecHandle: ...
     async def attach(
-        self, cmd: str, args_or_options: list[str] | dict[str, Any] | None = None
+        self,
+        cmd: str,
+        args: list[str] | None = None,
+        *,
+        cwd: str | None = None,
+        user: str | None = None,
+        env: Mapping[str, str] | None = None,
+        detach_keys: str | None = None,
+        options: AttachOptions | None = None,
     ) -> int: ...
     async def attach_shell(self) -> int: ...
     async def metrics(self) -> SandboxMetrics: ...
@@ -142,9 +204,8 @@ class ExecOutput:
 
 class ExecHandle:
     @property
-    async def id(self) -> str: ...
-    @property
-    def stdin(self) -> ExecSink | None: ...
+    def id(self) -> str: ...
+    def take_stdin(self) -> ExecSink | None: ...
     async def recv(self) -> ExecEvent | None: ...
     async def wait(self) -> tuple[int, bool]: ...
     async def collect(self) -> ExecOutput: ...
@@ -248,11 +309,11 @@ class Volume:
     @staticmethod
     async def remove(name: str) -> None: ...
     @staticmethod
-    def bind(path: str, *, readonly: bool = False) -> dict[str, Any]: ...
+    def bind(path: str, *, readonly: bool = False) -> MountConfig: ...
     @staticmethod
-    def named(name: str, *, readonly: bool = False) -> dict[str, Any]: ...
+    def named(name: str, *, readonly: bool = False) -> MountConfig: ...
     @staticmethod
-    def tmpfs(*, size_mib: int | None = None, readonly: bool = False) -> dict[str, Any]: ...
+    def tmpfs(*, size_mib: int | None = None, readonly: bool = False) -> MountConfig: ...
     @staticmethod
     def disk(
         path: str,
@@ -260,7 +321,7 @@ class Volume:
         format: str | None = None,
         fstype: str | None = None,
         readonly: bool = False,
-    ) -> dict[str, Any]: ...
+    ) -> MountConfig: ...
     @property
     def name(self) -> str: ...
     @property

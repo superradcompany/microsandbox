@@ -89,7 +89,9 @@ ExecOptions(
 )
 ```
 
-Frozen dataclass for per-execution overrides.
+Frozen dataclass for reusable per-execution overrides. Pass it explicitly with
+`options=...`; for one-off calls, prefer keyword arguments on `exec`,
+`exec_stream`, or `shell`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -116,7 +118,9 @@ AttachOptions(
 )
 ```
 
-Frozen dataclass for interactive PTY attach configuration.
+Frozen dataclass for reusable interactive PTY attach configuration. Pass it
+explicitly with `options=...`; for one-off calls, prefer keyword arguments on
+`attach`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

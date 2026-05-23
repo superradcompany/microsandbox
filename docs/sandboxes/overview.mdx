@@ -449,7 +449,7 @@ config = Sandbox.build_config(
 )
 
 print(json.dumps(config, indent=2))
-sb = await Sandbox.create(config)
+sb = await Sandbox.create(**config)
 ```
 
 ```go Go

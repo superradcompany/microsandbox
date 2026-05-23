@@ -14,16 +14,16 @@ See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/
 
 ```python
 @staticmethod
-async def create(name_or_config: str | dict, **kwargs) -> Sandbox
+async def create(name: str, **kwargs) -> Sandbox
 ```
 
-Create and boot a sandbox. The first argument is either a name (`str`) or a full config (`dict`). Keyword arguments provide individual config fields. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands.
+Create and boot a sandbox. Keyword arguments provide individual config fields. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
-| name_or_config | `str \| dict` | Sandbox name or full configuration dict |
+| name | `str` | Sandbox name |
 | image | `str \| ImageSource` | OCI image, local path, or disk image (required) |
 | cpus | `int` | Virtual CPUs (default `1`) |
 | memory | `int` | Guest memory in MiB (default `512`) |
@@ -42,7 +42,7 @@ Create and boot a sandbox. The first argument is either a name (`str`) or a full
 | pull_policy | `str \| PullPolicy` | Image pull behavior |
 | log_level | `str \| LogLevel` | Override log verbosity |
 | registry_auth | [`RegistryAuth`](#registryauth) | Private registry credentials |
-| volumes | `dict[str, dict]` | Volume mounts. See [Volumes](/sdk/python/volumes). |
+| volumes | `dict[str, MountConfig]` | Volume mounts. See [Volumes](/sdk/python/volumes). |
 | patches | `list[PatchConfig]` | Rootfs modifications applied before boot |
 | ports | `dict[int, int] \| Sequence[PortBinding]` | Port mappings. Dict form is TCP and binds to `127.0.0.1`; use [`PortBinding`](/sdk/python/networking#portbinding) for explicit bind addresses or UDP |
 | network | [`Network`](/sdk/python/networking#network) | Network policy and configuration |
@@ -70,7 +70,7 @@ async with await Sandbox.create("my-sandbox", image="alpine") as sb:
 
 ```python
 @staticmethod
-def create_with_progress(name_or_config: str | dict, **kwargs) -> PullSession
+def create_with_progress(name: str, **kwargs) -> PullSession
 ```
 
 Same parameters as [`Sandbox.create()`](#sandboxcreate) but returns a [`PullSession`](#pullsession) that lets you track image pull progress before the sandbox is ready. This method is synchronous (not awaitable) -- the async work happens through the `PullSession`.
@@ -218,7 +218,16 @@ Get a filesystem handle for reading and writing files inside the running sandbox
 #### attach()
 
 ```python
-async def attach(cmd: str, args_or_options: list[str] | ExecOptions | None = None) -> int
+async def attach(
+    cmd: str,
+    args: list[str] | None = None,
+    *,
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] | None = None,
+    detach_keys: str | None = None,
+    options: AttachOptions | None = None,
+) -> int
 ```
 
 Bridge your terminal directly to a process inside the sandbox for a fully interactive PTY session.
@@ -228,7 +237,12 @@ Bridge your terminal directly to a process inside the sandbox for a fully intera
 | Name | Type | Description |
 |------|------|-------------|
 | cmd | `str` | Command to run |
-| args_or_options | `list[str] \| ExecOptions \| None` | Command arguments or execution options |
+| args | `list[str] \| None` | Command arguments |
+| cwd | `str \| None` | Working directory |
+| user | `str \| None` | Guest user |
+| env | `Mapping[str, str] \| None` | Environment variables |
+| detach_keys | `str \| None` | Custom detach key sequence |
+| options | [`AttachOptions`](/sdk/python/execution#attachoptions) `\| None` | Explicit reusable options object |
 
 **Returns**
 
@@ -277,7 +291,19 @@ Start a graceful drain (SIGUSR1). Existing commands run to completion, new `exec
 #### exec()
 
 ```python
-async def exec(cmd: str, args_or_options: list[str] | ExecOptions | None = None) -> ExecOutput
+async def exec(
+    cmd: str,
+    args: list[str] | None = None,
+    *,
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    stdin: Stdin | bytes | str | None = None,
+    tty: bool = False,
+    rlimits: list[Rlimit] | None = None,
+    options: ExecOptions | None = None,
+) -> ExecOutput
 ```
 
 Run a command inside the sandbox and wait for it to complete. Collects all stdout and stderr into memory and returns them along with the exit code. For long-running processes or large output, use [`exec_stream()`](#exec_stream) instead.
@@ -287,7 +313,15 @@ Run a command inside the sandbox and wait for it to complete. Collects all stdou
 | Name | Type | Description |
 |------|------|-------------|
 | cmd | `str` | Command to execute (e.g. `"python"`, `"/usr/bin/node"`) |
-| args_or_options | `list[str] \| ExecOptions \| None` | Command arguments (e.g. `["-c", "print('hello')"]`) or [`ExecOptions`](/sdk/python/execution#execoptions) |
+| args | `list[str] \| None` | Command arguments (e.g. `["-c", "print('hello')"]`) |
+| cwd | `str \| None` | Working directory |
+| user | `str \| None` | Guest user |
+| env | `Mapping[str, str] \| None` | Environment variables |
+| timeout | `float \| None` | Kill the process after this many seconds |
+| stdin | [`Stdin`](/sdk/python/execution#stdin) `\| bytes \| str \| None` | Stdin source |
+| tty | `bool` | Allocate a pseudo-terminal |
+| rlimits | `list[`[`Rlimit`](/sdk/python/execution#rlimit)`] \| None` | Resource limits |
+| options | [`ExecOptions`](/sdk/python/execution#execoptions) `\| None` | Explicit reusable options object |
 
 **Returns**
 
@@ -300,7 +334,19 @@ Run a command inside the sandbox and wait for it to complete. Collects all stdou
 #### exec_stream()
 
 ```python
-async def exec_stream(cmd: str, args_or_options: list[str] | ExecOptions | None = None) -> ExecHandle
+async def exec_stream(
+    cmd: str,
+    args: list[str] | None = None,
+    *,
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    stdin: Stdin | bytes | str | None = None,
+    tty: bool = False,
+    rlimits: list[Rlimit] | None = None,
+    options: ExecOptions | None = None,
+) -> ExecHandle
 ```
 
 Run a command with streaming output. Returns a handle that emits stdout, stderr, and exit events as they happen, rather than buffering everything.
@@ -310,7 +356,8 @@ Run a command with streaming output. Returns a handle that emits stdout, stderr,
 | Name | Type | Description |
 |------|------|-------------|
 | cmd | `str` | Command to execute |
-| args_or_options | `list[str] \| ExecOptions \| None` | Command arguments or [`ExecOptions`](/sdk/python/execution#execoptions) |
+| args | `list[str] \| None` | Command arguments |
+| options | [`ExecOptions`](/sdk/python/execution#execoptions) `\| None` | Explicit reusable options object |
 
 **Returns**
 
@@ -457,7 +504,18 @@ Remove the sandbox and all its persisted state from disk.
 #### shell()
 
 ```python
-async def shell(script: str) -> ExecOutput
+async def shell(
+    script: str,
+    *,
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    stdin: Stdin | bytes | str | None = None,
+    tty: bool = False,
+    rlimits: list[Rlimit] | None = None,
+    options: ExecOptions | None = None,
+) -> ExecOutput
 ```
 
 Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Shell syntax like pipes, redirects, and `&&` chains works.
@@ -467,6 +525,7 @@ Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Sh
 | Name | Type | Description |
 |------|------|-------------|
 | script | `str` | Shell command string (e.g. `"ls -la /app && echo done"`) |
+| options | [`ExecOptions`](/sdk/python/execution#execoptions) `\| None` | Explicit reusable options object. `options.args` is not valid for shell commands. |
 
 **Returns**
 

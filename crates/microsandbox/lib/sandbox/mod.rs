@@ -802,6 +802,19 @@ impl Sandbox {
         handle.collect().await
     }
 
+    /// Run a shell command with full execution options and wait for completion.
+    ///
+    /// The shell invocation itself supplies `-c <script>`, so any args configured
+    /// through the builder are ignored.
+    pub async fn shell_with(
+        &self,
+        script: impl Into<String>,
+        f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
+    ) -> MicrosandboxResult<ExecOutput> {
+        let mut handle = self.shell_stream_with(script, f).await?;
+        handle.collect().await
+    }
+
     /// Run a shell command with streaming I/O.
     ///
     /// Like [`shell`](Self::shell) but returns a streaming [`ExecHandle`]
@@ -812,6 +825,21 @@ impl Sandbox {
             args: vec!["-c".to_string(), script.into()],
             ..Default::default()
         };
+        self.exec_stream_inner(shell.to_string(), opts).await
+    }
+
+    /// Run a shell command with full execution options and streaming I/O.
+    ///
+    /// Like [`shell_with`](Self::shell_with) but returns a streaming
+    /// [`ExecHandle`] instead of waiting for completion.
+    pub async fn shell_stream_with(
+        &self,
+        script: impl Into<String>,
+        f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
+    ) -> MicrosandboxResult<ExecHandle> {
+        let shell = self.config.shell.as_deref().unwrap_or("/bin/sh");
+        let mut opts = f(ExecOptionsBuilder::default()).build()?;
+        opts.args = vec!["-c".to_string(), script.into()];
         self.exec_stream_inner(shell.to_string(), opts).await
     }
 }

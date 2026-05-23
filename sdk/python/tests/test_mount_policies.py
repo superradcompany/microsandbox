@@ -25,6 +25,22 @@ def test_bind_default_omits_policies() -> None:
     assert d["bind"] == "/host/data"
 
 
+def test_bind_accepts_policy_strings() -> None:
+    mc = MountConfig(
+        kind=MountKind.BIND,
+        bind="/host/data",
+        readonly=True,
+        stat_virtualization="relaxed",
+        host_permissions="mirror",
+    )
+    assert mc._to_dict() == {
+        "readonly": True,
+        "bind": "/host/data",
+        "stat_virtualization": "relaxed",
+        "host_permissions": "mirror",
+    }
+
+
 def test_bind_with_relaxed_and_mirror_serializes_lowercase() -> None:
     mc = MountConfig(
         kind=MountKind.BIND,
