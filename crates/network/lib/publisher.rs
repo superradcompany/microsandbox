@@ -353,12 +353,25 @@ async fn tcp_listener_task(
         }
 
         let conn = InboundConnection { stream, guest_port };
-        if inbound_tx.send(conn).await.is_err() {
+        if !queue_inbound_connection(&inbound_tx, conn, &shared).await {
             break; // Publisher dropped.
         }
     }
 
     Ok(())
+}
+
+async fn queue_inbound_connection<T>(
+    inbound_tx: &mpsc::Sender<T>,
+    conn: T,
+    shared: &SharedState,
+) -> bool {
+    if inbound_tx.send(conn).await.is_err() {
+        return false;
+    }
+
+    shared.proxy_wake.wake();
+    true
 }
 
 /// Relay task: bridges a host TcpStream to channels connected to smoltcp.
@@ -448,5 +461,34 @@ fn write_host_data(socket: &mut tcp::Socket<'_>, relay: &mut InboundRelay) {
             }
             Err(_) => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fd_is_readable(fd: std::os::fd::RawFd) -> bool {
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+
+        // SAFETY: poll_fd points to one valid pollfd and uses a zero timeout.
+        let n = unsafe { libc::poll(&mut poll_fd, 1, 0) };
+        n > 0 && poll_fd.revents & libc::POLLIN != 0
+    }
+
+    #[tokio::test]
+    async fn queue_inbound_connection_wakes_poll_loop() {
+        let shared = SharedState::new(4);
+        shared.proxy_wake.drain();
+
+        let (tx, mut rx) = mpsc::channel(1);
+
+        assert!(queue_inbound_connection(&tx, (), &shared).await);
+        assert!(rx.try_recv().is_ok());
+        assert!(fd_is_readable(shared.proxy_wake.as_raw_fd()));
     }
 }
