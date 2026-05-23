@@ -83,6 +83,24 @@ typedef char *(*msb_sandbox_remove_fn)(uint64_t cancel_id, const char *name, uin
 typedef char *(*msb_sandbox_exec_fn)(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *exec_opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_exec_stream_fn)(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *exec_opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_metrics_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_ssh_connect_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_ssh_server_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_ssh_server_close_fn)(uint64_t cancel_id, uint64_t server_handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_ssh_server_serve_stdio_fn)(uint64_t cancel_id, uint64_t server_handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_ssh_client_exec_fn)(uint64_t cancel_id, uint64_t client_handle, const char *command, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_ssh_client_attach_fn)(uint64_t cancel_id, uint64_t client_handle, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_ssh_client_close_fn)(uint64_t cancel_id, uint64_t client_handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_ssh_client_sftp_fn)(uint64_t cancel_id, uint64_t client_handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sftp_read_fn)(uint64_t cancel_id, uint64_t sftp_handle, const char *path, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sftp_write_fn)(uint64_t cancel_id, uint64_t sftp_handle, const char *path, const char *data_b64, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sftp_mkdir_fn)(uint64_t cancel_id, uint64_t sftp_handle, const char *path, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sftp_remove_file_fn)(uint64_t cancel_id, uint64_t sftp_handle, const char *path, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sftp_remove_dir_fn)(uint64_t cancel_id, uint64_t sftp_handle, const char *path, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sftp_rename_fn)(uint64_t cancel_id, uint64_t sftp_handle, const char *old_path, const char *new_path, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sftp_real_path_fn)(uint64_t cancel_id, uint64_t sftp_handle, const char *path, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sftp_read_link_fn)(uint64_t cancel_id, uint64_t sftp_handle, const char *path, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sftp_symlink_fn)(uint64_t cancel_id, uint64_t sftp_handle, const char *target, const char *link_path, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sftp_close_fn)(uint64_t cancel_id, uint64_t sftp_handle, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_exec_recv_fn)(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_exec_close_fn)(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len);
@@ -196,6 +214,24 @@ static msb_sandbox_remove_fn     ptr_msb_sandbox_remove     = NULL;
 static msb_sandbox_exec_fn       ptr_msb_sandbox_exec       = NULL;
 static msb_sandbox_exec_stream_fn ptr_msb_sandbox_exec_stream = NULL;
 static msb_sandbox_metrics_fn    ptr_msb_sandbox_metrics    = NULL;
+static msb_sandbox_ssh_connect_fn ptr_msb_sandbox_ssh_connect = NULL;
+static msb_sandbox_ssh_server_fn ptr_msb_sandbox_ssh_server = NULL;
+static msb_ssh_server_close_fn   ptr_msb_ssh_server_close   = NULL;
+static msb_ssh_server_serve_stdio_fn ptr_msb_ssh_server_serve_stdio = NULL;
+static msb_ssh_client_exec_fn    ptr_msb_ssh_client_exec    = NULL;
+static msb_ssh_client_attach_fn  ptr_msb_ssh_client_attach  = NULL;
+static msb_ssh_client_close_fn   ptr_msb_ssh_client_close   = NULL;
+static msb_ssh_client_sftp_fn    ptr_msb_ssh_client_sftp    = NULL;
+static msb_sftp_read_fn          ptr_msb_sftp_read          = NULL;
+static msb_sftp_write_fn         ptr_msb_sftp_write         = NULL;
+static msb_sftp_mkdir_fn         ptr_msb_sftp_mkdir         = NULL;
+static msb_sftp_remove_file_fn   ptr_msb_sftp_remove_file   = NULL;
+static msb_sftp_remove_dir_fn    ptr_msb_sftp_remove_dir    = NULL;
+static msb_sftp_rename_fn        ptr_msb_sftp_rename        = NULL;
+static msb_sftp_real_path_fn     ptr_msb_sftp_real_path     = NULL;
+static msb_sftp_read_link_fn     ptr_msb_sftp_read_link     = NULL;
+static msb_sftp_symlink_fn       ptr_msb_sftp_symlink       = NULL;
+static msb_sftp_close_fn         ptr_msb_sftp_close         = NULL;
 static msb_exec_recv_fn          ptr_msb_exec_recv          = NULL;
 static msb_exec_close_fn         ptr_msb_exec_close         = NULL;
 static msb_exec_signal_fn        ptr_msb_exec_signal        = NULL;
@@ -327,6 +363,24 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_exec);
 	RESOLVE(msb_sandbox_exec_stream);
 	RESOLVE(msb_sandbox_metrics);
+	RESOLVE(msb_sandbox_ssh_connect);
+	RESOLVE(msb_sandbox_ssh_server);
+	RESOLVE(msb_ssh_server_close);
+	RESOLVE(msb_ssh_server_serve_stdio);
+	RESOLVE(msb_ssh_client_exec);
+	RESOLVE(msb_ssh_client_attach);
+	RESOLVE(msb_ssh_client_close);
+	RESOLVE(msb_ssh_client_sftp);
+	RESOLVE(msb_sftp_read);
+	RESOLVE(msb_sftp_write);
+	RESOLVE(msb_sftp_mkdir);
+	RESOLVE(msb_sftp_remove_file);
+	RESOLVE(msb_sftp_remove_dir);
+	RESOLVE(msb_sftp_rename);
+	RESOLVE(msb_sftp_real_path);
+	RESOLVE(msb_sftp_read_link);
+	RESOLVE(msb_sftp_symlink);
+	RESOLVE(msb_sftp_close);
 	RESOLVE(msb_exec_recv);
 	RESOLVE(msb_exec_close);
 	RESOLVE(msb_exec_signal);
@@ -479,6 +533,60 @@ char *call_msb_sandbox_exec_stream(uint64_t cancel_id, uint64_t handle, const ch
 }
 char *call_msb_sandbox_metrics(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_metrics ? ptr_msb_sandbox_metrics(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_ssh_connect(uint64_t cancel_id, uint64_t handle, const char *opts, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_ssh_connect ? ptr_msb_sandbox_ssh_connect(cancel_id, handle, opts, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_ssh_server(uint64_t cancel_id, uint64_t handle, const char *opts, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_ssh_server ? ptr_msb_sandbox_ssh_server(cancel_id, handle, opts, buf, buf_len) : NULL;
+}
+char *call_msb_ssh_server_close(uint64_t cancel_id, uint64_t server_handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_ssh_server_close ? ptr_msb_ssh_server_close(cancel_id, server_handle, buf, buf_len) : NULL;
+}
+char *call_msb_ssh_server_serve_stdio(uint64_t cancel_id, uint64_t server_handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_ssh_server_serve_stdio ? ptr_msb_ssh_server_serve_stdio(cancel_id, server_handle, buf, buf_len) : NULL;
+}
+char *call_msb_ssh_client_exec(uint64_t cancel_id, uint64_t client_handle, const char *command, const char *opts, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_ssh_client_exec ? ptr_msb_ssh_client_exec(cancel_id, client_handle, command, opts, buf, buf_len) : NULL;
+}
+char *call_msb_ssh_client_attach(uint64_t cancel_id, uint64_t client_handle, const char *opts, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_ssh_client_attach ? ptr_msb_ssh_client_attach(cancel_id, client_handle, opts, buf, buf_len) : NULL;
+}
+char *call_msb_ssh_client_close(uint64_t cancel_id, uint64_t client_handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_ssh_client_close ? ptr_msb_ssh_client_close(cancel_id, client_handle, buf, buf_len) : NULL;
+}
+char *call_msb_ssh_client_sftp(uint64_t cancel_id, uint64_t client_handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_ssh_client_sftp ? ptr_msb_ssh_client_sftp(cancel_id, client_handle, buf, buf_len) : NULL;
+}
+char *call_msb_sftp_read(uint64_t cancel_id, uint64_t sftp_handle, const char *path, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sftp_read ? ptr_msb_sftp_read(cancel_id, sftp_handle, path, buf, buf_len) : NULL;
+}
+char *call_msb_sftp_write(uint64_t cancel_id, uint64_t sftp_handle, const char *path, const char *data_b64, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sftp_write ? ptr_msb_sftp_write(cancel_id, sftp_handle, path, data_b64, buf, buf_len) : NULL;
+}
+char *call_msb_sftp_mkdir(uint64_t cancel_id, uint64_t sftp_handle, const char *path, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sftp_mkdir ? ptr_msb_sftp_mkdir(cancel_id, sftp_handle, path, buf, buf_len) : NULL;
+}
+char *call_msb_sftp_remove_file(uint64_t cancel_id, uint64_t sftp_handle, const char *path, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sftp_remove_file ? ptr_msb_sftp_remove_file(cancel_id, sftp_handle, path, buf, buf_len) : NULL;
+}
+char *call_msb_sftp_remove_dir(uint64_t cancel_id, uint64_t sftp_handle, const char *path, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sftp_remove_dir ? ptr_msb_sftp_remove_dir(cancel_id, sftp_handle, path, buf, buf_len) : NULL;
+}
+char *call_msb_sftp_rename(uint64_t cancel_id, uint64_t sftp_handle, const char *old_path, const char *new_path, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sftp_rename ? ptr_msb_sftp_rename(cancel_id, sftp_handle, old_path, new_path, buf, buf_len) : NULL;
+}
+char *call_msb_sftp_real_path(uint64_t cancel_id, uint64_t sftp_handle, const char *path, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sftp_real_path ? ptr_msb_sftp_real_path(cancel_id, sftp_handle, path, buf, buf_len) : NULL;
+}
+char *call_msb_sftp_read_link(uint64_t cancel_id, uint64_t sftp_handle, const char *path, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sftp_read_link ? ptr_msb_sftp_read_link(cancel_id, sftp_handle, path, buf, buf_len) : NULL;
+}
+char *call_msb_sftp_symlink(uint64_t cancel_id, uint64_t sftp_handle, const char *target, const char *link_path, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sftp_symlink ? ptr_msb_sftp_symlink(cancel_id, sftp_handle, target, link_path, buf, buf_len) : NULL;
+}
+char *call_msb_sftp_close(uint64_t cancel_id, uint64_t sftp_handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sftp_close ? ptr_msb_sftp_close(cancel_id, sftp_handle, buf, buf_len) : NULL;
 }
 char *call_msb_exec_recv(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_exec_recv ? ptr_msb_exec_recv(cancel_id, exec_handle, buf, buf_len) : NULL;
@@ -1873,6 +1981,420 @@ func (s *Sandbox) Exec(ctx context.Context, cmd string, opts ExecOptions) (*Exec
 		code = *raw.ExitCode
 	}
 	return &ExecResult{Stdout: raw.Stdout, Stderr: raw.Stderr, ExitCode: code}, nil
+}
+
+// =============================================================================
+// SSH
+// =============================================================================
+
+// SSHClientOptions is the FFI wire shape for a native SSH client connection.
+type SSHClientOptions struct {
+	User string `json:"user,omitempty"`
+	Term string `json:"term,omitempty"`
+	SFTP *bool  `json:"sftp,omitempty"`
+}
+
+// SSHExecOptions is the FFI wire shape for an SSH exec request.
+type SSHExecOptions struct {
+	TTY *bool `json:"tty,omitempty"`
+}
+
+// SSHAttachOptions is the FFI wire shape for an SSH attach request.
+type SSHAttachOptions struct {
+	Term       string `json:"term,omitempty"`
+	DetachKeys string `json:"detach_keys,omitempty"`
+}
+
+// SSHServerOptions is the FFI wire shape for preparing an SSH server endpoint.
+type SSHServerOptions struct {
+	HostKeyPath        string `json:"host_key_path,omitempty"`
+	AuthorizedKeysPath string `json:"authorized_keys_path,omitempty"`
+	User               string `json:"user,omitempty"`
+	SFTP               *bool  `json:"sftp,omitempty"`
+}
+
+// SSHOutput is the FFI-decoded output from an SSH exec request.
+type SSHOutput struct {
+	Status int
+	Stdout []byte
+	Stderr []byte
+}
+
+// SSHClient is an opaque reference to a Rust-side SSH client.
+type SSHClient struct {
+	handle atomic.Uint64
+}
+
+// SSHServer is an opaque reference to a Rust-side SSH server endpoint.
+type SSHServer struct {
+	handle atomic.Uint64
+}
+
+// SFTPClient is an opaque reference to a Rust-side SFTP client session.
+type SFTPClient struct {
+	handle atomic.Uint64
+}
+
+func (c *SSHClient) h() C.uint64_t { return C.uint64_t(c.handle.Load()) }
+
+func (srv *SSHServer) h() C.uint64_t { return C.uint64_t(srv.handle.Load()) }
+
+func (sftp *SFTPClient) h() C.uint64_t { return C.uint64_t(sftp.handle.Load()) }
+
+// SSHConnect connects a native in-process SSH client to this sandbox.
+func (s *Sandbox) SSHConnect(ctx context.Context, opts SSHClientOptions) (*SSHClient, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	optsJSON, err := json.Marshal(opts)
+	if err != nil {
+		return nil, fmt.Errorf("marshal SSH client opts: %w", err)
+	}
+	cOpts := C.CString(string(optsJSON))
+	defer C.free(unsafe.Pointer(cOpts))
+
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_ssh_connect(cancelID, s.h(), cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		ClientHandle uint64 `json:"client_handle"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, fmt.Errorf("parse ssh_connect response: %w", err)
+	}
+	client := &SSHClient{}
+	client.handle.Store(resp.ClientHandle)
+	return client, nil
+}
+
+// SSHServer prepares a reusable SSH server endpoint for this sandbox.
+func (s *Sandbox) SSHServer(ctx context.Context, opts SSHServerOptions) (*SSHServer, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	optsJSON, err := json.Marshal(opts)
+	if err != nil {
+		return nil, fmt.Errorf("marshal SSH server opts: %w", err)
+	}
+	cOpts := C.CString(string(optsJSON))
+	defer C.free(unsafe.Pointer(cOpts))
+
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_ssh_server(cancelID, s.h(), cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		ServerHandle uint64 `json:"server_handle"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, fmt.Errorf("parse ssh_server response: %w", err)
+	}
+	server := &SSHServer{}
+	server.handle.Store(resp.ServerHandle)
+	return server, nil
+}
+
+// Exec runs an SSH exec request and collects output.
+func (c *SSHClient) Exec(ctx context.Context, command string, opts SSHExecOptions) (*SSHOutput, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	optsJSON, err := json.Marshal(opts)
+	if err != nil {
+		return nil, fmt.Errorf("marshal SSH exec opts: %w", err)
+	}
+	cCommand := C.CString(command)
+	defer C.free(unsafe.Pointer(cCommand))
+	cOpts := C.CString(string(optsJSON))
+	defer C.free(unsafe.Pointer(cOpts))
+
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_ssh_client_exec(cancelID, c.h(), cCommand, cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Status int    `json:"status"`
+		Stdout string `json:"stdout"`
+		Stderr string `json:"stderr"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, fmt.Errorf("parse ssh_client_exec response: %w", err)
+	}
+	stdout, err := base64.StdEncoding.DecodeString(resp.Stdout)
+	if err != nil {
+		return nil, fmt.Errorf("decode ssh stdout: %w", err)
+	}
+	stderr, err := base64.StdEncoding.DecodeString(resp.Stderr)
+	if err != nil {
+		return nil, fmt.Errorf("decode ssh stderr: %w", err)
+	}
+	return &SSHOutput{Status: resp.Status, Stdout: stdout, Stderr: stderr}, nil
+}
+
+// Attach bridges the local terminal to an SSH shell.
+func (c *SSHClient) Attach(ctx context.Context, opts SSHAttachOptions) (int, error) {
+	if err := ensureLoaded(); err != nil {
+		return -1, err
+	}
+	optsJSON, err := json.Marshal(opts)
+	if err != nil {
+		return -1, fmt.Errorf("marshal SSH attach opts: %w", err)
+	}
+	cOpts := C.CString(string(optsJSON))
+	defer C.free(unsafe.Pointer(cOpts))
+
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_ssh_client_attach(cancelID, c.h(), cOpts, buf, bufLen)
+	})
+	if err != nil {
+		return -1, err
+	}
+	var resp struct {
+		Status int `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return -1, fmt.Errorf("parse ssh_client_attach response: %w", err)
+	}
+	return resp.Status, nil
+}
+
+// SFTP opens an SFTP session over this SSH connection.
+func (c *SSHClient) SFTP(ctx context.Context) (*SFTPClient, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_ssh_client_sftp(cancelID, c.h(), buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		SFTPHandle uint64 `json:"sftp_handle"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, fmt.Errorf("parse ssh_client_sftp response: %w", err)
+	}
+	sftp := &SFTPClient{}
+	sftp.handle.Store(resp.SFTPHandle)
+	return sftp, nil
+}
+
+// Close closes this SSH client session. The handle is consumed.
+func (c *SSHClient) Close(ctx context.Context) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	h := c.handle.Swap(0)
+	if h == 0 {
+		return &Error{Kind: KindInvalidHandle, Message: "SSH client handle already closed"}
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_ssh_client_close(cancelID, C.uint64_t(h), buf, bufLen)
+	})
+	return err
+}
+
+// Read reads a file over SFTP.
+func (sftp *SFTPClient) Read(ctx context.Context, path string) ([]byte, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sftp_read(cancelID, sftp.h(), cPath, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Data string `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, fmt.Errorf("parse sftp_read response: %w", err)
+	}
+	data, err := base64.StdEncoding.DecodeString(resp.Data)
+	if err != nil {
+		return nil, fmt.Errorf("decode sftp data: %w", err)
+	}
+	return data, nil
+}
+
+// Write writes a file over SFTP, creating or truncating it.
+func (sftp *SFTPClient) Write(ctx context.Context, path string, data []byte) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	cData := C.CString(base64.StdEncoding.EncodeToString(data))
+	defer C.free(unsafe.Pointer(cData))
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sftp_write(cancelID, sftp.h(), cPath, cData, buf, bufLen)
+	})
+	return err
+}
+
+// Mkdir creates a directory over SFTP.
+func (sftp *SFTPClient) Mkdir(ctx context.Context, path string) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sftp_mkdir(cancelID, sftp.h(), cPath, buf, bufLen)
+	})
+	return err
+}
+
+// RemoveFile removes a file over SFTP.
+func (sftp *SFTPClient) RemoveFile(ctx context.Context, path string) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sftp_remove_file(cancelID, sftp.h(), cPath, buf, bufLen)
+	})
+	return err
+}
+
+// RemoveDir removes an empty directory over SFTP.
+func (sftp *SFTPClient) RemoveDir(ctx context.Context, path string) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sftp_remove_dir(cancelID, sftp.h(), cPath, buf, bufLen)
+	})
+	return err
+}
+
+// Rename renames a file or directory over SFTP.
+func (sftp *SFTPClient) Rename(ctx context.Context, oldPath string, newPath string) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	cOld := C.CString(oldPath)
+	defer C.free(unsafe.Pointer(cOld))
+	cNew := C.CString(newPath)
+	defer C.free(unsafe.Pointer(cNew))
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sftp_rename(cancelID, sftp.h(), cOld, cNew, buf, bufLen)
+	})
+	return err
+}
+
+// RealPath resolves a path to its canonical absolute form over SFTP.
+func (sftp *SFTPClient) RealPath(ctx context.Context, path string) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sftp_real_path(cancelID, sftp.h(), cPath, buf, bufLen)
+	})
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", fmt.Errorf("parse sftp_real_path response: %w", err)
+	}
+	return resp.Path, nil
+}
+
+// ReadLink reads a symlink target over SFTP.
+func (sftp *SFTPClient) ReadLink(ctx context.Context, path string) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sftp_read_link(cancelID, sftp.h(), cPath, buf, bufLen)
+	})
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Target string `json:"target"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", fmt.Errorf("parse sftp_read_link response: %w", err)
+	}
+	return resp.Target, nil
+}
+
+// Symlink creates a symlink over SFTP.
+func (sftp *SFTPClient) Symlink(ctx context.Context, target string, linkPath string) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	cTarget := C.CString(target)
+	defer C.free(unsafe.Pointer(cTarget))
+	cLink := C.CString(linkPath)
+	defer C.free(unsafe.Pointer(cLink))
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sftp_symlink(cancelID, sftp.h(), cTarget, cLink, buf, bufLen)
+	})
+	return err
+}
+
+// Close closes this SFTP session. The handle is consumed.
+func (sftp *SFTPClient) Close(ctx context.Context) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	h := sftp.handle.Swap(0)
+	if h == 0 {
+		return &Error{Kind: KindInvalidHandle, Message: "SFTP handle already closed"}
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sftp_close(cancelID, C.uint64_t(h), buf, bufLen)
+	})
+	return err
+}
+
+// Close releases this prepared server endpoint. The handle is consumed.
+func (srv *SSHServer) Close(ctx context.Context) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	h := srv.handle.Swap(0)
+	if h == 0 {
+		return &Error{Kind: KindInvalidHandle, Message: "SSH server handle already closed"}
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_ssh_server_close(cancelID, C.uint64_t(h), buf, bufLen)
+	})
+	return err
+}
+
+// ServeStdio serves one SSH transport over this process's stdin/stdout.
+func (srv *SSHServer) ServeStdio(ctx context.Context) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	_, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_ssh_server_serve_stdio(cancelID, srv.h(), buf, bufLen)
+	})
+	return err
 }
 
 // =============================================================================

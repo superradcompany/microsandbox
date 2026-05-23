@@ -178,6 +178,8 @@ export interface NapiSandbox {
   shell(script: string): Promise<NapiExecOutput>;
   shellStream(script: string): Promise<NapiExecHandle>;
   fs(): NapiSandboxFs;
+  sshConnect(opts?: NapiSshClientOptions): Promise<NapiSshClient>;
+  sshServer(opts?: NapiSshServerOptions): Promise<NapiSshServer>;
   metrics(): Promise<NapiSandboxMetrics>;
   metricsStream(intervalMs: number): Promise<NapiMetricsStream>;
   attach(cmd: string, args?: string[]): Promise<number>;
@@ -244,6 +246,59 @@ export interface LogStreamOptions {
 /** Native stream returned by `logStream()`. */
 export interface NapiLogStream extends AsyncIterable<LogEntry> {
   recv(): Promise<LogEntry | null>;
+}
+
+export interface NapiSshOutput {
+  readonly status: number;
+  readonly stdout: Buffer;
+  readonly stderr: Buffer;
+}
+
+export interface NapiSshClientOptions {
+  user?: string;
+  term?: string;
+  sftp?: boolean;
+}
+
+export interface NapiSshExecOptions {
+  tty?: boolean;
+}
+
+export interface NapiSshAttachOptions {
+  term?: string;
+  detachKeys?: string;
+}
+
+export interface NapiSshServerOptions {
+  hostKeyPath?: string;
+  authorizedKeysPath?: string;
+  user?: string;
+  sftp?: boolean;
+}
+
+export interface NapiSshClient {
+  exec(command: string, opts?: NapiSshExecOptions): Promise<NapiSshOutput>;
+  attach(opts?: NapiSshAttachOptions): Promise<number>;
+  sftp(): Promise<NapiSftpClient>;
+  close(): Promise<void>;
+}
+
+export interface NapiSftpClient {
+  read(path: string): Promise<Buffer>;
+  write(path: string, data: Buffer): Promise<void>;
+  mkdir(path: string): Promise<void>;
+  removeFile(path: string): Promise<void>;
+  removeDir(path: string): Promise<void>;
+  rename(oldPath: string, newPath: string): Promise<void>;
+  realPath(path: string): Promise<string>;
+  readLink(path: string): Promise<string>;
+  symlink(target: string, linkPath: string): Promise<void>;
+  close(): Promise<void>;
+}
+
+export interface NapiSshServer {
+  serveStdio(): Promise<void>;
+  close(): Promise<void>;
 }
 
 export interface NapiSandboxInfo {

@@ -12,6 +12,7 @@ use crate::exec::{ExecOutput, JsExecHandle};
 use crate::exec_options_builder::JsExecOptionsBuilder;
 use crate::fs::JsSandboxFs;
 use crate::sandbox_handle::JsSandboxHandle;
+use crate::ssh::{JsSshClient, JsSshServer, apply_client_options, apply_server_options};
 use crate::types::*;
 
 //--------------------------------------------------------------------------------------------------
@@ -251,6 +252,36 @@ impl Sandbox {
     #[napi]
     pub fn fs(&self) -> JsSandboxFs {
         JsSandboxFs::new(self.inner.clone())
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // SSH
+    //----------------------------------------------------------------------------------------------
+
+    /// Connect a native in-process SSH client to this sandbox.
+    #[napi(js_name = "sshConnect")]
+    pub async fn ssh_connect(&self, options: Option<SshClientOptions>) -> Result<JsSshClient> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let client = sb
+            .ssh()
+            .connect_with(|builder| apply_client_options(options, builder))
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsSshClient::from_rust(client))
+    }
+
+    /// Prepare a reusable SSH server endpoint for this sandbox.
+    #[napi(js_name = "sshServer")]
+    pub async fn ssh_server(&self, options: Option<SshServerOptions>) -> Result<JsSshServer> {
+        let guard = self.inner.lock().await;
+        let sb = guard.as_ref().ok_or_else(consumed_error)?;
+        let server = sb
+            .ssh()
+            .server_with(|builder| apply_server_options(options, builder))
+            .await
+            .map_err(to_napi_error)?;
+        Ok(JsSshServer::from_rust(server))
     }
 
     //----------------------------------------------------------------------------------------------
@@ -656,7 +687,7 @@ fn sandbox_handle_to_info(handle: &microsandbox::sandbox::SandboxHandle) -> Sand
     }
 }
 
-fn exit_status_to_js(status: std::process::ExitStatus) -> ExitStatus {
+pub(crate) fn exit_status_to_js(status: std::process::ExitStatus) -> ExitStatus {
     use std::os::unix::process::ExitStatusExt;
     let code = status.code().unwrap_or_else(|| {
         // If no code, the process was killed by a signal.

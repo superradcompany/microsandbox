@@ -1,0 +1,117 @@
+---
+title: SSH
+description: Go SDK - native SSH client and server helpers
+icon: "terminal"
+---
+
+The Go SDK exposes SSH through `sandbox.SSH()`. SSH is implemented by microsandbox on the host side; no `sshd` process runs inside the guest.
+
+## Connect
+
+```go
+sb, err := microsandbox.StartSandbox(ctx, "devbox")
+if err != nil {
+    return err
+}
+
+ssh, err := sb.SSH().Connect(ctx)
+if err != nil {
+    return err
+}
+defer ssh.Close(ctx)
+
+out, err := ssh.Exec(ctx, "uname -a")
+if err != nil {
+    return err
+}
+fmt.Print(string(out.Stdout))
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `sb.SSH()` | `*SSH` | Return the SSH namespace |
+| `SSH.Connect(ctx, opts...)` | `(*SSHClient, error)` | Connect an in-process SSH client |
+| `SSH.Server(ctx, opts...)` | `(*SSHServer, error)` | Prepare a server endpoint |
+
+| Client option | Description |
+|---------------|-------------|
+| `WithSSHUser(user)` | SSH login user. Defaults to `root` |
+| `WithSSHTerm(term)` | Terminal name for interactive sessions |
+| `WithSSHClientSFTP(enabled)` | Enable or disable SFTP on the internal server |
+
+## SSHClient
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Exec(ctx, command, opts...)` | `(*SSHOutput, error)` | Run `shell -c command` through SSH |
+| `Attach(ctx, opts...)` | `(int, error)` | Attach the local terminal to an SSH shell |
+| `SFTP(ctx)` | `(*SFTPClient, error)` | Open an SFTP client session |
+| `Close(ctx)` | `error` | Close the client session |
+
+`SSHOutput` contains `Status`, `Stdout`, and `Stderr`.
+
+```go
+sftp, err := ssh.SFTP(ctx)
+if err != nil {
+    return err
+}
+defer sftp.Close(ctx)
+
+if err := sftp.Write(ctx, "/tmp/hello.txt", []byte("hello")); err != nil {
+    return err
+}
+data, err := sftp.Read(ctx, "/tmp/hello.txt")
+```
+
+| SFTP method | Returns | Description |
+|-------------|---------|-------------|
+| `Read(ctx, path)` | `([]byte, error)` | Read a file into memory |
+| `Write(ctx, path, data)` | `error` | Create or truncate a file |
+| `Mkdir(ctx, path)` | `error` | Create a directory |
+| `RemoveFile(ctx, path)` | `error` | Remove a file |
+| `RemoveDir(ctx, path)` | `error` | Remove an empty directory |
+| `Rename(ctx, oldPath, newPath)` | `error` | Rename a file or directory |
+| `RealPath(ctx, path)` | `(string, error)` | Resolve a canonical path |
+| `ReadLink(ctx, path)` | `(string, error)` | Read a symlink target |
+| `Symlink(ctx, target, linkPath)` | `error` | Create a symlink |
+| `Close(ctx)` | `error` | Close the SFTP session |
+
+| Exec option | Description |
+|-------------|-------------|
+| `WithSSHTTY(enabled)` | Request a PTY for the exec channel |
+
+| Attach option | Description |
+|---------------|-------------|
+| `WithSSHAttachTerm(term)` | Terminal name for the shell |
+| `WithSSHDetachKeys(keys)` | Detach key sequence |
+
+## SSHServer
+
+```go
+server, err := sb.SSH().Server(ctx, microsandbox.WithSSHServerSFTP(true))
+if err != nil {
+    return err
+}
+defer server.Close(ctx)
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `ServeStdio(ctx)` | `error` | Serve one SSH transport over stdin/stdout |
+| `Close(ctx)` | `error` | Release the prepared endpoint |
+
+| Server option | Description |
+|---------------|-------------|
+| `WithSSHHostKeyPath(path)` | Override the host private key path |
+| `WithSSHAuthorizedKeysPath(path)` | Override the authorized-keys path |
+| `WithSSHServerUser(user)` | Override the guest user used for exec requests |
+| `WithSSHServerSFTP(enabled)` | Enable or disable SFTP |
+
+## SSH State
+
+| Path | Purpose |
+|------|---------|
+| `<sandbox-dir>/ssh/host_ed25519` | Per-sandbox SSH host private key |
+| `<MSB_HOME>/ssh/authorized_keys` | Authorized public keys for external server transports |
+
+When `MSB_HOME` is unset, `<MSB_HOME>` is `~/.microsandbox`.

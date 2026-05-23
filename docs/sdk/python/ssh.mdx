@@ -1,0 +1,97 @@
+---
+title: SSH
+description: Python SDK - native SSH client and server helpers
+icon: "terminal"
+---
+
+The Python SDK exposes SSH through `sandbox.ssh()`. SSH is implemented by microsandbox on the host side; no `sshd` process runs inside the guest.
+
+## Connect
+
+```python
+from microsandbox import Sandbox
+
+sb = await Sandbox.start("devbox")
+ssh = await sb.ssh().connect()
+
+output = await ssh.exec("uname -a")
+print(output.stdout_text)
+
+await ssh.close()
+```
+
+```python
+code = await (await sb.ssh().connect(user="root")).attach()
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `sb.ssh()` | `SandboxSsh` | Return the SSH namespace |
+| `ssh.connect(...)` | `SshClient` | Connect an in-process SSH client |
+| `ssh.server(...)` | `SshServer` | Prepare a server endpoint |
+
+| Connect parameter | Description |
+|-------------------|-------------|
+| `user` | SSH login user. Defaults to `root` |
+| `term` | Terminal name for interactive sessions |
+| `sftp` | Enable or disable SFTP on the internal server |
+
+## SshClient
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `exec(command, tty=False)` | `SshOutput` | Run `shell -c command` through SSH |
+| `attach(term=None, detach_keys=None)` | `int` | Attach the local terminal to an SSH shell |
+| `sftp()` | `SftpClient` | Open an SFTP client session |
+| `close()` | `None` | Close the client session |
+
+`SshOutput` exposes `status`, `success`, `stdout_text`, `stderr_text`, `stdout_bytes`, and `stderr_bytes`.
+
+```python
+sftp = await ssh.sftp()
+await sftp.write("/tmp/hello.txt", b"hello")
+data = await sftp.read("/tmp/hello.txt")
+await sftp.close()
+```
+
+| SFTP method | Returns | Description |
+|-------------|---------|-------------|
+| `read(path)` | `bytes` | Read a file into memory |
+| `write(path, data)` | `None` | Create or truncate a file |
+| `mkdir(path)` | `None` | Create a directory |
+| `remove_file(path)` | `None` | Remove a file |
+| `remove_dir(path)` | `None` | Remove an empty directory |
+| `rename(old_path, new_path)` | `None` | Rename a file or directory |
+| `real_path(path)` | `str` | Resolve a canonical path |
+| `read_link(path)` | `str` | Read a symlink target |
+| `symlink(target, link_path)` | `None` | Create a symlink |
+| `close()` | `None` | Close the SFTP session |
+
+## SshServer
+
+```python
+server = await sb.ssh().server(sftp=True)
+
+await server.serve_stdio()
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `serve_stdio()` | `None` | Serve one SSH transport over stdin/stdout |
+| `close()` | `None` | Release the prepared endpoint |
+
+| Server parameter | Description |
+|------------------|-------------|
+| `host_key_path` | Override the host private key path |
+| `authorized_keys_path` | Override the authorized-keys path |
+| `user` | Override the guest user used for exec requests |
+| `sftp` | Enable or disable SFTP |
+
+## SSH State
+
+| Path | Purpose |
+|------|---------|
+| `<sandbox-dir>/ssh/host_ed25519` | Per-sandbox SSH host private key |
+| `<MSB_HOME>/ssh/authorized_keys` | Authorized public keys for external server transports |
+
+When `MSB_HOME` is unset, `<MSB_HOME>` is `~/.microsandbox`.

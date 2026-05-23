@@ -94,6 +94,7 @@
             "pages": [
               "sdk/rust/sandbox",
               "sdk/rust/execution",
+              "sdk/rust/ssh",
               "sdk/rust/filesystem",
               "sdk/rust/volumes",
               "sdk/rust/networking",
@@ -109,6 +110,7 @@
             "pages": [
               "sdk/typescript/sandbox",
               "sdk/typescript/execution",
+              "sdk/typescript/ssh",
               "sdk/typescript/filesystem",
               "sdk/typescript/volumes",
               "sdk/typescript/networking",
@@ -124,6 +126,7 @@
             "pages": [
               "sdk/python/sandbox",
               "sdk/python/execution",
+              "sdk/python/ssh",
               "sdk/python/filesystem",
               "sdk/python/volumes",
               "sdk/python/networking",
@@ -139,6 +142,7 @@
             "pages": [
               "sdk/go/sandbox",
               "sdk/go/execution",
+              "sdk/go/ssh",
               "sdk/go/filesystem",
               "sdk/go/volumes",
               "sdk/go/images",
@@ -160,6 +164,7 @@
             "pages": [
               "cli/overview",
               "cli/sandbox-commands",
+              "cli/ssh-commands",
               "cli/volume-commands",
               "cli/image-commands"
             ]

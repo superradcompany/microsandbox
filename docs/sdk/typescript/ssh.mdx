@@ -1,0 +1,106 @@
+---
+title: SSH
+description: TypeScript SDK - native SSH client and server helpers
+icon: "terminal"
+---
+
+The TypeScript SDK exposes SSH through `sandbox.ssh()`. SSH is implemented by microsandbox on the host side; no `sshd` process runs inside the guest.
+
+## Connect
+
+```typescript
+import { Sandbox } from "microsandbox";
+
+const sandbox = await Sandbox.start("devbox");
+const ssh = await sandbox.ssh().connect();
+
+const output = await ssh.exec("uname -a");
+process.stdout.write(output.stdout);
+
+await ssh.close();
+```
+
+```typescript
+const code = await (await sandbox.ssh().connect({ user: "root" })).attach();
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `sandbox.ssh()` | `SandboxSsh` | Return the SSH namespace |
+| `ssh.connect(options?)` | `Promise<SshClient>` | Connect an in-process SSH client |
+| `ssh.server(options?)` | `Promise<SshServer>` | Prepare a server endpoint |
+
+| Client option | Type | Description |
+|---------------|------|-------------|
+| `user` | `string` | SSH login user. Defaults to `root` |
+| `term` | `string` | Terminal name for interactive sessions |
+| `sftp` | `boolean` | Enable or disable SFTP on the internal server |
+
+## SshClient
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `exec(command, options?)` | `Promise<SshOutput>` | Run `shell -c command` through SSH |
+| `attach(options?)` | `Promise<number>` | Attach the local terminal to an SSH shell |
+| `sftp()` | `Promise<SftpClient>` | Open an SFTP client session |
+| `close()` | `Promise<void>` | Close the client session |
+
+`SshOutput` contains `status`, `stdout`, and `stderr`.
+
+```typescript
+const sftp = await ssh.sftp();
+await sftp.write("/tmp/hello.txt", Buffer.from("hello"));
+const data = await sftp.read("/tmp/hello.txt");
+await sftp.close();
+```
+
+| SFTP method | Returns | Description |
+|-------------|---------|-------------|
+| `read(path)` | `Promise<Buffer>` | Read a file into memory |
+| `write(path, data)` | `Promise<void>` | Create or truncate a file |
+| `mkdir(path)` | `Promise<void>` | Create a directory |
+| `removeFile(path)` | `Promise<void>` | Remove a file |
+| `removeDir(path)` | `Promise<void>` | Remove an empty directory |
+| `rename(oldPath, newPath)` | `Promise<void>` | Rename a file or directory |
+| `realPath(path)` | `Promise<string>` | Resolve a canonical path |
+| `readLink(path)` | `Promise<string>` | Read a symlink target |
+| `symlink(target, linkPath)` | `Promise<void>` | Create a symlink |
+| `close()` | `Promise<void>` | Close the SFTP session |
+
+| Exec option | Type | Description |
+|-------------|------|-------------|
+| `tty` | `boolean` | Request a PTY for the exec channel |
+
+| Attach option | Type | Description |
+|---------------|------|-------------|
+| `term` | `string` | Terminal name for the shell |
+| `detachKeys` | `string` | Detach key sequence |
+
+## SshServer
+
+```typescript
+const server = await sandbox.ssh().server({ sftp: true });
+
+await server.serveStdio();
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `serveStdio()` | `Promise<void>` | Serve one SSH transport over stdin/stdout |
+| `close()` | `Promise<void>` | Release the prepared endpoint |
+
+| Server option | Type | Description |
+|---------------|------|-------------|
+| `hostKeyPath` | `string` | Override the host private key path |
+| `authorizedKeysPath` | `string` | Override the authorized-keys path |
+| `user` | `string` | Override the guest user used for exec requests |
+| `sftp` | `boolean` | Enable or disable SFTP |
+
+## SSH State
+
+| Path | Purpose |
+|------|---------|
+| `<sandbox-dir>/ssh/host_ed25519` | Per-sandbox SSH host private key |
+| `<MSB_HOME>/ssh/authorized_keys` | Authorized public keys for external server transports |
+
+When `MSB_HOME` is unset, `<MSB_HOME>` is `~/.microsandbox`.

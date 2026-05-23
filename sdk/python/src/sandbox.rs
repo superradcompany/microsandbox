@@ -14,6 +14,7 @@ use crate::logs::read_logs_blocking;
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
 use crate::sandbox_handle::PySandboxHandle;
+use crate::ssh::PySandboxSsh;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -365,6 +366,15 @@ impl PySandbox {
                 .map_err(to_py_err)?;
             Ok(PyExecHandle::from_rust(handle))
         })
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // SSH
+    //----------------------------------------------------------------------------------------------
+
+    /// Return the SSH namespace for this sandbox.
+    fn ssh(&self) -> PySandboxSsh {
+        PySandboxSsh::new(self.inner.clone())
     }
 
     //----------------------------------------------------------------------------------------------

@@ -1,0 +1,109 @@
+---
+title: SSH
+description: Rust SDK - native SSH client and server helpers
+icon: "terminal"
+---
+
+The Rust SDK exposes SSH as a sandbox namespace. It uses microsandbox exec and filesystem protocols under the hood; no `sshd` process runs in the guest.
+
+```toml
+microsandbox = { version = "0.4.6", features = ["ssh"] }
+```
+
+## Connect
+
+```rust
+let sandbox = Sandbox::start("devbox").await?;
+let ssh = sandbox.ssh().connect().await?;
+
+let output = ssh.exec("uname -a").await?;
+println!("{}", String::from_utf8_lossy(&output.stdout));
+
+ssh.close().await?;
+```
+
+```rust
+let code = sandbox
+    .ssh()
+    .connect_with(|ssh| ssh.user("root").term("xterm-256color"))
+    .await?
+    .attach()
+    .await?;
+```
+
+| Method | Description |
+|--------|-------------|
+| `sandbox.ssh()` | Return the SSH namespace |
+| `ssh.connect()` | Connect an in-process SSH client |
+| `ssh.connect_with(|opts| ...)` | Connect with client options |
+
+| Client option | Description |
+|---------------|-------------|
+| `user(user)` | SSH login user. Defaults to `root` |
+| `term(term)` | Terminal name for interactive sessions |
+| `sftp(enabled)` | Enable or disable SFTP on the internal server |
+
+## SshClient
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `exec(command)` | `MicrosandboxResult<SshOutput>` | Run `shell -c command` through SSH |
+| `exec_with(command, |opts| ...)` | `MicrosandboxResult<SshOutput>` | Run an exec request with options |
+| `attach()` | `MicrosandboxResult<i32>` | Attach the local terminal to an SSH shell |
+| `attach_with(|opts| ...)` | `MicrosandboxResult<i32>` | Attach with terminal options |
+| `sftp()` | `MicrosandboxResult<SftpClient>` | Open an SFTP client session |
+| `close()` | `MicrosandboxResult<()>` | Close the client session |
+
+`SshOutput` contains `status`, `stdout`, and `stderr`.
+
+```rust
+let sftp = ssh.sftp().await?;
+sftp.write("/tmp/hello.txt", b"hello").await?;
+let data = sftp.read("/tmp/hello.txt").await?;
+sftp.close().await?;
+```
+
+| Exec option | Description |
+|-------------|-------------|
+| `tty(enabled)` | Request a PTY for the exec channel |
+
+| Attach option | Description |
+|---------------|-------------|
+| `term(term)` | Terminal name for the shell |
+| `detach_keys(keys)` | Detach key sequence |
+
+## Server
+
+```rust
+let server = sandbox
+    .ssh()
+    .server_with(|ssh| ssh.sftp(true))
+    .await?;
+
+server.serve(stream).await?;
+```
+
+`SshServer` is a reusable endpoint. The SDK prepares SSH protocol state; the caller owns the transport and passes each ordered duplex stream to `serve(stream)`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `ssh.server()` | `MicrosandboxResult<SshServer>` | Prepare a server endpoint |
+| `ssh.server_with(|opts| ...)` | `MicrosandboxResult<SshServer>` | Prepare with server options |
+| `server.serve(stream)` | `MicrosandboxResult<()>` | Serve one SSH connection over a duplex stream |
+
+| Server option | Description |
+|---------------|-------------|
+| `host_key_path(path)` | Override the host private key path |
+| `authorized_keys_path(path)` | Override the authorized-keys path |
+| `authorized_key(key)` | Add one in-memory public key |
+| `user(user)` | Override the guest user used for exec requests |
+| `sftp(enabled)` | Enable or disable SFTP |
+
+## SSH State
+
+| Path | Purpose |
+|------|---------|
+| `<sandbox-dir>/ssh/host_ed25519` | Per-sandbox SSH host private key |
+| `<MSB_HOME>/ssh/authorized_keys` | Authorized public keys for external server transports |
+
+When `MSB_HOME` is unset, `<MSB_HOME>` is `~/.microsandbox`.

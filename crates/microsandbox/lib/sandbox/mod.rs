@@ -14,6 +14,8 @@ mod handle;
 pub mod init;
 mod metrics;
 mod patch;
+#[cfg(feature = "ssh")]
+pub mod ssh;
 mod types;
 
 use std::{collections::HashMap, path::Path, process::ExitStatus, sync::Arc};
@@ -60,7 +62,10 @@ pub use attach::AttachOptionsBuilder;
 pub use builder::{RegistryConfigBuilder, SandboxBuilder};
 pub use config::{DEFAULT_REPLACE_TIMEOUT, SandboxConfig};
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
-pub use fs::{FsEntry, FsEntryKind, FsMetadata, FsReadStream, FsWriteSink, SandboxFs};
+pub use fs::{
+    FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
+    FsWriteSink, SandboxFs,
+};
 pub use handle::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_STOP_TIMEOUT, SandboxHandle};
 pub use init::{HandoffInit, InitOptionsBuilder};
 pub use metrics::{SandboxMetrics, all_sandbox_metrics};
@@ -72,6 +77,12 @@ pub use microsandbox_network::config::NetworkConfig;
 #[cfg(feature = "net")]
 pub use microsandbox_network::policy::NetworkPolicy;
 pub use microsandbox_runtime::logging::LogLevel;
+#[cfg(feature = "ssh")]
+pub use ssh::{
+    DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSsh, SftpClient, SshAttachOptionsBuilder, SshClient,
+    SshClientOptionsBuilder, SshExecOptionsBuilder, SshOutput, SshServer, SshServerOptionsBuilder,
+    SshStdioStream,
+};
 pub use types::{
     DiskImageFormat, HostPermissions, ImageBuilder, ImageSource, IntoImage, MountBuilder, Patch,
     PatchBuilder, RootfsSource, StatVirtualization, VolumeMount,
@@ -332,15 +343,36 @@ impl Sandbox {
         }
 
         // Validate that the configured workdir exists inside the guest.
-        if let Some(ref workdir) = sandbox.config.workdir
-            && !sandbox.fs().exists(workdir).await.unwrap_or(false)
-        {
-            let _ = sandbox.stop().await;
-            let _ = update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
-            free_metrics_slot_for(sandbox_id, None, microsandbox_metrics::ReleaseMode::Free);
-            return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                "workdir does not exist in guest: {workdir}"
-            )));
+        if let Some(ref workdir) = sandbox.config.workdir {
+            match sandbox.fs().stat(workdir).await {
+                Ok(metadata) if metadata.kind == fs::FsEntryKind::Directory => {}
+                Ok(_) => {
+                    let _ = sandbox.stop().await;
+                    let _ =
+                        update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+                    free_metrics_slot_for(
+                        sandbox_id,
+                        None,
+                        microsandbox_metrics::ReleaseMode::Free,
+                    );
+                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                        "workdir is not a directory in guest: {workdir}"
+                    )));
+                }
+                Err(error) => {
+                    let _ = sandbox.stop().await;
+                    let _ =
+                        update_sandbox_status(write_db, sandbox_id, SandboxStatus::Stopped).await;
+                    free_metrics_slot_for(
+                        sandbox_id,
+                        None,
+                        microsandbox_metrics::ReleaseMode::Free,
+                    );
+                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                        "workdir does not exist in guest: {workdir}: {error}"
+                    )));
+                }
+            }
         }
 
         Ok(sandbox)
@@ -547,7 +579,7 @@ impl Sandbox {
 
     /// Read, write, and manage files inside the running sandbox.
     /// Operations go through the guest agent (agentd).
-    pub fn fs(&self) -> fs::SandboxFs<'_> {
+    pub fn fs(&self) -> fs::SandboxFs {
         fs::SandboxFs::new(&self.client)
     }
 
@@ -665,6 +697,18 @@ impl Sandbox {
         cmd: String,
         opts: ExecOptions,
     ) -> MicrosandboxResult<ExecHandle> {
+        self.exec_stream_with_agent(Arc::clone(&self.client), cmd, opts, 24, 80)
+            .await
+    }
+
+    pub(crate) async fn exec_stream_with_agent(
+        &self,
+        client: Arc<AgentClient>,
+        cmd: String,
+        opts: ExecOptions,
+        rows: u16,
+        cols: u16,
+    ) -> MicrosandboxResult<ExecHandle> {
         let ExecOptions {
             args,
             cwd,
@@ -694,21 +738,21 @@ impl Sandbox {
             &env,
             &rlimits,
             tty,
-            24,
-            80,
+            rows,
+            cols,
         );
-        let (id, rx) = self.client.stream(MessageType::ExecRequest, &req).await?;
+        let (id, rx) = client.stream(MessageType::ExecRequest, &req).await?;
 
         // Build stdin sink (if Pipe mode).
         let stdin = match &stdin_mode {
-            StdinMode::Pipe => Some(ExecSink::new(id, Arc::clone(&self.client))),
+            StdinMode::Pipe => Some(ExecSink::new(id, Arc::clone(&client))),
             _ => None,
         };
 
         // Handle StdinMode::Bytes — send bytes then close.
         if let StdinMode::Bytes(ref data) = stdin_mode {
             let data = data.clone();
-            let bridge = Arc::clone(&self.client);
+            let bridge = Arc::clone(&client);
             tokio::spawn(async move {
                 let payload = ExecStdin { data };
                 let _ = bridge.send(id, MessageType::ExecStdin, &payload).await;
@@ -722,12 +766,7 @@ impl Sandbox {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         tokio::spawn(event_mapper_task(rx, event_tx));
 
-        Ok(ExecHandle::new(
-            id,
-            event_rx,
-            stdin,
-            Arc::clone(&self.client),
-        ))
+        Ok(ExecHandle::new(id, event_rx, stdin, Arc::clone(&client)))
     }
 
     /// Execute a command and wait for completion.
