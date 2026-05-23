@@ -24,6 +24,24 @@ msb ssh --name serve -- uptime
 
 `msb connect <sandbox>` is a top-level alias for `msb ssh <sandbox>`.
 
+## msb ssh authorize
+
+Add a public key to microsandbox's SSH authorization file.
+
+```bash
+msb ssh authorize --file ~/.ssh/id_ed25519.pub
+msb ssh authorize --key "ssh-ed25519 AAAA... user@host"
+cat ~/.ssh/id_ed25519.pub | msb ssh authorize --stdin
+```
+
+| Flag | Description |
+|------|-------------|
+| `--file PATH` | Read one public key from a file |
+| `--key KEY` | Read one public key from the flag value |
+| `--stdin` | Read one public key from stdin |
+
+The default authorization file is `<MSB_HOME>/ssh/authorized_keys`, or `~/.microsandbox/ssh/authorized_keys` when `MSB_HOME` is unset. The file is created with private permissions.
+
 ## msb ssh serve
 
 Serve a sandbox over SSH for external OpenSSH, SFTP, or `ProxyCommand` clients.
@@ -69,24 +87,6 @@ msb ssh connect devbox -- uname -a
 | `sandbox` | Sandbox name |
 | `--name NAME` | Explicit sandbox name |
 | `-- COMMAND...` | Remote command to run through the sandbox shell |
-
-## msb ssh authorize
-
-Add a public key to microsandbox's SSH authorization file.
-
-```bash
-msb ssh authorize --file ~/.ssh/id_ed25519.pub
-msb ssh authorize --key "ssh-ed25519 AAAA... user@host"
-cat ~/.ssh/id_ed25519.pub | msb ssh authorize --stdin
-```
-
-| Flag | Description |
-|------|-------------|
-| `--file PATH` | Read one public key from a file |
-| `--key KEY` | Read one public key from the flag value |
-| `--stdin` | Read one public key from stdin |
-
-The default authorization file is `<MSB_HOME>/ssh/authorized_keys`, or `~/.microsandbox/ssh/authorized_keys` when `MSB_HOME` is unset. The file is created with private permissions.
 
 ## SSH state
 
