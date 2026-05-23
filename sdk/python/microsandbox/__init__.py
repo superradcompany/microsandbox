@@ -78,11 +78,9 @@ from microsandbox.events import (
 )
 from microsandbox.types import (
     Action,
-    AttachOptions,
     DestGroup,
     Direction,
     DiskImageFormat,
-    ExecOptions,
     ExitStatus,
     FsEntryKind,
     GiB,
@@ -146,7 +144,6 @@ __all__ = [
     "LogEntry",
     "LogStream",
     "MetricsStream",
-    "ExecOptions",
     "ExitStatus",
     "Stdin",
     "Rlimit",
@@ -216,7 +213,6 @@ __all__ = [
     # Patches
     "Patch",
     "PatchConfig",
-    "AttachOptions",
     # Init handoff
     "InitConfig",
     # Metrics

@@ -224,7 +224,6 @@ impl PySandbox {
         stdin = None,
         tty = false,
         rlimits = None,
-        options = None,
     ))]
     fn exec<'py>(
         &self,
@@ -238,11 +237,9 @@ impl PySandbox {
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
-        options: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let (args, opts) =
-            parse_exec_call(args, cwd, user, env, timeout, stdin, tty, rlimits, options)?;
+        let (args, opts) = parse_exec_call(args, cwd, user, env, timeout, stdin, tty, rlimits)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -267,7 +264,6 @@ impl PySandbox {
         stdin = None,
         tty = false,
         rlimits = None,
-        options = None,
     ))]
     fn exec_stream<'py>(
         &self,
@@ -281,11 +277,9 @@ impl PySandbox {
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
-        options: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let (args, opts) =
-            parse_exec_call(args, cwd, user, env, timeout, stdin, tty, rlimits, options)?;
+        let (args, opts) = parse_exec_call(args, cwd, user, env, timeout, stdin, tty, rlimits)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -309,7 +303,6 @@ impl PySandbox {
         stdin = None,
         tty = false,
         rlimits = None,
-        options = None,
     ))]
     fn shell<'py>(
         &self,
@@ -322,10 +315,9 @@ impl PySandbox {
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
-        options: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits, options)?;
+        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -349,7 +341,6 @@ impl PySandbox {
         stdin = None,
         tty = false,
         rlimits = None,
-        options = None,
     ))]
     fn shell_stream<'py>(
         &self,
@@ -362,10 +353,9 @@ impl PySandbox {
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
-        options: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits, options)?;
+        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -393,7 +383,6 @@ impl PySandbox {
         user = None,
         env = None,
         detach_keys = None,
-        options = None,
     ))]
     fn attach<'py>(
         &self,
@@ -404,10 +393,9 @@ impl PySandbox {
         user: Option<String>,
         env: Option<HashMap<String, String>>,
         detach_keys: Option<String>,
-        options: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let (args, opts) = parse_attach_call(args, cwd, user, env, detach_keys, options)?;
+        let (args, opts) = parse_attach_call(args, cwd, user, env, detach_keys)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -668,13 +656,7 @@ fn parse_exec_call(
     stdin: Option<&Bound<'_, PyAny>>,
     tty: bool,
     rlimits: Option<&Bound<'_, PyAny>>,
-    options: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(Vec<String>, ExecOpts)> {
-    if let Some(options) = options {
-        ensure_no_exec_keywords(args, &cwd, &user, &env, timeout_secs, stdin, tty, rlimits)?;
-        return parse_exec_options_obj(options);
-    }
-
     let args = parse_args(args)?;
     let (stdin_mode, stdin_data) = parse_stdin(stdin)?;
     validate_timeout(timeout_secs)?;
@@ -702,19 +684,7 @@ fn parse_shell_call(
     stdin: Option<&Bound<'_, PyAny>>,
     tty: bool,
     rlimits: Option<&Bound<'_, PyAny>>,
-    options: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<ExecOpts> {
-    if let Some(options) = options {
-        ensure_no_exec_keywords(None, &cwd, &user, &env, timeout_secs, stdin, tty, rlimits)?;
-        let (args, opts) = parse_exec_options_obj(options)?;
-        if !args.is_empty() {
-            return Err(PyValueError::new_err(
-                "options.args is not valid for shell(); pass the script as the first argument",
-            ));
-        }
-        return Ok(opts);
-    }
-
     let (stdin_mode, stdin_data) = parse_stdin(stdin)?;
     validate_timeout(timeout_secs)?;
     Ok(ExecOpts {
@@ -735,22 +705,7 @@ fn parse_attach_call(
     user: Option<String>,
     env: Option<HashMap<String, String>>,
     detach_keys: Option<String>,
-    options: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(Vec<String>, AttachOpts)> {
-    if let Some(options) = options {
-        if args.is_some()
-            || cwd.is_some()
-            || user.is_some()
-            || env.is_some()
-            || detach_keys.is_some()
-        {
-            return Err(PyValueError::new_err(
-                "options= cannot be combined with args or attach keyword options",
-            ));
-        }
-        return parse_attach_options_obj(options);
-    }
-
     Ok((
         parse_args(args)?,
         AttachOpts {
@@ -762,40 +717,13 @@ fn parse_attach_call(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn ensure_no_exec_keywords(
-    args: Option<&Bound<'_, PyAny>>,
-    cwd: &Option<String>,
-    user: &Option<String>,
-    env: &Option<HashMap<String, String>>,
-    timeout_secs: Option<f64>,
-    stdin: Option<&Bound<'_, PyAny>>,
-    tty: bool,
-    rlimits: Option<&Bound<'_, PyAny>>,
-) -> PyResult<()> {
-    if args.is_some()
-        || cwd.is_some()
-        || user.is_some()
-        || env.is_some()
-        || timeout_secs.is_some()
-        || stdin.is_some()
-        || tty
-        || rlimits.is_some()
-    {
-        return Err(PyValueError::new_err(
-            "options= cannot be combined with args or execution keyword options",
-        ));
-    }
-    Ok(())
-}
-
 fn parse_args(args: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
     let Some(args) = args else {
         return Ok(Vec::new());
     };
     if args.downcast::<PyDict>().is_ok() {
         return Err(pyo3::exceptions::PyTypeError::new_err(
-            "args must be a list of strings; pass ExecOptions with options=...",
+            "args must be a list of strings",
         ));
     }
     if args.downcast::<PyBytes>().is_ok() || args.extract::<String>().is_ok() {
@@ -809,40 +737,6 @@ fn parse_args(args: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
     list.iter().map(|item| item.extract::<String>()).collect()
 }
 
-fn parse_exec_options_obj(obj: &Bound<'_, PyAny>) -> PyResult<(Vec<String>, ExecOpts)> {
-    let dict = options_dict(obj, "options")?;
-    let args = parse_args_from_dict(&dict)?;
-    let (stdin_mode, stdin_data) = parse_stdin_from_dict(&dict)?;
-    let timeout_secs = optional_from_dict::<f64>(&dict, "timeout")?;
-    validate_timeout(timeout_secs)?;
-    Ok((
-        args,
-        ExecOpts {
-            cwd: optional_from_dict(&dict, "cwd")?,
-            user: optional_from_dict(&dict, "user")?,
-            env: parse_env_from_dict(&dict)?,
-            timeout_secs,
-            tty: optional_from_dict(&dict, "tty")?.unwrap_or(false),
-            stdin_mode,
-            stdin_data,
-            rlimits: parse_rlimits_from_dict(&dict)?,
-        },
-    ))
-}
-
-fn parse_attach_options_obj(obj: &Bound<'_, PyAny>) -> PyResult<(Vec<String>, AttachOpts)> {
-    let dict = options_dict(obj, "options")?;
-    Ok((
-        parse_args_from_dict(&dict)?,
-        AttachOpts {
-            cwd: optional_from_dict(&dict, "cwd")?,
-            user: optional_from_dict(&dict, "user")?,
-            env: parse_env_from_dict(&dict)?,
-            detach_keys: optional_from_dict(&dict, "detach_keys")?,
-        },
-    ))
-}
-
 fn options_dict<'py>(obj: &Bound<'py, PyAny>, label: &str) -> PyResult<Bound<'py, PyDict>> {
     if let Ok(dict) = obj.downcast::<PyDict>() {
         return Ok(dict.clone());
@@ -854,34 +748,6 @@ fn options_dict<'py>(obj: &Bound<'py, PyAny>, label: &str) -> PyResult<Bound<'py
     Err(pyo3::exceptions::PyTypeError::new_err(format!(
         "{label} must be a dict or object with _to_dict()",
     )))
-}
-
-fn parse_args_from_dict(dict: &Bound<'_, PyDict>) -> PyResult<Vec<String>> {
-    let Some(args) = dict.get_item("args")? else {
-        return Ok(Vec::new());
-    };
-    if args.is_none() {
-        return Ok(Vec::new());
-    }
-    let list = args.downcast::<PyList>().map_err(|_| {
-        pyo3::exceptions::PyTypeError::new_err("options.args must be a list of strings")
-    })?;
-    list.iter().map(|item| item.extract::<String>()).collect()
-}
-
-fn parse_env_from_dict(dict: &Bound<'_, PyDict>) -> PyResult<Vec<(String, String)>> {
-    let Some(env_obj) = dict.get_item("env")? else {
-        return Ok(Vec::new());
-    };
-    if env_obj.is_none() {
-        return Ok(Vec::new());
-    }
-
-    let env_dict: &Bound<'_, PyDict> = env_obj.downcast()?;
-    env_dict
-        .iter()
-        .map(|(k, v)| Ok::<_, PyErr>((k.extract::<String>()?, v.extract::<String>()?)))
-        .collect()
 }
 
 fn env_to_pairs(env: Option<HashMap<String, String>>) -> Vec<(String, String)> {
@@ -913,18 +779,6 @@ fn parse_stdin(stdin: Option<&Bound<'_, PyAny>>) -> PyResult<(Option<String>, Op
     normalize_stdin(mode, data)
 }
 
-fn parse_stdin_from_dict(dict: &Bound<'_, PyDict>) -> PyResult<(Option<String>, Option<Vec<u8>>)> {
-    let Some(stdin_obj) = dict.get_item("stdin")? else {
-        return Ok((None, None));
-    };
-    if stdin_obj.is_none() {
-        return Ok((None, None));
-    }
-    let mode: String = stdin_obj.extract()?;
-    let data = optional_from_dict(dict, "stdin_data")?;
-    normalize_stdin(mode, data)
-}
-
 fn normalize_stdin(
     mode: String,
     data: Option<Vec<u8>>,
@@ -944,16 +798,6 @@ fn parse_rlimits(rlimits: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<(String, u6
         return Ok(Vec::new());
     };
     parse_rlimits_iter(rlimits)
-}
-
-fn parse_rlimits_from_dict(dict: &Bound<'_, PyDict>) -> PyResult<Vec<(String, u64, u64)>> {
-    let Some(rlimits) = dict.get_item("rlimits")? else {
-        return Ok(Vec::new());
-    };
-    if rlimits.is_none() {
-        return Ok(Vec::new());
-    }
-    parse_rlimits_iter(&rlimits)
 }
 
 fn parse_rlimits_iter(obj: &Bound<'_, PyAny>) -> PyResult<Vec<(String, u64, u64)>> {
@@ -1015,16 +859,6 @@ fn validate_timeout(timeout_secs: Option<f64>) -> PyResult<()> {
         return Err(PyValueError::new_err("timeout must be non-negative"));
     }
     Ok(())
-}
-
-fn optional_from_dict<'py, T: FromPyObject<'py>>(
-    dict: &Bound<'py, PyDict>,
-    key: &str,
-) -> PyResult<Option<T>> {
-    match dict.get_item(key)? {
-        Some(val) if !val.is_none() => Ok(Some(val.extract()?)),
-        _ => Ok(None),
-    }
 }
 
 fn required_from_dict<'py, T: FromPyObject<'py>>(

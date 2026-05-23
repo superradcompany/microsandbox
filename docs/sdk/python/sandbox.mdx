@@ -226,7 +226,6 @@ async def attach(
     user: str | None = None,
     env: Mapping[str, str] | None = None,
     detach_keys: str | None = None,
-    options: AttachOptions | None = None,
 ) -> int
 ```
 
@@ -242,7 +241,6 @@ Bridge your terminal directly to a process inside the sandbox for a fully intera
 | user | `str \| None` | Guest user |
 | env | `Mapping[str, str] \| None` | Environment variables |
 | detach_keys | `str \| None` | Custom detach key sequence |
-| options | [`AttachOptions`](/sdk/python/execution#attachoptions) `\| None` | Explicit reusable options object |
 
 **Returns**
 
@@ -302,7 +300,6 @@ async def exec(
     stdin: Stdin | bytes | str | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,
-    options: ExecOptions | None = None,
 ) -> ExecOutput
 ```
 
@@ -321,7 +318,6 @@ Run a command inside the sandbox and wait for it to complete. Collects all stdou
 | stdin | [`Stdin`](/sdk/python/execution#stdin) `\| bytes \| str \| None` | Stdin source |
 | tty | `bool` | Allocate a pseudo-terminal |
 | rlimits | `list[`[`Rlimit`](/sdk/python/execution#rlimit)`] \| None` | Resource limits |
-| options | [`ExecOptions`](/sdk/python/execution#execoptions) `\| None` | Explicit reusable options object |
 
 **Returns**
 
@@ -345,7 +341,6 @@ async def exec_stream(
     stdin: Stdin | bytes | str | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,
-    options: ExecOptions | None = None,
 ) -> ExecHandle
 ```
 
@@ -357,7 +352,13 @@ Run a command with streaming output. Returns a handle that emits stdout, stderr,
 |------|------|-------------|
 | cmd | `str` | Command to execute |
 | args | `list[str] \| None` | Command arguments |
-| options | [`ExecOptions`](/sdk/python/execution#execoptions) `\| None` | Explicit reusable options object |
+| cwd | `str \| None` | Working directory |
+| user | `str \| None` | Guest user |
+| env | `Mapping[str, str] \| None` | Environment variables |
+| timeout | `float \| None` | Kill the process after this many seconds |
+| stdin | [`Stdin`](/sdk/python/execution#stdin) `\| bytes \| str \| None` | Stdin source |
+| tty | `bool` | Allocate a pseudo-terminal |
+| rlimits | `list[`[`Rlimit`](/sdk/python/execution#rlimit)`] \| None` | Resource limits |
 
 **Returns**
 
@@ -514,7 +515,6 @@ async def shell(
     stdin: Stdin | bytes | str | None = None,
     tty: bool = False,
     rlimits: list[Rlimit] | None = None,
-    options: ExecOptions | None = None,
 ) -> ExecOutput
 ```
 
@@ -525,7 +525,13 @@ Run a command through the sandbox's configured shell (defaults to `/bin/sh`). Sh
 | Name | Type | Description |
 |------|------|-------------|
 | script | `str` | Shell command string (e.g. `"ls -la /app && echo done"`) |
-| options | [`ExecOptions`](/sdk/python/execution#execoptions) `\| None` | Explicit reusable options object. `options.args` is not valid for shell commands. |
+| cwd | `str \| None` | Working directory |
+| user | `str \| None` | Guest user |
+| env | `Mapping[str, str] \| None` | Environment variables |
+| timeout | `float \| None` | Kill the process after this many seconds |
+| stdin | [`Stdin`](/sdk/python/execution#stdin) `\| bytes \| str \| None` | Stdin source |
+| tty | `bool` | Allocate a pseudo-terminal |
+| rlimits | `list[`[`Rlimit`](/sdk/python/execution#rlimit)`] \| None` | Resource limits |
 
 **Returns**
 

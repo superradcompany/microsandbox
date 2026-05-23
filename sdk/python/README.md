@@ -432,8 +432,6 @@ if not is_installed():
 
 | Type | Description |
 |------|-------------|
-| `ExecOptions` | Reusable execution options for `options=` |
-| `AttachOptions` | Reusable attach options for `options=` |
 | `ExitStatus` | Exit code and success flag |
 | `MountConfig` | Volume mount (bind, named, or tmpfs) |
 | `PatchConfig` | Pre-boot filesystem modification |

@@ -6,15 +6,7 @@ import os
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
-from microsandbox.types import (
-    AttachOptions,
-    ExecOptions,
-    LogReadSource,
-    LogSource,
-    MountConfig,
-    Rlimit,
-    Stdin,
-)
+from microsandbox.types import LogReadSource, LogSource, MountConfig, Rlimit, Stdin
 
 class PyAgentClient:
     @staticmethod
@@ -70,7 +62,6 @@ class Sandbox:
         stdin: Stdin | bytes | str | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
-        options: ExecOptions | None = None,
     ) -> ExecOutput: ...
     async def exec_stream(
         self,
@@ -84,7 +75,6 @@ class Sandbox:
         stdin: Stdin | bytes | str | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
-        options: ExecOptions | None = None,
     ) -> ExecHandle: ...
     async def shell(
         self,
@@ -97,7 +87,6 @@ class Sandbox:
         stdin: Stdin | bytes | str | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
-        options: ExecOptions | None = None,
     ) -> ExecOutput: ...
     async def shell_stream(
         self,
@@ -110,7 +99,6 @@ class Sandbox:
         stdin: Stdin | bytes | str | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
-        options: ExecOptions | None = None,
     ) -> ExecHandle: ...
     async def attach(
         self,
@@ -121,7 +109,6 @@ class Sandbox:
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         detach_keys: str | None = None,
-        options: AttachOptions | None = None,
     ) -> int: ...
     async def attach_shell(self) -> int: ...
     async def metrics(self) -> SandboxMetrics: ...

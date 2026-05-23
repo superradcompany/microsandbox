@@ -266,45 +266,6 @@ class Stdin:
         return cls("bytes", data)
 
 #--------------------------------------------------------------------------------------------------
-# Types: Exec
-#--------------------------------------------------------------------------------------------------
-
-@dataclass(frozen=True, slots=True)
-class ExecOptions:
-    """Reusable execution options for ``options=`` on exec/exec_stream/shell."""
-    args: tuple[str, ...] = ()
-    cwd: str | None = None
-    user: str | None = None
-    env: Mapping[str, str] = field(default_factory=dict)
-    timeout: float | None = None
-    stdin: Stdin = field(default_factory=Stdin.null)
-    tty: bool = False
-    rlimits: tuple[Rlimit, ...] = ()
-
-    def _to_dict(self) -> dict:
-        d: dict = {"args": list(self.args)}
-        if self.cwd is not None:
-            d["cwd"] = self.cwd
-        if self.user is not None:
-            d["user"] = self.user
-        if self.env:
-            d["env"] = dict(self.env)
-        if self.timeout is not None:
-            d["timeout"] = self.timeout
-        if self.tty:
-            d["tty"] = True
-        if self.stdin._mode != "null":
-            d["stdin"] = self.stdin._mode
-            if self.stdin._data is not None:
-                d["stdin_data"] = self.stdin._data
-        if self.rlimits:
-            d["rlimits"] = [
-                {"resource": str(r.resource), "soft": r.soft, "hard": r.hard}
-                for r in self.rlimits
-            ]
-        return d
-
-#--------------------------------------------------------------------------------------------------
 # Types: Init Handoff
 #--------------------------------------------------------------------------------------------------
 
@@ -330,31 +291,6 @@ class InitConfig:
             d["args"] = list(self.args)
         if self.env:
             d["env"] = dict(self.env)
-        return d
-
-#--------------------------------------------------------------------------------------------------
-# Types: Attach
-#--------------------------------------------------------------------------------------------------
-
-@dataclass(frozen=True, slots=True)
-class AttachOptions:
-    """Reusable attach options for ``options=`` on attach."""
-    args: tuple[str, ...] = ()
-    cwd: str | None = None
-    user: str | None = None
-    env: Mapping[str, str] = field(default_factory=dict)
-    detach_keys: str | None = None
-
-    def _to_dict(self) -> dict:
-        d: dict = {"args": list(self.args)}
-        if self.cwd is not None:
-            d["cwd"] = self.cwd
-        if self.user is not None:
-            d["user"] = self.user
-        if self.env:
-            d["env"] = dict(self.env)
-        if self.detach_keys is not None:
-            d["detach_keys"] = self.detach_keys
         return d
 
 #--------------------------------------------------------------------------------------------------
