@@ -1,43 +1,17 @@
 ---
 title: SSH Commands
 description: Connect to and serve sandboxes over SSH
-icon: "terminal"
+icon: "lock"
 ---
 
-`msb ssh` puts the OpenSSH protocol in front of an existing sandbox. Interactive shells, remote commands, PTY resize, stdin/stdout/stderr, and SFTP are handled by the microsandbox runtime; no SSH daemon runs inside the guest.
+SSH commands expose sandbox shells, remote commands, and SFTP through the SSH protocol. For usage flows, see [SSH](/sandboxes/ssh/overview).
 
-See [SSH](/sandboxes/ssh) for the conceptual model and common OpenSSH, SFTP, and `ProxyCommand` flows.
+## msb ssh
 
-<Note>
-  `msb ssh serve` uses public-key authentication for external clients. Add keys explicitly with `msb ssh authorize`; microsandbox does not import keys from `~/.ssh` automatically. Native `msb ssh <sandbox>` uses an internal client and does not require authorization.
-</Note>
-
-## msb ssh authorize
-
-Add a public key to microsandbox's SSH authorization file.
-
-```bash
-msb ssh authorize --file ~/.ssh/id_ed25519.pub
-msb ssh authorize --key "ssh-ed25519 AAAA... user@host"
-cat ~/.ssh/id_ed25519.pub | msb ssh authorize --stdin
-```
-
-| Flag | Description |
-|------|-------------|
-| `--file PATH` | Read one public key from a file |
-| `--key KEY` | Read one public key from the flag value |
-| `--stdin` | Read one public key from stdin |
-
-The default authorization file is `<MSB_HOME>/ssh/authorized_keys`, or `~/.microsandbox/ssh/authorized_keys` when `MSB_HOME` is unset. The file is created with private permissions.
-
-## msb ssh / msb connect / msb ssh connect
-
-Start a native SSH client session into the sandbox. With no remote command, this opens an interactive shell. With `--`, the remaining tokens are joined into the remote shell command.
+Start a native SSH client session into a sandbox. With no remote command, this opens an interactive shell. With `--`, the remaining tokens are joined into the remote shell command.
 
 ```bash
 msb ssh devbox
-msb connect devbox
-msb ssh connect devbox
 msb ssh devbox -- uname -a
 msb ssh --name serve -- uptime
 ```
@@ -48,9 +22,22 @@ msb ssh --name serve -- uptime
 | `--name NAME` | Explicit sandbox name, useful when the name collides with `serve`, `authorize`, or `help` |
 | `-- COMMAND...` | Remote command to run through the sandbox shell |
 
-`msb ssh <sandbox>` starts the sandbox if needed, creates an in-process SSH client/server pair over an in-memory duplex stream, and tears it down when the session exits. It does not require the host `ssh` binary and does not bind a loopback TCP port.
+`msb connect <sandbox>` is a top-level alias for `msb ssh <sandbox>`.
 
-`msb connect <sandbox>` is a top-level alias. `msb ssh connect <sandbox>` is the explicit subcommand form.
+## msb ssh connect
+
+Explicit subcommand form for native SSH client sessions.
+
+```bash
+msb ssh connect devbox
+msb ssh connect devbox -- uname -a
+```
+
+| Argument | Description |
+|----------|-------------|
+| `sandbox` | Sandbox name |
+| `--name NAME` | Explicit sandbox name |
+| `-- COMMAND...` | Remote command to run through the sandbox shell |
 
 ## msb ssh serve
 
@@ -83,7 +70,25 @@ Host devbox.msb
   ProxyCommand msb ssh serve devbox --stdio
 ```
 
-## SSH State
+## msb ssh authorize
+
+Add a public key to microsandbox's SSH authorization file.
+
+```bash
+msb ssh authorize --file ~/.ssh/id_ed25519.pub
+msb ssh authorize --key "ssh-ed25519 AAAA... user@host"
+cat ~/.ssh/id_ed25519.pub | msb ssh authorize --stdin
+```
+
+| Flag | Description |
+|------|-------------|
+| `--file PATH` | Read one public key from a file |
+| `--key KEY` | Read one public key from the flag value |
+| `--stdin` | Read one public key from stdin |
+
+The default authorization file is `<MSB_HOME>/ssh/authorized_keys`, or `~/.microsandbox/ssh/authorized_keys` when `MSB_HOME` is unset. The file is created with private permissions.
+
+## SSH state
 
 | Path | Purpose |
 |------|---------|

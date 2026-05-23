@@ -1,111 +1,297 @@
 ---
 title: SSH
-description: Rust SDK - native SSH client and server helpers
-icon: "terminal"
+description: Rust SDK - SSH API reference
+icon: "lock"
 ---
 
-The Rust SDK exposes SSH as a sandbox namespace. It uses microsandbox exec and filesystem protocols under the hood; no `sshd` process runs in the guest.
-
-See [SSH](/sandboxes/ssh) for the protocol model and cross-language examples.
+See [SSH](/sandboxes/ssh/overview) for usage flows.
 
 ```toml
 microsandbox = { version = "0.4.6", features = ["ssh"] }
 ```
 
-## Connect
+## Sandbox
+
+---
+
+#### ssh()
 
 ```rust
-let sandbox = Sandbox::start("devbox").await?;
-let ssh = sandbox.ssh().connect().await?;
-
-let output = ssh.exec("uname -a").await?;
-println!("{}", String::from_utf8_lossy(&output.stdout));
-
-ssh.close().await?;
+fn ssh(&self) -> SandboxSsh
 ```
+
+Return the SSH namespace for this sandbox.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxSsh`](#sandboxssh) | SSH client and server helpers |
+
+## SandboxSsh
+
+---
+
+#### connect()
 
 ```rust
-let code = sandbox
-    .ssh()
-    .connect_with(|ssh| ssh.user("root").term("xterm-256color"))
-    .await?
-    .attach()
-    .await?;
+async fn connect(&self) -> MicrosandboxResult<SshClient>
 ```
 
-| Method | Description |
-|--------|-------------|
-| `sandbox.ssh()` | Return the SSH namespace |
-| `ssh.connect()` | Connect an in-process SSH client |
-| `ssh.connect_with(|opts| ...)` | Connect with client options |
+Connect a native in-process SSH client to the sandbox.
 
-| Client option | Description |
-|---------------|-------------|
-| `user(user)` | SSH login user. Defaults to `root` |
-| `term(term)` | Terminal name for interactive sessions |
-| `sftp(enabled)` | Enable or disable SFTP on the internal server |
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SshClient`](#sshclient) | Native SSH client session |
+
+---
+
+#### connect_with()
+
+```rust
+async fn connect_with(
+    &self,
+    f: impl FnOnce(SshClientOptionsBuilder) -> SshClientOptionsBuilder,
+) -> MicrosandboxResult<SshClient>
+```
+
+Connect a native SSH client with custom client options.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| f | `FnOnce(SshClientOptionsBuilder) -> SshClientOptionsBuilder` | Configure user, terminal, and SFTP support |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SshClient`](#sshclient) | Native SSH client session |
+
+---
+
+#### server()
+
+```rust
+async fn server(&self) -> MicrosandboxResult<SshServer>
+```
+
+Prepare a reusable SSH server endpoint for this sandbox.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SshServer`](#sshserver) | Reusable SSH server endpoint |
+
+---
+
+#### server_with()
+
+```rust
+async fn server_with(
+    &self,
+    f: impl FnOnce(SshServerOptionsBuilder) -> SshServerOptionsBuilder,
+) -> MicrosandboxResult<SshServer>
+```
+
+Prepare a server endpoint with custom host-key, authorization, user, or SFTP options.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| f | `FnOnce(SshServerOptionsBuilder) -> SshServerOptionsBuilder` | Configure server options |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SshServer`](#sshserver) | Reusable SSH server endpoint |
 
 ## SshClient
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `exec(command)` | `MicrosandboxResult<SshOutput>` | Run `shell -c command` through SSH |
-| `exec_with(command, |opts| ...)` | `MicrosandboxResult<SshOutput>` | Run an exec request with options |
-| `attach()` | `MicrosandboxResult<i32>` | Attach the local terminal to an SSH shell |
-| `attach_with(|opts| ...)` | `MicrosandboxResult<i32>` | Attach with terminal options |
-| `sftp()` | `MicrosandboxResult<SftpClient>` | Open an SFTP client session |
-| `close()` | `MicrosandboxResult<()>` | Close the client session |
+---
 
-`SshOutput` contains `status`, `stdout`, and `stderr`.
+#### exec()
 
 ```rust
-let sftp = ssh.sftp().await?;
-sftp.write("/tmp/hello.txt", b"hello").await?;
-let data = sftp.read("/tmp/hello.txt").await?;
-sftp.close().await?;
+async fn exec(&self, command: impl Into<String>) -> MicrosandboxResult<SshOutput>
 ```
 
-| Exec option | Description |
-|-------------|-------------|
-| `tty(enabled)` | Request a PTY for the exec channel |
+Run an SSH exec request and collect stdout, stderr, and exit status.
 
-| Attach option | Description |
-|---------------|-------------|
-| `term(term)` | Terminal name for the shell |
-| `detach_keys(keys)` | Detach key sequence |
+**Parameters**
 
-## Server
+| Name | Type | Description |
+|------|------|-------------|
+| command | `impl Into<String>` | Command string sent through SSH |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SshOutput`](#sshoutput) | Captured output and status |
+
+---
+
+#### exec_with()
 
 ```rust
-let server = sandbox
-    .ssh()
-    .server_with(|ssh| ssh.sftp(true))
-    .await?;
-
-server.serve(stream).await?;
+async fn exec_with(
+    &self,
+    command: impl Into<String>,
+    f: impl FnOnce(SshExecOptionsBuilder) -> SshExecOptionsBuilder,
+) -> MicrosandboxResult<SshOutput>
 ```
 
-`SshServer` is a reusable endpoint. The SDK prepares SSH protocol state; the caller owns the transport and passes each ordered duplex stream to `serve(stream)`.
+Run an SSH exec request with options.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `ssh.server()` | `MicrosandboxResult<SshServer>` | Prepare a server endpoint |
-| `ssh.server_with(|opts| ...)` | `MicrosandboxResult<SshServer>` | Prepare with server options |
-| `server.serve(stream)` | `MicrosandboxResult<()>` | Serve one SSH connection over a duplex stream |
+**Parameters**
 
-| Server option | Description |
-|---------------|-------------|
-| `host_key_path(path)` | Override the host private key path |
-| `authorized_keys_path(path)` | Override the authorized-keys path |
-| `authorized_key(key)` | Add one in-memory public key |
-| `user(user)` | Override the guest user used for exec requests |
-| `sftp(enabled)` | Enable or disable SFTP |
+| Name | Type | Description |
+|------|------|-------------|
+| command | `impl Into<String>` | Command string sent through SSH |
+| f | `FnOnce(SshExecOptionsBuilder) -> SshExecOptionsBuilder` | Configure exec options |
 
-## SSH State
+**Returns**
 
-| Path | Purpose |
-|------|---------|
-| `<sandbox-dir>/ssh/host_ed25519` | Per-sandbox SSH host private key |
-| `<MSB_HOME>/ssh/authorized_keys` | Authorized public keys for external server transports |
+| Type | Description |
+|------|-------------|
+| [`SshOutput`](#sshoutput) | Captured output and status |
 
-When `MSB_HOME` is unset, `<MSB_HOME>` is `~/.microsandbox`.
+---
+
+#### attach()
+
+```rust
+async fn attach(&self) -> MicrosandboxResult<i32>
+```
+
+Attach the local terminal to an interactive SSH shell.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `i32` | Exit code |
+
+---
+
+#### attach_with()
+
+```rust
+async fn attach_with(
+    &self,
+    f: impl FnOnce(SshAttachOptionsBuilder) -> SshAttachOptionsBuilder,
+) -> MicrosandboxResult<i32>
+```
+
+Attach with terminal options.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| f | `FnOnce(SshAttachOptionsBuilder) -> SshAttachOptionsBuilder` | Configure terminal and detach keys |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `i32` | Exit code |
+
+---
+
+#### sftp()
+
+```rust
+async fn sftp(&self) -> MicrosandboxResult<SftpClient>
+```
+
+Open an SFTP session over this SSH connection.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SftpClient`](#sftpclient) | SFTP client session |
+
+---
+
+#### close()
+
+```rust
+async fn close(self) -> MicrosandboxResult<()>
+```
+
+Close the native SSH client session.
+
+## SshServer
+
+---
+
+#### serve()
+
+```rust
+async fn serve<S>(&self, stream: S) -> MicrosandboxResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static
+```
+
+Serve one SSH connection over an ordered duplex stream.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| stream | `S` | Ordered duplex SSH transport |
+
+## Types
+
+### SshOutput
+
+| Field | Type | Description |
+|-------|------|-------------|
+| status | `i32` | Exit status code |
+| stdout | `Bytes` | Captured stdout bytes |
+| stderr | `Bytes` | Captured stderr bytes |
+
+### SftpClient
+
+Alias for `russh_sftp::client::SftpSession`.
+
+### SshClientOptionsBuilder
+
+| Method | Parameters | Description |
+|--------|------------|-------------|
+| user() | `impl Into<String>` | SSH login user. Defaults to `root` |
+| term() | `impl Into<String>` | Terminal name for interactive sessions |
+| sftp() | `bool` | Enable or disable SFTP on the internal server |
+
+### SshExecOptionsBuilder
+
+| Method | Parameters | Description |
+|--------|------------|-------------|
+| tty() | `bool` | Request a PTY for the exec channel |
+
+### SshAttachOptionsBuilder
+
+| Method | Parameters | Description |
+|--------|------------|-------------|
+| term() | `impl Into<String>` | Terminal name for the shell |
+| detach_keys() | `impl Into<String>` | Detach key sequence |
+
+### SshServerOptionsBuilder
+
+| Method | Parameters | Description |
+|--------|------------|-------------|
+| host_key_path() | `impl Into<PathBuf>` | Override the host private key path |
+| host_key() | `PrivateKey` | Use an in-memory host private key |
+| authorized_keys_path() | `impl Into<PathBuf>` | Override the authorized-keys path |
+| authorized_key() | `impl Into<String>` | Add one in-memory authorized public key |
+| user() | `impl Into<String>` | Override the guest user used for exec requests |
+| sftp() | `bool` | Enable or disable SFTP |
