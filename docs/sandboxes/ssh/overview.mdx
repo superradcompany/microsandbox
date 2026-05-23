@@ -1,0 +1,55 @@
+---
+title: Overview
+description: Use SSH protocol sessions without running sshd in the sandbox
+icon: "terminal"
+---
+
+microsandbox can speak SSH on behalf of a sandbox. The SSH server runs in the host-side microsandbox process, while commands and file operations are forwarded through the sandbox's existing exec and filesystem protocols.
+
+That means you can use SSH-shaped workflows without installing or supervising `sshd` inside the guest.
+
+## What SSH maps to
+
+| SSH feature | microsandbox behavior |
+|-------------|-----------------------|
+| Interactive shell | Starts the sandbox's configured shell with a PTY |
+| Remote command | Runs the SSH command string through the sandbox shell |
+| PTY resize | Forwards terminal resize events to the running session |
+| SFTP | Uses sandbox filesystem handles for read, write, list, stat, rename, chmod-style metadata updates, and symlinks |
+| Host key | Stored per sandbox for external clients |
+| Public-key auth | Required only when serving external SSH clients |
+
+## Choose a path
+
+| Use case | Entry point | Notes |
+|----------|-------------|-------|
+| Open a shell from the CLI | [`msb ssh <sandbox>`](/sandboxes/ssh/native-sessions#cli) | Uses an internal SSH client. No host `ssh` binary, TCP listener, or authorized key is required. |
+| Run one command from the CLI | [`msb ssh <sandbox> -- <command>`](/sandboxes/ssh/native-sessions#remote-commands) | Keeps SSH command semantics while staying inside microsandbox. |
+| Use OpenSSH or SFTP | [`msb ssh serve <sandbox>`](/sandboxes/ssh/external-clients#tcp-listener) | Listens on `127.0.0.1:2222` by default and requires an explicitly authorized public key. |
+| Use `ProxyCommand` | [`msb ssh serve <sandbox> --stdio`](/sandboxes/ssh/external-clients#proxycommand) | Lets OpenSSH spawn `msb` as the transport bridge. |
+| Build with the SDK | [`sandbox.ssh()`](/sandboxes/ssh/native-sessions#sdk) | The SDK exposes native clients and reusable server endpoints. |
+
+## State on disk
+
+| Path | Purpose |
+|------|---------|
+| `<sandbox-dir>/ssh/host_ed25519` | Per-sandbox SSH host private key for external server transports |
+| `<MSB_HOME>/ssh/authorized_keys` | Public keys allowed to connect to `msb ssh serve` |
+
+When `MSB_HOME` is unset, microsandbox uses `~/.microsandbox`.
+
+<Note>
+  Native sessions such as `msb ssh devbox` and `sandbox.ssh().connect()` generate a temporary in-process client/server pair. They do not read `authorized_keys`.
+</Note>
+
+## Security model
+
+`msb ssh serve` never imports keys from `~/.ssh` automatically. Add public keys explicitly with `msb ssh authorize`, or pass an authorized-keys path through the SDK server options.
+
+The default TCP listener binds to `127.0.0.1`. Use a wider bind address only when you intentionally want other machines to reach the listener.
+
+## Next steps
+
+- [Native Sessions](/sandboxes/ssh/native-sessions) covers `msb ssh`, `msb connect`, and SDK client sessions.
+- [External Clients](/sandboxes/ssh/external-clients) covers `msb ssh serve`, OpenSSH, SFTP, and `ProxyCommand`.
+- [SSH Commands](/cli/ssh-commands) is the CLI reference.

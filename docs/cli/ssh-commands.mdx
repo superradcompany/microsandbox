@@ -6,6 +6,8 @@ icon: "terminal"
 
 `msb ssh` puts the OpenSSH protocol in front of an existing sandbox. Interactive shells, remote commands, PTY resize, stdin/stdout/stderr, and SFTP are handled by the microsandbox runtime; no SSH daemon runs inside the guest.
 
+See [SSH](/sandboxes/ssh/overview) for the conceptual model and [External Clients](/sandboxes/ssh/external-clients) for OpenSSH, SFTP, and `ProxyCommand` examples.
+
 <Note>
   `msb ssh serve` uses public-key authentication for external clients. Add keys explicitly with `msb ssh authorize`; microsandbox does not import keys from `~/.ssh` automatically. Native `msb ssh <sandbox>` uses an internal client and does not require authorization.
 </Note>
@@ -28,13 +30,14 @@ cat ~/.ssh/id_ed25519.pub | msb ssh authorize --stdin
 
 The default authorization file is `<MSB_HOME>/ssh/authorized_keys`, or `~/.microsandbox/ssh/authorized_keys` when `MSB_HOME` is unset. The file is created with private permissions.
 
-## msb ssh
+## msb ssh / msb connect / msb ssh connect
 
 Start a native SSH client session into the sandbox. With no remote command, this opens an interactive shell. With `--`, the remaining tokens are joined into the remote shell command.
 
 ```bash
 msb ssh devbox
 msb connect devbox
+msb ssh connect devbox
 msb ssh devbox -- uname -a
 msb ssh --name serve -- uptime
 ```
@@ -46,6 +49,8 @@ msb ssh --name serve -- uptime
 | `-- COMMAND...` | Remote command to run through the sandbox shell |
 
 `msb ssh <sandbox>` starts the sandbox if needed, creates an in-process SSH client/server pair over an in-memory duplex stream, and tears it down when the session exits. It does not require the host `ssh` binary and does not bind a loopback TCP port.
+
+`msb connect <sandbox>` is a top-level alias. `msb ssh connect <sandbox>` is the explicit subcommand form.
 
 ## msb ssh serve
 
