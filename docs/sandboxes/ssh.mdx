@@ -1,0 +1,200 @@
+---
+title: SSH
+description: Connect to sandboxes through SSH protocol sessions
+icon: "terminal"
+---
+
+microsandbox can speak SSH for a sandbox without running `sshd` inside the guest. The SSH server runs in the host-side microsandbox process, then forwards shell, exec, PTY, and SFTP activity through the sandbox's existing command and filesystem channels.
+
+Use SSH when you want familiar SSH-shaped workflows: an interactive shell, remote command strings, SFTP, OpenSSH clients, or editor integrations.
+
+## Native sessions
+
+Native sessions use an in-process SSH client and server over an in-memory stream. They don't require the host `ssh` binary, don't bind a port, and don't require authorized keys.
+
+<CodeGroup>
+```bash CLI
+msb ssh devbox
+msb connect devbox
+msb ssh connect devbox
+msb ssh devbox -- uname -a
+```
+
+```rust Rust
+let sb = Sandbox::start("devbox").await?;
+let ssh = sb.ssh().connect().await?;
+
+let output = ssh.exec("uname -a").await?;
+println!("{}", String::from_utf8_lossy(&output.stdout));
+
+ssh.close().await?;
+```
+
+```typescript TypeScript
+const sb = await Sandbox.start("devbox");
+const ssh = await sb.ssh().connect();
+
+const output = await ssh.exec("uname -a");
+console.log(output.stdout.toString());
+
+await ssh.close();
+```
+
+```python Python
+sb = await Sandbox.start("devbox")
+ssh = await sb.ssh().connect()
+
+output = await ssh.exec("uname -a")
+print(output.stdout_text)
+
+await ssh.close()
+```
+
+```go Go
+sb, err := m.StartSandbox(ctx, "devbox")
+if err != nil {
+    return err
+}
+defer sb.Close()
+
+ssh, err := sb.SSH().Connect(ctx)
+if err != nil {
+    return err
+}
+defer ssh.Close(ctx)
+
+output, err := ssh.Exec(ctx, "uname -a")
+if err != nil {
+    return err
+}
+fmt.Print(string(output.Stdout))
+```
+</CodeGroup>
+
+With no remote command, `msb ssh <sandbox>` opens an interactive shell. With `--`, the remaining tokens are joined into the SSH command string and run through the sandbox shell.
+
+```bash
+msb ssh devbox -- sh -lc "cd /app && npm test"
+```
+
+If a sandbox name collides with an SSH subcommand such as `serve` or `authorize`, use `--name`:
+
+```bash
+msb ssh --name serve
+msb ssh --name authorize -- uptime
+```
+
+## Interactive attach
+
+SDK clients can attach the local terminal to an SSH shell. This requires a real terminal.
+
+<CodeGroup>
+```rust Rust
+let code = sb
+    .ssh()
+    .connect_with(|ssh| ssh.term("xterm-256color"))
+    .await?
+    .attach()
+    .await?;
+```
+
+```typescript TypeScript
+const ssh = await sb.ssh().connect({ term: "xterm-256color" });
+const code = await ssh.attach({ detachKeys: "ctrl-]" });
+```
+
+```python Python
+ssh = await sb.ssh().connect(term="xterm-256color")
+code = await ssh.attach(detach_keys="ctrl-]")
+```
+
+```go Go
+ssh, err := sb.SSH().Connect(ctx, m.WithSSHTerm("xterm-256color"))
+if err != nil {
+    return err
+}
+code, err := ssh.Attach(ctx, m.WithSSHDetachKeys("ctrl-]"))
+```
+</CodeGroup>
+
+## SFTP
+
+SFTP uses sandbox filesystem handles under the hood. It supports reading, writing, listing, stat-style metadata, metadata updates, symlinks, rename, and remove operations.
+
+<CodeGroup>
+```rust Rust
+let sftp = ssh.sftp().await?;
+sftp.write("/tmp/hello.txt", b"hello").await?;
+let data = sftp.read("/tmp/hello.txt").await?;
+sftp.close().await?;
+```
+
+```typescript TypeScript
+const sftp = await ssh.sftp();
+await sftp.write("/tmp/hello.txt", Buffer.from("hello"));
+const data = await sftp.read("/tmp/hello.txt");
+await sftp.close();
+```
+
+```python Python
+sftp = await ssh.sftp()
+await sftp.write("/tmp/hello.txt", b"hello")
+data = await sftp.read("/tmp/hello.txt")
+await sftp.close()
+```
+
+```go Go
+sftp, err := ssh.SFTP(ctx)
+if err != nil {
+    return err
+}
+defer sftp.Close(ctx)
+
+if err := sftp.Write(ctx, "/tmp/hello.txt", []byte("hello")); err != nil {
+    return err
+}
+data, err := sftp.Read(ctx, "/tmp/hello.txt")
+```
+</CodeGroup>
+
+For direct SDK file access without SSH, use the [Filesystem](/sandboxes/filesystem) API.
+
+## Serve external clients
+
+`msb ssh serve` exposes a sandbox to OpenSSH, SFTP, `ProxyCommand`, and tools that already know how to speak SSH. External clients use public-key authentication, so add public keys explicitly first.
+
+```bash
+msb ssh authorize --file ~/.ssh/id_ed25519.pub
+msb ssh serve devbox
+```
+
+By default, the listener binds to `127.0.0.1:2222`.
+
+```bash
+msb ssh serve devbox --host 127.0.0.1 --port 2223
+ssh -p 2223 root@127.0.0.1
+sftp -P 2223 root@127.0.0.1
+```
+
+Use `--stdio` when an SSH client should spawn `msb` as a transport bridge:
+
+```sshconfig
+Host devbox.msb
+  User root
+  ProxyCommand msb ssh serve devbox --stdio
+```
+
+<Note>
+  microsandbox never imports keys from `~/.ssh` automatically. Keep the default loopback bind unless you intentionally want other machines to reach the listener.
+</Note>
+
+## State
+
+| Path | Purpose |
+|------|---------|
+| `<sandbox-dir>/ssh/host_ed25519` | Per-sandbox SSH host private key for external server transports |
+| `<MSB_HOME>/ssh/authorized_keys` | Public keys allowed to connect to `msb ssh serve` |
+
+When `MSB_HOME` is unset, microsandbox uses `~/.microsandbox`.
+
+For exact command flags, see [SSH Commands](/cli/ssh-commands). For SDK method signatures, see the SSH reference for [Rust](/sdk/rust/ssh), [TypeScript](/sdk/typescript/ssh), [Python](/sdk/python/ssh), or [Go](/sdk/go/ssh).

@@ -6,7 +6,7 @@ icon: "terminal"
 
 `msb ssh` puts the OpenSSH protocol in front of an existing sandbox. Interactive shells, remote commands, PTY resize, stdin/stdout/stderr, and SFTP are handled by the microsandbox runtime; no SSH daemon runs inside the guest.
 
-See [SSH](/sandboxes/ssh/overview) for the conceptual model and [External Clients](/sandboxes/ssh/external-clients) for OpenSSH, SFTP, and `ProxyCommand` examples.
+See [SSH](/sandboxes/ssh) for the conceptual model and common OpenSSH, SFTP, and `ProxyCommand` flows.
 
 <Note>
   `msb ssh serve` uses public-key authentication for external clients. Add keys explicitly with `msb ssh authorize`; microsandbox does not import keys from `~/.ssh` automatically. Native `msb ssh <sandbox>` uses an internal client and does not require authorization.

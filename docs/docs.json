@@ -40,14 +40,7 @@
               "sandboxes/overview",
               "sandboxes/lifecycle",
               "sandboxes/commands",
-              {
-                "group": "SSH",
-                "pages": [
-                  "sandboxes/ssh/overview",
-                  "sandboxes/ssh/native-sessions",
-                  "sandboxes/ssh/external-clients"
-                ]
-              },
+              "sandboxes/ssh",
               "sandboxes/filesystem",
               "sandboxes/volumes",
               "sandboxes/secrets",
