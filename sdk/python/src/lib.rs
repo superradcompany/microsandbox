@@ -9,6 +9,7 @@ mod sandbox;
 mod sandbox_handle;
 mod setup;
 mod snapshot;
+mod ssh;
 mod volume;
 
 use pyo3::prelude::*;
@@ -45,6 +46,11 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<logs::PyLogEntry>()?;
     m.add_class::<logs::PyLogStream>()?;
     m.add_class::<sandbox::PyPullSession>()?;
+    m.add_class::<ssh::PySandboxSsh>()?;
+    m.add_class::<ssh::PySshOutput>()?;
+    m.add_class::<ssh::PySshClient>()?;
+    m.add_class::<ssh::PySftpClient>()?;
+    m.add_class::<ssh::PySshServer>()?;
     m.add_class::<exec::PyExecEvent>()?;
     m.add_class::<fs::PyFsEntry>()?;
     m.add_class::<fs::PyFsMetadata>()?;

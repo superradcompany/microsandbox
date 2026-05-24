@@ -24,6 +24,8 @@ pub mod remove;
 pub mod run;
 pub mod self_cmd;
 pub mod snapshot;
+#[cfg(feature = "ssh")]
+pub mod ssh;
 pub mod start;
 pub mod stop;
 pub mod uninstall;

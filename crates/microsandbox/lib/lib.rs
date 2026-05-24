@@ -33,7 +33,13 @@ pub use microsandbox_runtime::logging::LogLevel;
 pub use microsandbox_utils::size;
 #[cfg(feature = "net")]
 pub use sandbox::NetworkPolicy;
-pub use sandbox::exec::{ExecEvent, ExecHandle};
+pub use sandbox::exec::{ExecControl, ExecEvent, ExecHandle};
+#[cfg(feature = "ssh")]
+pub use sandbox::ssh::{
+    DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSsh, SftpClient, SshAttachOptionsBuilder, SshClient,
+    SshClientOptionsBuilder, SshExecOptionsBuilder, SshOutput, SshServer, SshServerOptionsBuilder,
+    SshStdioStream,
+};
 pub use sandbox::{ExecOutput, Sandbox, SandboxConfig};
 pub use snapshot::{
     Snapshot, SnapshotBuilder, SnapshotConfig, SnapshotDestination, SnapshotFormat, SnapshotHandle,

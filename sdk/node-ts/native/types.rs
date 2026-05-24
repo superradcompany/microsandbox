@@ -89,6 +89,44 @@ pub struct LogStreamOptions {
     pub follow: Option<bool>,
 }
 
+/// Output from an SSH exec request.
+#[napi(object)]
+pub struct SshOutput {
+    pub status: i32,
+    pub stdout: napi::bindgen_prelude::Buffer,
+    pub stderr: napi::bindgen_prelude::Buffer,
+}
+
+/// Options accepted by `Sandbox.ssh().connect()`.
+#[napi(object)]
+pub struct SshClientOptions {
+    pub user: Option<String>,
+    pub term: Option<String>,
+    pub sftp: Option<bool>,
+}
+
+/// Options accepted by `SshClient.exec()`.
+#[napi(object)]
+pub struct SshExecOptions {
+    pub tty: Option<bool>,
+}
+
+/// Options accepted by `SshClient.attach()`.
+#[napi(object)]
+pub struct SshAttachOptions {
+    pub term: Option<String>,
+    pub detach_keys: Option<String>,
+}
+
+/// Options accepted by `Sandbox.ssh().server()`.
+#[napi(object)]
+pub struct SshServerOptions {
+    pub host_key_path: Option<String>,
+    pub authorized_keys_path: Option<String>,
+    pub user: Option<String>,
+    pub sftp: Option<bool>,
+}
+
 /// Filesystem entry metadata returned by `fs.list()`.
 #[napi(object)]
 pub struct FsEntry {

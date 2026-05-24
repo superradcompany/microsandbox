@@ -17,10 +17,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::{Bytes, BytesMut};
 use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE};
+use microsandbox_protocol::core::RelayClientDisconnected;
 use microsandbox_protocol::exec::{ExecRequest, ExecSignal, ExecStderr, ExecStdout};
 use microsandbox_protocol::message::{
     FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message, MessageType,
 };
+use microsandbox_protocol::{AGENT_RELAY_ID_RANGE_STEP, AGENT_RELAY_MAX_CLIENTS};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, unix::AsyncFd};
 use tokio::net::UnixListener;
 use tokio::net::unix::OwnedReadHalf;
@@ -60,12 +62,6 @@ type SessionRegistry = std::sync::Mutex<HashMap<u32, SessionInfo>>;
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
-
-/// Maximum number of simultaneous clients.
-const MAX_CLIENTS: u32 = 128;
-
-/// Size of the correlation ID range allocated to each client.
-const ID_RANGE_STEP: u32 = u32::MAX / MAX_CLIENTS;
 
 /// Size of the length prefix in the wire format.
 const LEN_PREFIX_SIZE: usize = 4;
@@ -301,7 +297,7 @@ impl AgentRelay {
                             let slot = {
                                 let mut slots = used_slots.lock().await;
                                 let mut found = None;
-                                for i in 0..MAX_CLIENTS {
+                                for i in 0..AGENT_RELAY_MAX_CLIENTS {
                                     if !slots.contains(&i) {
                                         slots.insert(i);
                                         found = Some(i);
@@ -320,9 +316,9 @@ impl AgentRelay {
                                 }
                             };
 
-                            let id_offset = slot * ID_RANGE_STEP;
+                            let id_offset = slot * AGENT_RELAY_ID_RANGE_STEP;
                             let id_start = id_offset.saturating_add(1);
-                            let id_end_exclusive = id_offset.saturating_add(ID_RANGE_STEP);
+                            let id_end_exclusive = id_offset.saturating_add(AGENT_RELAY_ID_RANGE_STEP);
                             tracing::info!(
                                 "agent relay: client connected slot={slot} id_start={id_start} id_end_exclusive={id_end_exclusive}"
                             );
@@ -565,19 +561,22 @@ fn tap_frame_into_log(frame: &RawFrame, writer: &LogWriter, session_registry: &S
 async fn ring_writer_task(shared: Arc<ConsoleSharedState>, mut rx: mpsc::Receiver<Vec<u8>>) {
     while let Some(frame_bytes) = rx.recv().await {
         let mut data = frame_bytes;
-        for attempt in 0..50 {
+        let mut attempts = 0u64;
+        loop {
             match shared.rx_ring.push(data) {
                 Ok(()) => {
                     shared.rx_wake.wake();
                     break;
                 }
                 Err(returned) => {
-                    if attempt == 49 {
-                        tracing::error!("agent relay: rx_ring full after retries, dropping frame");
-                        break;
+                    attempts = attempts.saturating_add(1);
+                    if attempts == 50 || attempts.is_multiple_of(500) {
+                        tracing::warn!(
+                            attempts,
+                            "agent relay: rx_ring full, waiting to deliver frame"
+                        );
                     }
                     data = returned;
-                    // Brief yield to let the guest drain the ring.
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 }
             }
@@ -637,8 +636,8 @@ async fn ring_reader_task(
         }
 
         for frame in frames.drain(..) {
-            let client_slot = frame.id / ID_RANGE_STEP;
-            let client_slot = client_slot.min(MAX_CLIENTS - 1);
+            let client_slot = frame.id / AGENT_RELAY_ID_RANGE_STEP;
+            let client_slot = client_slot.min(AGENT_RELAY_MAX_CLIENTS - 1);
 
             let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
 
@@ -795,10 +794,12 @@ async fn client_reader_task(
         //
         // FLAG_SESSION_START is set on both ExecRequest and FsRequest,
         // so we decode the type to disambiguate.
+        let mut is_exec_session_start = false;
         if is_session_start
             && let Ok(msg) = decode_frame(frame.data.to_vec())
             && msg.t == MessageType::ExecRequest
         {
+            is_exec_session_start = true;
             let pty = msg.payload::<ExecRequest>().map(|r| r.tty).unwrap_or(false);
             let session_id = next_session_id.fetch_add(1, Ordering::SeqCst);
             if let Ok(mut registry) = session_registry.lock() {
@@ -814,10 +815,10 @@ async fn client_reader_task(
 
         // Only acquire the lock when session bookkeeping is needed.
         // Data frames (the vast majority) skip the lock entirely.
-        if is_session_start || is_terminal {
+        if is_exec_session_start || is_terminal {
             let mut map = clients.lock().await;
             if let Some(client) = map.get_mut(&slot) {
-                if is_session_start {
+                if is_exec_session_start {
                     client.active_sessions.insert(frame.id);
                 }
                 if is_terminal {
@@ -876,6 +877,32 @@ async fn client_reader_task(
                 tracing::error!("agent relay: ring writer channel closed during cleanup");
                 break;
             }
+        }
+    }
+
+    let disconnected = RelayClientDisconnected {
+        id_start,
+        id_end_exclusive,
+    };
+    let disconnect_msg =
+        match Message::with_payload(MessageType::RelayClientDisconnected, 0, &disconnected) {
+            Ok(msg) => msg,
+            Err(e) => {
+                tracing::error!("agent relay: failed to encode relay disconnect event: {e}");
+                used_slots.lock().await.remove(&slot);
+                tracing::debug!("agent relay: slot={slot} released");
+                return;
+            }
+        };
+    let mut buf = Vec::new();
+    match codec::encode_to_buf(&disconnect_msg, &mut buf) {
+        Ok(()) => {
+            if agent_tx.send(buf).await.is_err() {
+                tracing::error!("agent relay: ring writer channel closed during fs cleanup");
+            }
+        }
+        Err(e) => {
+            tracing::error!("agent relay: failed to encode relay disconnect frame: {e}");
         }
     }
 

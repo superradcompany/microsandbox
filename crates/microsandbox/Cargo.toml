@@ -18,6 +18,7 @@ path = "bin/main.rs"
 [features]
 default = ["keyring", "net", "prebuilt"]
 keyring = ["dep:dbus", "dep:keyring"]
+ssh = ["dep:anyhow", "dep:russh", "dep:russh-sftp"]
 prebuilt = [
     "microsandbox-filesystem/prebuilt",
     "microsandbox-runtime/prebuilt",
@@ -26,6 +27,7 @@ prebuilt = [
 net = ["dep:microsandbox-network", "microsandbox-runtime/net"]
 
 [dependencies]
+anyhow = { workspace = true, optional = true }
 astral-tokio-tar.workspace = true
 async-compression = { workspace = true, features = ["tokio", "zstd", "gzip"] }
 base64.workspace = true
@@ -52,6 +54,8 @@ nix = { workspace = true, features = ["process", "signal"] }
 notify.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+russh = { workspace = true, optional = true }
+russh-sftp = { workspace = true, optional = true }
 scopeguard.workspace = true
 sea-orm.workspace = true
 serde.workspace = true

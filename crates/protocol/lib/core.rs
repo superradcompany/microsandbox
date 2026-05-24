@@ -26,3 +26,17 @@ pub struct Ready {
     /// Represents total time from kernel boot to agent readiness.
     pub ready_time_ns: u64,
 }
+
+/// Payload for `core.relay.client.disconnected` messages.
+///
+/// Sent by the host relay when one SDK client socket disconnects. The
+/// guest agent uses the assigned correlation ID range to clean up resources
+/// owned by that client, such as open filesystem handles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayClientDisconnected {
+    /// First correlation ID assigned to the disconnected client.
+    pub id_start: u32,
+
+    /// Exclusive upper bound of the disconnected client's ID range.
+    pub id_end_exclusive: u32,
+}

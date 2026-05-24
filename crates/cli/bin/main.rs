@@ -85,6 +85,10 @@ enum Commands {
     /// Manage registry credentials.
     Registry(registry::RegistryArgs),
 
+    /// Connect to a sandbox over SSH.
+    #[cfg(feature = "ssh")]
+    Ssh(microsandbox_cli::commands::ssh::SshArgs),
+
     /// List cached images (alias for `image ls`).
     #[command(hide = true)]
     Images(image::ImageListArgs),
@@ -283,6 +287,8 @@ fn run_async_command_anyhow(
             Commands::Image(args) => image::run(args).await,
             Commands::Pull(args) => image::run_pull(args).await,
             Commands::Registry(args) => registry::run(args).await,
+            #[cfg(feature = "ssh")]
+            Commands::Ssh(args) => microsandbox_cli::commands::ssh::run(args).await,
             Commands::Images(args) => image::run_list(args).await,
             Commands::Rmi(args) => image::run_remove(args).await,
             Commands::Inspect(args) => inspect::run(args).await,

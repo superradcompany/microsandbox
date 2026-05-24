@@ -771,6 +771,10 @@ export declare class Sandbox {
   shellStream(script: string): Promise<ExecHandle>
   /** Get a filesystem handle for operations on the running sandbox. */
   fs(): SandboxFs
+  /** Connect a native in-process SSH client to this sandbox. */
+  sshConnect(options?: SshClientOptions | undefined | null): Promise<JsSshClient>
+  /** Prepare a reusable SSH server endpoint for this sandbox. */
+  sshServer(options?: SshServerOptions | undefined | null): Promise<JsSshServer>
   /** Get point-in-time resource metrics. */
   metrics(): Promise<SandboxMetrics>
   /** Stream metrics snapshots at the requested interval (in milliseconds). */
@@ -1161,6 +1165,31 @@ export declare class Setup {
 }
 export type JsSetup = Setup
 
+/** High-level SFTP client session. */
+export declare class SftpClient {
+  /** Read a file into memory. */
+  read(path: string): Promise<Buffer>
+  /** Write a file, creating or truncating it. */
+  write(path: string, data: Buffer): Promise<void>
+  /** Create a directory. */
+  mkdir(path: string): Promise<void>
+  /** Remove a file. */
+  removeFile(path: string): Promise<void>
+  /** Remove an empty directory. */
+  removeDir(path: string): Promise<void>
+  /** Rename a file or directory. */
+  rename(oldPath: string, newPath: string): Promise<void>
+  /** Resolve a path to its canonical absolute form. */
+  realPath(path: string): Promise<string>
+  /** Read a symlink target. */
+  readLink(path: string): Promise<string>
+  /** Create a symlink. */
+  symlink(target: string, linkPath: string): Promise<void>
+  /** Close this SFTP session. */
+  close(): Promise<void>
+}
+export type JsSftpClient = SftpClient
+
 /** A snapshot artifact on disk. */
 export declare class Snapshot {
   static open(pathOrName: string): Promise<Snapshot>
@@ -1234,6 +1263,28 @@ export declare class SnapshotHandle {
   remove(opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
 }
 export type JsSnapshotHandle = SnapshotHandle
+
+/** Native in-process SSH client session. */
+export declare class SshClient {
+  /** Run an SSH exec request and collect stdout, stderr, and exit status. */
+  exec(command: string, options?: SshExecOptions | undefined | null): Promise<SshOutput>
+  /** Attach the local terminal to an interactive SSH shell. */
+  attach(options?: SshAttachOptions | undefined | null): Promise<number>
+  /** Open an SFTP session over this SSH connection. */
+  sftp(): Promise<SftpClient>
+  /** Close this SSH client session. */
+  close(): Promise<void>
+}
+export type JsSshClient = SshClient
+
+/** Reusable SSH server endpoint for a sandbox. */
+export declare class SshServer {
+  /** Serve one SSH transport over this process's stdin/stdout. */
+  serveStdio(): Promise<void>
+  /** Release this prepared server endpoint. */
+  close(): Promise<void>
+}
+export type JsSshServer = SshServer
 
 /** Fluent builder for TLS interception settings. */
 export declare class TlsBuilder {
@@ -1850,6 +1901,39 @@ export interface SnapshotVerifyReport {
   upperKind: string
   upperAlgorithm?: string
   upperDigest?: string
+}
+
+/** Options accepted by `SshClient.attach()`. */
+export interface SshAttachOptions {
+  term?: string
+  detachKeys?: string
+}
+
+/** Options accepted by `Sandbox.ssh().connect()`. */
+export interface SshClientOptions {
+  user?: string
+  term?: string
+  sftp?: boolean
+}
+
+/** Options accepted by `SshClient.exec()`. */
+export interface SshExecOptions {
+  tty?: boolean
+}
+
+/** Output from an SSH exec request. */
+export interface SshOutput {
+  status: number
+  stdout: Buffer
+  stderr: Buffer
+}
+
+/** Options accepted by `Sandbox.ssh().server()`. */
+export interface SshServerOptions {
+  hostKeyPath?: string
+  authorizedKeysPath?: string
+  user?: string
+  sftp?: boolean
 }
 
 /** Stdin mode for an exec. */

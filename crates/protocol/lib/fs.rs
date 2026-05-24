@@ -18,10 +18,31 @@ pub const FS_CHUNK_SIZE: usize = 3 * 1024 * 1024;
 /// A filesystem operation requested by the host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FsOp {
+    /// Resolve a path to its canonical absolute form.
+    RealPath {
+        /// Guest path to resolve.
+        path: String,
+    },
+
     /// Get metadata for a path.
     Stat {
         /// Guest path to stat.
         path: String,
+
+        /// Whether to follow symlinks.
+        follow_symlink: bool,
+    },
+
+    /// Update metadata for a path.
+    SetStat {
+        /// Guest path to update.
+        path: String,
+
+        /// Whether to follow symlinks.
+        follow_symlink: bool,
+
+        /// Attributes to update.
+        attrs: FsSetAttrs,
     },
 
     /// List directory contents.
@@ -30,25 +51,29 @@ pub enum FsOp {
         path: String,
     },
 
-    /// Read a file (streaming: guest replies with FsData chunks then FsResponse).
-    Read {
-        /// Guest file path to read.
+    /// Read a symlink target.
+    ReadLink {
+        /// Guest symlink path to read.
         path: String,
     },
 
-    /// Write a file (streaming: host sends FsData chunks, guest replies with FsResponse).
-    Write {
-        /// Guest file path to write.
-        path: String,
-        /// Permission bits to set on creation (e.g. 0o644).
-        #[serde(default)]
-        mode: Option<u32>,
+    /// Create a symlink.
+    Symlink {
+        /// Symlink target.
+        target: String,
+
+        /// Symlink path to create.
+        link_path: String,
     },
 
     /// Create a directory (and parents).
     Mkdir {
         /// Guest directory path to create.
         path: String,
+
+        /// Permission bits to set on creation (e.g. 0o755).
+        #[serde(default)]
+        mode: Option<u32>,
     },
 
     /// Remove a file.
@@ -57,10 +82,13 @@ pub enum FsOp {
         path: String,
     },
 
-    /// Remove a directory recursively.
+    /// Remove a directory.
     RemoveDir {
         /// Guest directory path to remove.
         path: String,
+
+        /// Whether to remove recursively.
+        recursive: bool,
     },
 
     /// Copy a file or directory within the guest.
@@ -78,6 +106,122 @@ pub enum FsOp {
         /// Destination path in guest.
         dst: String,
     },
+
+    /// Open a file and allocate an agentd-side handle.
+    OpenFile {
+        /// Guest file path to open.
+        path: String,
+
+        /// File open options.
+        options: FsOpenOptions,
+    },
+
+    /// Open a directory and allocate an agentd-side handle.
+    OpenDir {
+        /// Guest directory path to open.
+        path: String,
+    },
+
+    /// Close a file or directory handle.
+    CloseHandle {
+        /// Agentd-side handle.
+        handle: u64,
+    },
+
+    /// Read from an open file handle.
+    Read {
+        /// Agentd-side file handle.
+        handle: u64,
+
+        /// Byte offset to read from.
+        offset: u64,
+
+        /// Maximum bytes to read. `None` means read to EOF.
+        len: Option<u64>,
+    },
+
+    /// Write to an open file handle.
+    Write {
+        /// Agentd-side file handle.
+        handle: u64,
+
+        /// Byte offset to write at.
+        offset: u64,
+
+        /// Expected byte count. `None` disables count validation.
+        len: Option<u64>,
+    },
+
+    /// Read the next batch of entries from an open directory handle.
+    ReadDir {
+        /// Agentd-side directory handle.
+        handle: u64,
+
+        /// Maximum entries to return. `None` uses the agent default.
+        limit: Option<u32>,
+    },
+
+    /// Get metadata for an open file or directory handle.
+    FStat {
+        /// Agentd-side handle.
+        handle: u64,
+    },
+
+    /// Update metadata for an open file handle.
+    FSetStat {
+        /// Agentd-side handle.
+        handle: u64,
+
+        /// Attributes to update.
+        attrs: FsSetAttrs,
+    },
+}
+
+/// Attributes accepted by setstat-style filesystem operations.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FsSetAttrs {
+    /// Unix permission bits.
+    pub mode: Option<u32>,
+
+    /// Owner user ID.
+    pub uid: Option<u32>,
+
+    /// Owner group ID.
+    pub gid: Option<u32>,
+
+    /// File size.
+    pub size: Option<u64>,
+
+    /// Access time as Unix timestamp seconds.
+    pub atime: Option<i64>,
+
+    /// Modification time as Unix timestamp seconds.
+    pub mtime: Option<i64>,
+}
+
+/// Options used when opening a file handle.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FsOpenOptions {
+    /// Open for reading.
+    pub read: bool,
+
+    /// Open for writing.
+    pub write: bool,
+
+    /// Append writes to the end.
+    pub append: bool,
+
+    /// Create the file if it is missing.
+    pub create: bool,
+
+    /// Truncate the file after opening.
+    pub truncate: bool,
+
+    /// Create a new file and fail if it already exists.
+    pub create_new: bool,
+
+    /// Permission bits to set on creation.
+    pub mode: Option<u32>,
 }
 
 /// Request to perform a filesystem operation in the guest.
@@ -104,6 +248,18 @@ pub struct FsEntryInfo {
 
     /// Last modification time as Unix timestamp (seconds since epoch).
     pub modified: Option<i64>,
+
+    /// Owner user ID.
+    pub uid: u32,
+
+    /// Owner group ID.
+    pub gid: u32,
+
+    /// Last access time as Unix timestamp (seconds since epoch).
+    pub atime: Option<i64>,
+
+    /// Last modification time as Unix timestamp (seconds since epoch).
+    pub mtime: Option<i64>,
 }
 
 /// Data variants that can be included in a filesystem response.
@@ -114,6 +270,12 @@ pub enum FsResponseData {
 
     /// Directory listing result.
     List(Vec<FsEntryInfo>),
+
+    /// Open handle.
+    Handle(u64),
+
+    /// Resolved path or symlink target.
+    Path(String),
 }
 
 /// Terminal response for a filesystem operation.

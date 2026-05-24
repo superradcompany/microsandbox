@@ -346,6 +346,11 @@ impl GlobalConfig {
             .unwrap_or_else(|| self.home().join(microsandbox_utils::SECRETS_SUBDIR))
     }
 
+    /// Resolve the `ssh` directory used for host-side SSH state.
+    pub fn ssh_dir(&self) -> PathBuf {
+        self.home().join(microsandbox_utils::SSH_SUBDIR)
+    }
+
     /// Resolve the `run` directory used for ephemeral runtime artifacts.
     pub fn run_dir(&self) -> PathBuf {
         self.home().join(microsandbox_utils::RUN_SUBDIR)

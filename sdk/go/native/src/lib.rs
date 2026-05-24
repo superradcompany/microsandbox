@@ -56,11 +56,13 @@ use microsandbox::{
         FsEntryKind, PullPolicy, all_sandbox_metrics,
         exec::{ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
+        ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
     },
     snapshot::{ExportOpts, SnapshotDestination, SnapshotFormat},
     volume::{Volume, VolumeBuilder, VolumeHandle},
 };
 use microsandbox_network::{builder::ViolationActionBuilder, secrets::config::ViolationAction};
+use tokio::io::AsyncWriteExt;
 use tokio::runtime::Runtime;
 use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
@@ -95,6 +97,9 @@ type Handle = u64;
 static NEXT_SANDBOX_HANDLE: AtomicU64 = AtomicU64::new(1);
 static NEXT_EXEC_HANDLE: AtomicU64 = AtomicU64::new(1);
 static NEXT_AGENT_HANDLE: AtomicU64 = AtomicU64::new(1);
+static NEXT_SSH_SERVER_HANDLE: AtomicU64 = AtomicU64::new(1);
+static NEXT_SSH_CLIENT_HANDLE: AtomicU64 = AtomicU64::new(1);
+static NEXT_SFTP_HANDLE: AtomicU64 = AtomicU64::new(1);
 static NEXT_CANCEL_ID: AtomicU64 = AtomicU64::new(1);
 
 fn registry() -> &'static RwLock<HashMap<Handle, std::sync::Arc<Sandbox>>> {
@@ -241,6 +246,116 @@ fn remove_agent(handle: Handle) -> Result<Option<AgentEntry>, FfiError> {
         .write()
         .map_err(|_| FfiError::internal("agent registry lock poisoned"))?
         .remove(&handle))
+}
+
+// ---------------------------------------------------------------------------
+// SSH handle registry
+// ---------------------------------------------------------------------------
+
+type SshServerEntry = std::sync::Arc<tokio::sync::Mutex<Option<SshServer>>>;
+type SshClientEntry = std::sync::Arc<tokio::sync::Mutex<Option<SshClient>>>;
+type SftpClientEntry = std::sync::Arc<tokio::sync::Mutex<Option<SftpClient>>>;
+
+fn ssh_server_registry() -> &'static RwLock<HashMap<Handle, SshServerEntry>> {
+    static REG: OnceLock<RwLock<HashMap<Handle, SshServerEntry>>> = OnceLock::new();
+    REG.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn ssh_client_registry() -> &'static RwLock<HashMap<Handle, SshClientEntry>> {
+    static REG: OnceLock<RwLock<HashMap<Handle, SshClientEntry>>> = OnceLock::new();
+    REG.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn sftp_client_registry() -> &'static RwLock<HashMap<Handle, SftpClientEntry>> {
+    static REG: OnceLock<RwLock<HashMap<Handle, SftpClientEntry>>> = OnceLock::new();
+    REG.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn register_ssh_server(server: SshServer) -> Result<Handle, FfiError> {
+    let h = NEXT_SSH_SERVER_HANDLE.fetch_add(1, Ordering::Relaxed);
+    ssh_server_registry()
+        .write()
+        .map_err(|_| FfiError::internal("SSH server registry lock poisoned"))?
+        .insert(
+            h,
+            std::sync::Arc::new(tokio::sync::Mutex::new(Some(server))),
+        );
+    Ok(h)
+}
+
+fn remove_ssh_server(handle: Handle) -> Result<SshServerEntry, FfiError> {
+    ssh_server_registry()
+        .write()
+        .map_err(|_| FfiError::internal("SSH server registry lock poisoned"))?
+        .remove(&handle)
+        .ok_or_else(|| FfiError::invalid_handle(handle))
+}
+
+fn get_ssh_server(handle: Handle) -> Result<SshServerEntry, FfiError> {
+    ssh_server_registry()
+        .read()
+        .map_err(|_| FfiError::internal("SSH server registry lock poisoned"))?
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| FfiError::invalid_handle(handle))
+}
+
+fn register_ssh_client(client: SshClient) -> Result<Handle, FfiError> {
+    let h = NEXT_SSH_CLIENT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    ssh_client_registry()
+        .write()
+        .map_err(|_| FfiError::internal("SSH client registry lock poisoned"))?
+        .insert(
+            h,
+            std::sync::Arc::new(tokio::sync::Mutex::new(Some(client))),
+        );
+    Ok(h)
+}
+
+fn get_ssh_client(handle: Handle) -> Result<SshClientEntry, FfiError> {
+    ssh_client_registry()
+        .read()
+        .map_err(|_| FfiError::internal("SSH client registry lock poisoned"))?
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| FfiError::invalid_handle(handle))
+}
+
+fn remove_ssh_client(handle: Handle) -> Result<SshClientEntry, FfiError> {
+    ssh_client_registry()
+        .write()
+        .map_err(|_| FfiError::internal("SSH client registry lock poisoned"))?
+        .remove(&handle)
+        .ok_or_else(|| FfiError::invalid_handle(handle))
+}
+
+fn register_sftp_client(client: SftpClient) -> Result<Handle, FfiError> {
+    let h = NEXT_SFTP_HANDLE.fetch_add(1, Ordering::Relaxed);
+    sftp_client_registry()
+        .write()
+        .map_err(|_| FfiError::internal("SFTP client registry lock poisoned"))?
+        .insert(
+            h,
+            std::sync::Arc::new(tokio::sync::Mutex::new(Some(client))),
+        );
+    Ok(h)
+}
+
+fn get_sftp_client(handle: Handle) -> Result<SftpClientEntry, FfiError> {
+    sftp_client_registry()
+        .read()
+        .map_err(|_| FfiError::internal("SFTP client registry lock poisoned"))?
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| FfiError::invalid_handle(handle))
+}
+
+fn remove_sftp_client(handle: Handle) -> Result<SftpClientEntry, FfiError> {
+    sftp_client_registry()
+        .write()
+        .map_err(|_| FfiError::internal("SFTP client registry lock poisoned"))?
+        .remove(&handle)
+        .ok_or_else(|| FfiError::invalid_handle(handle))
 }
 
 // ---------------------------------------------------------------------------
@@ -2265,6 +2380,550 @@ pub unsafe extern "C" fn msb_sandbox_remove(
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
             Sandbox::remove(&name).await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox — SSH
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize, Default)]
+struct SshClientOpts {
+    user: Option<String>,
+    term: Option<String>,
+    sftp: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SshServerOpts {
+    host_key_path: Option<PathBuf>,
+    authorized_keys_path: Option<PathBuf>,
+    user: Option<String>,
+    sftp: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SshExecOpts {
+    tty: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SshAttachOpts {
+    term: Option<String>,
+    detach_keys: Option<String>,
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_ssh_connect(
+    cancel_id: u64,
+    handle: Handle,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SshClientOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid SSH client opts: {e}")))?;
+        Ok(Box::pin(async move {
+            let client = sb
+                .ssh()
+                .connect_with(|builder| {
+                    let mut builder = builder;
+                    if let Some(user) = opts.user {
+                        builder = builder.user(user);
+                    }
+                    if let Some(term) = opts.term {
+                        builder = builder.term(term);
+                    }
+                    if let Some(sftp) = opts.sftp {
+                        builder = builder.sftp(sftp);
+                    }
+                    builder
+                })
+                .await
+                .map_err(FfiError::from)?;
+            let client_handle = register_ssh_client(client)?;
+            Ok(serde_json::json!({
+                "client_handle": client_handle,
+            })
+            .to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sandbox_ssh_server(
+    cancel_id: u64,
+    handle: Handle,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sb = get(handle)?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SshServerOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid SSH server opts: {e}")))?;
+        Ok(Box::pin(async move {
+            let server = sb
+                .ssh()
+                .server_with(|builder| {
+                    let mut builder = builder;
+                    if let Some(path) = opts.host_key_path {
+                        builder = builder.host_key_path(path);
+                    }
+                    if let Some(path) = opts.authorized_keys_path {
+                        builder = builder.authorized_keys_path(path);
+                    }
+                    if let Some(user) = opts.user {
+                        builder = builder.user(user);
+                    }
+                    if let Some(sftp) = opts.sftp {
+                        builder = builder.sftp(sftp);
+                    }
+                    builder
+                })
+                .await
+                .map_err(FfiError::from)?;
+            let server_handle = register_ssh_server(server)?;
+            Ok(serde_json::json!({
+                "server_handle": server_handle,
+            })
+            .to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_ssh_server_close(
+    cancel_id: u64,
+    server_handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let entry = remove_ssh_server(server_handle)?;
+        Ok(Box::pin(async move {
+            entry
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| FfiError::invalid_handle(server_handle))?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_ssh_server_serve_stdio(
+    cancel_id: u64,
+    server_handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let entry = get_ssh_server(server_handle)?;
+        Ok(Box::pin(async move {
+            let server = {
+                let guard = entry.lock().await;
+                guard
+                    .as_ref()
+                    .ok_or_else(|| FfiError::invalid_handle(server_handle))?
+                    .clone()
+            };
+            server
+                .serve(SshStdioStream::new())
+                .await
+                .map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_ssh_client_exec(
+    cancel_id: u64,
+    client_handle: Handle,
+    command: *const c_char,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let client = get_ssh_client(client_handle)?;
+        let command = unsafe { cstr(command) }?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SshExecOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid SSH exec opts: {e}")))?;
+        Ok(Box::pin(async move {
+            let guard = client.lock().await;
+            let client = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(client_handle))?;
+            let output = client
+                .exec_with(command, |builder| {
+                    let mut builder = builder;
+                    if let Some(tty) = opts.tty {
+                        builder = builder.tty(tty);
+                    }
+                    builder
+                })
+                .await
+                .map_err(FfiError::from)?;
+            Ok(serde_json::json!({
+                "status": output.status,
+                "stdout": base64::engine::general_purpose::STANDARD.encode(output.stdout.as_ref()),
+                "stderr": base64::engine::general_purpose::STANDARD.encode(output.stderr.as_ref()),
+            })
+            .to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_ssh_client_attach(
+    cancel_id: u64,
+    client_handle: Handle,
+    opts_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let client = get_ssh_client(client_handle)?;
+        let opts_raw = unsafe { cstr(opts_json) }?;
+        let opts: SshAttachOpts = serde_json::from_str(&opts_raw)
+            .map_err(|e| FfiError::invalid_argument(format!("invalid SSH attach opts: {e}")))?;
+        Ok(Box::pin(async move {
+            let guard = client.lock().await;
+            let client = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(client_handle))?;
+            let status = client
+                .attach_with(|builder| {
+                    let mut builder = builder;
+                    if let Some(term) = opts.term {
+                        builder = builder.term(term);
+                    }
+                    if let Some(detach_keys) = opts.detach_keys {
+                        builder = builder.detach_keys(detach_keys);
+                    }
+                    builder
+                })
+                .await
+                .map_err(FfiError::from)?;
+            Ok(serde_json::json!({
+                "status": status,
+            })
+            .to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_ssh_client_close(
+    cancel_id: u64,
+    client_handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let entry = remove_ssh_client(client_handle)?;
+        Ok(Box::pin(async move {
+            let client = entry
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| FfiError::invalid_handle(client_handle))?;
+            client.close().await.map_err(FfiError::from)?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_ssh_client_sftp(
+    cancel_id: u64,
+    client_handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let client = get_ssh_client(client_handle)?;
+        Ok(Box::pin(async move {
+            let guard = client.lock().await;
+            let client = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(client_handle))?;
+            let sftp = client.sftp().await.map_err(FfiError::from)?;
+            let sftp_handle = register_sftp_client(sftp)?;
+            Ok(serde_json::json!({
+                "sftp_handle": sftp_handle,
+            })
+            .to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_read(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let path = unsafe { cstr(path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            let data = sftp
+                .read(path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP read: {e}")))?;
+            Ok(serde_json::json!({
+                "data": base64::engine::general_purpose::STANDARD.encode(data),
+            })
+            .to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_write(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    path: *const c_char,
+    data_b64: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let path = unsafe { cstr(path) }?;
+        let data_b64 = unsafe { cstr(data_b64) }?;
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(data_b64.as_bytes())
+            .map_err(|e| FfiError::invalid_argument(format!("invalid base64 data: {e}")))?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            let mut file = sftp
+                .create(path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP create: {e}")))?;
+            file.write_all(&data)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP write: {e}")))?;
+            file.shutdown()
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP close file: {e}")))?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_mkdir(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let path = unsafe { cstr(path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            sftp.create_dir(path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP mkdir: {e}")))?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_remove_file(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let path = unsafe { cstr(path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            sftp.remove_file(path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP remove file: {e}")))?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_remove_dir(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let path = unsafe { cstr(path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            sftp.remove_dir(path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP remove dir: {e}")))?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_rename(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    old_path: *const c_char,
+    new_path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let old_path = unsafe { cstr(old_path) }?;
+        let new_path = unsafe { cstr(new_path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            sftp.rename(old_path, new_path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP rename: {e}")))?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_real_path(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let path = unsafe { cstr(path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            let path = sftp
+                .canonicalize(path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP realpath: {e}")))?;
+            Ok(serde_json::json!({ "path": path }).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_read_link(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let path = unsafe { cstr(path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            let target = sftp
+                .read_link(path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP readlink: {e}")))?;
+            Ok(serde_json::json!({ "target": target }).to_string())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_symlink(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    target: *const c_char,
+    link_path: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let sftp = get_sftp_client(sftp_handle)?;
+        let target = unsafe { cstr(target) }?;
+        let link_path = unsafe { cstr(link_path) }?;
+        Ok(Box::pin(async move {
+            let guard = sftp.lock().await;
+            let sftp = guard
+                .as_ref()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            sftp.symlink(target, link_path)
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP symlink: {e}")))?;
+            Ok(r#"{"ok":true}"#.into())
+        }))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_sftp_close(
+    cancel_id: u64,
+    sftp_handle: Handle,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let entry = remove_sftp_client(sftp_handle)?;
+        Ok(Box::pin(async move {
+            let sftp = entry
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| FfiError::invalid_handle(sftp_handle))?;
+            sftp.close()
+                .await
+                .map_err(|e| FfiError::internal(format!("SFTP close: {e}")))?;
             Ok(r#"{"ok":true}"#.into())
         }))
     })

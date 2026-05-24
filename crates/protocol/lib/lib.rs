@@ -59,6 +59,12 @@ pub const FILE_MOUNTS_DIR: &str = "/.msb/file-mounts";
 /// Guest path for named scripts (added to PATH by agentd).
 pub const SCRIPTS_PATH: &str = "/.msb/scripts";
 
+/// Maximum number of simultaneous SDK clients the host relay admits.
+pub const AGENT_RELAY_MAX_CLIENTS: u32 = 128;
+
+/// Size of the correlation ID range allocated to each relay client.
+pub const AGENT_RELAY_ID_RANGE_STEP: u32 = u32::MAX / AGENT_RELAY_MAX_CLIENTS;
+
 //--------------------------------------------------------------------------------------------------
 // Constants: Guest Init Environment Variables
 //--------------------------------------------------------------------------------------------------

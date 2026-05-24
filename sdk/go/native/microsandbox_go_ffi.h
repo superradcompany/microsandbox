@@ -139,6 +139,110 @@ char *msb_sandbox_remove(uint64_t cancel_id,
                          unsigned char *buf,
                          uintptr_t buf_len);
 
+char *msb_sandbox_ssh_connect(uint64_t cancel_id,
+                              Handle handle,
+                              const char *opts_json,
+                              unsigned char *buf,
+                              uintptr_t buf_len);
+
+char *msb_sandbox_ssh_server(uint64_t cancel_id,
+                             Handle handle,
+                             const char *opts_json,
+                             unsigned char *buf,
+                             uintptr_t buf_len);
+
+char *msb_ssh_server_close(uint64_t cancel_id,
+                           Handle server_handle,
+                           unsigned char *buf,
+                           uintptr_t buf_len);
+
+char *msb_ssh_server_serve_stdio(uint64_t cancel_id,
+                                 Handle server_handle,
+                                 unsigned char *buf,
+                                 uintptr_t buf_len);
+
+char *msb_ssh_client_exec(uint64_t cancel_id,
+                          Handle client_handle,
+                          const char *command,
+                          const char *opts_json,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+char *msb_ssh_client_attach(uint64_t cancel_id,
+                            Handle client_handle,
+                            const char *opts_json,
+                            unsigned char *buf,
+                            uintptr_t buf_len);
+
+char *msb_ssh_client_close(uint64_t cancel_id,
+                           Handle client_handle,
+                           unsigned char *buf,
+                           uintptr_t buf_len);
+
+char *msb_ssh_client_sftp(uint64_t cancel_id,
+                          Handle client_handle,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+char *msb_sftp_read(uint64_t cancel_id,
+                    Handle sftp_handle,
+                    const char *path,
+                    unsigned char *buf,
+                    uintptr_t buf_len);
+
+char *msb_sftp_write(uint64_t cancel_id,
+                     Handle sftp_handle,
+                     const char *path,
+                     const char *data_b64,
+                     unsigned char *buf,
+                     uintptr_t buf_len);
+
+char *msb_sftp_mkdir(uint64_t cancel_id,
+                     Handle sftp_handle,
+                     const char *path,
+                     unsigned char *buf,
+                     uintptr_t buf_len);
+
+char *msb_sftp_remove_file(uint64_t cancel_id,
+                           Handle sftp_handle,
+                           const char *path,
+                           unsigned char *buf,
+                           uintptr_t buf_len);
+
+char *msb_sftp_remove_dir(uint64_t cancel_id,
+                          Handle sftp_handle,
+                          const char *path,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+char *msb_sftp_rename(uint64_t cancel_id,
+                      Handle sftp_handle,
+                      const char *old_path,
+                      const char *new_path,
+                      unsigned char *buf,
+                      uintptr_t buf_len);
+
+char *msb_sftp_real_path(uint64_t cancel_id,
+                         Handle sftp_handle,
+                         const char *path,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+char *msb_sftp_read_link(uint64_t cancel_id,
+                         Handle sftp_handle,
+                         const char *path,
+                         unsigned char *buf,
+                         uintptr_t buf_len);
+
+char *msb_sftp_symlink(uint64_t cancel_id,
+                       Handle sftp_handle,
+                       const char *target,
+                       const char *link_path,
+                       unsigned char *buf,
+                       uintptr_t buf_len);
+
+char *msb_sftp_close(uint64_t cancel_id, Handle sftp_handle, unsigned char *buf, uintptr_t buf_len);
+
 char *msb_sandbox_exec(uint64_t cancel_id,
                        Handle handle,
                        const char *cmd,

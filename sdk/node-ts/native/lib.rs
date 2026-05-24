@@ -31,6 +31,7 @@ mod secret_builder;
 mod setup;
 mod snapshot;
 mod snapshot_builder;
+mod ssh;
 mod tls_builder;
 mod types;
 mod violation_action_builder;

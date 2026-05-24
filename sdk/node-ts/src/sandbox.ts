@@ -25,6 +25,7 @@ import { SandboxHandle, sandboxInfoToHandle } from "./sandbox-handle.js";
 import type { SandboxMetrics } from "./metrics.js";
 import { metricsFromNapi } from "./internal/metrics.js";
 import { MetricsStream } from "./metrics-stream.js";
+import { SandboxSsh } from "./ssh.js";
 
 /**
  * Fluent builder for a sandbox. Returned by `Sandbox.builder(name)`.
@@ -251,6 +252,12 @@ export class Sandbox implements AsyncDisposable {
 
   fs(): SandboxFs {
     return new SandboxFs(this.inner.fs());
+  }
+
+  // -- ssh ----------------------------------------------------------------
+
+  ssh(): SandboxSsh {
+    return new SandboxSsh(this.inner);
   }
 
   // -- config -------------------------------------------------------------
