@@ -899,6 +899,7 @@ struct RegistryAuthOpts {
 struct SandboxCreateOpts {
     image: Option<String>,
     image_fstype: Option<String>,
+    oci_upper_size_mib: Option<u32>,
     snapshot: Option<String>,
     memory_mib: Option<u32>,
     cpus: Option<u8>,
@@ -1706,12 +1707,20 @@ pub unsafe extern "C" fn msb_sandbox_create(
                     "image and snapshot are mutually exclusive",
                 ));
             }
+            if opts.oci_upper_size_mib.is_some() && opts.snapshot.is_some() {
+                return Err(FfiError::invalid_argument(
+                    "oci_upper_size_mib is not valid when booting from a snapshot",
+                ));
+            }
             if let Some(img) = opts.image {
                 if let Some(fstype) = opts.image_fstype {
                     builder = builder.image_with(|i| i.disk(img).fstype(fstype));
                 } else {
                     builder = builder.image(img.as_str());
                 }
+            }
+            if let Some(size_mib) = opts.oci_upper_size_mib {
+                builder = builder.oci_upper_size(size_mib);
             }
             if let Some(snapshot) = opts.snapshot {
                 builder = builder.from_snapshot(snapshot);
@@ -5338,4 +5347,28 @@ fn kind_str(kind: FsEntryKind) -> &'static str {
 
 fn agent_error(err: microsandbox::AgentClientError) -> FfiError {
     FfiError::from(MicrosandboxError::AgentClient(err))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_create_opts_preserves_explicit_zero_oci_upper_size() {
+        let opts: SandboxCreateOpts =
+            serde_json::from_str(r#"{"image":"python:3.12","oci_upper_size_mib":0}"#).unwrap();
+
+        assert_eq!(opts.oci_upper_size_mib, Some(0));
+    }
+
+    #[test]
+    fn sandbox_create_opts_distinguishes_absent_oci_upper_size() {
+        let opts: SandboxCreateOpts = serde_json::from_str(r#"{"image":"python:3.12"}"#).unwrap();
+
+        assert_eq!(opts.oci_upper_size_mib, None);
+    }
 }

@@ -370,6 +370,7 @@ class ImageSource:
     _type: str
     _path: str | None = None
     _reference: str | None = None
+    _upper_size_mib: int | None = None
     _fstype: str | None = None
     _format: DiskImageFormat | None = None
 
@@ -387,8 +388,12 @@ class Image:
     """Factory for explicit image source configuration."""
 
     @staticmethod
-    def oci(reference: str) -> ImageSource:
-        return ImageSource(_type="oci", _reference=reference)
+    def oci(reference: str, *, upper_size_mib: int | None = None) -> ImageSource:
+        return ImageSource(
+            _type="oci",
+            _reference=reference,
+            _upper_size_mib=upper_size_mib,
+        )
 
     @staticmethod
     def bind(path: str) -> ImageSource:

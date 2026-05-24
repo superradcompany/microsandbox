@@ -208,6 +208,7 @@ impl Sandbox {
         let mut pinned_manifest_digest: Option<String> = None;
         let mut pinned_reference: Option<String> = None;
 
+        config.apply_rootfs_defaults();
         config.apply_runtime_defaults();
         validate_rootfs_source(&config.image)?;
 
@@ -218,19 +219,42 @@ impl Sandbox {
         prepare_create_target(db, &config, &sandbox_dir).await?;
 
         // Resolve OCI images before spawning the sandbox process.
-        if let RootfsSource::Oci(reference) = config.image.clone() {
+        if let RootfsSource::Oci(oci) = config.image.clone() {
+            let reference = oci.reference;
+            let upper_size_mib = oci.upper_size_mib;
+            let snapshot_manifest_digest = if config.snapshot_upper_source.is_some() {
+                Some(config.manifest_digest.clone().ok_or_else(|| {
+                    crate::MicrosandboxError::InvalidConfig(
+                        "from_snapshot requires a pinned OCI manifest digest".into(),
+                    )
+                })?)
+            } else {
+                None
+            };
+            let pull_reference = match snapshot_manifest_digest.as_deref() {
+                Some(digest) => digest_pinned_reference(&reference, digest)?,
+                None => reference.clone(),
+            };
             let overrides = RegistryOverrides {
                 auth: config.registry_auth.clone(),
                 insecure: config.insecure,
                 ca_certs: config.ca_certs.clone(),
             };
             let pull_result =
-                pull_oci_image(&reference, config.pull_policy, overrides, progress).await?;
+                pull_oci_image(&pull_reference, config.pull_policy, overrides, progress).await?;
+            let resolved_manifest_digest = pull_result.manifest_digest.to_string();
+            if let Some(expected) = snapshot_manifest_digest.as_deref()
+                && resolved_manifest_digest != expected
+            {
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "from_snapshot pinned OCI manifest digest '{expected}', but '{reference}' resolved to '{resolved_manifest_digest}'"
+                )));
+            }
 
             // Merge image config defaults under user-provided config.
             config.merge_image_defaults(&pull_result.config);
 
-            pinned_manifest_digest = Some(pull_result.manifest_digest.to_string());
+            pinned_manifest_digest = Some(resolved_manifest_digest.clone());
             pinned_reference = Some(reference.clone());
 
             // Verify VMDK exists in the global cache.
@@ -280,14 +304,19 @@ impl Sandbox {
                     crate::MicrosandboxError::Custom(format!("snapshot copy task: {e}"))
                 })??;
             } else if !upper_path.exists() || upper_tree.is_some() {
-                create_upper_ext4(&upper_path, upper_tree).await?;
+                let upper_size_mib = upper_size_mib.ok_or_else(|| {
+                    crate::MicrosandboxError::InvalidConfig(
+                        "OCI upper size was not resolved before create".into(),
+                    )
+                })?;
+                create_upper_ext4(&upper_path, upper_size_mib, upper_tree).await?;
             }
 
             // Store manifest digest for spawn to derive paths.
-            config.manifest_digest = Some(pull_result.manifest_digest.to_string());
+            config.manifest_digest = Some(resolved_manifest_digest);
 
             // Persist full image metadata to database.
-            if let Ok(image_ref) = reference.parse::<Reference>() {
+            if let Ok(image_ref) = pull_reference.parse::<Reference>() {
                 match cache.read_image_metadata_async(&image_ref).await {
                     Ok(Some(metadata)) => {
                         if let Err(e) = crate::image::Image::persist(&reference, metadata).await {
@@ -1678,6 +1707,21 @@ pub(super) fn pid_is_alive(pid: i32) -> bool {
     )
 }
 
+fn digest_pinned_reference(reference: &str, manifest_digest: &str) -> MicrosandboxResult<String> {
+    let image_ref: Reference = reference.parse().map_err(|e| {
+        crate::MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
+    })?;
+    let pinned = image_ref
+        .clone_with_digest(manifest_digest.to_string())
+        .to_string();
+    pinned.parse::<Reference>().map_err(|e| {
+        crate::MicrosandboxError::InvalidConfig(format!(
+            "invalid pinned image reference '{pinned}': {e}"
+        ))
+    })?;
+    Ok(pinned)
+}
+
 /// Pull an OCI image and return the pull result.
 ///
 /// Auth resolution:
@@ -1784,7 +1828,18 @@ fn validate_rootfs_source(rootfs: &RootfsSource) -> MicrosandboxResult<()> {
                 )));
             }
         }
-        RootfsSource::Oci(_) => {}
+        RootfsSource::Oci(oci) => {
+            if oci.reference.is_empty() {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "image source is required".into(),
+                ));
+            }
+            if oci.upper_size_mib == Some(0) {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "oci upper_size must be greater than 0".into(),
+                ));
+            }
+        }
         RootfsSource::DiskImage { path, .. } => {
             if !path.exists() {
                 return Err(crate::MicrosandboxError::InvalidConfig(format!(
@@ -2094,10 +2149,14 @@ async fn replace_oci_manifest_pin<C: ConnectionTrait>(
 /// Create a sparse ext4 image for the writable overlay upper layer.
 async fn create_upper_ext4(
     path: &std::path::Path,
+    upper_size_mib: u32,
     tree: Option<filetree::FileTree>,
 ) -> MicrosandboxResult<()> {
     let _ = tokio::fs::remove_file(path).await;
-    let ext4_options = ext4::Ext4FormatOptions::default();
+    let ext4_options = ext4::Ext4FormatOptions {
+        size_bytes: u64::from(upper_size_mib) * 1024 * 1024,
+        ..Default::default()
+    };
     let overlay_tree = build_overlay_upper_tree(tree);
     let path = path.to_path_buf();
 
@@ -2156,7 +2215,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        RootfsSource, SandboxConfig, SandboxStatus, insert_sandbox_record,
+        RootfsSource, SandboxConfig, SandboxStatus, digest_pinned_reference, insert_sandbox_record,
         persist_oci_manifest_pin, prepare_create_target, reconcile_sandbox_runtime_state,
         remove_dir_if_exists, validate_rootfs_source,
     };
@@ -2202,6 +2261,20 @@ mod tests {
     #[test]
     fn test_default_tty_term_falls_back_from_dumb() {
         assert_eq!(super::select_tty_term(Some("dumb")), "xterm");
+    }
+
+    #[test]
+    fn test_digest_pinned_reference_replaces_tag_with_digest() {
+        let pinned = digest_pinned_reference(
+            "docker.io/library/alpine:3.20",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+
+        assert_eq!(
+            pinned,
+            "docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
     }
 
     #[test]
@@ -2334,7 +2407,7 @@ mod tests {
 
         let mut config = SandboxConfig {
             name: "pinned".into(),
-            image: RootfsSource::Oci("docker.io/library/alpine".into()),
+            image: RootfsSource::oci("docker.io/library/alpine"),
             ..Default::default()
         };
         config.manifest_digest = Some("sha256:aaaa".into());
@@ -2376,7 +2449,7 @@ mod tests {
 
         let mut config = SandboxConfig {
             name: "recreated".into(),
-            image: RootfsSource::Oci("docker.io/library/alpine".into()),
+            image: RootfsSource::oci("docker.io/library/alpine"),
             ..Default::default()
         };
         config.manifest_digest = Some("sha256:aaaa".into());
@@ -2417,7 +2490,7 @@ mod tests {
 
         let mut config = SandboxConfig {
             name: "persisted-digest".into(),
-            image: RootfsSource::Oci("docker.io/library/alpine".into()),
+            image: RootfsSource::oci("docker.io/library/alpine"),
             ..Default::default()
         };
         config.manifest_digest = Some("sha256:abc123".into());
@@ -2658,7 +2731,7 @@ mod tests {
 
         let mut config = SandboxConfig {
             name: "persisted".into(),
-            image: RootfsSource::Oci("docker.io/library/alpine".into()),
+            image: RootfsSource::oci("docker.io/library/alpine"),
             ..Default::default()
         };
         config.manifest_digest = Some("sha256:aaaa".into());

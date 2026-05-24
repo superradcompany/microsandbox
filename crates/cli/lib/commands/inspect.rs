@@ -81,13 +81,16 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
     // Parse and display config details.
     if let Ok(config) = serde_json::from_str::<SandboxConfig>(handle.config_json()) {
         let image = match &config.image {
-            microsandbox::sandbox::RootfsSource::Oci(s) => s.clone(),
+            microsandbox::sandbox::RootfsSource::Oci(oci) => oci.reference.clone(),
             microsandbox::sandbox::RootfsSource::Bind(p) => p.display().to_string(),
             microsandbox::sandbox::RootfsSource::DiskImage { path, .. } => {
                 path.display().to_string()
             }
         };
         ui::detail_kv("Image", &image);
+        if let Some(upper_size_mib) = config.image.oci_upper_size_mib() {
+            ui::detail_kv("OCI Upper", &format!("{upper_size_mib} MiB"));
+        }
 
         ui::detail_header("Resources");
         ui::detail_kv_indent("CPUs", &config.cpus.to_string());

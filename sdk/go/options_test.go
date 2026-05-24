@@ -14,6 +14,28 @@ func TestWithImage(t *testing.T) {
 	}
 }
 
+func TestWithOCIUpperSize(t *testing.T) {
+	o := SandboxConfig{}
+	WithOCIUpperSize(8192)(&o)
+	if o.OCIUpperSizeMiB != 8192 {
+		t.Errorf("OCIUpperSizeMiB = %d, want 8192", o.OCIUpperSizeMiB)
+	}
+	if !o.ociUpperSizeSet {
+		t.Error("ociUpperSizeSet = false, want true")
+	}
+}
+
+func TestWithOCIUpperSizeZeroIsExplicit(t *testing.T) {
+	o := SandboxConfig{}
+	WithOCIUpperSize(0)(&o)
+	if o.OCIUpperSizeMiB != 0 {
+		t.Errorf("OCIUpperSizeMiB = %d, want 0", o.OCIUpperSizeMiB)
+	}
+	if !o.ociUpperSizeSet {
+		t.Error("ociUpperSizeSet = false, want true")
+	}
+}
+
 func TestWithImageDisk(t *testing.T) {
 	o := SandboxConfig{}
 	WithImageDisk("./alpine.raw", "ext4")(&o)

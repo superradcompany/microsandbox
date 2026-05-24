@@ -64,9 +64,9 @@ pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbo
         }
         SandboxStatus::Stopped | SandboxStatus::Crashed => {
             if let Ok(config) = handle.config()
-                && let RootfsSource::Oci(ref reference) = config.image
+                && let RootfsSource::Oci(ref oci) = config.image
             {
-                image::pull_if_missing(reference, quiet).await?;
+                image::pull_if_missing(&oci.reference, quiet).await?;
             }
 
             let spinner = if quiet {

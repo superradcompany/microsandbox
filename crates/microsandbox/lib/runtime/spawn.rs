@@ -39,6 +39,13 @@ use crate::{
 };
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+static SIGCHLD_ALT_STACK_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -168,6 +175,8 @@ pub async fn spawn_sandbox(
     // Capture stdout (for startup JSON), inherit stderr so errors are visible.
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::inherit());
+
+    ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
 
     // Spawn the sandbox process. On failure, release the metrics reservation
     // so the slot does not leak.
@@ -318,6 +327,68 @@ fn release_metrics_reservation(
     };
     if let Err(err) = registry.release(reservation.slot, reservation.generation, mode) {
         tracing::debug!(error = %err, sandbox = %config.name, "release: metrics slot release failed");
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn ensure_sigchld_handler_uses_alt_stack_before_spawn() -> MicrosandboxResult<()> {
+    SIGCHLD_ALT_STACK_INIT
+        .get_or_try_init(|| async {
+            install_tokio_sigchld_handler()?;
+            patch_sigchld_handler_uses_alt_stack();
+            Ok::<(), crate::MicrosandboxError>(())
+        })
+        .await?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn ensure_sigchld_handler_uses_alt_stack_before_spawn() -> MicrosandboxResult<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn install_tokio_sigchld_handler() -> MicrosandboxResult<()> {
+    let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
+    let _ = Box::leak(Box::new(signal));
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn patch_sigchld_handler_uses_alt_stack() {
+    // Go's cgo runtime requires non-Go signal handlers to use SA_ONSTACK.
+    // The caller initializes Tokio's SIGCHLD handler first, before spawning
+    // sandbox children, then this preserves the handler while adding the flag.
+    //
+    // SAFETY: sigaction is called with valid pointers to read and then rewrite
+    // the current SIGCHLD action, preserving the existing handler and mask.
+    unsafe {
+        let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+        if libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) != 0 {
+            return;
+        }
+
+        let mut action = action.assume_init();
+        if action.sa_flags & libc::SA_ONSTACK != 0 {
+            return;
+        }
+
+        action.sa_flags |= libc::SA_ONSTACK;
+        let _ = libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut());
+    }
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn sigchld_handler_uses_alt_stack() -> bool {
+    // SAFETY: sigaction is called with a valid output pointer and a null new
+    // action pointer, which only reads the current process handler state.
+    unsafe {
+        let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+        if libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) != 0 {
+            return false;
+        }
+
+        action.assume_init().sa_flags & libc::SA_ONSTACK != 0
     }
 }
 
@@ -1006,6 +1077,16 @@ mod tests {
         .collect()
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_sigchld_handler_uses_alt_stack_after_prepare() {
+        super::ensure_sigchld_handler_uses_alt_stack_before_spawn()
+            .await
+            .unwrap();
+
+        assert!(super::sigchld_handler_uses_alt_stack());
+    }
+
     //----------------------------------------------------------------------------------------------
     // Tests: stat-virt + host-perms encoding in --mount args
     //----------------------------------------------------------------------------------------------
@@ -1472,7 +1553,7 @@ mod tests {
     async fn test_sandbox_cli_args_apply_default_oci_tmpfs() {
         let mut config = SandboxConfig {
             name: "test".into(),
-            image: RootfsSource::Oci("alpine".into()),
+            image: RootfsSource::oci("alpine"),
             memory_mib: 1024,
             manifest_digest: Some(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),

@@ -215,14 +215,19 @@ export declare class FsWriteSink {
 export type JsFsWriteSink = FsWriteSink
 
 /**
- * Fluent builder for a disk-image rootfs source.
+ * Fluent builder for an explicit rootfs image source.
  *
  * Used inside `Sandbox.builder(...).imageWith((i) => i.disk(...).fstype(...))`
- * to construct a `RootfsSource::DiskImage`. Standalone use is rare;
- * `.image("./ubuntu.qcow2")` resolves the same way for the common case.
+ * or `Sandbox.builder(...).imageWith((i) => i.oci(...).upperSize(...))`.
+ * Standalone use is rare; `.image("python:3.12")` and `.image("./ubuntu.qcow2")`
+ * resolve the common cases automatically.
  */
 export declare class ImageBuilder {
   constructor()
+  /** Use an OCI image reference as the root filesystem. */
+  oci(reference: string): this
+  /** Set the writable overlay upper size for an OCI rootfs, in MiB. */
+  upperSize(sizeMib: number): this
   /**
    * Use a host disk image file as the root filesystem. The format is
    * derived from the file extension: `.qcow2`, `.raw`, or `.vmdk`.

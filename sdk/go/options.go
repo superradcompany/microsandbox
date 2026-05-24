@@ -8,40 +8,42 @@ import "time"
 // SandboxConfig is exported for callers that prefer to build a config value
 // directly and pass it via WithConfig.
 type SandboxConfig struct {
-	Image       string
-	ImageFstype string
-	Snapshot    string
-	MemoryMiB   uint32
-	CPUs        uint8
-	Workdir     string
-	Shell       string
-	Hostname    string
-	User        string
-	Replace     bool
+	Image           string
+	ImageFstype     string
+	OCIUpperSizeMiB uint32
+	ociUpperSizeSet bool
+	Snapshot        string
+	MemoryMiB       uint32
+	CPUs            uint8
+	Workdir         string
+	Shell           string
+	Hostname        string
+	User            string
+	Replace         bool
 	// ReplaceWithTimeout, if non-nil, sets a specific timeout between
 	// SIGTERM and SIGKILL when replacing an existing sandbox. nil means
 	// "use the runtime default" (10s when Replace is set). Setting this
 	// implies Replace=true. Zero is honored — it skips SIGTERM and
 	// SIGKILLs immediately. Use WithReplaceWithTimeout.
 	ReplaceWithTimeout *time.Duration
-	Env              map[string]string
-	Detached         bool
-	Entrypoint       []string
-	Init             *InitConfig
-	LogLevel         LogLevel
-	QuietLogs        bool
-	Scripts          map[string]string
-	PullPolicy       PullPolicy
-	MaxDuration      time.Duration
-	IdleTimeout      time.Duration
-	RegistryAuth     *RegistryAuth
-	Ports            map[uint16]uint16 // host port → guest port (TCP)
-	PortsUDP         map[uint16]uint16 // host port → guest port (UDP)
-	PortBindings     []PortBinding     // explicit bind address host→guest ports
-	Network          *NetworkConfig
-	Secrets          []SecretEntry
-	Patches          []PatchConfig
-	Volumes          map[string]MountConfig // guest path → mount config
+	Env                map[string]string
+	Detached           bool
+	Entrypoint         []string
+	Init               *InitConfig
+	LogLevel           LogLevel
+	QuietLogs          bool
+	Scripts            map[string]string
+	PullPolicy         PullPolicy
+	MaxDuration        time.Duration
+	IdleTimeout        time.Duration
+	RegistryAuth       *RegistryAuth
+	Ports              map[uint16]uint16 // host port → guest port (TCP)
+	PortsUDP           map[uint16]uint16 // host port → guest port (UDP)
+	PortBindings       []PortBinding     // explicit bind address host→guest ports
+	Network            *NetworkConfig
+	Secrets            []SecretEntry
+	Patches            []PatchConfig
+	Volumes            map[string]MountConfig // guest path → mount config
 }
 
 // SandboxOption is a functional option for configuring a sandbox.
@@ -50,6 +52,15 @@ type SandboxOption func(*SandboxConfig)
 // WithImage sets the container image to use (e.g. "python:3.12").
 func WithImage(image string) SandboxOption {
 	return func(o *SandboxConfig) { o.Image = image }
+}
+
+// WithOCIUpperSize sets the writable overlay upper size for an OCI image, in MiB.
+// It is valid only with WithImage when the image resolves to an OCI reference.
+func WithOCIUpperSize(mebibytes uint32) SandboxOption {
+	return func(o *SandboxConfig) {
+		o.OCIUpperSizeMiB = mebibytes
+		o.ociUpperSizeSet = true
+	}
 }
 
 // WithImageDisk sets a disk image as the sandbox root filesystem and provides

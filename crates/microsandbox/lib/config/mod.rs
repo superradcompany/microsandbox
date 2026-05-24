@@ -178,6 +178,9 @@ pub struct SandboxDefaults {
     /// Default guest memory in MiB.
     pub memory_mib: u32,
 
+    /// Default OCI rootfs settings.
+    pub oci: OciSandboxDefaults,
+
     /// Default shell for interactive sessions and scripts.
     pub shell: String,
 
@@ -194,6 +197,16 @@ pub struct SandboxDefaults {
     /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
     #[serde(default)]
     pub disable_metrics_sample: bool,
+}
+
+/// Default values applied to OCI-rooted sandboxes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OciSandboxDefaults {
+    /// Default writable overlay upper size in MiB.
+    ///
+    /// `None` uses microsandbox's built-in formatter default.
+    pub upper_size_mib: Option<u32>,
 }
 
 /// Registry configuration.
@@ -526,6 +539,7 @@ impl Default for SandboxDefaults {
         Self {
             cpus: DEFAULT_CPUS,
             memory_mib: DEFAULT_MEMORY_MIB,
+            oci: OciSandboxDefaults::default(),
             shell: "/bin/sh".into(),
             workdir: None,
             metrics_sample_interval_ms: default_metrics_sample_interval(),
@@ -1045,6 +1059,7 @@ mod tests {
         let cfg = GlobalConfig::default();
         assert_eq!(cfg.sandbox_defaults.cpus, 1);
         assert_eq!(cfg.sandbox_defaults.memory_mib, 512);
+        assert_eq!(cfg.sandbox_defaults.oci.upper_size_mib, None);
         assert_eq!(cfg.sandbox_defaults.shell, "/bin/sh");
         assert_eq!(
             cfg.sandbox_defaults.metrics_sample_interval_ms,

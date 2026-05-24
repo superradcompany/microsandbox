@@ -109,6 +109,7 @@ impl SandboxBuilder {
     /// Set the root filesystem image using a builder closure.
     ///
     /// ```ignore
+    /// .image_with(|i| i.oci("python:3.12").upper_size(8.gib()))
     /// .image_with(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
     /// ```
     pub fn image_with(mut self, f: impl FnOnce(ImageBuilder) -> ImageBuilder) -> Self {
@@ -117,6 +118,35 @@ impl SandboxBuilder {
             Err(e) => {
                 if self.build_error.is_none() {
                     self.build_error = Some(e);
+                }
+            }
+        }
+        self
+    }
+
+    /// Set the writable overlay upper size for an OCI rootfs.
+    ///
+    /// Prefer [`image_with`](Self::image_with) when configuring the image and
+    /// upper together. This method exists for call sites, such as CLIs, where
+    /// the image reference and its options are parsed separately.
+    pub fn oci_upper_size(mut self, size: impl Into<Mebibytes>) -> Self {
+        let size_mib = size.into().as_u32();
+        match &mut self.config.image {
+            RootfsSource::Oci(oci) if !oci.reference.is_empty() => {
+                oci.upper_size_mib = Some(size_mib);
+            }
+            RootfsSource::Oci(_) => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(crate::MicrosandboxError::InvalidConfig(
+                        "oci_upper_size() requires an OCI image to be set first".into(),
+                    ));
+                }
+            }
+            _ => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(crate::MicrosandboxError::InvalidConfig(
+                        "oci_upper_size() is only valid for OCI images".into(),
+                    ));
                 }
             }
         }
@@ -668,6 +698,7 @@ impl SandboxBuilder {
     /// digest, and upper-layer source path are populated onto the config.
     pub async fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
         self.resolve_pending().await?;
+        self.config.apply_rootfs_defaults();
         self.validate()?;
         Ok(self.config)
     }
@@ -680,30 +711,27 @@ impl SandboxBuilder {
             return Ok(());
         };
 
+        if self.has_explicit_rootfs_source() {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "from_snapshot is mutually exclusive with explicit rootfs configuration".into(),
+            ));
+        }
+
         let snap = crate::snapshot::Snapshot::open(&snapshot_ref).await?;
         let snap_ref = snap.manifest().image.reference.clone();
 
-        let user_image = match &self.config.image {
-            RootfsSource::Oci(s) if !s.is_empty() => Some(s.clone()),
-            RootfsSource::Bind(p) if !p.as_os_str().is_empty() => {
-                return Err(crate::MicrosandboxError::InvalidConfig(
-                    "from_snapshot is mutually exclusive with bind/disk image".into(),
-                ));
-            }
-            _ => None,
-        };
-        if let Some(img) = user_image
-            && img != snap_ref
-        {
-            return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                "from_snapshot pins image '{snap_ref}', but builder was set to '{img}'"
-            )));
-        }
-
-        self.config.image = RootfsSource::Oci(snap_ref);
+        self.config.image = RootfsSource::oci(snap_ref);
         self.config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
         self.config.snapshot_upper_source = Some(snap.path().join(&snap.manifest().upper.file));
         Ok(())
+    }
+
+    fn has_explicit_rootfs_source(&self) -> bool {
+        match &self.config.image {
+            RootfsSource::Oci(oci) => !oci.reference.is_empty() || oci.upper_size_mib.is_some(),
+            RootfsSource::Bind(path) => !path.as_os_str().is_empty(),
+            RootfsSource::DiskImage { .. } => true,
+        }
     }
 
     /// Create the sandbox. Boots the VM with agentd ready.
@@ -784,9 +812,14 @@ impl SandboxBuilder {
 
         // Check that image is set (non-empty OCI string or Bind path).
         match &self.config.image {
-            RootfsSource::Oci(s) if s.is_empty() => {
+            RootfsSource::Oci(oci) if oci.reference.is_empty() => {
                 return Err(crate::MicrosandboxError::InvalidConfig(
                     "image source is required".into(),
+                ));
+            }
+            RootfsSource::Oci(oci) if oci.upper_size_mib == Some(0) => {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "oci upper_size must be greater than 0".into(),
                 ));
             }
             RootfsSource::DiskImage { .. } if !self.config.patches.is_empty() => {
@@ -890,6 +923,106 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.log_level, Some(LogLevel::Debug));
+    }
+
+    #[tokio::test]
+    async fn test_builder_image_with_oci_upper_size() {
+        let config = SandboxBuilder::new("test")
+            .image_with(|i| i.oci("alpine").upper_size(8192u32))
+            .build()
+            .await
+            .unwrap();
+
+        match config.image {
+            super::RootfsSource::Oci(oci) => {
+                assert_eq!(oci.reference, "alpine");
+                assert_eq!(oci.upper_size_mib, Some(8192));
+            }
+            other => panic!("expected Oci, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_builder_image_applies_default_oci_upper_size() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.image.oci_upper_size_mib(), Some(4096));
+    }
+
+    #[tokio::test]
+    async fn test_builder_oci_upper_size_rejects_bind_rootfs() {
+        let err = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .oci_upper_size(8192u32)
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("only valid for OCI images"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_from_snapshot_rejects_explicit_oci_image() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .from_snapshot("/tmp/missing-snapshot")
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("from_snapshot is mutually exclusive")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_from_snapshot_rejects_explicit_oci_upper_size() {
+        let err = SandboxBuilder::new("test")
+            .image_with(|i| i.oci("").upper_size(8192u32))
+            .from_snapshot("/tmp/missing-snapshot")
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("from_snapshot is mutually exclusive")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_from_snapshot_rejects_explicit_disk_image() {
+        let err = SandboxBuilder::new("test")
+            .image_with(|i| i.disk("./rootfs.raw"))
+            .from_snapshot("/tmp/missing-snapshot")
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("from_snapshot is mutually exclusive")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_from_snapshot_rejects_explicit_bind_rootfs() {
+        let err = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .from_snapshot("/tmp/missing-snapshot")
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("from_snapshot is mutually exclusive")
+        );
     }
 
     #[tokio::test]

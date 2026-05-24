@@ -36,6 +36,7 @@ msb run --name public-api -p 0.0.0.0:8000:8000 python
 | `-n`, `--name` | Sandbox name (if omitted, sandbox is ephemeral) |
 | `-c`, `--cpus` | Number of virtual CPUs to allocate |
 | `-m`, `--memory` | Amount of memory (e.g. `512M`, `1G`) |
+| `--oci-upper-size` | Writable overlay upper size for OCI images (e.g. `4G`, `8192M`) |
 | `-v`, `--volume` | Mount a host path or named volume (`SOURCE:DEST`) |
 | `-p`, `--port` | Forward a host port to the sandbox (`HOST:GUEST`, `BIND_ADDR:HOST:GUEST`, and `/udp` variants) |
 | `-e`, `--env` | Set an environment variable (`KEY=VALUE`) |

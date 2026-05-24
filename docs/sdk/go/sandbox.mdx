@@ -643,6 +643,16 @@ OCI image, local path, or disk image (e.g. `"python:3.12"`, `"docker.io/library/
 
 ---
 
+#### WithOCIUpperSize()
+
+```go
+func WithOCIUpperSize(mebibytes uint32) SandboxOption
+```
+
+Set the writable overlay upper size for an OCI image, in MiB. Valid only with an OCI image rootfs, not disk images or snapshots.
+
+---
+
 #### WithImageDisk()
 
 ```go
@@ -958,6 +968,7 @@ The config struct populated by [`SandboxOption`](#sandboxoption) functions. Most
 | ---------------- | ---------------------------------------------------- | -------------------------------------------------------------------- |
 | Image            | `string`                                             | OCI image, local path, or disk image                                 |
 | ImageFstype      | `string`                                             | Optional inner filesystem type for disk-image roots                  |
+| OCIUpperSizeMiB  | `uint32`                                             | Writable overlay upper size for OCI image roots                      |
 | Snapshot         | `string`                                             | Snapshot artifact path or bare name; mutually exclusive with `Image` |
 | MemoryMiB        | `uint32`                                             | Guest memory in MiB                                                  |
 | CPUs             | `uint8`                                              | Virtual CPUs                                                         |

@@ -919,6 +919,8 @@ export interface NapiRegistryConfigBuilder {
 }
 
 export interface NapiImageBuilder {
+  oci(reference: string): this;
+  upperSize(sizeMiB: number): this;
   disk(path: string): this;
   fstype(fstype: string): this;
 }
