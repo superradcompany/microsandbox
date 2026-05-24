@@ -86,7 +86,6 @@ enum Commands {
     Registry(registry::RegistryArgs),
 
     /// Connect to a sandbox over SSH.
-    #[command(visible_alias = "connect")]
     #[cfg(feature = "ssh")]
     Ssh(microsandbox_cli::commands::ssh::SshArgs),
 

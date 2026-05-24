@@ -35,7 +35,7 @@ For quick interactive access, use the built-in microsandbox SSH client. This doe
 
 ```bash
 msb ssh devbox
-msb connect devbox
+msb ssh connect devbox
 msb ssh devbox -- uname -a
 ```
 
@@ -81,5 +81,5 @@ sftp, err := ssh.SFTP(ctx)
 ## What to read next
 
 - [External Clients](/sandboxes/ssh/external-clients) covers OpenSSH, SFTP, and `ProxyCommand`.
-- [Native Sessions](/sandboxes/ssh/native-sessions) covers `msb ssh`, `msb connect`, and SDK client sessions.
+- [Native Sessions](/sandboxes/ssh/native-sessions) covers `msb ssh`, `msb ssh connect`, and SDK client sessions.
 - [SSH Commands](/cli/ssh-commands) is the CLI reference.
