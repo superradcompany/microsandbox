@@ -558,14 +558,15 @@ pub fn format_ext4_with_tree(
     write_journal(&mut file, &layout)?;
 
     let sb_bytes = build_superblock_with_stats(&layout, &stats)?;
-    write_superblock_at(&mut file, 0, &sb_bytes)?;
+    write_primary_superblock_at(&mut file, &sb_bytes)?;
 
     let gdt_bytes = build_gdt_with_stats(&layout, &stats)?;
     write_gdt_at(&mut file, 0, &gdt_bytes)?;
 
     for g in 1..layout.num_groups {
         if sparse_super_group(g) {
-            write_superblock_at(&mut file, layout.group_start_block(g), &sb_bytes)?;
+            let backup_sb_bytes = build_backup_superblock_with_stats(&layout, &stats, g)?;
+            write_backup_superblock_at(&mut file, layout.group_start_block(g), &backup_sb_bytes)?;
             write_gdt_at(&mut file, layout.group_start_block(g), &gdt_bytes)?;
         }
     }
@@ -1168,8 +1169,26 @@ fn write_empty_extent_tree(buf: &mut [u8], offset: usize) {
 }
 
 fn build_superblock_with_stats(layout: &Layout, stats: &FsStats) -> Result<Vec<u8>, Ext4Error> {
-    let mut block = build_superblock(layout)?;
-    let sb = &mut block[1024..2048];
+    build_superblock_with_stats_for_group(layout, stats, 0, true)
+}
+
+fn build_backup_superblock_with_stats(
+    layout: &Layout,
+    stats: &FsStats,
+    group: u32,
+) -> Result<Vec<u8>, Ext4Error> {
+    build_superblock_with_stats_for_group(layout, stats, group, false)
+}
+
+fn build_superblock_with_stats_for_group(
+    layout: &Layout,
+    stats: &FsStats,
+    group: u32,
+    padded_primary: bool,
+) -> Result<Vec<u8>, Ext4Error> {
+    let mut block = build_superblock(layout, group, padded_primary)?;
+    let sb_offset = if padded_primary { 1024 } else { 0 };
+    let sb = &mut block[sb_offset..sb_offset + 1024];
     put_le32(sb, 0x0C, stats.total_free_blocks as u32);
     put_le32(sb, 0x10, stats.total_free_inodes as u32);
     put_le32(sb, 0x158, (stats.total_free_blocks >> 32) as u32);
@@ -1469,12 +1488,19 @@ fn write_journal(
     Ok(())
 }
 
-/// Build the 1024-byte ext4 superblock.
-fn build_superblock(layout: &Layout) -> Result<Vec<u8>, Ext4Error> {
-    // The superblock is 1024 bytes starting at byte 1024 within block 0.
-    // We build a full 4096-byte block with the sb at offset 1024.
-    let mut block = vec![0u8; EXT4_BLOCK_SIZE as usize];
-    let sb = &mut block[1024..2048]; // 1024-byte superblock
+/// Build an ext4 superblock image.
+fn build_superblock(
+    layout: &Layout,
+    group: u32,
+    padded_primary: bool,
+) -> Result<Vec<u8>, Ext4Error> {
+    let mut block = if padded_primary {
+        vec![0u8; EXT4_BLOCK_SIZE as usize]
+    } else {
+        vec![0u8; 1024]
+    };
+    let sb_offset = if padded_primary { 1024 } else { 0 };
+    let sb = &mut block[sb_offset..sb_offset + 1024];
 
     let total_blocks = layout.num_blocks;
     let total_inodes = layout.num_groups as u64 * EXT4_INODES_PER_GROUP as u64;
@@ -1540,7 +1566,7 @@ fn build_superblock(layout: &Layout) -> Result<Vec<u8>, Ext4Error> {
     // s_inode_size (0x58, u16)
     put_le16(sb, 0x58, EXT4_INODE_SIZE);
     // s_block_group_nr (0x5A, u16) -- block group hosting this superblock
-    put_le16(sb, 0x5A, 0);
+    put_le16(sb, 0x5A, group as u16);
 
     // s_feature_compat (0x5C, u32)
     put_le32(sb, 0x5C, layout.feature_compat);
@@ -1719,18 +1745,23 @@ fn build_gdt(
     Ok(gdt)
 }
 
-/// Write superblock at the given group's first block.
-fn write_superblock_at(
+/// Write the primary superblock block at the start of the image.
+fn write_primary_superblock_at(
+    file: &mut (impl std::io::Write + std::io::Seek),
+    sb_block: &[u8],
+) -> Result<(), Ext4Error> {
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(sb_block)?;
+    Ok(())
+}
+
+/// Write a 1024-byte backup superblock at the given group's first byte.
+fn write_backup_superblock_at(
     file: &mut (impl std::io::Write + std::io::Seek),
     group_start_block: u64,
     sb_block: &[u8],
 ) -> Result<(), Ext4Error> {
-    // The superblock is always at byte offset 1024 within the first block of
-    // the group. For group 0 the offset is 1024. For backup groups the sb is at
-    // group_start_block * block_size + 0 (the whole block including the padding
-    // before offset 1024).
-    let offset = group_start_block * EXT4_BLOCK_SIZE as u64;
-    file.seek(SeekFrom::Start(offset))?;
+    file.seek(SeekFrom::Start(group_start_block * EXT4_BLOCK_SIZE as u64))?;
     file.write_all(sb_block)?;
     Ok(())
 }
@@ -1820,6 +1851,10 @@ mod tests {
     use super::*;
     use std::io::{Read, Seek, SeekFrom};
 
+    fn le_u16(bytes: &[u8], offset: usize) -> u16 {
+        u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+    }
+
     fn le_u32(bytes: &[u8], offset: usize) -> u32 {
         u32::from_le_bytes([
             bytes[offset],
@@ -1835,6 +1870,23 @@ mod tests {
         let mut bytes = vec![0u8; len];
         file.read_exact(&mut bytes).unwrap();
         bytes
+    }
+
+    fn assert_backup_superblock(path: &Path, layout: &Layout, group: u32) {
+        assert!(sparse_super_group(group));
+        let backup_offset = layout.group_start_block(group) * EXT4_BLOCK_SIZE as u64;
+        let bytes = read_exact_at(path, backup_offset, 2048);
+
+        assert_eq!(le_u16(&bytes, 0x38), EXT4_SUPER_MAGIC);
+        assert_eq!(le_u16(&bytes, 0x5A), group as u16);
+        assert_ne!(le_u16(&bytes, 1024 + 0x38), EXT4_SUPER_MAGIC);
+
+        let mut sb = bytes[..1024].to_vec();
+        let stored = le_u32(&sb, 0x3FC);
+        put_le32(&mut sb, 0x3FC, 0);
+        let expected = crc32c::crc32c_raw(0xFFFF_FFFF, &sb[..0x3FC]);
+
+        assert_eq!(stored, expected);
     }
 
     #[test]
@@ -2007,6 +2059,37 @@ mod tests {
 
         assert_eq!(block_bitmap, layout.group_block_bitmap_block(1));
         assert!(block_bitmap > group_start + layout.gdt_blocks as u64 - 1);
+    }
+
+    #[test]
+    fn test_backup_superblock_is_written_at_backup_group_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backup-super.ext4");
+        let opts = Ext4FormatOptions {
+            size_bytes: 256 * 1024 * 1024,
+            journal_blocks: 4096,
+        };
+
+        format_ext4(&path, &opts).unwrap();
+
+        let layout = Layout::compute(&opts).unwrap();
+        assert_backup_superblock(&path, &layout, 1);
+    }
+
+    #[test]
+    fn test_backup_superblock_is_group_specific_in_sixteen_gib_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backup-super-16g.ext4");
+        let opts = Ext4FormatOptions {
+            size_bytes: 16 * 1024 * 1024 * 1024,
+            journal_blocks: DEFAULT_JOURNAL_BLOCKS,
+        };
+
+        format_ext4(&path, &opts).unwrap();
+
+        let layout = Layout::compute(&opts).unwrap();
+        assert_eq!(layout.num_groups, 128);
+        assert_backup_superblock(&path, &layout, 81);
     }
 
     #[test]

@@ -711,37 +711,27 @@ impl SandboxBuilder {
             return Ok(());
         };
 
+        if self.has_explicit_rootfs_source() {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "from_snapshot is mutually exclusive with explicit rootfs configuration".into(),
+            ));
+        }
+
         let snap = crate::snapshot::Snapshot::open(&snapshot_ref).await?;
         let snap_ref = snap.manifest().image.reference.clone();
-
-        let user_image = match &self.config.image {
-            RootfsSource::Oci(oci) if !oci.reference.is_empty() => {
-                if oci.upper_size_mib.is_some() {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "from_snapshot is mutually exclusive with oci upper_size".into(),
-                    ));
-                }
-                Some(oci.reference.clone())
-            }
-            RootfsSource::Bind(p) if !p.as_os_str().is_empty() => {
-                return Err(crate::MicrosandboxError::InvalidConfig(
-                    "from_snapshot is mutually exclusive with bind/disk image".into(),
-                ));
-            }
-            _ => None,
-        };
-        if let Some(img) = user_image
-            && img != snap_ref
-        {
-            return Err(crate::MicrosandboxError::InvalidConfig(format!(
-                "from_snapshot pins image '{snap_ref}', but builder was set to '{img}'"
-            )));
-        }
 
         self.config.image = RootfsSource::oci(snap_ref);
         self.config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
         self.config.snapshot_upper_source = Some(snap.path().join(&snap.manifest().upper.file));
         Ok(())
+    }
+
+    fn has_explicit_rootfs_source(&self) -> bool {
+        match &self.config.image {
+            RootfsSource::Oci(oci) => !oci.reference.is_empty() || oci.upper_size_mib.is_some(),
+            RootfsSource::Bind(path) => !path.as_os_str().is_empty(),
+            RootfsSource::DiskImage { .. } => true,
+        }
     }
 
     /// Create the sandbox. Boots the VM with agentd ready.
@@ -973,6 +963,66 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("only valid for OCI images"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_from_snapshot_rejects_explicit_oci_image() {
+        let err = SandboxBuilder::new("test")
+            .image("alpine")
+            .from_snapshot("/tmp/missing-snapshot")
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("from_snapshot is mutually exclusive")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_from_snapshot_rejects_explicit_oci_upper_size() {
+        let err = SandboxBuilder::new("test")
+            .image_with(|i| i.oci("").upper_size(8192u32))
+            .from_snapshot("/tmp/missing-snapshot")
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("from_snapshot is mutually exclusive")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_from_snapshot_rejects_explicit_disk_image() {
+        let err = SandboxBuilder::new("test")
+            .image_with(|i| i.disk("./rootfs.raw"))
+            .from_snapshot("/tmp/missing-snapshot")
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("from_snapshot is mutually exclusive")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_from_snapshot_rejects_explicit_bind_rootfs() {
+        let err = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .from_snapshot("/tmp/missing-snapshot")
+            .build()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("from_snapshot is mutually exclusive")
+        );
     }
 
     #[tokio::test]
