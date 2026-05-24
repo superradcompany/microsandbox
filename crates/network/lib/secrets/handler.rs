@@ -31,6 +31,21 @@ pub struct SecretsHandler {
     /// placeholder split across TCP writes still trips the violation check.
     /// Capped at `max_placeholder_len - 1` bytes.
     prev_tail: Vec<u8>,
+    /// HTTP framing state for the request stream. Tracks whether the next
+    /// chunk should be parsed as a request start (headers) or treated as a
+    /// continuation of the current request's body.
+    http_state: HttpState,
+}
+
+/// HTTP request framing state for the guest→server byte stream.
+#[derive(Debug, Clone)]
+enum HttpState {
+    /// Scanning for the start of a request. The next `\r\n\r\n` ends headers.
+    AwaitingHeaders,
+    /// Inside a request body. `remaining` is the number of body bytes left
+    /// per Content-Length; `None` means unknown framing (chunked or
+    /// connection-close) — stay in this state until the connection ends.
+    InBody { remaining: Option<usize> },
 }
 
 /// A secret that passed host matching for this connection.
@@ -222,6 +237,7 @@ impl SecretsHandler {
             tls_intercepted,
             max_placeholder_len,
             prev_tail: Vec::new(),
+            http_state: HttpState::AwaitingHeaders,
         }
     }
 
@@ -236,6 +252,14 @@ impl SecretsHandler {
     /// Returns the violation action if a placeholder is detected going to a
     /// disallowed host.
     pub fn substitute<'a>(&mut self, data: &'a [u8]) -> Result<Cow<'a, [u8]>, ViolationAction> {
+        // Body-continuation chunk: previous chunk(s) already contained the
+        // request line and headers. The remainder of the body must pass
+        // through as raw bytes — never run `from_utf8_lossy` on it, which
+        // would corrupt binary payloads.
+        if let HttpState::InBody { remaining } = self.http_state {
+            return self.substitute_body_chunk(data, remaining);
+        }
+
         // Split raw bytes at the header boundary BEFORE converting to owned strings.
         // This avoids position shifts from from_utf8_lossy replacement chars.
         let boundary = find_header_boundary(data);
@@ -263,6 +287,16 @@ impl SecretsHandler {
             }
         }
         self.update_tail(data);
+
+        // Update framing state for the next chunk. Done regardless of whether
+        // we end up modifying the bytes, so subsequent body-continuation
+        // chunks take the body-only path above.
+        if boundary.is_some() {
+            self.http_state = next_state_after_headers(
+                String::from_utf8_lossy(header_bytes).as_ref(),
+                body_bytes.len(),
+            );
+        }
 
         if self.eligible_for_substitution.is_empty() {
             // No substitution needed. Return borrowed slice (zero-copy).
@@ -317,6 +351,11 @@ impl SecretsHandler {
 
         let body_bytes_out = body.as_deref().unwrap_or(body_bytes);
         // Update Content-Length only when body substitution changed the size.
+        //
+        // FIXME: `body_bytes_out.len()` is the chunk's substituted body length,
+        // not the request's total. If `inject_body=true` and the body spans
+        // multiple `substitute()` calls, continuation chunks are forwarded
+        // as-is past this rewritten CL.
         if body_changed && body_bytes_out.len() != body_bytes.len() {
             let headers = match header_str {
                 Some(headers) => update_content_length(&headers, body_bytes_out.len()),
@@ -334,6 +373,49 @@ impl SecretsHandler {
 
         output.extend_from_slice(body_bytes_out);
         Ok(Cow::Owned(output))
+    }
+
+    /// Handle a chunk that is purely the continuation of the current
+    /// request's body (no headers present). Bytes are forwarded as-is
+    /// after running the violation scan.
+    ///
+    /// Body substitution across chunks is unsupported (would require
+    /// rewriting Content-Length in already-forwarded headers).
+    fn substitute_body_chunk<'a>(
+        &mut self,
+        data: &'a [u8],
+        remaining: Option<usize>,
+    ) -> Result<Cow<'a, [u8]>, ViolationAction> {
+        if let Some(action) = self.detect_blocking_action(data, "") {
+            match action {
+                BlockingAction::Block => return Err(action.into_violation_action()),
+                BlockingAction::BlockAndLog => {
+                    tracing::warn!("secret violation: placeholder detected for disallowed host");
+                    return Err(action.into_violation_action());
+                }
+                BlockingAction::BlockAndTerminate => {
+                    tracing::error!(
+                        "secret violation: placeholder detected for disallowed host — terminating"
+                    );
+                    return Err(action.into_violation_action());
+                }
+            }
+        }
+        self.update_tail(data);
+
+        // Advance the body-byte counter. When the counted body ends mid-
+        // chunk we ideally would re-enter header-parsing on the spillover
+        // (pipelined next request), but pipelining is vanishingly rare in
+        // practice — reset to AwaitingHeaders on the next call instead.
+        self.http_state = match remaining {
+            Some(n) if data.len() >= n => HttpState::AwaitingHeaders,
+            Some(n) => HttpState::InBody {
+                remaining: Some(n - data.len()),
+            },
+            None => HttpState::InBody { remaining: None },
+        };
+
+        Ok(Cow::Borrowed(data))
     }
 
     /// Returns true if this connection needs no secret substitution or violation detection.
@@ -449,6 +531,61 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         return false;
     }
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Compute the framing state for the next chunk after we just observed a
+/// `\r\n\r\n` boundary in this chunk. `body_in_chunk` is how many body bytes
+/// followed the boundary in this same chunk.
+fn next_state_after_headers(headers: &str, body_in_chunk: usize) -> HttpState {
+    if is_transfer_chunked(headers) {
+        // Chunked framing doesn't expose a Content-Length up front. Stay in
+        // body mode until the connection closes; we don't parse the chunked
+        // end marker. Body substitution across chunks is unsupported anyway,
+        // so subsequent reads just pass through verbatim.
+        return HttpState::InBody { remaining: None };
+    }
+    match parse_content_length(headers) {
+        Some(cl) if body_in_chunk >= cl => HttpState::AwaitingHeaders,
+        Some(cl) => HttpState::InBody {
+            remaining: Some(cl - body_in_chunk),
+        },
+        None if body_in_chunk > 0 => HttpState::InBody { remaining: None },
+        None => HttpState::AwaitingHeaders,
+    }
+}
+
+/// Parse a `Content-Length:` value from the headers block. Case-insensitive
+/// header name match; returns `None` if absent or unparseable.
+fn parse_content_length(headers: &str) -> Option<usize> {
+    for line in headers.split("\r\n") {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            return value.trim().parse().ok();
+        }
+    }
+    None
+}
+
+/// True if the headers contain `Transfer-Encoding: chunked` (case-insensitive,
+/// last value in the comma-list per RFC 7230).
+fn is_transfer_chunked(headers: &str) -> bool {
+    for line in headers.split("\r\n") {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("transfer-encoding")
+            && value
+                .split(',')
+                .next_back()
+                .map(|s| s.trim().eq_ignore_ascii_case("chunked"))
+                .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Replace all occurrences of `needle` in `haystack`.
@@ -1123,7 +1260,8 @@ mod tests {
     fn body_split_across_two_chunks_round_trips() {
         // Body bytes arrive across two substitute() calls: the first chunk
         // carries headers + the first slice of body, the second chunk
-        // carries the remainder. Both halves must pass through byte-for-byte.
+        // carries the remainder. Both halves must pass through byte-for-byte
+        // (the state machine decrements `remaining` correctly).
         //
         // The second chunk embeds a literal `$KEY` between non-UTF-8 bytes,
         // so a regression where continuation chunks fall back to the header
@@ -1150,6 +1288,45 @@ mod tests {
 
         let out2 = handler.substitute(&body[5..]).unwrap();
         assert_eq!(out2.as_ref(), &body[5..]);
+    }
+
+    #[test]
+    fn framing_state_resets_after_request_completes() {
+        // Once a body has been fully forwarded, the next chunk must be
+        // parsed as a fresh request — not continued as body. A regression
+        // here would silently treat the next request line as body bytes.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "example.com")]);
+        let mut handler = SecretsHandler::new(&config, "example.com", true);
+
+        let body: Vec<u8> = vec![0x00, 0x80, 0xc0, 0xff, 0xfe];
+        let mut chunk1 =
+            b"POST /a HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\n".to_vec();
+        chunk1.extend_from_slice(&body);
+        handler.substitute(&chunk1).unwrap();
+
+        // Second request on the same connection. With state correctly reset
+        // to AwaitingHeaders, this is parsed normally and forwarded.
+        let chunk2 = b"GET /b HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let out2 = handler.substitute(chunk2).unwrap();
+        assert_eq!(out2.as_ref(), chunk2.as_slice());
+    }
+
+    #[test]
+    fn violation_detected_in_body_continuation_chunk() {
+        // Placeholder bytes for a host that is not allowed to receive the
+        // real secret arrive in a body-continuation chunk. The body-only
+        // path must still run violation detection.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let chunk1 = b"POST /a HTTP/1.1\r\nHost: evil.com\r\nContent-Length: 16\r\n\r\n";
+        handler.substitute(chunk1).unwrap();
+
+        let chunk2 = b"prefix:$KEY:suffix";
+        assert_eq!(
+            handler.substitute(chunk2).unwrap_err(),
+            ViolationAction::Block
+        );
     }
 
     #[test]
