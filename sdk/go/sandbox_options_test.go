@@ -50,6 +50,13 @@ func TestFFIWireShape_WithOCIUpperSize(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_WithOCIUpperSizeZero(t *testing.T) {
+	got := marshalCreateOptions(t, WithImage("python:3.12"), WithOCIUpperSize(0))
+	if v := mustField(t, got, "oci_upper_size_mib"); v != float64(0) {
+		t.Fatalf("oci_upper_size_mib = %v, want 0", v)
+	}
+}
+
 func TestFFIWireShape_WithSnapshot(t *testing.T) {
 	got := marshalCreateOptions(t, WithSnapshot("after-pip-install"))
 	if v := mustField(t, got, "snapshot"); v != "after-pip-install" {
@@ -346,8 +353,9 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	}
 }
 
-// The Rust side relies on serde(default), so zero-valued Go fields must not
-// reach the wire — otherwise the runtime can't tell "unset" from "set to zero".
+// The Rust side relies on serde(default), so zero-valued Go scalar fields must
+// not reach the wire. Explicit optional values use pointers when zero is valid
+// on the wire for validation.
 func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 	got := marshalCreateOptions(t)
 

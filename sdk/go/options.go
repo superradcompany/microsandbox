@@ -11,6 +11,7 @@ type SandboxConfig struct {
 	Image           string
 	ImageFstype     string
 	OCIUpperSizeMiB uint32
+	ociUpperSizeSet bool
 	Snapshot        string
 	MemoryMiB       uint32
 	CPUs            uint8
@@ -56,7 +57,10 @@ func WithImage(image string) SandboxOption {
 // WithOCIUpperSize sets the writable overlay upper size for an OCI image, in MiB.
 // It is valid only with WithImage when the image resolves to an OCI reference.
 func WithOCIUpperSize(mebibytes uint32) SandboxOption {
-	return func(o *SandboxConfig) { o.OCIUpperSizeMiB = mebibytes }
+	return func(o *SandboxConfig) {
+		o.OCIUpperSizeMiB = mebibytes
+		o.ociUpperSizeSet = true
+	}
 }
 
 // WithImageDisk sets a disk image as the sandbox root filesystem and provides

@@ -4689,3 +4689,27 @@ fn kind_str(kind: FsEntryKind) -> &'static str {
 fn agent_error(err: microsandbox::AgentClientError) -> FfiError {
     FfiError::from(MicrosandboxError::AgentClient(err))
 }
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_create_opts_preserves_explicit_zero_oci_upper_size() {
+        let opts: SandboxCreateOpts =
+            serde_json::from_str(r#"{"image":"python:3.12","oci_upper_size_mib":0}"#).unwrap();
+
+        assert_eq!(opts.oci_upper_size_mib, Some(0));
+    }
+
+    #[test]
+    fn sandbox_create_opts_distinguishes_absent_oci_upper_size() {
+        let opts: SandboxCreateOpts = serde_json::from_str(r#"{"image":"python:3.12"}"#).unwrap();
+
+        assert_eq!(opts.oci_upper_size_mib, None);
+    }
+}

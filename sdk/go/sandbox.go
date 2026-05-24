@@ -41,7 +41,6 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	ffiOpts := ffi.CreateOptions{
 		Image:           o.Image,
 		ImageFstype:     o.ImageFstype,
-		OCIUpperSizeMiB: o.OCIUpperSizeMiB,
 		Snapshot:        o.Snapshot,
 		MemoryMiB:       o.MemoryMiB,
 		CPUs:            o.CPUs,
@@ -62,6 +61,9 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		Ports:           o.Ports,
 		PortsUDP:        o.PortsUDP,
 		PortBindings:    buildFFIPortBindings(o.PortBindings),
+	}
+	if o.ociUpperSizeSet || o.OCIUpperSizeMiB != 0 {
+		ffiOpts.OCIUpperSizeMiB = &o.OCIUpperSizeMiB
 	}
 	if o.ReplaceWithTimeout != nil {
 		var ms uint64

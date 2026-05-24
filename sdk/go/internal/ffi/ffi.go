@@ -1236,11 +1236,12 @@ func (c *AgentClient) CloseCtx(ctx context.Context) error {
 // =============================================================================
 
 // CreateOptions matches the JSON payload shape expected by msb_sandbox_create.
-// Zero-valued fields are omitted; the Rust side applies defaults.
+// Zero-valued scalar fields are omitted; pointer fields preserve explicit zero.
+// The Rust side applies defaults when optional fields are absent.
 type CreateOptions struct {
 	Image                string               `json:"image,omitempty"`
 	ImageFstype          string               `json:"image_fstype,omitempty"`
-	OCIUpperSizeMiB      uint32               `json:"oci_upper_size_mib,omitempty"`
+	OCIUpperSizeMiB      *uint32              `json:"oci_upper_size_mib,omitempty"`
 	Snapshot             string               `json:"snapshot,omitempty"`
 	MemoryMiB            uint32               `json:"memory_mib,omitempty"`
 	CPUs                 uint8                `json:"cpus,omitempty"`
