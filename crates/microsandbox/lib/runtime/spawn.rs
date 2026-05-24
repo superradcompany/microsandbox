@@ -178,6 +178,7 @@ pub async fn spawn_sandbox(
             return Err(e.into());
         }
     };
+    ensure_sigchld_handler_uses_alt_stack();
 
     let _pid = match child.id() {
         Some(pid) => pid,
@@ -320,6 +321,33 @@ fn release_metrics_reservation(
         tracing::debug!(error = %err, sandbox = %config.name, "release: metrics slot release failed");
     }
 }
+
+#[cfg(target_os = "linux")]
+fn ensure_sigchld_handler_uses_alt_stack() {
+    // Go's cgo runtime requires non-Go signal handlers to use SA_ONSTACK.
+    // Tokio installs the SIGCHLD handler lazily when the first process is
+    // spawned, so patch the installed handler flags immediately after spawn.
+    //
+    // SAFETY: sigaction is called with valid pointers to read and then rewrite
+    // the current SIGCHLD action, preserving the existing handler and mask.
+    unsafe {
+        let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+        if libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) != 0 {
+            return;
+        }
+
+        let mut action = action.assume_init();
+        if action.sa_flags & libc::SA_ONSTACK != 0 {
+            return;
+        }
+
+        action.sa_flags |= libc::SA_ONSTACK;
+        let _ = libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ensure_sigchld_handler_uses_alt_stack() {}
 
 async fn terminate_startup_process(
     child: &mut tokio::process::Child,
