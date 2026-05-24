@@ -1160,6 +1160,31 @@ export declare class Setup {
 }
 export type JsSetup = Setup
 
+/** High-level SFTP client session. */
+export declare class SftpClient {
+  /** Read a file into memory. */
+  read(path: string): Promise<Buffer>
+  /** Write a file, creating or truncating it. */
+  write(path: string, data: Buffer): Promise<void>
+  /** Create a directory. */
+  mkdir(path: string): Promise<void>
+  /** Remove a file. */
+  removeFile(path: string): Promise<void>
+  /** Remove an empty directory. */
+  removeDir(path: string): Promise<void>
+  /** Rename a file or directory. */
+  rename(oldPath: string, newPath: string): Promise<void>
+  /** Resolve a path to its canonical absolute form. */
+  realPath(path: string): Promise<string>
+  /** Read a symlink target. */
+  readLink(path: string): Promise<string>
+  /** Create a symlink. */
+  symlink(target: string, linkPath: string): Promise<void>
+  /** Close this SFTP session. */
+  close(): Promise<void>
+}
+export type JsSftpClient = SftpClient
+
 /** A snapshot artifact on disk. */
 export declare class Snapshot {
   static open(pathOrName: string): Promise<Snapshot>
@@ -1241,36 +1266,11 @@ export declare class SshClient {
   /** Attach the local terminal to an interactive SSH shell. */
   attach(options?: SshAttachOptions | undefined | null): Promise<number>
   /** Open an SFTP session over this SSH connection. */
-  sftp(): Promise<JsSftpClient>
+  sftp(): Promise<SftpClient>
   /** Close this SSH client session. */
   close(): Promise<void>
 }
 export type JsSshClient = SshClient
-
-/** High-level SFTP client session. */
-export declare class SftpClient {
-  /** Read a file into memory. */
-  read(path: string): Promise<Buffer>
-  /** Write a file, creating or truncating it. */
-  write(path: string, data: Buffer): Promise<void>
-  /** Create a directory. */
-  mkdir(path: string): Promise<void>
-  /** Remove a file. */
-  removeFile(path: string): Promise<void>
-  /** Remove an empty directory. */
-  removeDir(path: string): Promise<void>
-  /** Rename a file or directory. */
-  rename(oldPath: string, newPath: string): Promise<void>
-  /** Resolve a path to its canonical absolute form. */
-  realPath(path: string): Promise<string>
-  /** Read a symlink target. */
-  readLink(path: string): Promise<string>
-  /** Create a symlink. */
-  symlink(target: string, linkPath: string): Promise<void>
-  /** Close this SFTP session. */
-  close(): Promise<void>
-}
-export type JsSftpClient = SftpClient
 
 /** Reusable SSH server endpoint for a sandbox. */
 export declare class SshServer {
