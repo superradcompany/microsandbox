@@ -1087,4 +1087,93 @@ mod tests {
         ));
         assert!(!json_escaped_contains(b"KEY", b"$KEY"));
     }
+
+    #[test]
+    fn body_in_separate_chunk_preserves_non_utf8_bytes() {
+        // substitute() is called once per chunk from the TLS stream. A
+        // single HTTP request can arrive as (headers) then (body) in
+        // separate calls; the second call carries body bytes with no
+        // `\r\n\r\n` boundary and must be recognised as body continuation,
+        // not parsed as a fresh request.
+        //
+        // The body embeds a literal `$KEY` between non-UTF-8 bytes. Without
+        // framing state the continuation chunk is parsed as headers,
+        // `may_substitute_in_headers` finds the placeholder, the chunk is
+        // lossy-decoded (mangling the surrounding bytes), and the
+        // header-only secret leaks into the body.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "example.com")]);
+        let mut handler = SecretsHandler::new(&config, "example.com", true);
+
+        // Chunk 1: headers only; Content-Length announces 13 body bytes.
+        let chunk1 = b"POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: 13\r\n\r\n";
+        handler.substitute(chunk1).unwrap();
+
+        // Chunk 2: 13 body bytes, no boundary marker. `$KEY` sits between
+        // 0xff / 0xfe bytes so misclassification corrupts both.
+        let mut body: Vec<u8> = vec![0x00, 0x80, 0xc0, 0xff, 0xfe];
+        body.extend_from_slice(b"$KEY");
+        body.extend_from_slice(&[0x81, 0xc1, 0xee, 0xef]);
+        assert_eq!(body.len(), 13);
+
+        let out = handler.substitute(&body).unwrap();
+        assert_eq!(out.as_ref(), body.as_slice());
+    }
+
+    #[test]
+    fn body_split_across_two_chunks_round_trips() {
+        // Body bytes arrive across two substitute() calls: the first chunk
+        // carries headers + the first slice of body, the second chunk
+        // carries the remainder. Both halves must pass through byte-for-byte.
+        //
+        // The second chunk embeds a literal `$KEY` between non-UTF-8 bytes,
+        // so a regression where continuation chunks fall back to the header
+        // path both leaks the secret and clobbers the surrounding bytes.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "example.com")]);
+        let mut handler = SecretsHandler::new(&config, "example.com", true);
+
+        let mut body: Vec<u8> = vec![0x00, 0x80, 0xc0, 0xff, 0xfe, 0xfd, 0xfc];
+        body.extend_from_slice(b"$KEY");
+        body.extend_from_slice(&[0x81, 0xc1, 0xee, 0xef]);
+        assert_eq!(body.len(), 15);
+
+        let mut chunk1 =
+            b"POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: 15\r\n\r\n".to_vec();
+        chunk1.extend_from_slice(&body[..5]);
+
+        let out1 = handler.substitute(&chunk1).unwrap();
+        let boundary = out1
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|p| p + 4)
+            .unwrap();
+        assert_eq!(&out1[boundary..], &body[..5]);
+
+        let out2 = handler.substitute(&body[5..]).unwrap();
+        assert_eq!(out2.as_ref(), &body[5..]);
+    }
+
+    #[test]
+    fn header_only_secret_does_not_leak_into_body_continuation_chunk() {
+        // Security regression: a secret with the default injection scopes
+        // (inject_headers=true, inject_body=false) must NOT substitute its
+        // placeholder when the placeholder appears in body bytes. Without
+        // the framing fix, a body-continuation chunk was parsed as headers
+        // and run through `substitute_in_headers`, which replaces the
+        // placeholder on every line — leaking the real secret value into a
+        // request body the user explicitly opted out of injecting into.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "example.com")]);
+        let mut handler = SecretsHandler::new(&config, "example.com", true);
+
+        // Chunk 1: headers only. Content-Length announces 24 body bytes.
+        let chunk1 = b"POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: 24\r\n\r\n";
+        handler.substitute(chunk1).unwrap();
+
+        // Chunk 2: ASCII body containing a literal `$KEY` token. The
+        // placeholder must be forwarded verbatim, never replaced with the
+        // secret value.
+        let body = b"prefix:$KEY:more-padding";
+        assert_eq!(body.len(), 24);
+        let out = handler.substitute(body).unwrap();
+        assert_eq!(out.as_ref(), body.as_slice());
+    }
 }
