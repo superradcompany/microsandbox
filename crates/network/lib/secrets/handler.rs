@@ -947,4 +947,34 @@ mod tests {
         ));
         assert!(!json_escaped_contains(b"KEY", b"$KEY"));
     }
+
+    #[test]
+    fn body_preserves_non_utf8_bytes() {
+        // substitute() operates on the raw plaintext byte stream. The body
+        // portion must round-trip byte-for-byte regardless of content;
+        // request bodies are arbitrary application data (compressed payloads,
+        // binary uploads, …) and the function has no license to transform
+        // bytes outside its declared substitution scopes.
+        //
+        // Uses default injection scopes (headers + basic_auth, no body) so
+        // the body is out of scope for substitution but the eligible secret
+        // still forces the function down its full processing path.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "example.com")]);
+        let mut handler = SecretsHandler::new(&config, "example.com", true);
+
+        let body: Vec<u8> = vec![
+            0x00, 0x80, 0xc0, 0xff, 0xfe, 0xfd, 0xfc, 0x81, 0x82, 0xc1, 0xc2, 0xee, 0xef,
+        ];
+        let mut input =
+            b"POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: 13\r\n\r\n".to_vec();
+        input.extend_from_slice(&body);
+
+        let output = handler.substitute(&input).unwrap().into_owned();
+        let boundary = output
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|p| p + 4)
+            .unwrap();
+        assert_eq!(&output[boundary..], body.as_slice());
+    }
 }
