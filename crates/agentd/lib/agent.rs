@@ -44,6 +44,18 @@ const SERIAL_READ_BUF_SIZE: usize = 64 * 1024;
 const MAX_INPUT_BUF_SIZE: usize = MAX_FRAME_SIZE as usize + 4;
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Default)]
+struct AgentState {
+    sessions: HashMap<u32, ExecSession>,
+    write_sessions: HashMap<u32, FsWriteSession>,
+    read_sessions: HashMap<u32, FsReadSession>,
+    fs: FsState,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -74,17 +86,7 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64, config: &AgentdConfig) ->
     let mut serial_in_buf = Vec::new();
     let mut serial_out_buf = Vec::new();
 
-    // Active exec sessions.
-    let mut sessions: HashMap<u32, ExecSession> = HashMap::new();
-
-    // Active filesystem write sessions.
-    let mut write_sessions: HashMap<u32, FsWriteSession> = HashMap::new();
-
-    // Active filesystem read sessions.
-    let mut read_sessions: HashMap<u32, FsReadSession> = HashMap::new();
-
-    // Active filesystem handles.
-    let mut fs_state = FsState::default();
+    let mut state = AgentState::default();
 
     // Channel for session output events.
     let (session_tx, mut session_rx) = mpsc::unbounded_channel::<(u32, SessionOutput)>();
@@ -141,10 +143,7 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64, config: &AgentdConfig) ->
                             {
                                 handle_message(
                                     msg,
-                                    &mut sessions,
-                                    &mut write_sessions,
-                                    &mut read_sessions,
-                                    &mut fs_state,
+                                    &mut state,
                                     &session_tx,
                                     &mut serial_out_buf,
                                     config,
@@ -183,10 +182,10 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64, config: &AgentdConfig) ->
                             .map_err(|e| AgentdError::ExecSession(format!("encode exited: {e}")))?;
                         codec::encode_to_buf(&msg, &mut serial_out_buf)
                             .map_err(|e| AgentdError::ExecSession(format!("encode exited frame: {e}")))?;
-                        sessions.remove(&id);
+                        state.sessions.remove(&id);
                     }
                     SessionOutput::Raw(frame_bytes) => {
-                        remove_completed_fs_read(&frame_bytes, &mut read_sessions);
+                        remove_completed_fs_read(&frame_bytes, &mut state.read_sessions);
                         // Pre-encoded frame — write directly to output buffer.
                         serial_out_buf.extend_from_slice(&frame_bytes);
                     }
@@ -201,7 +200,7 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64, config: &AgentdConfig) ->
             _ = heartbeat_timer.tick() => {
                 if heartbeat::heartbeat_dir_exists() {
                     let _ = heartbeat::write_heartbeat(
-                        sessions.len() as u32,
+                        state.sessions.len() as u32,
                         last_activity,
                     ).await;
                 }
@@ -219,10 +218,7 @@ pub async fn run(boot_time_ns: u64, init_time_ns: u64, config: &AgentdConfig) ->
 /// Handles a single incoming message from the host.
 async fn handle_message(
     msg: Message,
-    sessions: &mut HashMap<u32, ExecSession>,
-    write_sessions: &mut HashMap<u32, FsWriteSession>,
-    read_sessions: &mut HashMap<u32, FsReadSession>,
-    fs_state: &mut FsState,
+    state: &mut AgentState,
     session_tx: &mpsc::UnboundedSender<(u32, SessionOutput)>,
     out_buf: &mut Vec<u8>,
     config: &AgentdConfig,
@@ -244,7 +240,7 @@ async fn handle_message(
                     codec::encode_to_buf(&reply, out_buf).map_err(|e| {
                         AgentdError::ExecSession(format!("encode started frame: {e}"))
                     })?;
-                    sessions.insert(msg.id, session);
+                    state.sessions.insert(msg.id, session);
                 }
                 Err(e) => {
                     // Send a typed `ExecFailed` so the host can render a
@@ -276,7 +272,7 @@ async fn handle_message(
             let stdin: ExecStdin = msg
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode stdin: {e}")))?;
-            if let Some(session) = sessions.get_mut(&msg.id) {
+            if let Some(session) = state.sessions.get_mut(&msg.id) {
                 if stdin.data.is_empty() {
                     // Empty data signals EOF — close stdin.
                     session.close_stdin();
@@ -299,7 +295,7 @@ async fn handle_message(
             let resize: ExecResize = msg
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode resize: {e}")))?;
-            if let Some(session) = sessions.get(&msg.id) {
+            if let Some(session) = state.sessions.get(&msg.id) {
                 let _ = session.resize(resize.rows, resize.cols);
             }
         }
@@ -308,7 +304,7 @@ async fn handle_message(
             let signal: ExecSignal = msg
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode signal: {e}")))?;
-            if let Some(session) = sessions.get(&msg.id) {
+            if let Some(session) = state.sessions.get(&msg.id) {
                 let _ = session.send_signal(signal.signal);
             }
         }
@@ -317,12 +313,12 @@ async fn handle_message(
             let req: FsRequest = msg
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode fs request: {e}")))?;
-            match fs::handle_fs_request(msg.id, req, fs_state, out_buf, session_tx).await {
+            match fs::handle_fs_request(msg.id, req, &mut state.fs, out_buf, session_tx).await {
                 Ok(Some(FsStreamSession::Read(rs))) => {
-                    read_sessions.insert(msg.id, rs);
+                    state.read_sessions.insert(msg.id, rs);
                 }
                 Ok(Some(FsStreamSession::Write(ws))) => {
-                    write_sessions.insert(msg.id, ws);
+                    state.write_sessions.insert(msg.id, ws);
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -335,16 +331,16 @@ async fn handle_message(
             let data: FsData = msg
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode fs data: {e}")))?;
-            if let Some(session) = write_sessions.get_mut(&msg.id) {
+            if let Some(session) = state.write_sessions.get_mut(&msg.id) {
                 match fs::handle_fs_data(msg.id, data, session, out_buf).await {
                     Ok(true) => {
                         // Session complete — remove it.
-                        write_sessions.remove(&msg.id);
+                        state.write_sessions.remove(&msg.id);
                     }
                     Ok(false) => {}
                     Err(e) => {
                         eprintln!("fs data error for {}: {e}", msg.id);
-                        write_sessions.remove(&msg.id);
+                        state.write_sessions.remove(&msg.id);
                     }
                 }
             } else {
@@ -365,13 +361,15 @@ async fn handle_message(
             let disconnected: RelayClientDisconnected = msg
                 .payload()
                 .map_err(|e| AgentdError::ExecSession(format!("decode relay disconnect: {e}")))?;
-            fs_state.close_owner_range(disconnected.id_start, disconnected.id_end_exclusive);
+            state
+                .fs
+                .close_owner_range(disconnected.id_start, disconnected.id_end_exclusive);
             abort_read_sessions_in_owner_range(
-                read_sessions,
+                &mut state.read_sessions,
                 disconnected.id_start,
                 disconnected.id_end_exclusive,
             );
-            write_sessions.retain(|_, session| {
+            state.write_sessions.retain(|_, session| {
                 let owner_id = session.owner_id();
                 owner_id < disconnected.id_start || owner_id >= disconnected.id_end_exclusive
             });
@@ -381,11 +379,11 @@ async fn handle_message(
             // Graceful shutdown — signal all sessions, then ask the guest
             // kernel to power off so block-root filesystems can shut down
             // cleanly instead of leaving ext4 journal recovery pending.
-            for (_, session) in sessions.drain() {
+            for (_, session) in state.sessions.drain() {
                 let _ = session.send_signal(15); // SIGTERM
             }
-            write_sessions.clear();
-            fs_state.clear();
+            state.write_sessions.clear();
+            state.fs.clear();
 
             request_guest_poweroff()?;
             return Err(AgentdError::Shutdown);

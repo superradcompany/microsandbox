@@ -956,11 +956,11 @@ async fn set_times_fd(
 fn timespecs(atime: i64, mtime: i64) -> [libc::timespec; 2] {
     [
         libc::timespec {
-            tv_sec: atime as libc::time_t,
+            tv_sec: atime as _,
             tv_nsec: 0,
         },
         libc::timespec {
-            tv_sec: mtime as libc::time_t,
+            tv_sec: mtime as _,
             tv_nsec: 0,
         },
     ]
