@@ -220,12 +220,8 @@ impl SecretsHandler {
             Some(pos) => (&data[..pos], &data[pos..]),
             None => (data, &[] as &[u8]),
         };
+        // Headers are text by spec, so lossy UTF-8 conversion is acceptable there.
         let mut header_str = String::from_utf8_lossy(header_bytes).into_owned();
-        let mut body_str = if boundary.is_some() {
-            String::from_utf8_lossy(body_bytes).into_owned()
-        } else {
-            String::new()
-        };
 
         // Check for disallowed placeholders before forwarding or substituting data.
         if let Some(action) = self.detect_blocking_action(data, &header_str) {
@@ -250,6 +246,9 @@ impl SecretsHandler {
             return Ok(Cow::Borrowed(data));
         }
 
+        let original_header_len = header_str.len();
+        let mut new_body: Option<Vec<u8>> = None;
+
         for secret in &self.eligible_for_substitution {
             // Skip secrets that require TLS identity on non-intercepted connections.
             if secret.require_tls_identity && !self.tls_intercepted {
@@ -258,19 +257,36 @@ impl SecretsHandler {
             if secret.wants_header_injection() {
                 header_str = secret.substitute_in_headers(&header_str);
             }
-            if boundary.is_some() && secret.inject_body && body_str.contains(&secret.placeholder) {
-                body_str = body_str.replace(&secret.placeholder, &secret.value);
+            if boundary.is_some() && secret.inject_body {
+                let current: &[u8] = new_body.as_deref().unwrap_or(body_bytes);
+                let needle = secret.placeholder.as_bytes();
+                if contains_bytes(current, needle) {
+                    new_body = Some(replace_bytes(current, needle, secret.value.as_bytes()));
+                }
             }
         }
 
         // If body substitution changed the length, update Content-Length.
-        if boundary.is_some() && body_str.len() != body_bytes.len() {
-            header_str = update_content_length(&header_str, body_str.len());
+        if let Some(b) = &new_body
+            && b.len() != body_bytes.len()
+        {
+            header_str = update_content_length(&header_str, b.len());
         }
 
-        let mut output = header_str;
-        output.push_str(&body_str);
-        Ok(Cow::Owned(output.into_bytes()))
+        let body_out: &[u8] = new_body.as_deref().unwrap_or(body_bytes);
+
+        // If nothing actually changed, then just return the original slice.
+        if new_body.is_none()
+            && header_str.len() == original_header_len
+            && header_bytes == header_str.as_bytes()
+        {
+            return Ok(Cow::Borrowed(data));
+        }
+
+        let mut output = Vec::with_capacity(header_str.len() + body_out.len());
+        output.extend_from_slice(header_str.as_bytes());
+        output.extend_from_slice(body_out);
+        Ok(Cow::Owned(output))
     }
 
     /// Returns true if this connection needs no secret substitution or violation detection.
@@ -386,6 +402,26 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         return false;
     }
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Byte-level non-overlapping replace_all. Used for body substitution.
+fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+    if needle.is_empty() {
+        return haystack.to_vec();
+    }
+    let mut out = Vec::with_capacity(haystack.len());
+    let mut i = 0;
+    while i + needle.len() <= haystack.len() {
+        if &haystack[i..i + needle.len()] == needle {
+            out.extend_from_slice(replacement);
+            i += needle.len();
+        } else {
+            out.push(haystack[i]);
+            i += 1;
+        }
+    }
+    out.extend_from_slice(&haystack[i..]);
+    out
 }
 
 /// Returns true if `haystack`, after URL percent-decoding, contains `needle`.
