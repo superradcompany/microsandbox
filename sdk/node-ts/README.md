@@ -506,7 +506,7 @@ await setup()
 |---|---|
 | `Image` | Static API: `get`, `list`, `inspect`, `remove`, `gcLayers`, `gc`. |
 | `ImageHandle` / `ImageDetail` / `ImageConfigDetail` / `ImageLayerDetail` | Cached image metadata. |
-| `RootfsSource` / `DiskImageFormat` | Discriminated rootfs union and disk format literal type. |
+| `RootfsSource` / `DiskImageFormat` | Discriminated rootfs union and disk format literal type; OCI sources may include `upperSizeMiB`. |
 | `intoRootfsSource(input)` | Resolve a string into the right `RootfsSource`. |
 
 ### Networking

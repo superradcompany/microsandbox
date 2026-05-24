@@ -101,16 +101,52 @@ pub fn sandbox_builder_from_args(
             ));
         };
 
-        // Handle disk image with fstype if ImageSource has those attributes.
-        if let Ok(fstype_attr) = image_obj.getattr("_fstype") {
-            if !fstype_attr.is_none() {
-                let fstype: String = fstype_attr.extract()?;
-                builder = builder.image_with(|i| i.disk(&image_str).fstype(&fstype));
+        let fstype = if let Ok(fstype_attr) = image_obj.getattr("_fstype") {
+            if fstype_attr.is_none() {
+                None
             } else {
-                builder = builder.image(image_str.as_str());
+                Some(fstype_attr.extract::<String>()?)
             }
         } else {
-            builder = builder.image(image_str.as_str());
+            None
+        };
+        let upper_size_mib = if let Ok(upper_size_attr) = image_obj.getattr("_upper_size_mib") {
+            if upper_size_attr.is_none() {
+                None
+            } else {
+                Some(upper_size_attr.extract::<u32>()?)
+            }
+        } else {
+            None
+        };
+
+        if upper_size_mib.is_some() {
+            let image_type = image_obj
+                .getattr("_type")
+                .ok()
+                .and_then(|attr| attr.extract::<String>().ok());
+            if image_type.as_deref() != Some("oci") {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "upper_size_mib is only valid for Image.oci(...)",
+                ));
+            }
+        }
+
+        match (fstype, upper_size_mib) {
+            (Some(_), Some(_)) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "fstype and upper_size_mib cannot be set on the same ImageSource",
+                ));
+            }
+            (Some(fstype), None) => {
+                builder = builder.image_with(|i| i.disk(&image_str).fstype(&fstype));
+            }
+            (None, Some(size_mib)) => {
+                builder = builder.image_with(|i| i.oci(image_str.as_str()).upper_size(size_mib));
+            }
+            (None, None) => {
+                builder = builder.image(image_str.as_str());
+            }
         };
     }
 

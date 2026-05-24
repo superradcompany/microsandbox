@@ -1472,7 +1472,7 @@ mod tests {
     async fn test_sandbox_cli_args_apply_default_oci_tmpfs() {
         let mut config = SandboxConfig {
             name: "test".into(),
-            image: RootfsSource::Oci("alpine".into()),
+            image: RootfsSource::oci("alpine"),
             memory_mib: 1024,
             manifest_digest: Some(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),

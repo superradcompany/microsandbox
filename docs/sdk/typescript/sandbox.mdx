@@ -556,6 +556,7 @@ Fluent configuration builder returned by `Sandbox.builder(name)`. Every setter r
 | Method | Description |
 |--------|-------------|
 | `image(src)` | OCI image (`"alpine"`), local rootfs path, or a `RootfsSource`. **Required.** |
+| `imageWith(i => i.oci("alpine").upperSize(8192))` | Configure explicit OCI upper size or disk-image details |
 | `cpus(n)` | Virtual CPUs |
 | `memory(mib)` | Guest memory in MiB |
 | `logLevel(level)` | Override log verbosity |

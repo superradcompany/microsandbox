@@ -29,8 +29,8 @@ pub enum RootfsSource {
     /// Use a host directory directly as the root filesystem.
     Bind(PathBuf),
 
-    /// Use an OCI image reference (e.g. `python`).
-    Oci(String),
+    /// Use an OCI image reference with an EROFS lower and ext4 overlay upper.
+    Oci(OciRootfsSource),
 
     /// Use a disk image file as the root filesystem via virtio-blk.
     DiskImage {
@@ -41,6 +41,17 @@ pub enum RootfsSource {
         /// Inner filesystem type (optional; auto-detected if absent).
         fstype: Option<String>,
     },
+}
+
+/// OCI root filesystem source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OciRootfsSource {
+    /// OCI image reference (e.g. `python`).
+    pub reference: String,
+
+    /// Writable overlay upper size in MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upper_size_mib: Option<u32>,
 }
 
 /// Intermediate type for parsing user input into a [`RootfsSource`].
@@ -62,11 +73,12 @@ pub enum ImageSource {
     Path(PathBuf),
 }
 
-/// Builder for configuring a disk image rootfs.
+/// Builder for configuring an image rootfs.
 ///
 /// Used with [`crate::sandbox::SandboxBuilder::image_with`]:
 ///
 /// ```ignore
+/// .image_with(|i| i.oci("python:3.12").upper_size(8.gib()))
 /// .image_with(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
 /// ```
 #[derive(Default)]
@@ -79,7 +91,7 @@ pub struct ImageBuilder {
 ///
 /// Implemented for:
 /// - `&str`, `String`, `PathBuf` — resolved via [`ImageSource`].
-/// - `FnOnce(ImageBuilder) -> ImageBuilder` — closure-based disk image configuration.
+/// - `FnOnce(ImageBuilder) -> ImageBuilder` — closure-based image configuration.
 pub trait IntoImage {
     /// Resolve this value into a concrete root filesystem source.
     fn into_rootfs_source(self) -> crate::MicrosandboxResult<RootfsSource>;
@@ -694,6 +706,45 @@ impl VolumeMount {
     }
 }
 
+impl OciRootfsSource {
+    /// Create a new OCI rootfs source.
+    pub fn new(reference: impl Into<String>) -> Self {
+        Self {
+            reference: reference.into(),
+            upper_size_mib: None,
+        }
+    }
+
+    /// Set the writable overlay upper size.
+    pub fn upper_size(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.upper_size_mib = Some(size.into().as_u32());
+        self
+    }
+}
+
+impl RootfsSource {
+    /// Create an OCI rootfs source from an image reference.
+    pub fn oci(reference: impl Into<String>) -> Self {
+        Self::Oci(OciRootfsSource::new(reference))
+    }
+
+    /// Return the OCI image reference if this is an OCI rootfs.
+    pub fn oci_reference(&self) -> Option<&str> {
+        match self {
+            Self::Oci(oci) => Some(&oci.reference),
+            _ => None,
+        }
+    }
+
+    /// Return the configured OCI upper size in MiB if this is an OCI rootfs.
+    pub fn oci_upper_size_mib(&self) -> Option<u32> {
+        match self {
+            Self::Oci(oci) => oci.upper_size_mib,
+            _ => None,
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods: ImageSource
 //--------------------------------------------------------------------------------------------------
@@ -707,7 +758,7 @@ impl ImageSource {
                 if microsandbox_utils::looks_like_local_path_text(&s) {
                     Self::resolve_path(PathBuf::from(s))
                 } else {
-                    Ok(RootfsSource::Oci(s))
+                    Ok(RootfsSource::oci(s))
                 }
             }
         }
@@ -763,6 +814,36 @@ impl ImageBuilder {
     /// Create a new image builder.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Use an OCI image reference as the root filesystem.
+    ///
+    /// ```ignore
+    /// .image_with(|i| i.oci("python:3.12").upper_size(8.gib()))
+    /// ```
+    pub fn oci(mut self, reference: impl Into<String>) -> Self {
+        self.source = Some(RootfsSource::oci(reference));
+        self
+    }
+
+    /// Set the writable overlay upper size for an OCI rootfs.
+    ///
+    /// This is valid only after [`oci`](Self::oci).
+    pub fn upper_size(mut self, size: impl Into<Mebibytes>) -> Self {
+        let size_mib = size.into().as_u32();
+        match &mut self.source {
+            Some(RootfsSource::Oci(oci)) => {
+                oci.upper_size_mib = Some(size_mib);
+            }
+            _ => {
+                if self.error.is_none() {
+                    self.error = Some(crate::MicrosandboxError::InvalidConfig(
+                        "upper_size() requires oci() to be called first".into(),
+                    ));
+                }
+            }
+        }
+        self
     }
 
     /// Use a disk image file as the root filesystem.
@@ -836,7 +917,7 @@ impl ImageBuilder {
         }
         self.source.ok_or_else(|| {
             crate::MicrosandboxError::InvalidConfig(
-                "ImageBuilder: no image source set (call .disk())".into(),
+                "ImageBuilder: no image source set (call .oci() or .disk())".into(),
             )
         })
     }
@@ -889,7 +970,7 @@ impl std::str::FromStr for DiskImageFormat {
 
 impl Default for RootfsSource {
     fn default() -> Self {
-        Self::Oci(String::new())
+        Self::oci(String::new())
     }
 }
 
@@ -1357,7 +1438,38 @@ mod tests {
     fn test_image_source_resolves_oci_reference() {
         let source = ImageSource::from("python");
         let rootfs = source.into_rootfs_source().unwrap();
-        assert!(matches!(rootfs, RootfsSource::Oci(_)));
+        match rootfs {
+            RootfsSource::Oci(oci) => {
+                assert_eq!(oci.reference, "python");
+                assert_eq!(oci.upper_size_mib, None);
+            }
+            _ => panic!("expected Oci"),
+        }
+    }
+
+    #[test]
+    fn test_image_builder_oci_with_upper_size() {
+        let rootfs = ImageBuilder::new()
+            .oci("python:3.12")
+            .upper_size(8192u32)
+            .build()
+            .unwrap();
+
+        match rootfs {
+            RootfsSource::Oci(oci) => {
+                assert_eq!(oci.reference, "python:3.12");
+                assert_eq!(oci.upper_size_mib, Some(8192));
+            }
+            _ => panic!("expected Oci"),
+        }
+    }
+
+    #[test]
+    fn test_image_builder_upper_size_requires_oci() {
+        let result = ImageBuilder::new().upper_size(8192u32).build();
+        let err = result.unwrap_err();
+
+        assert!(err.to_string().contains("upper_size() requires oci()"));
     }
 
     #[test]

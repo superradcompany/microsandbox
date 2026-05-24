@@ -164,7 +164,7 @@ fn format_ports(config: &SandboxConfig) -> String {
 
 fn extract_image_raw(config: &SandboxConfig) -> String {
     match &config.image {
-        microsandbox::sandbox::RootfsSource::Oci(s) => s.clone(),
+        microsandbox::sandbox::RootfsSource::Oci(oci) => oci.reference.clone(),
         microsandbox::sandbox::RootfsSource::Bind(p) => p.display().to_string(),
         microsandbox::sandbox::RootfsSource::DiskImage { path, .. } => path.display().to_string(),
     }

@@ -43,6 +43,13 @@ func TestFFIWireShape_WithImage(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_WithOCIUpperSize(t *testing.T) {
+	got := marshalCreateOptions(t, WithImage("python:3.12"), WithOCIUpperSize(8192))
+	if v := mustField(t, got, "oci_upper_size_mib"); v != float64(8192) {
+		t.Fatalf("oci_upper_size_mib = %v, want 8192", v)
+	}
+}
+
 func TestFFIWireShape_WithSnapshot(t *testing.T) {
 	got := marshalCreateOptions(t, WithSnapshot("after-pip-install"))
 	if v := mustField(t, got, "snapshot"); v != "after-pip-install" {
@@ -348,7 +355,7 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 		"image", "snapshot", "memory_mib", "cpus", "workdir", "shell",
 		"hostname", "user", "replace", "detached", "env", "scripts",
 		"ports", "ports_udp", "network", "secrets", "patches", "volumes",
-		"init", "registry_auth",
+		"init", "registry_auth", "oci_upper_size_mib",
 	} {
 		if _, present := got[key]; present {
 			body, _ := json.Marshal(got)

@@ -41,6 +41,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	ffiOpts := ffi.CreateOptions{
 		Image:           o.Image,
 		ImageFstype:     o.ImageFstype,
+		OCIUpperSizeMiB: o.OCIUpperSizeMiB,
 		Snapshot:        o.Snapshot,
 		MemoryMiB:       o.MemoryMiB,
 		CPUs:            o.CPUs,

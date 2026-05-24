@@ -15,7 +15,7 @@ export const RootfsSourceKinds: readonly RootfsSourceKind[] = [
 /** Source of a sandbox's root filesystem. */
 export type RootfsSource =
   | { kind: "bind"; path: string }
-  | { kind: "oci"; reference: string }
+  | { kind: "oci"; reference: string; upperSizeMiB?: number }
   | { kind: "disk"; path: string; format: DiskImageFormat; fstype?: string };
 
 /**

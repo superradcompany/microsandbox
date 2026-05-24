@@ -14,6 +14,14 @@ func TestWithImage(t *testing.T) {
 	}
 }
 
+func TestWithOCIUpperSize(t *testing.T) {
+	o := SandboxConfig{}
+	WithOCIUpperSize(8192)(&o)
+	if o.OCIUpperSizeMiB != 8192 {
+		t.Errorf("OCIUpperSizeMiB = %d, want 8192", o.OCIUpperSizeMiB)
+	}
+}
+
 func TestWithImageDisk(t *testing.T) {
 	o := SandboxConfig{}
 	WithImageDisk("./alpine.raw", "ext4")(&o)

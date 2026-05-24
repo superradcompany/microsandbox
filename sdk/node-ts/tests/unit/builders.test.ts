@@ -49,7 +49,7 @@ describe("intoRootfsSource", () => {
   });
 
   it("passes through structured RootfsSource values", () => {
-    const src = { kind: "oci" as const, reference: "alpine" };
+    const src = { kind: "oci" as const, reference: "alpine", upperSizeMiB: 8192 };
     expect(intoRootfsSource(src)).toBe(src);
   });
 });

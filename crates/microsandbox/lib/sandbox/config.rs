@@ -22,6 +22,7 @@ use super::{
 const DEFAULT_OCI_TMPFS_PATH: &str = "/tmp";
 const DEFAULT_OCI_TMPFS_MAX_SIZE_MIB: u32 = 512;
 const DEFAULT_OCI_TMPFS_MEMORY_DIVISOR: u32 = 4;
+const DEFAULT_OCI_UPPER_SIZE_MIB: u32 = 4 * 1024;
 
 /// Default timeout given to the existing sandbox during a `.replace()`
 /// create before it is force-killed.
@@ -280,6 +281,22 @@ impl SandboxConfig {
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .map(String::from);
+        }
+    }
+
+    /// Materialize rootfs defaults that should be persisted with the sandbox.
+    pub(crate) fn apply_rootfs_defaults(&mut self) {
+        if self.snapshot_upper_source.is_none()
+            && let RootfsSource::Oci(oci) = &mut self.image
+            && oci.upper_size_mib.is_none()
+        {
+            oci.upper_size_mib = Some(
+                crate::config::config()
+                    .sandbox_defaults
+                    .oci
+                    .upper_size_mib
+                    .unwrap_or(DEFAULT_OCI_UPPER_SIZE_MIB),
+            );
         }
     }
 
@@ -550,7 +567,7 @@ mod tests {
     #[test]
     fn test_apply_runtime_defaults_adds_tmpfs_for_oci_tmp() {
         let mut config = SandboxConfig {
-            image: RootfsSource::Oci("python:3.12".into()),
+            image: RootfsSource::oci("python:3.12"),
             memory_mib: 2048,
             ..Default::default()
         };
@@ -573,9 +590,34 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_rootfs_defaults_sets_oci_upper_size() {
+        let mut config = SandboxConfig {
+            image: RootfsSource::oci("python:3.12"),
+            ..Default::default()
+        };
+
+        config.apply_rootfs_defaults();
+
+        assert_eq!(config.image.oci_upper_size_mib(), Some(4096));
+    }
+
+    #[test]
+    fn test_apply_rootfs_defaults_skips_snapshot_upper_source() {
+        let mut config = SandboxConfig {
+            image: RootfsSource::oci("python:3.12"),
+            snapshot_upper_source: Some("/tmp/upper.ext4".into()),
+            ..Default::default()
+        };
+
+        config.apply_rootfs_defaults();
+
+        assert_eq!(config.image.oci_upper_size_mib(), None);
+    }
+
+    #[test]
     fn test_apply_runtime_defaults_preserves_explicit_tmp_mount() {
         let mut config = SandboxConfig {
-            image: RootfsSource::Oci("python:3.12".into()),
+            image: RootfsSource::oci("python:3.12"),
             mounts: vec![VolumeMount::Bind {
                 host: "/host/tmp".into(),
                 guest: "/tmp/".into(),

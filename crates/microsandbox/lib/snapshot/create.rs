@@ -161,7 +161,7 @@ pub(super) async fn create_snapshot(config: SnapshotConfig) -> MicrosandboxResul
 fn oci_reference_string(config: &SandboxConfig) -> MicrosandboxResult<String> {
     use crate::sandbox::RootfsSource;
     match &config.image {
-        RootfsSource::Oci(reference) => Ok(reference.clone()),
+        RootfsSource::Oci(oci) => Ok(oci.reference.clone()),
         _ => Err(MicrosandboxError::InvalidConfig(
             "snapshot requires an OCI-rooted sandbox".into(),
         )),
