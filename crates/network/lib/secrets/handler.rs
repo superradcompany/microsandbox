@@ -433,13 +433,22 @@ impl SecretsHandler {
         data: &'a [u8],
         remaining: Option<usize>,
     ) -> Result<Cow<'a, [u8]>, ViolationAction> {
-        // Split into "this request's body bytes" and "spillover from the
-        // next pipelined request". For unknown framing (`remaining = None`,
-        // chunked or close-delimited) there is no detectable spillover; the
-        // entire chunk is body.
-        let (body_part, spillover) = match remaining {
-            Some(n) if data.len() > n => data.split_at(n),
-            _ => (data, &[] as &[u8]),
+        // Determine where this request's body ends inside the chunk.
+        //
+        // - Content-Length framing (`remaining = Some(n)`): split at `n`.
+        //   Trailing bytes are a pipelined next request.
+        // - Chunked framing (`remaining = None`): scan for the terminator
+        //   `0\r\n\r\n`. Trailing bytes are a pipelined next request.
+        // - No detected terminator under chunked framing: stay in body
+        //   mode; no spillover this chunk.
+        let body_end = match remaining {
+            Some(n) if data.len() > n => Some(n),
+            Some(_) => None,
+            None => find_chunked_body_end(data),
+        };
+        let (body_part, spillover) = match body_end {
+            Some(end) => data.split_at(end),
+            None => (data, &[] as &[u8]),
         };
 
         if let Some(action) = self.detect_blocking_action(body_part, "") {
@@ -461,12 +470,12 @@ impl SecretsHandler {
 
         // Advance framing state. If the body completes within this chunk,
         // the spillover below is the start of a fresh request.
-        self.http_state = match remaining {
-            Some(n) if data.len() >= n => HttpState::AwaitingHeaders,
-            Some(n) => HttpState::InBody {
+        self.http_state = match (remaining, body_end) {
+            (_, Some(_)) => HttpState::AwaitingHeaders,
+            (Some(n), None) => HttpState::InBody {
                 remaining: Some(n - body_part.len()),
             },
-            None => HttpState::InBody { remaining: None },
+            (None, None) => HttpState::InBody { remaining: None },
         };
 
         self.append_pipelined_spillover(data, body_part, spillover)
@@ -741,6 +750,29 @@ fn find_header_boundary(data: &[u8]) -> Option<usize> {
     data.windows(4)
         .position(|w| w == b"\r\n\r\n")
         .map(|pos| pos + 4)
+}
+
+/// Locate the end of a chunked-encoded request body inside `data` and
+/// return the byte position right after the terminator.
+///
+/// Looks for the zero-size last chunk with an empty trailer section:
+/// either `\r\n0\r\n\r\n` (the common case, where the preceding chunk's
+/// closing `\r\n` is still in this slice) or a chunk that starts directly
+/// with `0\r\n\r\n` (TLS reads aligning so the closing `\r\n` ended the
+/// previous slice).
+///
+/// Trailers in the last chunk (`0\r\n<Trailer>:<value>\r\n\r\n`) are not
+/// supported and will not be detected here; they are exceedingly rare
+/// in request direction. Terminators that straddle a TLS read boundary
+/// are likewise not detected (would need a small dedicated lookahead).
+fn find_chunked_body_end(data: &[u8]) -> Option<usize> {
+    if let Some(pos) = data.windows(7).position(|w| w == b"\r\n0\r\n\r\n") {
+        return Some(pos + 7);
+    }
+    if data.starts_with(b"0\r\n\r\n") {
+        return Some(5);
+    }
+    None
 }
 
 /// Returns the stricter of two blocking actions, where
@@ -1559,13 +1591,39 @@ mod tests {
         let mut handler = SecretsHandler::new(&config, "example.com", true);
 
         let mut chunk = b"GET /a HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec();
-        chunk.extend_from_slice(
-            b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: $KEY\r\n\r\n",
-        );
+        chunk.extend_from_slice(b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: $KEY\r\n\r\n");
 
         let out = handler.substitute(&chunk).unwrap();
 
         let mut expected = b"GET /a HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec();
+        expected.extend_from_slice(
+            b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: real-secret\r\n\r\n",
+        );
+        assert_eq!(out.as_ref(), expected.as_slice());
+    }
+
+    #[test]
+    fn substitution_resumes_after_chunked_request_body_terminator() {
+        // A chunked-encoded request must not poison the connection state.
+        // After the chunked body terminator (`0\r\n\r\n`), the next bytes
+        // are the start of a fresh request whose headers must be parsed
+        // and substituted. A regression that stays in `InBody { None }`
+        // forever misses every subsequent keep-alive request's headers.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "example.com")]);
+        let mut handler = SecretsHandler::new(&config, "example.com", true);
+
+        // Chunk 1: request 1 headers with `Transfer-Encoding: chunked`.
+        let chunk1 = b"POST /a HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n";
+        handler.substitute(chunk1).unwrap();
+
+        // Chunk 2: a 5-byte chunk (`hello`), the chunked terminator, then
+        // a pipelined request with `$KEY` in a header.
+        let mut chunk2 = b"5\r\nhello\r\n0\r\n\r\n".to_vec();
+        chunk2.extend_from_slice(b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: $KEY\r\n\r\n");
+
+        let out = handler.substitute(&chunk2).unwrap();
+
+        let mut expected = b"5\r\nhello\r\n0\r\n\r\n".to_vec();
         expected.extend_from_slice(
             b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: real-secret\r\n\r\n",
         );
