@@ -82,6 +82,7 @@ impl EligibleSecret {
             return true;
         }
 
+        // Search decoded Basic auth credentials, not the raw header value.
         if self.inject_basic_auth {
             return basic_auth_decoded_contains(
                 String::from_utf8_lossy(headers).as_ref(),
@@ -268,6 +269,7 @@ impl SecretsHandler {
             return Ok(Cow::Borrowed(data));
         }
 
+        // Start with borrowed bytes; allocate only when a substitution is needed.
         let mut header_str = None;
         let mut body = None;
 
@@ -277,12 +279,14 @@ impl SecretsHandler {
                 continue;
             }
 
+            // Header substitution still uses string helpers after a scoped match.
             if secret.may_substitute_in_headers(header_bytes) {
                 let current = header_str
                     .get_or_insert_with(|| String::from_utf8_lossy(header_bytes).into_owned());
                 *current = secret.substitute_in_headers(current);
             }
 
+            // Body substitution works on bytes so encoded payloads stay valid.
             if boundary.is_some() && secret.inject_body {
                 let source = body.as_deref().unwrap_or(body_bytes);
                 if let Some(replaced) = replace_bytes(
@@ -300,18 +304,19 @@ impl SecretsHandler {
             .is_some_and(|headers| headers.as_bytes() != header_bytes);
         let body_changed = body.is_some();
 
+        // No header or body replacement was produced. Return original bytes.
         if !header_changed && !body_changed {
             return Ok(Cow::Borrowed(data));
         }
 
-        let mut output = Vec::with_capacity(
-            header_str
-                .as_ref()
-                .map_or(header_bytes.len(), |headers| headers.len())
-                + body.as_ref().map_or(body_bytes.len(), Vec::len),
-        );
+        let header_len = header_str
+            .as_ref()
+            .map_or(header_bytes.len(), |headers| headers.len());
+        let body_len = body.as_ref().map_or(body_bytes.len(), Vec::len);
+        let mut output = Vec::with_capacity(header_len + body_len);
 
         let body_bytes_out = body.as_deref().unwrap_or(body_bytes);
+        // Update Content-Length only when body substitution changed the size.
         if body_changed && body_bytes_out.len() != body_bytes.len() {
             let headers = match header_str {
                 Some(headers) => update_content_length(&headers, body_bytes_out.len()),
