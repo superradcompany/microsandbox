@@ -879,8 +879,10 @@ impl Sandbox {
         script: impl Into<String>,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecOutput> {
-        let mut handle = self.shell_stream_with(script, f).await?;
-        handle.collect().await
+        let shell = self.config.shell.as_deref().unwrap_or("/bin/sh");
+        let mut opts = f(ExecOptionsBuilder::default()).build()?;
+        opts.args = vec!["-c".to_string(), script.into()];
+        self.exec_with_opts(shell.to_string(), opts).await
     }
 
     /// Run a shell command with streaming I/O.

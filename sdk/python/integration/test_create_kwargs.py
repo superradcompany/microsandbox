@@ -32,6 +32,7 @@ async def test_create_kwargs_affect_guest_defaults(sandbox_name):
         env={"PYTHON_CREATE_KWARG": "guest-visible"},
         scripts={
             "create-kwarg-script": (
+                "#!/bin/sh\n"
                 "printf 'script:%s:%s\\n' \"$(whoami)\" \"$PYTHON_CREATE_KWARG\""
             )
         },
@@ -80,7 +81,7 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
     )
 
     try:
-        assert await sandbox.owns_lifecycle() is False
+        assert await sandbox.owns_lifecycle is False
 
         handle = await Sandbox.get(name)
         config = json.loads(handle.config_json)

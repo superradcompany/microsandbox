@@ -19,7 +19,7 @@ async def test_create_get_list_connect_stop_start_and_remove(sandbox_name):
     sandbox = await Sandbox.create(name, image=IMAGE, cpus=1, memory=512)
     try:
         assert await sandbox.name == name
-        assert await sandbox.owns_lifecycle() is True
+        assert await sandbox.owns_lifecycle is True
 
         handles = await Sandbox.list()
         assert any(handle.name == name for handle in handles)
@@ -33,7 +33,7 @@ async def test_create_get_list_connect_stop_start_and_remove(sandbox_name):
         connected = await handle.connect()
         try:
             assert await connected.name == name
-            assert await connected.owns_lifecycle() is False
+            assert await connected.owns_lifecycle is False
             out = await connected.shell("printf 'connected\\n'")
             assert out.success is True
             assert out.stdout_text == "connected\n"

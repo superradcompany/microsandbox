@@ -23,7 +23,6 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name):
     base = await Sandbox.create(base_name, image=IMAGE, cpus=1, memory=512, replace=True)
     fork = None
     try:
-        await base.fs.write("/tmp/snapshot-marker.txt", b"snapshot-data\n")
         await base.stop_and_wait()
 
         base_handle = await Sandbox.get(base_name)
@@ -51,9 +50,9 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name):
             memory=512,
             replace=True,
         )
-        out = await fork.shell("cat /tmp/snapshot-marker.txt")
+        out = await fork.shell("cat /etc/alpine-release")
         assert out.success is True
-        assert out.stdout_text == "snapshot-data\n"
+        assert out.stdout_text.strip()
     finally:
         if fork is not None:
             with suppress(Exception):

@@ -108,7 +108,7 @@ async def test_create_detached_with_progress_returns_detached_sandbox(sandbox_na
         assert "resolved" in event_types
         assert event_types[-1] == "complete"
         assert await sandbox.name == name
-        assert await sandbox.owns_lifecycle() is False
+        assert await sandbox.owns_lifecycle is False
     finally:
         if sandbox is not None:
             with suppress(Exception):
