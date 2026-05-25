@@ -44,7 +44,7 @@ enum HttpState {
     AwaitingHeaders,
     /// Inside a request body. `remaining` is the number of body bytes left
     /// per Content-Length; `None` means unknown framing (chunked or
-    /// connection-close) — stay in this state until the connection ends.
+    /// connection-close).
     InBody { remaining: Option<usize> },
 }
 
@@ -253,9 +253,7 @@ impl SecretsHandler {
     /// disallowed host.
     pub fn substitute<'a>(&mut self, data: &'a [u8]) -> Result<Cow<'a, [u8]>, ViolationAction> {
         // Body-continuation chunk: previous chunk(s) already contained the
-        // request line and headers. The remainder of the body must pass
-        // through as raw bytes — never run `from_utf8_lossy` on it, which
-        // would corrupt binary payloads.
+        // request line and headers.
         if let HttpState::InBody { remaining } = self.http_state {
             return self.substitute_body_chunk(data, remaining);
         }
@@ -263,14 +261,33 @@ impl SecretsHandler {
         // Split raw bytes at the header boundary BEFORE converting to owned strings.
         // This avoids position shifts from from_utf8_lossy replacement chars.
         let boundary = find_header_boundary(data);
-        let (header_bytes, body_bytes) = match boundary {
+        let (header_bytes, after_headers) = match boundary {
             Some(pos) => (&data[..pos], &data[pos..]),
             None => (data, &[] as &[u8]),
         };
 
+        // A single chunk may carry headers + body + the start of the next
+        // pipelined request. Compute how many post-boundary bytes belong to
+        // THIS request; the rest is spillover that gets its own recursive
+        // pass through `substitute()` so its headers are substituted and
+        // its violations are detected.
+        let (body_bytes, spillover) = if boundary.is_some() {
+            let (next_state, body_in_request) = next_state_after_headers(
+                String::from_utf8_lossy(header_bytes).as_ref(),
+                after_headers.len(),
+            );
+            self.http_state = next_state;
+            after_headers.split_at(body_in_request)
+        } else {
+            (after_headers, &[] as &[u8])
+        };
+
+        // Everything from `data` belonging to this request, headers and body.
+        let this_request = &data[..header_bytes.len() + body_bytes.len()];
+
         // Check for disallowed placeholders before forwarding or substituting data.
-        if let Some(action) =
-            self.detect_blocking_action(data, String::from_utf8_lossy(header_bytes).as_ref())
+        if let Some(action) = self
+            .detect_blocking_action(this_request, String::from_utf8_lossy(header_bytes).as_ref())
         {
             match action {
                 BlockingAction::Block => return Err(action.into_violation_action()),
@@ -280,27 +297,18 @@ impl SecretsHandler {
                 }
                 BlockingAction::BlockAndTerminate => {
                     tracing::error!(
-                        "secret violation: placeholder detected for disallowed host — terminating"
+                        "secret violation: placeholder detected for disallowed host - terminating"
                     );
                     return Err(action.into_violation_action());
                 }
             }
         }
-        self.update_tail(data);
-
-        // Update framing state for the next chunk. Done regardless of whether
-        // we end up modifying the bytes, so subsequent body-continuation
-        // chunks take the body-only path above.
-        if boundary.is_some() {
-            self.http_state = next_state_after_headers(
-                String::from_utf8_lossy(header_bytes).as_ref(),
-                body_bytes.len(),
-            );
-        }
+        self.update_tail(this_request);
 
         if self.eligible_for_substitution.is_empty() {
-            // No substitution needed. Return borrowed slice (zero-copy).
-            return Ok(Cow::Borrowed(data));
+            // No substitution needed; pass this request through and let the
+            // recursive call handle the spillover (if any).
+            return self.append_pipelined_spillover(data, this_request, spillover);
         }
 
         // Start with borrowed bytes; allocate only when a substitution is needed.
@@ -338,16 +346,17 @@ impl SecretsHandler {
             .is_some_and(|headers| headers.as_bytes() != header_bytes);
         let body_changed = body.is_some();
 
-        // No header or body replacement was produced. Return original bytes.
+        // No header or body replacement was produced. Forward this request
+        // unchanged and recurse on the spillover.
         if !header_changed && !body_changed {
-            return Ok(Cow::Borrowed(data));
+            return self.append_pipelined_spillover(data, this_request, spillover);
         }
 
         let header_len = header_str
             .as_ref()
             .map_or(header_bytes.len(), |headers| headers.len());
         let body_len = body.as_ref().map_or(body_bytes.len(), Vec::len);
-        let mut output = Vec::with_capacity(header_len + body_len);
+        let mut output = Vec::with_capacity(header_len + body_len + spillover.len());
 
         let body_bytes_out = body.as_deref().unwrap_or(body_bytes);
         // Update Content-Length only when body substitution changed the size.
@@ -355,7 +364,7 @@ impl SecretsHandler {
         // FIXME: `body_bytes_out.len()` is the chunk's substituted body length,
         // not the request's total. If `inject_body=true` and the body spans
         // multiple `substitute()` calls, continuation chunks are forwarded
-        // as-is past this rewritten CL.
+        // as-is past this rewritten Content-Length.
         if body_changed && body_bytes_out.len() != body_bytes.len() {
             let headers = match header_str {
                 Some(headers) => update_content_length(&headers, body_bytes_out.len()),
@@ -372,12 +381,50 @@ impl SecretsHandler {
         }
 
         output.extend_from_slice(body_bytes_out);
+
+        if !spillover.is_empty() {
+            let next_out = self.substitute(spillover)?;
+            output.extend_from_slice(next_out.as_ref());
+        }
         Ok(Cow::Owned(output))
     }
 
-    /// Handle a chunk that is purely the continuation of the current
-    /// request's body (no headers present). Bytes are forwarded as-is
-    /// after running the violation scan.
+    /// Forward `this_request` (an unchanged subslice of `parent`) and
+    /// recursively `substitute()` the `spillover` (the start of a
+    /// pipelined next request). When both halves pass through unchanged,
+    /// returns `Cow::Borrowed(parent)` for zero-copy.
+    fn append_pipelined_spillover<'a>(
+        &mut self,
+        parent: &'a [u8],
+        this_request: &'a [u8],
+        spillover: &'a [u8],
+    ) -> Result<Cow<'a, [u8]>, ViolationAction> {
+        if spillover.is_empty() {
+            return Ok(Cow::Borrowed(parent));
+        }
+        let next_out = self.substitute(spillover)?;
+        if let Cow::Borrowed(b) = &next_out
+            && std::ptr::eq(b.as_ptr(), spillover.as_ptr())
+            && b.len() == spillover.len()
+        {
+            // Spillover passed through unchanged; both halves are contiguous
+            // subslices of `parent`, so the whole parent can be returned
+            // borrowed.
+            return Ok(Cow::Borrowed(parent));
+        }
+        let next_bytes = next_out.as_ref();
+        let mut out = Vec::with_capacity(this_request.len() + next_bytes.len());
+        out.extend_from_slice(this_request);
+        out.extend_from_slice(next_bytes);
+        Ok(Cow::Owned(out))
+    }
+
+    /// Handle a chunk that is the continuation of the current request's
+    /// body (no headers present at the start). The body bytes are
+    /// forwarded as-is after a violation scan. If the body ends inside
+    /// this chunk and the remaining bytes are a pipelined next request,
+    /// they are recursively dispatched through `substitute()` so their
+    /// headers are substituted and their violations are detected.
     ///
     /// Body substitution across chunks is unsupported (would require
     /// rewriting Content-Length in already-forwarded headers).
@@ -386,7 +433,16 @@ impl SecretsHandler {
         data: &'a [u8],
         remaining: Option<usize>,
     ) -> Result<Cow<'a, [u8]>, ViolationAction> {
-        if let Some(action) = self.detect_blocking_action(data, "") {
+        // Split into "this request's body bytes" and "spillover from the
+        // next pipelined request". For unknown framing (`remaining = None`,
+        // chunked or close-delimited) there is no detectable spillover; the
+        // entire chunk is body.
+        let (body_part, spillover) = match remaining {
+            Some(n) if data.len() > n => data.split_at(n),
+            _ => (data, &[] as &[u8]),
+        };
+
+        if let Some(action) = self.detect_blocking_action(body_part, "") {
             match action {
                 BlockingAction::Block => return Err(action.into_violation_action()),
                 BlockingAction::BlockAndLog => {
@@ -395,27 +451,25 @@ impl SecretsHandler {
                 }
                 BlockingAction::BlockAndTerminate => {
                     tracing::error!(
-                        "secret violation: placeholder detected for disallowed host — terminating"
+                        "secret violation: placeholder detected for disallowed host - terminating"
                     );
                     return Err(action.into_violation_action());
                 }
             }
         }
-        self.update_tail(data);
+        self.update_tail(body_part);
 
-        // Advance the body-byte counter. When the counted body ends mid-
-        // chunk we ideally would re-enter header-parsing on the spillover
-        // (pipelined next request), but pipelining is vanishingly rare in
-        // practice — reset to AwaitingHeaders on the next call instead.
+        // Advance framing state. If the body completes within this chunk,
+        // the spillover below is the start of a fresh request.
         self.http_state = match remaining {
             Some(n) if data.len() >= n => HttpState::AwaitingHeaders,
             Some(n) => HttpState::InBody {
-                remaining: Some(n - data.len()),
+                remaining: Some(n - body_part.len()),
             },
             None => HttpState::InBody { remaining: None },
         };
 
-        Ok(Cow::Borrowed(data))
+        self.append_pipelined_spillover(data, body_part, spillover)
     }
 
     /// Returns true if this connection needs no secret substitution or violation detection.
@@ -533,24 +587,29 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-/// Compute the framing state for the next chunk after we just observed a
-/// `\r\n\r\n` boundary in this chunk. `body_in_chunk` is how many body bytes
-/// followed the boundary in this same chunk.
-fn next_state_after_headers(headers: &str, body_in_chunk: usize) -> HttpState {
+/// Compute the framing state for the next chunk and how many of the
+/// post-boundary bytes belong to THIS request's body. `body_in_chunk` is
+/// the number of bytes that followed `\r\n\r\n` in this chunk; the
+/// returned `body_in_request` is at most `body_in_chunk`, and any
+/// remaining bytes are spillover from a pipelined next request.
+fn next_state_after_headers(headers: &str, body_in_chunk: usize) -> (HttpState, usize) {
     if is_transfer_chunked(headers) {
         // Chunked framing doesn't expose a Content-Length up front. Stay in
         // body mode until the connection closes; we don't parse the chunked
-        // end marker. Body substitution across chunks is unsupported anyway,
-        // so subsequent reads just pass through verbatim.
-        return HttpState::InBody { remaining: None };
+        // end marker, so in-chunk spillover after a chunked body is not
+        // detected.
+        return (HttpState::InBody { remaining: None }, body_in_chunk);
     }
     match parse_content_length(headers) {
-        Some(cl) if body_in_chunk >= cl => HttpState::AwaitingHeaders,
-        Some(cl) => HttpState::InBody {
-            remaining: Some(cl - body_in_chunk),
-        },
-        None if body_in_chunk > 0 => HttpState::InBody { remaining: None },
-        None => HttpState::AwaitingHeaders,
+        Some(cl) if body_in_chunk >= cl => (HttpState::AwaitingHeaders, cl),
+        Some(cl) => (
+            HttpState::InBody {
+                remaining: Some(cl - body_in_chunk),
+            },
+            body_in_chunk,
+        ),
+        None if body_in_chunk > 0 => (HttpState::InBody { remaining: None }, body_in_chunk),
+        None => (HttpState::AwaitingHeaders, body_in_chunk),
     }
 }
 
@@ -1352,5 +1411,138 @@ mod tests {
         assert_eq!(body.len(), 24);
         let out = handler.substitute(body).unwrap();
         assert_eq!(out.as_ref(), body.as_slice());
+    }
+
+    #[test]
+    fn pipelined_request_in_body_continuation_chunk_is_substituted() {
+        // HTTP/1.1 pipelining: request 1's body ends partway through chunk
+        // 2 and request 2's headers follow in the same chunk. Without
+        // recursion into the spillover, request 2's bytes are forwarded
+        // verbatim as body and its substitutable placeholder never
+        // reaches the substitution loop.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "example.com")]);
+        let mut handler = SecretsHandler::new(&config, "example.com", true);
+
+        // Chunk 1: request 1 headers + 4 of 5 body bytes.
+        let mut chunk1 =
+            b"POST /a HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\n".to_vec();
+        chunk1.extend_from_slice(b"abcd");
+        handler.substitute(&chunk1).unwrap();
+
+        // Chunk 2: last body byte, then a complete pipelined request with
+        // `$KEY` in a header.
+        let mut chunk2 = b"e".to_vec();
+        chunk2.extend_from_slice(b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: $KEY\r\n\r\n");
+
+        let out = handler.substitute(&chunk2).unwrap();
+
+        let mut expected = b"e".to_vec();
+        expected.extend_from_slice(
+            b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: real-secret\r\n\r\n",
+        );
+        assert_eq!(out.as_ref(), expected.as_slice());
+    }
+
+    #[test]
+    fn pipelined_request_in_same_chunk_as_headers_is_substituted() {
+        // Headers-path pipelining: a single chunk carries request 1's
+        // headers + complete body + the start of request 2. The header
+        // parser must scope the body to Content-Length and recurse on
+        // the trailing bytes; otherwise request 2's headers get treated
+        // as request 1's body and no substitution runs.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "example.com")]);
+        let mut handler = SecretsHandler::new(&config, "example.com", true);
+
+        let mut chunk =
+            b"POST /a HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\n".to_vec();
+        chunk.extend_from_slice(b"abcde");
+        chunk.extend_from_slice(b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: $KEY\r\n\r\n");
+
+        let out = handler.substitute(&chunk).unwrap();
+
+        let mut expected =
+            b"POST /a HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\n".to_vec();
+        expected.extend_from_slice(b"abcde");
+        expected.extend_from_slice(
+            b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: real-secret\r\n\r\n",
+        );
+        assert_eq!(out.as_ref(), expected.as_slice());
+    }
+
+    #[test]
+    fn three_pipelined_requests_in_one_chunk_all_substitute() {
+        // Three pipelined requests in one chunk. The recursion nests
+        // twice. Each request has a substitutable placeholder in a
+        // header that must be replaced.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "example.com")]);
+        let mut handler = SecretsHandler::new(&config, "example.com", true);
+
+        let r1 =
+            b"POST /a HTTP/1.1\r\nHost: example.com\r\nAuth: $KEY\r\nContent-Length: 3\r\n\r\nbod";
+        let r2 =
+            b"PUT /b HTTP/1.1\r\nHost: example.com\r\nAuth: $KEY\r\nContent-Length: 2\r\n\r\nXY";
+        let r3 = b"GET /c HTTP/1.1\r\nHost: example.com\r\nAuth: $KEY\r\n\r\n";
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(r1);
+        chunk.extend_from_slice(r2);
+        chunk.extend_from_slice(r3);
+
+        let out = handler.substitute(&chunk).unwrap();
+
+        let r1_out = b"POST /a HTTP/1.1\r\nHost: example.com\r\nAuth: real-secret\r\nContent-Length: 3\r\n\r\nbod";
+        let r2_out = b"PUT /b HTTP/1.1\r\nHost: example.com\r\nAuth: real-secret\r\nContent-Length: 2\r\n\r\nXY";
+        let r3_out = b"GET /c HTTP/1.1\r\nHost: example.com\r\nAuth: real-secret\r\n\r\n";
+        let mut expected = Vec::new();
+        expected.extend_from_slice(r1_out);
+        expected.extend_from_slice(r2_out);
+        expected.extend_from_slice(r3_out);
+
+        assert_eq!(out.as_ref(), expected.as_slice());
+    }
+
+    #[test]
+    fn pipelined_spillover_without_substitution_stays_zero_copy() {
+        // No eligible secret matches this host; the chunk just needs to
+        // be forwarded. Even with a pipelined boundary inside the chunk,
+        // the output should be the original borrowed slice (no allocation).
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "other.com")]);
+        let mut handler = SecretsHandler::new(&config, "example.com", true);
+
+        let r1 = b"POST /a HTTP/1.1\r\nHost: example.com\r\nContent-Length: 3\r\n\r\nbod";
+        let r2 = b"GET /b HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(r1);
+        chunk.extend_from_slice(r2);
+
+        let out = handler.substitute(&chunk).unwrap();
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert_eq!(out.as_ref(), chunk.as_slice());
+    }
+
+    #[test]
+    fn violation_in_pipelined_next_request_basic_auth_is_detected() {
+        // Request 1's body ends in this chunk and request 2's headers
+        // follow. Request 2 carries `Authorization: Basic <b64>` whose
+        // decoded credentials contain a placeholder for a host that is
+        // NOT allowed to receive the real secret. The base64 form
+        // has no literal `$KEY` bytes, so the body-path byte scan
+        // cannot see it. Only the recursive header pass decodes the
+        // credentials and detects the violation.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "evil.com", true);
+
+        let chunk1 = b"POST /a HTTP/1.1\r\nHost: evil.com\r\nContent-Length: 3\r\n\r\n";
+        handler.substitute(chunk1).unwrap();
+
+        // base64("admin:$KEY") = "YWRtaW46JEtFWQ==" - no literal `$KEY` in the
+        // encoded form, so byte-level scanning over the body chunk misses it.
+        let mut chunk2 = b"foo".to_vec();
+        chunk2.extend_from_slice(
+            b"POST /b HTTP/1.1\r\nHost: evil.com\r\nAuthorization: Basic YWRtaW46JEtFWQ==\r\n\r\n",
+        );
+        assert_eq!(
+            handler.substitute(&chunk2).unwrap_err(),
+            ViolationAction::Block
+        );
     }
 }
