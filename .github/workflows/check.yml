@@ -484,14 +484,39 @@ jobs:
 
       # The published platform-pkg msb may lag the SDK; replace it with the
       # freshly-built binaries so the smoke test runs against current code.
+      # Release-bump PRs can reference platform package versions that are not
+      # published yet, so synthesize the package layout before patching it.
       - name: Use fresh runtime binaries in platform package
         working-directory: sdk/node-ts
         run: |
           PKG=node_modules/@superradcompany/microsandbox-linux-x64-gnu
+          mkdir -p "$PKG/bin" "$PKG/lib"
+          node - <<'NODE'
+          const fs = require("node:fs");
+
+          const pkgName = "@superradcompany/microsandbox-linux-x64-gnu";
+          const root = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const version = root.optionalDependencies?.[pkgName] ?? root.version;
+
+          fs.writeFileSync(
+            "node_modules/@superradcompany/microsandbox-linux-x64-gnu/package.json",
+            `${JSON.stringify({
+              name: pkgName,
+              version,
+              main: "microsandbox.linux-x64-gnu.node",
+              os: ["linux"],
+              cpu: ["x64"],
+              libc: ["glibc"],
+              license: "Apache-2.0",
+              engines: { node: ">= 22" },
+            }, null, 2)}\n`,
+          );
+          NODE
+          cp native/microsandbox.linux-x64-gnu.node "$PKG/"
           chmod +x ${{ github.workspace }}/build/msb
-          install -m755 ${{ github.workspace }}/build/msb $PKG/bin/msb
-          rm -f $PKG/lib/libkrunfw*
-          cp -P ${{ github.workspace }}/build/libkrunfw.so* $PKG/lib/
+          install -m755 ${{ github.workspace }}/build/msb "$PKG/bin/msb"
+          rm -f "$PKG"/lib/libkrunfw*
+          cp -P ${{ github.workspace }}/build/libkrunfw.so* "$PKG/lib/"
 
       - name: Run SDK tests (Node)
         working-directory: sdk/node-ts
