@@ -594,10 +594,10 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 /// remaining bytes are spillover from a pipelined next request.
 fn next_state_after_headers(headers: &str, body_in_chunk: usize) -> (HttpState, usize) {
     if is_transfer_chunked(headers) {
-        // Chunked framing doesn't expose a Content-Length up front. Stay in
-        // body mode until the connection closes; we don't parse the chunked
-        // end marker, so in-chunk spillover after a chunked body is not
-        // detected.
+        // Chunked framing doesn't expose a Content-Length up front. The
+        // chunked body terminator (`0\r\n\r\n`) is detected later by
+        // `substitute_body_chunk` so the connection can return to
+        // `AwaitingHeaders` for subsequent keep-alive requests.
         return (HttpState::InBody { remaining: None }, body_in_chunk);
     }
     match parse_content_length(headers) {
@@ -608,8 +608,10 @@ fn next_state_after_headers(headers: &str, body_in_chunk: usize) -> (HttpState, 
             },
             body_in_chunk,
         ),
-        None if body_in_chunk > 0 => (HttpState::InBody { remaining: None }, body_in_chunk),
-        None => (HttpState::AwaitingHeaders, body_in_chunk),
+        // Per RFC 9112 §6.3 case 6, a request with neither `Content-Length`
+        // nor `Transfer-Encoding` has a zero-length body. Any trailing
+        // bytes are the start of a pipelined next request.
+        None => (HttpState::AwaitingHeaders, 0),
     }
 }
 
@@ -961,7 +963,7 @@ mod tests {
         let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
 
-        let input = b"POST / HTTP/1.1\r\n\r\n{\"key\": \"$KEY\"}";
+        let input = b"POST / HTTP/1.1\r\nContent-Length: 15\r\n\r\n{\"key\": \"$KEY\"}";
         let output = handler.substitute(input).unwrap();
         assert!(
             String::from_utf8(output.into_owned())
@@ -977,11 +979,11 @@ mod tests {
         let config = make_config(vec![secret]);
         let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
 
-        let input = b"POST / HTTP/1.1\r\n\r\n{\"key\": \"$KEY\"}";
+        let input = b"POST / HTTP/1.1\r\nContent-Length: 15\r\n\r\n{\"key\": \"$KEY\"}";
         let output = handler.substitute(input).unwrap();
         assert_eq!(
             String::from_utf8(output.into_owned()).unwrap(),
-            "POST / HTTP/1.1\r\n\r\n{\"key\": \"real-secret\"}"
+            "POST / HTTP/1.1\r\nContent-Length: 22\r\n\r\n{\"key\": \"real-secret\"}"
         );
     }
 
@@ -1544,5 +1546,29 @@ mod tests {
             handler.substitute(&chunk2).unwrap_err(),
             ViolationAction::Block
         );
+    }
+
+    #[test]
+    fn pipelined_get_without_content_length_recurses_into_next_request() {
+        // Per RFC 9112 §6.3 case 6, a request with no Content-Length and no
+        // Transfer-Encoding has a zero-length body. Any trailing bytes are
+        // the start of the next pipelined request, not body of this one.
+        // A regression that treats them as body misses substitution and
+        // violation detection for the entire rest of the connection.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "example.com")]);
+        let mut handler = SecretsHandler::new(&config, "example.com", true);
+
+        let mut chunk = b"GET /a HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec();
+        chunk.extend_from_slice(
+            b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: $KEY\r\n\r\n",
+        );
+
+        let out = handler.substitute(&chunk).unwrap();
+
+        let mut expected = b"GET /a HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec();
+        expected.extend_from_slice(
+            b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: real-secret\r\n\r\n",
+        );
+        assert_eq!(out.as_ref(), expected.as_slice());
     }
 }
