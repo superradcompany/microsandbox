@@ -10,6 +10,8 @@
 //! own `~/.microsandbox` so they can run in parallel without sharing
 //! the sqlite db, image cache, or sandbox namespace.
 
+use std::net::{IpAddr, ToSocketAddrs};
+
 use microsandbox::{NetworkPolicy, Sandbox};
 use microsandbox_network::policy::{Action, Destination, Direction, PortRange, Protocol, Rule};
 use test_utils::msb_test;
@@ -154,6 +156,51 @@ async fn dns_lookup(sb: &Sandbox, name: &str) -> String {
     out.stdout().unwrap_or_default().trim().to_string()
 }
 
+/// Resolve a test hostname on the host side. This gives the test a
+/// reachable IP without populating the sandbox's resolved-hostname
+/// cache for that name.
+fn host_resolved_ipv4(name: &str) -> String {
+    (name, 443)
+        .to_socket_addrs()
+        .expect("host DNS lookup")
+        .find_map(|addr| match addr.ip() {
+            IpAddr::V4(ip) => Some(ip.to_string()),
+            IpAddr::V6(_) => None,
+        })
+        .unwrap_or_else(|| panic!("host DNS lookup for {name} returned no IPv4 address"))
+}
+
+/// Like [`probe_https`], but force curl to connect to `ip` while still
+/// sending `host` as the HTTP Host header and TLS SNI.
+async fn probe_https_with_resolve(sb: &Sandbox, host: &str, ip: &str) -> String {
+    let cmd = format!(
+        "tmp=$(mktemp); \
+         code=$(curl -sS --max-time 30 -o /dev/null \
+                -w '%{{http_code}}' \
+                --resolve {host}:443:{ip} \
+                https://{host}/ 2>\"$tmp\"); \
+         exit=$?; \
+         err=$(tr '\\n' ' ' <\"$tmp\"; rm -f \"$tmp\"); \
+         case \"$code\" in \
+             000|\"\") printf 'FAIL exit=%s err=%s' \"$exit\" \"$err\" ;; \
+             *) printf '%s' \"$code\" ;; \
+         esac"
+    );
+    let out = sb.shell(&cmd).await.expect("curl --resolve shell");
+    out.stdout().unwrap_or_default().trim().to_string()
+}
+
+async fn probe_https_with_resolve_retry(sb: &Sandbox, host: &str, ip: &str) -> String {
+    let mut last = String::new();
+    for _ in 0..3 {
+        last = probe_https_with_resolve(sb, host, ip).await;
+        if reached_server(&last) {
+            return last;
+        }
+    }
+    last
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -237,6 +284,44 @@ async fn domain_policy_deny_domain_refuses_dns() {
     assert!(
         !allowed_out.is_empty(),
         "dl-cdn.alpinelinux.org DNS lookup should succeed under default-allow: got `{allowed_out}`"
+    );
+
+    sb.stop_and_wait().await.expect("stop");
+    let _ = Sandbox::remove(name).await;
+}
+
+/// Default-allow plus `deny Domain("www.rfc-editor.org")` must block a
+/// direct-IP TLS connection whose SNI is `www.rfc-editor.org`, even when
+/// the sandbox never resolved that name through the gateway DNS cache.
+#[msb_test]
+async fn domain_policy_deny_domain_blocks_sni_direct_ip_without_dns_cache() {
+    const ALLOWED_HOST: &str = "www.iana.org";
+    const DENIED_HOST: &str = "www.rfc-editor.org";
+
+    let name = "net-domain-policy-deny-sni-ip";
+    let allowed_ip = host_resolved_ipv4(ALLOWED_HOST);
+    let denied_ip = host_resolved_ipv4(DENIED_HOST);
+    let policy = NetworkPolicy {
+        default_egress: Action::Allow,
+        default_ingress: Action::Allow,
+        rules: vec![Rule::deny_egress(Destination::Domain(
+            DENIED_HOST.parse().expect("valid domain"),
+        ))],
+    };
+    let sb = setup_alpine(name, policy).await;
+
+    // Baseline the bypass shape itself: `curl --resolve` connects by IP
+    // and sends SNI without asking the sandbox DNS resolver.
+    let allowed = probe_https_with_resolve_retry(&sb, ALLOWED_HOST, &allowed_ip).await;
+    assert!(
+        reached_server(&allowed),
+        "direct-IP HTTPS to unrelated {ALLOWED_HOST} should be allowed: got `{allowed}`"
+    );
+
+    let denied = probe_https_with_resolve(&sb, DENIED_HOST, &denied_ip).await;
+    assert!(
+        curl_failed(&denied),
+        "direct-IP HTTPS with denied SNI {DENIED_HOST} should be blocked: got `{denied}`"
     );
 
     sb.stop_and_wait().await.expect("stop");
