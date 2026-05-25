@@ -378,7 +378,11 @@ Stop the sandbox and wait for the VM process to exit. Returns the guest exit cod
 func (s *Sandbox) Kill(ctx context.Context) error
 ```
 
-Force-terminate the sandbox immediately (SIGKILL). No graceful shutdown.
+Force-terminate the sandbox immediately (SIGKILL). No graceful
+shutdown. Pending writes that the workload hasn't `fsync`'d may be
+lost — same durability semantics as a sudden power loss on a physical
+machine. Use [`Stop()`](#stop) for graceful shutdown that gives the
+workload a chance to flush.
 
 ---
 
@@ -639,6 +643,16 @@ OCI image, local path, or disk image (e.g. `"python:3.12"`, `"docker.io/library/
 
 ---
 
+#### WithOCIUpperSize()
+
+```go
+func WithOCIUpperSize(mebibytes uint32) SandboxOption
+```
+
+Set the writable overlay upper size for an OCI image, in MiB. Valid only with an OCI image rootfs, not disk images or snapshots.
+
+---
+
 #### WithImageDisk()
 
 ```go
@@ -739,13 +753,13 @@ Replace any existing sandbox with the same name. Sends SIGTERM, waits up to 10s 
 
 ---
 
-#### WithReplaceWithGrace()
+#### WithReplaceWithTimeout()
 
 ```go
-func WithReplaceWithGrace(grace time.Duration) SandboxOption
+func WithReplaceWithTimeout(timeout time.Duration) SandboxOption
 ```
 
-Like [`WithReplace`](#withreplace) but with a caller-specified grace period between SIGTERM and SIGKILL. Implies `WithReplace`. A zero duration skips SIGTERM and SIGKILLs immediately.
+Like [`WithReplace`](#withreplace) but with a caller-specified timeout between SIGTERM and SIGKILL. Implies `WithReplace`. A zero duration skips SIGTERM and SIGKILLs immediately.
 
 ---
 
@@ -954,6 +968,7 @@ The config struct populated by [`SandboxOption`](#sandboxoption) functions. Most
 | ---------------- | ---------------------------------------------------- | -------------------------------------------------------------------- |
 | Image            | `string`                                             | OCI image, local path, or disk image                                 |
 | ImageFstype      | `string`                                             | Optional inner filesystem type for disk-image roots                  |
+| OCIUpperSizeMiB  | `uint32`                                             | Writable overlay upper size for OCI image roots                      |
 | Snapshot         | `string`                                             | Snapshot artifact path or bare name; mutually exclusive with `Image` |
 | MemoryMiB        | `uint32`                                             | Guest memory in MiB                                                  |
 | CPUs             | `uint8`                                              | Virtual CPUs                                                         |
@@ -962,7 +977,7 @@ The config struct populated by [`SandboxOption`](#sandboxoption) functions. Most
 | Hostname         | `string`                                             | Guest hostname                                                       |
 | User             | `string`                                             | Default guest user                                                   |
 | Replace          | `bool`                                               | Replace existing sandbox with same name                              |
-| ReplaceWithGrace | `*time.Duration`                                     | Grace period between SIGTERM and SIGKILL (implies `Replace`)         |
+| ReplaceWithTimeout | `*time.Duration`                                   | Timeout between SIGTERM and SIGKILL (implies `Replace`)              |
 | Env              | `map[string]string`                                  | Environment variables                                                |
 | Detached         | `bool`                                               | If `true`, sandbox survives after process exits                      |
 | Entrypoint       | `[]string`                                           | Override image entrypoint                                            |

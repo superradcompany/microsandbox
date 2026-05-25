@@ -722,6 +722,13 @@ impl PendingDestination {
                         raw: raw.clone(),
                         source,
                     })?;
+                let name = name
+                    .try_into_suffix()
+                    .map_err(|source| BuildError::InvalidDomain {
+                        rule_index: idx,
+                        raw: raw.clone(),
+                        source,
+                    })?;
                 Ok(Destination::DomainSuffix(name))
             }
         }

@@ -62,12 +62,15 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		PortsUDP:        o.PortsUDP,
 		PortBindings:    buildFFIPortBindings(o.PortBindings),
 	}
-	if o.ReplaceWithGrace != nil {
+	if o.ociUpperSizeSet || o.OCIUpperSizeMiB != 0 {
+		ffiOpts.OCIUpperSizeMiB = &o.OCIUpperSizeMiB
+	}
+	if o.ReplaceWithTimeout != nil {
 		var ms uint64
-		if d := *o.ReplaceWithGrace; d > 0 {
+		if d := *o.ReplaceWithTimeout; d > 0 {
 			ms = uint64((d + time.Millisecond - 1) / time.Millisecond)
 		}
-		ffiOpts.ReplaceWithGraceMs = &ms
+		ffiOpts.ReplaceWithTimeoutMs = &ms
 	}
 	if o.Init != nil {
 		init := &ffi.InitOptions{Cmd: o.Init.Cmd, Args: append([]string(nil), o.Init.Args...)}
@@ -90,14 +93,16 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		ffiOpts.Volumes = make(map[string]ffi.MountSpec, len(o.Volumes))
 		for guestPath, m := range o.Volumes {
 			ffiOpts.Volumes[guestPath] = ffi.MountSpec{
-				Bind:     m.Bind,
-				Named:    m.Named,
-				Tmpfs:    m.Tmpfs,
-				Disk:     m.Disk,
-				Format:   m.Format,
-				Fstype:   m.Fstype,
-				Readonly: m.Readonly,
-				SizeMiB:  m.SizeMiB,
+				Bind:               m.Bind,
+				Named:              m.Named,
+				Tmpfs:              m.Tmpfs,
+				Disk:               m.Disk,
+				Format:             m.Format,
+				Fstype:             m.Fstype,
+				Readonly:           m.Readonly,
+				SizeMiB:            m.SizeMiB,
+				StatVirtualization: string(m.StatVirtualization),
+				HostPermissions:    string(m.HostPermissions),
 			}
 		}
 	}

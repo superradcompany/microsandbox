@@ -32,6 +32,10 @@ pub struct LogEntry {
     /// Body bytes. UTF-8 lossy decoded by default; raw mode (future)
     /// preserves bytes via base64 round-trip on the host side.
     pub data: napi::bindgen_prelude::Buffer,
+
+    /// Opaque resume token. Pass back to `logStream` via
+    /// `fromCursor` to pick up immediately after this entry.
+    pub cursor: String,
 }
 
 /// Filters applied by `Sandbox.logs()`.
@@ -53,6 +57,74 @@ pub struct LogOptions {
     /// `"output"`, `"system"`, or `"all"`. Defaults to
     /// `["stdout", "stderr", "output"]` when omitted.
     pub sources: Option<Vec<String>>,
+}
+
+/// Options accepted by `Sandbox.logStream()`.
+///
+/// All fields optional. Defaults: sources = `["stdout", "stderr",
+/// "output"]`, start from the beginning of available history, no
+/// upper bound, `follow = false`.
+///
+/// `sinceMs` and `fromCursor` are mutually exclusive — passing both
+/// rejects at the boundary.
+#[napi(object)]
+pub struct LogStreamOptions {
+    /// Same shape as `LogOptions.sources`.
+    pub sources: Option<Vec<String>>,
+
+    /// Start at the first entry whose timestamp is `>= sinceMs`.
+    /// Mutually exclusive with `fromCursor`.
+    pub since_ms: Option<f64>,
+
+    /// Resume strictly after the entry identified by this cursor
+    /// (the value of `LogEntry.cursor` from a prior call).
+    /// Mutually exclusive with `sinceMs`.
+    pub from_cursor: Option<String>,
+
+    /// Stop emitting at the first entry whose timestamp is `>= untilMs`.
+    pub until_ms: Option<f64>,
+
+    /// When true, keep the stream open past current EOF and yield
+    /// new entries as they are written.
+    pub follow: Option<bool>,
+}
+
+/// Output from an SSH exec request.
+#[napi(object)]
+pub struct SshOutput {
+    pub status: i32,
+    pub stdout: napi::bindgen_prelude::Buffer,
+    pub stderr: napi::bindgen_prelude::Buffer,
+}
+
+/// Options accepted by `Sandbox.ssh().connect()`.
+#[napi(object)]
+pub struct SshClientOptions {
+    pub user: Option<String>,
+    pub term: Option<String>,
+    pub sftp: Option<bool>,
+}
+
+/// Options accepted by `SshClient.exec()`.
+#[napi(object)]
+pub struct SshExecOptions {
+    pub tty: Option<bool>,
+}
+
+/// Options accepted by `SshClient.attach()`.
+#[napi(object)]
+pub struct SshAttachOptions {
+    pub term: Option<String>,
+    pub detach_keys: Option<String>,
+}
+
+/// Options accepted by `Sandbox.ssh().server()`.
+#[napi(object)]
+pub struct SshServerOptions {
+    pub host_key_path: Option<String>,
+    pub authorized_keys_path: Option<String>,
+    pub user: Option<String>,
+    pub sftp: Option<bool>,
 }
 
 /// Filesystem entry metadata returned by `fs.list()`.

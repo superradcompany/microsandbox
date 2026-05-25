@@ -101,16 +101,52 @@ pub fn sandbox_builder_from_args(
             ));
         };
 
-        // Handle disk image with fstype if ImageSource has those attributes.
-        if let Ok(fstype_attr) = image_obj.getattr("_fstype") {
-            if !fstype_attr.is_none() {
-                let fstype: String = fstype_attr.extract()?;
-                builder = builder.image_with(|i| i.disk(&image_str).fstype(&fstype));
+        let fstype = if let Ok(fstype_attr) = image_obj.getattr("_fstype") {
+            if fstype_attr.is_none() {
+                None
             } else {
-                builder = builder.image(image_str.as_str());
+                Some(fstype_attr.extract::<String>()?)
             }
         } else {
-            builder = builder.image(image_str.as_str());
+            None
+        };
+        let upper_size_mib = if let Ok(upper_size_attr) = image_obj.getattr("_upper_size_mib") {
+            if upper_size_attr.is_none() {
+                None
+            } else {
+                Some(upper_size_attr.extract::<u32>()?)
+            }
+        } else {
+            None
+        };
+
+        if upper_size_mib.is_some() {
+            let image_type = image_obj
+                .getattr("_type")
+                .ok()
+                .and_then(|attr| attr.extract::<String>().ok());
+            if image_type.as_deref() != Some("oci") {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "upper_size_mib is only valid for Image.oci(...)",
+                ));
+            }
+        }
+
+        match (fstype, upper_size_mib) {
+            (Some(_), Some(_)) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "fstype and upper_size_mib cannot be set on the same ImageSource",
+                ));
+            }
+            (Some(fstype), None) => {
+                builder = builder.image_with(|i| i.disk(&image_str).fstype(&fstype));
+            }
+            (None, Some(size_mib)) => {
+                builder = builder.image_with(|i| i.oci(image_str.as_str()).upper_size(size_mib));
+            }
+            (None, None) => {
+                builder = builder.image(image_str.as_str());
+            }
         };
     }
 
@@ -149,13 +185,13 @@ pub fn sandbox_builder_from_args(
     {
         builder = builder.replace();
     }
-    if let Some(grace) = extract_opt::<f64>(kwargs, "replace_with_grace")? {
-        if grace < 0.0 {
+    if let Some(timeout) = extract_opt::<f64>(kwargs, "replace_with_timeout")? {
+        if timeout < 0.0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "replace_with_grace must be non-negative",
+                "replace_with_timeout must be non-negative",
             ));
         }
-        builder = builder.replace_with_grace(std::time::Duration::from_secs_f64(grace));
+        builder = builder.replace_with_timeout(std::time::Duration::from_secs_f64(timeout));
     }
     if let Some(max_duration) = extract_opt::<f64>(kwargs, "max_duration")? {
         if max_duration < 0.0 {
@@ -285,9 +321,15 @@ pub fn sandbox_builder_from_args(
     }
 
     // Secret violation action (top-level kwarg).
-    if let Some(violation) = extract_opt::<String>(kwargs, "on_secret_violation")? {
-        let action = parse_violation_action(&violation)?;
-        builder = builder.network(|n| n.on_secret_violation(action));
+    if let Some(violation_obj) = kwargs.get_item("on_secret_violation")?
+        && !violation_obj.is_none()
+    {
+        let action = parse_violation_action_obj(&violation_obj)?;
+        builder = builder.network(|n| {
+            n.on_secret_violation(|_| {
+                microsandbox_network::builder::ViolationActionBuilder::from_action(action)
+            })
+        });
     }
 
     Ok(builder)
@@ -380,16 +422,40 @@ fn apply_mount(
     mount: &Bound<'_, PyDict>,
 ) -> PyResult<microsandbox::sandbox::SandboxBuilder> {
     let readonly = extract_opt::<bool>(mount, "readonly")?.unwrap_or(false);
+    let stat_virt = extract_opt::<String>(mount, "stat_virtualization")?
+        .map(parse_stat_virt)
+        .transpose()?;
+    let host_perms = extract_opt::<String>(mount, "host_permissions")?
+        .map(parse_host_perms)
+        .transpose()?;
 
     if let Some(bind_path) = extract_opt::<String>(mount, "bind")? {
         Ok(builder.volume(&guest_path, |v| {
-            let m = v.bind(&bind_path);
-            if readonly { m.readonly() } else { m }
+            let mut m = v.bind(&bind_path);
+            if readonly {
+                m = m.readonly();
+            }
+            if let Some(p) = stat_virt {
+                m = m.stat_virtualization(p);
+            }
+            if let Some(p) = host_perms {
+                m = m.host_permissions(p);
+            }
+            m
         }))
     } else if let Some(vol_name) = extract_opt::<String>(mount, "named")? {
         Ok(builder.volume(&guest_path, |v| {
-            let m = v.named(&vol_name);
-            if readonly { m.readonly() } else { m }
+            let mut m = v.named(&vol_name);
+            if readonly {
+                m = m.readonly();
+            }
+            if let Some(p) = stat_virt {
+                m = m.stat_virtualization(p);
+            }
+            if let Some(p) = host_perms {
+                m = m.host_permissions(p);
+            }
+            m
         }))
     } else if extract_opt::<bool>(mount, "tmpfs")?.unwrap_or(false) {
         let size_mib = extract_opt::<u32>(mount, "size_mib")?;
@@ -424,6 +490,27 @@ fn apply_mount(
         Err(pyo3::exceptions::PyValueError::new_err(
             "mount must have one of: bind, named, tmpfs, disk",
         ))
+    }
+}
+
+fn parse_stat_virt(s: String) -> PyResult<microsandbox::sandbox::StatVirtualization> {
+    match s.as_str() {
+        "strict" => Ok(microsandbox::sandbox::StatVirtualization::Strict),
+        "relaxed" => Ok(microsandbox::sandbox::StatVirtualization::Relaxed),
+        "off" => Ok(microsandbox::sandbox::StatVirtualization::Off),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid stat_virtualization {other:?} (expected strict|relaxed|off)"
+        ))),
+    }
+}
+
+fn parse_host_perms(s: String) -> PyResult<microsandbox::sandbox::HostPermissions> {
+    match s.as_str() {
+        "private" => Ok(microsandbox::sandbox::HostPermissions::Private),
+        "mirror" => Ok(microsandbox::sandbox::HostPermissions::Mirror),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid host_permissions {other:?} (expected private|mirror)"
+        ))),
     }
 }
 
@@ -782,9 +869,15 @@ fn apply_network(
     }
 
     // Secret violation action (sandbox-level, not per-secret).
-    if let Some(violation) = extract_opt::<String>(net, "on_secret_violation")? {
-        let action = parse_violation_action(&violation)?;
-        builder = builder.network(|n| n.on_secret_violation(action));
+    if let Some(violation_obj) = net.get_item("on_secret_violation")?
+        && !violation_obj.is_none()
+    {
+        let action = parse_violation_action_obj(&violation_obj)?;
+        builder = builder.network(|n| {
+            n.on_secret_violation(|_| {
+                microsandbox_network::builder::ViolationActionBuilder::from_action(action)
+            })
+        });
     }
 
     // TLS config.
@@ -890,6 +983,13 @@ fn apply_secret(
     let allow_hosts: Vec<String> = extract_opt(secret, "allow_hosts")?.unwrap_or_default();
     let allow_host_patterns: Vec<String> =
         extract_opt(secret, "allow_host_patterns")?.unwrap_or_default();
+    let on_violation = if let Some(violation_obj) = secret.get_item("on_violation")?
+        && !violation_obj.is_none()
+    {
+        Some(parse_violation_action_obj(&violation_obj)?)
+    } else {
+        None
+    };
 
     let placeholder: Option<String> = extract_opt(secret, "placeholder")?;
     let require_tls: Option<bool> = extract_opt(secret, "require_tls")?;
@@ -914,6 +1014,11 @@ fn apply_secret(
         }
         for pattern in &allow_host_patterns {
             s = s.allow_host_pattern(pattern);
+        }
+        if let Some(action) = on_violation {
+            s = s.on_violation(|_| {
+                microsandbox_network::builder::ViolationActionBuilder::from_action(action)
+            });
         }
         if let Some(ref ph) = placeholder {
             s = s.placeholder(ph);
@@ -966,15 +1071,69 @@ fn as_dict<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
 fn parse_violation_action(
     s: &str,
 ) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
-    use microsandbox_network::secrets::config::ViolationAction;
+    use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
     match s {
         "block" => Ok(ViolationAction::Block),
         "block-and-log" | "block_and_log" => Ok(ViolationAction::BlockAndLog),
         "block-and-terminate" | "block_and_terminate" => Ok(ViolationAction::BlockAndTerminate),
+        "passthrough" => Ok(ViolationAction::Passthrough(vec![HostPattern::Any])),
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "unknown violation action: {s}"
         ))),
     }
+}
+
+fn parse_violation_action_obj(
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
+    if let Ok(s) = obj.extract::<String>() {
+        return parse_violation_action(&s);
+    }
+
+    let dict = as_dict(obj)?;
+    if let Some(passthrough_obj) = dict.get_item("passthrough")?
+        && !passthrough_obj.is_none()
+    {
+        return parse_passthrough_policy(&as_dict(&passthrough_obj)?);
+    }
+
+    Err(pyo3::exceptions::PyValueError::new_err(
+        "expected violation action string or {'passthrough': {...}}",
+    ))
+}
+
+fn parse_passthrough_policy(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<microsandbox_network::secrets::config::ViolationAction> {
+    use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
+
+    if let Some(fallback) = extract_opt::<String>(dict, "fallback")?
+        && matches!(
+            parse_violation_action(&fallback)?,
+            ViolationAction::Passthrough(_)
+        )
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "passthrough fallback must be a blocking action",
+        ));
+    }
+
+    let hosts: Vec<String> = extract_opt(dict, "hosts")?.unwrap_or_default();
+    let host_patterns: Vec<String> = extract_opt(dict, "host_patterns")?.unwrap_or_default();
+    let all_hosts = extract_opt::<bool>(dict, "all_hosts")?.unwrap_or(false);
+
+    let mut patterns = Vec::new();
+    for host in hosts {
+        patterns.push(HostPattern::Exact(host));
+    }
+    for pattern in host_patterns {
+        patterns.push(HostPattern::Wildcard(pattern));
+    }
+    if all_hosts {
+        patterns.push(HostPattern::Any);
+    }
+
+    Ok(ViolationAction::Passthrough(patterns))
 }
 
 fn extract_opt<'py, T: FromPyObject<'py>>(

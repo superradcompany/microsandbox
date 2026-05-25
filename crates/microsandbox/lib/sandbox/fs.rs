@@ -6,6 +6,7 @@
 use std::{path::Path, sync::Arc};
 
 use bytes::Bytes;
+pub use microsandbox_protocol::fs::{FsOpenOptions, FsSetAttrs};
 use microsandbox_protocol::{
     fs::{FS_CHUNK_SIZE, FsData, FsEntryInfo, FsOp, FsRequest, FsResponse, FsResponseData},
     message::{Message, MessageType},
@@ -22,9 +23,13 @@ use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient};
 ///
 /// All operations go through the agent protocol (`core.fs.*` messages),
 /// which are handled by agentd inside the guest VM.
-pub struct SandboxFs<'a> {
-    client: &'a Arc<AgentClient>,
+#[derive(Clone)]
+pub struct SandboxFs {
+    client: Arc<AgentClient>,
 }
+
+/// Agentd-side filesystem handle.
+pub type FsHandle = u64;
 
 /// A filesystem entry returned from listing or stat operations.
 #[derive(Debug, Clone)]
@@ -40,6 +45,15 @@ pub struct FsEntry {
 
     /// Unix permission bits.
     pub mode: u32,
+
+    /// Owner user ID.
+    pub uid: u32,
+
+    /// Owner group ID.
+    pub gid: u32,
+
+    /// Last access time.
+    pub accessed: Option<chrono::DateTime<chrono::Utc>>,
 
     /// Last modification time.
     pub modified: Option<chrono::DateTime<chrono::Utc>>,
@@ -73,8 +87,17 @@ pub struct FsMetadata {
     /// Unix permission bits.
     pub mode: u32,
 
+    /// Owner user ID.
+    pub uid: u32,
+
+    /// Owner group ID.
+    pub gid: u32,
+
     /// Whether the entry is read-only.
     pub readonly: bool,
+
+    /// Last access time.
+    pub accessed: Option<chrono::DateTime<chrono::Utc>>,
 
     /// Last modification time.
     pub modified: Option<chrono::DateTime<chrono::Utc>>,
@@ -86,6 +109,8 @@ pub struct FsMetadata {
 /// A streaming reader for file data from the sandbox.
 pub struct FsReadStream {
     rx: mpsc::UnboundedReceiver<Message>,
+    client: Arc<AgentClient>,
+    close_handle: Option<FsHandle>,
 }
 
 /// A streaming writer for file data to the sandbox.
@@ -93,16 +118,19 @@ pub struct FsWriteSink {
     id: u32,
     client: Arc<AgentClient>,
     rx: mpsc::UnboundedReceiver<Message>,
+    close_handle: Option<FsHandle>,
 }
 
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl<'a> SandboxFs<'a> {
+impl SandboxFs {
     /// Create a new filesystem handle.
-    pub fn new(client: &'a Arc<AgentClient>) -> Self {
-        Self { client }
+    pub fn new(client: &Arc<AgentClient>) -> Self {
+        Self {
+            client: Arc::clone(client),
+        }
     }
 
     //----------------------------------------------------------------------------------------------
@@ -111,39 +139,19 @@ impl<'a> SandboxFs<'a> {
 
     /// Read an entire file from the guest filesystem into memory.
     pub async fn read(&self, path: &str) -> MicrosandboxResult<Bytes> {
-        let id = self.client.next_id();
-        let mut rx = self.client.subscribe(id).await;
-
-        let req = FsRequest {
-            op: FsOp::Read {
-                path: path.to_string(),
-            },
-        };
-        let msg = Message::with_payload(MessageType::FsRequest, id, &req)?;
-        self.client.send(&msg).await?;
-
-        // Collect FsData chunks until FsResponse (terminal).
-        let mut data = Vec::new();
-        while let Some(msg) = rx.recv().await {
-            match msg.t {
-                MessageType::FsData => {
-                    let chunk: FsData = msg.payload()?;
-                    data.extend_from_slice(&chunk.data);
-                }
-                MessageType::FsResponse => {
-                    let resp: FsResponse = msg.payload()?;
-                    if !resp.ok {
-                        return Err(MicrosandboxError::SandboxFs(
-                            resp.error.unwrap_or_else(|| "unknown error".into()),
-                        ));
-                    }
-                    break;
-                }
-                _ => {}
+        let handle = self.open_file(path, read_only_open_options()).await?;
+        let result = self.read_handle(handle, 0, None).await;
+        let close_result = self.close_handle(handle).await;
+        match result {
+            Ok(data) => {
+                close_result?;
+                Ok(data)
+            }
+            Err(error) => {
+                let _ = close_result;
+                Err(error)
             }
         }
-
-        Ok(Bytes::from(data))
     }
 
     /// Read an entire file from the guest filesystem as a UTF-8 string.
@@ -157,18 +165,55 @@ impl<'a> SandboxFs<'a> {
     ///
     /// Returns an [`FsReadStream`] that yields chunks of data as they arrive.
     pub async fn read_stream(&self, path: &str) -> MicrosandboxResult<FsReadStream> {
-        let id = self.client.next_id();
-        let rx = self.client.subscribe(id).await;
+        let handle = self.open_file(path, read_only_open_options()).await?;
+        self.read_handle_stream_with_close(handle, 0, None, Some(handle))
+            .await
+    }
 
+    /// Read an entire open handle into memory.
+    pub async fn read_handle(
+        &self,
+        handle: FsHandle,
+        offset: u64,
+        len: Option<u64>,
+    ) -> MicrosandboxResult<Bytes> {
+        self.read_handle_stream(handle, offset, len)
+            .await?
+            .collect()
+            .await
+    }
+
+    /// Read an open handle with streaming.
+    pub async fn read_handle_stream(
+        &self,
+        handle: FsHandle,
+        offset: u64,
+        len: Option<u64>,
+    ) -> MicrosandboxResult<FsReadStream> {
+        self.read_handle_stream_with_close(handle, offset, len, None)
+            .await
+    }
+
+    async fn read_handle_stream_with_close(
+        &self,
+        handle: FsHandle,
+        offset: u64,
+        len: Option<u64>,
+        close_handle: Option<FsHandle>,
+    ) -> MicrosandboxResult<FsReadStream> {
         let req = FsRequest {
             op: FsOp::Read {
-                path: path.to_string(),
+                handle,
+                offset,
+                len,
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, id, &req)?;
-        self.client.send(&msg).await?;
-
-        Ok(FsReadStream { rx })
+        let (_id, rx) = self.client.stream(MessageType::FsRequest, &req).await?;
+        Ok(FsReadStream {
+            rx,
+            client: Arc::clone(&self.client),
+            close_handle,
+        })
     }
 
     //----------------------------------------------------------------------------------------------
@@ -177,36 +222,17 @@ impl<'a> SandboxFs<'a> {
 
     /// Write data to a file in the guest, creating it if it doesn't exist.
     pub async fn write(&self, path: &str, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
-        let data = data.as_ref();
-        let id = self.client.next_id();
-        let mut rx = self.client.subscribe(id).await;
-
-        // Send write request.
-        let req = FsRequest {
-            op: FsOp::Write {
-                path: path.to_string(),
-                mode: None,
-            },
+        let options = FsOpenOptions {
+            write: true,
+            create: true,
+            truncate: true,
+            ..Default::default()
         };
-        let msg = Message::with_payload(MessageType::FsRequest, id, &req)?;
-        self.client.send(&msg).await?;
-
-        // Send data chunks.
-        for chunk in data.chunks(FS_CHUNK_SIZE) {
-            let fs_data = FsData {
-                data: chunk.to_vec(),
-            };
-            let msg = Message::with_payload(MessageType::FsData, id, &fs_data)?;
-            self.client.send(&msg).await?;
-        }
-
-        // Send EOF.
-        let eof = FsData { data: Vec::new() };
-        let msg = Message::with_payload(MessageType::FsData, id, &eof)?;
-        self.client.send(&msg).await?;
-
-        // Wait for terminal response.
-        wait_for_ok_response(&mut rx).await
+        let handle = self.open_file(path, options).await?;
+        let result = self.write_handle(handle, 0, data).await;
+        let close_result = self.close_handle(handle).await;
+        result?;
+        close_result
     }
 
     /// Write with streaming.
@@ -214,25 +240,115 @@ impl<'a> SandboxFs<'a> {
     /// Returns an [`FsWriteSink`] for writing data in chunks. Call
     /// [`FsWriteSink::close`] when done writing.
     pub async fn write_stream(&self, path: &str) -> MicrosandboxResult<FsWriteSink> {
-        let id = self.client.next_id();
+        let options = FsOpenOptions {
+            write: true,
+            create: true,
+            truncate: true,
+            ..Default::default()
+        };
+        let handle = self.open_file(path, options).await?;
+        self.write_handle_stream_with_close(handle, 0, None, Some(handle))
+            .await
+    }
 
-        // Subscribe before sending to avoid race.
-        let rx = self.client.subscribe(id).await;
+    /// Write data to an open file handle.
+    pub async fn write_handle(
+        &self,
+        handle: FsHandle,
+        offset: u64,
+        data: impl AsRef<[u8]>,
+    ) -> MicrosandboxResult<()> {
+        let data = data.as_ref();
+        let sink = self
+            .write_handle_stream(handle, offset, Some(data.len() as u64))
+            .await?;
+        for chunk in data.chunks(FS_CHUNK_SIZE) {
+            sink.write(chunk).await?;
+        }
+        sink.close().await
+    }
 
+    /// Write to an open file handle with streaming.
+    pub async fn write_handle_stream(
+        &self,
+        handle: FsHandle,
+        offset: u64,
+        len: Option<u64>,
+    ) -> MicrosandboxResult<FsWriteSink> {
+        self.write_handle_stream_with_close(handle, offset, len, None)
+            .await
+    }
+
+    async fn write_handle_stream_with_close(
+        &self,
+        handle: FsHandle,
+        offset: u64,
+        len: Option<u64>,
+        close_handle: Option<FsHandle>,
+    ) -> MicrosandboxResult<FsWriteSink> {
         let req = FsRequest {
             op: FsOp::Write {
-                path: path.to_string(),
-                mode: None,
+                handle,
+                offset,
+                len,
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, id, &req)?;
-        self.client.send(&msg).await?;
-
+        let (id, rx) = self.client.stream(MessageType::FsRequest, &req).await?;
         Ok(FsWriteSink {
             id,
-            client: Arc::clone(self.client),
+            client: Arc::clone(&self.client),
             rx,
+            close_handle,
         })
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Handle Operations
+    //----------------------------------------------------------------------------------------------
+
+    /// Open a file and return an agentd-side handle.
+    pub async fn open_file(
+        &self,
+        path: &str,
+        options: FsOpenOptions,
+    ) -> MicrosandboxResult<FsHandle> {
+        let req = FsRequest {
+            op: FsOp::OpenFile {
+                path: path.to_string(),
+                options,
+            },
+        };
+        let resp = self.request_response(req).await?;
+        match resp.data {
+            Some(FsResponseData::Handle(handle)) => Ok(handle),
+            _ => Err(MicrosandboxError::SandboxFs(
+                "unexpected response data for open file".into(),
+            )),
+        }
+    }
+
+    /// Open a directory and return an agentd-side handle.
+    pub async fn open_dir(&self, path: &str) -> MicrosandboxResult<FsHandle> {
+        let req = FsRequest {
+            op: FsOp::OpenDir {
+                path: path.to_string(),
+            },
+        };
+        let resp = self.request_response(req).await?;
+        match resp.data {
+            Some(FsResponseData::Handle(handle)) => Ok(handle),
+            _ => Err(MicrosandboxError::SandboxFs(
+                "unexpected response data for open directory".into(),
+            )),
+        }
+    }
+
+    /// Close an open file or directory handle.
+    pub async fn close_handle(&self, handle: FsHandle) -> MicrosandboxResult<()> {
+        let req = FsRequest {
+            op: FsOp::CloseHandle { handle },
+        };
+        self.request_ok(req).await
     }
 
     //----------------------------------------------------------------------------------------------
@@ -241,21 +357,37 @@ impl<'a> SandboxFs<'a> {
 
     /// List the immediate children of a directory in the guest (non-recursive).
     pub async fn list(&self, path: &str) -> MicrosandboxResult<Vec<FsEntry>> {
-        let req = FsRequest {
-            op: FsOp::List {
-                path: path.to_string(),
-            },
-        };
-        let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.client.request(msg).await?;
-        let resp: FsResponse = resp_msg.payload()?;
+        let handle = self.open_dir(path).await?;
+        let mut entries = Vec::new();
 
-        if !resp.ok {
-            return Err(MicrosandboxError::SandboxFs(
-                resp.error.unwrap_or_else(|| "unknown error".into()),
-            ));
+        loop {
+            let batch = match self.read_dir(handle, None).await {
+                Ok(batch) => batch,
+                Err(error) => {
+                    let _ = self.close_handle(handle).await;
+                    return Err(error);
+                }
+            };
+            if batch.is_empty() {
+                break;
+            }
+            entries.extend(batch);
         }
 
+        self.close_handle(handle).await?;
+        Ok(entries)
+    }
+
+    /// Read the next batch from an open directory handle.
+    pub async fn read_dir(
+        &self,
+        handle: FsHandle,
+        limit: Option<u32>,
+    ) -> MicrosandboxResult<Vec<FsEntry>> {
+        let req = FsRequest {
+            op: FsOp::ReadDir { handle, limit },
+        };
+        let resp = self.request_response(req).await?;
         match resp.data {
             Some(FsResponseData::List(entries)) => {
                 Ok(entries.into_iter().map(entry_info_to_fs_entry).collect())
@@ -269,11 +401,10 @@ impl<'a> SandboxFs<'a> {
         let req = FsRequest {
             op: FsOp::Mkdir {
                 path: path.to_string(),
+                mode: None,
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.client.request(msg).await?;
-        check_response(resp_msg)
+        self.request_ok(req).await
     }
 
     /// Remove a directory recursively.
@@ -281,11 +412,21 @@ impl<'a> SandboxFs<'a> {
         let req = FsRequest {
             op: FsOp::RemoveDir {
                 path: path.to_string(),
+                recursive: true,
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.client.request(msg).await?;
-        check_response(resp_msg)
+        self.request_ok(req).await
+    }
+
+    /// Remove an empty directory.
+    pub async fn remove_empty_dir(&self, path: &str) -> MicrosandboxResult<()> {
+        let req = FsRequest {
+            op: FsOp::RemoveDir {
+                path: path.to_string(),
+                recursive: false,
+            },
+        };
+        self.request_ok(req).await
     }
 
     //----------------------------------------------------------------------------------------------
@@ -299,9 +440,7 @@ impl<'a> SandboxFs<'a> {
                 path: path.to_string(),
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.client.request(msg).await?;
-        check_response(resp_msg)
+        self.request_ok(req).await
     }
 
     /// Copy a file within the sandbox.
@@ -312,9 +451,7 @@ impl<'a> SandboxFs<'a> {
                 dst: to.to_string(),
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.client.request(msg).await?;
-        check_response(resp_msg)
+        self.request_ok(req).await
     }
 
     /// Rename/move a file or directory.
@@ -325,38 +462,119 @@ impl<'a> SandboxFs<'a> {
                 dst: to.to_string(),
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.client.request(msg).await?;
-        check_response(resp_msg)
+        self.request_ok(req).await
+    }
+
+    /// Read a symlink target.
+    pub async fn read_link(&self, path: &str) -> MicrosandboxResult<String> {
+        let req = FsRequest {
+            op: FsOp::ReadLink {
+                path: path.to_string(),
+            },
+        };
+        let resp = self.request_response(req).await?;
+        match resp.data {
+            Some(FsResponseData::Path(path)) => Ok(path),
+            _ => Err(MicrosandboxError::SandboxFs(
+                "unexpected response data for readlink".into(),
+            )),
+        }
+    }
+
+    /// Create a symlink.
+    pub async fn symlink(&self, target: &str, link_path: &str) -> MicrosandboxResult<()> {
+        let req = FsRequest {
+            op: FsOp::Symlink {
+                target: target.to_string(),
+                link_path: link_path.to_string(),
+            },
+        };
+        self.request_ok(req).await
+    }
+
+    /// Resolve a path to its canonical absolute form.
+    pub async fn real_path(&self, path: &str) -> MicrosandboxResult<String> {
+        let req = FsRequest {
+            op: FsOp::RealPath {
+                path: path.to_string(),
+            },
+        };
+        let resp = self.request_response(req).await?;
+        match resp.data {
+            Some(FsResponseData::Path(path)) => Ok(path),
+            _ => Err(MicrosandboxError::SandboxFs(
+                "unexpected response data for realpath".into(),
+            )),
+        }
     }
 
     //----------------------------------------------------------------------------------------------
     // Metadata
     //----------------------------------------------------------------------------------------------
 
-    /// Get file/directory metadata.
+    /// Get file/directory metadata, following symlinks.
     pub async fn stat(&self, path: &str) -> MicrosandboxResult<FsMetadata> {
+        self.stat_with_follow(path, true).await
+    }
+
+    /// Get file/directory metadata with explicit symlink behavior.
+    pub async fn stat_with_follow(
+        &self,
+        path: &str,
+        follow_symlink: bool,
+    ) -> MicrosandboxResult<FsMetadata> {
         let req = FsRequest {
             op: FsOp::Stat {
                 path: path.to_string(),
+                follow_symlink,
             },
         };
-        let msg = Message::with_payload(MessageType::FsRequest, 0, &req)?;
-        let resp_msg = self.client.request(msg).await?;
-        let resp: FsResponse = resp_msg.payload()?;
-
-        if !resp.ok {
-            return Err(MicrosandboxError::SandboxFs(
-                resp.error.unwrap_or_else(|| "unknown error".into()),
-            ));
-        }
-
+        let resp = self.request_response(req).await?;
         match resp.data {
             Some(FsResponseData::Stat(info)) => Ok(entry_info_to_metadata(&info)),
             _ => Err(MicrosandboxError::SandboxFs(
                 "unexpected response data for stat".into(),
             )),
         }
+    }
+
+    /// Get metadata for an open handle.
+    pub async fn fstat(&self, handle: FsHandle) -> MicrosandboxResult<FsMetadata> {
+        let req = FsRequest {
+            op: FsOp::FStat { handle },
+        };
+        let resp = self.request_response(req).await?;
+        match resp.data {
+            Some(FsResponseData::Stat(info)) => Ok(entry_info_to_metadata(&info)),
+            _ => Err(MicrosandboxError::SandboxFs(
+                "unexpected response data for fstat".into(),
+            )),
+        }
+    }
+
+    /// Update path metadata.
+    pub async fn set_stat(
+        &self,
+        path: &str,
+        follow_symlink: bool,
+        attrs: FsSetAttrs,
+    ) -> MicrosandboxResult<()> {
+        let req = FsRequest {
+            op: FsOp::SetStat {
+                path: path.to_string(),
+                follow_symlink,
+                attrs,
+            },
+        };
+        self.request_ok(req).await
+    }
+
+    /// Update metadata for an open handle.
+    pub async fn fset_stat(&self, handle: FsHandle, attrs: FsSetAttrs) -> MicrosandboxResult<()> {
+        let req = FsRequest {
+            op: FsOp::FSetStat { handle, attrs },
+        };
+        self.request_ok(req).await
     }
 
     /// Check whether a file or directory exists at the given path in the guest.
@@ -403,6 +621,25 @@ impl<'a> SandboxFs<'a> {
         tokio::fs::write(host_path.as_ref(), &data).await?;
         Ok(())
     }
+
+    async fn request_ok(&self, req: FsRequest) -> MicrosandboxResult<()> {
+        let resp = self.request_response(req).await?;
+        if resp.ok {
+            Ok(())
+        } else {
+            Err(response_error(resp))
+        }
+    }
+
+    async fn request_response(&self, req: FsRequest) -> MicrosandboxResult<FsResponse> {
+        let msg = self.client.request(MessageType::FsRequest, &req).await?;
+        let resp: FsResponse = msg.payload()?;
+        if resp.ok {
+            Ok(resp)
+        } else {
+            Err(response_error(resp))
+        }
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -425,16 +662,17 @@ impl FsReadStream {
                 }
                 MessageType::FsResponse => {
                     let resp: FsResponse = msg.payload()?;
+                    let close_result = self.close_owned_handle().await;
                     if !resp.ok {
-                        return Err(MicrosandboxError::SandboxFs(
-                            resp.error.unwrap_or_else(|| "unknown error".into()),
-                        ));
+                        return Err(response_error(resp));
                     }
+                    close_result?;
                     return Ok(None);
                 }
                 _ => {}
             }
         }
+        self.close_owned_handle().await?;
         Ok(None)
     }
 
@@ -445,6 +683,13 @@ impl FsReadStream {
             data.extend_from_slice(&chunk);
         }
         Ok(Bytes::from(data))
+    }
+
+    async fn close_owned_handle(&mut self) -> MicrosandboxResult<()> {
+        if let Some(handle) = self.close_handle.take() {
+            close_handle(&self.client, handle).await?;
+        }
+        Ok(())
     }
 }
 
@@ -458,8 +703,10 @@ impl FsWriteSink {
         let fs_data = FsData {
             data: data.as_ref().to_vec(),
         };
-        let msg = Message::with_payload(MessageType::FsData, self.id, &fs_data)?;
-        self.client.send(&msg).await
+        self.client
+            .send(self.id, MessageType::FsData, &fs_data)
+            .await?;
+        Ok(())
     }
 
     /// Close the write stream (sends EOF) and wait for confirmation.
@@ -468,11 +715,16 @@ impl FsWriteSink {
     /// error if the guest reports a write failure.
     pub async fn close(mut self) -> MicrosandboxResult<()> {
         let eof = FsData { data: Vec::new() };
-        let msg = Message::with_payload(MessageType::FsData, self.id, &eof)?;
-        self.client.send(&msg).await?;
+        self.client.send(self.id, MessageType::FsData, &eof).await?;
 
-        // Wait for the terminal FsResponse from the guest.
-        wait_for_ok_response(&mut self.rx).await
+        let result = wait_for_ok_response(&mut self.rx).await;
+        let close_result = if let Some(handle) = self.close_handle.take() {
+            close_handle(&self.client, handle).await
+        } else {
+            Ok(())
+        };
+        result?;
+        close_result
     }
 }
 
@@ -491,7 +743,7 @@ fn parse_kind(s: &str) -> FsEntryKind {
 }
 
 /// Parse an optional Unix timestamp into a `DateTime<Utc>`.
-fn parse_modified(ts: Option<i64>) -> Option<chrono::DateTime<chrono::Utc>> {
+fn parse_time(ts: Option<i64>) -> Option<chrono::DateTime<chrono::Utc>> {
     ts.map(|t| chrono::DateTime::from_timestamp(t, 0).unwrap_or_default())
 }
 
@@ -499,10 +751,13 @@ fn parse_modified(ts: Option<i64>) -> Option<chrono::DateTime<chrono::Utc>> {
 fn entry_info_to_fs_entry(info: FsEntryInfo) -> FsEntry {
     FsEntry {
         kind: parse_kind(&info.kind),
-        modified: parse_modified(info.modified),
+        accessed: parse_time(info.atime),
+        modified: parse_time(info.mtime.or(info.modified)),
         path: info.path,
         size: info.size,
         mode: info.mode,
+        uid: info.uid,
+        gid: info.gid,
     }
 }
 
@@ -510,10 +765,13 @@ fn entry_info_to_fs_entry(info: FsEntryInfo) -> FsEntry {
 fn entry_info_to_metadata(info: &FsEntryInfo) -> FsMetadata {
     FsMetadata {
         kind: parse_kind(&info.kind),
-        modified: parse_modified(info.modified),
+        accessed: parse_time(info.atime),
+        modified: parse_time(info.mtime.or(info.modified)),
         created: None,
         size: info.size,
         mode: info.mode,
+        uid: info.uid,
+        gid: info.gid,
         readonly: info.mode & 0o200 == 0,
     }
 }
@@ -524,9 +782,7 @@ fn check_response(msg: Message) -> MicrosandboxResult<()> {
     if resp.ok {
         Ok(())
     } else {
-        Err(MicrosandboxError::SandboxFs(
-            resp.error.unwrap_or_else(|| "unknown error".into()),
-        ))
+        Err(response_error(resp))
     }
 }
 
@@ -540,4 +796,23 @@ async fn wait_for_ok_response(rx: &mut mpsc::UnboundedReceiver<Message>) -> Micr
     Err(MicrosandboxError::SandboxFs(
         "channel closed before response".into(),
     ))
+}
+
+async fn close_handle(client: &Arc<AgentClient>, handle: FsHandle) -> MicrosandboxResult<()> {
+    let req = FsRequest {
+        op: FsOp::CloseHandle { handle },
+    };
+    let msg = client.request(MessageType::FsRequest, &req).await?;
+    check_response(msg)
+}
+
+fn response_error(resp: FsResponse) -> MicrosandboxError {
+    MicrosandboxError::SandboxFs(resp.error.unwrap_or_else(|| "unknown error".into()))
+}
+
+fn read_only_open_options() -> FsOpenOptions {
+    FsOpenOptions {
+        read: true,
+        ..Default::default()
+    }
 }

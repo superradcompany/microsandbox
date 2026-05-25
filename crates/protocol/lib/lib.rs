@@ -6,6 +6,41 @@
 mod error;
 
 //--------------------------------------------------------------------------------------------------
+// Constants: Host↔Guest Shutdown Timings
+//--------------------------------------------------------------------------------------------------
+
+/// Maximum time agentd spends in its handoff-mode poweroff sequence.
+///
+/// In init-handoff sandboxes (systemd, openrc, …) agentd's shutdown
+/// handler signals the new PID 1 with `SIGRTMIN+4`, sleeps for this
+/// duration to give the init a chance to act, then falls back to
+/// `SIGTERM`. The host's [`SHUTDOWN_FLUSH_TIMEOUT`] must exceed this
+/// so the host's fallback exit doesn't cut the sequence short.
+pub const HANDOFF_POWEROFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long the host waits after forwarding `core.shutdown` to agentd
+/// before triggering its own VMM exit fallback.
+///
+/// agentd uses this window to `sync()` block-backed root filesystems
+/// and power off the kernel cleanly (or run its handoff sequence —
+/// see [`HANDOFF_POWEROFF_TIMEOUT`]). On a healthy guest the VMM
+/// exits well inside the window and the host fallback is a no-op;
+/// the fallback only fires when the guest is wedged.
+///
+/// Must exceed [`HANDOFF_POWEROFF_TIMEOUT`] plus margin for the
+/// init's own signal handling — enforced at compile time below.
+pub const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+// Compile-time invariant: the host must wait at least as long as
+// agentd's longest internal grace, otherwise the host fallback will
+// cut agentd's handoff sequence short and we'll silently strand
+// init-handoff sandboxes.
+const _: () = assert!(
+    SHUTDOWN_FLUSH_TIMEOUT.as_secs() > HANDOFF_POWEROFF_TIMEOUT.as_secs(),
+    "SHUTDOWN_FLUSH_TIMEOUT must exceed HANDOFF_POWEROFF_TIMEOUT",
+);
+
+//--------------------------------------------------------------------------------------------------
 // Constants: Host↔Guest Protocol
 //--------------------------------------------------------------------------------------------------
 
@@ -23,6 +58,12 @@ pub const FILE_MOUNTS_DIR: &str = "/.msb/file-mounts";
 
 /// Guest path for named scripts (added to PATH by agentd).
 pub const SCRIPTS_PATH: &str = "/.msb/scripts";
+
+/// Maximum number of simultaneous SDK clients the host relay admits.
+pub const AGENT_RELAY_MAX_CLIENTS: u32 = 128;
+
+/// Size of the correlation ID range allocated to each relay client.
+pub const AGENT_RELAY_ID_RANGE_STEP: u32 = u32::MAX / AGENT_RELAY_MAX_CLIENTS;
 
 //--------------------------------------------------------------------------------------------------
 // Constants: Guest Init Environment Variables

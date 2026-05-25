@@ -12,7 +12,7 @@
 
 <br />
 
-<div align="center"><b>——&nbsp;&nbsp;&nbsp;every agent deserves its own computer&nbsp;&nbsp;&nbsp;——</b></div>
+<div align="center"><b>——&nbsp;&nbsp;&nbsp;the easiest way to give your agent their own computer&nbsp;&nbsp;&nbsp;——</b></div>
 
 <br />
 <br />
@@ -320,9 +320,10 @@ This project is licensed under the [Apache License 2.0](./LICENSE).
 Special thanks to all our contributors, testers, and community members who help make microsandbox better every day! We'd like to thank the following projects and communities that made `microsandbox` possible: [libkrun](https://github.com/containers/libkrun) and [smoltcp](https://github.com/smoltcp-rs/smoltcp)
 
 <br />
-<br />
-<br />
 
 <div align='center'>
   <a href="https://www.ycombinator.com/"><img src="https://img.shields.io/badge/BACKED%20BY-Y%20COMBINATOR-F26522?style=for-the-badge&logo=ycombinator&logoColor=white" alt="Backed by Y Combinator"></a>
 </div>
+
+<br />
+<br />

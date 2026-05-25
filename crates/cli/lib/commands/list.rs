@@ -95,7 +95,7 @@ fn extract_image(config_json: &str) -> String {
     serde_json::from_str::<SandboxConfig>(config_json)
         .ok()
         .map(|c| match c.image {
-            microsandbox::sandbox::RootfsSource::Oci(ref s) => s.clone(),
+            microsandbox::sandbox::RootfsSource::Oci(ref oci) => oci.reference.clone(),
             microsandbox::sandbox::RootfsSource::Bind(ref p) => p.display().to_string(),
             microsandbox::sandbox::RootfsSource::DiskImage { ref path, .. } => {
                 path.display().to_string()

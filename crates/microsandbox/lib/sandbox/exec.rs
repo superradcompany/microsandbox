@@ -4,8 +4,8 @@ use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use microsandbox_protocol::{
-    exec::{ExecSignal, ExecStdin},
-    message::{Message, MessageType},
+    exec::{ExecResize, ExecSignal, ExecStdin},
+    message::MessageType,
 };
 
 pub use microsandbox_protocol::exec::RlimitResource;
@@ -101,6 +101,16 @@ pub struct ExecHandle {
     stdin: Option<ExecSink>,
 
     /// Bridge reference for sending signals/stdin.
+    client: Arc<AgentClient>,
+}
+
+/// Cloneable control handle for a streaming exec session.
+#[derive(Clone)]
+pub struct ExecControl {
+    /// Correlation ID for this session.
+    id: u32,
+
+    /// Bridge reference for sending control messages.
     client: Arc<AgentClient>,
 }
 
@@ -326,6 +336,32 @@ impl ExecHandle {
         self.id.to_string()
     }
 
+    /// Get a cloneable control handle for this session.
+    pub fn control(&self) -> ExecControl {
+        ExecControl {
+            id: self.id,
+            client: Arc::clone(&self.client),
+        }
+    }
+
+    /// Consume this handle into separately owned control, stdin, and event parts.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ExecControl,
+        Option<ExecSink>,
+        mpsc::UnboundedReceiver<ExecEvent>,
+    ) {
+        (
+            ExecControl {
+                id: self.id,
+                client: Arc::clone(&self.client),
+            },
+            self.stdin,
+            self.events,
+        )
+    }
+
     /// Receive the next exec event.
     ///
     /// Returns `None` when the session has ended.
@@ -405,14 +441,48 @@ impl ExecHandle {
     /// Send a Unix signal (e.g., `libc::SIGTERM`, `libc::SIGINT`) to the
     /// running process inside the guest.
     pub async fn signal(&self, signal: i32) -> MicrosandboxResult<()> {
+        self.control().signal(signal).await
+    }
+
+    /// Send SIGKILL to the running process.
+    pub async fn kill(&self) -> MicrosandboxResult<()> {
+        self.control().kill().await
+    }
+
+    /// Resize the PTY for this session.
+    pub async fn resize(&self, rows: u16, cols: u16) -> MicrosandboxResult<()> {
+        self.control().resize(rows, cols).await
+    }
+}
+
+impl ExecControl {
+    /// Get the execution session ID.
+    pub fn id(&self) -> String {
+        self.id.to_string()
+    }
+
+    /// Send a Unix signal (e.g., `libc::SIGTERM`, `libc::SIGINT`) to the
+    /// running process inside the guest.
+    pub async fn signal(&self, signal: i32) -> MicrosandboxResult<()> {
         let payload = ExecSignal { signal };
-        let msg = Message::with_payload(MessageType::ExecSignal, self.id, &payload)?;
-        self.client.send(&msg).await
+        self.client
+            .send(self.id, MessageType::ExecSignal, &payload)
+            .await?;
+        Ok(())
     }
 
     /// Send SIGKILL to the running process.
     pub async fn kill(&self) -> MicrosandboxResult<()> {
         self.signal(9).await
+    }
+
+    /// Resize the PTY for this session.
+    pub async fn resize(&self, rows: u16, cols: u16) -> MicrosandboxResult<()> {
+        let payload = ExecResize { rows, cols };
+        self.client
+            .send(self.id, MessageType::ExecResize, &payload)
+            .await?;
+        Ok(())
     }
 }
 
@@ -427,14 +497,18 @@ impl ExecSink {
         let payload = ExecStdin {
             data: data.as_ref().to_vec(),
         };
-        let msg = Message::with_payload(MessageType::ExecStdin, self.id, &payload)?;
-        self.client.send(&msg).await
+        self.client
+            .send(self.id, MessageType::ExecStdin, &payload)
+            .await?;
+        Ok(())
     }
 
     /// Close stdin (sends EOF to the process).
     pub async fn close(&self) -> MicrosandboxResult<()> {
         let payload = ExecStdin { data: Vec::new() };
-        let msg = Message::with_payload(MessageType::ExecStdin, self.id, &payload)?;
-        self.client.send(&msg).await
+        self.client
+            .send(self.id, MessageType::ExecStdin, &payload)
+            .await?;
+        Ok(())
     }
 }

@@ -36,6 +36,7 @@ msb run --name public-api -p 0.0.0.0:8000:8000 python
 | `-n`, `--name` | Sandbox name (if omitted, sandbox is ephemeral) |
 | `-c`, `--cpus` | Number of virtual CPUs to allocate |
 | `-m`, `--memory` | Amount of memory (e.g. `512M`, `1G`) |
+| `--oci-upper-size` | Writable overlay upper size for OCI images (e.g. `4G`, `8192M`) |
 | `-v`, `--volume` | Mount a host path or named volume (`SOURCE:DEST`) |
 | `-p`, `--port` | Forward a host port to the sandbox (`HOST:GUEST`, `BIND_ADDR:HOST:GUEST`, and `/udp` variants) |
 | `-e`, `--env` | Set an environment variable (`KEY=VALUE`) |
@@ -63,10 +64,11 @@ msb run --name public-api -p 0.0.0.0:8000:8000 python
 | `--script-path` | Register a script from a host file (`NAME:PATH`). File contents are read verbatim |
 | `--max-duration` | Kill the entire sandbox after this duration (e.g. `30s`, `5m`, `1h`). Sandbox-level lifetime limit |
 | `--idle-timeout` | Stop the sandbox after this period of inactivity (e.g. `30s`, `5m`, `1h`) |
-| `--no-network` | Disable all network access |
-| `--network-policy` | Control which destinations are reachable from the sandbox. Accepted values: `none` (no network), `public-only` (default — public internet only), `nonlocal` (public + private/LAN; blocks loopback, link-local, and metadata), `allow-all` (unrestricted) |
-| `--deny-domain` | Deny egress to a domain. Repeatable. Adds a `deny Domain("...")` policy rule that fires at DNS resolution (REFUSED), TLS first-flight (SNI), and TCP egress (cache fallback) |
-| `--deny-domain-suffix` | Deny egress to all subdomains of a suffix (e.g. `.ads.com`). Repeatable. Adds a `deny DomainSuffix("...")` policy rule |
+| `--no-net` | Disable all network access by default. Sugar for `--net-default deny`. Combine with `--net-rule allow@<target>` entries to build an allowlist |
+| `--net-rule` | Network rule. Repeatable; each value is a comma-separated list of rule tokens (see [Network rule syntax](#network-rule-syntax) below). Adds entries to the policy in argv order |
+| `--net-default` | Default action (`allow` or `deny`) for traffic in both directions that doesn't match any `--net-rule`. Mutually exclusive with `--net-default-egress` / `--net-default-ingress` |
+| `--net-default-egress` | Default action for unmatched egress traffic. Mutually exclusive with `--net-default` |
+| `--net-default-ingress` | Default action for unmatched ingress traffic. Mutually exclusive with `--net-default` |
 | `--no-dns-rebind-protection` | Allow DNS responses pointing to private/internal IP addresses |
 | `--dns-nameserver` | Nameserver to forward DNS queries to (repeatable; `IP` or `IP:PORT`). Overrides the host's `/etc/resolv.conf` |
 | `--dns-query-timeout-ms` | Per-DNS-query timeout in milliseconds (default: 5000) |
@@ -75,7 +77,7 @@ msb run --name public-api -p 0.0.0.0:8000:8000 python
 | `--max-connections` | Limit the number of concurrent network connections |
 | `--trust-host-cas` | Ship the host's trusted root CAs into the guest so outbound TLS works behind corporate MITM proxies (Cloudflare Warp Zero Trust, Zscaler, etc.) whose gateway CA is installed on the host but unknown to the guest's stock bundle. Opt-in; by default the guest validates against its stock Mozilla bundle only |
 | `--secret` | Inject a secret that is only sent to an allowed host (`ENV=VALUE@HOST`) |
-| `--on-secret-violation` | Action when a secret is sent to a disallowed host (`block`, `block-and-log`, `block-and-terminate`) |
+| `--on-secret-violation` | Action when a secret is sent to a disallowed host (`block`, `block-and-log`, `block-and-terminate`, `passthrough`) |
 | `--tls-intercept` | Intercept and inspect HTTPS traffic via a built-in TLS proxy |
 | `--tls-intercept-port` | TCP port to apply TLS interception on (default: 443) |
 | `--tls-bypass` | Skip TLS interception for a domain (e.g. `*.internal.com`) |
@@ -85,6 +87,49 @@ msb run --name public-api -p 0.0.0.0:8000:8000 python
 | `--tls-upstream-ca-cert` | Trust an additional CA certificate for upstream server verification (PEM file). Can be specified multiple times |
 
 When no `--` command is given, the image's `entrypoint` and `cmd` are used as the default process. If the image has neither, an interactive shell is started. When a command is given via `--`, it replaces the image `cmd` but the `entrypoint` is preserved. See [Image config inheritance](/images/overview#image-config-inheritance) for details.
+
+### Network rule syntax
+
+`--net-rule` takes one or more comma-separated rule tokens. The token grammar is:
+
+```
+<action>[:<direction>]@<target>[:<proto>[:<ports>]]
+```
+
+| Field | Values |
+| ----- | ------ |
+| `action` | `allow`, `deny` |
+| `direction` | `egress` (default), `ingress`, `any` |
+| `target` | See *Targets* below |
+| `proto` | `tcp`, `udp`, `icmpv4`, `icmpv6`, `any` (default) |
+| `ports` | `<port>`, `<lo>-<hi>`, or `any` (default) |
+
+**Targets**
+
+| Form | Example | Notes |
+| ---- | ------- | ----- |
+| IP / CIDR | `198.51.100.5`, `10.0.0.0/8`, `[2001:db8::]/32` | IPv6 must be bracketed |
+| Domain (exact) | `example.com` | Use `domain=public` to disambiguate from the `public` group |
+| Domain suffix | `*.example.com`, `suffix=example.com` | Matches the apex and any subdomain at any depth. Suffixes must be at least two labels: `*.com` and `suffix=local` are rejected to prevent accidental blast radius |
+| Group | `public`, `private`, `multicast`, `loopback`, `link_local`, `metadata`, `any` | Pre-defined IP groups |
+
+Wildcard quoting: the rule grammar uses `@`, `:`, and `,` which are shell-significant, so always quote `--net-rule` values. The `*.` in suffix shorthand mirrors the syntax already used by `--tls-bypass` and `--secret`.
+
+**Common compositions**
+
+```bash
+# Allowlist: deny by default, allow specific destinations
+msb run alpine --net-default deny --net-rule "allow@github.com,allow@*.githubusercontent.com"
+
+# Blocklist: allow by default, deny specific destinations
+msb run alpine --net-default allow --net-rule "deny@*.tracking.com,deny@*.ads.example"
+
+# Airgapped: equivalent to `--net-default deny`
+msb run alpine --no-net
+
+# Airgapped except one host (allowlist with --no-net sugar)
+msb run alpine --no-net --net-rule "allow@api.internal.corp"
+```
 
 ## msb create
 
@@ -112,15 +157,26 @@ msb start devbox
 ## msb stop
 
 ```bash
-msb stop devbox                # Graceful shutdown
+msb stop devbox                # Graceful shutdown (10s grace)
 msb stop --force devbox        # Force kill immediately
-msb stop -t 10 devbox          # Wait 10s then force kill
+msb stop -t 30 devbox          # 30s grace before force kill
 ```
+
+Graceful shutdown gives the sandbox a chance to finish writing any
+pending data to disk before it exits, so files written inside the
+sandbox aren't lost across a later `msb start`. If the sandbox is
+still running after the timeout, it is force-killed.
+
+`--force` and a timeout that elapses both end in a force-kill. Pending
+writes that the workload hasn't `fsync`'d at that point may be lost —
+same durability semantics as a sudden power loss on a physical
+machine. For durable writes, workloads should `fsync` important data
+themselves.
 
 | Flag | Description |
 |------|-------------|
-| `-f`, `--force` | Immediately kill the sandbox without graceful shutdown |
-| `-t`, `--timeout` | Seconds to wait for graceful shutdown before force-killing |
+| `-f`, `--force` | Force terminate immediately. Pending writes may be lost |
+| `-t`, `--timeout` | Seconds to wait for graceful shutdown before force-killing. Defaults to 10 |
 | `-q`, `--quiet` | Suppress progress output |
 
 ## msb exec

@@ -192,7 +192,12 @@ Get a filesystem handle for reading and writing files inside the running sandbox
 async fn kill(&self) -> MicrosandboxResult<()>
 ```
 
-Force-terminate the sandbox immediately with SIGKILL. No graceful shutdown - use when the sandbox is unresponsive.
+Force-terminate the sandbox immediately with SIGKILL. No graceful
+shutdown — use when the sandbox is unresponsive. Pending writes that
+the workload hasn't `fsync`'d may be lost, same durability semantics
+as a sudden power loss on a physical machine. Prefer
+[`stop()`](#stop) for graceful shutdown that gives the workload a
+chance to flush.
 
 ---
 
@@ -346,7 +351,11 @@ Remove the sandbox and all its persisted state from disk.
 async fn stop(&self) -> MicrosandboxResult<()>
 ```
 
-Gracefully shut down the sandbox. Sends SIGTERM to all guest processes and waits for the VM to exit.
+Gracefully shut down the sandbox. Lets the sandbox finish writing
+any pending data to disk before it exits, so files written inside
+the sandbox aren't lost across a later restart. Waits up to ten
+seconds for a clean exit; if the sandbox is still running after
+that, it is force-killed.
 
 ---
 
@@ -610,13 +619,22 @@ Set the root filesystem source. Accepts OCI image names, local directory paths, 
 fn image_with(self, f: impl FnOnce(ImageBuilder) -> ImageBuilder) -> Self
 ```
 
-Configure a disk image rootfs with explicit filesystem type. Use when the filesystem type can't be auto-detected.
+Configure an explicit rootfs source. Use this for OCI-only settings such as the writable overlay upper size, or for disk images when the filesystem type can't be auto-detected.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
-| f | `ImageBuilder` | Configure the disk image rootfs. |
+| f | `ImageBuilder` | Configure the rootfs source. |
+
+```rust
+use microsandbox::size::SizeExt;
+
+let sb = Sandbox::builder("worker")
+    .image_with(|i| i.oci("python:3.12").upper_size(8.gib()))
+    .create()
+    .await?;
+```
 
 ---
 
@@ -1173,9 +1191,10 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 |-------------------|------|-------------|
 | config() | `Result<`[`SandboxConfig`](#sandboxconfig)`>` | Parsed configuration |
 | config_json() | `&str` | Raw JSON configuration |
-| connect() | `Result<`[`Sandbox`](#instance-methods)`>` | Connect to a running sandbox |
+| connect() | `Result<`[`Sandbox`](#instance-methods)`>` | Connect to a running sandbox; returns an error if it doesn't respond within ten seconds |
+| connect_with_timeout(timeout) | `Result<`[`Sandbox`](#instance-methods)`>` | Same as `connect()` with an explicit timeout |
 | created_at() | `Option<DateTime<Utc>>` | Creation timestamp |
-| kill() | `Result<()>` | Force terminate |
+| kill() | `Result<()>` | Force terminate immediately. Pending writes may be lost |
 | logs() | `Result<Vec<`[`LogEntry`](#logentry)`>>` | Read captured `exec.log` (works without starting) |
 | metrics() | `Result<`[`SandboxMetrics`](#sandboxmetrics)`>` | Point-in-time resource metrics |
 | name() | `&str` | Sandbox name |
@@ -1183,7 +1202,8 @@ A lightweight handle to an existing sandbox (running or stopped). Obtained via [
 | start() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in attached mode |
 | start_detached() | `Result<`[`Sandbox`](#instance-methods)`>` | Start in detached mode |
 | status() | [`SandboxStatus`](#sandboxstatus) | Current status |
-| stop() | `Result<()>` | Graceful shutdown |
+| stop() | `Result<()>` | Gracefully shut down. Waits up to ten seconds for pending writes to flush, then force-kills |
+| stop_with_timeout(timeout) | `Result<()>` | Same as `stop()` with an explicit timeout; `Duration::ZERO` force-kills immediately |
 | updated_at() | `Option<DateTime<Utc>>` | Last update timestamp |
 
 ### SandboxMetrics

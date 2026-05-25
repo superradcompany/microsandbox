@@ -12,7 +12,7 @@ use crate::ui;
 //--------------------------------------------------------------------------------------------------
 
 /// Common sandbox configuration flags shared between `msb run` and `msb create`.
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub struct SandboxOpts {
     /// Name for the sandbox. Auto-generated if omitted.
     #[arg(short, long)]
@@ -46,11 +46,13 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub replace: bool,
 
-    /// Grace period the existing sandbox gets after SIGTERM before it
-    /// is SIGKILLed during a replace. Accepts `0`, `500ms`, `5s`, `2m`.
-    /// Implies `--replace`. Default 10s when `--replace` is set on its own.
+    /// Timeout the existing sandbox gets after SIGTERM before it is
+    /// SIGKILLed during a replace. Accepts `0`, `500ms`, `5s`, `2m`.
+    /// Implies `--replace`. Default 10s when `--replace` is set on its
+    /// own. An expired timeout force-kills the prior sandbox; the
+    /// `create` call still proceeds.
     #[arg(long, value_name = "DURATION")]
-    pub replace_with_grace: Option<String>,
+    pub replace_with_timeout: Option<String>,
 
     /// Suppress progress output.
     #[arg(short, long)]
@@ -122,6 +124,10 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub pull: Option<String>,
 
+    /// Writable overlay upper size for OCI images (e.g. 4G, 8192M).
+    #[arg(long = "oci-upper-size", value_name = "SIZE")]
+    pub oci_upper_size: Option<String>,
+
     /// Log verbosity for the sandbox runtime (error, warn, info, debug, trace).
     #[arg(long)]
     pub log_level: Option<String>,
@@ -141,24 +147,15 @@ pub struct SandboxOpts {
     #[arg(short, long)]
     pub port: Vec<String>,
 
-    /// Disable all network access. Sugar for `--net-default-egress deny`
-    /// with no rules.
+    /// Disable all network access by default. Sugar for `--net-default deny`.
+    /// Combine with `--net-rule allow@<target>` entries to build an
+    /// allowlist; without rules, the guest has no network reachability.
     #[cfg(feature = "net")]
-    #[arg(long = "no-net")]
+    #[arg(
+        long = "no-net",
+        conflicts_with_all = ["net_default", "net_default_egress", "net_default_ingress"]
+    )]
     pub no_net: bool,
-
-    /// Deny egress to a domain. Equivalent to a `deny Domain("...")`
-    /// policy rule appended after any `--net-rule` entries.
-    #[cfg(feature = "net")]
-    #[arg(long = "deny-domain", value_name = "NAME")]
-    pub deny_domain: Vec<String>,
-
-    /// Deny egress to all subdomains of a suffix (e.g. `.ads.example`).
-    /// Equivalent to a `deny DomainSuffix("...")` rule appended after
-    /// any `--net-rule` entries.
-    #[cfg(feature = "net")]
-    #[arg(long = "deny-domain-suffix", value_name = "SUFFIX")]
-    pub deny_domain_suffix: Vec<String>,
 
     /// Allow DNS responses pointing to private/internal IP addresses.
     #[cfg(feature = "net")]
@@ -191,14 +188,31 @@ pub struct SandboxOpts {
     /// rule tokens. Token grammar:
     /// `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`.
     ///
-    /// Examples:
-    ///   --net-rule "allow@public"
-    ///   --net-rule "deny@198.51.100.5,allow@public"
-    ///   --net-rule "allow:ingress@private"
-    ///   --net-rule "allow@example.com:tcp:443"
+    /// Target kinds: IPs/CIDRs, domains (`example.com`), domain suffixes
+    /// (`*.example.com` shorthand or `suffix=example.com`), and groups
+    /// (`public`, `private`, `multicast`, ...). Suffixes must be at
+    /// least two labels (e.g. `*.example.com`, not `*.com`).
+    ///
+    /// Examples: --net-rule "allow@public"
+    /// --net-rule "deny@198.51.100.5,allow@public"
+    /// --net-rule "allow:ingress@private"
+    /// --net-rule "allow@example.com:tcp:443"
+    /// --net-rule "deny@*.ads.example.com"
     #[cfg(feature = "net")]
     #[arg(long = "net-rule", value_name = "TOKENS")]
     pub net_rule: Vec<String>,
+
+    /// Default action for traffic in both directions that doesn't match
+    /// any `--net-rule`. Sets egress and ingress symmetrically; use
+    /// `--net-default-egress` / `--net-default-ingress` to set them
+    /// independently.
+    #[cfg(feature = "net")]
+    #[arg(
+        long = "net-default",
+        value_name = "ACTION",
+        conflicts_with_all = ["net_default_egress", "net_default_ingress"],
+    )]
+    pub net_default: Option<String>,
 
     /// Default action for egress traffic that doesn't match any
     /// `--net-rule`. Default: deny (with an implicit allow@public rule
@@ -270,7 +284,7 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub secret: Vec<String>,
 
-    /// Action when a secret is sent to a disallowed host (block, block-and-log, block-and-terminate).
+    /// Action when a secret is sent to a disallowed host (block, block-and-log, block-and-terminate, passthrough).
     #[cfg(feature = "net")]
     #[arg(long)]
     pub on_secret_violation: Option<String>,
@@ -300,6 +314,7 @@ impl SandboxOpts {
             || self.hostname.is_some()
             || self.user.is_some()
             || self.pull.is_some()
+            || self.oci_upper_size.is_some()
             || self.log_level.is_some()
             || self.max_duration.is_some()
             || self.idle_timeout.is_some();
@@ -307,12 +322,11 @@ impl SandboxOpts {
         #[cfg(feature = "net")]
         let net = !self.port.is_empty()
             || self.no_net
-            || !self.deny_domain.is_empty()
-            || !self.deny_domain_suffix.is_empty()
             || self.no_dns_rebind_protection
             || !self.dns_nameserver.is_empty()
             || self.dns_query_timeout_ms.is_some()
             || !self.net_rule.is_empty()
+            || self.net_default.is_some()
             || self.net_default_egress.is_some()
             || self.net_default_ingress.is_some()
             || self.max_connections.is_some()
@@ -357,9 +371,10 @@ pub fn apply_sandbox_opts(
         validate_shell(shell)?;
         builder = builder.shell(shell);
     }
-    if let Some(ref grace) = opts.replace_with_grace {
-        let d = parse_duration(grace).map_err(|e| anyhow::anyhow!("--replace-with-grace: {e}"))?;
-        builder = builder.replace_with_grace(d);
+    if let Some(ref timeout) = opts.replace_with_timeout {
+        let d =
+            parse_duration(timeout).map_err(|e| anyhow::anyhow!("--replace-with-timeout: {e}"))?;
+        builder = builder.replace_with_timeout(d);
     } else if opts.replace {
         builder = builder.replace();
     }
@@ -407,6 +422,10 @@ pub fn apply_sandbox_opts(
     }
     if let Some(ref pull) = opts.pull {
         builder = builder.pull_policy(parse_pull_policy(pull)?);
+    }
+    if let Some(ref size) = opts.oci_upper_size {
+        let size_mib = ui::parse_size_mib(size).map_err(anyhow::Error::msg)?;
+        builder = builder.oci_upper_size(size_mib);
     }
 
     // --- Handoff init ---
@@ -457,16 +476,106 @@ pub fn apply_sandbox_opts(
 }
 
 /// Parse a volume spec and apply it to the builder.
+///
+/// Accepts: `SRC:DST[,ro][,stat-virt=strict|relaxed|off][,host-perms=private|mirror]`.
+///
+/// SRC and DST may contain commas — the parser splits on `:` first to
+/// separate `SRC` from `DST[,opts]`, and only then treats commas inside the
+/// DST portion as option separators. Duplicate option keys are rejected.
 pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
-    let (source, guest) = spec
+    use microsandbox::sandbox::{HostPermissions, StatVirtualization};
+
+    let (source, guest_and_opts) = spec
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("volume must be in format source:guest"))?;
 
-    if microsandbox_utils::looks_like_local_path_text(source) {
-        Ok(builder.volume(guest, |m| m.bind(source)))
-    } else {
-        Ok(builder.volume(guest, |m| m.named(source)))
+    let (guest, options) = match guest_and_opts.split_once(',') {
+        Some((g, o)) => (g, Some(o)),
+        None => (guest_and_opts, None),
+    };
+
+    let mut readonly = false;
+    let mut stat_virt: Option<StatVirtualization> = None;
+    let mut host_perms: Option<HostPermissions> = None;
+    let mut seen_ro = false;
+    let mut seen_stat_virt = false;
+    let mut seen_host_perms = false;
+
+    if let Some(opts) = options {
+        for opt in opts.split(',') {
+            let opt = opt.trim();
+            if opt.is_empty() {
+                continue;
+            }
+            match opt {
+                "ro" | "rw" => {
+                    if seen_ro {
+                        anyhow::bail!("volume option `ro`/`rw` specified more than once");
+                    }
+                    seen_ro = true;
+                    readonly = opt == "ro";
+                }
+                _ => {
+                    let (key, value) = opt.split_once('=').ok_or_else(|| {
+                        anyhow::anyhow!("volume option {opt:?} must be key=value")
+                    })?;
+                    match key {
+                        "stat-virt" => {
+                            if seen_stat_virt {
+                                anyhow::bail!("volume option `stat-virt` specified more than once");
+                            }
+                            seen_stat_virt = true;
+                            stat_virt = Some(match value {
+                                "strict" => StatVirtualization::Strict,
+                                "relaxed" => StatVirtualization::Relaxed,
+                                "off" => StatVirtualization::Off,
+                                other => anyhow::bail!(
+                                    "invalid stat-virt {other:?} (expected strict|relaxed|off)"
+                                ),
+                            });
+                        }
+                        "host-perms" => {
+                            if seen_host_perms {
+                                anyhow::bail!(
+                                    "volume option `host-perms` specified more than once"
+                                );
+                            }
+                            seen_host_perms = true;
+                            host_perms = Some(match value {
+                                "private" => HostPermissions::Private,
+                                "mirror" => HostPermissions::Mirror,
+                                other => anyhow::bail!(
+                                    "invalid host-perms {other:?} (expected private|mirror)"
+                                ),
+                            });
+                        }
+                        other => anyhow::bail!("unknown volume option {other:?}"),
+                    }
+                }
+            }
+        }
     }
+
+    let is_path = microsandbox_utils::looks_like_local_path_text(source);
+    let source = source.to_string();
+    let guest = guest.to_string();
+    Ok(builder.volume(guest, move |mut m| {
+        m = if is_path {
+            m.bind(&source)
+        } else {
+            m.named(&source)
+        };
+        if readonly {
+            m = m.readonly();
+        }
+        if let Some(sv) = stat_virt {
+            m = m.stat_virtualization(sv);
+        }
+        if let Some(hp) = host_perms {
+            m = m.host_permissions(hp);
+        }
+        m
+    }))
 }
 
 /// Apply network-related options to the builder (requires "net" feature).
@@ -487,39 +596,6 @@ fn apply_network_opts(
         };
     }
 
-    // Disable networking. `--no-net` is mutually exclusive with the
-    // policy-shaping flags: it kills the guest's network interface
-    // entirely, so any rule or default action would be dead code and
-    // is almost certainly a user mistake. Reject the combination at
-    // parse time with a helpful migration hint.
-    if opts.no_net {
-        let mut conflicts: Vec<&'static str> = Vec::new();
-        if !opts.net_rule.is_empty() {
-            conflicts.push("--net-rule");
-        }
-        if opts.net_default_egress.is_some() {
-            conflicts.push("--net-default-egress");
-        }
-        if opts.net_default_ingress.is_some() {
-            conflicts.push("--net-default-ingress");
-        }
-        if opts.net_ipv4_pool.is_some() {
-            conflicts.push("--net-ipv4-pool");
-        }
-        if opts.net_ipv6_pool.is_some() {
-            conflicts.push("--net-ipv6-pool");
-        }
-        if !conflicts.is_empty() {
-            anyhow::bail!(
-                "--no-net cannot be combined with {}; \
-                 --no-net disables the guest network entirely, so rules and defaults are dead code. \
-                 Drop --no-net to apply rules, or drop the rule flags to keep the network off.",
-                conflicts.join(" / "),
-            );
-        }
-        builder = builder.disable_network();
-    }
-
     // Secrets.
     for secret_str in &opts.secret {
         let (env_var, value, host) = parse_secret(secret_str)?;
@@ -527,12 +603,12 @@ fn apply_network_opts(
     }
 
     // DNS, TLS, and other network configuration.
-    let has_network_config = !opts.deny_domain.is_empty()
-        || !opts.deny_domain_suffix.is_empty()
-        || opts.no_dns_rebind_protection
+    let has_network_config = opts.no_dns_rebind_protection
         || !opts.dns_nameserver.is_empty()
         || opts.dns_query_timeout_ms.is_some()
         || !opts.net_rule.is_empty()
+        || opts.no_net
+        || opts.net_default.is_some()
         || opts.net_default_egress.is_some()
         || opts.net_default_ingress.is_some()
         || opts.net_ipv4_pool.is_some()
@@ -558,10 +634,10 @@ fn apply_network_opts(
         let dns_query_timeout_ms = opts.dns_query_timeout_ms;
         let network_policy = build_network_policy(
             &opts.net_rule,
+            opts.no_net,
+            opts.net_default.as_deref(),
             opts.net_default_egress.as_deref(),
             opts.net_default_ingress.as_deref(),
-            &opts.deny_domain,
-            &opts.deny_domain_suffix,
         )?;
         let max_conn = opts.max_connections;
         let ipv4_pool = opts
@@ -619,7 +695,9 @@ fn apply_network_opts(
                 n = n.trust_host_cas(true);
             }
             if let Some(action) = violation_action {
-                n = n.on_secret_violation(action);
+                n = n.on_secret_violation(|_| {
+                    microsandbox_network::builder::ViolationActionBuilder::from_action(action)
+                });
             }
 
             // TLS configuration.
@@ -705,43 +783,35 @@ pub fn parse_duration(s: &str) -> anyhow::Result<std::time::Duration> {
     }
 }
 
-/// Assemble a [`NetworkPolicy`] from `--net-rule` / `--net-default-*`
-/// and the bulk-deny flags. Returns `None` when no flag is set.
-/// Multiple `--net-rule` invocations concatenate in argv order.
+/// Assemble a [`NetworkPolicy`] from `--net-rule`, `--net-default*`,
+/// and `--no-net`. Returns `None` when no flag is set. Multiple
+/// `--net-rule` invocations concatenate in argv order.
+///
+/// `--no-net` desugars to `--net-default deny`; clap rejects combining
+/// it with the explicit defaults, so the four default-source params are
+/// mutually exclusive on the caller side.
 #[cfg(feature = "net")]
 fn build_network_policy(
     rule_args: &[String],
+    no_net: bool,
+    default_both: Option<&str>,
     default_egress: Option<&str>,
     default_ingress: Option<&str>,
-    deny_domains: &[String],
-    deny_domain_suffixes: &[String],
 ) -> anyhow::Result<Option<microsandbox_network::policy::NetworkPolicy>> {
-    use anyhow::Context;
-    use microsandbox_network::policy::{Action, Destination, DomainName, NetworkPolicy, Rule};
+    use microsandbox_network::policy::{Action, NetworkPolicy};
 
     use crate::net_rule::parse_rule_list;
 
-    let no_rule_flags =
-        rule_args.is_empty() && default_egress.is_none() && default_ingress.is_none();
-    let no_block_flags = deny_domains.is_empty() && deny_domain_suffixes.is_empty();
-    if no_rule_flags && no_block_flags {
+    let no_flags = rule_args.is_empty()
+        && !no_net
+        && default_both.is_none()
+        && default_egress.is_none()
+        && default_ingress.is_none();
+    if no_flags {
         return Ok(None);
     }
 
     let mut rules = Vec::new();
-
-    // Prepend bulk-deny flags so they outrank later allow rules.
-    for d in deny_domains {
-        let domain: DomainName = d.parse().with_context(|| format!("--deny-domain {d:?}"))?;
-        rules.push(Rule::deny_egress(Destination::Domain(domain)));
-    }
-    for s in deny_domain_suffixes {
-        let suffix: DomainName = s
-            .parse()
-            .with_context(|| format!("--deny-domain-suffix {s:?}"))?;
-        rules.push(Rule::deny_egress(Destination::DomainSuffix(suffix)));
-    }
-
     for arg in rule_args {
         let parsed = parse_rule_list(arg).map_err(anyhow::Error::from)?;
         rules.extend(parsed);
@@ -755,23 +825,31 @@ fn build_network_policy(
         }
     };
 
+    // `--no-net` and `--net-default` are siblings: both set egress and
+    // ingress symmetrically. clap enforces they're mutex with each
+    // other and with `--net-default-{egress,ingress}`, so at most one
+    // source resolves here.
+    let symmetric = if no_net {
+        Some(Action::Deny)
+    } else if let Some(raw) = default_both {
+        Some(parse_action("--net-default", raw)?)
+    } else {
+        None
+    };
+
     // When the user sets no defaults explicitly, fall through to
     // NetworkPolicy::public_only's defaults so behaviour stays in sync
     // with the preset.
-    //
-    // Exception: if only --deny-domain / --deny-domain-suffix were set
-    // (no --net-rule, no --net-default-*), default egress flips to
-    // Allow so the rest of the network keeps working — these flags
-    // add deny entries on top of permissive defaults.
     let preset = NetworkPolicy::public_only();
-    let default_egress = match default_egress {
-        Some(raw) => parse_action("--net-default-egress", raw)?,
-        None if no_rule_flags => Action::Allow,
-        None => preset.default_egress,
+    let default_egress = match (symmetric, default_egress) {
+        (_, Some(raw)) => parse_action("--net-default-egress", raw)?,
+        (Some(action), None) => action,
+        (None, None) => preset.default_egress,
     };
-    let default_ingress = match default_ingress {
-        Some(raw) => parse_action("--net-default-ingress", raw)?,
-        None => preset.default_ingress,
+    let default_ingress = match (symmetric, default_ingress) {
+        (_, Some(raw)) => parse_action("--net-default-ingress", raw)?,
+        (Some(action), None) => action,
+        (None, None) => preset.default_ingress,
     };
 
     Ok(Some(NetworkPolicy {
@@ -868,14 +946,15 @@ fn parse_secret(spec: &str) -> anyhow::Result<(String, String, String)> {
 fn parse_violation_action(
     s: &Option<String>,
 ) -> anyhow::Result<Option<microsandbox_network::secrets::config::ViolationAction>> {
-    use microsandbox_network::secrets::config::ViolationAction;
+    use microsandbox_network::secrets::config::{HostPattern, ViolationAction};
     match s.as_deref() {
         None => Ok(None),
         Some("block") => Ok(Some(ViolationAction::Block)),
         Some("block-and-log") => Ok(Some(ViolationAction::BlockAndLog)),
         Some("block-and-terminate") => Ok(Some(ViolationAction::BlockAndTerminate)),
+        Some("passthrough") => Ok(Some(ViolationAction::Passthrough(vec![HostPattern::Any]))),
         Some(other) => anyhow::bail!(
-            "invalid violation action: {other} (expected: block, block-and-log, block-and-terminate)"
+            "invalid violation action: {other} (expected: block, block-and-log, block-and-terminate, passthrough)"
         ),
     }
 }
@@ -1156,9 +1235,207 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use microsandbox::sandbox::VolumeMount;
+    use microsandbox::sandbox::{HostPermissions, RootfsSource, StatVirtualization, VolumeMount};
 
     use super::*;
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn parse_violation_action_accepts_passthrough() {
+        let action = parse_violation_action(&Some("passthrough".to_string()))
+            .expect("passthrough should parse")
+            .expect("action should be present");
+
+        assert!(matches!(
+            action,
+            microsandbox_network::secrets::config::ViolationAction::Passthrough(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_oci_upper_size() {
+        let opts = SandboxOpts {
+            oci_upper_size: Some("8G".to_string()),
+            ..Default::default()
+        };
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        match config.image {
+            RootfsSource::Oci(oci) => assert_eq!(oci.upper_size_mib, Some(8192)),
+            other => panic!("expected Oci, got {other:?}"),
+        }
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Tests: apply_volume / -v parser
+    //----------------------------------------------------------------------------------------------
+
+    /// Apply a single `-v` spec to a fresh builder and return the resulting mount.
+    async fn build_one(spec: &str) -> VolumeMount {
+        let builder = SandboxBuilder::new("test").image("/tmp/rootfs");
+        let builder = apply_volume(builder, spec).unwrap();
+        let config = builder.build().await.unwrap();
+        config.mounts.into_iter().next().unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_bind_defaults_to_strict_private() {
+        let mount = build_one("/host:/guest").await;
+        match mount {
+            VolumeMount::Bind {
+                stat_virtualization,
+                host_permissions,
+                readonly,
+                ..
+            } => {
+                assert!(matches!(stat_virtualization, StatVirtualization::Strict));
+                assert!(matches!(host_permissions, HostPermissions::Private));
+                assert!(!readonly);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_ro_flag() {
+        let mount = build_one("/host:/guest,ro").await;
+        match mount {
+            VolumeMount::Bind { readonly, .. } => assert!(readonly),
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_stat_virt_relaxed() {
+        let mount = build_one("/host:/guest,ro,stat-virt=relaxed").await;
+        match mount {
+            VolumeMount::Bind {
+                stat_virtualization,
+                readonly,
+                ..
+            } => {
+                assert!(matches!(stat_virtualization, StatVirtualization::Relaxed));
+                assert!(readonly);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_host_perms_mirror() {
+        let mount = build_one("./project:/work,host-perms=mirror").await;
+        match mount {
+            VolumeMount::Bind {
+                host_permissions, ..
+            } => {
+                assert!(matches!(host_permissions, HostPermissions::Mirror));
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_combined_policies() {
+        // Off + Mirror is rejected at build; use Relaxed + Mirror instead.
+        let mount = build_one("/mnt:/host,ro,stat-virt=relaxed,host-perms=mirror").await;
+        match mount {
+            VolumeMount::Bind {
+                stat_virtualization,
+                host_permissions,
+                readonly,
+                ..
+            } => {
+                assert!(matches!(stat_virtualization, StatVirtualization::Relaxed));
+                assert!(matches!(host_permissions, HostPermissions::Mirror));
+                assert!(readonly);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_rejects_off_plus_mirror_at_sandbox_build() {
+        // The Off+Mirror conflict surfaces at SandboxBuilder.build() time
+        // because MountBuilder.build() is deferred inside the volume closure.
+        let builder = SandboxBuilder::new("test").image("/tmp/rootfs");
+        let builder = apply_volume(builder, "/mnt:/host,stat-virt=off,host-perms=mirror")
+            .expect("apply_volume defers validation");
+        let err = builder.build().await.unwrap_err();
+        assert!(
+            err.to_string().contains("Off cannot be combined with"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_named() {
+        let mount = build_one("mycache:/data,stat-virt=relaxed").await;
+        match mount {
+            VolumeMount::Named {
+                name,
+                stat_virtualization,
+                ..
+            } => {
+                assert_eq!(name, "mycache");
+                assert!(matches!(stat_virtualization, StatVirtualization::Relaxed));
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    fn expect_apply_volume_err(spec: &str) -> String {
+        let builder = SandboxBuilder::new("test").image("/tmp/rootfs");
+        match apply_volume(builder, spec) {
+            Ok(_) => panic!("expected error for spec {spec:?}"),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_unknown_stat_virt() {
+        let err = expect_apply_volume_err("/host:/guest,stat-virt=bogus");
+        assert!(err.contains("invalid stat-virt"), "got: {err}");
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_unknown_host_perms() {
+        let err = expect_apply_volume_err("/host:/guest,host-perms=public");
+        assert!(err.contains("invalid host-perms"), "got: {err}");
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_unknown_option_key() {
+        let err = expect_apply_volume_err("/host:/guest,bogus=1");
+        assert!(err.contains("unknown volume option"), "got: {err}");
+    }
+
+    #[test]
+    fn test_apply_volume_rejects_duplicate_stat_virt() {
+        let err = expect_apply_volume_err("/host:/guest,stat-virt=strict,stat-virt=off");
+        assert!(err.contains("more than once"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_rejects_comma_in_source_path() {
+        // Embedded commas in host paths could silently inject mount options
+        // through the spawn → VM wire format. The SDK rejects them at build
+        // time with a clear error; the CLI surfaces that error verbatim.
+        let builder = SandboxBuilder::new("test").image("/tmp/rootfs");
+        // apply_volume itself defers to MountBuilder which only validates at
+        // SandboxBuilder::build() — so the parse step succeeds and the
+        // rejection comes from the subsequent build.
+        let builder =
+            apply_volume(builder, "/path/with,comma:/dst").expect("apply_volume defers validation");
+        let err = builder.build().await.unwrap_err();
+        assert!(
+            err.to_string().contains("must not contain ','"),
+            "got: {err}"
+        );
+    }
 
     /// Write a temp file with unique name, return its path.
     fn write_temp(content: &str) -> PathBuf {
@@ -1556,5 +1833,87 @@ mod tests {
     fn collect_empty_inputs_ok() {
         let out = collect_scripts(None, &[], &[], &[]).unwrap();
         assert!(out.is_empty());
+    }
+
+    // --- build_network_policy: --net-default / --no-net ---
+
+    #[cfg(feature = "net")]
+    use microsandbox_network::policy::Action;
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_no_flags_returns_none() {
+        let p = build_network_policy(&[], false, None, None, None).unwrap();
+        assert!(p.is_none());
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_net_default_deny_sets_both_directions() {
+        let p = build_network_policy(&[], false, Some("deny"), None, None)
+            .unwrap()
+            .expect("policy");
+        assert_eq!(p.default_egress, Action::Deny);
+        assert_eq!(p.default_ingress, Action::Deny);
+        assert!(p.rules.is_empty());
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_net_default_allow_sets_both_directions() {
+        let p = build_network_policy(&[], false, Some("allow"), None, None)
+            .unwrap()
+            .expect("policy");
+        assert_eq!(p.default_egress, Action::Allow);
+        assert_eq!(p.default_ingress, Action::Allow);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_no_net_desugars_to_deny_both() {
+        let p = build_network_policy(&[], true, None, None, None)
+            .unwrap()
+            .expect("policy");
+        assert_eq!(p.default_egress, Action::Deny);
+        assert_eq!(p.default_ingress, Action::Deny);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_no_net_with_allow_rule_yields_allowlist() {
+        let rules = vec!["allow@example.com".to_string()];
+        let p = build_network_policy(&rules, true, None, None, None)
+            .unwrap()
+            .expect("policy");
+        assert_eq!(p.default_egress, Action::Deny);
+        assert_eq!(p.default_ingress, Action::Deny);
+        assert_eq!(p.rules.len(), 1);
+        assert_eq!(p.rules[0].action, Action::Allow);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_net_default_rejects_unknown_action() {
+        let err = build_network_policy(&[], false, Some("maybe"), None, None).unwrap_err();
+        assert!(
+            err.to_string().contains("--net-default"),
+            "expected --net-default in error, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn build_policy_rule_only_uses_preset_defaults() {
+        // Without any --net-default* flag, rules apply on top of the
+        // public_only preset (deny egress, allow ingress). Verifies the
+        // "rules alone keep the preset's defaults" path now that the
+        // --deny-domain* flip-to-allow exception is gone.
+        let rules = vec!["allow@example.com".to_string()];
+        let p = build_network_policy(&rules, false, None, None, None)
+            .unwrap()
+            .expect("policy");
+        let preset = microsandbox_network::policy::NetworkPolicy::public_only();
+        assert_eq!(p.default_egress, preset.default_egress);
+        assert_eq!(p.default_ingress, preset.default_ingress);
     }
 }

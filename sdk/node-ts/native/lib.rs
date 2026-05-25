@@ -5,6 +5,7 @@
 // in test builds only — production builds still lint it normally.
 #![cfg_attr(test, allow(dead_code))]
 
+mod agent;
 mod attach_options_builder;
 mod dns_builder;
 mod error;
@@ -30,7 +31,9 @@ mod secret_builder;
 mod setup;
 mod snapshot;
 mod snapshot_builder;
+mod ssh;
 mod tls_builder;
 mod types;
+mod violation_action_builder;
 mod volume;
 mod volume_builder;

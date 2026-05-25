@@ -1,0 +1,231 @@
+---
+title: SSH
+description: Go SDK - SSH API reference
+icon: "lock"
+---
+
+See [SSH](/sandboxes/ssh/overview) for usage flows.
+
+## Sandbox
+
+---
+
+#### SSH()
+
+```go
+func (s *Sandbox) SSH() *SSH
+```
+
+Return the SSH namespace for this sandbox.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `*SSH` | SSH client and server helpers |
+
+## SSH
+
+---
+
+#### Connect()
+
+```go
+func (ssh *SSH) Connect(ctx context.Context, opts ...SSHClientOption) (*SSHClient, error)
+```
+
+Connect a native in-process SSH client to the sandbox.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| ctx | `context.Context` | Cancels the connection attempt |
+| opts | `...SSHClientOption` | Client options |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `*SSHClient` | Native SSH client session |
+| `error` | Typed microsandbox error |
+
+---
+
+#### Server()
+
+```go
+func (ssh *SSH) Server(ctx context.Context, opts ...SSHServerOption) (*SSHServer, error)
+```
+
+Prepare a reusable SSH server endpoint.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| ctx | `context.Context` | Cancels server preparation |
+| opts | `...SSHServerOption` | Server options |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `*SSHServer` | Server endpoint |
+| `error` | Typed microsandbox error |
+
+## SSHClient
+
+---
+
+#### Exec()
+
+```go
+func (c *SSHClient) Exec(ctx context.Context, command string, opts ...SSHExecOption) (*SSHOutput, error)
+```
+
+Run an SSH exec request and collect stdout, stderr, and exit status.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| ctx | `context.Context` | Cancels the exec request |
+| command | `string` | Command string sent through SSH |
+| opts | `...SSHExecOption` | Exec options |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `*SSHOutput` | Captured output and status |
+| `error` | Typed microsandbox error |
+
+---
+
+#### Attach()
+
+```go
+func (c *SSHClient) Attach(ctx context.Context, opts ...SSHAttachOption) (int, error)
+```
+
+Attach the local terminal to an interactive SSH shell.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| ctx | `context.Context` | Cancels the attach session |
+| opts | `...SSHAttachOption` | Attach options |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `int` | Exit code |
+| `error` | Typed microsandbox error |
+
+---
+
+#### SFTP()
+
+```go
+func (c *SSHClient) SFTP(ctx context.Context) (*SFTPClient, error)
+```
+
+Open an SFTP session over this SSH connection.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `*SFTPClient` | SFTP client session |
+| `error` | Typed microsandbox error |
+
+---
+
+#### Close()
+
+```go
+func (c *SSHClient) Close(ctx context.Context) error
+```
+
+Close the native SSH client session. The handle is consumed.
+
+## SFTPClient
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| Read(ctx, path) | `([]byte, error)` | Read a file into memory |
+| Write(ctx, path, data) | `error` | Create or truncate a file |
+| Mkdir(ctx, path) | `error` | Create a directory |
+| RemoveFile(ctx, path) | `error` | Remove a file |
+| RemoveDir(ctx, path) | `error` | Remove an empty directory |
+| Rename(ctx, oldPath, newPath) | `error` | Rename a file or directory |
+| RealPath(ctx, path) | `(string, error)` | Resolve a canonical path |
+| ReadLink(ctx, path) | `(string, error)` | Read a symlink target |
+| Symlink(ctx, target, linkPath) | `error` | Create a symlink |
+| Close(ctx) | `error` | Close the SFTP session |
+
+## SSHServer
+
+---
+
+#### ServeStdio()
+
+```go
+func (srv *SSHServer) ServeStdio(ctx context.Context) error
+```
+
+Serve one SSH transport over stdin/stdout.
+
+---
+
+#### Close()
+
+```go
+func (srv *SSHServer) Close(ctx context.Context) error
+```
+
+Release the prepared server endpoint. The handle is consumed.
+
+## Types
+
+### SSHOutput
+
+| Field / Method | Type | Description |
+|----------------|------|-------------|
+| Status | `int` | Exit status code |
+| Stdout | `[]byte` | Captured stdout bytes |
+| Stderr | `[]byte` | Captured stderr bytes |
+| Success() | `bool` | `true` if status is `0` |
+
+### SSHClientOption
+
+| Option | Description |
+|--------|-------------|
+| WithSSHUser(user) | SSH login user. Defaults to `root` |
+| WithSSHTerm(term) | Terminal name for interactive sessions |
+| WithSSHClientSFTP(enabled) | Enable or disable SFTP on the internal server |
+
+### SSHExecOption
+
+| Option | Description |
+|--------|-------------|
+| WithSSHTTY(enabled) | Request a PTY for the exec channel |
+
+### SSHAttachOption
+
+| Option | Description |
+|--------|-------------|
+| WithSSHAttachTerm(term) | Terminal name for the shell |
+| WithSSHDetachKeys(keys) | Detach key sequence |
+
+### SSHServerOption
+
+| Option | Description |
+|--------|-------------|
+| WithSSHHostKeyPath(path) | Override the host private key path |
+| WithSSHAuthorizedKeysPath(path) | Override the authorized-keys path |
+| WithSSHServerUser(user) | Override the guest user used for exec requests |
+| WithSSHServerSFTP(enabled) | Enable or disable SFTP |

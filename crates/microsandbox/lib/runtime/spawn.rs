@@ -32,8 +32,18 @@ use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 use crate::{
     MicrosandboxResult, config,
     runtime::handle::ProcessHandle,
-    sandbox::{DiskImageFormat, Rlimit, RootfsSource, SandboxConfig, VolumeMount},
+    sandbox::{
+        DiskImageFormat, HostPermissions, Rlimit, RootfsSource, SandboxConfig, StatVirtualization,
+        VolumeMount,
+    },
 };
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+static SIGCHLD_ALT_STACK_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -165,6 +175,8 @@ pub async fn spawn_sandbox(
     // Capture stdout (for startup JSON), inherit stderr so errors are visible.
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::inherit());
+
+    ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
 
     // Spawn the sandbox process. On failure, release the metrics reservation
     // so the slot does not leak.
@@ -318,6 +330,68 @@ fn release_metrics_reservation(
     }
 }
 
+#[cfg(target_os = "linux")]
+async fn ensure_sigchld_handler_uses_alt_stack_before_spawn() -> MicrosandboxResult<()> {
+    SIGCHLD_ALT_STACK_INIT
+        .get_or_try_init(|| async {
+            install_tokio_sigchld_handler()?;
+            patch_sigchld_handler_uses_alt_stack();
+            Ok::<(), crate::MicrosandboxError>(())
+        })
+        .await?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn ensure_sigchld_handler_uses_alt_stack_before_spawn() -> MicrosandboxResult<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn install_tokio_sigchld_handler() -> MicrosandboxResult<()> {
+    let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
+    let _ = Box::leak(Box::new(signal));
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn patch_sigchld_handler_uses_alt_stack() {
+    // Go's cgo runtime requires non-Go signal handlers to use SA_ONSTACK.
+    // The caller initializes Tokio's SIGCHLD handler first, before spawning
+    // sandbox children, then this preserves the handler while adding the flag.
+    //
+    // SAFETY: sigaction is called with valid pointers to read and then rewrite
+    // the current SIGCHLD action, preserving the existing handler and mask.
+    unsafe {
+        let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+        if libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) != 0 {
+            return;
+        }
+
+        let mut action = action.assume_init();
+        if action.sa_flags & libc::SA_ONSTACK != 0 {
+            return;
+        }
+
+        action.sa_flags |= libc::SA_ONSTACK;
+        let _ = libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut());
+    }
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn sigchld_handler_uses_alt_stack() -> bool {
+    // SAFETY: sigaction is called with a valid output pointer and a null new
+    // action pointer, which only reads the current process handler state.
+    unsafe {
+        let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+        if libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) != 0 {
+            return false;
+        }
+
+        action.assume_init().sa_flags & libc::SA_ONSTACK != 0
+    }
+}
+
 async fn terminate_startup_process(
     child: &mut tokio::process::Child,
 ) -> Option<std::process::ExitStatus> {
@@ -344,7 +418,15 @@ async fn stage_file_mounts(
                 host,
                 guest,
                 readonly,
-            } if host.is_file() => Some((host, guest, *readonly)),
+                stat_virtualization,
+                host_permissions,
+            } if host.is_file() => Some((
+                host,
+                guest,
+                *readonly,
+                *stat_virtualization,
+                *host_permissions,
+            )),
             _ => None,
         })
         .collect();
@@ -356,7 +438,7 @@ async fn stage_file_mounts(
     let tempdir = tempfile::tempdir()?;
     let mut staged = HashMap::new();
 
-    for (host, guest, readonly) in file_mounts {
+    for (host, guest, readonly, _stat_virt, _host_perms) in file_mounts {
         // Generate a random tag to avoid collisions.
         let id: u32 = rand::rng().random();
         let tag = format!("fm_{id:08x}");
@@ -424,20 +506,41 @@ async fn stage_file_mounts(
     Ok((staged, Some(tempdir)))
 }
 
-/// Push a `--mount tag:host_path[:ro]` arg pair.
+/// Push a `--mount tag:host_path[:ro][,stat-virt=...][,host-perms=...]` arg pair.
 fn push_dir_mount_arg(
     args: &mut Vec<OsString>,
     guest: &str,
     host_display: &impl std::fmt::Display,
     readonly: bool,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
 ) {
     let tag = guest_mount_tag(guest);
     let mut arg = format!("{tag}:{host_display}");
     if readonly {
         arg.push_str(":ro");
     }
+    append_policy_options(&mut arg, stat_virtualization, host_permissions);
     args.push(OsString::from("--mount"));
     args.push(OsString::from(arg));
+}
+
+/// Append `,stat-virt=...,host-perms=...` to a `--mount` arg when the policies
+/// deviate from the runtime defaults. Defaults are omitted to keep args tidy.
+fn append_policy_options(
+    arg: &mut String,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+) {
+    match stat_virtualization {
+        StatVirtualization::Strict => {}
+        StatVirtualization::Relaxed => arg.push_str(",stat-virt=relaxed"),
+        StatVirtualization::Off => arg.push_str(",stat-virt=off"),
+    }
+    match host_permissions {
+        HostPermissions::Private => {}
+        HostPermissions::Mirror => arg.push_str(",host-perms=mirror"),
+    }
 }
 
 /// Append a `tag:guest_path[:ro]` entry to the `MSB_DIR_MOUNTS` env var value.
@@ -454,12 +557,20 @@ fn push_dir_mounts_spec(dir_mounts_val: &mut String, guest: &str, readonly: bool
     }
 }
 
-/// Push a `--mount fm_tag:file_mount_dir[:ro]` arg pair.
-fn push_file_mount_arg(args: &mut Vec<OsString>, tag: &str, file_mount_dir: &Path, readonly: bool) {
+/// Push a `--mount fm_tag:file_mount_dir[:ro][,stat-virt=...][,host-perms=...]` arg pair.
+fn push_file_mount_arg(
+    args: &mut Vec<OsString>,
+    tag: &str,
+    file_mount_dir: &Path,
+    readonly: bool,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+) {
     let mut arg = format!("{tag}:{}", file_mount_dir.display());
     if readonly {
         arg.push_str(":ro");
     }
+    append_policy_options(&mut arg, stat_virtualization, host_permissions);
     args.push(OsString::from("--mount"));
     args.push(OsString::from(arg));
 }
@@ -721,12 +832,28 @@ fn sandbox_cli_args(
                 host,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => {
                 if let Some((file_mount_dir, filename, tag)) = staged_file_mounts.get(guest) {
-                    push_file_mount_arg(&mut args, tag, file_mount_dir, *readonly);
+                    push_file_mount_arg(
+                        &mut args,
+                        tag,
+                        file_mount_dir,
+                        *readonly,
+                        *stat_virtualization,
+                        *host_permissions,
+                    );
                     push_file_mounts_spec(&mut file_mounts_val, tag, filename, guest, *readonly);
                 } else {
-                    push_dir_mount_arg(&mut args, guest, &host.display(), *readonly);
+                    push_dir_mount_arg(
+                        &mut args,
+                        guest,
+                        &host.display(),
+                        *readonly,
+                        *stat_virtualization,
+                        *host_permissions,
+                    );
                     push_dir_mounts_spec(&mut dir_mounts_val, guest, *readonly);
                 }
             }
@@ -734,9 +861,18 @@ fn sandbox_cli_args(
                 name,
                 guest,
                 readonly,
+                stat_virtualization,
+                host_permissions,
             } => {
                 let vol_path = config::config().volumes_dir().join(name);
-                push_dir_mount_arg(&mut args, guest, &vol_path.display(), *readonly);
+                push_dir_mount_arg(
+                    &mut args,
+                    guest,
+                    &vol_path.display(),
+                    *readonly,
+                    *stat_virtualization,
+                    *host_permissions,
+                );
                 push_dir_mounts_spec(&mut dir_mounts_val, guest, *readonly);
             }
             VolumeMount::Tmpfs {
@@ -939,6 +1075,137 @@ mod tests {
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_sigchld_handler_uses_alt_stack_after_prepare() {
+        super::ensure_sigchld_handler_uses_alt_stack_before_spawn()
+            .await
+            .unwrap();
+
+        assert!(super::sigchld_handler_uses_alt_stack());
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Tests: stat-virt + host-perms encoding in --mount args
+    //----------------------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_dir_mount_arg_omits_defaults() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| m.bind("/host/data"))
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        // Default Strict + Private must not show up in the wire format.
+        let mount_args: Vec<&String> = rendered
+            .windows(2)
+            .filter(|p| p[0] == "--mount")
+            .map(|p| &p[1])
+            .collect();
+        assert!(!mount_args.is_empty());
+        let m = mount_args[0];
+        assert!(
+            !m.contains("stat-virt") && !m.contains("host-perms"),
+            "default-policy mount leaked policy options into wire format: {m}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dir_mount_arg_encodes_relaxed_stat_virt() {
+        use crate::sandbox::StatVirtualization;
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/host-tmp", |m| {
+                m.bind("/tmp")
+                    .readonly()
+                    .stat_virtualization(StatVirtualization::Relaxed)
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let m = rendered
+            .windows(2)
+            .find(|p| p[0] == "--mount")
+            .map(|p| p[1].clone())
+            .expect("expected --mount arg");
+        assert!(m.contains(":ro"), "expected ro flag: {m}");
+        assert!(m.contains(",stat-virt=relaxed"), "missing policy: {m}");
+    }
+
+    #[tokio::test]
+    async fn test_dir_mount_arg_encodes_mirror_host_perms() {
+        use crate::sandbox::HostPermissions;
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/work", |m| {
+                m.bind("./project")
+                    .host_permissions(HostPermissions::Mirror)
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let m = rendered
+            .windows(2)
+            .find(|p| p[0] == "--mount")
+            .map(|p| p[1].clone())
+            .expect("expected --mount arg");
+        assert!(m.contains(",host-perms=mirror"), "missing policy: {m}");
+    }
+
+    #[tokio::test]
+    async fn test_dir_mount_arg_encodes_both_policies_off_plus_private() {
+        // `Off + Mirror` is rejected at build time; combine `Off` with the
+        // explicit (matching default) `Private` to verify both encoders fire.
+        use crate::sandbox::{HostPermissions, StatVirtualization};
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/host", |m| {
+                m.bind("/mnt/windows")
+                    .readonly()
+                    .stat_virtualization(StatVirtualization::Off)
+                    .host_permissions(HostPermissions::Private)
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let m = rendered
+            .windows(2)
+            .find(|p| p[0] == "--mount")
+            .map(|p| p[1].clone())
+            .expect("expected --mount arg");
+        assert!(m.contains(",stat-virt=off"));
+        // host-perms=private is the default and is omitted from the wire format.
+        assert!(!m.contains("host-perms"));
+    }
+
+    #[tokio::test]
+    async fn test_off_plus_mirror_rejected_at_build_time() {
+        use crate::sandbox::{HostPermissions, StatVirtualization};
+        let err = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/host", |m| {
+                m.bind("/mnt/windows")
+                    .stat_virtualization(StatVirtualization::Off)
+                    .host_permissions(HostPermissions::Mirror)
+            })
+            .build()
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Off cannot be combined with"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1286,7 +1553,7 @@ mod tests {
     async fn test_sandbox_cli_args_apply_default_oci_tmpfs() {
         let mut config = SandboxConfig {
             name: "test".into(),
-            image: RootfsSource::Oci("alpine".into()),
+            image: RootfsSource::oci("alpine"),
             memory_mib: 1024,
             manifest_digest: Some(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),

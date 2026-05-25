@@ -40,6 +40,15 @@
               "sandboxes/overview",
               "sandboxes/lifecycle",
               "sandboxes/commands",
+              {
+                "group": "SSH",
+                "icon": "lock",
+                "pages": [
+                  "sandboxes/ssh/overview",
+                  "sandboxes/ssh/native-sessions",
+                  "sandboxes/ssh/external-clients"
+                ]
+              },
               "sandboxes/filesystem",
               "sandboxes/volumes",
               "sandboxes/secrets",
@@ -94,12 +103,14 @@
             "pages": [
               "sdk/rust/sandbox",
               "sdk/rust/execution",
+              "sdk/rust/ssh",
               "sdk/rust/filesystem",
               "sdk/rust/volumes",
               "sdk/rust/networking",
               "sdk/rust/secrets",
               "sdk/rust/snapshots",
-              "sdk/rust/events"
+              "sdk/rust/events",
+              "sdk/rust/agent-client"
             ]
           },
           {
@@ -108,12 +119,14 @@
             "pages": [
               "sdk/typescript/sandbox",
               "sdk/typescript/execution",
+              "sdk/typescript/ssh",
               "sdk/typescript/filesystem",
               "sdk/typescript/volumes",
               "sdk/typescript/networking",
               "sdk/typescript/secrets",
               "sdk/typescript/snapshots",
-              "sdk/typescript/events"
+              "sdk/typescript/events",
+              "sdk/typescript/agent-client"
             ]
           },
           {
@@ -122,12 +135,14 @@
             "pages": [
               "sdk/python/sandbox",
               "sdk/python/execution",
+              "sdk/python/ssh",
               "sdk/python/filesystem",
               "sdk/python/volumes",
               "sdk/python/networking",
               "sdk/python/secrets",
               "sdk/python/snapshots",
-              "sdk/python/events"
+              "sdk/python/events",
+              "sdk/python/agent-client"
             ]
           },
           {
@@ -136,13 +151,15 @@
             "pages": [
               "sdk/go/sandbox",
               "sdk/go/execution",
+              "sdk/go/ssh",
               "sdk/go/filesystem",
               "sdk/go/volumes",
               "sdk/go/images",
               "sdk/go/networking",
               "sdk/go/secrets",
               "sdk/go/snapshots",
-              "sdk/go/events"
+              "sdk/go/events",
+              "sdk/go/agent-client"
             ]
           }
         ]
@@ -156,6 +173,7 @@
             "pages": [
               "cli/overview",
               "cli/sandbox-commands",
+              "cli/ssh-commands",
               "cli/volume-commands",
               "cli/image-commands"
             ]

@@ -1,0 +1,221 @@
+---
+title: SSH
+description: TypeScript SDK - SSH API reference
+icon: "lock"
+---
+
+See [SSH](/sandboxes/ssh/overview) for usage flows.
+
+## Sandbox
+
+---
+
+#### ssh()
+
+```typescript
+ssh(): SandboxSsh
+```
+
+Return the SSH namespace for this sandbox.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| [`SandboxSsh`](#sandboxssh) | SSH client and server helpers |
+
+## SandboxSsh
+
+---
+
+#### connect()
+
+```typescript
+connect(opts?: SshClientOptions): Promise<SshClient>
+```
+
+Connect a native in-process SSH client to the sandbox.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| opts? | [`SshClientOptions`](#sshclientoptions) | Client options |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Promise<`[`SshClient`](#sshclient)`>` | Native SSH client session |
+
+---
+
+#### server()
+
+```typescript
+server(opts?: SshServerOptions): Promise<SshServer>
+```
+
+Prepare a reusable SSH server endpoint.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| opts? | [`SshServerOptions`](#sshserveroptions) | Server options |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Promise<`[`SshServer`](#sshserver)`>` | Server endpoint |
+
+## SshClient
+
+---
+
+#### exec()
+
+```typescript
+exec(command: string, opts?: SshExecOptions): Promise<SshOutput>
+```
+
+Run an SSH exec request and collect stdout, stderr, and exit status.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| command | `string` | Command string sent through SSH |
+| opts? | [`SshExecOptions`](#sshexecoptions) | Exec options |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Promise<`[`SshOutput`](#sshoutput)`>` | Captured output and status |
+
+---
+
+#### attach()
+
+```typescript
+attach(opts?: SshAttachOptions): Promise<number>
+```
+
+Attach the local terminal to an interactive SSH shell.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| opts? | [`SshAttachOptions`](#sshattachoptions) | Attach options |
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Promise<number>` | Exit code |
+
+---
+
+#### sftp()
+
+```typescript
+sftp(): Promise<SftpClient>
+```
+
+Open an SFTP session over this SSH connection.
+
+**Returns**
+
+| Type | Description |
+|------|-------------|
+| `Promise<`[`SftpClient`](#sftpclient)`>` | SFTP client session |
+
+---
+
+#### close()
+
+```typescript
+close(): Promise<void>
+```
+
+Close the native SSH client session.
+
+## SftpClient
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| read(path) | `Promise<Buffer>` | Read a file into memory |
+| write(path, data) | `Promise<void>` | Create or truncate a file |
+| mkdir(path) | `Promise<void>` | Create a directory |
+| removeFile(path) | `Promise<void>` | Remove a file |
+| removeDir(path) | `Promise<void>` | Remove an empty directory |
+| rename(oldPath, newPath) | `Promise<void>` | Rename a file or directory |
+| realPath(path) | `Promise<string>` | Resolve a canonical path |
+| readLink(path) | `Promise<string>` | Read a symlink target |
+| symlink(target, linkPath) | `Promise<void>` | Create a symlink |
+| close() | `Promise<void>` | Close the SFTP session |
+
+## SshServer
+
+---
+
+#### serveStdio()
+
+```typescript
+serveStdio(): Promise<void>
+```
+
+Serve one SSH transport over stdin/stdout.
+
+---
+
+#### close()
+
+```typescript
+close(): Promise<void>
+```
+
+Release the prepared server endpoint.
+
+## Types
+
+### SshOutput
+
+| Property | Type | Description |
+|----------|------|-------------|
+| status | `number` | Exit status code |
+| stdout | `Buffer` | Captured stdout bytes |
+| stderr | `Buffer` | Captured stderr bytes |
+
+### SshClientOptions
+
+| Property | Type | Description |
+|----------|------|-------------|
+| user | `string` | SSH login user. Defaults to `root` |
+| term | `string` | Terminal name for interactive sessions |
+| sftp | `boolean` | Enable or disable SFTP on the internal server |
+
+### SshExecOptions
+
+| Property | Type | Description |
+|----------|------|-------------|
+| tty | `boolean` | Request a PTY for the exec channel |
+
+### SshAttachOptions
+
+| Property | Type | Description |
+|----------|------|-------------|
+| term | `string` | Terminal name for the shell |
+| detachKeys | `string` | Detach key sequence |
+
+### SshServerOptions
+
+| Property | Type | Description |
+|----------|------|-------------|
+| hostKeyPath | `string` | Override the host private key path |
+| authorizedKeysPath | `string` | Override the authorized-keys path |
+| user | `string` | Override the guest user used for exec requests |
+| sftp | `boolean` | Enable or disable SFTP |

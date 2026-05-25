@@ -160,6 +160,9 @@ impl<'a> VolumeFs<'a> {
                         kind: FsEntryKind::Other,
                         size: 0,
                         mode: 0,
+                        uid: 0,
+                        gid: 0,
+                        accessed: None,
                         modified: None,
                     });
                 }
@@ -372,6 +375,13 @@ fn std_modified(meta: &std::fs::Metadata) -> Option<chrono::DateTime<chrono::Utc
         .map(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0).unwrap_or_default())
 }
 
+/// Extract the access time from `std::fs::Metadata`.
+fn std_accessed(meta: &std::fs::Metadata) -> Option<chrono::DateTime<chrono::Utc>> {
+    use std::os::unix::fs::MetadataExt;
+
+    chrono::DateTime::from_timestamp(meta.atime(), 0)
+}
+
 /// Convert `std::fs::Metadata` to an `FsEntry`.
 fn metadata_to_entry(path: &str, meta: &std::fs::Metadata) -> FsEntry {
     use std::os::unix::fs::MetadataExt;
@@ -381,6 +391,9 @@ fn metadata_to_entry(path: &str, meta: &std::fs::Metadata) -> FsEntry {
         kind: std_kind(meta),
         size: meta.len(),
         mode: meta.mode(),
+        uid: meta.uid(),
+        gid: meta.gid(),
+        accessed: std_accessed(meta),
         modified: std_modified(meta),
     }
 }
@@ -401,7 +414,10 @@ fn std_metadata_to_fs(meta: &std::fs::Metadata) -> FsMetadata {
         kind: std_kind(meta),
         size: meta.len(),
         mode: meta.mode(),
+        uid: meta.uid(),
+        gid: meta.gid(),
         readonly: meta.permissions().readonly(),
+        accessed: std_accessed(meta),
         modified: std_modified(meta),
         created: std_created(meta),
     }

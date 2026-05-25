@@ -9,6 +9,7 @@ import {
   NetworkBuilder,
   PatchBuilder,
   Sandbox,
+  SecretBuilder,
   Stdin,
 } from "../../dist/index.js";
 
@@ -61,6 +62,8 @@ describe("MountBuilder", () => {
       host: "/host/data",
       guest: "/data",
       readonly: false,
+      statVirtualization: "strict",
+      hostPermissions: "private",
     });
   });
 
@@ -127,6 +130,77 @@ describe("MountBuilder", () => {
   it("rejects guest paths containing : or ;", () => {
     const builder = new MountBuilder("/foo:bar").bind("/host");
     expect(() => builder.build()).toThrow(InvalidConfigError);
+  });
+
+  it("defaults bind mount to strict + private when policies are not set", () => {
+    const m = new MountBuilder("/data").bind("/host/data").build();
+    expect(m.statVirtualization).toBe("strict");
+    expect(m.hostPermissions).toBe("private");
+  });
+
+  it("propagates explicit stat-virt and host-perms on a bind mount", () => {
+    const m = new MountBuilder("/work")
+      .bind("./project")
+      .statVirtualization("relaxed")
+      .hostPermissions("mirror")
+      .build();
+    expect(m).toMatchObject({
+      kind: "bind",
+      statVirtualization: "relaxed",
+      hostPermissions: "mirror",
+    });
+  });
+
+  it("propagates stat-virt + host-perms on a named volume", () => {
+    const m = new MountBuilder("/cache")
+      .named("my-cache")
+      .statVirtualization("off")
+      .build();
+    expect(m).toMatchObject({
+      kind: "named",
+      name: "my-cache",
+      statVirtualization: "off",
+      hostPermissions: "private",
+    });
+  });
+
+  it("rejects unknown stat-virt strings at the FFI boundary", () => {
+    expect(() =>
+      new MountBuilder("/data").bind("/host").statVirtualization("bogus"),
+    ).toThrow(/invalid stat_virtualization/);
+  });
+
+  it("rejects unknown host-perms strings at the FFI boundary", () => {
+    expect(() =>
+      new MountBuilder("/data").bind("/host").hostPermissions("public"),
+    ).toThrow(/invalid host_permissions/);
+  });
+
+  it("rejects stat-virt on a tmpfs mount at build time", () => {
+    const builder = new MountBuilder("/scratch")
+      .tmpfs()
+      .statVirtualization("relaxed");
+    expect(() => builder.build()).toThrow(InvalidConfigError);
+  });
+
+  it("rejects host-perms on a disk mount at build time", () => {
+    const builder = new MountBuilder("/data")
+      .disk("./d.raw")
+      .hostPermissions("mirror");
+    expect(() => builder.build()).toThrow(InvalidConfigError);
+  });
+
+  it("rejects Off + Mirror at build time", () => {
+    const builder = new MountBuilder("/data")
+      .bind("/host")
+      .statVirtualization("off")
+      .hostPermissions("mirror");
+    expect(() => builder.build()).toThrow(/Off cannot be combined with/);
+  });
+
+  it("rejects commas in bind host paths at build time", () => {
+    const builder = new MountBuilder("/data").bind("/host/with,comma");
+    expect(() => builder.build()).toThrow(/must not contain ','/);
   });
 });
 
@@ -277,6 +351,48 @@ describe("NetworkBuilder.secretEnvSimple (3-arg shorthand)", () => {
     expect(cfg.secrets.secrets[0].envVar).toBe("API_KEY");
     // Placeholder defaults to the value when omitted.
     expect(cfg.secrets.secrets[0].placeholder).toBe("sk-abc");
+  });
+});
+
+describe("NetworkBuilder secret passthrough", () => {
+  it("builds global passthrough violation policy", () => {
+    const cfg = new NetworkBuilder()
+      .onSecretViolation((v) =>
+        v
+          .blockAndTerminate()
+          .passthroughHost("api.anthropic.com")
+          .passthroughHostPattern("*.anthropic.com"),
+      )
+      .build() as {
+      secrets: {
+        onViolation: {
+          passthrough: unknown[];
+        };
+      };
+    };
+
+    expect(cfg.secrets.onViolation).toEqual({
+      passthrough: [
+        { exact: "api.anthropic.com" },
+        { wildcard: "*.anthropic.com" },
+      ],
+    });
+  });
+
+  it("builds per-secret passthrough violation policy", () => {
+    const secret = new SecretBuilder()
+      .env("API_KEY")
+      .value("sk-abc")
+      .allowHost("api.github.com")
+      .onViolation((v) =>
+        v
+          .blockAndLog()
+          .passthroughHost("api.anthropic.com")
+          .passthroughHostPattern("*.anthropic.com"),
+      )
+      .build();
+
+    expect(secret.allowedHosts).toEqual(["api.github.com"]);
   });
 });
 

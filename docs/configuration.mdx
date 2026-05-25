@@ -28,6 +28,9 @@ microsandbox reads its global configuration from `~/.microsandbox/config.json`. 
   "sandbox_defaults": {
     "cpus": 2,
     "memory_mib": 1024,
+    "oci": {
+      "upper_size_mib": 8192
+    },
     "shell": "/bin/bash",
     "workdir": "/app"
   },
@@ -92,10 +95,19 @@ Defaults applied to every sandbox unless overridden per-sandbox.
 |-------|---------|-------------|
 | `cpus` | `1` | Number of vCPUs |
 | `memory_mib` | `512` | Guest memory in MiB |
+| `oci` | [reference](#sandbox_defaultsoci) | Defaults for OCI-rooted sandboxes |
 | `shell` | `"/bin/sh"` | Shell for interactive sessions and scripts |
 | `workdir` | `null` | Working directory inside the sandbox |
 | `metrics_sample_interval_ms` | `1000` | Runtime metrics sampling interval in milliseconds. Set to `0` to disable sampling. |
 | `disable_metrics_sample` | `false` | Force-disable metrics sampling regardless of `metrics_sample_interval_ms`. |
+
+### `sandbox_defaults.oci`
+
+Defaults applied only when the sandbox rootfs is an OCI image.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `upper_size_mib` | `4096` | Writable overlay upper size in MiB |
 
 ## `registries`
 

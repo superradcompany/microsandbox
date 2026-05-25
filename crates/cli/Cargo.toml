@@ -16,9 +16,10 @@ name = "microsandbox_cli"
 path = "lib/lib.rs"
 
 [features]
-default = ["net", "prebuilt", "keyring"]
+default = ["net", "prebuilt", "keyring", "ssh"]
 keyring = ["microsandbox/keyring"]
 prebuilt = ["microsandbox-runtime/prebuilt", "microsandbox/prebuilt"]
+ssh = ["microsandbox/ssh", "dep:russh"]
 net = [
     "dep:microsandbox-network",
     "microsandbox-runtime/net",
@@ -29,10 +30,13 @@ net = [
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
 console.workspace = true
 dirs.workspace = true
+futures.workspace = true
 indicatif.workspace = true
 ipnetwork = { workspace = true, optional = true }
 libc.workspace = true
@@ -46,9 +50,13 @@ rand.workspace = true
 regex = "1"
 reqwest.workspace = true
 rpassword.workspace = true
+russh = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror = { workspace = true, optional = true }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+test-utils = { path = "../test-utils" }

@@ -72,62 +72,6 @@ Python dataclass variants are also available for pattern matching:
 
 The union type `ExecEvent = StartedEvent | StdoutEvent | StderrEvent | ExitedEvent` is available from `events.py`.
 
----
-
-### ExecOptions
-
-```python
-ExecOptions(
-    args: tuple[str, ...] = (),
-    cwd: str | None = None,
-    user: str | None = None,
-    env: Mapping[str, str] = {},
-    timeout: float | None = None,  # seconds
-    stdin: Stdin = Stdin.null(),
-    tty: bool = False,
-    rlimits: tuple[Rlimit, ...] = (),
-)
-```
-
-Frozen dataclass for per-execution overrides.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| args | `tuple[str, ...]` | `()` | Command arguments |
-| cwd | `str \| None` | `None` | Working directory |
-| user | `str \| None` | `None` | Guest user |
-| env | `Mapping[str, str]` | `{}` | Environment variables |
-| timeout | `float \| None` | `None` | Kill the process after this many seconds |
-| stdin | [`Stdin`](#stdin) | `Stdin.null()` | Stdin source |
-| tty | `bool` | `False` | Allocate a pseudo-terminal |
-| rlimits | `tuple[`[`Rlimit`](#rlimit)`, ...]` | `()` | Resource limits |
-
----
-
-### AttachOptions
-
-```python
-AttachOptions(
-    args: tuple[str, ...] = (),
-    cwd: str | None = None,
-    user: str | None = None,
-    env: Mapping[str, str] = {},
-    detach_keys: str | None = None,
-)
-```
-
-Frozen dataclass for interactive PTY attach configuration.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| args | `tuple[str, ...]` | `()` | Command arguments |
-| cwd | `str \| None` | `None` | Working directory |
-| user | `str \| None` | `None` | Guest user |
-| env | `Mapping[str, str]` | `{}` | Environment variables |
-| detach_keys | `str \| None` | `None` | Key sequence to detach without stopping |
-
----
-
 ### Stdin
 
 Frozen dataclass with factory methods for configuring process stdin.

@@ -43,6 +43,20 @@ func TestFFIWireShape_WithImage(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_WithOCIUpperSize(t *testing.T) {
+	got := marshalCreateOptions(t, WithImage("python:3.12"), WithOCIUpperSize(8192))
+	if v := mustField(t, got, "oci_upper_size_mib"); v != float64(8192) {
+		t.Fatalf("oci_upper_size_mib = %v, want 8192", v)
+	}
+}
+
+func TestFFIWireShape_WithOCIUpperSizeZero(t *testing.T) {
+	got := marshalCreateOptions(t, WithImage("python:3.12"), WithOCIUpperSize(0))
+	if v := mustField(t, got, "oci_upper_size_mib"); v != float64(0) {
+		t.Fatalf("oci_upper_size_mib = %v, want 0", v)
+	}
+}
+
 func TestFFIWireShape_WithSnapshot(t *testing.T) {
 	got := marshalCreateOptions(t, WithSnapshot("after-pip-install"))
 	if v := mustField(t, got, "snapshot"); v != "after-pip-install" {
@@ -96,13 +110,13 @@ func TestFFIWireShape_ScalarKnobs(t *testing.T) {
 	}
 }
 
-func TestFFIWireShape_ReplaceWithGraceMs(t *testing.T) {
+func TestFFIWireShape_ReplaceWithTimeoutMs(t *testing.T) {
 	got := marshalCreateOptions(t,
 		WithImage("alpine"),
-		WithReplaceWithGrace(750*time.Millisecond),
+		WithReplaceWithTimeout(750*time.Millisecond),
 	)
-	if v := mustField(t, got, "replace_with_grace_ms"); v != float64(750) {
-		t.Fatalf("replace_with_grace_ms = %v, want 750", v)
+	if v := mustField(t, got, "replace_with_timeout_ms"); v != float64(750) {
+		t.Fatalf("replace_with_timeout_ms = %v, want 750", v)
 	}
 	if v := mustField(t, got, "replace"); v != true {
 		t.Fatalf("replace = %v, want true", v)
@@ -111,14 +125,14 @@ func TestFFIWireShape_ReplaceWithGraceMs(t *testing.T) {
 	// Zero must round-trip (means "skip SIGTERM"), not be omitted.
 	got = marshalCreateOptions(t,
 		WithImage("alpine"),
-		WithReplaceWithGrace(0),
+		WithReplaceWithTimeout(0),
 	)
-	v, ok := got["replace_with_grace_ms"]
+	v, ok := got["replace_with_timeout_ms"]
 	if !ok {
-		t.Fatal("zero grace was omitted")
+		t.Fatal("zero timeout was omitted")
 	}
 	if v != float64(0) {
-		t.Fatalf("replace_with_grace_ms = %v, want 0", v)
+		t.Fatalf("replace_with_timeout_ms = %v, want 0", v)
 	}
 }
 
@@ -339,8 +353,9 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	}
 }
 
-// The Rust side relies on serde(default), so zero-valued Go fields must not
-// reach the wire — otherwise the runtime can't tell "unset" from "set to zero".
+// The Rust side relies on serde(default), so zero-valued Go scalar fields must
+// not reach the wire. Explicit optional values use pointers when zero is valid
+// on the wire for validation.
 func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 	got := marshalCreateOptions(t)
 
@@ -348,7 +363,7 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 		"image", "snapshot", "memory_mib", "cpus", "workdir", "shell",
 		"hostname", "user", "replace", "detached", "env", "scripts",
 		"ports", "ports_udp", "network", "secrets", "patches", "volumes",
-		"init", "registry_auth",
+		"init", "registry_auth", "oci_upper_size_mib",
 	} {
 		if _, present := got[key]; present {
 			body, _ := json.Marshal(got)

@@ -2,7 +2,9 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use microsandbox_network::builder::SecretBuilder as RustSecretBuilder;
-use microsandbox_network::secrets::config::{HostPattern, SecretEntry as RustSecretEntry};
+use microsandbox_network::secrets::config::SecretEntry as RustSecretEntry;
+
+use crate::violation_action_builder::JsViolationActionBuilder;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -148,6 +150,24 @@ impl JsSecretBuilder {
         self
     }
 
+    /// Configure violation behavior for this secret.
+    #[napi(js_name = "onViolation")]
+    pub fn on_violation(
+        &mut self,
+        env: &Env,
+        configure: Function<
+            ClassInstance<JsViolationActionBuilder>,
+            ClassInstance<JsViolationActionBuilder>,
+        >,
+    ) -> Result<&Self> {
+        let initial = JsViolationActionBuilder::new().into_instance(env)?;
+        let mut returned = configure.call(initial)?;
+        let violation_builder = returned.take_inner_builder()?;
+        let prev = self.take_inner();
+        self.inner = Some(prev.on_violation(|_default| violation_builder));
+        Ok(self)
+    }
+
     /// Materialize into a `SecretEntry`. Panics if `env` or `value` weren't
     /// set (matches the underlying Rust builder's contract; surface as a
     /// typed error here).
@@ -205,9 +225,11 @@ pub(crate) fn to_js_secret_entry(entry: RustSecretEntry) -> JsSecretEntry {
     let mut allow_any_host = false;
     for h in entry.allowed_hosts {
         match h {
-            HostPattern::Exact(s) => allowed_hosts.push(s),
-            HostPattern::Wildcard(s) => allowed_host_patterns.push(s),
-            HostPattern::Any => allow_any_host = true,
+            microsandbox_network::secrets::config::HostPattern::Exact(s) => allowed_hosts.push(s),
+            microsandbox_network::secrets::config::HostPattern::Wildcard(s) => {
+                allowed_host_patterns.push(s)
+            }
+            microsandbox_network::secrets::config::HostPattern::Any => allow_any_host = true,
         }
     }
     JsSecretEntry {
