@@ -121,6 +121,13 @@ impl PySandbox {
             .and_then(|v| v.extract::<bool>().ok())
             .unwrap_or(false);
 
+        // `create_with_progress()` is intentionally synchronous from Python, but
+        // the Rust builder spawns the creation task immediately. Enter the
+        // pyo3-owned Tokio runtime so that spawn has a reactor even before the
+        // caller reaches `async with session`.
+        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        let _runtime_guard = runtime.enter();
+
         let (progress, task) = if detached {
             builder
                 .create_detached_with_pull_progress()
@@ -667,22 +674,112 @@ fn parse_exec_call(
     tty: bool,
     rlimits: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(Vec<String>, ExecOpts)> {
-    let args = parse_args(args)?;
     let (stdin_mode, stdin_data) = parse_stdin(stdin)?;
-    validate_timeout(timeout_secs)?;
-    Ok((
-        args,
-        ExecOpts {
-            cwd,
-            user,
-            env: env_to_pairs(env),
-            timeout_secs,
-            tty,
-            stdin_mode,
-            stdin_data,
-            rlimits: parse_rlimits(rlimits)?,
-        },
-    ))
+    let mut parsed_args = Vec::new();
+    let mut opts = ExecOpts {
+        cwd,
+        user,
+        env: env_to_pairs(env),
+        timeout_secs,
+        tty,
+        stdin_mode,
+        stdin_data,
+        rlimits: parse_rlimits(rlimits)?,
+    };
+
+    if let Some(args_or_options) = args {
+        if is_options_like(args_or_options) {
+            let dict = options_dict(args_or_options, "exec options")?;
+            validate_exec_options_keys(&dict)?;
+            parsed_args = parse_options_args(&dict)?;
+            apply_exec_options_dict(&mut opts, &dict)?;
+        } else {
+            parsed_args = parse_args(Some(args_or_options))?;
+        }
+    }
+
+    validate_timeout(opts.timeout_secs)?;
+    Ok((parsed_args, opts))
+}
+
+fn is_options_like(obj: &Bound<'_, PyAny>) -> bool {
+    obj.downcast::<PyDict>().is_ok() || obj.getattr("_to_dict").is_ok()
+}
+
+fn validate_exec_options_keys(dict: &Bound<'_, PyDict>) -> PyResult<()> {
+    for (key, _) in dict.iter() {
+        let key = key.extract::<String>().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err("exec option keys must be strings")
+        })?;
+        match key.as_str() {
+            "args" | "cwd" | "user" | "env" | "timeout" | "tty" | "stdin" | "stdin_data"
+            | "rlimits" => {}
+            other => {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "unknown exec option: {other}",
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_options_args(dict: &Bound<'_, PyDict>) -> PyResult<Vec<String>> {
+    match dict.get_item("args")? {
+        Some(args) if !args.is_none() => parse_args(Some(&args)),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn apply_exec_options_dict(opts: &mut ExecOpts, dict: &Bound<'_, PyDict>) -> PyResult<()> {
+    if let Some(cwd) = extract_optional_dict_value::<String>(dict, "cwd")? {
+        opts.cwd = Some(cwd);
+    }
+    if let Some(user) = extract_optional_dict_value::<String>(dict, "user")? {
+        opts.user = Some(user);
+    }
+    if let Some(env) = extract_optional_dict_value::<HashMap<String, String>>(dict, "env")? {
+        opts.env = env_to_pairs(Some(env));
+    }
+    if let Some(timeout) = extract_optional_dict_value::<f64>(dict, "timeout")? {
+        opts.timeout_secs = Some(timeout);
+    }
+    if let Some(tty) = extract_optional_dict_value::<bool>(dict, "tty")? {
+        opts.tty = tty;
+    }
+    if let Some(stdin) = dict.get_item("stdin")?
+        && !stdin.is_none()
+    {
+        let stdin_data = extract_optional_dict_value::<Vec<u8>>(dict, "stdin_data")?;
+        let (mode, data) = if let Ok(mode) = stdin.extract::<String>() {
+            normalize_stdin(mode, stdin_data)?
+        } else {
+            parse_stdin(Some(&stdin))?
+        };
+        opts.stdin_mode = mode;
+        opts.stdin_data = data;
+    } else if let Some(stdin_data) = extract_optional_dict_value::<Vec<u8>>(dict, "stdin_data")? {
+        opts.stdin_mode = Some("bytes".to_string());
+        opts.stdin_data = Some(stdin_data);
+    }
+    if let Some(rlimits) = dict.get_item("rlimits")? {
+        opts.rlimits = if rlimits.is_none() {
+            Vec::new()
+        } else {
+            parse_rlimits(Some(&rlimits))?
+        };
+    }
+    Ok(())
+}
+
+fn extract_optional_dict_value<'py, T: FromPyObject<'py>>(
+    dict: &Bound<'py, PyDict>,
+    key: &str,
+) -> PyResult<Option<T>> {
+    dict.get_item(key)?
+        .filter(|value| !value.is_none())
+        .map(|value| value.extract::<T>())
+        .transpose()
 }
 
 #[allow(clippy::too_many_arguments)]
