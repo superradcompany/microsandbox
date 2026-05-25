@@ -291,7 +291,7 @@ Start a graceful drain (SIGUSR1). Existing commands run to completion, new `exec
 ```python
 async def exec(
     cmd: str,
-    args: list[str] | Mapping[str, Any] | None = None,
+    args: list[str] | None = None,
     *,
     cwd: str | None = None,
     user: str | None = None,
@@ -305,14 +305,14 @@ async def exec(
 
 Run a command inside the sandbox and wait for it to complete. Collects all stdout and stderr into memory and returns them along with the exit code. For long-running processes or large output, use [`exec_stream()`](#exec_stream) instead.
 
-Pass per-execution options as keyword-only arguments. For compatibility with existing callers, the second positional value can also be an options mapping with `args`, `cwd`, `user`, `env`, `timeout`, `stdin`, `tty`, and `rlimits` keys.
+Pass per-execution options as keyword-only arguments. The SDK still accepts the older second-positional options dict for compatibility, but prefer kwargs for new code.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
 | cmd | `str` | Command to execute (e.g. `"python"`, `"/usr/bin/node"`) |
-| args | `list[str] \| Mapping[str, Any] \| None` | Command arguments, or an options mapping with an `args` key |
+| args | `list[str] \| None` | Command arguments |
 | cwd | `str \| None` | Working directory |
 | user | `str \| None` | Guest user |
 | env | `Mapping[str, str] \| None` | Environment variables |
@@ -344,7 +344,7 @@ output = await sb.exec(
 ```python
 async def exec_stream(
     cmd: str,
-    args: list[str] | Mapping[str, Any] | None = None,
+    args: list[str] | None = None,
     *,
     cwd: str | None = None,
     user: str | None = None,
@@ -358,14 +358,14 @@ async def exec_stream(
 
 Run a command with streaming output. Returns a handle that emits stdout, stderr, and exit events as they happen, rather than buffering everything.
 
-Like [`exec()`](#exec), pass per-execution options as keyword-only arguments. The second positional value may also be an options mapping for compatibility with existing callers.
+Like [`exec()`](#exec), pass per-execution options as keyword-only arguments. The older second-positional options dict remains accepted for compatibility.
 
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
 | cmd | `str` | Command to execute |
-| args | `list[str] \| Mapping[str, Any] \| None` | Command arguments, or an options mapping with an `args` key |
+| args | `list[str] \| None` | Command arguments |
 | cwd | `str \| None` | Working directory |
 | user | `str \| None` | Guest user |
 | env | `Mapping[str, str] \| None` | Environment variables |
