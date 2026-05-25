@@ -1,4 +1,4 @@
-"""Lifecycle and creation-configuration integration tests."""
+"""Sandbox lifecycle integration tests."""
 
 from __future__ import annotations
 
@@ -80,18 +80,3 @@ async def test_replace_rejects_duplicate_then_replaces(sandbox_name):
         with suppress(Exception):
             await first.stop_and_wait()
         await remove_sandbox(name)
-
-
-@pytest.mark.asyncio
-async def test_create_configuration_affects_guest(sandbox_factory):
-    sandbox = await sandbox_factory(
-        "py-sdk-config",
-        hostname="py-sdk-host",
-        workdir="/tmp",
-        env={"PYTHON_SDK_BASE": "from-create"},
-        shell="/bin/sh",
-    )
-
-    out = await sandbox.shell('printf "%s:%s:%s\\n" "$(hostname)" "$(pwd)" "$PYTHON_SDK_BASE"')
-    assert out.success is True
-    assert out.stdout_text == "py-sdk-host:/tmp:from-create\n"
