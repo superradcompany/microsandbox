@@ -137,6 +137,19 @@ console.log(await vfs.list(""));
 
 ---
 
+## VolumeBuilder
+
+Fluent configuration builder returned by `Volume.builder(name)`.
+
+| Method | Description |
+|--------|-------------|
+| `quota(mib)` | Maximum storage size in MiB |
+| `label(key, value)` | Add a metadata label |
+| `build()` | Materialize a [`VolumeConfig`](#volumeconfig) |
+| `create()` | Build and create the volume; returns a [`Volume`](#volume) |
+
+---
+
 ## Mounts
 
 Volume mounts attach a host directory, named volume, tmpfs, or disk image to a guest path. Configure them via `SandboxBuilder.volume(guestPath, m => ...)`:
@@ -151,7 +164,9 @@ await using sb = await Sandbox.builder("worker")
   .create();
 ```
 
-### MountBuilder
+---
+
+## MountBuilder
 
 Used inside `SandboxBuilder.volume(guestPath, m => ...)`. Pick exactly one mount kind, then chain modifiers.
 
@@ -166,6 +181,10 @@ Used inside `SandboxBuilder.volume(guestPath, m => ...)`. Pick exactly one mount
 | `readonly()` | Mount read-only. |
 | `size(mib)` | Cap in MiB. Tmpfs only. |
 | `build()` | Internal — produce a `VolumeMount`. |
+
+---
+
+## Types
 
 ### VolumeMount
 
@@ -191,19 +210,6 @@ type VolumeMount =
 ```typescript
 type DiskImageFormat = "qcow2" | "raw" | "vmdk";
 ```
-
----
-
-## Types
-
-### VolumeBuilder
-
-| Method | Description |
-|--------|-------------|
-| `quota(mib)` | Maximum storage size in MiB |
-| `label(key, value)` | Add a metadata label |
-| `build()` | Materialize a [`VolumeConfig`](#volumeconfig) |
-| `create()` | Build and create the volume; returns a [`Volume`](#volume) |
 
 ### VolumeConfig
 

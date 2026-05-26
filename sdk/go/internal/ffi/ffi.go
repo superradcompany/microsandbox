@@ -896,6 +896,7 @@ type CreateOptions struct {
 	Workdir            string               `json:"workdir,omitempty"`
 	Shell              string               `json:"shell,omitempty"`
 	Hostname           string               `json:"hostname,omitempty"`
+	LibkrunfwPath      string               `json:"libkrunfw_path,omitempty"`
 	User               string               `json:"user,omitempty"`
 	Replace            bool                 `json:"replace,omitempty"`
 	ReplaceWithGraceMs *uint64              `json:"replace_with_grace_ms,omitempty"`
