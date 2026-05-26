@@ -40,6 +40,9 @@ const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 /// Entry cadence for cooperative scheduler yields during tar ingestion.
 const INGEST_YIELD_EVERY_ENTRIES: u64 = 32;
 
+/// Maximum file-body read size used while ingesting tar entries.
+const ENTRY_READ_CHUNK_SIZE: usize = 64 * 1024;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -317,9 +320,7 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
                         {
                             stream_entry_to_spool(&mut entry, size, spool).await?
                         } else {
-                            let mut buf = Vec::with_capacity(size as usize);
-                            entry.read_to_end(&mut buf).await.map_err(IngestError::Io)?;
-                            FileData::Memory(buf)
+                            FileData::Memory(read_entry_to_memory(&mut entry, size).await?)
                         };
 
                         let node = TreeNode::RegularFile(RegularFileNode {
@@ -715,6 +716,36 @@ fn handle_hardlink(
     Ok(())
 }
 
+async fn read_entry_to_memory<R: AsyncRead + Unpin>(
+    entry: &mut tar::Entry<R>,
+    size: u64,
+) -> Result<Vec<u8>, IngestError> {
+    let size = usize::try_from(size)
+        .map_err(|_| IngestError::InvalidEntry("file too large to fit in memory".to_string()))?;
+
+    if size <= ENTRY_READ_CHUNK_SIZE {
+        let mut data = vec![0u8; size];
+        entry.read_exact(&mut data).await.map_err(IngestError::Io)?;
+        return Ok(data);
+    }
+
+    let mut data = Vec::with_capacity(size);
+    let mut remaining = size;
+    let mut buf = vec![0u8; ENTRY_READ_CHUNK_SIZE];
+
+    while remaining > 0 {
+        let to_read = remaining.min(buf.len());
+        entry
+            .read_exact(&mut buf[..to_read])
+            .await
+            .map_err(IngestError::Io)?;
+        data.extend_from_slice(&buf[..to_read]);
+        remaining -= to_read;
+    }
+
+    Ok(data)
+}
+
 async fn stream_entry_to_spool<R: AsyncRead + Unpin>(
     entry: &mut tar::Entry<R>,
     size: u64,
@@ -722,7 +753,7 @@ async fn stream_entry_to_spool<R: AsyncRead + Unpin>(
 ) -> Result<FileData, IngestError> {
     let offset = spool.current_offset();
     let mut remaining = size;
-    let mut buf = vec![0u8; 1024 * 1024];
+    let mut buf = vec![0u8; ENTRY_READ_CHUNK_SIZE];
 
     while remaining > 0 {
         let to_read = remaining.min(buf.len() as u64) as usize;
@@ -970,12 +1001,21 @@ mod tests {
     // The parent module aliases `tokio_tar` as `tar`, so we use the explicit
     // crate path here to avoid ambiguity.
     use ::tar as sync_tar;
+    use async_compression::tokio::write::GzipEncoder;
     use tempfile::tempdir;
+    use tokio::io::AsyncWriteExt;
 
     fn build_tar(build: impl FnOnce(&mut sync_tar::Builder<Vec<u8>>)) -> Vec<u8> {
         let mut builder = sync_tar::Builder::new(Vec::new());
         build(&mut builder);
         builder.into_inner().unwrap()
+    }
+
+    async fn gzip(data: &[u8]) -> Vec<u8> {
+        let mut encoder = GzipEncoder::new(Vec::new());
+        encoder.write_all(data).await.unwrap();
+        encoder.shutdown().await.unwrap();
+        encoder.into_inner()
     }
 
     #[tokio::test]
@@ -1007,6 +1047,36 @@ mod tests {
                 assert_eq!(f.metadata.mode, 0o644);
                 assert_eq!(f.metadata.mtime, 1234567890);
                 assert_eq!(f.nlink, 1);
+            }
+            _ => panic!("expected regular file"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_gzip_large_file_without_spool() {
+        let content = (0..SPOOL_THRESHOLD as usize * 8 + 13)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>();
+        let tar_data = build_tar(|b| {
+            let mut header = sync_tar::Header::new_gnu();
+            header.set_path("large.bin").unwrap();
+            header.set_size(content.len() as u64);
+            header.set_entry_type(sync_tar::EntryType::Regular);
+            header.set_mode(0o644);
+            header.set_cksum();
+            b.append(&header, content.as_slice()).unwrap();
+        });
+        let data = gzip(&tar_data).await;
+
+        let limits = ResourceLimits::default();
+        let result =
+            ingest_compressed_tar(std::io::Cursor::new(data), Compression::Gzip, &limits, None)
+                .await
+                .unwrap();
+
+        match result.tree.get(b"large.bin").unwrap() {
+            TreeNode::RegularFile(f) => {
+                assert_eq!(f.data, FileData::Memory(content));
             }
             _ => panic!("expected regular file"),
         }
