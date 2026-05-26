@@ -33,6 +33,14 @@ func TestWithSnapshot(t *testing.T) {
 	}
 }
 
+func TestWithLibkrunfwPath(t *testing.T) {
+	o := SandboxConfig{}
+	WithLibkrunfwPath("/opt/msb/lib/libkrunfw.so")(&o)
+	if o.LibkrunfwPath != "/opt/msb/lib/libkrunfw.so" {
+		t.Errorf("got %q, want %q", o.LibkrunfwPath, "/opt/msb/lib/libkrunfw.so")
+	}
+}
+
 func TestWithMemory(t *testing.T) {
 	o := SandboxConfig{}
 	WithMemory(512)(&o)

@@ -700,6 +700,7 @@ struct SandboxCreateOpts {
     #[serde(default)]
     detached: bool,
     hostname: Option<String>,
+    libkrunfw_path: Option<PathBuf>,
     user: Option<String>,
     #[serde(default)]
     replace: bool,
@@ -1405,6 +1406,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             if let Some(h) = opts.hostname {
                 builder = builder.hostname(h);
+            }
+            if let Some(path) = opts.libkrunfw_path {
+                builder = builder.libkrunfw_path(path);
             }
             if let Some(u) = opts.user {
                 builder = builder.user(u);
