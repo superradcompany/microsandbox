@@ -4,13 +4,13 @@
 //! (EROFS_INODE_CHUNK_BASED) referencing data in external layer blobs via
 //! device table entries. Directories and symlinks use standard flat layout.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::crc32c;
-use crate::tree::{DirectoryNode, FileTree, TreeNode};
+use crate::tree::{DirectoryNode, FileTree, RegularFileId, TreeNode};
 
 use super::format::{
     EROFS_BLKSIZ, EROFS_BLKSIZ_BITS, EROFS_CHUNK_FORMAT_INDEXES, EROFS_CHUNK_INDEX_SIZE,
@@ -55,6 +55,8 @@ struct FsmetaInodePlan {
 
 struct FsmetaLayoutState {
     plans: Vec<FsmetaInodePlan>,
+    regular_file_plans: HashMap<RegularFileId, usize>,
+    regular_file_link_counts: HashMap<RegularFileId, u32>,
     current_meta_offset: u64,
     /// Only used for directory data blocks (fsmeta has no file data blocks).
     current_data_block: u32,
@@ -68,9 +70,11 @@ struct FsmetaLayoutState {
 //--------------------------------------------------------------------------------------------------
 
 impl FsmetaLayoutState {
-    fn new(meta_blkaddr: u32) -> Self {
+    fn new(meta_blkaddr: u32, merged_tree: &FileTree) -> Self {
         Self {
             plans: Vec::new(),
+            regular_file_plans: HashMap::new(),
+            regular_file_link_counts: merged_tree.regular_file_link_counts(),
             current_meta_offset: meta_blkaddr as u64 * EROFS_BLKSIZ as u64,
             current_data_block: 0,
             meta_blkaddr,
@@ -118,7 +122,7 @@ pub fn write_fsmeta(
     let mut fsmeta_blocks: u32 = meta_blkaddr + 1; // initial guess
 
     for _iteration in 0..4 {
-        let mut state = FsmetaLayoutState::new(meta_blkaddr);
+        let mut state = FsmetaLayoutState::new(meta_blkaddr, merged_tree);
         plan_fsmeta_directory(
             &merged_tree.root,
             0,
@@ -153,7 +157,7 @@ pub fn write_fsmeta(
     }
 
     // Final pass with the last estimate.
-    let mut state = FsmetaLayoutState::new(meta_blkaddr);
+    let mut state = FsmetaLayoutState::new(meta_blkaddr, merged_tree);
     plan_fsmeta_directory(
         &merged_tree.root,
         0,
@@ -348,8 +352,12 @@ fn plan_fsmeta_directory(
                 layer_maps,
                 &child_path,
             )?,
-            TreeNode::RegularFile(_) => {
-                plan_fsmeta_regular_file(child, state, provenance, layer_maps, &child_path)?
+            TreeNode::RegularFile(file) => {
+                if let Some(plan_idx) = state.regular_file_plans.get(&file.id) {
+                    state.plans[*plan_idx].nid
+                } else {
+                    plan_fsmeta_regular_file(child, state, provenance, layer_maps, &child_path)?
+                }
             }
             _ => plan_fsmeta_leaf_node(child, state)?,
         };
@@ -441,6 +449,9 @@ fn plan_fsmeta_regular_file(
         parent_nid: 0,
         chunk_count,
     };
+    if let TreeNode::RegularFile(file) = node {
+        state.regular_file_plans.insert(file.id, plan_idx);
+    }
 
     Ok(nid)
 }
@@ -516,6 +527,25 @@ fn write_fsmeta_dir_data(
     data_start_block: u32,
     plan_idx: &mut usize,
 ) -> Result<(), ErofsError> {
+    let mut seen_regular_files = HashSet::new();
+    write_fsmeta_dir_data_inner(
+        file,
+        state,
+        dir,
+        data_start_block,
+        plan_idx,
+        &mut seen_regular_files,
+    )
+}
+
+fn write_fsmeta_dir_data_inner(
+    file: &mut (impl Write + Seek),
+    state: &FsmetaLayoutState,
+    dir: &DirectoryNode,
+    data_start_block: u32,
+    plan_idx: &mut usize,
+    seen_regular_files: &mut HashSet<RegularFileId>,
+) -> Result<(), ErofsError> {
     let blksiz = EROFS_BLKSIZ as u64;
     let plan = &state.plans[*plan_idx];
     *plan_idx += 1;
@@ -540,7 +570,23 @@ fn write_fsmeta_dir_data(
     for child in dir.entries.values() {
         match child {
             TreeNode::Directory(child_dir) => {
-                write_fsmeta_dir_data(file, state, child_dir, data_start_block, plan_idx)?;
+                write_fsmeta_dir_data_inner(
+                    file,
+                    state,
+                    child_dir,
+                    data_start_block,
+                    plan_idx,
+                    seen_regular_files,
+                )?;
+            }
+            TreeNode::RegularFile(file) => {
+                if seen_regular_files.insert(file.id) {
+                    debug_assert_eq!(
+                        state.regular_file_plans.get(&file.id).copied(),
+                        Some(*plan_idx)
+                    );
+                    *plan_idx += 1;
+                }
             }
             TreeNode::Symlink(s) => {
                 let child_plan = &state.plans[*plan_idx];
@@ -679,7 +725,7 @@ fn write_fsmeta_inode(
     inode[32..40].copy_from_slice(&meta.mtime.to_le_bytes());
     inode[40..44].copy_from_slice(&meta.mtime_nsec.to_le_bytes());
 
-    let nlink = node_nlink(node);
+    let nlink = node_nlink(node, &state.regular_file_link_counts);
     inode[44..48].copy_from_slice(&nlink.to_le_bytes());
 
     file.write_all(&inode)?;
@@ -767,8 +813,28 @@ fn write_fsmeta_leaf(
 ) -> Result<(), ErofsError> {
     let blksiz = EROFS_BLKSIZ as u64;
     let meta_base = state.meta_blkaddr as u64 * blksiz;
-    let plan = &state.plans[*plan_idx];
-    *plan_idx += 1;
+    let (plan, first_regular_visit) = match node {
+        TreeNode::RegularFile(file) => {
+            let child_plan_idx = *state
+                .regular_file_plans
+                .get(&file.id)
+                .expect("regular file plan missing");
+            let first_visit = child_plan_idx == *plan_idx;
+            if first_visit {
+                *plan_idx += 1;
+            }
+            (&state.plans[child_plan_idx], first_visit)
+        }
+        _ => {
+            let plan = &state.plans[*plan_idx];
+            *plan_idx += 1;
+            (plan, true)
+        }
+    };
+
+    if !first_regular_visit {
+        return Ok(());
+    }
 
     let inode_offset = meta_base + plan.nid as u64 * EROFS_ISLOT_SIZE as u64;
     file.seek(SeekFrom::Start(inode_offset))?;
@@ -822,7 +888,7 @@ fn write_fsmeta_leaf(
     inode[32..40].copy_from_slice(&meta.mtime.to_le_bytes());
     inode[40..44].copy_from_slice(&meta.mtime_nsec.to_le_bytes());
 
-    let nlink = node_nlink(node);
+    let nlink = node_nlink(node, &state.regular_file_link_counts);
     inode[44..48].copy_from_slice(&nlink.to_le_bytes());
 
     file.write_all(&inode)?;
@@ -1013,13 +1079,29 @@ fn align_up(value: u64, alignment: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fs::File};
+    use std::{collections::HashMap, fs::File, path::PathBuf};
 
     use tempfile::tempdir;
 
-    use crate::tree::{FileTree, InodeMetadata, SymlinkNode, TreeNode};
+    use crate::{
+        erofs::write_erofs,
+        tree::{
+            FileData, FileTree, InodeMetadata, RegularFileId, RegularFileNode, SymlinkNode,
+            TreeNode,
+        },
+    };
 
     use super::{super::reader::ErofsReader, super::writer::ErofsDataMap, write_fsmeta};
+
+    fn regular_file_with_id(data: &[u8], id: RegularFileId) -> TreeNode {
+        TreeNode::RegularFile(RegularFileNode {
+            id,
+            metadata: InodeMetadata::default(),
+            xattrs: Vec::new(),
+            data: FileData::Memory(data.to_vec()),
+            nlink: 1,
+        })
+    }
 
     #[test]
     fn write_fsmeta_persists_plain_symlink_data_blocks() {
@@ -1051,5 +1133,61 @@ mod tests {
         let mut reader =
             ErofsReader::new(File::open(&output).expect("open fsmeta")).expect("create reader");
         assert_eq!(reader.read_link("/link").expect("read link"), target);
+    }
+
+    #[test]
+    fn write_fsmeta_preserves_hardlink_inode_identity() {
+        let content = b"shared layer data";
+        let file_id = RegularFileId::new();
+
+        let mut layer_tree = FileTree::new();
+        layer_tree
+            .insert(b"alpha", regular_file_with_id(content, file_id))
+            .expect("insert alpha layer file");
+        layer_tree
+            .insert(b"beta", regular_file_with_id(content, file_id))
+            .expect("insert beta layer file");
+
+        let output_dir = tempdir().expect("tempdir");
+        let layer_output = output_dir.path().join("layer.erofs");
+        let data_map = write_erofs(&layer_tree, &layer_output).expect("write layer erofs");
+        let alpha_path = PathBuf::from("alpha");
+        let beta_path = PathBuf::from("beta");
+
+        assert_eq!(
+            data_map
+                .file_blocks
+                .get(&alpha_path)
+                .copied()
+                .expect("alpha data map"),
+            data_map
+                .file_blocks
+                .get(&beta_path)
+                .copied()
+                .expect("beta data map")
+        );
+
+        let mut merged_tree = FileTree::new();
+        merged_tree
+            .insert(b"alpha", regular_file_with_id(b"", file_id))
+            .expect("insert alpha fsmeta file");
+        merged_tree
+            .insert(b"beta", regular_file_with_id(b"", file_id))
+            .expect("insert beta fsmeta file");
+
+        let provenance = HashMap::from([(alpha_path, 0usize), (beta_path, 0usize)]);
+        let fsmeta_output = output_dir.path().join("fsmeta.erofs");
+        write_fsmeta(&merged_tree, &provenance, &[data_map], &fsmeta_output).expect("write fsmeta");
+
+        let mut reader =
+            ErofsReader::new(File::open(&fsmeta_output).expect("open fsmeta")).expect("reader");
+        let alpha = reader.inode_debug_info("/alpha").expect("alpha inode");
+        let beta = reader.inode_debug_info("/beta").expect("beta inode");
+
+        assert_eq!(alpha.nid, beta.nid);
+        assert_eq!(alpha.nlink, 2);
+        assert_eq!(beta.nlink, 2);
+        assert_eq!(alpha.size, content.len() as u64);
+        assert_eq!(alpha.data_layout, super::EROFS_INODE_CHUNK_BASED);
     }
 }

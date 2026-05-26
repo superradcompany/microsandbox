@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::crc32c;
-use crate::tree::{DirectoryNode, FileTree, InodeMetadata, TreeNode, Xattr};
+use crate::tree::{DirectoryNode, FileTree, InodeMetadata, RegularFileId, TreeNode, Xattr};
 
 use super::format::{
     self, EROFS_BLKSIZ, EROFS_BLKSIZ_BITS, EROFS_DIRENT_SIZE, EROFS_FEATURE_COMPAT_SB_CHKSUM,
@@ -62,6 +62,8 @@ struct InodePlan {
 #[allow(dead_code)]
 struct LayoutState {
     plans: Vec<InodePlan>,
+    regular_file_plans: HashMap<RegularFileId, usize>,
+    regular_file_link_counts: HashMap<RegularFileId, u32>,
     current_meta_offset: u64,
     current_data_block: u32,
     meta_blkaddr: u32,
@@ -74,9 +76,11 @@ struct LayoutState {
 //--------------------------------------------------------------------------------------------------
 
 impl LayoutState {
-    fn new() -> Self {
+    fn new(tree: &FileTree) -> Self {
         Self {
             plans: Vec::new(),
+            regular_file_plans: HashMap::new(),
+            regular_file_link_counts: tree.regular_file_link_counts(),
             current_meta_offset: EROFS_BLKSIZ as u64,
             current_data_block: 0,
             meta_blkaddr: 1,
@@ -121,7 +125,7 @@ impl From<io::Error> for ErofsError {
 
 pub fn write_erofs(tree: &FileTree, output: &Path) -> Result<ErofsDataMap, ErofsError> {
     let mut file = BufWriter::new(std::fs::File::create(output)?);
-    let mut state = LayoutState::new();
+    let mut state = LayoutState::new(tree);
 
     // Phase 1+2: Plan layout and assign NIDs.
     plan_directory(&tree.root, 0, &mut state, true)?;
@@ -479,9 +483,15 @@ pub(super) fn node_metadata(node: &TreeNode) -> &InodeMetadata {
     }
 }
 
-pub(super) fn node_nlink(node: &TreeNode) -> u32 {
+pub(super) fn node_nlink(
+    node: &TreeNode,
+    regular_file_link_counts: &HashMap<RegularFileId, u32>,
+) -> u32 {
     match node {
-        TreeNode::RegularFile(f) => f.nlink,
+        TreeNode::RegularFile(f) => regular_file_link_counts
+            .get(&f.id)
+            .copied()
+            .unwrap_or(f.nlink.max(1)),
         TreeNode::Directory(d) => {
             // nlink for directory = 2 + number of child directories
             let child_dirs = d
@@ -579,6 +589,7 @@ fn plan_directory(
     for (name, child) in &dir.entries {
         let child_nid = match child {
             TreeNode::Directory(child_dir) => plan_directory(child_dir, dir_nid, state, false)?,
+            TreeNode::RegularFile(file) => plan_regular_file(child, file.id, state)?,
             _ => plan_leaf_node(child, state)?,
         };
         child_nids.insert(name.clone(), child_nid);
@@ -594,6 +605,21 @@ fn plan_directory(
     state.plans[dir_plan_idx].dir_data = Some(dir_data);
 
     Ok(dir_nid)
+}
+
+fn plan_regular_file(
+    node: &TreeNode,
+    file_id: RegularFileId,
+    state: &mut LayoutState,
+) -> Result<u32, ErofsError> {
+    if let Some(plan_idx) = state.regular_file_plans.get(&file_id) {
+        return Ok(state.plans[*plan_idx].nid);
+    }
+
+    let plan_idx = state.plans.len();
+    let nid = plan_leaf_node(node, state)?;
+    state.regular_file_plans.insert(file_id, plan_idx);
+    Ok(nid)
 }
 
 fn plan_leaf_node(node: &TreeNode, state: &mut LayoutState) -> Result<u32, ErofsError> {
@@ -687,6 +713,7 @@ fn write_data_blocks(
 
     // Write data blocks for each plan that has data blocks
     let current_path = PathBuf::new();
+    let mut written_regular_files = HashSet::new();
     write_data_for_tree(
         file,
         state,
@@ -695,11 +722,13 @@ fn write_data_blocks(
         &mut 0,
         &current_path,
         data_map,
+        &mut written_regular_files,
     )?;
 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_data_for_tree(
     file: &mut (impl Write + Seek),
     state: &LayoutState,
@@ -708,6 +737,7 @@ fn write_data_for_tree(
     plan_idx: &mut usize,
     current_path: &Path,
     data_map: &mut HashMap<PathBuf, (u32, u64)>,
+    written_regular_files: &mut HashSet<RegularFileId>,
 ) -> Result<(), ErofsError> {
     let blksiz = EROFS_BLKSIZ as u64;
     let plan = &state.plans[*plan_idx];
@@ -745,11 +775,20 @@ fn write_data_for_tree(
                     plan_idx,
                     &child_path,
                     data_map,
+                    written_regular_files,
                 )?;
             }
             TreeNode::RegularFile(f) => {
-                let child_plan = &state.plans[*plan_idx];
-                *plan_idx += 1;
+                let child_plan_idx = *state
+                    .regular_file_plans
+                    .get(&f.id)
+                    .expect("regular file plan missing");
+                let child_plan = &state.plans[child_plan_idx];
+                let first_visit = written_regular_files.insert(f.id);
+                if first_visit {
+                    debug_assert_eq!(child_plan_idx, *plan_idx);
+                    *plan_idx += 1;
+                }
 
                 // Record block address for this file in the data map.
                 if child_plan.data_block_start != EROFS_NULL_ADDR {
@@ -760,7 +799,7 @@ fn write_data_for_tree(
                     data_map.insert(child_path, (EROFS_NULL_ADDR, 0));
                 }
 
-                if child_plan.data_block_count > 0 {
+                if first_visit && child_plan.data_block_count > 0 {
                     let abs_block = data_start_block + child_plan.data_block_start;
                     let offset = abs_block as u64 * blksiz;
                     file.seek(SeekFrom::Start(offset))?;
@@ -943,7 +982,7 @@ fn write_metadata_for_tree(
     inode[40..44].copy_from_slice(&meta.mtime_nsec.to_le_bytes());
 
     // i_nlink
-    let nlink = node_nlink(node);
+    let nlink = node_nlink(node, &state.regular_file_link_counts);
     inode[44..48].copy_from_slice(&nlink.to_le_bytes());
 
     // reserved[16] already zeroed
@@ -1013,8 +1052,28 @@ fn write_metadata_for_leaf(
 ) -> Result<(), ErofsError> {
     let blksiz = EROFS_BLKSIZ as u64;
     let meta_base = state.meta_blkaddr as u64 * blksiz;
-    let plan = &state.plans[*plan_idx];
-    *plan_idx += 1;
+    let (plan, first_regular_visit) = match node {
+        TreeNode::RegularFile(file) => {
+            let child_plan_idx = *state
+                .regular_file_plans
+                .get(&file.id)
+                .expect("regular file plan missing");
+            let first_visit = child_plan_idx == *plan_idx;
+            if first_visit {
+                *plan_idx += 1;
+            }
+            (&state.plans[child_plan_idx], first_visit)
+        }
+        _ => {
+            let plan = &state.plans[*plan_idx];
+            *plan_idx += 1;
+            (plan, true)
+        }
+    };
+
+    if !first_regular_visit {
+        return Ok(());
+    }
 
     let inode_offset = meta_base + plan.nid as u64 * EROFS_ISLOT_SIZE as u64;
     file.seek(SeekFrom::Start(inode_offset))?;
@@ -1056,7 +1115,7 @@ fn write_metadata_for_leaf(
     inode[32..40].copy_from_slice(&meta.mtime.to_le_bytes());
     inode[40..44].copy_from_slice(&meta.mtime_nsec.to_le_bytes());
 
-    let nlink = node_nlink(node);
+    let nlink = node_nlink(node, &state.regular_file_link_counts);
     inode[44..48].copy_from_slice(&nlink.to_le_bytes());
 
     file.write_all(&inode)?;
