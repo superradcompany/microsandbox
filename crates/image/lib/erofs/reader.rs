@@ -555,7 +555,7 @@ mod tests {
     use super::ErofsReader;
     use crate::{
         erofs::write_erofs,
-        filetree::{FileData, FileTree, InodeMetadata, RegularFileNode, TreeNode},
+        tree::{FileData, FileTree, InodeMetadata, RegularFileNode, TreeNode},
     };
 
     fn make_regular_file(data: &[u8]) -> TreeNode {

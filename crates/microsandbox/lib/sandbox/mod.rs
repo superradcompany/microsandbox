@@ -34,8 +34,8 @@ use sea_orm::{
 use tokio::sync::{Mutex, mpsc};
 
 use microsandbox_image::{
-    Digest, GlobalCache, PullOptions, PullProgressSender, PullResult, Reference, ext4, filetree,
-    progress_channel,
+    Digest, GlobalCache, PullOptions, PullProgressSender, PullResult, Reference, ext4,
+    progress_channel, tree,
 };
 
 use crate::{
@@ -2158,7 +2158,7 @@ async fn replace_oci_manifest_pin<C: ConnectionTrait>(
 async fn create_upper_ext4(
     path: &std::path::Path,
     upper_size_mib: u32,
-    tree: Option<filetree::FileTree>,
+    tree: Option<tree::FileTree>,
 ) -> MicrosandboxResult<()> {
     let _ = tokio::fs::remove_file(path).await;
     let ext4_options = ext4::Ext4FormatOptions {
@@ -2179,8 +2179,8 @@ async fn create_upper_ext4(
 }
 
 /// Build the ext4 root directory tree that overlayfs expects.
-fn build_overlay_upper_tree(tree: Option<filetree::FileTree>) -> filetree::FileTree {
-    use filetree::{DirectoryNode, FileTree, InodeMetadata, TreeNode};
+fn build_overlay_upper_tree(tree: Option<tree::FileTree>) -> tree::FileTree {
+    use tree::{DirectoryNode, FileTree, InodeMetadata, TreeNode};
 
     let mut overlay_tree = FileTree::new();
     let mut upper_dir = DirectoryNode::new(InodeMetadata::default());

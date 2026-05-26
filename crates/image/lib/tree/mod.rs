@@ -1,8 +1,7 @@
-mod format;
-mod formatter;
+mod model;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use formatter::{Ext4Error, Ext4FormatOptions, format_ext4, format_ext4_with_tree};
+pub use model::*;

@@ -7,23 +7,24 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::crc32c;
-use crate::filetree::{DirectoryNode, FileTree, InodeMetadata, TreeNode, Xattr};
+use crate::tree::{DirectoryNode, FileTree, TreeNode};
 
 use super::format::{
-    self, EROFS_BLKSIZ, EROFS_BLKSIZ_BITS, EROFS_CHUNK_FORMAT_INDEXES, EROFS_CHUNK_INDEX_SIZE,
-    EROFS_DEVICE_SLOT_SIZE, EROFS_DIRENT_SIZE, EROFS_FEATURE_COMPAT_SB_CHKSUM,
-    EROFS_FEATURE_INCOMPAT_CHUNKED_FILE, EROFS_FEATURE_INCOMPAT_DEVICE_TABLE,
-    EROFS_INODE_CHUNK_BASED, EROFS_INODE_EXTENDED_SIZE, EROFS_INODE_FLAT_INLINE,
+    EROFS_BLKSIZ, EROFS_BLKSIZ_BITS, EROFS_CHUNK_FORMAT_INDEXES, EROFS_CHUNK_INDEX_SIZE,
+    EROFS_DEVICE_SLOT_SIZE, EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_CHUNKED_FILE,
+    EROFS_FEATURE_INCOMPAT_DEVICE_TABLE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_EXTENDED_SIZE,
     EROFS_INODE_FLAT_PLAIN, EROFS_ISLOT_SIZE, EROFS_NULL_ADDR, EROFS_SUPER_MAGIC,
-    EROFS_SUPER_OFFSET, EROFS_SUPERBLOCK_SIZE, EROFS_XATTR_IBODY_HEADER_SIZE, dirent_file_type,
-    erofs_xattr_align, mode_type_bits, new_encode_dev, xattr_prefix_index,
+    EROFS_SUPER_OFFSET, EROFS_SUPERBLOCK_SIZE, mode_type_bits, new_encode_dev,
 };
 use super::writer::ErofsDataMap;
-use super::writer::ErofsError;
+use super::writer::{
+    ErofsError, clone_dir_shell, compute_dir_data_size, compute_xattr_ibody_size,
+    compute_xattr_icount, decide_data_layout, node_data_size, node_metadata, node_nlink,
+    node_xattrs, serialize_dir_blocks, write_xattr_ibody,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -310,6 +311,7 @@ fn plan_fsmeta_directory(
         inode_fixed_size,
         state.current_meta_offset,
         &mut state.current_data_block,
+        true,
     );
 
     let total_inode_size = inode_fixed_size + d.inline_tail_size;
@@ -482,6 +484,7 @@ fn plan_fsmeta_leaf_node(
         inode_fixed_size,
         state.current_meta_offset,
         &mut state.current_data_block,
+        true,
     );
 
     let total_inode_size = inode_fixed_size + d.inline_tail_size;
@@ -1004,325 +1007,6 @@ fn align_up(value: u64, alignment: u64) -> u64 {
     value.div_ceil(alignment) * alignment
 }
 
-fn compute_xattr_ibody_size(xattrs: &[Xattr]) -> Result<u32, ErofsError> {
-    if xattrs.is_empty() {
-        return Ok(0);
-    }
-    let mut size = EROFS_XATTR_IBODY_HEADER_SIZE as usize;
-    for xattr in xattrs {
-        let (_, suffix) =
-            xattr_prefix_index(&xattr.name).ok_or(ErofsError::UnsupportedXattrPrefix)?;
-        let entry_size = 4 + suffix.len() + xattr.value.len();
-        size += erofs_xattr_align(entry_size);
-    }
-    Ok(size as u32)
-}
-
-fn compute_xattr_icount(xattr_ibody_size: u32) -> u16 {
-    if xattr_ibody_size == 0 {
-        0
-    } else {
-        ((xattr_ibody_size - EROFS_XATTR_IBODY_HEADER_SIZE) / 4 + 1) as u16
-    }
-}
-
-struct DataLayoutDecision {
-    layout: u8,
-    inline_tail_size: u32,
-    block_count: u32,
-    block_start: u32,
-}
-
-fn decide_data_layout(
-    data_size: u64,
-    inode_fixed_size: u32,
-    meta_offset: u64,
-    current_data_block: &mut u32,
-) -> DataLayoutDecision {
-    let blksiz = EROFS_BLKSIZ as u64;
-    let tail_size = data_size % blksiz;
-    let full_blocks = data_size / blksiz;
-
-    if data_size == 0 {
-        DataLayoutDecision {
-            layout: EROFS_INODE_FLAT_PLAIN,
-            inline_tail_size: 0,
-            block_count: 0,
-            block_start: EROFS_NULL_ADDR,
-        }
-    } else if tail_size == 0 {
-        let start = *current_data_block;
-        *current_data_block += full_blocks as u32;
-        DataLayoutDecision {
-            layout: EROFS_INODE_FLAT_PLAIN,
-            inline_tail_size: 0,
-            block_count: full_blocks as u32,
-            block_start: start,
-        }
-    } else {
-        let inode_pos_in_block = meta_offset % blksiz;
-        let remaining_in_block = blksiz - inode_pos_in_block;
-        let needed = inode_fixed_size as u64 + tail_size;
-
-        if needed <= remaining_in_block {
-            let start = if full_blocks > 0 {
-                let s = *current_data_block;
-                *current_data_block += full_blocks as u32;
-                s
-            } else {
-                EROFS_NULL_ADDR
-            };
-            DataLayoutDecision {
-                layout: EROFS_INODE_FLAT_INLINE,
-                inline_tail_size: tail_size as u32,
-                block_count: full_blocks as u32,
-                block_start: start,
-            }
-        } else {
-            let start = *current_data_block;
-            *current_data_block += (full_blocks + 1) as u32;
-            DataLayoutDecision {
-                layout: EROFS_INODE_FLAT_PLAIN,
-                inline_tail_size: 0,
-                block_count: (full_blocks + 1) as u32,
-                block_start: start,
-            }
-        }
-    }
-}
-
-fn compute_dir_data_size(dir: &DirectoryNode) -> u32 {
-    let entry_count = 2 + dir.entries.len();
-    let mut names: Vec<&[u8]> = Vec::with_capacity(entry_count);
-    names.push(b".");
-    names.push(b"..");
-    for name in dir.entries.keys() {
-        names.push(name.as_bytes());
-    }
-    // EROFS requires dirents sorted by name in byte order.
-    names.sort();
-
-    let blksiz = EROFS_BLKSIZ as usize;
-    let mut total_size = 0usize;
-    let mut idx = 0;
-
-    while idx < names.len() {
-        let mut block_entries = 0;
-        let mut name_area = 0usize;
-
-        for name in &names[idx..] {
-            let new_dirent_area = (block_entries + 1) * EROFS_DIRENT_SIZE as usize;
-            let new_name_area = name_area + name.len();
-            if new_dirent_area + new_name_area > blksiz {
-                break;
-            }
-            name_area = new_name_area;
-            block_entries += 1;
-        }
-
-        if block_entries == 0 {
-            block_entries = 1;
-            name_area = names[idx].len();
-        }
-
-        let dirent_area = block_entries * EROFS_DIRENT_SIZE as usize;
-        let used = dirent_area + name_area;
-        if idx + block_entries < names.len() {
-            total_size += blksiz;
-        } else {
-            total_size += used;
-        }
-        idx += block_entries;
-    }
-
-    total_size as u32
-}
-
-fn serialize_dir_blocks(
-    dir: &DirectoryNode,
-    own_nid: u32,
-    parent_nid: u32,
-    child_nids: &BTreeMap<OsString, u32>,
-) -> Result<Vec<u8>, ErofsError> {
-    struct DirEntryInfo {
-        name: Vec<u8>,
-        nid: u64,
-        file_type: u8,
-    }
-
-    let mut entries: Vec<DirEntryInfo> = Vec::new();
-    entries.push(DirEntryInfo {
-        name: b".".to_vec(),
-        nid: own_nid as u64,
-        file_type: format::EROFS_FT_DIR,
-    });
-    entries.push(DirEntryInfo {
-        name: b"..".to_vec(),
-        nid: parent_nid as u64,
-        file_type: format::EROFS_FT_DIR,
-    });
-
-    for (name, child) in &dir.entries {
-        let nid = *child_nids.get(name).expect("child NID not found") as u64;
-        entries.push(DirEntryInfo {
-            name: name.as_bytes().to_vec(),
-            nid,
-            file_type: dirent_file_type(child),
-        });
-    }
-
-    // EROFS requires dirents sorted by name in byte order (memcmp).
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let blksiz = EROFS_BLKSIZ as usize;
-    let mut result = Vec::new();
-    let mut idx = 0;
-
-    while idx < entries.len() {
-        let mut block_entries = 0usize;
-        let mut name_total = 0usize;
-
-        for entry in &entries[idx..] {
-            let new_dirent_area = (block_entries + 1) * EROFS_DIRENT_SIZE as usize;
-            let new_name_total = name_total + entry.name.len();
-            if new_dirent_area + new_name_total > blksiz {
-                break;
-            }
-            name_total += entry.name.len();
-            block_entries += 1;
-        }
-
-        if block_entries == 0 {
-            block_entries = 1;
-            name_total = entries[idx].name.len();
-        }
-
-        let dirent_area_size = block_entries * EROFS_DIRENT_SIZE as usize;
-        let is_last_block = idx + block_entries >= entries.len();
-
-        let mut block = vec![
-            0u8;
-            if is_last_block {
-                dirent_area_size + name_total
-            } else {
-                blksiz
-            }
-        ];
-
-        let mut name_offset = dirent_area_size;
-        for i in 0..block_entries {
-            let e = &entries[idx + i];
-            let dirent_off = i * EROFS_DIRENT_SIZE as usize;
-
-            block[dirent_off..dirent_off + 8].copy_from_slice(&e.nid.to_le_bytes());
-            block[dirent_off + 8..dirent_off + 10]
-                .copy_from_slice(&(name_offset as u16).to_le_bytes());
-            block[dirent_off + 10] = e.file_type;
-            block[dirent_off + 11] = 0;
-
-            block[name_offset..name_offset + e.name.len()].copy_from_slice(&e.name);
-            name_offset += e.name.len();
-        }
-
-        result.extend_from_slice(&block);
-        idx += block_entries;
-    }
-
-    Ok(result)
-}
-
-fn node_data_size(node: &TreeNode) -> u64 {
-    match node {
-        TreeNode::RegularFile(f) => f.data.len() as u64,
-        TreeNode::Symlink(s) => s.target.len() as u64,
-        _ => 0,
-    }
-}
-
-fn node_xattrs(node: &TreeNode) -> &[Xattr] {
-    match node {
-        TreeNode::RegularFile(f) => &f.xattrs,
-        TreeNode::Directory(d) => &d.xattrs,
-        _ => &[],
-    }
-}
-
-fn node_metadata(node: &TreeNode) -> &InodeMetadata {
-    match node {
-        TreeNode::RegularFile(f) => &f.metadata,
-        TreeNode::Directory(d) => &d.metadata,
-        TreeNode::Symlink(s) => &s.metadata,
-        TreeNode::CharDevice(d) => &d.metadata,
-        TreeNode::BlockDevice(d) => &d.metadata,
-        TreeNode::Fifo(m) => m,
-        TreeNode::Socket(m) => m,
-    }
-}
-
-fn node_nlink(node: &TreeNode) -> u32 {
-    match node {
-        TreeNode::RegularFile(f) => f.nlink,
-        TreeNode::Directory(d) => {
-            let child_dirs = d
-                .entries
-                .values()
-                .filter(|c| matches!(c, TreeNode::Directory(_)))
-                .count();
-            2 + child_dirs as u32
-        }
-        _ => 1,
-    }
-}
-
-fn write_xattr_ibody(file: &mut (impl Write + Seek), xattrs: &[Xattr]) -> Result<(), ErofsError> {
-    let header = [0u8; EROFS_XATTR_IBODY_HEADER_SIZE as usize];
-    file.write_all(&header)?;
-
-    for xattr in xattrs {
-        let (prefix_idx, suffix) =
-            xattr_prefix_index(&xattr.name).ok_or(ErofsError::UnsupportedXattrPrefix)?;
-
-        let mut entry = [0u8; 4];
-        entry[0] = suffix.len() as u8;
-        entry[1] = prefix_idx;
-        entry[2..4].copy_from_slice(&(xattr.value.len() as u16).to_le_bytes());
-        file.write_all(&entry)?;
-
-        file.write_all(suffix)?;
-        file.write_all(&xattr.value)?;
-
-        let entry_size = 4 + suffix.len() + xattr.value.len();
-        let aligned = erofs_xattr_align(entry_size);
-        let pad = aligned - entry_size;
-        if pad > 0 {
-            file.write_all(&ZEROS[..pad])?;
-        }
-    }
-
-    Ok(())
-}
-
-fn clone_dir_shell(dir: &DirectoryNode) -> DirectoryNode {
-    DirectoryNode {
-        metadata: InodeMetadata {
-            uid: dir.metadata.uid,
-            gid: dir.metadata.gid,
-            mode: dir.metadata.mode,
-            mtime: dir.metadata.mtime,
-            mtime_nsec: dir.metadata.mtime_nsec,
-        },
-        xattrs: dir
-            .xattrs
-            .iter()
-            .map(|x| Xattr {
-                name: x.name.clone(),
-                value: x.value.clone(),
-            })
-            .collect(),
-        entries: BTreeMap::new(),
-    }
-}
-
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -1333,7 +1017,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::filetree::{FileTree, InodeMetadata, SymlinkNode, TreeNode};
+    use crate::tree::{FileTree, InodeMetadata, SymlinkNode, TreeNode};
 
     use super::{super::reader::ErofsReader, super::writer::ErofsDataMap, write_fsmeta};
 

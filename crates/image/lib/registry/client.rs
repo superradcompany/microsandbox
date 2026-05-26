@@ -13,11 +13,7 @@ use std::{
     time::Instant,
 };
 
-use oci_client::{
-    Client,
-    client::{Certificate, CertificateEncoding, ClientConfig, ClientProtocol},
-    manifest::ImageIndexEntry,
-};
+use oci_client::{Client, manifest::ImageIndexEntry};
 use tokio::{
     io::{AsyncRead, ReadBuf},
     sync::Semaphore,
@@ -25,21 +21,23 @@ use tokio::{
 };
 
 use crate::{
-    auth::RegistryAuth,
+    cache::{
+        self, CachedImageMetadata, CachedLayerMetadata, GlobalCache,
+        lock::{flock_unlock, open_lock_file},
+    },
     config::ImageConfig,
     digest::Digest,
     erofs,
     error::{ImageError, ImageResult},
-    filetree::{FileTree, ResourceLimits},
     layer::Layer,
-    lock::{flock_unlock, open_lock_file},
-    manifest::OciManifest,
     platform::Platform,
     progress::{self, PullProgress, PullProgressHandle, PullProgressSender},
     pull::{PullOptions, PullPolicy, PullResult},
-    store::{self, CachedImageMetadata, CachedLayerMetadata, GlobalCache},
-    tar_ingest::{self, Compression},
+    tar::{self, Compression},
+    tree::{FileTree, ResourceLimits},
 };
+
+use super::{RegistryBuilder, manifest::OciManifest};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -57,10 +55,10 @@ const MAX_LAYER_PIPELINE_CONCURRENCY: usize = 16;
 
 /// OCI registry client with platform resolution, caching, and progress reporting.
 pub struct Registry {
-    client: Client,
-    auth: oci_client::secrets::RegistryAuth,
-    platform: Platform,
-    cache: GlobalCache,
+    pub(super) client: Client,
+    pub(super) auth: oci_client::secrets::RegistryAuth,
+    pub(super) platform: Platform,
+    pub(super) cache: GlobalCache,
 }
 
 /// Resolved manifest layer descriptor used during download/materialization.
@@ -69,15 +67,6 @@ struct LayerDescriptor {
     digest: Digest,
     media_type: Option<String>,
     size: Option<u64>,
-}
-
-/// Builder for constructing a [`Registry`] client with optional auth and TLS settings.
-pub struct RegistryBuilder {
-    platform: Platform,
-    cache: GlobalCache,
-    auth: oci_client::secrets::RegistryAuth,
-    insecure_registries: Vec<String>,
-    extra_ca_certs: Vec<Vec<u8>>,
 }
 
 struct CachedPullInfo {
@@ -142,13 +131,7 @@ impl Registry {
 
     /// Create a builder for configuring auth, TLS, and other registry options.
     pub fn builder(platform: Platform, cache: GlobalCache) -> RegistryBuilder {
-        RegistryBuilder {
-            platform,
-            cache,
-            auth: oci_client::secrets::RegistryAuth::Anonymous,
-            insecure_registries: Vec::new(),
-            extra_ca_certs: Vec::new(),
-        }
+        RegistryBuilder::new(platform, cache)
     }
 
     /// Resolve a pull directly from the on-disk cache without building a registry client.
@@ -639,7 +622,7 @@ impl Registry {
         //   the missing ones; fsmeta/VMDK regen follows if needed.
         let fsmeta_path = self.cache.fsmeta_erofs_path(manifest_digest);
         let vmdk_path = self.cache.vmdk_path(manifest_digest);
-        let fsmeta_valid = store::is_valid_erofs_artifact_async(&fsmeta_path).await;
+        let fsmeta_valid = cache::is_valid_erofs_artifact_async(&fsmeta_path).await;
         let vmdk_valid = path_exists_async(&vmdk_path).await;
         let all_layers_valid =
             all_layers_materialized_async(&self.cache, &validated_diff_ids).await;
@@ -698,7 +681,7 @@ impl Registry {
                             })?;
                     let layer_started_at = Instant::now();
 
-                    if store::is_valid_erofs_artifact_async(&erofs_path).await && !layer_force {
+                    if cache::is_valid_erofs_artifact_async(&erofs_path).await && !layer_force {
                         if let Some(ref p) = progress {
                             p.send(PullProgress::LayerMaterializeComplete {
                                 layer_index: i,
@@ -750,7 +733,7 @@ impl Registry {
                     });
 
                     // Re-check after lock — another process may have materialized it.
-                    if store::is_valid_erofs_artifact_async(&erofs_path).await && !layer_force {
+                    if cache::is_valid_erofs_artifact_async(&erofs_path).await && !layer_force {
                         if let Some(ref p) = progress {
                             p.send(PullProgress::LayerMaterializeComplete {
                                 layer_index: i,
@@ -795,7 +778,7 @@ impl Registry {
                     let limits = ResourceLimits::default();
                     let spool_path = tmp_dir.join(format!("{}.spool", diff_id));
                     let ingest_started_at = Instant::now();
-                    let ingest_result = tar_ingest::ingest_compressed_tar(
+                    let ingest_result = tar::ingest_compressed_tar(
                         MaterializeProgressReader::new(
                             tar_file,
                             progress.clone(),
@@ -910,7 +893,7 @@ impl Registry {
         let fsmeta_path = self.cache.fsmeta_erofs_path(manifest_digest);
         let vmdk_path = self.cache.vmdk_path(manifest_digest);
 
-        if store::is_valid_erofs_artifact_async(&fsmeta_path).await
+        if cache::is_valid_erofs_artifact_async(&fsmeta_path).await
             && path_exists_async(&vmdk_path).await
             && !force
         {
@@ -941,7 +924,7 @@ impl Registry {
         });
 
         // Re-check after lock acquisition.
-        if store::is_valid_erofs_artifact_async(&fsmeta_path).await
+        if cache::is_valid_erofs_artifact_async(&fsmeta_path).await
             && path_exists_async(&vmdk_path).await
             && !force
         {
@@ -1022,7 +1005,7 @@ impl Registry {
                 layer_count: layer_trees.len(),
             });
         }
-        let (merged_tree, provenance) = crate::filetree::merge_layers_with_provenance(layer_trees);
+        let (merged_tree, provenance) = crate::tree::merge_layers_with_provenance(layer_trees);
 
         // Generate fsmeta and VMDK.
         let fsmeta_path_for_write = fsmeta_path.clone();
@@ -1073,7 +1056,7 @@ impl Registry {
             let mut extents: Vec<&std::path::Path> = vec![&fsmeta_path_for_write];
             extents.extend(layer_erofs_paths.iter().map(|p| p.as_path()));
 
-            crate::vmdk::write_vmdk_descriptor(&temp_vmdk, &extents).map_err(|e| {
+            crate::stitch::write_vmdk_descriptor(&temp_vmdk, &extents).map_err(|e| {
                 ImageError::Materialize {
                     digest: manifest_digest_str.clone(),
                     message: format!("VMDK write failed: {e}"),
@@ -1135,7 +1118,7 @@ impl Registry {
         if path_exists_async(&vmdk_path).await {
             return Ok(());
         }
-        if !store::is_valid_erofs_artifact_async(&fsmeta_path).await {
+        if !cache::is_valid_erofs_artifact_async(&fsmeta_path).await {
             return Err(ImageError::Materialize {
                 digest: manifest_digest.to_string(),
                 message: "fsmeta vanished while waiting for VMDK regen lock".into(),
@@ -1167,7 +1150,7 @@ impl Registry {
             let mut extents: Vec<&std::path::Path> = vec![&fsmeta_path];
             extents.extend(layer_erofs_paths.iter().map(|p| p.as_path()));
 
-            crate::vmdk::write_vmdk_descriptor(&temp_vmdk, &extents).map_err(|e| {
+            crate::stitch::write_vmdk_descriptor(&temp_vmdk, &extents).map_err(|e| {
                 ImageError::Materialize {
                     digest: manifest_digest_str.clone(),
                     message: format!("VMDK write failed: {e}"),
@@ -1264,79 +1247,11 @@ fn detect_manifest_media_type(bytes: &[u8]) -> String {
     "application/vnd.oci.image.manifest.v1+json".to_string()
 }
 
-impl RegistryBuilder {
-    /// Set authentication credentials for the registry.
-    pub fn auth(mut self, auth: RegistryAuth) -> Self {
-        self.auth = (&auth).into();
-        self
-    }
-
-    /// Add registries that should be accessed over plain HTTP instead of HTTPS.
-    pub fn add_insecure_registries(mut self, registries: Vec<String>) -> Self {
-        self.insecure_registries.extend(registries);
-        self
-    }
-
-    /// Add PEM-encoded CA root certificates to trust.
-    pub fn extra_ca_certs(mut self, certs: Vec<Vec<u8>>) -> Self {
-        self.extra_ca_certs = certs;
-        self
-    }
-
-    /// Build the registry client.
-    ///
-    /// Returns [`ImageError::InvalidCertificate`] if any PEM data in
-    /// `extra_ca_certs` cannot be parsed as valid certificates.
-    pub fn build(self) -> ImageResult<Registry> {
-        let protocol = if self.insecure_registries.is_empty() {
-            ClientProtocol::Https
-        } else {
-            ClientProtocol::HttpsExcept(self.insecure_registries)
-        };
-
-        let mut extra_root_certificates = Vec::new();
-        for (i, pem_data) in self.extra_ca_certs.into_iter().enumerate() {
-            let certs: Vec<_> = rustls_pemfile::certs(&mut pem_data.as_slice())
-                .collect::<Result<_, _>>()
-                .map_err(|e| {
-                    ImageError::InvalidCertificate(format!("entry {i}: failed to parse: {e}"))
-                })?;
-
-            if certs.is_empty() {
-                return Err(ImageError::InvalidCertificate(format!(
-                    "entry {i}: no certificates found in PEM data"
-                )));
-            }
-
-            for cert in certs {
-                extra_root_certificates.push(Certificate {
-                    encoding: CertificateEncoding::Der,
-                    data: cert.to_vec(),
-                });
-            }
-        }
-
-        let platform = self.platform.clone();
-        let client = Client::new(ClientConfig {
-            protocol,
-            extra_root_certificates,
-            platform_resolver: Some(Box::new(move |manifests| {
-                resolve_platform_digest(manifests, &platform)
-            })),
-            ..Default::default()
-        });
-
-        Ok(Registry {
-            client,
-            auth: self.auth,
-            platform: self.platform,
-            cache: self.cache,
-        })
-    }
-}
-
 /// Resolve the best matching platform-specific manifest digest.
-fn resolve_platform_digest(manifests: &[ImageIndexEntry], target: &Platform) -> Option<String> {
+pub(super) fn resolve_platform_digest(
+    manifests: &[ImageIndexEntry],
+    target: &Platform,
+) -> Option<String> {
     let mut arch_only_match: Option<String> = None;
 
     for entry in manifests {
@@ -1492,7 +1407,7 @@ async fn resolve_cached_pull_result_async(
         Ok(digest) => digest,
         Err(_) => return Ok(None),
     };
-    if !store::is_valid_erofs_artifact_async(&cache.fsmeta_erofs_path(&manifest_digest)).await
+    if !cache::is_valid_erofs_artifact_async(&cache.fsmeta_erofs_path(&manifest_digest)).await
         || !path_exists_async(&cache.vmdk_path(&manifest_digest)).await
     {
         return Ok(None);
@@ -1508,7 +1423,7 @@ async fn resolve_cached_pull_result_async(
 
 async fn all_layers_materialized_async(cache: &GlobalCache, diff_ids: &[Digest]) -> bool {
     for diff_id in diff_ids {
-        if !store::is_valid_erofs_artifact_async(&cache.layer_erofs_path(diff_id)).await {
+        if !cache::is_valid_erofs_artifact_async(&cache.layer_erofs_path(diff_id)).await {
             return false;
         }
     }
@@ -1552,10 +1467,10 @@ mod tests {
 
     use super::{Platform, resolve_cached_pull_result, resolve_platform_digest};
     use crate::{
+        cache::{CachedImageMetadata, CachedLayerMetadata, GlobalCache},
         config::ImageConfig,
         error::ImageError,
         pull::{PullOptions, PullPolicy},
-        store::{CachedImageMetadata, CachedLayerMetadata, GlobalCache},
     };
 
     #[test]

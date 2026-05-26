@@ -5,7 +5,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::crc32c;
-use crate::filetree::{DirectoryNode, FileTree, InodeMetadata, TreeNode, Xattr};
+use crate::tree::{DirectoryNode, FileTree, InodeMetadata, TreeNode, Xattr};
 
 use super::format::{
     self, EROFS_BLKSIZ, EROFS_BLKSIZ_BITS, EROFS_DIRENT_SIZE, EROFS_FEATURE_COMPAT_SB_CHKSUM,
@@ -165,7 +165,7 @@ pub fn write_erofs(tree: &FileTree, output: &Path) -> Result<ErofsDataMap, Erofs
     })
 }
 
-fn compute_xattr_ibody_size(xattrs: &[Xattr]) -> Result<u32, ErofsError> {
+pub(super) fn compute_xattr_ibody_size(xattrs: &[Xattr]) -> Result<u32, ErofsError> {
     if xattrs.is_empty() {
         return Ok(0);
     }
@@ -182,7 +182,7 @@ fn compute_xattr_ibody_size(xattrs: &[Xattr]) -> Result<u32, ErofsError> {
     Ok(size as u32)
 }
 
-fn compute_xattr_icount(xattr_ibody_size: u32) -> u16 {
+pub(super) fn compute_xattr_icount(xattr_ibody_size: u32) -> u16 {
     if xattr_ibody_size == 0 {
         0
     } else {
@@ -191,11 +191,11 @@ fn compute_xattr_icount(xattr_ibody_size: u32) -> u16 {
 }
 
 /// Layout decision result for an inode's data storage strategy.
-struct DataLayoutDecision {
-    layout: u8,
-    inline_tail_size: u32,
-    block_count: u32,
-    block_start: u32,
+pub(super) struct DataLayoutDecision {
+    pub(super) layout: u8,
+    pub(super) inline_tail_size: u32,
+    pub(super) block_count: u32,
+    pub(super) block_start: u32,
 }
 
 /// Decide between FLAT_PLAIN and FLAT_INLINE for an inode's data.
@@ -209,7 +209,7 @@ struct DataLayoutDecision {
 /// each full block via a chunk index by block address, so the tail must
 /// live in a real data block (padded) rather than being inlined in the
 /// per-layer EROFS metadata area, which fsmeta cannot reach.
-fn decide_data_layout(
+pub(super) fn decide_data_layout(
     data_size: u64,
     inode_fixed_size: u32,
     meta_offset: u64,
@@ -277,7 +277,7 @@ fn decide_data_layout(
     }
 }
 
-fn compute_dir_data_size(dir: &DirectoryNode) -> u32 {
+pub(super) fn compute_dir_data_size(dir: &DirectoryNode) -> u32 {
     // Total entries = 2 (. and ..) + number of children
     let entry_count = 2 + dir.entries.len();
 
@@ -349,7 +349,7 @@ fn compute_dir_data_size(dir: &DirectoryNode) -> u32 {
 ///
 /// The last block may be shorter than 4096 bytes — it will be stored
 /// inline after the inode if the layout planner chose FLAT_INLINE.
-fn serialize_dir_blocks(
+pub(super) fn serialize_dir_blocks(
     dir: &DirectoryNode,
     own_nid: u32,
     parent_nid: u32,
@@ -451,7 +451,7 @@ fn serialize_dir_blocks(
     Ok(result)
 }
 
-fn node_data_size(node: &TreeNode) -> u64 {
+pub(super) fn node_data_size(node: &TreeNode) -> u64 {
     match node {
         TreeNode::RegularFile(f) => f.data.len() as u64,
         TreeNode::Symlink(s) => s.target.len() as u64,
@@ -459,7 +459,7 @@ fn node_data_size(node: &TreeNode) -> u64 {
     }
 }
 
-fn node_xattrs(node: &TreeNode) -> &[Xattr] {
+pub(super) fn node_xattrs(node: &TreeNode) -> &[Xattr] {
     match node {
         TreeNode::RegularFile(f) => &f.xattrs,
         TreeNode::Directory(d) => &d.xattrs,
@@ -467,7 +467,7 @@ fn node_xattrs(node: &TreeNode) -> &[Xattr] {
     }
 }
 
-fn node_metadata(node: &TreeNode) -> &InodeMetadata {
+pub(super) fn node_metadata(node: &TreeNode) -> &InodeMetadata {
     match node {
         TreeNode::RegularFile(f) => &f.metadata,
         TreeNode::Directory(d) => &d.metadata,
@@ -479,7 +479,7 @@ fn node_metadata(node: &TreeNode) -> &InodeMetadata {
     }
 }
 
-fn node_nlink(node: &TreeNode) -> u32 {
+pub(super) fn node_nlink(node: &TreeNode) -> u32 {
     match node {
         TreeNode::RegularFile(f) => f.nlink,
         TreeNode::Directory(d) => {
@@ -840,7 +840,7 @@ fn write_metadata(
     Ok(())
 }
 
-fn clone_dir_shell(dir: &DirectoryNode) -> DirectoryNode {
+pub(super) fn clone_dir_shell(dir: &DirectoryNode) -> DirectoryNode {
     DirectoryNode {
         metadata: InodeMetadata {
             uid: dir.metadata.uid,
@@ -1085,7 +1085,10 @@ fn write_metadata_for_leaf(
     Ok(())
 }
 
-fn write_xattr_ibody(file: &mut (impl Write + Seek), xattrs: &[Xattr]) -> Result<(), ErofsError> {
+pub(super) fn write_xattr_ibody(
+    file: &mut (impl Write + Seek),
+    xattrs: &[Xattr],
+) -> Result<(), ErofsError> {
     // Write the ibody header (12 bytes)
     // h_name_filter: u32 = 0, h_shared_count: u8 = 0, reserved: [u8; 7] = 0
     let header = [0u8; EROFS_XATTR_IBODY_HEADER_SIZE as usize];

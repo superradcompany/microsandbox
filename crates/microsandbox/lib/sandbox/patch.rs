@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use microsandbox_image::erofs::{ErofsEntryInfo, ErofsEntryKind, ErofsReader};
-use microsandbox_image::filetree::{
+use microsandbox_image::tree::{
     DeviceNode, DirectoryNode, FileData, FileTree, FileTreeError, InodeMetadata, RegularFileNode,
     SymlinkNode, TreeNode,
 };
@@ -995,7 +995,7 @@ mod tests {
     use super::*;
 
     use microsandbox_image::erofs::write_erofs;
-    use microsandbox_image::filetree::Xattr;
+    use microsandbox_image::tree::Xattr;
 
     fn make_regular_file(data: &[u8]) -> TreeNode {
         TreeNode::RegularFile(RegularFileNode {

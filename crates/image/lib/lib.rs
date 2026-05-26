@@ -17,30 +17,29 @@
 )]
 
 mod auth;
+mod cache;
 mod config;
 pub(crate) mod crc32c;
 mod digest;
 pub mod erofs;
 mod error;
 pub mod ext4;
-pub mod filetree;
 pub(crate) mod layer;
-pub(crate) mod lock;
-mod manifest;
 mod platform;
 mod progress;
 mod pull;
 mod registry;
 pub mod snapshot;
-mod store;
-pub mod tar_ingest;
-pub mod vmdk;
+pub(crate) mod stitch;
+pub mod tar;
+pub mod tree;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
 pub use auth::RegistryAuth;
+pub use cache::{CachedImageMetadata, CachedLayerMetadata, GlobalCache};
 pub use config::ImageConfig;
 pub use digest::Digest;
 pub use error::{ImageError, ImageResult};
@@ -49,4 +48,3 @@ pub use platform::{Arch, Os, Platform};
 pub use progress::{PullProgress, PullProgressHandle, PullProgressSender, progress_channel};
 pub use pull::{PullOptions, PullPolicy, PullResult};
 pub use registry::{Registry, RegistryBuilder};
-pub use store::{CachedImageMetadata, CachedLayerMetadata, GlobalCache};

@@ -14,7 +14,7 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader, ReadBuf};
 use tokio_tar as tar;
 
-use crate::filetree::{
+use crate::tree::{
     DataSpool, DeviceNode, DirectoryNode, FileData, FileTree, FileTreeError, InodeMetadata,
     RegularFileNode, ResourceLimits, SPOOL_THRESHOLD, SymlinkNode, TreeNode, Xattr,
 };
@@ -29,7 +29,7 @@ const WHITEOUT_PREFIX: &[u8] = b".wh.";
 /// Opaque whiteout filename.
 const OPAQUE_WHITEOUT: &[u8] = b".wh..wh..opq";
 
-use crate::filetree::{OPAQUE_XATTR_NAME, OPAQUE_XATTR_VALUE, WHITEOUT_MAJOR, WHITEOUT_MINOR};
+use crate::tree::{OPAQUE_XATTR_NAME, OPAQUE_XATTR_VALUE, WHITEOUT_MAJOR, WHITEOUT_MINOR};
 
 /// Gzip magic bytes.
 const GZIP_MAGIC: [u8; 2] = [0x1F, 0x8B];

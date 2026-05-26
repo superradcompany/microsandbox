@@ -1,8 +1,9 @@
-mod format;
-mod formatter;
+pub(crate) mod lock;
+mod store;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use formatter::{Ext4Error, Ext4FormatOptions, format_ext4, format_ext4_with_tree};
+pub(crate) use store::is_valid_erofs_artifact_async;
+pub use store::{CachedImageMetadata, CachedLayerMetadata, GlobalCache};
