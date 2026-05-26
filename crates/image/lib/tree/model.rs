@@ -1,10 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -37,6 +38,8 @@ pub(crate) const OPAQUE_XATTR_VALUE: &[u8] = b"y";
 pub enum FileData {
     /// Small file content held in memory.
     Memory(Vec<u8>),
+    /// In-memory content shared by hardlinked regular-file aliases.
+    SharedMemory(Arc<[u8]>),
     /// Large file content written to a shared spool file on disk.
     /// Multiple `FileData::Spool` entries can reference different regions
     /// of the same underlying spool file via `Arc`.
@@ -51,6 +54,9 @@ impl std::fmt::Debug for FileData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FileData::Memory(data) => f.debug_tuple("Memory").field(&data.len()).finish(),
+            FileData::SharedMemory(data) => {
+                f.debug_tuple("SharedMemory").field(&data.len()).finish()
+            }
             FileData::Spool { offset, len, .. } => f
                 .debug_struct("Spool")
                 .field("offset", offset)
@@ -64,6 +70,9 @@ impl PartialEq for FileData {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (FileData::Memory(a), FileData::Memory(b)) => a == b,
+            (FileData::Memory(a), FileData::SharedMemory(b))
+            | (FileData::SharedMemory(b), FileData::Memory(a)) => a.as_slice() == b.as_ref(),
+            (FileData::SharedMemory(a), FileData::SharedMemory(b)) => a.as_ref() == b.as_ref(),
             _ => false,
         }
     }
@@ -104,6 +113,9 @@ pub struct Xattr {
     pub value: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RegularFileId(u64);
+
 #[derive(Clone)]
 pub enum TreeNode {
     RegularFile(RegularFileNode),
@@ -117,6 +129,7 @@ pub enum TreeNode {
 
 #[derive(Clone)]
 pub struct RegularFileNode {
+    pub id: RegularFileId,
     pub metadata: InodeMetadata,
     pub xattrs: Vec<Xattr>,
     pub data: FileData,
@@ -165,6 +178,7 @@ impl FileData {
     pub fn len(&self) -> usize {
         match self {
             FileData::Memory(v) => v.len(),
+            FileData::SharedMemory(v) => v.len(),
             FileData::Spool { len, .. } => *len as usize,
         }
     }
@@ -178,6 +192,7 @@ impl FileData {
     pub fn read_all(&self) -> std::io::Result<Vec<u8>> {
         match self {
             FileData::Memory(v) => Ok(v.clone()),
+            FileData::SharedMemory(v) => Ok(v.to_vec()),
             FileData::Spool { spool, offset, len } => {
                 let mut buf = vec![0u8; *len as usize];
                 let mut file = spool
@@ -194,6 +209,7 @@ impl FileData {
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             FileData::Memory(v) => Some(v),
+            FileData::SharedMemory(v) => Some(v),
             FileData::Spool { .. } => None,
         }
     }
@@ -213,6 +229,7 @@ impl FileData {
     ) -> std::io::Result<()> {
         match self {
             FileData::Memory(v) => out.write_all(&v[start..start + len]),
+            FileData::SharedMemory(v) => out.write_all(&v[start..start + len]),
             FileData::Spool { spool, offset, .. } => {
                 let mut file = spool
                     .lock()
@@ -229,6 +246,36 @@ impl FileData {
                 Ok(())
             }
         }
+    }
+
+    /// Return a shared reference suitable for a hardlinked alias.
+    pub fn clone_ref(&mut self) -> FileData {
+        match self {
+            FileData::Memory(data) => {
+                let shared: Arc<[u8]> = std::mem::take(data).into();
+                *self = FileData::SharedMemory(Arc::clone(&shared));
+                FileData::SharedMemory(shared)
+            }
+            FileData::SharedMemory(data) => FileData::SharedMemory(Arc::clone(data)),
+            FileData::Spool { spool, offset, len } => FileData::Spool {
+                spool: Arc::clone(spool),
+                offset: *offset,
+                len: *len,
+            },
+        }
+    }
+}
+
+impl RegularFileId {
+    pub fn new() -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+impl Default for RegularFileId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -262,15 +309,22 @@ impl DataSpool {
         })
     }
 
-    /// Clone a spool reference for a hardlinked file.
-    pub fn clone_ref(data: &FileData) -> FileData {
-        match data {
-            FileData::Memory(v) => FileData::Memory(v.clone()),
-            FileData::Spool { spool, offset, len } => FileData::Spool {
-                spool: Arc::clone(spool),
-                offset: *offset,
-                len: *len,
-            },
+    pub fn current_offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub fn write_chunk(&mut self, data: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        self.file.write_all(data)?;
+        self.offset += data.len() as u64;
+        Ok(())
+    }
+
+    pub fn data_ref(&self, offset: u64, len: u64) -> FileData {
+        FileData::Spool {
+            spool: Arc::clone(&self.shared),
+            offset,
+            len,
         }
     }
 }
@@ -439,8 +493,20 @@ impl FileTree {
         data_size_in_dir(&self.root)
     }
 
+    pub(crate) fn regular_file_link_counts(&self) -> HashMap<RegularFileId, u32> {
+        let mut counts = HashMap::new();
+        count_regular_links_in_dir(&self.root, &mut counts);
+        counts
+    }
+
+    pub(crate) fn refresh_regular_nlinks(&mut self) {
+        let counts = self.regular_file_link_counts();
+        refresh_regular_nlinks_in_dir(&mut self.root, &counts);
+    }
+
     pub fn merge_layer(&mut self, layer: FileTree) {
         merge_directory(&mut self.root, layer.root);
+        self.refresh_regular_nlinks();
     }
 
     /// Strip file data from this tree, keeping only directory structure and metadata.
@@ -537,19 +603,52 @@ fn count_nodes_in_dir(dir: &DirectoryNode) -> u64 {
 }
 
 fn data_size_in_dir(dir: &DirectoryNode) -> u64 {
+    let mut seen = HashSet::new();
+    data_size_in_dir_once(dir, &mut seen)
+}
+
+fn data_size_in_dir_once(dir: &DirectoryNode, seen: &mut HashSet<RegularFileId>) -> u64 {
     let mut size = 0u64;
     for node in dir.entries.values() {
         match node {
-            TreeNode::RegularFile(file) => {
+            TreeNode::RegularFile(file) if seen.insert(file.id) => {
                 size += file.data.len() as u64;
             }
             TreeNode::Directory(child_dir) => {
-                size += data_size_in_dir(child_dir);
+                size += data_size_in_dir_once(child_dir, seen);
             }
             _ => {}
         }
     }
     size
+}
+
+fn count_regular_links_in_dir(dir: &DirectoryNode, counts: &mut HashMap<RegularFileId, u32>) {
+    for node in dir.entries.values() {
+        match node {
+            TreeNode::RegularFile(file) => {
+                *counts.entry(file.id).or_insert(0) += 1;
+            }
+            TreeNode::Directory(child_dir) => {
+                count_regular_links_in_dir(child_dir, counts);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn refresh_regular_nlinks_in_dir(dir: &mut DirectoryNode, counts: &HashMap<RegularFileId, u32>) {
+    for node in dir.entries.values_mut() {
+        match node {
+            TreeNode::RegularFile(file) => {
+                file.nlink = counts.get(&file.id).copied().unwrap_or(1);
+            }
+            TreeNode::Directory(child_dir) => {
+                refresh_regular_nlinks_in_dir(child_dir, counts);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn strip_data_in_dir(dir: &mut DirectoryNode) {
@@ -592,6 +691,7 @@ pub fn merge_layers_with_provenance(layers: Vec<FileTree>) -> (FileTree, HashMap
     // Strip opaque xattrs from the final merged tree — they are overlayfs
     // directives consumed by the merge, not meaningful in fsmeta.
     strip_opaque_xattrs(&mut merged.root);
+    merged.refresh_regular_nlinks();
 
     (merged, provenance)
 }
@@ -744,7 +844,12 @@ mod tests {
     use super::*;
 
     fn make_regular_file(data: &[u8]) -> TreeNode {
+        make_regular_file_with_id(data, RegularFileId::new())
+    }
+
+    fn make_regular_file_with_id(data: &[u8], id: RegularFileId) -> TreeNode {
         TreeNode::RegularFile(RegularFileNode {
+            id,
             metadata: InodeMetadata::default(),
             xattrs: Vec::new(),
             data: FileData::Memory(data.to_vec()),
@@ -895,6 +1000,27 @@ mod tests {
         assert_eq!(tree.node_count(), 6);
         // 5 + 6 + 1 = 12
         assert_eq!(tree.total_data_size(), 12);
+    }
+
+    #[test]
+    fn data_size_counts_hardlinked_regular_file_once() {
+        let mut tree = FileTree::new();
+        let file_id = RegularFileId::new();
+
+        tree.insert(b"a.txt", make_regular_file_with_id(b"shared", file_id))
+            .unwrap();
+        tree.insert(b"b.txt", make_regular_file_with_id(b"shared", file_id))
+            .unwrap();
+
+        tree.refresh_regular_nlinks();
+
+        assert_eq!(tree.total_data_size(), b"shared".len() as u64);
+        for path in [b"a.txt".as_slice(), b"b.txt".as_slice()] {
+            match tree.get(path).unwrap() {
+                TreeNode::RegularFile(file) => assert_eq!(file.nlink, 2),
+                _ => panic!("expected regular file"),
+            }
+        }
     }
 
     #[test]

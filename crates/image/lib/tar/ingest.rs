@@ -16,7 +16,7 @@ use tokio_tar as tar;
 
 use crate::tree::{
     DataSpool, DeviceNode, DirectoryNode, FileData, FileTree, FileTreeError, InodeMetadata,
-    RegularFileNode, ResourceLimits, SPOOL_THRESHOLD, SymlinkNode, TreeNode, Xattr,
+    RegularFileId, RegularFileNode, ResourceLimits, SPOOL_THRESHOLD, SymlinkNode, TreeNode, Xattr,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -312,19 +312,18 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
                         tree.insert(&whiteout_path, node)?;
                     }
                     WhiteoutKind::None => {
-                        let mut buf = Vec::with_capacity(size as usize);
-                        entry.read_to_end(&mut buf).await.map_err(IngestError::Io)?;
-
-                        // Spool large files to disk to bound memory usage.
-                        let file_data = if buf.len() as u64 >= SPOOL_THRESHOLD
+                        let file_data = if size >= SPOOL_THRESHOLD
                             && let Some(spool) = spool.as_mut()
                         {
-                            spool.write_data(&buf).map_err(IngestError::Io)?
+                            stream_entry_to_spool(&mut entry, size, spool).await?
                         } else {
+                            let mut buf = Vec::with_capacity(size as usize);
+                            entry.read_to_end(&mut buf).await.map_err(IngestError::Io)?;
                             FileData::Memory(buf)
                         };
 
                         let node = TreeNode::RegularFile(RegularFileNode {
+                            id: RegularFileId::new(),
                             metadata,
                             xattrs: Vec::new(),
                             data: file_data,
@@ -376,6 +375,8 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
             tokio::task::yield_now().await;
         }
     }
+
+    tree.refresh_regular_nlinks();
 
     Ok(tree)
 }
@@ -684,56 +685,58 @@ fn handle_hardlink(
     link_path: &[u8],
     target_path: &[u8],
 ) -> Result<(), IngestError> {
-    let target_path_str = String::from_utf8_lossy(target_path).into_owned();
-
-    // Look up the target node and clone it.
-    let cloned_node = match tree.get(target_path) {
+    let node = match tree.get_mut(target_path) {
         Some(TreeNode::RegularFile(f)) => {
-            let cloned = RegularFileNode {
-                metadata: InodeMetadata {
-                    uid: f.metadata.uid,
-                    gid: f.metadata.gid,
-                    mode: f.metadata.mode,
-                    mtime: f.metadata.mtime,
-                    mtime_nsec: f.metadata.mtime_nsec,
-                },
-                xattrs: f
-                    .xattrs
-                    .iter()
-                    .map(|x| Xattr {
-                        name: x.name.clone(),
-                        value: x.value.clone(),
-                    })
-                    .collect(),
-                data: DataSpool::clone_ref(&f.data),
-                nlink: f.nlink + 1,
-            };
-            // The new copy also gets incremented nlink.
-            let new_nlink = cloned.nlink;
-            (TreeNode::RegularFile(cloned), new_nlink)
+            let new_nlink = f.nlink + 1;
+            f.nlink = new_nlink;
+            TreeNode::RegularFile(RegularFileNode {
+                id: f.id,
+                metadata: f.metadata.clone(),
+                xattrs: f.xattrs.clone(),
+                data: f.data.clone_ref(),
+                nlink: new_nlink,
+            })
         }
         Some(_) => {
-            // Hardlinks to non-regular files: clone metadata only.
             return Err(IngestError::HardlinkTarget(format!(
-                "hardlink target is not a regular file: \"{target_path_str}\""
+                "hardlink target is not a regular file: \"{}\"",
+                String::from_utf8_lossy(target_path)
             )));
         }
         None => {
-            return Err(IngestError::HardlinkTarget(target_path_str));
+            return Err(IngestError::HardlinkTarget(
+                String::from_utf8_lossy(target_path).into_owned(),
+            ));
         }
     };
 
-    let (node, new_nlink) = cloned_node;
-
-    // Update the nlink on the original target.
-    if let Some(TreeNode::RegularFile(target)) = tree.get_mut(target_path) {
-        target.nlink = new_nlink;
-    }
-
-    // Insert the cloned node at the link path.
     tree.insert(link_path, node)?;
 
     Ok(())
+}
+
+async fn stream_entry_to_spool<R: AsyncRead + Unpin>(
+    entry: &mut tar::Entry<R>,
+    size: u64,
+    spool: &mut DataSpool,
+) -> Result<FileData, IngestError> {
+    let offset = spool.current_offset();
+    let mut remaining = size;
+    let mut buf = vec![0u8; 1024 * 1024];
+
+    while remaining > 0 {
+        let to_read = remaining.min(buf.len() as u64) as usize;
+        entry
+            .read_exact(&mut buf[..to_read])
+            .await
+            .map_err(IngestError::Io)?;
+        spool
+            .write_chunk(&buf[..to_read])
+            .map_err(IngestError::Io)?;
+        remaining -= to_read as u64;
+    }
+
+    Ok(spool.data_ref(offset, size))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1118,21 +1121,68 @@ mod tests {
             .await
             .unwrap();
 
-        // Both should exist with the same data and nlink=2.
-        match tree.get(b"original.txt").unwrap() {
-            TreeNode::RegularFile(f) => {
-                assert_eq!(f.data, FileData::Memory(b"shared data".to_vec()));
-                assert_eq!(f.nlink, 2);
-            }
+        // Both should exist with the same data, inode identity, and nlink=2.
+        let original = match tree.get(b"original.txt").unwrap() {
+            TreeNode::RegularFile(f) => f,
             _ => panic!("expected regular file"),
-        }
-        match tree.get(b"hardlink.txt").unwrap() {
-            TreeNode::RegularFile(f) => {
-                assert_eq!(f.data, FileData::Memory(b"shared data".to_vec()));
-                assert_eq!(f.nlink, 2);
-            }
+        };
+        let hardlink = match tree.get(b"hardlink.txt").unwrap() {
+            TreeNode::RegularFile(f) => f,
             _ => panic!("expected regular file"),
-        }
+        };
+
+        assert_eq!(original.data, FileData::Memory(b"shared data".to_vec()));
+        assert_eq!(hardlink.data, FileData::Memory(b"shared data".to_vec()));
+        assert_eq!(original.id, hardlink.id);
+        assert_eq!(original.nlink, 2);
+        assert_eq!(hardlink.nlink, 2);
+        assert_eq!(tree.total_data_size(), b"shared data".len() as u64);
+    }
+
+    #[tokio::test]
+    async fn ingest_hardlink_chain_refreshes_link_counts() {
+        let data = build_tar(|b| {
+            let content = b"shared data";
+            let mut header = sync_tar::Header::new_gnu();
+            header.set_path("original.txt").unwrap();
+            header.set_size(content.len() as u64);
+            header.set_entry_type(sync_tar::EntryType::Regular);
+            header.set_mode(0o644);
+            header.set_cksum();
+            b.append(&header, &content[..]).unwrap();
+
+            for (link_name, target_name) in [
+                ("hardlink-a.txt", "original.txt"),
+                ("hardlink-b.txt", "hardlink-a.txt"),
+            ] {
+                let mut header = sync_tar::Header::new_gnu();
+                header.set_path(link_name).unwrap();
+                header.set_size(0);
+                header.set_entry_type(sync_tar::EntryType::Link);
+                header.set_link_name(target_name).unwrap();
+                header.set_cksum();
+                b.append(&header, &[] as &[u8]).unwrap();
+            }
+        });
+
+        let limits = ResourceLimits::default();
+        let tree = ingest_tar(std::io::Cursor::new(data), &limits, None)
+            .await
+            .unwrap();
+
+        let ids = ["original.txt", "hardlink-a.txt", "hardlink-b.txt"].map(|path| {
+            match tree.get(path.as_bytes()).unwrap() {
+                TreeNode::RegularFile(f) => {
+                    assert_eq!(f.nlink, 3);
+                    f.id
+                }
+                _ => panic!("expected regular file"),
+            }
+        });
+
+        assert_eq!(ids[0], ids[1]);
+        assert_eq!(ids[0], ids[2]);
+        assert_eq!(tree.total_data_size(), b"shared data".len() as u64);
     }
 
     #[tokio::test]
