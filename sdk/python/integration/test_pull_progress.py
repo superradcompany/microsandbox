@@ -97,6 +97,8 @@ async def test_create_detached_with_progress_returns_detached_sandbox(sandbox_na
     )
 
     sandbox = None
+    handle = None
+    connected = None
     try:
         event_types = []
         async with session:
@@ -108,11 +110,30 @@ async def test_create_detached_with_progress_returns_detached_sandbox(sandbox_na
         assert "resolved" in event_types
         assert event_types[-1] == "complete"
         assert await sandbox.name == name
-        assert await sandbox.owns_lifecycle is False
+        assert await sandbox.owns_lifecycle is True
+
+        await sandbox.detach()
+        sandbox = None
+
+        handle = await Sandbox.get(name)
+        connected = await handle.connect()
+        assert await connected.owns_lifecycle is False
+        out = await connected.shell("printf 'detached-progress\\n'")
+        assert out.success is True
+        assert out.stdout_text == "detached-progress\n"
     finally:
+        if connected is not None:
+            with suppress(Exception):
+                await connected.detach()
         if sandbox is not None:
             with suppress(Exception):
                 await sandbox.stop_and_wait()
+        if handle is None:
+            with suppress(Exception):
+                handle = await Sandbox.get(name)
+        if handle is not None:
+            with suppress(Exception):
+                await handle.stop_with_timeout(10.0)
         await remove_sandbox(name)
 
 

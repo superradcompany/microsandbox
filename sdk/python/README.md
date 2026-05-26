@@ -279,7 +279,7 @@ sandbox = await Sandbox.create(
 
 ### Detached Mode
 
-Sandboxes in detached mode survive the Python process:
+Sandboxes in detached mode survive the Python process after the returned handle is detached:
 
 ```python
 # Create in detached mode.

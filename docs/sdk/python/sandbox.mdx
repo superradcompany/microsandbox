@@ -48,7 +48,7 @@ Create and boot a sandbox. Keyword arguments provide individual config fields. P
 | ports | `dict[int, int] \| Sequence[PortBinding]` | Port mappings. Dict form is TCP and binds to `127.0.0.1`; use [`PortBinding`](/sdk/python/networking#portbinding) for explicit bind addresses or UDP |
 | network | [`Network`](/sdk/python/networking#network) | Network policy and configuration |
 | secrets | `list[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | Secret injection |
-| detached | `bool` | If `True`, sandbox survives after your process exits |
+| detached | `bool` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#detach) before dropping the returned handle when it should keep running |
 
 **Returns**
 
@@ -191,7 +191,7 @@ Sandbox name. This is an async property -- use `await sb.name`.
 async def owns_lifecycle(self) -> bool
 ```
 
-Whether this handle owns the sandbox lifecycle. `True` in attached mode, `False` in detached mode. This is an async property -- use `await sb.owns_lifecycle`.
+Whether this handle owns the sandbox lifecycle. A sandbox returned directly by [`create()`](#sandboxcreate) or [`start()`](#sandboxstart) owns lifecycle, including when created with `detached=True`, until you call [`detach()`](#detach). Handles returned by [`connect()`](#connect) do not own lifecycle. This is an async property -- use `await sb.owns_lifecycle`.
 
 ---
 
@@ -941,7 +941,7 @@ The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`San
 | ports | `dict[int, int] \| Sequence[PortBinding]` | `{}` | Port mappings. Dict form is TCP and binds to `127.0.0.1`; use [`PortBinding`](/sdk/python/networking#portbinding) for explicit bind addresses or UDP |
 | network | [`Network`](/sdk/python/networking#network) | `public_only` | Network policy and configuration |
 | secrets | `list[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
-| detached | `bool` | `False` | If `True`, sandbox survives after your process exits |
+| detached | `bool` | `False` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#detach) before dropping the returned handle when it should keep running |
 
 ### InitConfig
 

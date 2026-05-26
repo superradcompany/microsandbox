@@ -79,9 +79,11 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         detached=True,
         replace=True,
     )
+    handle = None
+    connected = None
 
     try:
-        assert await sandbox.owns_lifecycle is False
+        assert await sandbox.owns_lifecycle is True
 
         handle = await Sandbox.get(name)
         config = json.loads(handle.config_json)
@@ -105,9 +107,28 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         assert config["log_level"] == "info"
         assert config["policy"]["max_duration_secs"] == 7200
         assert config["policy"]["idle_timeout_secs"] == 1800
+
+        await sandbox.detach()
+        sandbox = None
+
+        connected = await handle.connect()
+        assert await connected.owns_lifecycle is False
+        out = await connected.shell("printf 'detached-create\\n'")
+        assert out.success is True
+        assert out.stdout_text == "detached-create\n"
     finally:
+        if connected is not None:
+            with suppress(Exception):
+                await connected.detach()
         with suppress(Exception):
-            await sandbox.stop_and_wait()
+            if sandbox is not None:
+                await sandbox.stop_and_wait()
+        if handle is None:
+            with suppress(Exception):
+                handle = await Sandbox.get(name)
+        if handle is not None:
+            with suppress(Exception):
+                await handle.stop_with_timeout(10.0)
         await remove_sandbox(name)
 
 
