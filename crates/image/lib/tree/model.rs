@@ -38,6 +38,8 @@ pub(crate) const OPAQUE_XATTR_VALUE: &[u8] = b"y";
 pub enum FileData {
     /// Small file content held in memory.
     Memory(Vec<u8>),
+    /// In-memory content shared by hardlinked regular-file aliases.
+    SharedMemory(Arc<[u8]>),
     /// Large file content written to a shared spool file on disk.
     /// Multiple `FileData::Spool` entries can reference different regions
     /// of the same underlying spool file via `Arc`.
@@ -52,6 +54,9 @@ impl std::fmt::Debug for FileData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FileData::Memory(data) => f.debug_tuple("Memory").field(&data.len()).finish(),
+            FileData::SharedMemory(data) => {
+                f.debug_tuple("SharedMemory").field(&data.len()).finish()
+            }
             FileData::Spool { offset, len, .. } => f
                 .debug_struct("Spool")
                 .field("offset", offset)
@@ -65,6 +70,9 @@ impl PartialEq for FileData {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (FileData::Memory(a), FileData::Memory(b)) => a == b,
+            (FileData::Memory(a), FileData::SharedMemory(b))
+            | (FileData::SharedMemory(b), FileData::Memory(a)) => a.as_slice() == b.as_ref(),
+            (FileData::SharedMemory(a), FileData::SharedMemory(b)) => a.as_ref() == b.as_ref(),
             _ => false,
         }
     }
@@ -170,6 +178,7 @@ impl FileData {
     pub fn len(&self) -> usize {
         match self {
             FileData::Memory(v) => v.len(),
+            FileData::SharedMemory(v) => v.len(),
             FileData::Spool { len, .. } => *len as usize,
         }
     }
@@ -183,6 +192,7 @@ impl FileData {
     pub fn read_all(&self) -> std::io::Result<Vec<u8>> {
         match self {
             FileData::Memory(v) => Ok(v.clone()),
+            FileData::SharedMemory(v) => Ok(v.to_vec()),
             FileData::Spool { spool, offset, len } => {
                 let mut buf = vec![0u8; *len as usize];
                 let mut file = spool
@@ -199,6 +209,7 @@ impl FileData {
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             FileData::Memory(v) => Some(v),
+            FileData::SharedMemory(v) => Some(v),
             FileData::Spool { .. } => None,
         }
     }
@@ -218,6 +229,7 @@ impl FileData {
     ) -> std::io::Result<()> {
         match self {
             FileData::Memory(v) => out.write_all(&v[start..start + len]),
+            FileData::SharedMemory(v) => out.write_all(&v[start..start + len]),
             FileData::Spool { spool, offset, .. } => {
                 let mut file = spool
                     .lock()
@@ -233,6 +245,23 @@ impl FileData {
                 }
                 Ok(())
             }
+        }
+    }
+
+    /// Return a shared reference suitable for a hardlinked alias.
+    pub fn clone_ref(&mut self) -> FileData {
+        match self {
+            FileData::Memory(data) => {
+                let shared: Arc<[u8]> = std::mem::take(data).into();
+                *self = FileData::SharedMemory(Arc::clone(&shared));
+                FileData::SharedMemory(shared)
+            }
+            FileData::SharedMemory(data) => FileData::SharedMemory(Arc::clone(data)),
+            FileData::Spool { spool, offset, len } => FileData::Spool {
+                spool: Arc::clone(spool),
+                offset: *offset,
+                len: *len,
+            },
         }
     }
 }
@@ -280,15 +309,22 @@ impl DataSpool {
         })
     }
 
-    /// Clone a spool reference for a hardlinked file.
-    pub fn clone_ref(data: &FileData) -> FileData {
-        match data {
-            FileData::Memory(v) => FileData::Memory(v.clone()),
-            FileData::Spool { spool, offset, len } => FileData::Spool {
-                spool: Arc::clone(spool),
-                offset: *offset,
-                len: *len,
-            },
+    pub fn current_offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub fn write_chunk(&mut self, data: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        self.file.write_all(data)?;
+        self.offset += data.len() as u64;
+        Ok(())
+    }
+
+    pub fn data_ref(&self, offset: u64, len: u64) -> FileData {
+        FileData::Spool {
+            spool: Arc::clone(&self.shared),
+            offset,
+            len,
         }
     }
 }

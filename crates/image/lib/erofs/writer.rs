@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -71,22 +71,33 @@ struct LayoutState {
     inode_count: u64,
 }
 
+pub(super) struct CursorTrackingWriter<'a, W> {
+    inner: &'a mut W,
+    cursor: &'a mut u64,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
 
 impl LayoutState {
-    fn new(tree: &FileTree) -> Self {
+    fn new() -> Self {
         Self {
             plans: Vec::new(),
             regular_file_plans: HashMap::new(),
-            regular_file_link_counts: tree.regular_file_link_counts(),
+            regular_file_link_counts: HashMap::new(),
             current_meta_offset: EROFS_BLKSIZ as u64,
             current_data_block: 0,
             meta_blkaddr: 1,
             root_nid: 0,
             inode_count: 0,
         }
+    }
+}
+
+impl<'a, W> CursorTrackingWriter<'a, W> {
+    pub(super) fn new(inner: &'a mut W, cursor: &'a mut u64) -> Self {
+        Self { inner, cursor }
     }
 }
 
@@ -119,20 +130,37 @@ impl From<io::Error> for ErofsError {
     }
 }
 
+impl<W: Write> Write for CursorTrackingWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        *self.cursor += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
 pub fn write_erofs(tree: &FileTree, output: &Path) -> Result<ErofsDataMap, ErofsError> {
     let mut file = BufWriter::new(std::fs::File::create(output)?);
-    let mut state = LayoutState::new(tree);
+    let mut state = LayoutState::new();
 
     // Phase 1+2: Plan layout and assign NIDs.
     plan_directory(&tree.root, 0, &mut state, true)?;
     state.root_nid = state.plans[0].nid;
 
     // Phase 3: Write data blocks and collect data map.
-    let mut data_map = HashMap::new();
+    let regular_file_paths = state
+        .regular_file_link_counts
+        .values()
+        .map(|count| *count as usize)
+        .sum();
+    let mut data_map = HashMap::with_capacity(regular_file_paths);
     write_data_blocks(&mut file, &state, tree, &mut data_map)?;
 
     // Phase 4: Write metadata.
@@ -612,6 +640,8 @@ fn plan_regular_file(
     file_id: RegularFileId,
     state: &mut LayoutState,
 ) -> Result<u32, ErofsError> {
+    *state.regular_file_link_counts.entry(file_id).or_insert(0) += 1;
+
     if let Some(plan_idx) = state.regular_file_plans.get(&file_id) {
         return Ok(state.plans[*plan_idx].nid);
     }
@@ -688,6 +718,27 @@ fn plan_leaf_node(node: &TreeNode, state: &mut LayoutState) -> Result<u32, Erofs
     Ok(nid)
 }
 
+pub(super) fn write_zero_padding_to(
+    file: &mut impl Write,
+    cursor: &mut u64,
+    target: u64,
+) -> Result<(), ErofsError> {
+    if target < *cursor {
+        return Err(ErofsError::Io(io::Error::other(
+            "EROFS layout cursor moved backwards",
+        )));
+    }
+
+    while *cursor < target {
+        let remaining = (target - *cursor) as usize;
+        let to_write = remaining.min(ZEROS.len());
+        file.write_all(&ZEROS[..to_write])?;
+        *cursor += to_write as u64;
+    }
+
+    Ok(())
+}
+
 fn write_data_blocks(
     file: &mut (impl Write + Seek),
     state: &LayoutState,
@@ -711,9 +762,10 @@ fn write_data_blocks(
     // During planning, we started current_data_block at 0, which means they're
     // relative to the data area. We need to add the data_start_block offset.
 
-    // Write data blocks for each plan that has data blocks
+    file.seek(SeekFrom::Start(data_area_start))?;
+    let mut data_cursor = data_area_start;
+
     let current_path = PathBuf::new();
-    let mut written_regular_files = HashSet::new();
     write_data_for_tree(
         file,
         state,
@@ -722,7 +774,7 @@ fn write_data_blocks(
         &mut 0,
         &current_path,
         data_map,
-        &mut written_regular_files,
+        &mut data_cursor,
     )?;
 
     Ok(())
@@ -737,7 +789,7 @@ fn write_data_for_tree(
     plan_idx: &mut usize,
     current_path: &Path,
     data_map: &mut HashMap<PathBuf, (u32, u64)>,
-    written_regular_files: &mut HashSet<RegularFileId>,
+    data_cursor: &mut u64,
 ) -> Result<(), ErofsError> {
     let blksiz = EROFS_BLKSIZ as u64;
     let plan = &state.plans[*plan_idx];
@@ -749,16 +801,17 @@ fn write_data_for_tree(
     {
         let abs_block = data_start_block + plan.data_block_start;
         let offset = abs_block as u64 * blksiz;
-        file.seek(SeekFrom::Start(offset))?;
+        write_zero_padding_to(file, data_cursor, offset)?;
+        let mut tracked = CursorTrackingWriter::new(file, data_cursor);
 
         let full_block_bytes = plan.data_block_count as usize * EROFS_BLKSIZ as usize;
         let data_to_write = &dir_data[..std::cmp::min(full_block_bytes, dir_data.len())];
-        file.write_all(data_to_write)?;
+        tracked.write_all(data_to_write)?;
 
         // Pad remaining space in last full block if needed
         if data_to_write.len() < full_block_bytes {
             let pad = full_block_bytes - data_to_write.len();
-            file.write_all(&ZEROS[..pad])?;
+            tracked.write_all(&ZEROS[..pad])?;
         }
     }
 
@@ -775,7 +828,7 @@ fn write_data_for_tree(
                     plan_idx,
                     &child_path,
                     data_map,
-                    written_regular_files,
+                    data_cursor,
                 )?;
             }
             TreeNode::RegularFile(f) => {
@@ -784,9 +837,8 @@ fn write_data_for_tree(
                     .get(&f.id)
                     .expect("regular file plan missing");
                 let child_plan = &state.plans[child_plan_idx];
-                let first_visit = written_regular_files.insert(f.id);
+                let first_visit = child_plan_idx == *plan_idx;
                 if first_visit {
-                    debug_assert_eq!(child_plan_idx, *plan_idx);
                     *plan_idx += 1;
                 }
 
@@ -802,7 +854,8 @@ fn write_data_for_tree(
                 if first_visit && child_plan.data_block_count > 0 {
                     let abs_block = data_start_block + child_plan.data_block_start;
                     let offset = abs_block as u64 * blksiz;
-                    file.seek(SeekFrom::Start(offset))?;
+                    write_zero_padding_to(file, data_cursor, offset)?;
+                    let mut tracked = CursorTrackingWriter::new(file, data_cursor);
 
                     let full_block_bytes =
                         child_plan.data_block_count as usize * EROFS_BLKSIZ as usize;
@@ -812,13 +865,13 @@ fn write_data_for_tree(
                         std::cmp::min(f.data.len(), full_block_bytes)
                     };
 
-                    f.data.write_range(0, data_end, file)?;
+                    f.data.write_range(0, data_end, &mut tracked)?;
 
                     if child_plan.data_layout == EROFS_INODE_FLAT_PLAIN
                         && data_end < full_block_bytes
                     {
                         let pad = full_block_bytes - data_end;
-                        file.write_all(&ZEROS[..pad])?;
+                        tracked.write_all(&ZEROS[..pad])?;
                     }
                 }
             }
@@ -829,7 +882,8 @@ fn write_data_for_tree(
                 if child_plan.data_block_count > 0 {
                     let abs_block = data_start_block + child_plan.data_block_start;
                     let offset = abs_block as u64 * blksiz;
-                    file.seek(SeekFrom::Start(offset))?;
+                    write_zero_padding_to(file, data_cursor, offset)?;
+                    let mut tracked = CursorTrackingWriter::new(file, data_cursor);
 
                     let full_block_bytes =
                         child_plan.data_block_count as usize * EROFS_BLKSIZ as usize;
@@ -839,13 +893,13 @@ fn write_data_for_tree(
                         std::cmp::min(s.target.len(), full_block_bytes)
                     };
 
-                    file.write_all(&s.target[..data_end])?;
+                    tracked.write_all(&s.target[..data_end])?;
 
                     if child_plan.data_layout == EROFS_INODE_FLAT_PLAIN
                         && data_end < full_block_bytes
                     {
                         let pad = full_block_bytes - data_end;
-                        file.write_all(&ZEROS[..pad])?;
+                        tracked.write_all(&ZEROS[..pad])?;
                     }
                 }
             }
@@ -866,6 +920,9 @@ fn write_metadata(
 ) -> Result<(), ErofsError> {
     let meta_end = align_to_block(state.current_meta_offset);
     let data_start_block = (meta_end / EROFS_BLKSIZ as u64) as u32;
+    let mut meta_cursor = state.meta_blkaddr as u64 * EROFS_BLKSIZ as u64;
+
+    file.seek(SeekFrom::Start(meta_cursor))?;
 
     write_metadata_for_tree(
         file,
@@ -874,6 +931,7 @@ fn write_metadata(
         &tree.root,
         data_start_block,
         &mut 0,
+        &mut meta_cursor,
     )?;
 
     Ok(())
@@ -907,6 +965,7 @@ fn write_metadata_for_tree(
     real_dir: &DirectoryNode,
     data_start_block: u32,
     plan_idx: &mut usize,
+    meta_cursor: &mut u64,
 ) -> Result<(), ErofsError> {
     let blksiz = EROFS_BLKSIZ as u64;
     let meta_base = state.meta_blkaddr as u64 * blksiz;
@@ -916,8 +975,7 @@ fn write_metadata_for_tree(
     // Compute the byte offset of this inode
     let inode_offset = meta_base + plan.nid as u64 * EROFS_ISLOT_SIZE as u64;
 
-    // Seek to inode position
-    file.seek(SeekFrom::Start(inode_offset))?;
+    write_zero_padding_to(file, meta_cursor, inode_offset)?;
 
     // Build the 64-byte extended inode
     let mut inode = [0u8; 64];
@@ -987,35 +1045,40 @@ fn write_metadata_for_tree(
 
     // reserved[16] already zeroed
 
-    file.write_all(&inode)?;
+    {
+        let mut tracked = CursorTrackingWriter::new(file, meta_cursor);
+        tracked.write_all(&inode)?;
 
-    // Write xattr ibody if present
-    let xattrs = node_xattrs(node);
-    if plan.xattr_ibody_size > 0 {
-        write_xattr_ibody(file, xattrs)?;
-    }
+        // Write xattr ibody if present
+        let xattrs = node_xattrs(node);
+        if plan.xattr_ibody_size > 0 {
+            write_xattr_ibody(&mut tracked, xattrs)?;
+        }
 
-    // Write inline tail data
-    if plan.inline_tail_size > 0 {
-        match node {
-            TreeNode::Directory(_) => {
-                if let Some(ref dir_data) = plan.dir_data {
-                    let full_block_bytes = plan.data_block_count as usize * EROFS_BLKSIZ as usize;
-                    let tail = &dir_data[full_block_bytes..];
-                    file.write_all(tail)?;
+        // Write inline tail data
+        if plan.inline_tail_size > 0 {
+            match node {
+                TreeNode::Directory(_) => {
+                    if let Some(ref dir_data) = plan.dir_data {
+                        let full_block_bytes =
+                            plan.data_block_count as usize * EROFS_BLKSIZ as usize;
+                        let tail = &dir_data[full_block_bytes..];
+                        tracked.write_all(tail)?;
+                    }
                 }
+                TreeNode::RegularFile(f) => {
+                    let full_block_bytes = plan.data_block_count as usize * EROFS_BLKSIZ as usize;
+                    let tail_len = f.data.len() - full_block_bytes;
+                    f.data
+                        .write_range(full_block_bytes, tail_len, &mut tracked)?;
+                }
+                TreeNode::Symlink(s) => {
+                    let full_block_bytes = plan.data_block_count as usize * EROFS_BLKSIZ as usize;
+                    let tail = &s.target[full_block_bytes..];
+                    tracked.write_all(tail)?;
+                }
+                _ => {}
             }
-            TreeNode::RegularFile(f) => {
-                let full_block_bytes = plan.data_block_count as usize * EROFS_BLKSIZ as usize;
-                let tail_len = f.data.len() - full_block_bytes;
-                f.data.write_range(full_block_bytes, tail_len, file)?;
-            }
-            TreeNode::Symlink(s) => {
-                let full_block_bytes = plan.data_block_count as usize * EROFS_BLKSIZ as usize;
-                let tail = &s.target[full_block_bytes..];
-                file.write_all(tail)?;
-            }
-            _ => {}
         }
     }
 
@@ -1031,10 +1094,18 @@ fn write_metadata_for_tree(
                         child_dir,
                         data_start_block,
                         plan_idx,
+                        meta_cursor,
                     )?;
                 }
                 _ => {
-                    write_metadata_for_leaf(file, state, child, data_start_block, plan_idx)?;
+                    write_metadata_for_leaf(
+                        file,
+                        state,
+                        child,
+                        data_start_block,
+                        plan_idx,
+                        meta_cursor,
+                    )?;
                 }
             }
         }
@@ -1049,6 +1120,7 @@ fn write_metadata_for_leaf(
     node: &TreeNode,
     data_start_block: u32,
     plan_idx: &mut usize,
+    meta_cursor: &mut u64,
 ) -> Result<(), ErofsError> {
     let blksiz = EROFS_BLKSIZ as u64;
     let meta_base = state.meta_blkaddr as u64 * blksiz;
@@ -1076,7 +1148,7 @@ fn write_metadata_for_leaf(
     }
 
     let inode_offset = meta_base + plan.nid as u64 * EROFS_ISLOT_SIZE as u64;
-    file.seek(SeekFrom::Start(inode_offset))?;
+    write_zero_padding_to(file, meta_cursor, inode_offset)?;
 
     let mut inode = [0u8; 64];
 
@@ -1118,36 +1190,37 @@ fn write_metadata_for_leaf(
     let nlink = node_nlink(node, &state.regular_file_link_counts);
     inode[44..48].copy_from_slice(&nlink.to_le_bytes());
 
-    file.write_all(&inode)?;
+    {
+        let mut tracked = CursorTrackingWriter::new(file, meta_cursor);
+        tracked.write_all(&inode)?;
 
-    let xattrs = node_xattrs(node);
-    if plan.xattr_ibody_size > 0 {
-        write_xattr_ibody(file, xattrs)?;
-    }
+        let xattrs = node_xattrs(node);
+        if plan.xattr_ibody_size > 0 {
+            write_xattr_ibody(&mut tracked, xattrs)?;
+        }
 
-    if plan.inline_tail_size > 0 {
-        match node {
-            TreeNode::RegularFile(f) => {
-                let full_block_bytes = plan.data_block_count as usize * EROFS_BLKSIZ as usize;
-                let tail_len = f.data.len() - full_block_bytes;
-                f.data.write_range(full_block_bytes, tail_len, file)?;
+        if plan.inline_tail_size > 0 {
+            match node {
+                TreeNode::RegularFile(f) => {
+                    let full_block_bytes = plan.data_block_count as usize * EROFS_BLKSIZ as usize;
+                    let tail_len = f.data.len() - full_block_bytes;
+                    f.data
+                        .write_range(full_block_bytes, tail_len, &mut tracked)?;
+                }
+                TreeNode::Symlink(s) => {
+                    let full_block_bytes = plan.data_block_count as usize * EROFS_BLKSIZ as usize;
+                    let tail = &s.target[full_block_bytes..];
+                    tracked.write_all(tail)?;
+                }
+                _ => {}
             }
-            TreeNode::Symlink(s) => {
-                let full_block_bytes = plan.data_block_count as usize * EROFS_BLKSIZ as usize;
-                let tail = &s.target[full_block_bytes..];
-                file.write_all(tail)?;
-            }
-            _ => {}
         }
     }
 
     Ok(())
 }
 
-pub(super) fn write_xattr_ibody(
-    file: &mut (impl Write + Seek),
-    xattrs: &[Xattr],
-) -> Result<(), ErofsError> {
+pub(super) fn write_xattr_ibody(file: &mut impl Write, xattrs: &[Xattr]) -> Result<(), ErofsError> {
     // Write the ibody header (12 bytes)
     // h_name_filter: u32 = 0, h_shared_count: u8 = 0, reserved: [u8; 7] = 0
     let header = [0u8; EROFS_XATTR_IBODY_HEADER_SIZE as usize];

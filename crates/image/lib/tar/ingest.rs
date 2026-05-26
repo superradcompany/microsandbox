@@ -312,15 +312,13 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
                         tree.insert(&whiteout_path, node)?;
                     }
                     WhiteoutKind::None => {
-                        let mut buf = Vec::with_capacity(size as usize);
-                        entry.read_to_end(&mut buf).await.map_err(IngestError::Io)?;
-
-                        // Spool large files to disk to bound memory usage.
-                        let file_data = if buf.len() as u64 >= SPOOL_THRESHOLD
+                        let file_data = if size >= SPOOL_THRESHOLD
                             && let Some(spool) = spool.as_mut()
                         {
-                            spool.write_data(&buf).map_err(IngestError::Io)?
+                            stream_entry_to_spool(&mut entry, size, spool).await?
                         } else {
+                            let mut buf = Vec::with_capacity(size as usize);
+                            entry.read_to_end(&mut buf).await.map_err(IngestError::Io)?;
                             FileData::Memory(buf)
                         };
 
@@ -687,58 +685,58 @@ fn handle_hardlink(
     link_path: &[u8],
     target_path: &[u8],
 ) -> Result<(), IngestError> {
-    let target_path_str = String::from_utf8_lossy(target_path).into_owned();
-
-    // Look up the target node and clone it.
-    let cloned_node = match tree.get(target_path) {
+    let node = match tree.get_mut(target_path) {
         Some(TreeNode::RegularFile(f)) => {
-            let cloned = RegularFileNode {
+            let new_nlink = f.nlink + 1;
+            f.nlink = new_nlink;
+            TreeNode::RegularFile(RegularFileNode {
                 id: f.id,
-                metadata: InodeMetadata {
-                    uid: f.metadata.uid,
-                    gid: f.metadata.gid,
-                    mode: f.metadata.mode,
-                    mtime: f.metadata.mtime,
-                    mtime_nsec: f.metadata.mtime_nsec,
-                },
-                xattrs: f
-                    .xattrs
-                    .iter()
-                    .map(|x| Xattr {
-                        name: x.name.clone(),
-                        value: x.value.clone(),
-                    })
-                    .collect(),
-                data: DataSpool::clone_ref(&f.data),
-                nlink: f.nlink + 1,
-            };
-            // The new copy also gets incremented nlink.
-            let new_nlink = cloned.nlink;
-            (TreeNode::RegularFile(cloned), new_nlink)
+                metadata: f.metadata.clone(),
+                xattrs: f.xattrs.clone(),
+                data: f.data.clone_ref(),
+                nlink: new_nlink,
+            })
         }
         Some(_) => {
-            // Hardlinks to non-regular files: clone metadata only.
             return Err(IngestError::HardlinkTarget(format!(
-                "hardlink target is not a regular file: \"{target_path_str}\""
+                "hardlink target is not a regular file: \"{}\"",
+                String::from_utf8_lossy(target_path)
             )));
         }
         None => {
-            return Err(IngestError::HardlinkTarget(target_path_str));
+            return Err(IngestError::HardlinkTarget(
+                String::from_utf8_lossy(target_path).into_owned(),
+            ));
         }
     };
 
-    let (node, new_nlink) = cloned_node;
-
-    // Update the nlink on the original target.
-    if let Some(TreeNode::RegularFile(target)) = tree.get_mut(target_path) {
-        target.nlink = new_nlink;
-    }
-
-    // Insert the cloned node at the link path.
     tree.insert(link_path, node)?;
-    tree.refresh_regular_nlinks();
 
     Ok(())
+}
+
+async fn stream_entry_to_spool<R: AsyncRead + Unpin>(
+    entry: &mut tar::Entry<R>,
+    size: u64,
+    spool: &mut DataSpool,
+) -> Result<FileData, IngestError> {
+    let offset = spool.current_offset();
+    let mut remaining = size;
+    let mut buf = vec![0u8; 1024 * 1024];
+
+    while remaining > 0 {
+        let to_read = remaining.min(buf.len() as u64) as usize;
+        entry
+            .read_exact(&mut buf[..to_read])
+            .await
+            .map_err(IngestError::Io)?;
+        spool
+            .write_chunk(&buf[..to_read])
+            .map_err(IngestError::Io)?;
+        remaining -= to_read as u64;
+    }
+
+    Ok(spool.data_ref(offset, size))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1153,12 +1151,15 @@ mod tests {
             header.set_cksum();
             b.append(&header, &content[..]).unwrap();
 
-            for link_name in ["hardlink-a.txt", "hardlink-b.txt"] {
+            for (link_name, target_name) in [
+                ("hardlink-a.txt", "original.txt"),
+                ("hardlink-b.txt", "hardlink-a.txt"),
+            ] {
                 let mut header = sync_tar::Header::new_gnu();
                 header.set_path(link_name).unwrap();
                 header.set_size(0);
                 header.set_entry_type(sync_tar::EntryType::Link);
-                header.set_link_name("original.txt").unwrap();
+                header.set_link_name(target_name).unwrap();
                 header.set_cksum();
                 b.append(&header, &[] as &[u8]).unwrap();
             }
