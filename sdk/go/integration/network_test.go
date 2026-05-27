@@ -93,7 +93,7 @@ func TestCustomPolicyDefaultEgressDeny(t *testing.T) {
 // other destinations blocked.
 func TestCustomPolicyAllowSpecificEgress(t *testing.T) {
 	ctx := integrationCtx(t)
-	name := "go-sdk-allowspec-" + t.Name()
+	name := uniqueIntegrationName(t, "go-net-ip")
 
 	sb, err := microsandbox.CreateSandbox(ctx, name,
 		microsandbox.WithImage("alpine:3.19"),
@@ -103,7 +103,7 @@ func TestCustomPolicyAllowSpecificEgress(t *testing.T) {
 				{
 					Action:      microsandbox.PolicyActionAllow,
 					Direction:   microsandbox.PolicyDirectionEgress,
-					Destination: "1.1.1.1/32",
+					Destination: "1.1.1.1",
 					Protocol:    microsandbox.PolicyProtocolTCP,
 					Port:        "443",
 				},

@@ -64,7 +64,7 @@ func main() {
 					{
 						Action:      microsandbox.PolicyActionAllow,
 						Direction:   microsandbox.PolicyDirectionEgress,
-						Destination: "1.1.1.1/32",
+						Destination: "1.1.1.1",
 						Protocol:    microsandbox.PolicyProtocolTCP,
 						Port:        "443",
 					},

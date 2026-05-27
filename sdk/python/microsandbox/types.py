@@ -57,6 +57,7 @@ class PortProtocol(enum.StrEnum):
     UDP = "udp"
 
 class DestGroup(enum.StrEnum):
+    PUBLIC = "public"
     LOOPBACK = "loopback"
     PRIVATE = "private"
     LINK_LOCAL = "link-local"
@@ -559,22 +560,78 @@ class Secret:
 #--------------------------------------------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
+class NetworkDestination:
+    """Typed network policy destination."""
+    kind: Literal["any", "ip", "cidr", "domain", "domain_suffix", "group"]
+    value: str | None = None
+
+    def _to_dict(self) -> dict:
+        d = {"destination_kind": self.kind}
+        if self.value is not None:
+            d["destination"] = self.value
+        return d
+
+
+class Destination:
+    """Factory for typed network policy destinations."""
+
+    @staticmethod
+    def any() -> NetworkDestination:
+        return NetworkDestination("any")
+
+    @staticmethod
+    def ip(ip: str) -> NetworkDestination:
+        return NetworkDestination("ip", ip)
+
+    @staticmethod
+    def cidr(cidr: str) -> NetworkDestination:
+        return NetworkDestination("cidr", cidr)
+
+    @staticmethod
+    def domain(domain: str) -> NetworkDestination:
+        return NetworkDestination("domain", domain)
+
+    @staticmethod
+    def domain_suffix(suffix: str) -> NetworkDestination:
+        return NetworkDestination("domain_suffix", suffix)
+
+    @staticmethod
+    def group(group: DestGroup | str) -> NetworkDestination:
+        return NetworkDestination("group", str(group))
+
+
+NetworkDestinationLike: TypeAlias = str | NetworkDestination | None
+
+
+@dataclass(frozen=True, slots=True)
 class Rule:
     """A network policy rule."""
     action: Action
     direction: Direction = Direction.EGRESS
-    destination: str | None = None
+    destination: NetworkDestinationLike = None
     protocol: Protocol | None = None
     port: int | str | None = None
 
     @classmethod
-    def allow(cls, *, direction: Direction = Direction.EGRESS, protocol: Protocol | None = None,
-              port: int | str | None = None, destination: str | None = None) -> Rule:
+    def allow(
+        cls,
+        *,
+        direction: Direction = Direction.EGRESS,
+        protocol: Protocol | None = None,
+        port: int | str | None = None,
+        destination: NetworkDestinationLike = None,
+    ) -> Rule:
         return cls(Action.ALLOW, direction, destination, protocol, port)
 
     @classmethod
-    def deny(cls, *, direction: Direction = Direction.EGRESS, protocol: Protocol | None = None,
-             port: int | str | None = None, destination: str | None = None) -> Rule:
+    def deny(
+        cls,
+        *,
+        direction: Direction = Direction.EGRESS,
+        protocol: Protocol | None = None,
+        port: int | str | None = None,
+        destination: NetworkDestinationLike = None,
+    ) -> Rule:
         return cls(Action.DENY, direction, destination, protocol, port)
 
     @classmethod
@@ -588,12 +645,25 @@ class Rule:
             NetworkPolicy(rules=(*Rule.allow_dns(), ...))
 
         DoT (TCP/853) is intentionally not included; add an explicit
-        `destination="host"`, `protocol=Protocol.TCP`, `port=853` rule
-        if needed (and pair with TLS interception).
+        `destination=Destination.group(DestGroup.HOST)`,
+        `protocol=Protocol.TCP`, `port=853` rule if needed (and pair with
+        TLS interception).
         """
         return (
-            cls(Action.ALLOW, Direction.EGRESS, "host", Protocol.UDP, 53),
-            cls(Action.ALLOW, Direction.EGRESS, "host", Protocol.TCP, 53),
+            cls(
+                Action.ALLOW,
+                Direction.EGRESS,
+                Destination.group(DestGroup.HOST),
+                Protocol.UDP,
+                53,
+            ),
+            cls(
+                Action.ALLOW,
+                Direction.EGRESS,
+                Destination.group(DestGroup.HOST),
+                Protocol.TCP,
+                53,
+            ),
         )
 
 @dataclass(frozen=True, slots=True)
@@ -611,6 +681,13 @@ class NetworkPolicy:
     rules: tuple[Rule, ...] = ()
 
     def _to_dict(self) -> dict:
+        def destination_fields(destination: NetworkDestinationLike) -> dict:
+            if destination is None:
+                return {}
+            if isinstance(destination, NetworkDestination):
+                return destination._to_dict()
+            return {"destination": str(destination)}
+
         d: dict = {
             "default_egress": str(self.default_egress),
             "default_ingress": str(self.default_ingress),
@@ -620,7 +697,7 @@ class NetworkPolicy:
                 {
                     "action": str(r.action),
                     "direction": str(r.direction),
-                    **({"destination": r.destination} if r.destination else {}),
+                    **destination_fields(r.destination),
                     **({"protocol": str(r.protocol)} if r.protocol else {}),
                     **({"port": str(r.port)} if r.port is not None else {}),
                 }
