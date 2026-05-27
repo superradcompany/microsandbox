@@ -651,7 +651,7 @@ fn build_vm(
             let m = m.vcpus(vm.vcpus).memory_mib(vm.memory_mib as usize);
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {
-                m.split_irqchip(true)
+                m.nested_virt(true).split_irqchip(true)
             }
             #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
             {
