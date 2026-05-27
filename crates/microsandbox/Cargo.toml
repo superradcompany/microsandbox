@@ -41,15 +41,15 @@ flate2.workspace = true
 futures.workspace = true
 hex.workspace = true
 libc.workspace = true
-microsandbox-db = { version = "0.5.0", path = "../db" }
-microsandbox-filesystem = { version = "0.5.0", path = "../filesystem", default-features = false }
-microsandbox-image = { version = "0.5.0", path = "../image" }
-microsandbox-metrics = { version = "0.5.0", path = "../metrics" }
-microsandbox-migration = { version = "0.5.0", path = "../migration" }
-microsandbox-network = { version = "0.5.0", path = "../network", optional = true }
-microsandbox-protocol = { version = "0.5.0", path = "../protocol" }
-microsandbox-runtime = { version = "0.5.0", path = "../runtime", default-features = false }
-microsandbox-utils = { version = "0.5.0", path = "../utils" }
+microsandbox-db = { version = "0.5.1", path = "../db" }
+microsandbox-filesystem = { version = "0.5.1", path = "../filesystem", default-features = false }
+microsandbox-image = { version = "0.5.1", path = "../image" }
+microsandbox-metrics = { version = "0.5.1", path = "../metrics" }
+microsandbox-migration = { version = "0.5.1", path = "../migration" }
+microsandbox-network = { version = "0.5.1", path = "../network", optional = true }
+microsandbox-protocol = { version = "0.5.1", path = "../protocol" }
+microsandbox-runtime = { version = "0.5.1", path = "../runtime", default-features = false }
+microsandbox-utils = { version = "0.5.1", path = "../utils" }
 nix = { workspace = true, features = ["process", "signal"] }
 notify.workspace = true
 rand.workspace = true
@@ -71,7 +71,7 @@ which.workspace = true
 
 [build-dependencies]
 flate2.workspace = true
-microsandbox-utils = { version = "0.5.0", path = "../utils" }
+microsandbox-utils = { version = "0.5.1", path = "../utils" }
 tar.workspace = true
 
 [dev-dependencies]
