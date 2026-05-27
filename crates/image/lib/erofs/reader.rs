@@ -46,6 +46,15 @@ pub struct ErofsEntryInfo {
     pub whiteout: bool,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ErofsInodeDebugInfo {
+    pub nid: u32,
+    pub nlink: u32,
+    pub size: u64,
+    pub data_layout: u8,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -115,6 +124,17 @@ impl ErofsReader {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn inode_debug_info(&mut self, path: &str) -> io::Result<ErofsInodeDebugInfo> {
+        let inode = self.lookup_path(path)?;
+        Ok(ErofsInodeDebugInfo {
+            nid: inode.nid,
+            nlink: inode.nlink,
+            size: inode.size,
+            data_layout: inode.data_layout,
+        })
+    }
+
     fn inode_offset(&self, nid: u32) -> u64 {
         (self.meta_blkaddr as u64) * (EROFS_BLKSIZ as u64) + (nid as u64) * 32
     }
@@ -132,6 +152,8 @@ impl ErofsReader {
             buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
         ]);
         let i_u = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        #[cfg(test)]
+        let nlink = u32::from_le_bytes([buf[44], buf[45], buf[46], buf[47]]);
 
         let data_layout = ((i_format >> 1) & 0x07) as u8;
 
@@ -148,6 +170,8 @@ impl ErofsReader {
             nid,
             mode,
             size,
+            #[cfg(test)]
+            nlink,
             data_layout,
             startblk_lo: i_u,
             rdev: i_u,
@@ -376,6 +400,8 @@ struct InodeInfo {
     nid: u32,
     mode: u16,
     size: u64,
+    #[cfg(test)]
+    nlink: u32,
     data_layout: u8,
     startblk_lo: u32,
     rdev: u32,
@@ -548,18 +574,23 @@ pub fn entry_info_from_erofs(image_path: &Path, file_path: &str) -> io::Result<E
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, io};
+    use std::{fs::File, io, path::PathBuf};
 
     use tempfile::tempdir;
 
     use super::ErofsReader;
     use crate::{
         erofs::write_erofs,
-        filetree::{FileData, FileTree, InodeMetadata, RegularFileNode, TreeNode},
+        tree::{FileData, FileTree, InodeMetadata, RegularFileId, RegularFileNode, TreeNode},
     };
 
     fn make_regular_file(data: &[u8]) -> TreeNode {
+        make_regular_file_with_id(data, RegularFileId::new())
+    }
+
+    fn make_regular_file_with_id(data: &[u8], id: RegularFileId) -> TreeNode {
         TreeNode::RegularFile(RegularFileNode {
+            id,
             metadata: InodeMetadata::default(),
             xattrs: Vec::new(),
             data: FileData::Memory(data.to_vec()),
@@ -594,5 +625,47 @@ mod tests {
             .entry_info("/dir/file-9999.txt")
             .expect_err("missing entry should fail");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn hardlinked_regular_files_share_inode_and_data_blocks() {
+        let mut tree = FileTree::new();
+        let file_id = RegularFileId::new();
+
+        tree.insert(b"alpha", make_regular_file_with_id(b"shared", file_id))
+            .expect("insert alpha");
+        tree.insert(b"beta", make_regular_file_with_id(b"shared", file_id))
+            .expect("insert beta");
+
+        let output_dir = tempdir().expect("tempdir");
+        let output = output_dir.path().join("hardlinks.erofs");
+        let data_map = write_erofs(&tree, &output).expect("write erofs");
+        let alpha_path = PathBuf::from("alpha");
+        let beta_path = PathBuf::from("beta");
+
+        assert_eq!(
+            data_map
+                .file_blocks
+                .get(&alpha_path)
+                .copied()
+                .expect("alpha data map"),
+            data_map
+                .file_blocks
+                .get(&beta_path)
+                .copied()
+                .expect("beta data map")
+        );
+
+        let file = File::open(&output).expect("open erofs");
+        let mut reader = ErofsReader::new(file).expect("reader");
+        let alpha = reader.inode_debug_info("/alpha").expect("alpha inode");
+        let beta = reader.inode_debug_info("/beta").expect("beta inode");
+
+        assert_eq!(alpha.nid, beta.nid);
+        assert_eq!(alpha.nlink, 2);
+        assert_eq!(beta.nlink, 2);
+        assert_eq!(alpha.size, b"shared".len() as u64);
+        assert_eq!(reader.read_file("/alpha").expect("read alpha"), b"shared");
+        assert_eq!(reader.read_file("/beta").expect("read beta"), b"shared");
     }
 }

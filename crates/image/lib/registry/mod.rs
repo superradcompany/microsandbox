@@ -1,8 +1,10 @@
-mod format;
-mod formatter;
+mod builder;
+mod client;
+mod manifest;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use formatter::{Ext4Error, Ext4FormatOptions, format_ext4, format_ext4_with_tree};
+pub use builder::RegistryBuilder;
+pub use client::Registry;

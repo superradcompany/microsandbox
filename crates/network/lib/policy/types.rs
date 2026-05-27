@@ -369,7 +369,13 @@ impl NetworkPolicy {
                     continue;
                 }
             }
-            match matches_destination_with_source(&rule.destination, addr, shared, source) {
+            match matches_egress_destination_with_source(
+                &rule.destination,
+                rule.action,
+                addr,
+                shared,
+                source,
+            ) {
                 DestinationMatch::Match => return rule.action.into(),
                 DestinationMatch::Defer => return EgressEvaluation::DeferUntilHostname,
                 DestinationMatch::NoMatch => continue,
@@ -741,7 +747,7 @@ fn rule_matches(
     matches_destination(&rule.destination, addr, shared)
 }
 
-/// Internal three-state result for [`matches_destination_with_source`].
+/// Internal three-state result for [`matches_egress_destination_with_source`].
 /// `Defer` is reachable only when the source is
 /// [`HostnameSource::Deferred`] and the destination is `Domain` or
 /// `DomainSuffix`.
@@ -761,25 +767,28 @@ impl From<bool> for DestinationMatch {
     }
 }
 
-/// Check if an IP / hostname source matches a destination specification.
+/// Check if an egress IP / hostname source matches a destination specification.
 ///
 /// IP-based destinations (`Any`, `Cidr`, `Group`) ignore `source` since
 /// they decide on the address alone. `Domain` / `DomainSuffix` consult
 /// `source`:
 ///
 /// - [`HostnameSource::Sni`]: byte-equality against the canonicalized
-///   SNI string (or label-aware suffix match) AND a resolved-hostname
-///   cache binding tying the claimed name to `addr`. The cache check
-///   stops a guest from declaring an arbitrary SNI on an unresolved
-///   IP to pass a `Domain`-allow rule (lax-SNI server spoof). Genuine
-///   shared-CDN traffic still passes because the guest resolves the
-///   name before connecting, populating the cache.
+///   SNI string (or label-aware suffix match). Allow rules also require
+///   a resolved-hostname cache binding tying the claimed name to `addr`;
+///   deny rules match on the SNI alone so a direct-to-IP connection
+///   cannot bypass a domain blocklist. The allow-side cache check stops
+///   a guest from declaring an arbitrary SNI on an unresolved IP to pass
+///   a `Domain`-allow rule (lax-SNI server spoof). Genuine shared-CDN
+///   traffic still passes because the guest resolves the name before
+///   connecting, populating the cache.
 /// - [`HostnameSource::CacheOnly`]: query the resolved-hostname cache
 ///   on `shared` for any prior resolution of `addr` that matches.
 /// - [`HostnameSource::Deferred`]: short-circuits to
 ///   [`DestinationMatch::Defer`].
-fn matches_destination_with_source(
+fn matches_egress_destination_with_source(
     dest: &Destination,
+    action: Action,
     addr: IpAddr,
     shared: &SharedState,
     source: HostnameSource<'_>,
@@ -789,20 +798,27 @@ fn matches_destination_with_source(
         Destination::Cidr(network) => matches_cidr(network, addr).into(),
         Destination::Group(group) => matches_group(*group, addr, shared).into(),
         Destination::Domain(domain) => match source {
-            HostnameSource::Sni(name) => (name == domain.as_str()
-                && shared.any_resolved_hostname(addr, |hostname| hostname == domain.as_str()))
-            .into(),
+            HostnameSource::Sni(name) => {
+                let name_matches = name == domain.as_str();
+                let cache_matches =
+                    || shared.any_resolved_hostname(addr, |hostname| hostname == domain.as_str());
+                (name_matches && (action.is_deny() || cache_matches())).into()
+            }
             HostnameSource::CacheOnly => shared
                 .any_resolved_hostname(addr, |hostname| hostname == domain.as_str())
                 .into(),
             HostnameSource::Deferred => DestinationMatch::Defer,
         },
         Destination::DomainSuffix(suffix) => match source {
-            HostnameSource::Sni(name) => (matches_suffix(name, suffix.as_str())
-                && shared.any_resolved_hostname(addr, |hostname| {
-                    matches_suffix(hostname, suffix.as_str())
-                }))
-            .into(),
+            HostnameSource::Sni(name) => {
+                let name_matches = matches_suffix(name, suffix.as_str());
+                let cache_matches = || {
+                    shared.any_resolved_hostname(addr, |hostname| {
+                        matches_suffix(hostname, suffix.as_str())
+                    })
+                };
+                (name_matches && (action.is_deny() || cache_matches())).into()
+            }
             HostnameSource::CacheOnly => shared
                 .any_resolved_hostname(addr, |hostname| matches_suffix(hostname, suffix.as_str()))
                 .into(),
@@ -811,12 +827,18 @@ fn matches_destination_with_source(
     }
 }
 
-/// Cache-only destination match used by the ingress evaluator. Wraps
-/// [`matches_destination_with_source`] with [`HostnameSource::CacheOnly`]
-/// since ingress has no SNI concept.
+/// Cache-only destination match used by the ingress evaluator. Ingress
+/// has no SNI concept, so the action-specific egress SNI behavior is
+/// irrelevant here.
 fn matches_destination(dest: &Destination, addr: IpAddr, shared: &SharedState) -> bool {
     matches!(
-        matches_destination_with_source(dest, addr, shared, HostnameSource::CacheOnly),
+        matches_egress_destination_with_source(
+            dest,
+            Action::Allow,
+            addr,
+            shared,
+            HostnameSource::CacheOnly,
+        ),
         DestinationMatch::Match,
     )
 }
@@ -1778,6 +1800,45 @@ mod tests {
             Protocol::Tcp,
             &shared,
             HostnameSource::Sni("pypi.org"),
+        );
+        assert_eq!(eval, EgressEvaluation::Deny);
+    }
+
+    #[test]
+    fn deny_rule_sni_matches_exact_domain_without_cache_binding() {
+        let shared = SharedState::new(4);
+        let policy = deny_domain_policy(Destination::Domain(name("evil.com")));
+        let eval = policy.evaluate_egress_with_source(
+            sock(PYPI_V4, 443),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Sni("evil.com"),
+        );
+        assert_eq!(eval, EgressEvaluation::Deny);
+    }
+
+    #[test]
+    fn deny_rule_sni_matches_domain_suffix_without_cache_binding() {
+        let shared = SharedState::new(4);
+        let policy = deny_domain_policy(Destination::DomainSuffix(name(".evil.com")));
+        let eval = policy.evaluate_egress_with_source(
+            sock(PYPI_V4, 443),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Sni("api.evil.com"),
+        );
+        assert_eq!(eval, EgressEvaluation::Deny);
+    }
+
+    #[test]
+    fn deny_rule_sni_matches_exact_domain_with_cache_binding() {
+        let shared = shared_with_host("evil.com", PYPI_V4);
+        let policy = deny_domain_policy(Destination::Domain(name("evil.com")));
+        let eval = policy.evaluate_egress_with_source(
+            sock(PYPI_V4, 443),
+            Protocol::Tcp,
+            &shared,
+            HostnameSource::Sni("evil.com"),
         );
         assert_eq!(eval, EgressEvaluation::Deny);
     }

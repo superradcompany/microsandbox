@@ -52,25 +52,16 @@ Writer for sending data to a running process's stdin.
 
 ### ExecEvent
 
-Low-level event from PyO3 bindings.
+Native event object emitted by streaming execution methods.
 
 | Property | Type | Description |
 |----------|------|-------------|
-| event_type | `str` | `"started"`, `"stdout"`, `"stderr"`, or `"exited"` |
+| event_type | `str` | `"started"`, `"stdout"`, `"stderr"`, `"exited"`, `"failed"`, or `"stdin_error"` |
 | pid | `int \| None` | Guest PID (on `"started"`) |
-| data | `bytes \| None` | Output data (on `"stdout"` / `"stderr"`) |
-| code | `int \| None` | Exit code (on `"exited"`) |
+| data | `bytes \| None` | Output data on `"stdout"` / `"stderr"`, or a UTF-8 failure message on `"failed"` / `"stdin_error"` |
+| code | `int \| None` | Exit code on `"exited"`, or errno when available on `"failed"` / `"stdin_error"` |
 
-Python dataclass variants are also available for pattern matching:
-
-| Class | Fields | Description |
-|-------|--------|-------------|
-| `StartedEvent` | `pid: int` | The process has started |
-| `StdoutEvent` | `data: bytes` | A chunk of stdout data |
-| `StderrEvent` | `data: bytes` | A chunk of stderr data |
-| `ExitedEvent` | `code: int` | The process has exited |
-
-The union type `ExecEvent = StartedEvent | StdoutEvent | StderrEvent | ExitedEvent` is available from `events.py`.
+Fields that do not apply to a particular event are `None`.
 
 ### Stdin
 

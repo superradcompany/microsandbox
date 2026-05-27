@@ -8,9 +8,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use microsandbox_image::erofs::{ErofsEntryInfo, ErofsEntryKind, ErofsReader};
-use microsandbox_image::filetree::{
-    DeviceNode, DirectoryNode, FileData, FileTree, FileTreeError, InodeMetadata, RegularFileNode,
-    SymlinkNode, TreeNode,
+use microsandbox_image::tree::{
+    DeviceNode, DirectoryNode, FileData, FileTree, FileTreeError, InodeMetadata, RegularFileId,
+    RegularFileNode, SymlinkNode, TreeNode,
 };
 use tokio::fs;
 
@@ -153,6 +153,7 @@ async fn apply_one_to_tree(
                 tree,
                 &rel,
                 TreeNode::RegularFile(RegularFileNode {
+                    id: RegularFileId::new(),
                     metadata: metadata_with_mode(mode.unwrap_or(0o644) as u16),
                     xattrs: Vec::new(),
                     data: FileData::Memory(content.as_bytes().to_vec()),
@@ -173,6 +174,7 @@ async fn apply_one_to_tree(
                 tree,
                 &rel,
                 TreeNode::RegularFile(RegularFileNode {
+                    id: RegularFileId::new(),
                     metadata: metadata_with_mode(mode.unwrap_or(0o644) as u16),
                     xattrs: Vec::new(),
                     data: FileData::Memory(content.clone()),
@@ -199,6 +201,7 @@ async fn apply_one_to_tree(
                 tree,
                 &rel,
                 TreeNode::RegularFile(RegularFileNode {
+                    id: RegularFileId::new(),
                     metadata: metadata_with_mode(file_mode),
                     xattrs: Vec::new(),
                     data: FileData::Memory(data),
@@ -302,6 +305,7 @@ async fn apply_one_to_tree(
                         tree,
                         &rel,
                         TreeNode::RegularFile(RegularFileNode {
+                            id: RegularFileId::new(),
                             metadata: metadata_with_mode(0o644),
                             xattrs: Vec::new(),
                             data: FileData::Memory(data),
@@ -609,6 +613,7 @@ async fn copy_dir_into_tree(
                 tree,
                 &child_relative,
                 TreeNode::RegularFile(RegularFileNode {
+                    id: RegularFileId::new(),
                     metadata: metadata_with_mode(mode),
                     xattrs: Vec::new(),
                     data: FileData::Memory(data),
@@ -995,10 +1000,11 @@ mod tests {
     use super::*;
 
     use microsandbox_image::erofs::write_erofs;
-    use microsandbox_image::filetree::Xattr;
+    use microsandbox_image::tree::Xattr;
 
     fn make_regular_file(data: &[u8]) -> TreeNode {
         TreeNode::RegularFile(RegularFileNode {
+            id: RegularFileId::new(),
             metadata: metadata_with_mode(0o644),
             xattrs: Vec::new(),
             data: FileData::Memory(data.to_vec()),

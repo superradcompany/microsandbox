@@ -20,7 +20,7 @@ The `microsandbox` Python package provides native bindings to the [microsandbox]
 - **Rootfs patches** — Modify the filesystem before the VM boots
 - **Detached mode** — Sandboxes can outlive the Python process
 - **Metrics** — CPU, memory, disk I/O, and network I/O per sandbox
-- **Typed** — Frozen dataclasses, `StrEnum`s, sealed event unions, `.pyi` stubs
+- **Typed** — Frozen dataclasses, `StrEnum`s, event objects, `.pyi` stubs
 
 ## Requirements
 
@@ -73,6 +73,8 @@ asyncio.run(main())
 ### Command Execution
 
 ```python
+import sys
+
 from microsandbox import Sandbox
 
 # Collected output.
@@ -277,7 +279,7 @@ sandbox = await Sandbox.create(
 
 ### Detached Mode
 
-Sandboxes in detached mode survive the Python process:
+Sandboxes in detached mode survive the Python process after the returned handle is detached:
 
 ```python
 # Create in detached mode.
@@ -433,7 +435,7 @@ if not is_installed():
 | Type | Description |
 |------|-------------|
 | `ExitStatus` | Exit code and success flag |
-| `MountConfig` | Volume mount (bind, named, or tmpfs) |
+| `MountConfig` | Volume mount (bind, named, tmpfs, or disk) |
 | `PatchConfig` | Pre-boot filesystem modification |
 | `SecretEntry` | Secret binding to env var with host allowlist |
 | `NetworkPolicy` | Custom network policy with rules |
@@ -444,12 +446,12 @@ if not is_installed():
 | `Size` | Memory/storage size value type |
 | `Rlimit` | POSIX resource limit |
 
-### Event Types (Python, sealed unions)
+### Event Types
 
-| Type | Variants |
-|------|----------|
-| `ExecEvent` | `StartedEvent`, `StdoutEvent`, `StderrEvent`, `ExitedEvent` |
-| `PullProgress` | `Resolving`, `Resolved`, `LayerDownloadProgress`, `LayerDownloadComplete`, `LayerExtractStarted`, `LayerExtractProgress`, `LayerExtractComplete`, `LayerIndexStarted`, `LayerIndexComplete`, `PullComplete` |
+| Type | Description |
+|------|-------------|
+| Streaming exec events | Event objects returned by `exec_stream()` / `shell_stream()`. Inspect `event_type`, `pid`, `data`, and `code`. |
+| Pull progress events | Event objects yielded by `PullSession.progress`. Inspect `event_type` and the optional detail fields for that event. |
 
 ### Functions
 

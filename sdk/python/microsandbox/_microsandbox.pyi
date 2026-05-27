@@ -53,7 +53,7 @@ class Sandbox:
     async def exec(
         self,
         cmd: str,
-        args: list[str] | None = None,
+        args: list[str] | Mapping[str, Any] | None = None,
         *,
         cwd: str | None = None,
         user: str | None = None,
@@ -66,7 +66,7 @@ class Sandbox:
     async def exec_stream(
         self,
         cmd: str,
-        args: list[str] | None = None,
+        args: list[str] | Mapping[str, Any] | None = None,
         *,
         cwd: str | None = None,
         user: str | None = None,

@@ -34,8 +34,8 @@ use sea_orm::{
 use tokio::sync::{Mutex, mpsc};
 
 use microsandbox_image::{
-    Digest, GlobalCache, PullOptions, PullProgressSender, PullResult, Reference, ext4, filetree,
-    progress_channel,
+    Digest, GlobalCache, PullOptions, PullProgressSender, PullResult, Reference, ext4,
+    progress_channel, tree,
 };
 
 use crate::{
@@ -866,8 +866,7 @@ impl Sandbox {
     /// - `sandbox.shell("echo hello")`
     /// - `sandbox.shell("ENV=val cmd | other_cmd")`
     pub async fn shell(&self, script: impl Into<String>) -> MicrosandboxResult<ExecOutput> {
-        let mut handle = self.shell_stream(script).await?;
-        handle.collect().await
+        self.shell_with(script, |e| e).await
     }
 
     /// Run a shell command with full execution options and wait for completion.
@@ -879,8 +878,8 @@ impl Sandbox {
         script: impl Into<String>,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecOutput> {
-        let mut handle = self.shell_stream_with(script, f).await?;
-        handle.collect().await
+        let (shell, opts) = self.shell_exec_opts(script, f)?;
+        self.exec_with_opts(shell, opts).await
     }
 
     /// Run a shell command with streaming I/O.
@@ -888,12 +887,7 @@ impl Sandbox {
     /// Like [`shell`](Self::shell) but returns a streaming [`ExecHandle`]
     /// instead of waiting for completion.
     pub async fn shell_stream(&self, script: impl Into<String>) -> MicrosandboxResult<ExecHandle> {
-        let shell = self.config.shell.as_deref().unwrap_or("/bin/sh");
-        let opts = ExecOptions {
-            args: vec!["-c".to_string(), script.into()],
-            ..Default::default()
-        };
-        self.exec_stream_inner(shell.to_string(), opts).await
+        self.shell_stream_with(script, |e| e).await
     }
 
     /// Run a shell command with full execution options and streaming I/O.
@@ -905,10 +899,24 @@ impl Sandbox {
         script: impl Into<String>,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecHandle> {
-        let shell = self.config.shell.as_deref().unwrap_or("/bin/sh");
+        let (shell, opts) = self.shell_exec_opts(script, f)?;
+        self.exec_stream_inner(shell, opts).await
+    }
+
+    fn shell_exec_opts(
+        &self,
+        script: impl Into<String>,
+        f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
+    ) -> MicrosandboxResult<(String, ExecOptions)> {
+        let shell = self
+            .config
+            .shell
+            .as_deref()
+            .unwrap_or("/bin/sh")
+            .to_string();
         let mut opts = f(ExecOptionsBuilder::default()).build()?;
         opts.args = vec!["-c".to_string(), script.into()];
-        self.exec_stream_inner(shell.to_string(), opts).await
+        Ok((shell, opts))
     }
 }
 
@@ -2150,7 +2158,7 @@ async fn replace_oci_manifest_pin<C: ConnectionTrait>(
 async fn create_upper_ext4(
     path: &std::path::Path,
     upper_size_mib: u32,
-    tree: Option<filetree::FileTree>,
+    tree: Option<tree::FileTree>,
 ) -> MicrosandboxResult<()> {
     let _ = tokio::fs::remove_file(path).await;
     let ext4_options = ext4::Ext4FormatOptions {
@@ -2171,8 +2179,8 @@ async fn create_upper_ext4(
 }
 
 /// Build the ext4 root directory tree that overlayfs expects.
-fn build_overlay_upper_tree(tree: Option<filetree::FileTree>) -> filetree::FileTree {
-    use filetree::{DirectoryNode, FileTree, InodeMetadata, TreeNode};
+fn build_overlay_upper_tree(tree: Option<tree::FileTree>) -> tree::FileTree {
+    use tree::{DirectoryNode, FileTree, InodeMetadata, TreeNode};
 
     let mut overlay_tree = FileTree::new();
     let mut upper_dir = DirectoryNode::new(InodeMetadata::default());

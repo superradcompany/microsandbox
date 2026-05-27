@@ -24,7 +24,8 @@ Create and boot a sandbox. Keyword arguments provide individual config fields. P
 | Name | Type | Description |
 |------|------|-------------|
 | name | `str` | Sandbox name |
-| image | `str \| ImageSource` | OCI image, local path, or disk image (required). Use `Image.oci("python:3.12", upper_size_mib=8192)` to set an OCI upper size |
+| image | `str \| ImageSource` | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Use `Image.oci("python:3.12", upper_size_mib=8192)` to set an OCI upper size |
+| snapshot | `str \| os.PathLike` | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
 | cpus | `int` | Virtual CPUs (default `1`) |
 | memory | `int` | Guest memory in MiB (default `512`) |
 | workdir | `str` | Default working directory for commands |
@@ -38,7 +39,7 @@ Create and boot a sandbox. Keyword arguments provide individual config fields. P
 | max_duration | `float` | Maximum sandbox lifetime in seconds |
 | idle_timeout | `float` | Idle timeout in seconds |
 | env | `dict[str, str]` | Environment variables visible to all commands |
-| scripts | `dict[str, str]` | Named scripts mounted at `/.msb/scripts/` |
+| scripts | `dict[str, str]` | Named scripts mounted at `/.msb/scripts/` and added to `PATH` |
 | pull_policy | `str \| PullPolicy` | Image pull behavior |
 | log_level | `str \| LogLevel` | Override log verbosity |
 | registry_auth | [`RegistryAuth`](#registryauth) | Private registry credentials |
@@ -47,7 +48,7 @@ Create and boot a sandbox. Keyword arguments provide individual config fields. P
 | ports | `dict[int, int] \| Sequence[PortBinding]` | Port mappings. Dict form is TCP and binds to `127.0.0.1`; use [`PortBinding`](/sdk/python/networking#portbinding) for explicit bind addresses or UDP |
 | network | [`Network`](/sdk/python/networking#network) | Network policy and configuration |
 | secrets | `list[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | Secret injection |
-| detached | `bool` | If `True`, sandbox survives after your process exits |
+| detached | `bool` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#detach) before dropping the returned handle when it should keep running |
 
 **Returns**
 
@@ -190,7 +191,7 @@ Sandbox name. This is an async property -- use `await sb.name`.
 async def owns_lifecycle(self) -> bool
 ```
 
-Whether this handle owns the sandbox lifecycle. `True` in attached mode, `False` in detached mode. This is an async property -- use `await sb.owns_lifecycle`.
+Whether this handle owns the sandbox lifecycle. A sandbox returned directly by [`create()`](#sandboxcreate) or [`start()`](#sandboxstart) owns lifecycle, including when created with `detached=True`, until you call [`detach()`](#detach). Handles returned by [`connect()`](#connect) do not own lifecycle. This is an async property -- use `await sb.owns_lifecycle`.
 
 ---
 
@@ -305,12 +306,14 @@ async def exec(
 
 Run a command inside the sandbox and wait for it to complete. Collects all stdout and stderr into memory and returns them along with the exit code. For long-running processes or large output, use [`exec_stream()`](#exec_stream) instead.
 
+Pass per-execution options as keyword-only arguments. The SDK still accepts the older second-positional options dict for compatibility, but prefer kwargs for new code.
+
 **Parameters**
 
 | Name | Type | Description |
 |------|------|-------------|
 | cmd | `str` | Command to execute (e.g. `"python"`, `"/usr/bin/node"`) |
-| args | `list[str] \| None` | Command arguments (e.g. `["-c", "print('hello')"]`) |
+| args | `list[str] \| None` | Command arguments |
 | cwd | `str \| None` | Working directory |
 | user | `str \| None` | Guest user |
 | env | `Mapping[str, str] \| None` | Environment variables |
@@ -324,6 +327,16 @@ Run a command inside the sandbox and wait for it to complete. Collects all stdou
 | Type | Description |
 |------|-------------|
 | [`ExecOutput`](/sdk/python/execution#execoutput) | Collected stdout, stderr, and exit status |
+
+```python
+output = await sb.exec(
+    "python",
+    ["compute.py"],
+    cwd="/app",
+    env={"PYTHONPATH": "/app/lib"},
+    timeout=30.0,
+)
+```
 
 ---
 
@@ -345,6 +358,8 @@ async def exec_stream(
 ```
 
 Run a command with streaming output. Returns a handle that emits stdout, stderr, and exit events as they happen, rather than buffering everything.
+
+Like [`exec()`](#exec), pass per-execution options as keyword-only arguments. The older second-positional options dict remains accepted for compatibility.
 
 **Parameters**
 
@@ -834,41 +849,45 @@ Controls when the SDK fetches an OCI image from the registry.
 | `"if-missing"` | Pull only if the image is not already cached. This is the default. |
 | `"never"` | Never pull; fail if the image is not cached locally |
 
-### PullProgress
+### PullEvent
 
-Type alias for pull progress events emitted by [`PullSession.progress`](#pullsession). Each event is one of the following frozen dataclasses, imported from `microsandbox`:
+Native event object emitted by [`PullSession.progress`](#pullsession). Inspect `event_type` and the fields relevant to that event:
 
-| Variant | Fields |
-|---------|--------|
-| `Resolving` | `reference: str` |
-| `Resolved` | `reference: str`, `manifest_digest: str`, `layer_count: int`, `total_download_bytes: int \| None` |
-| `LayerDownloadProgress` | `layer_index: int`, `digest: str`, `downloaded_bytes: int`, `total_bytes: int \| None` |
-| `LayerDownloadComplete` | `layer_index: int`, `digest: str`, `downloaded_bytes: int` |
-| `LayerExtractStarted` | `layer_index: int`, `diff_id: str` |
-| `LayerExtractProgress` | `layer_index: int`, `bytes_read: int`, `total_bytes: int` |
-| `LayerExtractComplete` | `layer_index: int`, `diff_id: str` |
-| `LayerIndexStarted` | `layer_index: int` |
-| `LayerIndexComplete` | `layer_index: int` |
-| `PullComplete` | `reference: str`, `layer_count: int` |
+| event_type | Fields |
+|------------|--------|
+| `"resolving"` | `reference` |
+| `"resolved"` | `reference`, `manifest_digest`, `layer_count`, `total_download_bytes` |
+| `"layer_download_progress"` | `layer_index`, `digest`, `downloaded_bytes`, `total_bytes` |
+| `"layer_download_complete"` | `layer_index`, `digest`, `downloaded_bytes` |
+| `"layer_download_verifying"` | `layer_index`, `digest` |
+| `"layer_materialize_started"` | `layer_index`, `diff_id` |
+| `"layer_materialize_progress"` | `layer_index`, `bytes_read`, `total_bytes` |
+| `"layer_materialize_writing"` | `layer_index` |
+| `"layer_materialize_complete"` | `layer_index`, `diff_id` |
+| `"stitch_merging_trees"` | `layer_count` |
+| `"stitch_writing_fsmeta"` | - |
+| `"stitch_writing_vmdk"` | - |
+| `"stitch_complete"` | - |
+| `"complete"` | `reference`, `layer_count` |
 
-Narrow with `isinstance`:
+Fields that do not apply to a particular event are `None`.
 
 ```python
-from microsandbox import Sandbox, Resolved, LayerDownloadProgress
+from microsandbox import Sandbox
 
 session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
 async with session:
     async for event in session.progress:
-        if isinstance(event, Resolved):
+        if event.event_type == "resolved":
             print(f"{event.layer_count} layers, {event.total_download_bytes} bytes")
-        elif isinstance(event, LayerDownloadProgress):
+        elif event.event_type == "layer_download_progress":
             print(f"layer {event.layer_index}: {event.downloaded_bytes}/{event.total_bytes}")
     sb = await session.result()
 ```
 
 ### PullSession
 
-Returned by [`Sandbox.create_with_progress()`](#sandbox-create_with_progress). Use as an async context manager to track image pull progress.
+Returned by [`Sandbox.create_with_progress()`](#sandboxcreate_with_progress). `Sandbox.create_with_progress()` itself is synchronous; use the returned session as an async context manager to track image pull progress.
 
 ```python
 session = Sandbox.create_with_progress("my-sandbox", image="ubuntu:latest")
@@ -880,8 +899,8 @@ async with session:
 
 | Property / Method | Type | Description |
 |-------------------|------|-------------|
-| progress | `AsyncIterator[`[`PullProgress`](#pullprogress)`]` | Async iterator of pull progress events |
-| result() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Await to get the final running sandbox |
+| progress | `AsyncIterator[`[`PullEvent`](#pullevent)`]` | Async iterator of pull progress events |
+| result() | `Awaitable[`[`Sandbox`](#instance-methods)`]` | Await once to get the final running sandbox. A second call raises `RuntimeError`. |
 
 ### RegistryAuth
 
@@ -898,7 +917,8 @@ The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`San
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| image | `str \| ImageSource` | - | OCI image, local path, or disk image (required). Use `Image.oci("python:3.12", upper_size_mib=8192)` to set an OCI upper size |
+| image | `str \| ImageSource` | - | OCI image, local path, or disk image. Required unless `snapshot=` is passed. Use `Image.oci("python:3.12", upper_size_mib=8192)` to set an OCI upper size |
+| snapshot | `str \| os.PathLike` | - | Snapshot artifact to boot from instead of `image=`. Mutually exclusive with `image=` |
 | cpus | `int` | `1` | Virtual CPUs |
 | memory | `int` | `512` | Guest memory in MiB. This is a limit, not a reservation. |
 | workdir | `str` | - | Default working directory for commands |
@@ -908,19 +928,20 @@ The keyword arguments accepted by [`Sandbox.create()`](#sandboxcreate) and [`San
 | entrypoint | `list[str]` | - | Override the image's stored ENTRYPOINT. Consulted by `msb exec` / `msb run` (CLI command resolution), **not** by `sb.exec` / `sb.shell` — those pass `cmd` literally |
 | init | `str \| dict \|` [`InitConfig`](#initconfig) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/customize#custom-init-system) |
 | replace | `bool` | `False` | Replace existing sandbox with same name |
+| replace_with_timeout | `float` | `10` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL`; implies `replace=True` |
 | max_duration | `float` | - | Maximum sandbox lifetime in seconds |
 | idle_timeout | `float` | - | Idle timeout in seconds |
 | env | `dict[str, str]` | `{}` | Environment variables visible to all commands |
-| scripts | `dict[str, str]` | `{}` | Named scripts mounted at `/.msb/scripts/` |
+| scripts | `dict[str, str]` | `{}` | Named scripts mounted at `/.msb/scripts/` and added to `PATH` |
 | pull_policy | `str \| PullPolicy` | `"if-missing"` | Image pull behavior |
 | log_level | `str \| LogLevel` | - | Override log verbosity |
 | registry_auth | [`RegistryAuth`](#registryauth) | - | Private registry credentials |
-| volumes | `dict[str, dict]` | `{}` | Volume mounts. See [Volumes](/sdk/python/volumes). |
+| volumes | `dict[str, MountConfig]` | `{}` | Volume mounts. See [Volumes](/sdk/python/volumes). |
 | patches | `list[PatchConfig]` | `[]` | Rootfs modifications applied before boot |
 | ports | `dict[int, int] \| Sequence[PortBinding]` | `{}` | Port mappings. Dict form is TCP and binds to `127.0.0.1`; use [`PortBinding`](/sdk/python/networking#portbinding) for explicit bind addresses or UDP |
 | network | [`Network`](/sdk/python/networking#network) | `public_only` | Network policy and configuration |
 | secrets | `list[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
-| detached | `bool` | `False` | If `True`, sandbox survives after your process exits |
+| detached | `bool` | `False` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#detach) before dropping the returned handle when it should keep running |
 
 ### InitConfig
 

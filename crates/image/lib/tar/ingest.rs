@@ -5,6 +5,8 @@
 //! including whiteouts, hardlinks, special files, and path validation.
 
 use std::fmt;
+use std::future::poll_fn;
+use std::io::ErrorKind;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -14,9 +16,9 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader, ReadBuf};
 use tokio_tar as tar;
 
-use crate::filetree::{
+use crate::tree::{
     DataSpool, DeviceNode, DirectoryNode, FileData, FileTree, FileTreeError, InodeMetadata,
-    RegularFileNode, ResourceLimits, SPOOL_THRESHOLD, SymlinkNode, TreeNode, Xattr,
+    RegularFileId, RegularFileNode, ResourceLimits, SPOOL_THRESHOLD, SymlinkNode, TreeNode, Xattr,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -29,7 +31,7 @@ const WHITEOUT_PREFIX: &[u8] = b".wh.";
 /// Opaque whiteout filename.
 const OPAQUE_WHITEOUT: &[u8] = b".wh..wh..opq";
 
-use crate::filetree::{OPAQUE_XATTR_NAME, OPAQUE_XATTR_VALUE, WHITEOUT_MAJOR, WHITEOUT_MINOR};
+use crate::tree::{OPAQUE_XATTR_NAME, OPAQUE_XATTR_VALUE, WHITEOUT_MAJOR, WHITEOUT_MINOR};
 
 /// Gzip magic bytes.
 const GZIP_MAGIC: [u8; 2] = [0x1F, 0x8B];
@@ -39,6 +41,15 @@ const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
 /// Entry cadence for cooperative scheduler yields during tar ingestion.
 const INGEST_YIELD_EVERY_ENTRIES: u64 = 32;
+
+/// Maximum file-body read size used while ingesting tar entries.
+const ENTRY_READ_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Compressed input buffer size used before gzip/zstd decoders.
+const COMPRESSED_INPUT_BUFFER_SIZE: usize = 256 * 1024;
+
+/// Spool write batch size used after bounded decoder reads.
+const SPOOL_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -185,6 +196,9 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
     let mut tree = FileTree::new();
     let mut entry_count: u64 = 0;
     let mut total_size: u64 = 0;
+    let mut saw_hardlink = false;
+    let mut spool_read_buf = Vec::new();
+    let mut spool_write_buf = Vec::new();
 
     let mut entries = archive.entries().map_err(IngestError::Io)?;
 
@@ -233,6 +247,7 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
                 };
 
                 handle_hardlink(&mut tree, &path, &target_path)?;
+                saw_hardlink = true;
             }
             tar::EntryType::Directory => {
                 let node = TreeNode::Directory(DirectoryNode {
@@ -312,19 +327,23 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
                         tree.insert(&whiteout_path, node)?;
                     }
                     WhiteoutKind::None => {
-                        let mut buf = Vec::with_capacity(size as usize);
-                        entry.read_to_end(&mut buf).await.map_err(IngestError::Io)?;
-
-                        // Spool large files to disk to bound memory usage.
-                        let file_data = if buf.len() as u64 >= SPOOL_THRESHOLD
+                        let file_data = if size >= SPOOL_THRESHOLD
                             && let Some(spool) = spool.as_mut()
                         {
-                            spool.write_data(&buf).map_err(IngestError::Io)?
+                            stream_entry_to_spool(
+                                &mut entry,
+                                size,
+                                spool,
+                                &mut spool_read_buf,
+                                &mut spool_write_buf,
+                            )
+                            .await?
                         } else {
-                            FileData::Memory(buf)
+                            FileData::Memory(read_entry_to_memory(&mut entry, size).await?)
                         };
 
                         let node = TreeNode::RegularFile(RegularFileNode {
+                            id: RegularFileId::new(),
                             metadata,
                             xattrs: Vec::new(),
                             data: file_data,
@@ -377,6 +396,10 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
         }
     }
 
+    if saw_hardlink {
+        tree.refresh_regular_nlinks();
+    }
+
     Ok(tree)
 }
 
@@ -412,7 +435,10 @@ pub async fn ingest_compressed_tar<R: AsyncRead + Unpin>(
             })
         }
         Compression::Gzip => {
-            let decoder = GzipDecoder::new(BufReader::new(reader));
+            let decoder = GzipDecoder::new(BufReader::with_capacity(
+                COMPRESSED_INPUT_BUFFER_SIZE,
+                reader,
+            ));
             let mut hashing = HashingReader::new(decoder);
             let tree = ingest_tar(&mut hashing, limits, spool.as_mut()).await?;
             // Drain any remaining bytes (tar EOF padding) to include
@@ -424,7 +450,10 @@ pub async fn ingest_compressed_tar<R: AsyncRead + Unpin>(
             })
         }
         Compression::Zstd => {
-            let decoder = ZstdDecoder::new(BufReader::new(reader));
+            let decoder = ZstdDecoder::new(BufReader::with_capacity(
+                COMPRESSED_INPUT_BUFFER_SIZE,
+                reader,
+            ));
             let mut hashing = HashingReader::new(decoder);
             let tree = ingest_tar(&mut hashing, limits, spool.as_mut()).await?;
             drain_reader(&mut hashing).await?;
@@ -440,7 +469,7 @@ pub async fn ingest_compressed_tar<R: AsyncRead + Unpin>(
 /// consumed (and hashed, if wrapped in `HashingReader`). The tar parser
 /// may stop before the EOF padding; the diff_id covers the full stream.
 async fn drain_reader<R: AsyncRead + Unpin>(reader: &mut R) -> Result<(), IngestError> {
-    let mut buf = [0u8; 8192];
+    let mut buf = vec![0u8; ENTRY_READ_CHUNK_SIZE];
     loop {
         let n = reader.read(&mut buf).await.map_err(IngestError::Io)?;
         if n == 0 {
@@ -684,56 +713,114 @@ fn handle_hardlink(
     link_path: &[u8],
     target_path: &[u8],
 ) -> Result<(), IngestError> {
-    let target_path_str = String::from_utf8_lossy(target_path).into_owned();
-
-    // Look up the target node and clone it.
-    let cloned_node = match tree.get(target_path) {
+    let node = match tree.get_mut(target_path) {
         Some(TreeNode::RegularFile(f)) => {
-            let cloned = RegularFileNode {
-                metadata: InodeMetadata {
-                    uid: f.metadata.uid,
-                    gid: f.metadata.gid,
-                    mode: f.metadata.mode,
-                    mtime: f.metadata.mtime,
-                    mtime_nsec: f.metadata.mtime_nsec,
-                },
-                xattrs: f
-                    .xattrs
-                    .iter()
-                    .map(|x| Xattr {
-                        name: x.name.clone(),
-                        value: x.value.clone(),
-                    })
-                    .collect(),
-                data: DataSpool::clone_ref(&f.data),
-                nlink: f.nlink + 1,
-            };
-            // The new copy also gets incremented nlink.
-            let new_nlink = cloned.nlink;
-            (TreeNode::RegularFile(cloned), new_nlink)
+            let new_nlink = f.nlink + 1;
+            f.nlink = new_nlink;
+            TreeNode::RegularFile(RegularFileNode {
+                id: f.id,
+                metadata: f.metadata.clone(),
+                xattrs: f.xattrs.clone(),
+                data: f.data.clone_ref(),
+                nlink: new_nlink,
+            })
         }
         Some(_) => {
-            // Hardlinks to non-regular files: clone metadata only.
             return Err(IngestError::HardlinkTarget(format!(
-                "hardlink target is not a regular file: \"{target_path_str}\""
+                "hardlink target is not a regular file: \"{}\"",
+                String::from_utf8_lossy(target_path)
             )));
         }
         None => {
-            return Err(IngestError::HardlinkTarget(target_path_str));
+            return Err(IngestError::HardlinkTarget(
+                String::from_utf8_lossy(target_path).into_owned(),
+            ));
         }
     };
 
-    let (node, new_nlink) = cloned_node;
-
-    // Update the nlink on the original target.
-    if let Some(TreeNode::RegularFile(target)) = tree.get_mut(target_path) {
-        target.nlink = new_nlink;
-    }
-
-    // Insert the cloned node at the link path.
     tree.insert(link_path, node)?;
 
     Ok(())
+}
+
+async fn read_entry_to_memory<R: AsyncRead + Unpin>(
+    entry: &mut tar::Entry<R>,
+    size: u64,
+) -> Result<Vec<u8>, IngestError> {
+    let size = usize::try_from(size)
+        .map_err(|_| IngestError::InvalidEntry("file too large to fit in memory".to_string()))?;
+    let mut data = Vec::with_capacity(size);
+    let mut remaining = size;
+
+    while remaining > 0 {
+        let start = data.len();
+        let to_read = remaining.min(ENTRY_READ_CHUNK_SIZE);
+        let read = {
+            let mut read_buf = ReadBuf::uninit(&mut data.spare_capacity_mut()[..to_read]);
+            poll_fn(|cx| Pin::new(&mut *entry).poll_read(cx, &mut read_buf))
+                .await
+                .map_err(IngestError::Io)?;
+            read_buf.filled().len()
+        };
+
+        if read == 0 {
+            return Err(IngestError::Io(std::io::Error::new(
+                ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer",
+            )));
+        }
+
+        // SAFETY: `poll_read` reported `read` initialized bytes in the spare
+        // capacity window above, and the window begins at the previous length.
+        unsafe {
+            data.set_len(start + read);
+        }
+        remaining -= read;
+    }
+
+    Ok(data)
+}
+
+async fn stream_entry_to_spool<R: AsyncRead + Unpin>(
+    entry: &mut tar::Entry<R>,
+    size: u64,
+    spool: &mut DataSpool,
+    read_buf: &mut Vec<u8>,
+    write_buf: &mut Vec<u8>,
+) -> Result<FileData, IngestError> {
+    let offset = spool.current_offset();
+    let mut remaining = size;
+
+    if read_buf.len() != ENTRY_READ_CHUNK_SIZE {
+        read_buf.resize(ENTRY_READ_CHUNK_SIZE, 0);
+    }
+    if write_buf.capacity() < SPOOL_WRITE_BUFFER_SIZE {
+        write_buf.reserve(SPOOL_WRITE_BUFFER_SIZE - write_buf.capacity());
+    }
+    write_buf.clear();
+
+    while remaining > 0 {
+        let to_read = remaining.min(read_buf.len() as u64) as usize;
+        entry
+            .read_exact(&mut read_buf[..to_read])
+            .await
+            .map_err(IngestError::Io)?;
+
+        if write_buf.len() + to_read > SPOOL_WRITE_BUFFER_SIZE && !write_buf.is_empty() {
+            spool.write_chunk(write_buf).map_err(IngestError::Io)?;
+            write_buf.clear();
+        }
+
+        write_buf.extend_from_slice(&read_buf[..to_read]);
+        remaining -= to_read as u64;
+    }
+
+    if !write_buf.is_empty() {
+        spool.write_chunk(write_buf).map_err(IngestError::Io)?;
+        write_buf.clear();
+    }
+
+    Ok(spool.data_ref(offset, size))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -967,12 +1054,21 @@ mod tests {
     // The parent module aliases `tokio_tar` as `tar`, so we use the explicit
     // crate path here to avoid ambiguity.
     use ::tar as sync_tar;
+    use async_compression::tokio::write::GzipEncoder;
     use tempfile::tempdir;
+    use tokio::io::AsyncWriteExt;
 
     fn build_tar(build: impl FnOnce(&mut sync_tar::Builder<Vec<u8>>)) -> Vec<u8> {
         let mut builder = sync_tar::Builder::new(Vec::new());
         build(&mut builder);
         builder.into_inner().unwrap()
+    }
+
+    async fn gzip(data: &[u8]) -> Vec<u8> {
+        let mut encoder = GzipEncoder::new(Vec::new());
+        encoder.write_all(data).await.unwrap();
+        encoder.shutdown().await.unwrap();
+        encoder.into_inner()
     }
 
     #[tokio::test]
@@ -1010,6 +1106,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ingest_gzip_large_file_without_spool() {
+        let content = (0..SPOOL_THRESHOLD as usize * 8 + 13)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>();
+        let tar_data = build_tar(|b| {
+            let mut header = sync_tar::Header::new_gnu();
+            header.set_path("large.bin").unwrap();
+            header.set_size(content.len() as u64);
+            header.set_entry_type(sync_tar::EntryType::Regular);
+            header.set_mode(0o644);
+            header.set_cksum();
+            b.append(&header, content.as_slice()).unwrap();
+        });
+        let data = gzip(&tar_data).await;
+
+        let limits = ResourceLimits::default();
+        let result =
+            ingest_compressed_tar(std::io::Cursor::new(data), Compression::Gzip, &limits, None)
+                .await
+                .unwrap();
+
+        match result.tree.get(b"large.bin").unwrap() {
+            TreeNode::RegularFile(f) => {
+                assert_eq!(f.data, FileData::Memory(content));
+            }
+            _ => panic!("expected regular file"),
+        }
+    }
+
+    #[tokio::test]
     async fn ingest_large_file_spools_to_disk() {
         let content = vec![b'x'; SPOOL_THRESHOLD as usize + 1];
         let data = build_tar(|b| {
@@ -1036,6 +1162,47 @@ mod tests {
                 assert_eq!(f.data.read_all().unwrap(), content);
             }
             _ => panic!("expected regular file"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_multiple_large_files_spools_to_distinct_ranges() {
+        let first = vec![b'a'; SPOOL_THRESHOLD as usize + 17];
+        let second = vec![b'b'; SPOOL_THRESHOLD as usize * 2 + 31];
+        let data = build_tar(|b| {
+            for (path, content) in [
+                ("first.bin", first.as_slice()),
+                ("second.bin", second.as_slice()),
+            ] {
+                let mut header = sync_tar::Header::new_gnu();
+                header.set_path(path).unwrap();
+                header.set_size(content.len() as u64);
+                header.set_entry_type(sync_tar::EntryType::Regular);
+                header.set_mode(0o644);
+                header.set_cksum();
+                b.append(&header, content).unwrap();
+            }
+        });
+
+        let tempdir = tempdir().unwrap();
+        let spool_path = tempdir.path().join("layer.spool");
+        let mut spool = DataSpool::new(&spool_path).unwrap();
+        let limits = ResourceLimits::default();
+        let tree = ingest_tar(std::io::Cursor::new(data), &limits, Some(&mut spool))
+            .await
+            .unwrap();
+
+        for (path, content) in [
+            (b"first.bin".as_slice(), first),
+            (b"second.bin".as_slice(), second),
+        ] {
+            match tree.get(path).unwrap() {
+                TreeNode::RegularFile(f) => {
+                    assert!(matches!(f.data, FileData::Spool { .. }));
+                    assert_eq!(f.data.read_all().unwrap(), content);
+                }
+                _ => panic!("expected regular file"),
+            }
         }
     }
 
@@ -1118,21 +1285,68 @@ mod tests {
             .await
             .unwrap();
 
-        // Both should exist with the same data and nlink=2.
-        match tree.get(b"original.txt").unwrap() {
-            TreeNode::RegularFile(f) => {
-                assert_eq!(f.data, FileData::Memory(b"shared data".to_vec()));
-                assert_eq!(f.nlink, 2);
-            }
+        // Both should exist with the same data, inode identity, and nlink=2.
+        let original = match tree.get(b"original.txt").unwrap() {
+            TreeNode::RegularFile(f) => f,
             _ => panic!("expected regular file"),
-        }
-        match tree.get(b"hardlink.txt").unwrap() {
-            TreeNode::RegularFile(f) => {
-                assert_eq!(f.data, FileData::Memory(b"shared data".to_vec()));
-                assert_eq!(f.nlink, 2);
-            }
+        };
+        let hardlink = match tree.get(b"hardlink.txt").unwrap() {
+            TreeNode::RegularFile(f) => f,
             _ => panic!("expected regular file"),
-        }
+        };
+
+        assert_eq!(original.data, FileData::Memory(b"shared data".to_vec()));
+        assert_eq!(hardlink.data, FileData::Memory(b"shared data".to_vec()));
+        assert_eq!(original.id, hardlink.id);
+        assert_eq!(original.nlink, 2);
+        assert_eq!(hardlink.nlink, 2);
+        assert_eq!(tree.total_data_size(), b"shared data".len() as u64);
+    }
+
+    #[tokio::test]
+    async fn ingest_hardlink_chain_refreshes_link_counts() {
+        let data = build_tar(|b| {
+            let content = b"shared data";
+            let mut header = sync_tar::Header::new_gnu();
+            header.set_path("original.txt").unwrap();
+            header.set_size(content.len() as u64);
+            header.set_entry_type(sync_tar::EntryType::Regular);
+            header.set_mode(0o644);
+            header.set_cksum();
+            b.append(&header, &content[..]).unwrap();
+
+            for (link_name, target_name) in [
+                ("hardlink-a.txt", "original.txt"),
+                ("hardlink-b.txt", "hardlink-a.txt"),
+            ] {
+                let mut header = sync_tar::Header::new_gnu();
+                header.set_path(link_name).unwrap();
+                header.set_size(0);
+                header.set_entry_type(sync_tar::EntryType::Link);
+                header.set_link_name(target_name).unwrap();
+                header.set_cksum();
+                b.append(&header, &[] as &[u8]).unwrap();
+            }
+        });
+
+        let limits = ResourceLimits::default();
+        let tree = ingest_tar(std::io::Cursor::new(data), &limits, None)
+            .await
+            .unwrap();
+
+        let ids = ["original.txt", "hardlink-a.txt", "hardlink-b.txt"].map(|path| {
+            match tree.get(path.as_bytes()).unwrap() {
+                TreeNode::RegularFile(f) => {
+                    assert_eq!(f.nlink, 3);
+                    f.id
+                }
+                _ => panic!("expected regular file"),
+            }
+        });
+
+        assert_eq!(ids[0], ids[1]);
+        assert_eq!(ids[0], ids[2]);
+        assert_eq!(tree.total_data_size(), b"shared data".len() as u64);
     }
 
     #[tokio::test]

@@ -61,6 +61,7 @@ sb = await Sandbox.create("worker", image="python")
 
 # Detached: sandbox survives after your process exits
 sb = await Sandbox.create("worker", image="python", detached=True)
+await sb.detach()
 ```
 
 ```go Go

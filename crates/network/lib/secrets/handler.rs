@@ -70,6 +70,29 @@ impl EligibleSecret {
         self.inject_headers || self.inject_basic_auth || self.inject_query_params
     }
 
+    /// Returns true when the current header bytes contain this secret's
+    /// placeholder in a header-substitution scope.
+    fn may_substitute_in_headers(&self, headers: &[u8]) -> bool {
+        if !self.wants_header_injection() {
+            return false;
+        }
+
+        let needle = self.placeholder.as_bytes();
+        if (self.inject_headers || self.inject_query_params) && contains_bytes(headers, needle) {
+            return true;
+        }
+
+        // Search decoded Basic auth credentials, not the raw header value.
+        if self.inject_basic_auth {
+            return basic_auth_decoded_contains(
+                String::from_utf8_lossy(headers).as_ref(),
+                &self.placeholder,
+            );
+        }
+
+        false
+    }
+
     /// Substitute this secret's placeholder in the headers portion, scoped by
     /// the secret's `headers` / `basic_auth` / `query_params` flags.
     fn substitute_in_headers(&self, headers: &str) -> String {
@@ -220,15 +243,11 @@ impl SecretsHandler {
             Some(pos) => (&data[..pos], &data[pos..]),
             None => (data, &[] as &[u8]),
         };
-        let mut header_str = String::from_utf8_lossy(header_bytes).into_owned();
-        let mut body_str = if boundary.is_some() {
-            String::from_utf8_lossy(body_bytes).into_owned()
-        } else {
-            String::new()
-        };
 
         // Check for disallowed placeholders before forwarding or substituting data.
-        if let Some(action) = self.detect_blocking_action(data, &header_str) {
+        if let Some(action) =
+            self.detect_blocking_action(data, String::from_utf8_lossy(header_bytes).as_ref())
+        {
             match action {
                 BlockingAction::Block => return Err(action.into_violation_action()),
                 BlockingAction::BlockAndLog => {
@@ -250,27 +269,71 @@ impl SecretsHandler {
             return Ok(Cow::Borrowed(data));
         }
 
+        // Start with borrowed bytes; allocate only when a substitution is needed.
+        let mut header_str = None;
+        let mut body = None;
+
         for secret in &self.eligible_for_substitution {
             // Skip secrets that require TLS identity on non-intercepted connections.
             if secret.require_tls_identity && !self.tls_intercepted {
                 continue;
             }
-            if secret.wants_header_injection() {
-                header_str = secret.substitute_in_headers(&header_str);
+
+            // Header substitution still uses string helpers after a scoped match.
+            if secret.may_substitute_in_headers(header_bytes) {
+                let current = header_str
+                    .get_or_insert_with(|| String::from_utf8_lossy(header_bytes).into_owned());
+                *current = secret.substitute_in_headers(current);
             }
-            if boundary.is_some() && secret.inject_body && body_str.contains(&secret.placeholder) {
-                body_str = body_str.replace(&secret.placeholder, &secret.value);
+
+            // Body substitution works on bytes so encoded payloads stay valid.
+            if boundary.is_some() && secret.inject_body {
+                let source = body.as_deref().unwrap_or(body_bytes);
+                if let Some(replaced) = replace_bytes(
+                    source,
+                    secret.placeholder.as_bytes(),
+                    secret.value.as_bytes(),
+                ) {
+                    body = Some(replaced);
+                }
             }
         }
 
-        // If body substitution changed the length, update Content-Length.
-        if boundary.is_some() && body_str.len() != body_bytes.len() {
-            header_str = update_content_length(&header_str, body_str.len());
+        let header_changed = header_str
+            .as_ref()
+            .is_some_and(|headers| headers.as_bytes() != header_bytes);
+        let body_changed = body.is_some();
+
+        // No header or body replacement was produced. Return original bytes.
+        if !header_changed && !body_changed {
+            return Ok(Cow::Borrowed(data));
         }
 
-        let mut output = header_str;
-        output.push_str(&body_str);
-        Ok(Cow::Owned(output.into_bytes()))
+        let header_len = header_str
+            .as_ref()
+            .map_or(header_bytes.len(), |headers| headers.len());
+        let body_len = body.as_ref().map_or(body_bytes.len(), Vec::len);
+        let mut output = Vec::with_capacity(header_len + body_len);
+
+        let body_bytes_out = body.as_deref().unwrap_or(body_bytes);
+        // Update Content-Length only when body substitution changed the size.
+        if body_changed && body_bytes_out.len() != body_bytes.len() {
+            let headers = match header_str {
+                Some(headers) => update_content_length(&headers, body_bytes_out.len()),
+                None => update_content_length(
+                    String::from_utf8_lossy(header_bytes).as_ref(),
+                    body_bytes_out.len(),
+                ),
+            };
+            output.extend_from_slice(headers.as_bytes());
+        } else if let Some(headers) = header_str {
+            output.extend_from_slice(headers.as_bytes());
+        } else {
+            output.extend_from_slice(header_bytes);
+        }
+
+        output.extend_from_slice(body_bytes_out);
+        Ok(Cow::Owned(output))
     }
 
     /// Returns true if this connection needs no secret substitution or violation detection.
@@ -386,6 +449,29 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         return false;
     }
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Replace all occurrences of `needle` in `haystack`.
+///
+/// Returns `None` when no replacement is needed so callers can preserve the
+/// original byte slice without rebuilding arbitrary binary payloads.
+fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Option<Vec<u8>> {
+    if !contains_bytes(haystack, needle) {
+        return None;
+    }
+
+    let mut result = Vec::with_capacity(haystack.len());
+    let mut cursor = 0;
+    while cursor < haystack.len() {
+        if haystack[cursor..].starts_with(needle) {
+            result.extend_from_slice(replacement);
+            cursor += needle.len();
+        } else {
+            result.push(haystack[cursor]);
+            cursor += 1;
+        }
+    }
+    Some(result)
 }
 
 /// Returns true if `haystack`, after URL percent-decoding, contains `needle`.
@@ -751,6 +837,60 @@ mod tests {
         // Body unchanged, Content-Length should stay 5.
         assert!(result.contains("Content-Length: 5"));
         assert!(result.ends_with("hello"));
+    }
+
+    #[test]
+    fn eligible_secret_preserves_binary_body_without_placeholder() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let body = vec![0x1f, 0x8b, 0x08, 0x00, 0xff, 0x00, 0x80, 0xfe];
+        let mut input = format!(
+            "POST /git-upload-pack HTTP/1.1\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        input.extend_from_slice(&body);
+
+        let output = handler.substitute(&input).unwrap();
+        assert_eq!(&*output, input.as_slice());
+    }
+
+    #[test]
+    fn eligible_secret_preserves_binary_chunk_without_placeholder() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = [0x1f, 0x8b, 0x08, 0x00, 0xff, 0x00, 0x80, 0xfe];
+        let output = handler.substitute(&input).unwrap();
+        assert_eq!(&*output, input.as_slice());
+    }
+
+    #[test]
+    fn body_injection_preserves_non_utf8_bytes() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.injection.body = true;
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let body = [0xff, b'$', b'K', b'E', b'Y', 0xfe];
+        let mut input =
+            format!("POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+        input.extend_from_slice(&body);
+
+        let output = handler.substitute(&input).unwrap().into_owned();
+        let expected_body = [b"\xffreal-secret".as_slice(), &[0xfe]].concat();
+        let expected = [
+            format!(
+                "POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                expected_body.len()
+            )
+            .as_bytes(),
+            expected_body.as_slice(),
+        ]
+        .concat();
+
+        assert_eq!(output, expected);
     }
 
     #[test]

@@ -350,9 +350,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Auto-prerelease for rc / alpha / beta / dev tags so consumers
+          # querying /releases/latest (e.g. install.microsandbox.dev) don't
+          # accidentally promote them. Matches v0.5.0-rc-1, v1.2.3-rc1,
+          # v1.0.0-alpha.4, etc.
+          PRERELEASE=""
+          if [[ "${{ github.ref_name }}" =~ -(rc|alpha|beta|dev) ]]; then
+            PRERELEASE="--prerelease"
+          fi
           gh release create "${{ github.ref_name }}" \
             --title "${{ github.ref_name }}" \
             --generate-notes \
+            $PRERELEASE \
             release-artifacts/*
 
   # ---------------------------------------------------------------------------
