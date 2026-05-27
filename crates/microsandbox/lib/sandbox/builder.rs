@@ -11,7 +11,7 @@ use microsandbox_network::config::{PortProtocol, PublishedPort};
 use std::net::{IpAddr, Ipv4Addr};
 
 use super::{
-    config::SandboxConfig,
+    config::{AutoVolumeIntent, SandboxConfig},
     exec::{Rlimit, RlimitResource},
     init::{HandoffInit, InitOptionsBuilder},
     types::{
@@ -59,6 +59,67 @@ impl RegistryConfigBuilder {
     pub fn ca_certs(mut self, pem_data: Vec<u8>) -> Self {
         self.ca_certs.push(pem_data);
         self
+    }
+}
+
+/// Sub-builder for [`SandboxBuilder::auto_volume_with`].
+pub struct AutoVolumeBuilder {
+    intent: AutoVolumeIntent,
+    readonly: bool,
+}
+
+impl AutoVolumeBuilder {
+    pub(crate) fn new(name: String) -> Self {
+        Self {
+            intent: AutoVolumeIntent {
+                name,
+                quota_mib: None,
+                labels: Vec::new(),
+            },
+            readonly: false,
+        }
+    }
+
+    /// Override the auto-generated volume name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.intent.name = name.into();
+        self
+    }
+
+    /// Set a storage quota for the volume.
+    pub fn quota(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.intent.quota_mib = Some(size.into().as_u32());
+        self
+    }
+
+    /// Mount the volume read-only inside the guest.
+    pub fn readonly(mut self) -> Self {
+        self.readonly = true;
+        self
+    }
+
+    /// Attach a label to the volume. Can be called multiple times.
+    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.intent.labels.push((key.into(), value.into()));
+        self
+    }
+
+    pub(crate) fn build(self) -> (AutoVolumeIntent, bool) {
+        (self.intent, self.readonly)
+    }
+}
+
+fn default_auto_volume_name(sandbox_name: &str, guest_path: &str) -> String {
+    let slug: String = guest_path
+        .trim_start_matches('/')
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        sandbox_name.to_string()
+    } else {
+        format!("{sandbox_name}-{slug}")
     }
 }
 
@@ -632,6 +693,86 @@ impl SandboxBuilder {
             }
         }
         self
+    }
+
+    /// Provision a fresh named volume and mount it at `guest_path` in one
+    /// step. The volume is created in the same DB transaction as the
+    /// sandbox row, so a concurrent `Volume::list` cannot observe it
+    /// before the owning sandbox exists.
+    ///
+    /// Volume name defaults to `{sandbox_name}{guest_slug}` where the
+    /// guest path is slugified (`/` → `-`). Use
+    /// [`auto_volume_named`](Self::auto_volume_named) to set the name
+    /// explicitly. Configure size and labels with
+    /// [`auto_volume_with`](Self::auto_volume_with).
+    pub fn auto_volume(self, guest_path: impl Into<String>) -> Self {
+        let guest = guest_path.into();
+        let name = default_auto_volume_name(&self.config.name, &guest);
+        self.auto_volume_named(guest, name)
+    }
+
+    /// Same as [`auto_volume`](Self::auto_volume) but with an explicit
+    /// volume name.
+    pub fn auto_volume_named(
+        mut self,
+        guest_path: impl Into<String>,
+        volume_name: impl Into<String>,
+    ) -> Self {
+        let guest = guest_path.into();
+        let name = volume_name.into();
+        if let Err(e) = crate::volume::validate_volume_name(&name)
+            && self.build_error.is_none()
+        {
+            self.build_error = Some(e);
+            return self;
+        }
+        self.config.auto_volumes.push(AutoVolumeIntent {
+            name: name.clone(),
+            quota_mib: None,
+            labels: Vec::new(),
+        });
+        self.push_named_mount(guest, name, false);
+        self
+    }
+
+    /// Provision a fresh named volume with builder-driven configuration
+    /// (labels, quota, readonly). Atomic registration is the same as
+    /// [`auto_volume_named`](Self::auto_volume_named).
+    pub fn auto_volume_with(
+        mut self,
+        guest_path: impl Into<String>,
+        f: impl FnOnce(AutoVolumeBuilder) -> AutoVolumeBuilder,
+    ) -> Self {
+        let guest = guest_path.into();
+        let default_name = default_auto_volume_name(&self.config.name, &guest);
+        let (intent, readonly) = f(AutoVolumeBuilder::new(default_name)).build();
+        if let Err(e) = crate::volume::validate_volume_name(&intent.name)
+            && self.build_error.is_none()
+        {
+            self.build_error = Some(e);
+            return self;
+        }
+        self.push_named_mount(guest, intent.name.clone(), readonly);
+        self.config.auto_volumes.push(intent);
+        self
+    }
+
+    /// Push a named-volume mount with the project's default
+    /// virtualization/permission policies. Centralised so future
+    /// policy defaults stay in one place.
+    fn push_named_mount(&mut self, guest: String, name: String, readonly: bool) {
+        let mut mb = MountBuilder::new(guest).named(name);
+        if readonly {
+            mb = mb.readonly();
+        }
+        match mb.build() {
+            Ok(mount) => self.config.mounts.push(mount),
+            Err(e) => {
+                if self.build_error.is_none() {
+                    self.build_error = Some(e);
+                }
+            }
+        }
     }
 
     /// Apply rootfs patches using a builder closure.
@@ -1317,5 +1458,54 @@ mod tests {
             err.to_string()
                 .contains("disk image host path does not exist")
         );
+    }
+
+    #[tokio::test]
+    async fn test_auto_volume_default_name_slugs_guest_path() {
+        let config = SandboxBuilder::new("sb")
+            .image("alpine")
+            .auto_volume("/tmp")
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.auto_volumes.len(), 1);
+        assert_eq!(config.auto_volumes[0].name, "sb-tmp");
+        assert_eq!(config.mounts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_auto_volume_named_overrides_default() {
+        let config = SandboxBuilder::new("sb")
+            .image("alpine")
+            .auto_volume_named("/tmp", "explicit-name")
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.auto_volumes[0].name, "explicit-name");
+    }
+
+    #[tokio::test]
+    async fn test_auto_volume_with_carries_labels_and_quota() {
+        let config = SandboxBuilder::new("sb")
+            .image("alpine")
+            .auto_volume_with("/scratch", |v| {
+                v.quota(1024u32).label("owner", "my-team").readonly()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(config.auto_volumes[0].quota_mib, Some(1024));
+        assert_eq!(
+            config.auto_volumes[0].labels,
+            vec![("owner".to_string(), "my-team".to_string())]
+        );
+        // Mount must reflect the readonly flag from the sub-builder.
+        match &config.mounts[0] {
+            super::VolumeMount::Named { readonly, .. } => assert!(readonly),
+            _ => panic!("expected Named mount"),
+        }
     }
 }
