@@ -23,6 +23,65 @@ Do not apply them to other repositories or to general agent behavior outside thi
 - `mcp/` and `skills/` are submodules related to agent integrations.
 - `vendor/libkrunfw` is a submodule for the kernel firmware library.
 
+Repository layout:
+
+```text
+.
+|-- AGENTS.md
+|-- Cargo.lock
+|-- Cargo.toml
+|-- DEVELOPMENT.md
+|-- Dockerfile.agentd
+|-- justfile
+|-- msb-entitlements.plist
+|-- assets/
+|-- benchmarks/
+|-- crates/
+|   |-- agentd/
+|   |-- cli/
+|   |-- db/
+|   |-- filesystem/
+|   |-- image/
+|   |-- metrics/
+|   |-- microsandbox/
+|   |-- migration/
+|   |-- network/
+|   |-- protocol/
+|   |-- runtime/
+|   |-- test-init/
+|   |-- test-macros/
+|   |-- test-utils/
+|   `-- utils/
+|-- docs/
+|   |-- cli/
+|   |-- getting-started/
+|   |-- images/
+|   |-- networking/
+|   |-- recipes/
+|   |-- sandboxes/
+|   `-- sdk/
+|-- examples/
+|   |-- python/
+|   |-- rust/
+|   `-- typescript/
+|-- mcp/
+|   |-- bin/
+|   |-- src/
+|   `-- package.json
+|-- packaging/
+|   `-- docker/
+|-- scripts/
+|   `-- smoke/
+|-- sdk/
+|   |-- go/
+|   |-- node-ts/
+|   `-- python/
+|-- skills/
+|   `-- microsandbox/
+`-- vendor/
+    `-- libkrunfw/
+```
+
 ## Design Principles
 
 - microsandbox is still early software. Prefer the clean current design over compatibility layers, migration shims, deprecated paths, or version checks unless a maintainer asks for them.
@@ -110,6 +169,17 @@ path = "bin/main.rs"
 - Keep feature-gated code close to the feature it gates and use existing `#[cfg(feature = "...")]` patterns.
 - Do not add examples under `examples/` unless requested or clearly required. Prefer tests and docs for small usage coverage.
 - Run `cargo fmt` before finalizing Rust changes.
+
+## Development Build Notes
+
+- If you build `msb` to run it locally on macOS, make sure the binary is codesigned with `msb-entitlements.plist`; otherwise VM/runtime failures may be caused by missing entitlements instead of your code change.
+- Prefer `just build` or `just build-msb` when producing a runnable local binary. The macOS recipe rebuilds `msb` and runs:
+
+```bash
+codesign --entitlements msb-entitlements.plist --force -s - build/msb
+```
+
+- If you bypass `just` and call `cargo build` directly, manually codesign the exact `msb` binary you are going to run before testing sandbox startup, protocol, networking, or filesystem behavior.
 
 ## Validation
 
