@@ -210,7 +210,7 @@ jobs:
       # -- Build & Test --
       - name: Build msb
         run: |
-          cargo build --release --no-default-features --features net -p microsandbox-cli
+          cargo build --release --no-default-features --features net,ssh -p microsandbox-cli
           mkdir -p build
           cp target/release/msb build/msb
 
